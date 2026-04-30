@@ -9,7 +9,7 @@
 
 // ── Array / Vector (Maps to YVec in C backend) ──────────────
 
-@target(CPU_AVX512)
+@require(avx512 >= 1)
 impl Vec {
     // Note: C-backend natively intercepts generic parameters for Vec
     
@@ -43,7 +43,7 @@ impl Vec {
 
 // ── String (Maps to YStr in C backend) ──────────────────────
 
-@target(CPU_AVX512)
+@require(avx512 >= 1)
 impl String {
     // Length of string
     fn len(s: &String) -> usize {
@@ -85,7 +85,7 @@ impl String {
 
 // ── File I/O ─────────────────────────────────────────────
 
-@target(CPU_AVX512)
+@require(avx512 >= 1)
 impl File {
     fn read_to_string(path: &String) -> String {
         return yfile_read_to_string(path);

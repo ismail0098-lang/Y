@@ -79,6 +79,7 @@ pub enum TokenKind {
     F16, BF16, TF32, F32, F64,
     I8, I16, I32, I64,
     U3, U8, U16, U32, U64,
+    QFixed(String), // e.g. "Q32.32"
     Bool,
     StringTy,
     CharTy,
@@ -106,7 +107,7 @@ pub enum TokenKind {
     BarrierSync,
 
     // ── Attributes (start with @) ────────────────────────────
-    AtTarget,
+    AtRequire,
     AtCachePolicy,
     AtPtxEmit,
     AtAvxEmit,
@@ -118,6 +119,7 @@ pub enum TokenKind {
     AtGpuUncached,
     AtAtomic,
     AtStaticAssert,
+    AtZeroDrift,      // @ZeroDrift — enforce zero numerical drift
     AtUnknown(String),  // future-proof
 
     // ── Operators ────────────────────────────────────────────
@@ -338,6 +340,14 @@ impl Lexer {
             if ch.is_alphanumeric() || ch == '_' {
                 ident.push(ch);
                 self.advance();
+            } else if ch == '.' && first == 'Q' && ident.len() > 1 {
+                // Fixed-point type support: e.g., "Q32" + "." + "32"
+                if self.peek2().map_or(false, |c| c.is_ascii_digit()) {
+                    ident.push(ch);
+                    self.advance();
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -460,6 +470,9 @@ impl Lexer {
             // MMA atom names   MMA_m16n8k16 etc.
             s if s.starts_with("MMA_") => TokenKind::MmaMod(s.to_string()),
 
+            // Fixed-point dtypes e.g. Q32.32
+            s if s.starts_with('Q') && s.contains('.') => TokenKind::QFixed(s.to_string()),
+
             // Everything else is an identifier
             _ => TokenKind::Ident(s.to_string()),
         }
@@ -479,7 +492,7 @@ impl Lexer {
             }
         }
         let kind = match name.as_str() {
-            "@target"       => TokenKind::AtTarget,
+            "@require"      => TokenKind::AtRequire,
             "@cache_policy" => TokenKind::AtCachePolicy,
             "@ptx_emit"     => TokenKind::AtPtxEmit,
             "@avx_emit"     => TokenKind::AtAvxEmit,
@@ -491,6 +504,7 @@ impl Lexer {
             "@gpu_uncached"  => TokenKind::AtGpuUncached,
             "@atomic"        => TokenKind::AtAtomic,
             "@static_assert" => TokenKind::AtStaticAssert,
+            "@ZeroDrift"    => TokenKind::AtZeroDrift,
             other           => TokenKind::AtUnknown(other.to_string()),
         };
         Token::new(kind, line, start_col, &name)
@@ -708,10 +722,10 @@ mod tests {
 
     #[test]
     fn test_attribute() {
-        let kinds = lex("@target(RTX_4070)");
-        assert_eq!(kinds[0], TokenKind::AtTarget);
+        let kinds = lex("@require(sm >= 89)");
+        assert_eq!(kinds[0], TokenKind::AtRequire);
         assert_eq!(kinds[1], TokenKind::LParen);
-        assert_eq!(kinds[2], TokenKind::HardwareTarget("RTX_4070".to_string()));
+        assert_eq!(kinds[2], TokenKind::Ident("sm".to_string()));
     }
 
     #[test]

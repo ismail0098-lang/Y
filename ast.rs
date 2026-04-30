@@ -122,18 +122,17 @@ pub struct StaticAssertDecl {
     pub span: Span,
 }
 
-/// `@target(RTX_4070Ti_Super)` or other GPU/CPU targets.
-/// Kept dynamic as a String to easily map diverse backends.
+/// `@require(condition)` to specify hardware requirements.
 #[derive(Debug, Clone, PartialEq)]
-pub struct HardwareTarget {
-    pub name: String,
+pub struct RequireAttr {
+    pub condition: Expr,
     pub span: Span,
 }
 
 /// Defines a Kernel, e.g. `kernel matmul(A: GlobalMemory<F16>...) { ... }`
 #[derive(Debug, Clone, PartialEq)]
 pub struct KernelDecl {
-    pub target: Option<HardwareTarget>,
+    pub requires: Vec<RequireAttr>,
     pub name: String,
     pub params: Vec<Param>,
     pub body: Block,
@@ -165,6 +164,7 @@ pub enum Stmt {
         ty: Option<Type>,
         init: Option<Expr>,
         cache_policy: Option<CachePolicyAttr>,
+        zero_drift: Option<ZeroDriftAttr>,
         span: Span,
     },
     /// `type ATile = SmemLayout<...>;`
@@ -425,5 +425,13 @@ pub enum GenericArg {
 pub struct CachePolicyAttr {
     pub policy: String, // "L2_PERSIST"
     pub reuse_count: Option<i64>,
+    pub span: Span,
+}
+
+/// `@ZeroDrift` — guarantees zero numerical drift for the annotated binding.
+/// The compiler validates against the HW profile and emits a performance
+/// advisory when the drift-free path is slower than the fast default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZeroDriftAttr {
     pub span: Span,
 }

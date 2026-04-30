@@ -9,7 +9,7 @@
 
 // ── Array / Vector (Maps to YVec in C backend) ──────────────
 
-@target(CPU_AVX512)
+@require(avx512 >= 1)
 impl Vec {
     // Note: C-backend natively intercepts generic parameters for Vec
     
@@ -43,7 +43,7 @@ impl Vec {
 
 // ── String (Maps to YStr in C backend) ──────────────────────
 
-@target(CPU_AVX512)
+@require(avx512 >= 1)
 impl String {
     // Length of string
     fn len(s: &String) -> usize {
@@ -85,7 +85,7 @@ impl String {
 
 // ── File I/O ─────────────────────────────────────────────
 
-@target(CPU_AVX512)
+@require(avx512 >= 1)
 impl File {
     fn read_to_string(path: &String) -> String {
         return yfile_read_to_string(path);
@@ -176,7 +176,7 @@ enum TokenKind {
     CpAsync, LdMatrix, MmaSync, BarrierSync,
 
     // ── Attributes (start with @) ────────────────────────────
-    AtTarget, AtCachePolicy, AtPtxEmit, AtAvxEmit, AtInline,
+    AtRequire, AtCachePolicy, AtPtxEmit, AtAvxEmit, AtInline,
     AtNoInline, AtAlign, AtSafe, AtUnsafe, AtGpuUncached,
     AtAtomic, AtStaticAssert, AtUnknown(String),
 
@@ -567,7 +567,10 @@ enum Expr {
     BinaryExpr(usize, BinaryOp, usize),
 
     // op operand_idx
-    UnaryExpr(UnaryOp, usize)
+    UnaryExpr(UnaryOp, usize),
+
+    // name, field_start, field_count
+    StructLit(String, usize, usize)
 }
 
 // ── Statements ──────────────────────────────────────────────
@@ -584,6 +587,12 @@ enum Stmt {
 
     // while cond_idx { body_start..body_count }
     While(usize, usize, usize),
+
+    // for loop_var in start_idx..end_idx step step_idx { body_start..body_count }
+    For(String, usize, usize, usize, usize, usize),
+
+    // match scrutinee_idx { arm_start..arm_count }
+    Match(usize, usize, usize),
 
     // target_idx = value_idx;
     Assign(usize, usize),
@@ -613,12 +622,39 @@ struct ParamDecl {
     type_str: String
 }
 
+struct FieldDecl {
+    name: String,
+    type_str: String
+}
+
+struct StructDecl {
+    name: String,
+    field_start: usize,
+    field_count: usize
+}
+
+enum MatchPattern {
+    Ident(String),
+    EnumVariant(String, String), // path, variant
+    Literal(usize), // expr_idx
+    Wildcard
+}
+
+struct MatchArm {
+    pattern: MatchPattern,
+    body_start: usize, // idx into stmts
+    body_count: usize  // length of block
+}
+
 impl Vec {
     fn get_Token(v: &Vec, i: usize) -> Token { let d: Token; return d; }
     fn get_Expr(v: &Vec, i: usize) -> Expr { let d: Expr; return d; }
     fn get_Stmt(v: &Vec, i: usize) -> Stmt { let d: Stmt; return d; }
     fn get_FuncDecl(v: &Vec, i: usize) -> FuncDecl { let d: FuncDecl; return d; }
     fn get_ParamDecl(v: &Vec, i: usize) -> ParamDecl { let d: ParamDecl; return d; }
+    fn get_StructDecl(v: &Vec, i: usize) -> StructDecl { let d: StructDecl; return d; }
+    fn get_FieldDecl(v: &Vec, i: usize) -> FieldDecl { let d: FieldDecl; return d; }
+    fn get_MatchArm(v: &Vec, i: usize) -> MatchArm { let d: MatchArm; return d; }
     fn get_usize(v: &Vec, i: usize) -> usize { return 0; }
 }
 
@@ -631,20 +667,29 @@ struct AstArena {
     stmts: Vec,
     params: Vec,
     funcs: Vec,
+    structs: Vec,
+    fields: Vec,
+    match_arms: Vec,
     // Auxiliary: expression argument lists stored flat
-    arg_indices: Vec
+    arg_indices: Vec,
+    struct_lit_names: Vec,
+    struct_lit_exprs: Vec
 }
 
 impl AstArena {
     @unsafe
     fn new() -> AstArena {
         let arena: AstArena;
-        // sizeof(Expr)  — We use a generous estimate for tagged union size
         arena.exprs = Vec::new(64);
         arena.stmts = Vec::new(64);
         arena.params = Vec::new(32);
         arena.funcs = Vec::new(32);
+        arena.structs = Vec::new(16);
+        arena.fields = Vec::new(64);
+        arena.match_arms = Vec::new(16);
         arena.arg_indices = Vec::new(8);
+        arena.struct_lit_names = Vec::new(16);
+        arena.struct_lit_exprs = Vec::new(16);
         return arena;
     }
 }
@@ -675,6 +720,19 @@ impl Parser {
     fn peek(p: &Parser) -> Token {
         if (*p).pos < (*p).token_count {
             return Vec::get_Token(&(*p).tokens, (*p).pos);
+        }
+        let eof: Token;
+        eof.kind = TokenKind::Eof;
+        eof.line = 0;
+        eof.col = 0;
+        eof.lexeme = String::new("");
+        return eof;
+    }
+
+    @unsafe
+    fn peek_at(p: &Parser, offset: usize) -> Token {
+        if (*p).pos + offset < (*p).token_count {
+            return Vec::get_Token(&(*p).tokens, (*p).pos + offset);
         }
         let eof: Token;
         eof.kind = TokenKind::Eof;
@@ -814,6 +872,53 @@ impl Parser {
                     Vec::push(&mut (*arena).exprs, expr);
                     let idx: usize = Vec::len(&(*arena).exprs);
                     return idx;
+                }
+
+                // Check for Struct Literal
+                let check1: Token = Parser::peek_at(p, 0);
+                if String::eq_cstr(&check1.lexeme, "{") {
+                    let check2: Token = Parser::peek_at(p, 1);
+                    let check3: Token = Parser::peek_at(p, 2);
+                    let mut is_struct: bool = false;
+                    if String::eq_cstr(&check2.lexeme, "}") {
+                        is_struct = true;
+                    } else if String::eq_cstr(&check3.lexeme, ":") {
+                        is_struct = true;
+                    }
+
+                    if is_struct {
+                        Parser::advance(p); // consume '{'
+                        let field_start: usize = Vec::len(&(*arena).struct_lit_exprs);
+                        let mut field_count: usize = 0;
+
+                        let mut parsing_sfields: bool = true;
+                        while parsing_sfields {
+                            let end_check: Token = Parser::peek(p);
+                            if String::eq_cstr(&end_check.lexeme, "}") {
+                                parsing_sfields = false;
+                            } else {
+                                let sf_tok: Token = Parser::advance(p);
+                                let sf_name: String = String::clone(&sf_tok.lexeme);
+                                Parser::expect_token(p, &String::new(":"));
+                                let sf_expr: usize = Parser::parse_expr(p, arena);
+
+                                Vec::push(&mut (*arena).struct_lit_names, sf_name);
+                                Vec::push(&mut (*arena).struct_lit_exprs, sf_expr);
+                                field_count += 1;
+
+                                let comma_check: Token = Parser::peek(p);
+                                if String::eq_cstr(&comma_check.lexeme, ",") {
+                                    Parser::advance(p);
+                                }
+                            }
+                        }
+                        Parser::expect_token(p, &String::new("}"));
+
+                        let expr: Expr = Expr::StructLit(String::clone(&lex), field_start, field_count);
+                        Vec::push(&mut (*arena).exprs, expr);
+                        let idx: usize = Vec::len(&(*arena).exprs);
+                        return idx;
+                    }
                 }
 
                 let expr: Expr = Expr::Ident(String::clone(&lex));
@@ -1169,6 +1274,109 @@ impl Parser {
             return idx;
         }
 
+        // ── for statement ──
+        if String::eq_cstr(&lex, "for") {
+            Parser::advance(p);
+            let var_tok: Token = Parser::advance(p);
+            let loop_var: String = String::clone(&var_tok.lexeme);
+            Parser::expect_token(p, &String::new("in"));
+            
+            let start_idx: usize = Parser::parse_expr(p, arena);
+            Parser::expect_token(p, &String::new(".."));
+            let end_idx: usize = Parser::parse_expr(p, arena);
+            
+            let mut step_idx: usize = 0;
+            let step_check: Token = Parser::peek(p);
+            if String::eq_cstr(&step_check.lexeme, "step") {
+                Parser::advance(p);
+                step_idx = Parser::parse_expr(p, arena);
+            }
+            
+            Parser::expect_token(p, &String::new("{"));
+            let body_start: usize = Vec::len(&(*arena).stmts);
+            let mut body_count: usize = 0;
+            let mut parsing_body: bool = true;
+            while parsing_body {
+                let check: Token = Parser::peek(p);
+                if String::eq_cstr(&check.lexeme, "}") {
+                    parsing_body = false;
+                } else {
+                    Parser::parse_stmt(p, arena);
+                    body_count += 1;
+                }
+            }
+            Parser::expect_token(p, &String::new("}"));
+            
+            let stmt: Stmt = Stmt::For(loop_var, start_idx, end_idx, step_idx, body_start, body_count);
+            Vec::push(&mut (*arena).stmts, stmt);
+            let idx: usize = Vec::len(&(*arena).stmts);
+            return idx;
+        }
+
+        // ── match statement ──
+        if String::eq_cstr(&lex, "match") {
+            Parser::advance(p);
+            let scrutinee_idx: usize = Parser::parse_expr(p, arena);
+            Parser::expect_token(p, &String::new("{"));
+            
+            let arm_start: usize = Vec::len(&(*arena).match_arms);
+            let mut arm_count: usize = 0;
+            
+            let mut parsing_arms: bool = true;
+            while parsing_arms {
+                let check: Token = Parser::peek(p);
+                if String::eq_cstr(&check.lexeme, "}") {
+                    parsing_arms = false;
+                } else {
+                    let pat_tok: Token = Parser::advance(p);
+                    let pat_lex: String = String::clone(&pat_tok.lexeme);
+                    let mut pattern: MatchPattern = MatchPattern::Wildcard;
+                    
+                    if String::eq_cstr(&pat_lex, "_") {
+                        pattern = MatchPattern::Wildcard;
+                    } else {
+                        // Very simplified pattern parsing for bootstrap:
+                        // Just map it to Ident or Wildcard for now, or Literal
+                        // Need a robust peek_at to distinguish EnumVariant vs Ident
+                        let next_tok: Token = Parser::peek(p);
+                        if String::eq_cstr(&next_tok.lexeme, "::") {
+                            Parser::advance(p);
+                            let variant_tok: Token = Parser::advance(p);
+                            let variant_lex: String = String::clone(&variant_tok.lexeme);
+                            pattern = MatchPattern::EnumVariant(pat_lex, variant_lex);
+                        } else {
+                            // Let's assume it's an Ident
+                            pattern = MatchPattern::Ident(pat_lex);
+                        }
+                    }
+                    
+                    Parser::expect_token(p, &String::new("=>"));
+                    
+                    // Body expression
+                    let body_idx: usize = Parser::parse_expr(p, arena);
+                    
+                    let comma_check: Token = Parser::peek(p);
+                    if String::eq_cstr(&comma_check.lexeme, ",") {
+                        Parser::advance(p);
+                    }
+                    
+                    let arm: MatchArm;
+                    arm.pattern = pattern;
+                    arm.body_start = body_idx;
+                    arm.body_count = 1; // It's an expression so count=1 statement logically, or it just maps directly to expr index.
+                    
+                    Vec::push(&mut (*arena).match_arms, arm);
+                    arm_count += 1;
+                }
+            }
+            Parser::expect_token(p, &String::new("}"));
+            
+            let stmt: Stmt = Stmt::Match(scrutinee_idx, arm_start, arm_count);
+            Vec::push(&mut (*arena).stmts, stmt);
+            let idx: usize = Vec::len(&(*arena).stmts);
+            return idx;
+        }
+
         // ── Expression statement / Assignment ──
         let expr_idx: usize = Parser::parse_expr(p, arena);
 
@@ -1347,22 +1555,60 @@ impl Parser {
             return true;
         }
 
-        // struct declaration — skip body for bootstrap
+        // struct declaration
         if String::eq_cstr(&lex, "struct") {
             Parser::advance(p);
-            let _name: Token = Parser::advance(p);
-            // Skip until closing }
+            let name_tok: Token = Parser::advance(p);
+            let s_name: String = String::clone(&name_tok.lexeme);
             Parser::expect_token(p, &String::new("{"));
-            let mut depth: usize = 1;
-            while depth > 0 {
-                let t: Token = Parser::advance(p);
-                if String::eq_cstr(&t.lexeme, "{") {
-                    depth += 1;
-                }
-                if String::eq_cstr(&t.lexeme, "}") {
-                    depth -= 1;
+
+            let field_start: usize = Vec::len(&(*arena).fields);
+            let mut field_count: usize = 0;
+
+            let mut parsing_fields: bool = true;
+            while parsing_fields {
+                let check: Token = Parser::peek(p);
+                if String::eq_cstr(&check.lexeme, "}") {
+                    parsing_fields = false;
+                } else {
+                    let fname_tok: Token = Parser::advance(p);
+                    let fname: String = String::clone(&fname_tok.lexeme);
+                    Parser::expect_token(p, &String::new(":"));
+                    
+                    let mut type_str: String = String::new("");
+                    let mut skipping: bool = true;
+                    while skipping {
+                        let t: Token = Parser::peek(p);
+                        if String::eq_cstr(&t.lexeme, ",") {
+                            skipping = false;
+                        } else if String::eq_cstr(&t.lexeme, "}") {
+                            skipping = false;
+                        } else {
+                            // In a real parser we'd append the type token's lexeme correctly
+                            // but for bootstrap we just skip until , or }
+                            Parser::advance(p);
+                        }
+                    }
+
+                    let field: FieldDecl;
+                    field.name = fname;
+                    field.type_str = type_str;
+                    Vec::push(&mut (*arena).fields, field);
+                    field_count += 1;
+
+                    let comma_check: Token = Parser::peek(p);
+                    if String::eq_cstr(&comma_check.lexeme, ",") {
+                        Parser::advance(p);
+                    }
                 }
             }
+            Parser::expect_token(p, &String::new("}"));
+
+            let sdecl: StructDecl;
+            sdecl.name = s_name;
+            sdecl.field_start = field_start;
+            sdecl.field_count = field_count;
+            Vec::push(&mut (*arena).structs, sdecl);
             return true;
         }
 
@@ -1449,9 +1695,7 @@ impl Parser {
         let mut parsing: bool = true;
         while parsing {
             let has_more: bool = Parser::parse_item(p, arena);
-            if has_more {
-                // continue
-            } else {
+            if has_more == false {
                 parsing = false;
             }
         }
@@ -1482,525 +1726,5 @@ fn main() {
     //   4. Inspect the AstArena contents
 
     println("--- Parser module compiled successfully ---");
-    return;
-}
-import lib;
-import parser;
-
-struct CEmitter {
-    c_buffer: String,
-    indent_level: usize
-}
-
-impl CEmitter {
-    @unsafe
-    fn new() -> CEmitter {
-        let e: CEmitter;
-        e.c_buffer = String::new("");
-        e.indent_level = 0;
-        return e;
-    }
-
-    @unsafe
-    fn indent(e: &mut CEmitter) {
-        let mut i: usize = 0;
-        while i < (*e).indent_level {
-            String::push_str(&mut (*e).c_buffer, &String::new("    "));
-            i += 1;
-        }
-    }
-
-    @unsafe
-    fn emit_func(e: &mut CEmitter, arena: &AstArena, func_idx: usize) {
-        let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, func_idx);
-        
-        CEmitter::indent(e);
-        String::push_str(&mut (*e).c_buffer, &String::new("int32_t "));
-        String::push_str(&mut (*e).c_buffer, &fdecl.name);
-        String::push_str(&mut (*e).c_buffer, &String::new("("));
-        
-        let mut p: usize = 0;
-        while p < fdecl.param_count {
-            let param: ParamDecl = Vec::get_ParamDecl(&(*arena).params, fdecl.param_start + p);
-            // Default to int32_t for all params in bootstrap to keep it simple
-            String::push_str(&mut (*e).c_buffer, &String::new("int32_t "));
-            String::push_str(&mut (*e).c_buffer, &param.name);
-            if p + 1 < fdecl.param_count {
-                String::push_str(&mut (*e).c_buffer, &String::new(", "));
-            }
-            p += 1;
-        }
-        
-        String::push_str(&mut (*e).c_buffer, &String::new(") {\n"));
-        (*e).indent_level += 1;
-        
-        let mut s: usize = 0;
-        while s < fdecl.body_count {
-            CEmitter::emit_stmt(e, arena, fdecl.body_start + s);
-            s += 1;
-        }
-        
-        (*e).indent_level -= 1;
-        CEmitter::indent(e);
-        String::push_str(&mut (*e).c_buffer, &String::new("}\n\n"));
-    }
-
-    @unsafe
-    fn emit_stmt(e: &mut CEmitter, arena: &AstArena, stmt_idx: usize) {
-        let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, stmt_idx);
-        CEmitter::indent(e);
-        
-        if stmt.tag == Stmt_TAG_Let {
-            let var_name: String = stmt.data.Let._0;
-            let init_idx: usize = stmt.data.Let._2;
-            
-            String::push_str(&mut (*e).c_buffer, &String::new("int32_t "));
-            String::push_str(&mut (*e).c_buffer, &var_name);
-            if init_idx > 0 {
-                String::push_str(&mut (*e).c_buffer, &String::new(" = "));
-                CEmitter::emit_expr(e, arena, init_idx - 1);
-            } else {
-                String::push_str(&mut (*e).c_buffer, &String::new(" = 0"));
-            }
-            String::push_str(&mut (*e).c_buffer, &String::new(";\n"));
-        } else if stmt.tag == Stmt_TAG_Return {
-            let ret_idx: usize = stmt.data.Return._0;
-            String::push_str(&mut (*e).c_buffer, &String::new("return "));
-            if ret_idx > 0 {
-                CEmitter::emit_expr(e, arena, ret_idx - 1);
-            }
-            String::push_str(&mut (*e).c_buffer, &String::new(";\n"));
-        } else if stmt.tag == Stmt_TAG_ExprStmt {
-            let expr_idx: usize = stmt.data.ExprStmt._0;
-            CEmitter::emit_expr(e, arena, expr_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new(";\n"));
-        } else if stmt.tag == Stmt_TAG_Assign {
-            let target_idx: usize = stmt.data.Assign._0;
-            let value_idx: usize = stmt.data.Assign._1;
-            CEmitter::emit_expr(e, arena, target_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new(" = "));
-            CEmitter::emit_expr(e, arena, value_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new(";\n"));
-        } else if stmt.tag == Stmt_TAG_CompoundAssign {
-            let target_idx: usize = stmt.data.CompoundAssign._0;
-            let value_idx: usize = stmt.data.CompoundAssign._2;
-            CEmitter::emit_expr(e, arena, target_idx - 1);
-            // hardcoded to += for now as binaryop isn't fully matched
-            String::push_str(&mut (*e).c_buffer, &String::new(" += "));
-            CEmitter::emit_expr(e, arena, value_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new(";\n"));
-        } else if stmt.tag == Stmt_TAG_If {
-            let cond_idx: usize = stmt.data.If._0;
-            let then_start: usize = stmt.data.If._1;
-            let then_count: usize = stmt.data.If._2;
-            let else_start: usize = stmt.data.If._3;
-            let else_count: usize = stmt.data.If._4;
-            
-            String::push_str(&mut (*e).c_buffer, &String::new("if ("));
-            CEmitter::emit_expr(e, arena, cond_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new(") {\n"));
-            
-            (*e).indent_level += 1;
-            let mut i: usize = 0;
-            while i < then_count {
-                CEmitter::emit_stmt(e, arena, then_start + i);
-                i += 1;
-            }
-            (*e).indent_level -= 1;
-            CEmitter::indent(e);
-            String::push_str(&mut (*e).c_buffer, &String::new("}\n"));
-            
-            if else_count > 0 {
-                CEmitter::indent(e);
-                String::push_str(&mut (*e).c_buffer, &String::new("else {\n"));
-                (*e).indent_level += 1;
-                let mut j: usize = 0;
-                while j < else_count {
-                    CEmitter::emit_stmt(e, arena, else_start + j);
-                    j += 1;
-                }
-                (*e).indent_level -= 1;
-                CEmitter::indent(e);
-                String::push_str(&mut (*e).c_buffer, &String::new("}\n"));
-            }
-        } else if stmt.tag == Stmt_TAG_While {
-            let cond_idx: usize = stmt.data.While._0;
-            let body_start: usize = stmt.data.While._1;
-            let body_count: usize = stmt.data.While._2;
-            
-            String::push_str(&mut (*e).c_buffer, &String::new("while ("));
-            CEmitter::emit_expr(e, arena, cond_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new(") {\n"));
-            
-            (*e).indent_level += 1;
-            let mut i: usize = 0;
-            while i < body_count {
-                CEmitter::emit_stmt(e, arena, body_start + i);
-                i += 1;
-            }
-            (*e).indent_level -= 1;
-            CEmitter::indent(e);
-            String::push_str(&mut (*e).c_buffer, &String::new("}\n"));
-        }
-    }
-
-    @unsafe
-    fn emit_expr(e: &mut CEmitter, arena: &AstArena, expr_idx: usize) {
-        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx);
-        
-        if expr.tag == Expr_TAG_IntLit {
-            // Self-hosted Y-Lang doesn't have format! or int->str yet.
-            // In the bootstrap, we assume 0 or we'll rely on C's string lit
-            String::push_str(&mut (*e).c_buffer, &String::new("0"));
-        } else if expr.tag == Expr_TAG_StringLit {
-            String::push_str(&mut (*e).c_buffer, &String::new("\""));
-            String::push_str(&mut (*e).c_buffer, &expr.data.StringLit._0);
-            String::push_str(&mut (*e).c_buffer, &String::new("\""));
-        } else if expr.tag == Expr_TAG_BoolLit {
-            if expr.data.BoolLit._0 == 1 {
-                String::push_str(&mut (*e).c_buffer, &String::new("true"));
-            } else {
-                String::push_str(&mut (*e).c_buffer, &String::new("false"));
-            }
-        } else if expr.tag == Expr_TAG_Ident {
-            String::push_str(&mut (*e).c_buffer, &expr.data.Ident._0);
-        } else if expr.tag == Expr_TAG_BinaryExpr {
-            let lhs: usize = expr.data.BinaryExpr._0;
-            let rhs: usize = expr.data.BinaryExpr._2;
-            String::push_str(&mut (*e).c_buffer, &String::new("("));
-            CEmitter::emit_expr(e, arena, lhs - 1);
-            // Op matching is skipped in this demo but could be expanded
-            String::push_str(&mut (*e).c_buffer, &String::new(" + "));
-            CEmitter::emit_expr(e, arena, rhs - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new(")"));
-        } else if expr.tag == Expr_TAG_Call {
-            let func_idx: usize = expr.data.Call._0;
-            let args_start: usize = expr.data.Call._1;
-            let arg_count: usize = expr.data.Call._2;
-            CEmitter::emit_expr(e, arena, func_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new("("));
-            
-            let mut i: usize = 0;
-            while i < arg_count {
-                let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + i);
-                CEmitter::emit_expr(e, arena, arg_idx - 1);
-                if i + 1 < arg_count {
-                    String::push_str(&mut (*e).c_buffer, &String::new(", "));
-                }
-                i += 1;
-            }
-            String::push_str(&mut (*e).c_buffer, &String::new(")"));
-        } else if expr.tag == Expr_TAG_MemberAccess {
-            let base_idx: usize = expr.data.MemberAccess._0;
-            let member: String = expr.data.MemberAccess._1;
-            CEmitter::emit_expr(e, arena, base_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new("."));
-            String::push_str(&mut (*e).c_buffer, &member);
-        } else if expr.tag == Expr_TAG_Index {
-            let base_idx: usize = expr.data.Index._0;
-            let idx_idx: usize = expr.data.Index._1;
-            CEmitter::emit_expr(e, arena, base_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new("["));
-            CEmitter::emit_expr(e, arena, idx_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new("]"));
-        } else if expr.tag == Expr_TAG_UnaryExpr {
-            let operand_idx: usize = expr.data.UnaryExpr._1;
-            // Assumes Deref for now
-            String::push_str(&mut (*e).c_buffer, &String::new("*("));
-            CEmitter::emit_expr(e, arena, operand_idx - 1);
-            String::push_str(&mut (*e).c_buffer, &String::new(")"));
-        }
-    }
-}
-import lib;
-import parser;
-
-struct LlvmEmitter {
-    buffer: String,
-    tmp_counter: usize,
-    label_counter: usize
-}
-
-impl LlvmEmitter {
-    @unsafe
-    fn new() -> LlvmEmitter {
-        let e: LlvmEmitter;
-        e.buffer = String::new("");
-        e.tmp_counter = 0;
-        e.label_counter = 0;
-        return e;
-    }
-
-    @unsafe
-    fn int_to_str(val: usize) -> String {
-        // A simple int-to-string for our prototype (only handles up to 9999)
-        if val == 0 { return String::new("0"); }
-        if val == 1 { return String::new("1"); }
-        if val == 2 { return String::new("2"); }
-        if val == 3 { return String::new("3"); }
-        if val == 4 { return String::new("4"); }
-        if val == 5 { return String::new("5"); }
-        if val == 6 { return String::new("6"); }
-        if val == 7 { return String::new("7"); }
-        if val == 8 { return String::new("8"); }
-        if val == 9 { return String::new("9"); }
-        
-        // For larger numbers in prototype, we just return a placeholder or implement a real loop if we had modulo
-        // Y-Lang self-hosted doesn't have modulo yet in this snippet, so let's just return a generic
-        return String::new("100");
-    }
-
-    @unsafe
-    fn fresh_tmp(e: &mut LlvmEmitter) -> String {
-        (*e).tmp_counter += 1;
-        let mut s: String = String::new("%t");
-        String::push_str(&mut s, &LlvmEmitter::int_to_str((*e).tmp_counter));
-        return s;
-    }
-
-    @unsafe
-    fn fresh_label(e: &mut LlvmEmitter, prefix: &String) -> String {
-        (*e).label_counter += 1;
-        let mut s: String = String::clone(prefix);
-        String::push_str(&mut s, &String::new("."));
-        String::push_str(&mut s, &LlvmEmitter::int_to_str((*e).label_counter));
-        return s;
-    }
-
-    @unsafe
-    fn emit_func(e: &mut LlvmEmitter, arena: &AstArena, func_idx: usize) {
-        let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, func_idx);
-        (*e).tmp_counter = 0;
-
-        String::push_str(&mut (*e).buffer, &String::new("define i32 @"));
-        String::push_str(&mut (*e).buffer, &fdecl.name);
-        String::push_str(&mut (*e).buffer, &String::new("("));
-        
-        let mut p: usize = 0;
-        while p < fdecl.param_count {
-            let param: ParamDecl = Vec::get_ParamDecl(&(*arena).params, fdecl.param_start + p);
-            String::push_str(&mut (*e).buffer, &String::new("i32 %"));
-            String::push_str(&mut (*e).buffer, &param.name);
-            String::push_str(&mut (*e).buffer, &String::new(".arg"));
-            if p + 1 < fdecl.param_count {
-                String::push_str(&mut (*e).buffer, &String::new(", "));
-            }
-            p += 1;
-        }
-        
-        String::push_str(&mut (*e).buffer, &String::new(") {\nentry:\n"));
-        
-        // Alloca for params
-        let mut ap: usize = 0;
-        while ap < fdecl.param_count {
-            let param: ParamDecl = Vec::get_ParamDecl(&(*arena).params, fdecl.param_start + ap);
-            String::push_str(&mut (*e).buffer, &String::new("  %"));
-            String::push_str(&mut (*e).buffer, &param.name);
-            String::push_str(&mut (*e).buffer, &String::new(" = alloca i32\n"));
-            String::push_str(&mut (*e).buffer, &String::new("  store i32 %"));
-            String::push_str(&mut (*e).buffer, &param.name);
-            String::push_str(&mut (*e).buffer, &String::new(".arg, ptr %"));
-            String::push_str(&mut (*e).buffer, &param.name);
-            String::push_str(&mut (*e).buffer, &String::new("\n"));
-            ap += 1;
-        }
-
-        let mut s: usize = 0;
-        while s < fdecl.body_count {
-            LlvmEmitter::emit_stmt(e, arena, fdecl.body_start + s);
-            s += 1;
-        }
-        
-        // Default return just in case
-        String::push_str(&mut (*e).buffer, &String::new("  ret i32 0\n}\n\n"));
-    }
-
-    @unsafe
-    fn emit_stmt(e: &mut LlvmEmitter, arena: &AstArena, stmt_idx: usize) {
-        let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, stmt_idx);
-        
-        if stmt.tag == Stmt_TAG_Let {
-            let var_name: String = stmt.data.Let._0;
-            let init_idx: usize = stmt.data.Let._2;
-            
-            String::push_str(&mut (*e).buffer, &String::new("  %"));
-            String::push_str(&mut (*e).buffer, &var_name);
-            String::push_str(&mut (*e).buffer, &String::new(" = alloca i32\n"));
-            
-            if init_idx > 0 {
-                let val: String = LlvmEmitter::emit_expr(e, arena, init_idx - 1);
-                String::push_str(&mut (*e).buffer, &String::new("  store i32 "));
-                String::push_str(&mut (*e).buffer, &val);
-                String::push_str(&mut (*e).buffer, &String::new(", ptr %"));
-                String::push_str(&mut (*e).buffer, &var_name);
-                String::push_str(&mut (*e).buffer, &String::new("\n"));
-            }
-        } else if stmt.tag == Stmt_TAG_Assign {
-            let target_idx: usize = stmt.data.Assign._0;
-            let value_idx: usize = stmt.data.Assign._1;
-            
-            let val: String = LlvmEmitter::emit_expr(e, arena, value_idx - 1);
-            let target_addr: String = LlvmEmitter::emit_lvalue(e, arena, target_idx - 1);
-            
-            String::push_str(&mut (*e).buffer, &String::new("  store i32 "));
-            String::push_str(&mut (*e).buffer, &val);
-            String::push_str(&mut (*e).buffer, &String::new(", ptr "));
-            String::push_str(&mut (*e).buffer, &target_addr);
-            String::push_str(&mut (*e).buffer, &String::new("\n"));
-        } else if stmt.tag == Stmt_TAG_Return {
-            let ret_idx: usize = stmt.data.Return._0;
-            if ret_idx > 0 {
-                let val: String = LlvmEmitter::emit_expr(e, arena, ret_idx - 1);
-                String::push_str(&mut (*e).buffer, &String::new("  ret i32 "));
-                String::push_str(&mut (*e).buffer, &val);
-                String::push_str(&mut (*e).buffer, &String::new("\n"));
-            } else {
-                String::push_str(&mut (*e).buffer, &String::new("  ret void\n"));
-            }
-        } else if stmt.tag == Stmt_TAG_ExprStmt {
-            let expr_idx: usize = stmt.data.ExprStmt._0;
-            LlvmEmitter::emit_expr(e, arena, expr_idx - 1);
-        } else if stmt.tag == Stmt_TAG_If {
-            let cond_idx: usize = stmt.data.If._0;
-            let then_start: usize = stmt.data.If._1;
-            let then_count: usize = stmt.data.If._2;
-            
-            let cond: String = LlvmEmitter::emit_expr(e, arena, cond_idx - 1);
-            let then_lbl: String = LlvmEmitter::fresh_label(e, &String::new("then"));
-            let merge_lbl: String = LlvmEmitter::fresh_label(e, &String::new("merge"));
-            
-            String::push_str(&mut (*e).buffer, &String::new("  br i1 "));
-            String::push_str(&mut (*e).buffer, &cond);
-            String::push_str(&mut (*e).buffer, &String::new(", label %"));
-            String::push_str(&mut (*e).buffer, &then_lbl);
-            String::push_str(&mut (*e).buffer, &String::new(", label %"));
-            String::push_str(&mut (*e).buffer, &merge_lbl);
-            String::push_str(&mut (*e).buffer, &String::new("\n"));
-            
-            String::push_str(&mut (*e).buffer, &then_lbl);
-            String::push_str(&mut (*e).buffer, &String::new(":\n"));
-            let mut i: usize = 0;
-            while i < then_count {
-                LlvmEmitter::emit_stmt(e, arena, then_start + i);
-                i += 1;
-            }
-            String::push_str(&mut (*e).buffer, &String::new("  br label %"));
-            String::push_str(&mut (*e).buffer, &merge_lbl);
-            String::push_str(&mut (*e).buffer, &String::new("\n"));
-            
-            String::push_str(&mut (*e).buffer, &merge_lbl);
-            String::push_str(&mut (*e).buffer, &String::new(":\n"));
-        }
-    }
-
-    @unsafe
-    fn emit_lvalue(e: &mut LlvmEmitter, arena: &AstArena, expr_idx: usize) -> String {
-        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx);
-        if expr.tag == Expr_TAG_Ident {
-            let mut res: String = String::new("%");
-            String::push_str(&mut res, &expr.data.Ident._0);
-            return res;
-        }
-        return LlvmEmitter::emit_expr(e, arena, expr_idx);
-    }
-
-    @unsafe
-    fn emit_expr(e: &mut LlvmEmitter, arena: &AstArena, expr_idx: usize) -> String {
-        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx);
-        
-        if expr.tag == Expr_TAG_IntLit {
-            return String::new("0");
-        } else if expr.tag == Expr_TAG_Ident {
-            let tmp: String = LlvmEmitter::fresh_tmp(e);
-            String::push_str(&mut (*e).buffer, &String::new("  "));
-            String::push_str(&mut (*e).buffer, &tmp);
-            String::push_str(&mut (*e).buffer, &String::new(" = load i32, ptr %"));
-            String::push_str(&mut (*e).buffer, &expr.data.Ident._0);
-            String::push_str(&mut (*e).buffer, &String::new("\n"));
-            return tmp;
-        } else if expr.tag == Expr_TAG_BinaryExpr {
-            let lhs_idx: usize = expr.data.BinaryExpr._0;
-            let rhs_idx: usize = expr.data.BinaryExpr._2;
-            let l: String = LlvmEmitter::emit_expr(e, arena, lhs_idx - 1);
-            let r: String = LlvmEmitter::emit_expr(e, arena, rhs_idx - 1);
-            let tmp: String = LlvmEmitter::fresh_tmp(e);
-            
-            String::push_str(&mut (*e).buffer, &String::new("  "));
-            String::push_str(&mut (*e).buffer, &tmp);
-            // Default to add for prototype
-            String::push_str(&mut (*e).buffer, &String::new(" = add i32 "));
-            String::push_str(&mut (*e).buffer, &l);
-            String::push_str(&mut (*e).buffer, &String::new(", "));
-            String::push_str(&mut (*e).buffer, &r);
-            String::push_str(&mut (*e).buffer, &String::new("\n"));
-            return tmp;
-        } else if expr.tag == Expr_TAG_Call {
-            let func_idx: usize = expr.data.Call._0;
-            let func_expr: Expr = Vec::get_Expr(&(*arena).exprs, func_idx - 1);
-            let mut func_name: String = String::new("unknown");
-            if func_expr.tag == Expr_TAG_Ident {
-                func_name = String::clone(&func_expr.data.Ident._0);
-            }
-            
-            let tmp: String = LlvmEmitter::fresh_tmp(e);
-            String::push_str(&mut (*e).buffer, &String::new("  "));
-            String::push_str(&mut (*e).buffer, &tmp);
-            String::push_str(&mut (*e).buffer, &String::new(" = call i32 @"));
-            String::push_str(&mut (*e).buffer, &func_name);
-            String::push_str(&mut (*e).buffer, &String::new("()\n"));
-            return tmp;
-        }
-        return String::new("0");
-    }
-}
-import lib;
-import lexer;
-import parser;
-import c_emitter;
-import llvm_emitter;
-
-@unsafe
-fn main() {
-    println("--- Y-Lang Self-Hosted Compiler ---");
-
-    // 1. Read source
-    let source_path: String = String::new("test.yy");
-    let source: String = File::read_to_string(&source_path);
-
-    // 2. Lexer
-    let mut lexer: Lexer = Lexer::new(&source);
-    let tokens: Vec = Lexer::tokenize(&mut lexer);
-    let token_count: usize = Vec::len(&tokens);
-    print("Lexed tokens: ");
-    print_int(token_count);
-    println("");
-
-    // 3. Parser
-    let mut arena: AstArena = AstArena::new();
-    let mut p: Parser = Parser::new(tokens, token_count);
-    Parser::parse_program(&mut p, &mut arena);
-
-    // 4. Emitter (C)
-    let mut emitter: CEmitter = CEmitter::new();
-    // 4.5 Emitter (LLVM)
-    let mut ll_emitter: LlvmEmitter = LlvmEmitter::new();
-    
-    let mut f: usize = 0;
-    let func_count: usize = Vec::len(&arena.funcs);
-    while f < func_count {
-        CEmitter::emit_func(&mut emitter, &arena, f);
-        LlvmEmitter::emit_func(&mut ll_emitter, &arena, f);
-        f += 1;
-    }
-
-    // 5. Output C
-    let out_path: String = String::new("test.c");
-    File::write(&out_path, &emitter.c_buffer);
-    
-    // 6. Output LLVM
-    let ll_path: String = String::new("test.ll");
-    File::write(&ll_path, &ll_emitter.buffer);
-    
-    println("Successfully compiled test.yy -> test.c and test.ll");
     return;
 }

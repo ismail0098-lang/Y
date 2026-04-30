@@ -84,25 +84,21 @@ impl Parser {
             return Ok(Item::StaticAssert(sa));
         }
 
-        // Look for @target attribute
-        let mut target = None;
-        if self.match_token(TokenKind::AtTarget) {
-            self.expect(TokenKind::LParen, "'(' after @target")?;
-            let tok = self.peek().clone();
-            if let TokenKind::HardwareTarget(name) = &tok.kind {
-                target = Some(HardwareTarget {
-                    name: name.clone(),
-                    span: Span { line: tok.line, col: tok.col },
-                });
-                self.advance();
-            } else {
-                return Err(format!("Line {}: Expected hardware target profile", tok.line));
-            }
-            self.expect(TokenKind::RParen, "')' after hardware target")?;
+        // Look for @require attributes
+        let mut requires = Vec::new();
+        while self.match_token(TokenKind::AtRequire) {
+            let start_tok = self.peek().clone();
+            self.expect(TokenKind::LParen, "'(' after @require")?;
+            let condition = self.parse_expr()?;
+            self.expect(TokenKind::RParen, "')' after @require condition")?;
+            requires.push(RequireAttr {
+                condition,
+                span: Span { line: start_tok.line, col: start_tok.col },
+            });
         }
 
         if self.match_token(TokenKind::Kernel) {
-            let kernel = self.parse_kernel(target)?;
+            let kernel = self.parse_kernel(requires)?;
             Ok(Item::Kernel(kernel))
         } else if self.match_token(TokenKind::Struct) {
             let s = self.parse_struct_decl()?;
@@ -354,7 +350,7 @@ impl Parser {
 
     // ── Kernel ──────────────────────────────────────────────
 
-    fn parse_kernel(&mut self, target: Option<HardwareTarget>) -> Result<KernelDecl, String> {
+    fn parse_kernel(&mut self, requires: Vec<RequireAttr>) -> Result<KernelDecl, String> {
         let name_tok = self.peek().clone();
         let name = match &name_tok.kind {
             TokenKind::Ident(s) => { self.advance(); s.clone() },
@@ -393,7 +389,7 @@ impl Parser {
 
         let body = self.parse_block()?;
 
-        Ok(KernelDecl { target, name, params, body, span })
+        Ok(KernelDecl { requires, name, params, body, span })
     }
 
     // ── Blocks and Statements ───────────────────────────────
@@ -415,21 +411,23 @@ impl Parser {
         let tok = self.peek().clone();
         let span = Span { line: tok.line, col: tok.col };
 
-        // Attributes applied to types/stmts (like cache_policy)
+        // Attributes applied to types/stmts -- @cache_policy and @ZeroDrift in any order
         let mut cache_policy = None;
-        if self.match_token(TokenKind::AtCachePolicy) {
+        let mut zero_drift   = None;
+
+        loop {
+            if self.match_token(TokenKind::AtCachePolicy) {
             self.expect(TokenKind::LParen, "'('")?;
-            let mut p_name = "".to_string();
-            
+
             // Allow matching CachePolicy token
             let pt_tok = self.peek().clone();
-            match &pt_tok.kind {
-                TokenKind::L2Persist => { p_name = "L2_PERSIST".into(); self.advance(); },
-                TokenKind::L2EvictFirst => { p_name = "L2_EVICT_FIRST".into(); self.advance(); },
-                TokenKind::L2EvictLast => { p_name = "L2_EVICT_LAST".into(); self.advance(); },
-                TokenKind::L2Stream => { p_name = "L2_STREAM".into(); self.advance(); },
+            let p_name = match &pt_tok.kind {
+                TokenKind::L2Persist => { self.advance(); "L2_PERSIST".to_string() },
+                TokenKind::L2EvictFirst => { self.advance(); "L2_EVICT_FIRST".to_string() },
+                TokenKind::L2EvictLast => { self.advance(); "L2_EVICT_LAST".to_string() },
+                TokenKind::L2Stream => { self.advance(); "L2_STREAM".to_string() },
                 _ => return Err("Expected a valid Cache Policy identifier".into()),
-            }
+            };
 
             let mut reuse = None;
             if self.match_token(TokenKind::Comma) {
@@ -447,11 +445,17 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::RParen, "')'")?;
-            cache_policy = Some(CachePolicyAttr { policy: p_name, reuse_count: reuse, span: Span{line:pt_tok.line, col:pt_tok.col} });
+                cache_policy = Some(CachePolicyAttr { policy: p_name, reuse_count: reuse, span: Span{line:pt_tok.line, col:pt_tok.col} });
+            } else if self.match_token(TokenKind::AtZeroDrift) {
+                // @ZeroDrift -- no parentheses needed
+                zero_drift = Some(ZeroDriftAttr { span: span.clone() });
+            } else {
+                break;
+            }
         }
 
         if self.match_token(TokenKind::Let) {
-            let mutable = self.match_token(TokenKind::Mut);
+            let _mutable = self.match_token(TokenKind::Mut);
             let ident_tok = self.peek().clone();
             let name = match &ident_tok.kind {
                 TokenKind::Ident(s) => { self.advance(); s.clone() },
@@ -468,7 +472,7 @@ impl Parser {
                 init = Some(self.parse_expr()?);
             }
             self.expect(TokenKind::Semicolon, "';' at end of let statement")?;
-            Ok(Stmt::Let { name, ty, init, cache_policy, span })
+            Ok(Stmt::Let { name, ty, init, cache_policy, zero_drift, span })
 
         } else if self.match_token(TokenKind::Type) {
             let ident_tok = self.peek().clone();
@@ -680,6 +684,7 @@ impl Parser {
             TokenKind::U16 => { self.advance(); return Ok(Type::Primitive("U16".into(), span)); }
             TokenKind::U32 => { self.advance(); return Ok(Type::Primitive("U32".into(), span)); }
             TokenKind::U64 => { self.advance(); return Ok(Type::Primitive("U64".into(), span)); }
+            TokenKind::QFixed(s) => { self.advance(); return Ok(Type::Primitive(s.clone(), span)); }
             TokenKind::Bool => { self.advance(); return Ok(Type::Primitive("bool".into(), span)); }
             TokenKind::RoleA => { self.advance(); return Ok(Type::Ident("A".into(), span)); }
             TokenKind::RoleB => { self.advance(); return Ok(Type::Ident("B".into(), span)); }
@@ -1008,54 +1013,8 @@ impl Parser {
                         return Ok(Expr::Ident(name, span));
                     }
                 }
-                return Err(format!("Line {}: Expected expression, found {:?}", tok.line, tok.kind));
-            },
-            // Type-like identifiers that can appear in expression position
-            TokenKind::Fragment => {
-                 self.advance();
-                 if self.match_token(TokenKind::ColonColon) {
-                     let next = self.peek().clone();
-                     if let TokenKind::Ident(n) = &next.kind {
-                        self.advance();
-                        return Ok(Expr::Path { namespace: "Fragment".into(), member: n.clone(), span });
-                     }
-                 }
-                 Ok(Expr::Ident("Fragment".into(), span))
-            },
-            TokenKind::Pipeline => {
-                 self.advance();
-                 if self.match_token(TokenKind::ColonColon) {
-                     let next = self.peek().clone();
-                     if let TokenKind::Ident(n) = &next.kind {
-                        self.advance();
-                        return Ok(Expr::Path { namespace: "Pipeline".into(), member: n.clone(), span });
-                     }
-                 }
-                 Ok(Expr::Ident("Pipeline".into(), span))
-            },
-            TokenKind::SharedMemory => {
-                 self.advance();
-                 if self.match_token(TokenKind::ColonColon) {
-                     let next = self.peek().clone();
-                     if let TokenKind::Ident(n) = &next.kind {
-                        self.advance();
-                        return Ok(Expr::Path { namespace: "SharedMemory".into(), member: n.clone(), span });
-                     }
-                 }
-                 Ok(Expr::Ident("SharedMemory".into(), span))
-            },
-            TokenKind::File => {
-                 self.advance();
-                 if self.match_token(TokenKind::ColonColon) {
-                     let next = self.peek().clone();
-                     if let TokenKind::Ident(n) = &next.kind {
-                        self.advance();
-                        return Ok(Expr::Path { namespace: "File".into(), member: n.clone(), span });
-                     }
-                 }
-                 Ok(Expr::Ident("File".into(), span))
-            },
-            _ => Err(format!("Line {}: Expected expression, found {:?}", tok.line, tok.kind))
+                Err(format!("Line {}: Expected expression, found {:?}", tok.line, tok.kind))
+            }
         }
     }
 
@@ -1107,3 +1066,4 @@ impl Parser {
         Ok(StaticAssertDecl { condition, message, span })
     }
 }
+

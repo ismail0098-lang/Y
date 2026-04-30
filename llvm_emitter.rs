@@ -161,10 +161,19 @@ impl LlvmEmitter {
             writeln!(&mut self.output, "  {} = fptosi {} {} to i64", int_tmp, src_ty, val).unwrap();
             writeln!(&mut self.output, "  {} = inttoptr i64 {} to ptr", tmp, int_tmp).unwrap();
         } else if src_ptr && dst_float {
-            // ptr -> float via intermediate int
+            // ptr -> float via intermediate int (PRESERVING BITS using bitcast)
             let int_tmp = self.fresh_tmp();
             writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", int_tmp, val).unwrap();
-            writeln!(&mut self.output, "  {} = sitofp i64 {} to {}", tmp, int_tmp, dst_ty).unwrap();
+            
+            if dst_ty == "double" {
+                // 64-bit pointer fits perfectly into 64-bit double
+                writeln!(&mut self.output, "  {} = bitcast i64 {} to double", tmp, int_tmp).unwrap();
+            } else {
+                // For 32-bit float, we must truncate the 64-bit pointer first
+                let trunc_tmp = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = trunc i64 {} to i32", trunc_tmp, int_tmp).unwrap();
+                writeln!(&mut self.output, "  {} = bitcast i32 {} to float", tmp, trunc_tmp).unwrap();
+            }
         } else {
             // Unknown conversion — pass through without conversion
             writeln!(&mut self.output, "  ; WARN: unhandled coerce {} -> {}", src_ty, dst_ty).unwrap();
@@ -530,8 +539,7 @@ impl LlvmEmitter {
         self.locals.clear();
         self.block_terminated = false;
 
-        writeln!(&mut self.output, "; @kernel target={}",
-            k.target.as_ref().map(|t| t.name.as_str()).unwrap_or("default")).unwrap();
+        writeln!(&mut self.output, "; @kernel").unwrap();
 
         let params: Vec<String> = k.params.iter().map(|p| {
             let ty = self.emit_type(&p.ty);
@@ -798,7 +806,6 @@ impl LlvmEmitter {
             Stmt::TypeAlias { .. } => {
                 // Type aliases are resolved at compile time — no IR emission needed
             }
-            _ => {}
         }
     }
 
@@ -976,7 +983,7 @@ impl LlvmEmitter {
                 }
                 self.emit_load(&lval, &field_ty)
             }
-            Expr::Index { base, index, .. } => {
+            Expr::Index { .. } => {
                 let lval = self.emit_lvalue(expr);
                 self.emit_load(&lval, "i32") // Fallback
             }
@@ -1118,3 +1125,4 @@ impl LlvmEmitter {
         }
     }
 }
+

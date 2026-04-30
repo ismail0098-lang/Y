@@ -1,4 +1,5 @@
-ï»¿
+
+
 
 
 
@@ -62,7 +63,7 @@ High-level (Triton, Mojo): The compiler makes decisions about tile sizes, memory
 
 
 
-Low-level (CUDA C + PTX): You have full control but no safety. A wrong register fragment role, a missing barrier after cp. async, a swizzle function the compiler silently re-optimizes â€” these are silent runtime bugs that only appear in a profiler hours later.
+Low-level (CUDA C + PTX): You have full control but no safety. A wrong register fragment role, a missing barrier after cp. async, a swizzle function the compiler silently re-optimizes — these are silent runtime bugs that only appear in a profiler hours later.
 
 
 
@@ -92,7 +93,7 @@ This section compares Y-Lang against CUDA C, Triton, and Mojo across the four di
 
 
 
-2.1 Shared Memory Bank Conflicts â€” Swizzling as a Type
+2.1 Shared Memory Bank Conflicts — Swizzling as a Type
 
 On an RTX 4070, shared memory has 32 banks, each 4 bytes wide. When multiple threads in a warp are on an RTX 4070, shared memory consists of 32 banks, each 4 bytes wide. When multiple threads in a warp access the same bank simultaneously, accesses are serialized, resulting in a bank conflict that reduces shared memory throughput. Lice access land on different banks. Every high-performance GEMM kernel does this. The differences lie in how each language handles it:
 
@@ -139,9 +140,9 @@ type ATile = SmemLayout&lt;
 
 
 
-2.2 L2 Cache â€” Managed, Not Transparent
+2.2 L2 Cache — Managed, Not Transparent
 
-The RTX 4070 has 36 MB of L2 cache running at roughly 5 TB/s â€” ten times the bandwidth of VRAM. In AI workloads, weight matrices are reused across many activation tiles. If weights are evicted from L2 between uses, performance falls off a cliff.
+The RTX 4070 has 36 MB of L2 cache running at roughly 5 TB/s — ten times the bandwidth of VRAM. In AI workloads, weight matrices are reused across many activation tiles. If weights are evicted from L2 between uses, performance falls off a cliff.
 
 
 
@@ -159,7 +160,7 @@ let weight_tile: L2Memory&lt;F16&gt; = load(weight_ptr);
 
 
 
-// One-time activation â€” evict immediately after use
+// One-time activation — evict immediately after use
 
 // Emits: ld.global.L2::evict_first
 
@@ -169,18 +170,18 @@ let act_tile: L2Memory&lt;F16&gt; = load(activation_ptr);
 
 
 
-This prevents cache thrashingâ€”the scenario where activation loads displace weight tiles that will be needed again in 4 microseconds.
+This prevents cache thrashing—the scenario where activation loads displace weight tiles that will be needed again in 4 microseconds.
 
 
 
 
-2.3 Async Pipeline â€” Scheduled, Not Hoped
+2.3 Async Pipeline — Scheduled, Not Hoped
 
 Double-buffering is the single most impactful optimization in high-performance GEMM: while the tensor cores compute on tile N, cp. async is already loading tile N+1 into the other SMEM buffer. When the pipeline is correctly sequenced, the tensor cores never idle waiting for memory.
 
 
 
-In Triton, the num_stages parameter activates an automated software pipelining pass. When it works, it works well. When the heuristic fails â€” wrong tile shape, unusual memory access pattern, unexpected register pressure â€” performance degrades with no diagnostic output and no recourse.
+In Triton, the num_stages parameter activates an automated software pipelining pass. When it works, it works well. When the heuristic fails — wrong tile shape, unusual memory access pattern, unexpected register pressure — performance degrades with no diagnostic output and no recourse.
 
 
 
@@ -213,9 +214,9 @@ let frag_A = ldmatrix(smem_tile);
 
 
 
-2.4 MMA Atoms â€” Fragment Roles as Types
+2.4 MMA Atoms — Fragment Roles as Types
 
-The m16n8k16 MMA atom is a warp-collective operation. All 32 threads participate, each holding a non-contiguous slice of the A, B, and C matrices known as a fragment. The fragment layout is fixed by the PTX ISA â€” thread 0 holds specific elements, thread 1 holds different ones, and so on.
+The m16n8k16 MMA atom is a warp-collective operation. All 32 threads participate, each holding a non-contiguous slice of the A, B, and C matrices known as a fragment. The fragment layout is fixed by the PTX ISA — thread 0 holds specific elements, thread 1 holds different ones, and so on.
 
 
 
@@ -223,7 +224,7 @@ In CUDA C, fragments are typed structs, but their roles (A vs. B vs. C) are not 
 
 
 
-// Fragment&lt;Op, Role, dtype&gt; â€” roles are incompatible types
+// Fragment&lt;Op, Role, dtype&gt; — roles are incompatible types
 
 let frag_A: Fragment&lt;MMA_m16n8k16, A, F16&gt;;  // holds r0,r1,r2,r3
 
@@ -233,13 +234,13 @@ let frag_C: Fragment&lt;MMA_m16n8k16, C, F16&gt;;  // holds d0,d1
 
 
 
-// mma_sync only accepts correct roles â€” enforced at compile time
+// mma_sync only accepts correct roles — enforced at compile time
 
 let frag_D = mma_sync(frag_A, frag_B, frag_C);
 
 
 
-// mma_sync(frag_B, frag_A, frag_C) â†’ COMPILE ERROR
+// mma_sync(frag_B, frag_A, frag_C) › COMPILE ERROR
 
 // 'expected Fragment&lt;_, A, _&gt;, got Fragment&lt;_, B, _&gt;'
 
@@ -346,7 +347,7 @@ Silicon-level expert
 
 3. The Y-Lang Type System
 
-Y-Lang's type system has five tiers, each corresponding to a distinct hardware concept. Types from different tiers are incompatible â€” there are no implicit conversions, only explicit typed operations.
+Y-Lang's type system has five tiers, each corresponding to a distinct hardware concept. Types from different tiers are incompatible — there are no implicit conversions, only explicit typed operations.
 
 
 
@@ -374,7 +375,7 @@ type RegisterFile    // 64KB/SM, ~80 TB/s, 0      cycle latency
 
 
 
-3.2 Transfer Types â€” Synchronization Obligations
+3.2 Transfer Types — Synchronization Obligations
 
 Moving data between memory tiers produces a Transfer value. This value is a linear type: it must be consumed exactly once via a wait call. Both forgetting to wait and waiting twice are compile-time errors.
 
@@ -388,22 +389,22 @@ type Transfer&lt;
 
     policy: Async&lt;commit_group: u32&gt; | Sync,
 
-    width:  u32    // 32 | 64 | 128 bits â€” controls cp. async instruction width
+    width:  u32    // 32 | 64 | 128 bits — controls cp. async instruction width
 
 &gt;
 
 
 
-// Transfer is a LINEAR TYPE â€” must be consumed exactly once
+// Transfer is a LINEAR TYPE — must be consumed exactly once
 
-// Dropping tx without wait(tx) â†’ compile error: 'unused transfer obligation'
+// Dropping tx without wait(tx) › compile error: 'unused transfer obligation'
 
-// Calling wait(tx) twice       â†’ compile error: 'transfer already consumed'
-
-
+// Calling wait(tx) twice       › compile error: 'transfer already consumed'
 
 
-3.3 Layout Types â€” Swizzle as a Type Property
+
+
+3.3 Layout Types — Swizzle as a Type Property
 
 type SmemLayout&lt;
 
@@ -427,12 +428,12 @@ type SmemLayout&lt;
 
 // prove conflict_free(op, layout) = true.
 
-// Failure â†’ compile error with exact conflict report.
+// Failure › compile error with exact conflict report.
 
 
 
 
-3.4 Fragment Types â€” Warp-Distributed Register Values
+3.4 Fragment Types — Warp-Distributed Register Values
 
 type Fragment&lt;
 
@@ -446,18 +447,18 @@ type Fragment&lt;
 
 
 
-// Fragment is a PHANTOM TYPE â€” zero runtime overhead
+// Fragment is a PHANTOM TYPE — zero runtime overhead
 
 // Role is enforced at compile time only
 
-// Fragment values cannot be indexed â€” no frag[i] syntax
+// Fragment values cannot be indexed — no frag[i] syntax
 
 // They are only valid as inputs to their matching MMA op
 
 
 
 
-3.5 Pipeline Types â€” Double-Buffering as a Type
+3.5 Pipeline Types — Double-Buffering as a Type
 
 type Pipeline&lt;
 
@@ -477,7 +478,7 @@ type Pipeline&lt;
 
 // by the compute stage for stage N.
 
-// Violation â†’ compile error.
+// Violation › compile error.
 
 
 
@@ -496,7 +497,7 @@ Y-Lang syntax is designed to be readable without being verbose. The guiding prin
 
 // All type proofs are discharged against this target
 
-@target(RTX_4070)
+@require(sm >= 89)
 
 kernel matmul(
 
@@ -517,7 +518,7 @@ kernel matmul(
 
 4.2 Memory Allocation
 
-// Typed SMEM allocation â€” swizzle is part of the type
+// Typed SMEM allocation — swizzle is part of the type
 
 type ATile = SmemLayout&lt;F16, rows=16, cols=64, swizzle=Swizzle&lt;3,3,3&gt;&gt;;
 
@@ -531,16 +532,16 @@ let smem_B: BTile = SharedMemory::alloc&lt;BTile&gt;();
 
 
 
-// Accumulator lives in register file â€” type knows this
+// Accumulator lives in register file — type knows this
 
 let acc: Fragment&lt;MMA_m16n8k16, D, F32&gt; = Fragment::zero();
 
 
 
 
-4.3 The K-Loop â€” Full Pipeline
+4.3 The K-Loop — Full Pipeline
 
-@target(RTX_4070)
+@require(sm >= 89)
 
 kernel matmul(A: GlobalMemory&lt;F16&gt;, B: GlobalMemory&lt;F16&gt;, C: GlobalMemory&lt;F32&gt;) {
 
@@ -560,7 +561,7 @@ kernel matmul(A: GlobalMemory&lt;F16&gt;, B: GlobalMemory&lt;F16&gt;, C: GlobalM
 
 
 
-    // Typed pipeline â€” double buffer, compiler verifies NoOverlap
+    // Typed pipeline — double buffer, compiler verifies NoOverlap
 
     let pipe: Pipeline&lt;stages=2, layout=ATile&gt; = Pipeline::init();
 
@@ -570,7 +571,7 @@ kernel matmul(A: GlobalMemory&lt;F16&gt;, B: GlobalMemory&lt;F16&gt;, C: GlobalM
 
 
 
-        // Async load â€” produces a linear Transfer obligation
+        // Async load — produces a linear Transfer obligation
 
         let tx_A: Transfer&lt;Global, Shared, Async&lt;1&gt;, 128&gt; =
 
@@ -582,7 +583,7 @@ kernel matmul(A: GlobalMemory&lt;F16&gt;, B: GlobalMemory&lt;F16&gt;, C: GlobalM
 
 
 
-        // Discharge obligations â€” compiler enforces this precedes ldmatrix
+        // Discharge obligations — compiler enforces this precedes ldmatrix
 
         pipe.wait(tx_A, tx_B);   // emits: cp.async.wait_group 1
 
@@ -590,7 +591,7 @@ kernel matmul(A: GlobalMemory&lt;F16&gt;, B: GlobalMemory&lt;F16&gt;, C: GlobalM
 
 
 
-        // ldmatrix â€” types verified against smem layout
+        // ldmatrix — types verified against smem layout
 
         let frag_A: Fragment&lt;MMA_m16n8k16, A, F16&gt; = ldmatrix(smem_A);
 
@@ -598,7 +599,7 @@ kernel matmul(A: GlobalMemory&lt;F16&gt;, B: GlobalMemory&lt;F16&gt;, C: GlobalM
 
 
 
-        // mma â€” roles verified, acc accumulated in-place
+        // mma — roles verified, acc accumulated in-place
 
         acc = mma_sync(frag_A, frag_B, acc);
 
@@ -606,7 +607,7 @@ kernel matmul(A: GlobalMemory&lt;F16&gt;, B: GlobalMemory&lt;F16&gt;, C: GlobalM
 
 
 
-    // Store â€” compiler knows acc is in registers, C is in global
+    // Store — compiler knows acc is in registers, C is in global
 
     store(acc -&gt; C);
 
@@ -617,7 +618,7 @@ kernel matmul(A: GlobalMemory&lt;F16&gt;, B: GlobalMemory&lt;F16&gt;, C: GlobalM
 
 4.4 Cache Policy Annotations
 
-// Weight tiles â€” persist in L2 across many activation tiles
+// Weight tiles — persist in L2 across many activation tiles
 
 @cache_policy(L2_PERSIST, reuse_count=8)
 
@@ -625,7 +626,7 @@ let weights: L2Memory&lt;F16&gt; = load(weight_ptr);
 
 
 
-// Activation tiles â€” one-time use, evict immediately
+// Activation tiles — one-time use, evict immediately
 
 @cache_policy(L2_EVICT_FIRST)
 
@@ -640,7 +641,7 @@ let activations: L2Memory&lt;F16&gt; = load(act_ptr);
 
 
 
-4.5 PTX Escape â€” For When You Need It
+4.5 PTX Escape — For When You Need It
 
 // Y-Lang has a PTX escape hatch for edge cases
 
@@ -680,7 +681,7 @@ Y-Lang's compiler has two distinct layers: a deterministic type-checking and cod
 
 Hard Rule
 
-AI components are advisory, not authoritative. A bad AI suggestion caught by the type checker falls back to a safe default. An AI suggestion that bypasses verification and produces incorrect output would be a language correctness bug â€” and the architecture makes that impossible by construction.
+AI components are advisory, not authoritative. A bad AI suggestion caught by the type checker falls back to a safe default. An AI suggestion that bypasses verification and produces incorrect output would be a language correctness bug — and the architecture makes that impossible by construction.
 
 
 
@@ -693,27 +694,27 @@ The following compiler stages are fully deterministic and involve no AI:
 
 
 
-Bank conflict analysis â€” the type system produces a mathematical proof, not a heuristic
+Bank conflict analysis — the type system produces a mathematical proof, not a heuristic
 
 
 
-Fragment role verification â€” phantom types, zero-cost, compile-time only
+Fragment role verification — phantom types, zero-cost, compile-time only
 
 
 
-Transfer obligation tracking â€” linear type system, formal verification
+Transfer obligation tracking — linear type system, formal verification
 
 
 
-PTX emission â€” correct by construction from the typed IR
+PTX emission — correct by construction from the typed IR
 
 
 
-Register allocation on fixed ISA patterns â€” solved problem, deterministic optimum
+Register allocation on fixed ISA patterns — solved problem, deterministic optimum
 
 
 
-Using AI in these stages would replace proofs with probabilities â€” a strict downgrade.
+Using AI in these stages would replace proofs with probabilities — a strict downgrade.
 
 
 
@@ -723,17 +724,17 @@ Using AI in these stages would replace proofs with probabilities â€” a strict do
 
 
 
-Stage 1 â€” Tile Size Prediction (Before Compilation)
+Stage 1 — Tile Size Prediction (Before Compilation)
 
 The hardest unsolved problem in kernel compilation: given a matrix shape, a hardware profile, and an operation type, what are the optimal BLOCK_M, BLOCK_N, BLOCK_K, num_warps, and num_stages?
 
 
 
-Triton brute-forces this with an autotuner that can run for hours. Y-Lang instead uses a small transformer trained on (hardware config, kernel shape) â†’ (optimal tile config, measured TFLOPS) pairs, predicting near-optimal configurations in milliseconds.
+Triton brute-forces this with an autotuner that can run for hours. Y-Lang instead uses a small transformer trained on (hardware config, kernel shape) › (optimal tile config, measured TFLOPS) pairs, predicting near-optimal configurations in milliseconds.
 
 
 
-// AI Tile Predictor â€” runs before compilation
+// AI Tile Predictor — runs before compilation
 
 // Input:  { hardware: RTX_4070, op: GEMM, M: 4096, N: 4096, K: 4096 }
 
@@ -750,28 +751,28 @@ Triton brute-forces this with an autotuner that can run for hours. Y-Lang instea
 
 
 
-Stage 2 â€” SASS-Level Hazard Detection (After PTX Emission)
+Stage 2 — SASS-Level Hazard Detection (After PTX Emission)
 
 After the deterministic PTX emitter runs, an AI model trained on (PTX, SASS disassembly, performance counter) triples scans the output for patterns that produce poor SASS:
 
 
 
-Load-use hazard chains â€” a load result consumed by the immediately following instruction
+Load-use hazard chains — a load result consumed by the immediately following instruction
 
-Register spill patterns â€” sequences that will cause the register allocator to spill to local memory
+Register spill patterns — sequences that will cause the register allocator to spill to local memory
 
-Uncoalesced access signatures â€” memory access patterns that will serialize across the warp
-
-
-
-This is particularly valuable because Y-Lang's target audience already reads SASS. The AI model augments rather than replaces that skill â€” catching hazards in code paths the programmer didn't manually inspect.
+Uncoalesced access signatures — memory access patterns that will serialize across the warp
 
 
 
+This is particularly valuable because Y-Lang's target audience already reads SASS. The AI model augments rather than replaces that skill — catching hazards in code paths the programmer didn't manually inspect.
 
-Stage 3 â€” Autotuning Loop Closure (After Profiling)
 
-The current optimization loop in practice: profile kernel â†’ read Nsight counters â†’ identify bottleneck â†’ infer code transformation â†’ reimplement â†’ reprofile. This cycle requires a human expert and takes hours.
+
+
+Stage 3 — Autotuning Loop Closure (After Profiling)
+
+The current optimization loop in practice: profile kernel › read Nsight counters › identify bottleneck › infer code transformation › reimplement › reprofile. This cycle requires a human expert and takes hours.
 
 
 
@@ -795,7 +796,7 @@ The current optimization loop in practice: profile kernel â†’ read Nsight counte
 
 //
 
-// Suggestion is applied as a Y-Lang annotation â€” still type-checked
+// Suggestion is applied as a Y-Lang annotation — still type-checked
 
 
 
@@ -855,19 +856,19 @@ The AI components do not require novel data collection. Existing public sources 
 
 
 
-CUTLASS benchmark suite â€” thousands of pre-tuned kernel configs with measured TFLOPS, directly usable as tile predictor training data
+CUTLASS benchmark suite — thousands of pre-tuned kernel configs with measured TFLOPS, directly usable as tile predictor training data
 
 
 
-Triton autotuner logs â€” every benchmark run produces (config, TFLOPS) pairs; publicly available in the Triton repository
+Triton autotuner logs — every benchmark run produces (config, TFLOPS) pairs; publicly available in the Triton repository
 
 
 
-NVIDIA MLPerf submissions â€” optimized kernel configs for specific hardware with measured results
+NVIDIA MLPerf submissions — optimized kernel configs for specific hardware with measured results
 
 
 
-YSU Engine kernels â€” real SASS analyzed by hand, ground truth for the hazard detector
+YSU Engine kernels — real SASS analyzed by hand, ground truth for the hazard detector
 
 
 
@@ -884,18 +885,18 @@ GPU hardware is growing more heterogeneous, not less. The H100 introduced the Tr
 
 
 
-Y-Lang bets on the opposite trend: that the highest-value workloads will always be run by people who care enough to target specific hardware â€” the render farm running inference on 1,000 RTX 4090s, the HPC cluster where every microsecond of latency has a cost, the research lab squeezing one more percentage point of GPU utilization out of a plasma simulation.
+Y-Lang bets on the opposite trend: that the highest-value workloads will always be run by people who care enough to target specific hardware — the render farm running inference on 1,000 RTX 4090s, the HPC cluster where every microsecond of latency has a cost, the research lab squeezing one more percentage point of GPU utilization out of a plasma simulation.
 
 
 
 
 6.2 The Type System as a Research Contribution
 
-Static bank conflict analysis is, to current knowledge, not implemented in any production compiler. Triton verifies tile shapes; CUTLASS uses template instantiation errors for shape mismatches. Neither proves conflict-freedom. A compiler that can emit a proof certificate â€” &quot;this kernel has zero bank conflicts for all valid inputs&quot; â€” is a publishable result, not merely a language feature.
+Static bank conflict analysis is, to current knowledge, not implemented in any production compiler. Triton verifies tile shapes; CUTLASS uses template instantiation errors for shape mismatches. Neither proves conflict-freedom. A compiler that can emit a proof certificate — &quot;this kernel has zero bank conflicts for all valid inputs&quot; — is a publishable result, not merely a language feature.
 
 
 
-The linear type system for Transfer obligations is similarly novel in the GPU kernel space. Linear types for memory safety are well-studied in languages like Rust, but applying them to asynchronous GPU memory movement â€” where the obligation spans a hardware pipeline rather than a thread boundary â€” is new territory.
+The linear type system for Transfer obligations is similarly novel in the GPU kernel space. Linear types for memory safety are well-studied in languages like Rust, but applying them to asynchronous GPU memory movement — where the obligation spans a hardware pipeline rather than a thread boundary — is new territory.
 
 
 
@@ -906,7 +907,7 @@ Learned tile size prediction is an active research area. DeepMind's AlphaTensor 
 
 
 
-The SASS hazard detector is a form of learned static analysis â€” a field attracting significant recent interest in the program analysis community. Applying it to GPU assembly, where hazard patterns are well-defined, and ground truth is measurable via performance counters, is a concrete and publishable instantiation.
+The SASS hazard detector is a form of learned static analysis — a field attracting significant recent interest in the program analysis community. Applying it to GPU assembly, where hazard patterns are well-defined, and ground truth is measurable via performance counters, is a concrete and publishable instantiation.
 
 
 
@@ -917,11 +918,11 @@ The SASS hazard detector is a form of learned static analysis â€” a field attrac
 
 
 
-Render farms and studios: Y-Lang kernels for ray tracing, denoising, and compositing â€” workloads where the same kernel runs millions of times and every percentage point of GPU utilization has a direct cost impact.
+Render farms and studios: Y-Lang kernels for ray tracing, denoising, and compositing — workloads where the same kernel runs millions of times and every percentage point of GPU utilization has a direct cost impact.
 
 
 
-Scientific simulation: Plasma dynamics, fluid simulation, molecular dynamics â€” workloads where the compute pattern is known in advance and the hardware can be targeted precisely. The YSU Engine's LBM fluid solver and plasma kernels are early examples.
+Scientific simulation: Plasma dynamics, fluid simulation, molecular dynamics — workloads where the compute pattern is known in advance and the hardware can be targeted precisely. The YSU Engine's LBM fluid solver and plasma kernels are early examples.
 
 
 
@@ -967,7 +968,7 @@ Y-Lang is currently in the design phase. The build order below is chosen to mini
 
 
 
-Phase 1 â€” Type System Prototype
+Phase 1 — Type System Prototype
 
 
 
@@ -996,7 +997,7 @@ Target: a type checker that accepts correct kernels and rejects wrong ones, even
 
 
 
-Phase 2 â€” PTX Emitter
+Phase 2 — PTX Emitter
 
 
 
@@ -1017,7 +1018,7 @@ Benchmark against an equivalent hand-written CUDA C kernel as a baseline
 
 
 
-Phase 3 â€” Benchmark Harness
+Phase 3 — Benchmark Harness
 
 
 
@@ -1034,7 +1035,7 @@ This data becomes the training set for Phase 4
 
 
 
-Phase 4 â€” AI Tile Predictor
+Phase 4 — AI Tile Predictor
 
 
 
@@ -1042,7 +1043,7 @@ Augment Phase 3 data with CUTLASS and Triton benchmark results
 
 
 
-Train a small model (gradient boosted tree or small transformer) on (shape, hardware) â†’ (tile config)
+Train a small model (gradient boosted tree or small transformer) on (shape, hardware) › (tile config)
 
 
 
@@ -1055,7 +1056,7 @@ Measure prediction accuracy vs. exhaustive autotuning
 
 
 
-Phase 5 â€” SASS Analyzer and Autotuner
+Phase 5 — SASS Analyzer and Autotuner
 
 
 
@@ -1067,7 +1068,7 @@ Train hazard detector on this data
 
 
 
-Build the autotuning loop: profile â†’ AI suggestion â†’ annotate â†’ recompile â†’ verify improvement
+Build the autotuning loop: profile › AI suggestion › annotate › recompile › verify improvement
 
 
 

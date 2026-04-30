@@ -179,42 +179,6 @@ struct Span {
     size_t col;
 };
 
-struct Token {
-    TokenKind kind;
-    size_t line;
-    size_t col;
-    YStr lexeme;
-};
-
-struct FuncDecl {
-    YStr name;
-    int32_t is_safe;
-    size_t param_count;
-    size_t body_start;
-    size_t body_count;
-    size_t line;
-    size_t col;
-};
-
-struct ParamDecl {
-    YStr name;
-    YStr type_str;
-};
-
-struct AstArena {
-    YVec exprs;
-    YVec stmts;
-    YVec params;
-    YVec funcs;
-    YVec arg_indices;
-};
-
-struct Parser {
-    YVec tokens;
-    size_t pos;
-    size_t token_count;
-};
-
 typedef enum {
     TokenKind_TAG_Kernel,
     TokenKind_TAG_Let,
@@ -292,7 +256,7 @@ typedef enum {
     TokenKind_TAG_I64,
     TokenKind_TAG_F32,
     TokenKind_TAG_F64,
-    TokenKind_TAG_AtTarget,
+    TokenKind_TAG_AtRequire,
     TokenKind_TAG_AtSafe,
     TokenKind_TAG_AtUnsafe,
     TokenKind_TAG_AtCachePolicy,
@@ -418,7 +382,7 @@ typedef struct {
 #define TokenKind_I64 ((TokenKind){ .tag = TokenKind_TAG_I64 })
 #define TokenKind_F32 ((TokenKind){ .tag = TokenKind_TAG_F32 })
 #define TokenKind_F64 ((TokenKind){ .tag = TokenKind_TAG_F64 })
-#define TokenKind_AtTarget ((TokenKind){ .tag = TokenKind_TAG_AtTarget })
+#define TokenKind_AtRequire ((TokenKind){ .tag = TokenKind_TAG_AtRequire })
 #define TokenKind_AtSafe ((TokenKind){ .tag = TokenKind_TAG_AtSafe })
 #define TokenKind_AtUnsafe ((TokenKind){ .tag = TokenKind_TAG_AtUnsafe })
 #define TokenKind_AtCachePolicy ((TokenKind){ .tag = TokenKind_TAG_AtCachePolicy })
@@ -465,6 +429,43 @@ static inline TokenKind TokenKind_Unknown(char _0) {
     res.data.Unknown._0 = _0;
     return res;
 }
+
+struct Token {
+    TokenKind kind;
+    size_t line;
+    size_t col;
+    YStr lexeme;
+};
+
+struct FuncDecl {
+    YStr name;
+    int32_t is_safe;
+    size_t param_count;
+    size_t body_start;
+    size_t body_count;
+    size_t line;
+    size_t col;
+};
+
+struct ParamDecl {
+    YStr name;
+    YStr type_str;
+};
+
+struct AstArena {
+    YVec exprs;
+    YVec stmts;
+    YVec params;
+    YVec funcs;
+    YVec arg_indices;
+};
+
+struct Parser {
+    YVec tokens;
+    size_t pos;
+    size_t token_count;
+};
+
 
 typedef enum {
     BinaryOp_Add,
@@ -816,7 +817,7 @@ size_t Parser_parse_stmt(Parser* p, AstArena* arena);
 size_t Parser_parse_func_decl(Parser* p, AstArena* arena, int32_t is_safe);
 bool Parser_parse_item(Parser* p, AstArena* arena);
 void Parser_parse_program(Parser* p, AstArena* arena);
-void main(void);
+int main(void);
 
 /* impl AstArena */
 AstArena AstArena_new(void) {
@@ -874,20 +875,20 @@ YStr Parser_match_ident(Parser* p) {
     Token tok = Parser_peek(p);
     YStr lex = ystr_clone((&tok.lexeme));
     size_t len = ystr_len((&lex));
-    if ((len > 0)) {
+    if (len > 0) {
         char ch = ystr_char_at((&lex), 0);
         bool is_ident = false;
-        if ((ch >= 'a')) {
-            if ((ch <= 'z')) {
+        if (ch >= 'a') {
+            if (ch <= 'z') {
                 is_ident = true;
             }
         }
-        if ((ch >= 'A')) {
-            if ((ch <= 'Z')) {
+        if (ch >= 'A') {
+            if (ch <= 'Z') {
                 is_ident = true;
             }
         }
-        if ((ch == '_')) {
+        if (ch == '_') {
             is_ident = true;
         }
         if (is_ident) {
@@ -921,11 +922,11 @@ size_t Parser_parse_primary(Parser* p, AstArena* arena) {
     size_t line = tok.line;
     size_t col = tok.col;
     size_t len = ystr_len((&lex));
-    if ((len > 0)) {
+    if (len > 0) {
         char ch = ystr_char_at((&lex), 0);
         bool is_digit = false;
-        if ((ch >= '0')) {
-            if ((ch <= '9')) {
+        if (ch >= '0') {
+            if (ch <= '9') {
                 is_digit = true;
             }
         }
@@ -936,7 +937,7 @@ size_t Parser_parse_primary(Parser* p, AstArena* arena) {
             size_t idx = yvec_len((&(*arena).exprs));
             return idx;
         }
-        if ((ch == '"')) {
+        if (ch == '"') {
             Parser_advance(p);
             Expr expr = Expr_StringLit(ystr_clone((&lex)));
             { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
@@ -958,17 +959,17 @@ size_t Parser_parse_primary(Parser* p, AstArena* arena) {
             return idx;
         }
         bool is_ident = false;
-        if ((ch >= 'a')) {
-            if ((ch <= 'z')) {
+        if (ch >= 'a') {
+            if (ch <= 'z') {
                 is_ident = true;
             }
         }
-        if ((ch >= 'A')) {
-            if ((ch <= 'Z')) {
+        if (ch >= 'A') {
+            if (ch <= 'Z') {
                 is_ident = true;
             }
         }
-        if ((ch == '_')) {
+        if (ch == '_') {
             is_ident = true;
         }
         if (is_ident) {
@@ -1202,9 +1203,9 @@ size_t Parser_parse_expr_bp(Parser* p, AstArena* arena, size_t min_bp) {
         Token tok = Parser_peek(p);
         YStr lex = ystr_clone((&tok.lexeme));
         size_t prec = Parser_get_binop_precedence((&lex));
-        if ((prec == 0)) {
+        if (prec == 0) {
             looping = false;
-        } else         if ((prec < min_bp)) {
+        } else         if (prec < min_bp) {
             looping = false;
         } else {
             Parser_advance(p);
@@ -1485,7 +1486,7 @@ bool Parser_parse_item(Parser* p, AstArena* arena) {
         Token _name = Parser_advance(p);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
         size_t depth = 1;
-        while ((depth > 0)) {
+        while (depth > 0) {
             Token t = Parser_advance(p);
             if (ystr_eq_cstr((&t.lexeme), "{")) {
                 depth += 1;
@@ -1501,7 +1502,7 @@ bool Parser_parse_item(Parser* p, AstArena* arena) {
         Token _name = Parser_advance(p);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
         size_t depth = 1;
-        while ((depth > 0)) {
+        while (depth > 0) {
             Token t = Parser_advance(p);
             if (ystr_eq_cstr((&t.lexeme), "{")) {
                 depth += 1;
@@ -1572,7 +1573,7 @@ void Parser_parse_program(Parser* p, AstArena* arena) {
     }
 }
 
-void main(void) {
+int main(void) {
     printf("%s\n", (ystr_new("--- Y-Lang Self-Hosted Parser (DOD Arena) ---")).data);
     AstArena arena = AstArena_new();
     printf("%s\n", (ystr_new("Arena initialized.")).data);
@@ -1580,6 +1581,6 @@ void main(void) {
     printf("%s\n", (ystr_new("Stmt arena ready.")).data);
     printf("%s\n", (ystr_new("Func arena ready.")).data);
     printf("%s\n", (ystr_new("--- Parser module compiled successfully ---")).data);
-    return;
+    return 0;
 }
 

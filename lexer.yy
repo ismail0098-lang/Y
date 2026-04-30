@@ -79,7 +79,7 @@ enum TokenKind {
     CpAsync, LdMatrix, MmaSync, BarrierSync,
 
     // ── Attributes (start with @) ────────────────────────────
-    AtTarget, AtCachePolicy, AtPtxEmit, AtAvxEmit, AtInline,
+    AtRequire, AtCachePolicy, AtPtxEmit, AtAvxEmit, AtInline,
     AtNoInline, AtAlign, AtSafe, AtUnsafe, AtGpuUncached,
     AtAtomic, AtStaticAssert, AtUnknown(String),
 

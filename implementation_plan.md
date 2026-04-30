@@ -10,7 +10,7 @@ Research indicated that Rust's `std::arch::x86_64` provides native SIMD intrinsi
 A Rust module implementing `Y256Register`—a safe wrapper around `std::arch::x86_64::__m256` and `__m256i` supporting add/sub/mul and type conversions.
 
 ### Front-End Lexer (Subagent C)
-Based on scanning `YLang_Specification.docx`, we extracted keywords such as `kernel`, memory spaces (`GlobalMemory`, `SharedMemory`), layout types, and attributes (`@target`).
+Based on scanning `YLang_Specification.docx`, we extracted keywords such as `kernel`, memory spaces (`GlobalMemory`, `SharedMemory`), layout types, and attributes (`@require`).
 #### [NEW] `keywords.json` (file:///c:/YSU-engine-main/YSU-engine-main/src/Y_lang/keywords.json)
 JSON listing all tokens and keywords from the Y-Lang spec.
 #### [NEW] `lexer.rs` (file:///c:/YSU-engine-main/YSU-engine-main/src/Y_lang/lexer.rs)
