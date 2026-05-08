@@ -38,12 +38,16 @@ pub struct LlvmEmitter {
     current_impl_target: Option<String>,
     /// Track local variables and their LLVM IR types
     locals: HashMap<String, String>,
+    /// Track what struct type a pointer local variable points to
+    pointee_types: HashMap<String, String>,
     /// Track function return types
     functions: HashMap<String, String>,
     /// Track struct fields: StructName -> Vec<(FieldName, IRType)>
     structs: HashMap<String, Vec<(String, String)>>,
     /// Track enums: EnumName -> has_data (true = tagged union, false = simple i32 tag)
     enums: HashMap<String, bool>,
+    /// Track enum variant tags: EnumName_VariantName -> tag integer
+    enum_variants: HashMap<String, usize>,
     /// Track whether the current block already has a terminator
     block_terminated: bool,
     /// Store current cache policy during let bindings
@@ -66,9 +70,11 @@ impl LlvmEmitter {
             label_counter: 0,
             current_impl_target: None,
             locals: HashMap::new(),
+            pointee_types: HashMap::new(),
             functions: HashMap::new(),
             structs: HashMap::new(),
             enums: HashMap::new(),
+            enum_variants: HashMap::new(),
             block_terminated: false,
             current_cache_policy: None,
             current_load_hint: None,
@@ -290,6 +296,9 @@ impl LlvmEmitter {
                 Item::Enum(e) => {
                     let has_data = e.variants.iter().any(|v| v.fields.is_some());
                     self.enums.insert(e.name.clone(), has_data);
+                    for (i, v) in e.variants.iter().enumerate() {
+                        self.enum_variants.insert(format!("{}_{}", e.name, v.name), i);
+                    }
                 }
                 _ => {}
             }
@@ -397,8 +406,12 @@ impl LlvmEmitter {
                 && !defined_set.contains(fname)
                 && !auto_declared.contains(fname)
             {
-                // Look up the return type from the functions table, default to i32
-                let ret_ty = self.functions.get(fname).cloned().unwrap_or_else(|| "i32".into());
+                // Look up the return type from the functions table, or use hardcoded built-ins
+                let ret_ty = match fname.as_str() {
+                    "println" | "print" | "print_int" | "File_write" => "void".into(),
+                    "String_new" | "File_read_to_string" => "ptr".into(),
+                    _ => self.functions.get(fname).cloned().unwrap_or_else(|| "i32".into()),
+                };
                 writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname).unwrap();
                 auto_declared.insert(fname.clone());
             }
@@ -471,6 +484,9 @@ impl LlvmEmitter {
         for p in &f.params {
             let ty = self.emit_type(&p.ty);
             self.locals.insert(p.name.clone(), ty.clone());
+            if let Some(pty) = self.get_pointee_type(&p.ty) {
+                self.pointee_types.insert(p.name.clone(), pty);
+            }
             writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
             self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
         }
@@ -484,10 +500,18 @@ impl LlvmEmitter {
         if !self.block_terminated {
             if ret_type == "void" {
                 self.wln("  ret void");
-            } else if ret_type == "i32" {
-                self.wln("  ret i32 0");
+            } else if ret_type == "ptr" {
+                self.wln("  ret ptr null");
+            } else if ret_type == "i1" {
+                self.wln("  ret i1 0");
+            } else if ret_type == "i8" {
+                self.wln("  ret i8 0");
+            } else if ret_type == "i64" {
+                self.wln("  ret i64 0");
+            } else if ret_type.starts_with('%') {
+                writeln!(&mut self.output, "  ret {} zeroinitializer", ret_type).unwrap();
             } else {
-                self.wln("  ret void");
+                writeln!(&mut self.output, "  ret {} 0", ret_type).unwrap();
             }
         }
 
@@ -499,18 +523,34 @@ impl LlvmEmitter {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Let { name, ty, init, .. } => {
-                    let ir_ty = match ty {
-                        Some(t) => self.emit_type(t),
-                        None => {
-                            if let Some(init_expr) = init {
-                                self.infer_type(init_expr)
-                            } else {
-                                "i32".into()
+                    if !self.locals.contains_key(name) {
+                        let ir_ty = match ty {
+                            Some(t) => {
+                                if let Some(pty) = self.get_pointee_type(t) {
+                                    self.pointee_types.insert(name.clone(), pty);
+                                }
+                                self.emit_type(t)
+                            },
+                            None => {
+                                if let Some(init_expr) = init {
+                                    let init_ty = self.infer_type(init_expr);
+                                    let pty = self.infer_struct_type(init_expr);
+                                    if pty != "i32" {
+                                        self.pointee_types.insert(name.clone(), pty);
+                                    }
+                                    init_ty
+                                } else {
+                                    "i32".into()
+                                }
                             }
+                        };
+                        self.locals.insert(name.clone(), ir_ty.clone());
+                        // Track struct/enum-typed locals for GEP base type inference
+                        if ir_ty.starts_with('%') {
+                            self.pointee_types.insert(name.clone(), ir_ty.clone());
                         }
-                    };
-                    self.locals.insert(name.clone(), ir_ty.clone());
-                    writeln!(&mut self.output, "  %{} = alloca {}", name, ir_ty).unwrap();
+                        writeln!(&mut self.output, "  %{} = alloca {}", name, ir_ty).unwrap();
+                    }
                 }
                 Stmt::For { loop_var, body, .. } => {
                     self.locals.insert(loop_var.clone(), "i32".into());
@@ -553,6 +593,9 @@ impl LlvmEmitter {
         for p in &k.params {
             let ty = self.emit_type(&p.ty);
             self.locals.insert(p.name.clone(), ty.clone());
+            if let Some(pty) = self.get_pointee_type(&p.ty) {
+                self.pointee_types.insert(p.name.clone(), pty);
+            }
             writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
             self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
         }
@@ -817,11 +860,41 @@ impl LlvmEmitter {
             Expr::Ident(name, _) => format!("%{}", name),
             Expr::MemberAccess { base, member, .. } => {
                 let base_val = self.emit_lvalue(base);
-                let base_ty = self.infer_type(base);
+                let base_ty = self.infer_struct_type(base);
                 let tmp = self.fresh_tmp();
                 
+                // Handle tagged union synthetic fields
+                let base_name = base_ty.trim_start_matches('%');
+                if let Some(&has_data) = self.enums.get(base_name) {
+                    if has_data {
+                        writeln!(&mut self.output, "  ; lvalue .{}", member).unwrap();
+                        if member == "tag" {
+                            // .tag -> index 0 (i32 discriminator)
+                            writeln!(&mut self.output, "  {} = getelementptr {}, ptr {}, i32 0, i32 0", tmp, base_ty, base_val).unwrap();
+                            return tmp;
+                        } else if member == "data" {
+                            // .data -> index 1 (payload: [4 x i64])
+                            writeln!(&mut self.output, "  {} = getelementptr {}, ptr {}, i32 0, i32 1", tmp, base_ty, base_val).unwrap();
+                            return tmp;
+                        }
+                    }
+                }
+                
+                if base_ty == "[4 x i64]" {
+                    writeln!(&mut self.output, "  ; lvalue payload overlay .{}", member).unwrap();
+                    if member.starts_with('_') {
+                        // ._N -> index N into the [4 x i64] payload
+                        let idx: usize = member[1..].parse().unwrap_or(0);
+                        writeln!(&mut self.output, "  {} = getelementptr [4 x i64], ptr {}, i32 0, i32 {}", tmp, base_val, idx).unwrap();
+                        return tmp;
+                    } else {
+                        // .VariantName -> pass-through (overlay on the data payload)
+                        return base_val;
+                    }
+                }
+                
                 let mut field_index = 0;
-                if let Some(fields) = self.structs.get(base_ty.trim_start_matches('%')) {
+                if let Some(fields) = self.structs.get(base_name) {
                     for (i, (fname, _)) in fields.iter().enumerate() {
                         if fname == member {
                             field_index = i;
@@ -858,6 +931,18 @@ impl LlvmEmitter {
             Expr::BoolLit(b, _) => if *b { "1".into() } else { "0".into() },
             Expr::CharLit(c, _) => format!("{}", *c as u32),
             Expr::Ident(name, _) => {
+                // If it's a known enum variant, replace with integer
+                if let Some(&tag) = self.enum_variants.get(name) {
+                    return tag.to_string();
+                }
+                let mut tag_name = name.clone();
+                if name.contains("_TAG_") {
+                    tag_name = name.replace("_TAG_", "_");
+                }
+                if let Some(&tag) = self.enum_variants.get(&tag_name) {
+                    return tag.to_string();
+                }
+
                 let ty = self.locals.get(name).cloned().unwrap_or_else(|| "i32".into());
                 self.emit_load(&format!("%{}", name), &ty)
             }
@@ -903,6 +988,15 @@ impl LlvmEmitter {
             Expr::Call { func, args, .. } => {
                 let func_name = self.emit_call_target(func);
                 self.called_functions.push(func_name.clone());
+
+                // --- Fix 1: Vec_push passes address, not loaded value ---
+                if func_name == "Vec_push" && args.len() == 2 {
+                    let vec_val = self.emit_expr(&args[0]);
+                    let elem_addr = self.emit_lvalue(&args[1]);
+                    writeln!(&mut self.output, "  call void @Vec_push(ptr {}, ptr {})", vec_val, elem_addr).unwrap();
+                    return self.fresh_tmp().replace("%t", "%_void");
+                }
+
                 let mut arg_strs = Vec::new();
                 for a in args {
                     let v = self.emit_expr(a);
@@ -956,7 +1050,36 @@ impl LlvmEmitter {
                     _ => {}
                 }
 
-                let ret_ty = self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into());
+                if let Some(&tag) = self.enum_variants.get(&func_name) {
+                    let enum_name = func_name.split('_').next().unwrap();
+                    let struct_name = format!("%{}", enum_name);
+                    
+                    let alloc_tmp = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = alloca {}", alloc_tmp, struct_name).unwrap();
+                    
+                    let tag_tmp = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = getelementptr {}, ptr {}, i32 0, i32 0", tag_tmp, struct_name, alloc_tmp).unwrap();
+                    writeln!(&mut self.output, "  store i32 {}, ptr {}", tag, tag_tmp).unwrap();
+                    
+                    let data_tmp = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = getelementptr {}, ptr {}, i32 0, i32 1", data_tmp, struct_name, alloc_tmp).unwrap();
+                    
+                    if !args.is_empty() {
+                        let val_val = self.emit_expr(&args[0]);
+                        let val_ty = self.infer_type(&args[0]);
+                        writeln!(&mut self.output, "  store {} {}, ptr {}", val_ty, val_val, data_tmp).unwrap();
+                    }
+                    
+                    let res_tmp = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = load {}, ptr {}", res_tmp, struct_name, alloc_tmp).unwrap();
+                    return res_tmp;
+                }
+
+                let ret_ty = match func_name.as_str() {
+                    "println" | "print" | "print_int" | "File_write" => "void".into(),
+                    "String_new" | "File_read_to_string" => "ptr".into(),
+                    _ => self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into()),
+                };
                 let tmp = self.fresh_tmp();
                 if ret_ty == "void" {
                     writeln!(&mut self.output, "  call void @{}({})", func_name, arg_strs.join(", ")).unwrap();
@@ -967,20 +1090,21 @@ impl LlvmEmitter {
                 }
             }
             Expr::Path { namespace, member, .. } => {
-                format!("{}_{}", namespace, member)
-            }
-            Expr::MemberAccess { base, member, .. } => {
-                let lval = self.emit_lvalue(expr);
-                let base_ty = self.infer_type(base);
-                let mut field_ty = "i32".to_string(); // fallback
-                if let Some(fields) = self.structs.get(base_ty.trim_start_matches('%')) {
-                    for (fname, fty) in fields {
-                        if fname == member {
-                            field_ty = fty.clone();
-                            break;
+                let full_name = format!("{}_{}", namespace, member);
+                if let Some(&tag) = self.enum_variants.get(&full_name) {
+                    if let Some(&has_data) = self.enums.get(namespace) {
+                        if has_data {
+                            return format!("{{ i32 {}, [4 x i64] zeroinitializer }}", tag);
                         }
                     }
+                    tag.to_string()
+                } else {
+                    full_name
                 }
+            }
+            Expr::MemberAccess { .. } => {
+                let lval = self.emit_lvalue(expr);
+                let field_ty = self.infer_type(expr);
                 self.emit_load(&lval, &field_ty)
             }
             Expr::Index { .. } => {
@@ -1087,15 +1211,33 @@ impl LlvmEmitter {
             Expr::BoolLit(_, _) => "i1".into(),
             Expr::CharLit(_, _) => "i8".into(),
             Expr::StringLit(_, _) => "ptr".into(),
-            Expr::Ident(name, _) => self.locals.get(name).cloned().unwrap_or_else(|| "i32".into()),
+            Expr::Ident(name, _) => {
+                if self.enum_variants.contains_key(name) {
+                    return "i32".into();
+                }
+                let mut tag_name = name.clone();
+                if name.contains("_TAG_") {
+                    tag_name = name.replace("_TAG_", "_");
+                }
+                if self.enum_variants.contains_key(&tag_name) {
+                    return "i32".into();
+                }
+                self.locals.get(name).cloned().unwrap_or_else(|| "i32".into())
+            },
             Expr::Call { func, .. } => {
                 let func_name = self.emit_call_target(func);
+                // Fix 2: enum constructor calls return the enum struct type
+                if self.enum_variants.contains_key(&func_name) {
+                    let enum_name = func_name.split('_').next().unwrap();
+                    return format!("%{}", enum_name);
+                }
                 match func_name.as_str() {
                     "load" => {
                         // The load() intrinsic uses current_load_hint or defaults to double
                         self.current_load_hint.clone().unwrap_or_else(|| "double".into())
                     }
-                    "println" | "print_int" => "i32".into(),
+                    "println" | "print" | "print_int" | "File_write" => "void".into(),
+                    "String_new" | "File_read_to_string" => "ptr".into(),
                     _ => self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into()),
                 }
             }
@@ -1110,8 +1252,28 @@ impl LlvmEmitter {
                 }
             }
             Expr::MemberAccess { base, member, .. } => {
-                let base_ty = self.infer_type(base);
-                if let Some(fields) = self.structs.get(base_ty.trim_start_matches('%')) {
+                let base_ty = self.infer_struct_type(base);
+                let base_name = base_ty.trim_start_matches('%');
+                
+                if let Some(&has_data) = self.enums.get(base_name) {
+                    if has_data {
+                        if member == "tag" {
+                            return "i32".into();
+                        } else if member == "data" {
+                            return "[4 x i64]".into();
+                        }
+                    }
+                }
+                
+                if base_ty == "[4 x i64]" {
+                    if member.starts_with('_') {
+                        return "i64".into(); // The payload elements are i64
+                    } else {
+                        return "[4 x i64]".into(); // e.g. `.Let` overlays the payload
+                    }
+                }
+
+                if let Some(fields) = self.structs.get(base_name) {
                     for (fname, fty) in fields {
                         if fname == member {
                             return fty.clone();
@@ -1121,8 +1283,95 @@ impl LlvmEmitter {
                 "i32".into()
             }
             Expr::StructLit { name, .. } => format!("%{}", name),
+            // Fix 3: Expr::Path on enum variants returns the enum struct type
+            Expr::Path { namespace, .. } => {
+                if let Some(&has_data) = self.enums.get(namespace) {
+                    if has_data {
+                        format!("%{}", namespace)
+                    } else {
+                        "i32".into() // simple enum = integer tag
+                    }
+                } else {
+                    "i32".into()
+                }
+            }
+            Expr::UnaryOp { op, operand, .. } => {
+                match op {
+                    UnaryOp::Ref => "ptr".into(),
+                    UnaryOp::Deref => {
+                        let inner_ty = self.infer_type(operand);
+                        if inner_ty == "ptr" { "i32".into() } else { inner_ty }
+                    }
+                    UnaryOp::Neg | UnaryOp::Not => self.infer_type(operand),
+                }
+            }
             _ => "i32".into(),
         }
     }
-}
 
+    fn get_pointee_type(&self, ty: &Type) -> Option<String> {
+        match ty {
+            Type::Reference { inner, .. } => {
+                if let Type::Ident(name, _) = &**inner {
+                    if self.structs.contains_key(name.as_str()) {
+                        return Some(format!("%{}", name));
+                    }
+                }
+                None
+            }
+            Type::Ident(name, _) => {
+                if self.structs.contains_key(name.as_str()) {
+                    return Some(format!("%{}", name));
+                }
+                None
+            }
+            _ => None
+        }
+    }
+
+    fn infer_struct_type(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Ident(name, _) => self.pointee_types.get(name).cloned().unwrap_or_else(|| "i32".into()),
+            Expr::MemberAccess { base, member, .. } => {
+                let base_ty = self.infer_struct_type(base);
+                let base_name = base_ty.trim_start_matches('%');
+                
+                if let Some(&has_data) = self.enums.get(base_name) {
+                    if has_data {
+                        if member == "data" || member.starts_with('_') {
+                            return "[4 x i64]".into();
+                        }
+                        if member == "tag" {
+                            return "i32".into();
+                        }
+                        return base_ty.clone();
+                    }
+                }
+                
+                if base_ty == "[4 x i64]" {
+                    if member.starts_with('_') {
+                        return "i64".into();
+                    } else {
+                        return "[4 x i64]".into();
+                    }
+                }
+
+                if let Some(fields) = self.structs.get(base_name) {
+                    for (fname, fty) in fields {
+                        if fname == member {
+                            if fty.starts_with('%') { return fty.clone(); }
+                            return "i32".into();
+                        }
+                    }
+                }
+                "i32".into()
+            }
+            Expr::Call { func, .. } => {
+                let func_name = self.emit_call_target(func);
+                self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into())
+            }
+            Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } => self.infer_struct_type(operand),
+            _ => "i32".into()
+        }
+    }
+}

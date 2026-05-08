@@ -1,6 +1,3 @@
-import lib;
-import parser;
-
 struct LlvmEmitter {
     buffer: String,
     tmp_counter: usize,
