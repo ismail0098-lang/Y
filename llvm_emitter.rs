@@ -383,6 +383,7 @@ impl LlvmEmitter {
 
         // Emit format strings for printf
         self.wln("@.fmt.sn = private unnamed_addr constant [4 x i8] c\"%s\\0A\\00\"");
+        self.wln("@.fmt.s = private unnamed_addr constant [3 x i8] c\"%s\\00\"");
         self.wln("@.fmt.d = private unnamed_addr constant [4 x i8] c\"%ld\\00\"");
         self.wln("");
 
@@ -999,6 +1000,16 @@ impl LlvmEmitter {
 
                 let mut arg_strs = Vec::new();
                 for a in args {
+                    if let Expr::UnaryOp { op: UnaryOp::Ref, operand, .. } = a {
+                        let inner_ty = self.infer_type(operand);
+                        if inner_ty == "ptr" {
+                            let v = self.emit_expr(a);
+                            let tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, v).unwrap();
+                            arg_strs.push(format!("ptr {}", tmp));
+                            continue;
+                        }
+                    }
                     let v = self.emit_expr(a);
                     let ty = self.infer_type(a);
                     arg_strs.push(format!("{} {}", ty, v));
@@ -1031,16 +1042,29 @@ impl LlvmEmitter {
                         writeln!(&mut self.output, "  {} = load {}, ptr {}{}", tmp, load_ty, ptr_val, metadata).unwrap();
                         return tmp;
                     }
-                    "println" => {
+                    "println" | "print" => {
+                        let is_ln = func_name == "println";
+                        let fmt_str = if is_ln { "@.fmt.sn" } else { "@.fmt.s" };
+
                         if !args.is_empty() {
+                            // Extract char* data from YStr* which is at offset 0
+                            let arg_val = arg_strs[0].split_whitespace().last().unwrap();
+                            let data_ptr = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", data_ptr, arg_val).unwrap();
+
                             let tmp = self.fresh_tmp();
-                            writeln!(&mut self.output, "  {} = call i32 (ptr, ...) @printf(ptr @.fmt.sn, {})", tmp, arg_strs[0]).unwrap();
+                            writeln!(&mut self.output, "  {} = call i32 (ptr, ...) @printf(ptr {}, ptr {})", tmp, fmt_str, data_ptr).unwrap();
                             return tmp;
                         }
-                        let tmp = self.fresh_tmp();
-                        let nl = self.register_string("");
-                        writeln!(&mut self.output, "  {} = call i32 (ptr, ...) @printf(ptr @.fmt.sn, ptr {})", tmp, nl).unwrap();
-                        return tmp;
+
+                        if is_ln {
+                            let tmp = self.fresh_tmp();
+                            let nl = self.register_string("");
+                            writeln!(&mut self.output, "  {} = call i32 (ptr, ...) @printf(ptr {}, ptr {})", tmp, fmt_str, nl).unwrap();
+                            return tmp;
+                        } else {
+                            return self.fresh_tmp().replace("%t", "%_void");
+                        }
                     }
                     "print_int" => {
                         let tmp = self.fresh_tmp();
