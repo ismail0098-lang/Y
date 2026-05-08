@@ -181,11 +181,11 @@ impl PtxEmitter {
                 let mut j = i + 1;
                 let mut hoisted = Vec::new();
                 while j < stmts.len() && hoist_count < budget {
-                    let is_independent_alu = match &stmts[j] {
-                        Stmt::Let { init: Some(Expr::BinaryOp { .. }), .. } => true,
-                        Stmt::Assign { value: Expr::BinaryOp { .. }, .. } => true,
-                        _ => false,
-                    };
+                    let is_independent_alu = matches!(
+                        &stmts[j],
+                        Stmt::Let { init: Some(Expr::BinaryOp { .. }), .. }
+                            | Stmt::Assign { value: Expr::BinaryOp { .. }, .. }
+                    );
                     
                     if is_independent_alu {
                         hoisted.push(stmts.remove(j));
