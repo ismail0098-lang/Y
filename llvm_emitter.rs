@@ -1392,6 +1392,11 @@ impl LlvmEmitter {
             }
             Expr::Call { func, .. } => {
                 let func_name = self.emit_call_target(func);
+                // Enum constructor calls return the enum struct type
+                if self.enum_variants.contains_key(&func_name) {
+                    let enum_name = func_name.split('_').next().unwrap();
+                    return format!("%{}", enum_name);
+                }
                 self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into())
             }
             Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } => self.infer_struct_type(operand),
