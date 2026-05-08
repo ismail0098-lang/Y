@@ -1067,3 +1067,82 @@ impl Parser {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn parse(src: &str) -> Result<Program, String> {
+        let mut lexer = Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        parser.parse_program()
+    }
+
+    #[test]
+    fn test_parse_empty_program() {
+        let res = parse("");
+        assert!(res.is_ok());
+        let prog = res.unwrap();
+        assert_eq!(prog.items.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_simple_program() {
+        let src = "fn main() { let x = 5; }";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        assert_eq!(prog.items.len(), 1);
+        if let Item::Func(f) = &prog.items[0] {
+            assert_eq!(f.name, "main");
+            assert_eq!(f.params.len(), 0);
+            assert_eq!(f.body.stmts.len(), 1);
+        } else {
+            panic!("Expected Func item");
+        }
+    }
+
+    #[test]
+    fn test_parse_multiple_items() {
+        let src = "
+            import std.math;
+
+            struct Point {
+                x: f32,
+                y: f32,
+            }
+
+            fn add(a: i32, b: i32) -> i32 {
+                return a + b;
+            }
+        ";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        assert_eq!(prog.items.len(), 3);
+
+        match &prog.items[0] {
+            Item::Import(i) => assert_eq!(i.path, vec!["std", "math"]),
+            _ => panic!("Expected Import"),
+        }
+
+        match &prog.items[1] {
+            Item::Struct(s) => {
+                assert_eq!(s.name, "Point");
+                assert_eq!(s.fields.len(), 2);
+            }
+            _ => panic!("Expected Struct"),
+        }
+
+        match &prog.items[2] {
+            Item::Func(f) => {
+                assert_eq!(f.name, "add");
+                assert_eq!(f.params.len(), 2);
+                assert!(f.ret_ty.is_some());
+            }
+            _ => panic!("Expected Func"),
+        }
+    }
+}
