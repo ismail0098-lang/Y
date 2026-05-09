@@ -1,0 +1,3 @@
+use lexer::*;
+
+fn main() {}
