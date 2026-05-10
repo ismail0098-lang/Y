@@ -638,3 +638,22 @@ impl TypeChecker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_enum() {
+        let mut checker = TypeChecker::new();
+        let enum_decl = EnumDecl {
+            name: "TestEnum".to_string(),
+            generic_params: vec![],
+            variants: vec![],
+            span: Span { line: 1, col: 1 },
+        };
+        checker.register_enum(&enum_decl);
+        assert!(checker.enums.contains_key("TestEnum"));
+        assert_eq!(checker.enums.get("TestEnum").unwrap().name, "TestEnum");
+    }
+}
