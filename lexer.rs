@@ -751,6 +751,56 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_multiple_lines() {
+        let mut lexer = Lexer::new("let a = 1;\n// comment\nlet b = 2;");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 11);
+
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[0].line, 1);
+        assert_eq!(tokens[0].col, 1);
+
+        assert_eq!(tokens[1].kind, TokenKind::Ident("a".to_string()));
+        assert_eq!(tokens[1].line, 1);
+        assert_eq!(tokens[1].col, 5);
+
+        assert_eq!(tokens[2].kind, TokenKind::Assign);
+        assert_eq!(tokens[2].line, 1);
+        assert_eq!(tokens[2].col, 7);
+
+        assert_eq!(tokens[3].kind, TokenKind::IntLit(1));
+        assert_eq!(tokens[3].line, 1);
+        assert_eq!(tokens[3].col, 9);
+
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[4].line, 1);
+        assert_eq!(tokens[4].col, 10);
+
+        assert_eq!(tokens[5].kind, TokenKind::Let);
+        assert_eq!(tokens[5].line, 3);
+        assert_eq!(tokens[5].col, 1);
+
+        assert_eq!(tokens[6].kind, TokenKind::Ident("b".to_string()));
+        assert_eq!(tokens[6].line, 3);
+        assert_eq!(tokens[6].col, 5);
+
+        assert_eq!(tokens[7].kind, TokenKind::Assign);
+        assert_eq!(tokens[7].line, 3);
+        assert_eq!(tokens[7].col, 7);
+
+        assert_eq!(tokens[8].kind, TokenKind::IntLit(2));
+        assert_eq!(tokens[8].line, 3);
+        assert_eq!(tokens[8].col, 9);
+
+        assert_eq!(tokens[9].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[9].line, 3);
+        assert_eq!(tokens[9].col, 10);
+
+        assert_eq!(tokens[10].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_kernel_keyword() {
         let kinds = lex("kernel matmul");
         assert_eq!(kinds[0], TokenKind::Kernel);
@@ -838,5 +888,37 @@ mod tests {
     fn test_eof() {
         let kinds = lex("");
         assert_eq!(kinds[0], TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_tokenize_unknown_char() {
+        let mut lexer = Lexer::new("let $ = 1;");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 6);
+
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+
+        assert_eq!(tokens[1].kind, TokenKind::Unknown('$'));
+        assert_eq!(tokens[1].line, 1);
+        assert_eq!(tokens[1].col, 5);
+        assert_eq!(tokens[1].lexeme, "$");
+
+        assert_eq!(tokens[2].kind, TokenKind::Assign);
+        assert_eq!(tokens[3].kind, TokenKind::IntLit(1));
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_tokenize_empty() {
+        let mut lexer = Lexer::new("");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Eof);
+        assert_eq!(tokens[0].line, 1);
+        assert_eq!(tokens[0].col, 1);
+        assert_eq!(tokens[0].lexeme, "");
     }
 }
