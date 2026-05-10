@@ -839,4 +839,10 @@ mod tests {
         let kinds = lex("");
         assert_eq!(kinds[0], TokenKind::Eof);
     }
+
+    #[test]
+    fn test_unclosed_comment() {
+        let kinds = lex("/* unterminated comment");
+        assert_eq!(kinds[0], TokenKind::Eof);
+    }
 }
