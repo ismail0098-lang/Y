@@ -1174,6 +1174,12 @@ impl LlvmEmitter {
                             _ => if param_ty.starts_with('&') { "ptr".to_string() } else { format!("%{}", param_ty) }
                         };
 
+                        if arg_ty == "i32" && llvm_param_ty == "i64" {
+                            let tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = sext i32 {} to i64", tmp, arg_val).unwrap();
+                            arg_val = tmp;
+                        }
+
                         if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
                             let tmp = self.fresh_tmp();
                             writeln!(&mut self.output, "  {} = load {}, ptr {}", tmp, llvm_param_ty, arg_val).unwrap();
@@ -1273,6 +1279,12 @@ impl LlvmEmitter {
                         "char" | "i8" => "i8".to_string(),
                         _ => if param_ty.starts_with('&') { "ptr".to_string() } else { format!("%{}", param_ty) }
                     };
+
+                    if arg_ty == "i32" && llvm_param_ty == "i64" {
+                        let tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = sext i32 {} to i64", tmp, arg_val).unwrap();
+                        arg_val = tmp;
+                    }
 
                     if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
                         let tmp = self.fresh_tmp();
