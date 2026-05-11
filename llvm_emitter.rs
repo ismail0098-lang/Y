@@ -1331,14 +1331,8 @@ impl LlvmEmitter {
                 };
                 let tmp = self.fresh_tmp();
                 if ret_ty.starts_with('%') {
-                    let sret_alloc = self.fresh_tmp();
-                    writeln!(&mut self.output, "  {} = alloca {}", sret_alloc, ret_ty).unwrap();
-                    let mut sret_arg_strs = vec![format!("ptr {}", sret_alloc)];
-                    sret_arg_strs.extend(arg_strs);
-                    writeln!(&mut self.output, "  call void @{}({})", func_name, sret_arg_strs.join(", ")).unwrap();
-                    let res_tmp = self.fresh_tmp();
-                    writeln!(&mut self.output, "  {} = load {}, ptr {}", res_tmp, ret_ty, sret_alloc).unwrap();
-                    res_tmp
+                    writeln!(&mut self.output, "  {} = call {} @{}({})", tmp, ret_ty, func_name, arg_strs.join(", ")).unwrap();
+                    tmp
                 } else if ret_ty == "void" {
                     writeln!(&mut self.output, "  call void @{}({})", func_name, arg_strs.join(", ")).unwrap();
                     tmp.replace("%t", "%_void")
