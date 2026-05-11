@@ -443,6 +443,7 @@ impl LlvmEmitter {
         self.wln("declare void @println(ptr)");
         self.wln("declare void @print_int(i64)");
         self.wln("declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)");
+        self.wln("declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)");
         self.wln("");
 
         // Emit all collected string constants at module scope
@@ -736,43 +737,53 @@ impl LlvmEmitter {
                     // Set load hint so `load()` intrinsic uses the LHS type
                     let dst_ty = self.locals.get(name).cloned().unwrap_or_else(|| "i32".into());
                     self.current_load_hint = Some(dst_ty.clone());
-                    let val = self.emit_expr(init_expr);
+                    let target_ptr = format!("%{}", name);
+                    let val = self.emit_expr(init_expr, Some(target_ptr.clone()), Some(dst_ty.clone()));
                     let val_ty = self.infer_type(init_expr);
                     self.current_load_hint = None;
-                    let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
-                    if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
-                        let size_tmp_ptr = self.fresh_tmp();
-                        let size_tmp = self.fresh_tmp();
-                        writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
-                        writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
-                        writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %{}, ptr align 8 {}, i64 {}, i1 false)", name, coerced, size_tmp).unwrap();
+
+                    if matches!(init_expr, Expr::ZeroInit(_)) {
+                        // For ZeroInit, the target pointer has already been memset. No further store needed.
                     } else {
-                        self.emit_store(&coerced, &format!("%{}", name), &dst_ty);
+                        let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
+                        if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
+                            let size_tmp_ptr = self.fresh_tmp();
+                            let size_tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
+                            writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
+                            writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_ptr, coerced, size_tmp).unwrap();
+                        } else {
+                            self.emit_store(&coerced, &target_ptr, &dst_ty);
+                        }
                     }
                 }
 
                 self.current_cache_policy = None;
             }
             Stmt::Assign { target, value, .. } => {
-                let val = self.emit_expr(value);
-                let val_ty = self.infer_type(value);
-                let dst_ty = self.infer_type(target);
-                // Get the address of the target (don't load it)
                 let target_addr = self.emit_lvalue(target);
-                let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
-                if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
-                    let size_tmp_ptr = self.fresh_tmp();
-                    let size_tmp = self.fresh_tmp();
-                    writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
-                    writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
-                    writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_addr, coerced, size_tmp).unwrap();
+                let dst_ty = self.infer_type(target);
+                let val = self.emit_expr(value, Some(target_addr.clone()), Some(dst_ty.clone()));
+                let val_ty = self.infer_type(value);
+
+                if matches!(value, Expr::ZeroInit(_)) {
+                    // ZeroInit handles memset directly into target_addr.
                 } else {
-                    self.emit_store(&coerced, &target_addr, &dst_ty);
+                    let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
+                    if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
+                        let size_tmp_ptr = self.fresh_tmp();
+                        let size_tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
+                        writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
+                        writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_addr, coerced, size_tmp).unwrap();
+                    } else {
+                        self.emit_store(&coerced, &target_addr, &dst_ty);
+                    }
                 }
             }
             Stmt::Return(expr, _) => {
                 if let Some(e) = expr {
-                    let val = self.emit_expr(e);
+                    let val = self.emit_expr(e, None, None);
                     let val_ty = self.infer_type(e);
                     let coerced = self.emit_coerce(&val, &val_ty, ret_type);
                     writeln!(&mut self.output, "  ret {} {}", ret_type, coerced).unwrap();
@@ -782,10 +793,10 @@ impl LlvmEmitter {
                 self.block_terminated = true;
             }
             Stmt::Expr(e) => {
-                self.emit_expr(e);
+                self.emit_expr(e, None, None);
             }
             Stmt::If { condition, then_block, else_block, .. } => {
-                let cond = self.emit_expr(condition);
+                let cond = self.emit_expr(condition, None, None);
                 let then_lbl = self.fresh_label("then");
                 let else_lbl = self.fresh_label("else");
                 let merge_lbl = self.fresh_label("merge");
@@ -823,7 +834,7 @@ impl LlvmEmitter {
 
                 writeln!(&mut self.output, "  br label %{}", cond_lbl).unwrap();
                 writeln!(&mut self.output, "{}:", cond_lbl).unwrap();
-                let cond = self.emit_expr(condition);
+                let cond = self.emit_expr(condition, None, None);
                 writeln!(&mut self.output, "  br i1 {}, label %{}, label %{}", cond, body_lbl, end_lbl).unwrap();
 
                 writeln!(&mut self.output, "{}:", body_lbl).unwrap();
@@ -837,8 +848,8 @@ impl LlvmEmitter {
                 self.block_terminated = false;
             }
             Stmt::For { loop_var, start, end, step, body, .. } => {
-                let s = self.emit_expr(start);
-                let e = self.emit_expr(end);
+                let s = self.emit_expr(start, None, None);
+                let e = self.emit_expr(end, None, None);
                 let cond_lbl = self.fresh_label("for.cond");
                 let body_lbl = self.fresh_label("for.body");
                 let end_lbl = self.fresh_label("for.end");
@@ -858,7 +869,7 @@ impl LlvmEmitter {
                 self.emit_block_body(body, ret_type);
 
                 // Increment
-                let step_val = if let Some(st) = step { self.emit_expr(st) } else { "1".into() };
+                let step_val = if let Some(st) = step { self.emit_expr(st, None, None) } else { "1".into() };
                 let loaded = self.emit_load(&format!("%{}", loop_var), "i32");
                 let incremented = self.fresh_tmp();
                 writeln!(&mut self.output, "  {} = add i32 {}, {}", incremented, loaded, step_val).unwrap();
@@ -870,7 +881,7 @@ impl LlvmEmitter {
             }
             Stmt::CompoundAssign { target, op, value, .. } => {
                 let addr = self.emit_lvalue(target);
-                let rhs = self.emit_expr(value);
+                let rhs = self.emit_expr(value, None, None);
                 let ty = self.infer_type(target);
                 let loaded = self.emit_load(&addr, &ty);
                 let result = self.fresh_tmp();
@@ -889,7 +900,7 @@ impl LlvmEmitter {
                 }
             }
             Stmt::Match { scrutinee, arms, .. } => {
-                let scrut_val = self.emit_expr(scrutinee);
+                let scrut_val = self.emit_expr(scrutinee, None, None);
                 let scrut_ty = self.infer_type(scrutinee);
                 let merge_lbl = self.fresh_label("match.end");
 
@@ -919,7 +930,7 @@ impl LlvmEmitter {
                             writeln!(&mut self.output, "  br label %{}", body_lbl).unwrap();
                         }
                         MatchPattern::Literal(lit) => {
-                            let lit_val = self.emit_expr(lit);
+                            let lit_val = self.emit_expr(lit, None, None);
                             let cmp = self.fresh_tmp();
                             let cmp_instr = if scrut_ty == "float" || scrut_ty == "double" { "fcmp oeq" } else { "icmp eq" };
                             writeln!(&mut self.output, "  {} = {} {} {}, {}", cmp, cmp_instr, scrut_ty, scrut_val, lit_val).unwrap();
@@ -947,7 +958,7 @@ impl LlvmEmitter {
 
                     writeln!(&mut self.output, "{}:", body_lbl).unwrap();
                     self.block_terminated = false;
-                    self.emit_expr(&arm.body);
+                    self.emit_expr(&arm.body, None, None);
                     if !self.block_terminated {
                         writeln!(&mut self.output, "  br label %{}", merge_lbl).unwrap();
                     }
@@ -1018,8 +1029,8 @@ impl LlvmEmitter {
                 tmp
             }
             Expr::Index { base, index, .. } => {
-                let base_val = self.emit_expr(base);
-                let idx_val = self.emit_expr(index);
+                let base_val = self.emit_expr(base, None, None);
+                let idx_val = self.emit_expr(index, None, None);
                 let base_ty = self.infer_type(base);
                 let elem_ty = if base_ty == "ptr" { "i64" } else { base_ty.as_str() };
                 let tmp = self.fresh_tmp();
@@ -1027,15 +1038,15 @@ impl LlvmEmitter {
                 tmp
             }
             Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } => {
-                self.emit_expr(operand)
+                self.emit_expr(operand, None, None)
             }
             _ => {
-                self.emit_expr(expr)
+                self.emit_expr(expr, None, None)
             }
         }
     }
 
-    fn emit_expr(&mut self, expr: &Expr) -> String {
+    fn emit_expr(&mut self, expr: &Expr, target: Option<String>, expected_ty: Option<String>) -> String {
         match expr {
             Expr::IntLit(val, _) => format!("{}", val),
             Expr::FloatLit(val, _) => format!("{:.6e}", val),
@@ -1064,8 +1075,8 @@ impl LlvmEmitter {
                 tmp
             }
             Expr::BinaryOp { left, op, right, .. } => {
-                let l = self.emit_expr(left);
-                let r = self.emit_expr(right);
+                let l = self.emit_expr(left, None, None);
+                let r = self.emit_expr(right, None, None);
                 let ty = self.infer_type(left);
                 let tmp = self.fresh_tmp();
                 
@@ -1086,7 +1097,7 @@ impl LlvmEmitter {
                 tmp
             }
             Expr::UnaryOp { op, operand, .. } => {
-                let val = self.emit_expr(operand);
+                let val = self.emit_expr(operand, None, None);
                 let tmp = self.fresh_tmp();
                 let ty = self.infer_type(operand);
                 match op {
@@ -1117,7 +1128,7 @@ impl LlvmEmitter {
 
                 if (func_name.starts_with("String_") || func_name.starts_with("Vec_") || func_name.starts_with("File_") || func_name.starts_with("yfile_") || func_name.starts_with("ystr_") || func_name.starts_with("yvec_")) && args.len() >= 1 {
                     if func_name == "Vec_push" && args.len() == 2 {
-                        let vec_val = self.emit_expr(&args[0]);
+                        let vec_val = self.emit_expr(&args[0], None, None);
                         let elem_addr = self.emit_lvalue(&args[1]);
                         writeln!(&mut self.output, "  call void @Vec_push(ptr {}, ptr {})", vec_val, elem_addr).unwrap();
                         return self.fresh_tmp().replace("%t", "%_void");
@@ -1128,8 +1139,8 @@ impl LlvmEmitter {
                     let expected_params = self.functions.get(&func_name).map(|(p, _)| p.clone()).unwrap_or_default();
 
                     for (i, arg) in args.iter().enumerate() {
-                        let mut arg_val = self.emit_expr(arg);
-                        let mut arg_ty = self.infer_type(arg);
+                        let mut arg_val = self.emit_expr(arg, None, None);
+                        let arg_ty = self.infer_type(arg);
                         let arg_ast = self.infer_ast_type(arg);
                         
                         let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
@@ -1227,8 +1238,8 @@ impl LlvmEmitter {
                 for (i, a) in args.iter().enumerate() {
                     let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
 
-                    let mut arg_val = self.emit_expr(a);
-                    let mut arg_ty = self.infer_type(a);
+                    let mut arg_val = self.emit_expr(a, None, None);
+                    let arg_ty = self.infer_type(a);
                     let arg_ast = self.infer_ast_type(a);
 
                     // Universal Context-aware deref
@@ -1283,7 +1294,7 @@ impl LlvmEmitter {
 
                 match func_name.as_str() {
                     "load" => {
-                        let ptr_val = self.emit_expr(&args[0]);
+                        let ptr_val = self.emit_expr(&args[0], None, None);
                         let tmp = self.fresh_tmp();
                         let mut metadata = String::new();
                         
@@ -1326,7 +1337,7 @@ impl LlvmEmitter {
                     writeln!(&mut self.output, "  {} = getelementptr {}, ptr {}, i32 0, i32 1", data_tmp, struct_name, alloc_tmp).unwrap();
                     
                     if !args.is_empty() {
-                        let val_val = self.emit_expr(&args[0]);
+                        let val_val = self.emit_expr(&args[0], None, None);
                         let val_ty = self.infer_type(&args[0]);
                         writeln!(&mut self.output, "  store {} {}, ptr {}", val_ty, val_val, data_tmp).unwrap();
                     }
@@ -1377,6 +1388,23 @@ impl LlvmEmitter {
                 self.emit_load(&lval, &ty)
             }
             Expr::SelfLit(_) => "%self".into(),
+            Expr::ZeroInit(_) => {
+                let ty = expected_ty.or_else(|| self.current_load_hint.clone()).unwrap_or_else(|| "i32".into());
+
+                let target_ptr = target.unwrap_or_else(|| {
+                    let tmp = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = alloca {}", tmp, ty).unwrap();
+                    tmp
+                });
+
+                let size_tmp_ptr = self.fresh_tmp();
+                let size_tmp = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, ty).unwrap();
+                writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
+                writeln!(&mut self.output, "  call void @llvm.memset.p0.i64(ptr {}, i8 0, i64 {}, i1 false)", target_ptr, size_tmp).unwrap();
+
+                return target_ptr;
+            }
             Expr::StructLit { name, fields, .. } => {
                 let ty = format!("%{}", name);
                 let mut current_val = "undef".to_string();
@@ -1393,7 +1421,7 @@ impl LlvmEmitter {
                             }
                         }
                     }
-                    let val = self.emit_expr(fexpr);
+                    let val = self.emit_expr(fexpr, None, None);
                     let val_ty = self.infer_type(fexpr);
                     let coerced = self.emit_coerce(&val, &val_ty, &field_ty);
                     let new_val = self.fresh_tmp();
@@ -1408,7 +1436,7 @@ impl LlvmEmitter {
                 self.called_functions.push(func_name.clone());
                 let mut arg_strs = Vec::new();
                 for a in args {
-                    let v = self.emit_expr(a);
+                    let v = self.emit_expr(a, None, None);
                     let ty = self.infer_type(a);
                     arg_strs.push(format!("{} {}", ty, v));
                 }
@@ -1607,6 +1635,7 @@ impl LlvmEmitter {
                 }
                 "i32".into()
             }
+            Expr::ZeroInit(_) => self.current_load_hint.clone().unwrap_or_else(|| "i32".into()),
             Expr::StructLit { name, .. } => format!("%{}", name),
             // Fix 3: Expr::Path on enum variants returns the enum struct type
             Expr::Path { namespace, .. } => {

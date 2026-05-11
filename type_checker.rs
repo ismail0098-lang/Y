@@ -34,6 +34,8 @@ pub struct TypeChecker {
     pub errors: Vec<String>,
     pub in_unsafe: bool,
     allow_transfer_use: usize,
+    current_return_type: Option<SemanticType>,
+    functions: HashMap<String, Vec<SemanticType>>,
 }
 
 impl TypeChecker {
@@ -44,6 +46,8 @@ impl TypeChecker {
             errors: Vec::new(),
             in_unsafe: false,
             allow_transfer_use: 0,
+            current_return_type: None,
+            functions: HashMap::new(),
         }
     }
 
@@ -159,6 +163,29 @@ impl TypeChecker {
     // ── AST Traversal ───────────────────────────────────────
 
     pub fn check_program(&mut self, prog: &Program) {
+        // Collect function signatures first
+        for item in &prog.items {
+            match item {
+                Item::Func(f) => {
+                    let mut params = Vec::new();
+                    for p in &f.params {
+                        params.push(self.resolve_type(&p.ty));
+                    }
+                    self.functions.insert(f.name.clone(), params);
+                }
+                Item::Impl(imp) => {
+                    for f in &imp.methods {
+                        let mut params = Vec::new();
+                        for p in &f.params {
+                            params.push(self.resolve_type(&p.ty));
+                        }
+                        self.functions.insert(format!("{}_{}", imp.target_type, f.name), params);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         for item in &prog.items {
             match item {
                 Item::Kernel(k) => self.check_kernel(k),
@@ -212,17 +239,22 @@ impl TypeChecker {
             self.insert_var(param.name.clone(), sty);
         }
 
+        let prev_ret_ty = self.current_return_type.clone();
         if let Some(ret_ty) = &f.ret_ty {
             let resolved = self.resolve_type(ret_ty);
+            self.current_return_type = Some(resolved.clone());
             if resolved == SemanticType::TransferObligation {
                 self.errors.push(format!(
                     "Line {}: Functions cannot return Transfer obligations. They must be consumed by `pipe.wait(...)` in the creating scope.",
                     f.span.line
                 ));
             }
+        } else {
+            self.current_return_type = None;
         }
 
         self.check_block(&f.body);
+        self.current_return_type = prev_ret_ty;
 
         self.in_unsafe = prev_unsafe;
         self.pop_scope();
@@ -244,16 +276,20 @@ impl TypeChecker {
         match stmt {
             Stmt::Let { name, ty, init, span, .. } => {
                 let mut inferred_type = SemanticType::Unknown;
-                
-                if let Some(init_expr) = init {
-                    inferred_type = self.check_expr(init_expr);
-                }
+                let mut explicit_resolved = None;
 
                 if let Some(explicit_ty) = ty {
-                    let resolved = self.resolve_type(explicit_ty);
+                    explicit_resolved = Some(self.resolve_type(explicit_ty));
+                }
+
+                if let Some(init_expr) = init {
+                    inferred_type = self.check_expr_with_expected(init_expr, explicit_resolved.as_ref());
+                }
+
+                if let Some(resolved) = explicit_resolved {
                     // Minimal type unification
                     if inferred_type == SemanticType::Unknown {
-                        inferred_type = resolved;
+                        inferred_type = resolved.clone();
                     } else if inferred_type != resolved && inferred_type != SemanticType::TransferObligation {
                         self.errors.push(format!("Line {}: Type mismatch in let assignment.", span.line));
                     }
@@ -315,7 +351,7 @@ impl TypeChecker {
             }
             Stmt::Assign { target, value, span } => {
                 let t1 = self.check_expr(target);
-                let t2 = self.check_expr(value);
+                let t2 = self.check_expr_with_expected(value, Some(&t1));
                 if t1 == SemanticType::TransferObligation {
                     self.errors.push(format!(
                         "Line {}: Transfer bindings cannot be reassigned. Create a new Transfer with `let` and consume it exactly once with `pipe.wait(...)`.",
@@ -343,7 +379,8 @@ impl TypeChecker {
             }
             Stmt::Return(val, span) => {
                 if let Some(expr) = val {
-                    let ret_ty = self.check_expr(expr);
+                    let expected_ret_ty = self.current_return_type.clone();
+                    let ret_ty = self.check_expr_with_expected(expr, expected_ret_ty.as_ref());
                     if ret_ty == SemanticType::TransferObligation {
                         self.errors.push(format!(
                             "Line {}: Returning a Transfer obligation would leak a linear sync proof. Consume it with `pipe.wait(...)` before returning.",
@@ -384,8 +421,20 @@ impl TypeChecker {
     }
 
     fn check_expr(&mut self, expr: &Expr) -> SemanticType {
+        self.check_expr_with_expected(expr, None)
+    }
+
+    fn check_expr_with_expected(&mut self, expr: &Expr, expected_type: Option<&SemanticType>) -> SemanticType {
         let span = expr.span();
         match expr {
+            Expr::ZeroInit(span) => {
+                if let Some(expected) = expected_type {
+                    expected.clone()
+                } else {
+                    self.errors.push(format!("Line {}: Ambiguous zero-initializer: cannot infer struct type.", span.line));
+                    SemanticType::Unknown
+                }
+            }
             Expr::Ident(name, _) => {
                 if let Some(ty) = self.lookup_var(name) {
                     let ty = ty.clone();
@@ -449,8 +498,17 @@ impl TypeChecker {
                 }
                 let func_ty = self.check_expr(func);
                 self.reject_transfer_escape(&func_ty, &func.span(), "as a callable value");
-                for arg in args {
-                    let arg_ty = self.check_expr(arg);
+
+                let mut expected_params = None;
+                if let Expr::Ident(fname, _) = &**func {
+                    expected_params = self.functions.get(fname).cloned();
+                } else if let Expr::Path { namespace, member, .. } = &**func {
+                    expected_params = self.functions.get(&format!("{}_{}", namespace, member)).cloned();
+                }
+
+                for (i, arg) in args.iter().enumerate() {
+                    let expected_ty = expected_params.as_ref().and_then(|p| p.get(i));
+                    let arg_ty = self.check_expr_with_expected(arg, expected_ty);
                     self.reject_transfer_escape(&arg_ty, &arg.span(), "as a function argument");
                 }
                 SemanticType::Unknown
