@@ -46,6 +46,8 @@ pub struct LlvmEmitter {
     functions: BTreeMap<String, (Vec<String>, String)>,
     /// Track struct fields: StructName -> Vec<(FieldName, IRType)>
     structs: BTreeMap<String, Vec<(String, String)>>,
+    /// Track struct fields AST Types: StructName -> Vec<(FieldName, ASTType)>
+    ast_structs: HashMap<String, Vec<(String, String)>>,
     /// Track enums: EnumName -> has_data (true = tagged union, false = simple i32 tag)
     enums: BTreeMap<String, bool>,
     /// Track enum variant tags: EnumName_VariantName -> tag integer
@@ -109,6 +111,7 @@ impl LlvmEmitter {
             pointee_types: BTreeMap::new(),
             functions,
             structs: BTreeMap::new(),
+            ast_structs: HashMap::new(),
             enums: BTreeMap::new(),
             enum_variants: BTreeMap::new(),
             block_terminated: false,
@@ -339,10 +342,13 @@ impl LlvmEmitter {
             match item {
                 Item::Struct(s) => {
                     let mut fields = Vec::new();
+                    let mut ast_fields = Vec::new();
                     for f in &s.fields {
                         fields.push((f.name.clone(), self.emit_type(&f.ty)));
+                        ast_fields.push((f.name.clone(), ast_type_to_string(&f.ty)));
                     }
                     self.structs.insert(s.name.clone(), fields);
+                    self.ast_structs.insert(s.name.clone(), ast_fields);
                 }
                 Item::Func(f) => {
                     let ret_ty = f.ret_ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "void".into());
@@ -1496,37 +1502,11 @@ impl LlvmEmitter {
                 // Approximate base ty
                 let base_ty = self.infer_ast_type(base);
                 let struct_name = base_ty.trim_start_matches('&');
-                let normalize_field_ast_type = |fty: &str| -> Option<String> {
-                    match fty {
-                        // Already-valid AST spellings used elsewhere in this emitter.
-                        "Unknown" | "String" | "bool" | "char" | "i64" | "f64" | "f32" | "usize" => {
-                            Some(fty.to_string())
-                        }
-                        // Common LLVM IR spellings that can be losslessly mapped back.
-                        "i1" => Some("bool".into()),
-                        "i8" => Some("char".into()),
-                        "float" => Some("f32".into()),
-                        "double" => Some("f64".into()),
-                        "%YStr" => Some("String".into()),
-                        // `ptr` has lost the referent type, so it cannot safely participate
-                        // in later AST-based comparisons such as `&T`.
-                        "ptr" => None,
-                        // Struct IR types are emitted as `%Foo`; convert back to `Foo`.
-                        _ if fty.starts_with('%') => Some(fty.trim_start_matches('%').to_string()),
-                        // Preserve AST reference spellings if they are already present.
-                        _ if fty.starts_with('&') => Some(fty.to_string()),
-                        // For overlapping primitive spellings such as `i32`/`i64`, keep the
-                        // existing value rather than returning an LLVM-only pointer type.
-                        _ => Some(fty.to_string()),
-                    }
-                };
-                if let Some(fields) = self.structs.get(struct_name) {
+
+                if let Some(fields) = self.ast_structs.get(struct_name) {
                     for (fname, fty) in fields {
                         if fname == member {
-                            if let Some(ast_fty) = normalize_field_ast_type(fty) {
-                                return ast_fty;
-                            }
-                            return "Unknown".into();
+                            return fty.clone();
                         }
                     }
                 }
