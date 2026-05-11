@@ -1,0 +1,5 @@
+fn main() {
+    let s: String = "hello";
+    let p: &String = &s;
+    println(p);
+}

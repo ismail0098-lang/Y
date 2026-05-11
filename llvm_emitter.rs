@@ -38,10 +38,12 @@ pub struct LlvmEmitter {
     current_impl_target: Option<String>,
     /// Track local variables and their LLVM IR types
     locals: BTreeMap<String, String>,
+    /// Map local variables to their AST type
+    locals_ast_type: BTreeMap<String, String>,
     /// Track what struct type a pointer local variable points to
     pointee_types: BTreeMap<String, String>,
-    /// Track function return types
-    functions: BTreeMap<String, String>,
+    /// Map function names to their LLVM parameter types and return type
+    functions: BTreeMap<String, (Vec<String>, String)>,
     /// Track struct fields: StructName -> Vec<(FieldName, IRType)>
     structs: BTreeMap<String, Vec<(String, String)>>,
     /// Track enums: EnumName -> has_data (true = tagged union, false = simple i32 tag)
@@ -60,23 +62,40 @@ pub struct LlvmEmitter {
     defined_functions: Vec<String>,
 }
 
+fn ast_type_to_string(ty: &Type) -> String {
+    match ty {
+        Type::Primitive(name, _) => name.clone(),
+        Type::Ident(name, _) => name.clone(),
+        Type::Reference { mutable, inner, .. } => {
+            let mut_str = if *mutable { "mut " } else { "" };
+            format!("&{}{}", mut_str, ast_type_to_string(inner))
+        }
+        Type::Generic { base, args: _, .. } => {
+            base.clone()
+        }
+        Type::Array { element, size: _, .. } => {
+            format!("[{}]", ast_type_to_string(element))
+        }
+    }
+}
+
 impl LlvmEmitter {
     pub fn new() -> Self {
         let mut functions = BTreeMap::new();
         // Pre-populate runtime function return types
-        functions.insert("String_new".into(), "ptr".into());
-        functions.insert("File_read_to_string".into(), "ptr".into());
-        functions.insert("yfile_read_to_string".into(), "ptr".into());
-        functions.insert("ystr_new".into(), "ptr".into());
-        functions.insert("ystr_clone".into(), "ptr".into());
-        functions.insert("yvec_new".into(), "ptr".into());
-        functions.insert("yvec_get".into(), "ptr".into());
-        functions.insert("malloc".into(), "ptr".into());
-        functions.insert("File_write".into(), "void".into());
-        functions.insert("yfile_write".into(), "void".into());
-        functions.insert("println".into(), "void".into());
-        functions.insert("print".into(), "void".into());
-        functions.insert("print_int".into(), "void".into());
+        functions.insert("String_new".into(), (vec!["String".to_string()], "ptr".into()));
+        functions.insert("File_read_to_string".into(), (vec!["&String".to_string()], "ptr".into()));
+        functions.insert("yfile_read_to_string".into(), (vec!["&String".to_string()], "ptr".into()));
+        functions.insert("ystr_new".into(), (vec!["String".to_string()], "ptr".into()));
+        functions.insert("ystr_clone".into(), (vec!["&String".to_string()], "ptr".into()));
+        functions.insert("yvec_new".into(), (vec!["i64".to_string()], "ptr".into()));
+        functions.insert("yvec_get".into(), (vec!["&Vec".to_string(), "usize".to_string()], "ptr".into()));
+        functions.insert("malloc".into(), (vec!["usize".to_string()], "ptr".into()));
+        functions.insert("File_write".into(), (vec!["&String".to_string(), "&String".to_string()], "void".into()));
+        functions.insert("yfile_write".into(), (vec!["&String".to_string(), "&String".to_string()], "void".into()));
+        functions.insert("println".into(), (vec!["&String".to_string()], "void".into()));
+        functions.insert("print".into(), (vec!["&String".to_string()], "void".into()));
+        functions.insert("print_int".into(), (vec!["i64".to_string()], "void".into()));
 
         Self {
             output: String::new(),
@@ -86,6 +105,7 @@ impl LlvmEmitter {
             label_counter: 0,
             current_impl_target: None,
             locals: BTreeMap::new(),
+            locals_ast_type: BTreeMap::new(),
             pointee_types: BTreeMap::new(),
             functions,
             structs: BTreeMap::new(),
@@ -290,24 +310,30 @@ impl LlvmEmitter {
 
     pub fn emit_program(&mut self, prog: &Program, profile: &crate::sentinel::HardwareProfile) -> String {
         // Phase 0: Collect struct layouts and function signatures
-        self.functions.insert("ystr_new".into(), "ptr".into());
-        self.functions.insert("ystr_len".into(), "i64".into());
-        self.functions.insert("ystr_eq".into(), "i1".into());
-        self.functions.insert("ystr_eq_cstr".into(), "i1".into());
-        self.functions.insert("ystr_char_at".into(), "i8".into());
-        self.functions.insert("ystr_clone".into(), "ptr".into());
-        self.functions.insert("yvec_new".into(), "ptr".into());
-        self.functions.insert("yvec_len".into(), "i64".into());
-        self.functions.insert("yvec_get".into(), "ptr".into());
-        self.functions.insert("yvec_get_char".into(), "i8".into());
-        self.functions.insert("yfile_read_to_string".into(), "ptr".into());
-        self.functions.insert("yfile_write".into(), "void".into());
-        self.functions.insert("printf".into(), "i32".into());
-        self.functions.insert("malloc".into(), "ptr".into());
-        self.functions.insert("free".into(), "void".into());
-        self.functions.insert("exit".into(), "void".into());
-        self.functions.insert("println".into(), "void".into());
-        self.functions.insert("print_int".into(), "void".into());
+        self.functions.insert("ystr_new".into(), (vec!["String".to_string()], "ptr".into()));
+        self.functions.insert("ystr_len".into(), (vec!["&String".to_string()], "i64".into()));
+        self.functions.insert("ystr_eq".into(), (vec!["String".to_string(), "String".to_string()], "i1".into()));
+        self.functions.insert("ystr_eq_cstr".into(), (vec!["String".to_string(), "ptr".to_string()], "i1".into()));
+        self.functions.insert("ystr_push".into(), (vec!["String".to_string(), "char".to_string()], "void".into()));
+        self.functions.insert("ystr_push_str".into(), (vec!["String".to_string(), "String".to_string()], "void".into()));
+        self.functions.insert("ystr_free".into(), (vec!["String".to_string()], "void".into()));
+        self.functions.insert("ystr_char_at".into(), (vec!["&String".to_string(), "usize".to_string()], "i8".into()));
+        self.functions.insert("ystr_clone".into(), (vec!["&String".to_string()], "ptr".into()));
+        self.functions.insert("yvec_new".into(), (vec!["i64".to_string()], "ptr".into()));
+        self.functions.insert("yvec_push".into(), (vec!["ptr".to_string(), "ptr".to_string()], "void".into()));
+        self.functions.insert("yvec_free".into(), (vec!["ptr".to_string()], "void".into()));
+        self.functions.insert("yvec_len".into(), (vec!["&Vec".to_string()], "i64".into()));
+        self.functions.insert("yvec_get".into(), (vec!["&Vec".to_string(), "usize".to_string()], "ptr".into()));
+        self.functions.insert("yvec_get_char".into(), (vec!["&Vec".to_string(), "usize".to_string()], "i8".into()));
+        self.functions.insert("yfile_read_to_string".into(), (vec!["&String".to_string()], "ptr".into()));
+        self.functions.insert("yfile_write".into(), (vec!["&String".to_string(), "&String".to_string()], "void".into()));
+        self.functions.insert("printf".into(), (vec!["ptr".to_string()], "i32".into())); // variadic
+        self.functions.insert("malloc".into(), (vec!["usize".to_string()], "ptr".into()));
+        self.functions.insert("free".into(), (vec!["ptr".to_string()], "void".into()));
+        self.functions.insert("exit".into(), (vec!["i32".to_string()], "void".into()));
+        self.functions.insert("ylexer_log".into(), (vec!["usize".to_string(), "char".to_string()], "void".into()));
+        self.functions.insert("println".into(), (vec!["&String".to_string()], "void".into()));
+        self.functions.insert("print_int".into(), (vec!["i64".to_string()], "void".into()));
 
         for item in &prog.items {
             match item {
@@ -320,16 +346,19 @@ impl LlvmEmitter {
                 }
                 Item::Func(f) => {
                     let ret_ty = f.ret_ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "void".into());
-                    self.functions.insert(f.name.clone(), ret_ty);
+                    let param_tys: Vec<String> = f.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
+                    self.functions.insert(f.name.clone(), (param_tys, ret_ty));
                 }
                 Item::Impl(imp) => {
                     for m in &imp.methods {
                         let ret_ty = m.ret_ty.as_ref().map(|t| self.emit_type(t)).unwrap_or_else(|| "void".into());
-                        self.functions.insert(format!("{}_{}", imp.target_type, m.name), ret_ty);
+                        let param_tys: Vec<String> = m.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
+                        self.functions.insert(format!("{}_{}", imp.target_type, m.name), (param_tys, ret_ty));
                     }
                 }
                 Item::Kernel(k) => {
-                    self.functions.insert(k.name.clone(), "void".into());
+                    let param_tys: Vec<String> = k.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
+                    self.functions.insert(k.name.clone(), (param_tys, "void".into()));
                 }
                 Item::Enum(e) => {
                     let has_data = e.variants.iter().any(|v| v.fields.is_some());
@@ -406,7 +435,7 @@ impl LlvmEmitter {
         self.wln("declare void @free(ptr)");
         self.wln("declare void @exit(i32) noreturn");
         self.wln("declare void @println(ptr)");
-        self.wln("declare void @print_int(i32)");
+        self.wln("declare void @print_int(i64)");
         self.wln("declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)");
         self.wln("");
 
@@ -449,9 +478,14 @@ impl LlvmEmitter {
                 let ret_ty = match fname.as_str() {
                     "println" | "print" | "print_int" | "File_write" | "yfile_write" | "yvec_push" | "ystr_push" | "ystr_push_str" => "void".into(),
                     "String_new" | "File_read_to_string" | "yfile_read_to_string" | "ystr_new" | "ystr_clone" | "yvec_new" | "yvec_get" | "malloc" => "ptr".into(),
-                    _ => self.functions.get(fname).cloned().unwrap_or_else(|| "i32".into()),
+                    _ => self.functions.get(fname).map(|(_, r)| r.clone()).unwrap_or_else(|| "i32".into()),
                 };
-                writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname).unwrap();
+
+                if ret_ty.starts_with('%') {
+                    writeln!(&mut extern_decls, "declare void @{}(...)", fname).unwrap();
+                } else {
+                    writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname).unwrap();
+                }
                 auto_declared.insert(fname.clone());
             }
         }
@@ -523,6 +557,7 @@ impl LlvmEmitter {
         for p in &f.params {
             let ty = self.emit_type(&p.ty);
             self.locals.insert(p.name.clone(), ty.clone());
+            self.locals_ast_type.insert(p.name.clone(), ast_type_to_string(&p.ty));
             if let Some(pty) = self.get_pointee_type(&p.ty) {
                 self.pointee_types.insert(p.name.clone(), pty);
             }
@@ -584,6 +619,9 @@ impl LlvmEmitter {
                             }
                         };
                         self.locals.insert(name.clone(), ir_ty.clone());
+                        if let Some(t) = ty {
+                            self.locals_ast_type.insert(name.clone(), ast_type_to_string(t));
+                        }
                         // Track struct/enum-typed locals for GEP base type inference
                         if ir_ty.starts_with('%') {
                             self.pointee_types.insert(name.clone(), ir_ty.clone());
@@ -632,6 +670,7 @@ impl LlvmEmitter {
         for p in &k.params {
             let ty = self.emit_type(&p.ty);
             self.locals.insert(p.name.clone(), ty.clone());
+            self.locals_ast_type.insert(p.name.clone(), ast_type_to_string(&p.ty));
             if let Some(pty) = self.get_pointee_type(&p.ty) {
                 self.pointee_types.insert(p.name.clone(), pty);
             }
@@ -685,7 +724,15 @@ impl LlvmEmitter {
                     let val_ty = self.infer_type(init_expr);
                     self.current_load_hint = None;
                     let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
-                    self.emit_store(&coerced, &format!("%{}", name), &dst_ty);
+                    if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
+                        let size_tmp_ptr = self.fresh_tmp();
+                        let size_tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
+                        writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
+                        writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %{}, ptr align 8 {}, i64 {}, i1 false)", name, coerced, size_tmp).unwrap();
+                    } else {
+                        self.emit_store(&coerced, &format!("%{}", name), &dst_ty);
+                    }
                 }
 
                 self.current_cache_policy = None;
@@ -697,7 +744,15 @@ impl LlvmEmitter {
                 // Get the address of the target (don't load it)
                 let target_addr = self.emit_lvalue(target);
                 let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
-                self.emit_store(&coerced, &target_addr, &dst_ty);
+                if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
+                    let size_tmp_ptr = self.fresh_tmp();
+                    let size_tmp = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
+                    writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
+                    writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_addr, coerced, size_tmp).unwrap();
+                } else {
+                    self.emit_store(&coerced, &target_addr, &dst_ty);
+                }
             }
             Stmt::Return(expr, _) => {
                 if let Some(e) = expr {
@@ -1053,18 +1108,65 @@ impl LlvmEmitter {
                     }
                     
                     let mut new_arg_strs = Vec::new();
+
+                    let expected_params = self.functions.get(&func_name).map(|(p, _)| p.clone()).unwrap_or_default();
+
                     for (i, arg) in args.iter().enumerate() {
                         let mut arg_val = self.emit_expr(arg);
-                        let arg_ty = self.infer_type(arg);
+                        let mut arg_ty = self.infer_type(arg);
+                        let arg_ast = self.infer_ast_type(arg);
                         
-                        if arg_ty.starts_with('&') && (arg_ty.contains("String") || arg_ty.contains("Vec") || arg_ty.contains("ptr")) {
+                        let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
+
+                        // Universal Context-aware deref
+                        let is_runtime_func = [
+                            "ystr_new", "ystr_push", "ystr_push_str", "ystr_eq_cstr", "ystr_len",
+                            "ystr_char_at", "ystr_clone", "yvec_new", "yvec_push", "yvec_get",
+                            "yvec_len", "yfile_read_to_string", "yfile_write", "printf", "malloc",
+                            "free", "exit", "println", "print_int", "llvm.prefetch.p0", "load",
+                            "yvec_free", "ystr_free", "ylexer_log"
+                        ].contains(&func_name.as_str());
+
+                        if arg_ast.starts_with('&') && param_ty == &arg_ast[1..] {
+                            let tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val).unwrap();
+                            arg_val = tmp;
+                        } else if arg_ty == "ptr" && param_ty == "String" {
+                            let tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val).unwrap();
+                            arg_val = tmp;
+                        } else if arg_ast.starts_with('&') && param_ty == arg_ast && arg_val.starts_with("%") && is_runtime_func {
+                            // If param is &String and arg is &String, but arg is a double pointer (e.g., alloca'd local variable yielding pointer to ptr), we load it to get the YStr* pointer instead of passing the alloca YStr**.
                             let tmp = self.fresh_tmp();
                             writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val).unwrap();
                             arg_val = tmp;
                         }
                         
-                        let llvm_ty = if arg_ty.starts_with('&') || arg_ty == "String" || arg_ty == "Vec" || arg_ty == "ptr" { "ptr".to_string() } else { arg_ty };
-                        new_arg_strs.push(format!("{} {}", llvm_ty, arg_val));
+                        let llvm_param_ty = match param_ty {
+                            "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
+                            "usize" | "i64" | "I64" => "i64".to_string(),
+                            "i32" | "I32" => "i32".to_string(),
+                            "bool" => "i1".to_string(),
+                            "char" | "i8" => "i8".to_string(),
+                            _ => if param_ty.starts_with('&') { "ptr".to_string() } else { format!("%{}", param_ty) }
+                        };
+
+                        if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
+                            let tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = load {}, ptr {}", tmp, llvm_param_ty, arg_val).unwrap();
+                            new_arg_strs.push(format!("{} {}", llvm_param_ty, tmp));
+                        } else if llvm_param_ty == "ptr" && arg_ty.starts_with('%') {
+                            let tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = alloca {}", tmp, arg_ty).unwrap();
+                            writeln!(&mut self.output, "  store {} {}, ptr {}", arg_ty, arg_val, tmp).unwrap();
+                            new_arg_strs.push(format!("ptr {}", tmp));
+                        } else {
+                            if llvm_param_ty == "ptr" {
+                                new_arg_strs.push(format!("ptr {}", arg_val));
+                            } else {
+                                new_arg_strs.push(format!("{} {}", llvm_param_ty, arg_val));
+                            }
+                        }
                     }
                     
                     if func_name.starts_with("Vec_get_") && args.len() == 2 {
@@ -1107,20 +1209,64 @@ impl LlvmEmitter {
                 }
 
                 let mut arg_strs = Vec::new();
-                for a in args {
-                    if let Expr::UnaryOp { op: UnaryOp::Ref, operand, .. } = a {
-                        let inner_ty = self.infer_type(operand);
-                        if inner_ty == "ptr" {
-                            let v = self.emit_expr(a);
-                            let tmp = self.fresh_tmp();
-                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, v).unwrap();
-                            arg_strs.push(format!("ptr {}", tmp));
-                            continue;
+
+                let expected_params = self.functions.get(&func_name).map(|(p, _)| p.clone()).unwrap_or_default();
+
+                for (i, a) in args.iter().enumerate() {
+                    let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
+
+                    let mut arg_val = self.emit_expr(a);
+                    let mut arg_ty = self.infer_type(a);
+                    let arg_ast = self.infer_ast_type(a);
+
+                    // Universal Context-aware deref
+                    let is_runtime_func = [
+                        "ystr_new", "ystr_push", "ystr_push_str", "ystr_eq_cstr", "ystr_len",
+                        "ystr_char_at", "ystr_clone", "yvec_new", "yvec_push", "yvec_get",
+                        "yvec_len", "yfile_read_to_string", "yfile_write", "printf", "malloc",
+                        "free", "exit", "println", "print_int", "llvm.prefetch.p0", "load",
+                        "yvec_free", "ystr_free", "ylexer_log"
+                    ].contains(&func_name.as_str());
+
+                    if arg_ast.starts_with('&') && param_ty == &arg_ast[1..] {
+                        let tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val).unwrap();
+                        arg_val = tmp;
+                    } else if arg_ty == "ptr" && param_ty == "String" {
+                        let tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val).unwrap();
+                        arg_val = tmp;
+                    } else if arg_ast.starts_with('&') && param_ty == arg_ast && arg_val.starts_with("%") && is_runtime_func {
+                        let tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val).unwrap();
+                        arg_val = tmp;
+                    }
+
+                    let llvm_param_ty = match param_ty {
+                        "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
+                        "usize" | "i64" | "I64" => "i64".to_string(),
+                        "i32" | "I32" => "i32".to_string(),
+                        "bool" => "i1".to_string(),
+                        "char" | "i8" => "i8".to_string(),
+                        _ => if param_ty.starts_with('&') { "ptr".to_string() } else { format!("%{}", param_ty) }
+                    };
+
+                    if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
+                        let tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = load {}, ptr {}", tmp, llvm_param_ty, arg_val).unwrap();
+                        arg_strs.push(format!("{} {}", llvm_param_ty, tmp));
+                    } else if llvm_param_ty == "ptr" && arg_ty.starts_with('%') {
+                        let tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = alloca {}", tmp, arg_ty).unwrap();
+                        writeln!(&mut self.output, "  store {} {}, ptr {}", arg_ty, arg_val, tmp).unwrap();
+                        arg_strs.push(format!("ptr {}", tmp));
+                    } else {
+                        if llvm_param_ty == "ptr" {
+                            arg_strs.push(format!("ptr {}", arg_val));
+                        } else {
+                            arg_strs.push(format!("{} {}", llvm_param_ty, arg_val));
                         }
                     }
-                    let v = self.emit_expr(a);
-                    let ty = self.infer_type(a);
-                    arg_strs.push(format!("{} {}", ty, v));
                 }
 
                 match func_name.as_str() {
@@ -1181,12 +1327,21 @@ impl LlvmEmitter {
                 let ret_ty = match func_name.as_str() {
                     "println" | "print" | "print_int" | "File_write" | "yfile_write" | "yvec_push" | "ystr_push" | "ystr_push_str" => "void".into(),
                     "String_new" | "File_read_to_string" | "yfile_read_to_string" | "ystr_new" | "ystr_clone" | "yvec_new" | "yvec_get" | "malloc" => "ptr".into(),
-                    _ => self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into()),
+                    _ => self.functions.get(&func_name).map(|(_, r)| r.clone()).unwrap_or_else(|| "i32".into()),
                 };
                 let tmp = self.fresh_tmp();
-                if ret_ty == "void" {
+                if ret_ty.starts_with('%') {
+                    let sret_alloc = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = alloca {}", sret_alloc, ret_ty).unwrap();
+                    let mut sret_arg_strs = vec![format!("ptr {}", sret_alloc)];
+                    sret_arg_strs.extend(arg_strs);
+                    writeln!(&mut self.output, "  call void @{}({})", func_name, sret_arg_strs.join(", ")).unwrap();
+                    let res_tmp = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = load {}, ptr {}", res_tmp, ret_ty, sret_alloc).unwrap();
+                    res_tmp
+                } else if ret_ty == "void" {
                     writeln!(&mut self.output, "  call void @{}({})", func_name, arg_strs.join(", ")).unwrap();
-                    tmp
+                    tmp.replace("%t", "%_void")
                 } else {
                     writeln!(&mut self.output, "  {} = call {} @{}({})", tmp, ret_ty, func_name, arg_strs.join(", ")).unwrap();
                     tmp
@@ -1251,11 +1406,20 @@ impl LlvmEmitter {
                     let ty = self.infer_type(a);
                     arg_strs.push(format!("{} {}", ty, v));
                 }
-                let ret_ty = self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into());
+                let ret_ty = self.functions.get(&func_name).map(|(_, r)| r.clone()).unwrap_or_else(|| "i32".into());
                 let tmp = self.fresh_tmp();
-                if ret_ty == "void" {
+                if ret_ty.starts_with('%') {
+                    let sret_alloc = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = alloca {}", sret_alloc, ret_ty).unwrap();
+                    let mut sret_arg_strs = vec![format!("ptr {}", sret_alloc)];
+                    sret_arg_strs.extend(arg_strs);
+                    writeln!(&mut self.output, "  call void @{}({})", func_name, sret_arg_strs.join(", ")).unwrap();
+                    let res_tmp = self.fresh_tmp();
+                    writeln!(&mut self.output, "  {} = load {}, ptr {}", res_tmp, ret_ty, sret_alloc).unwrap();
+                    res_tmp
+                } else if ret_ty == "void" {
                     writeln!(&mut self.output, "  call void @{}({})", func_name, arg_strs.join(", ")).unwrap();
-                    tmp
+                    tmp.replace("%t", "%_void")
                 } else {
                     writeln!(&mut self.output, "  {} = call {} @{}({})", tmp, ret_ty, func_name, arg_strs.join(", ")).unwrap();
                     tmp
@@ -1308,6 +1472,56 @@ impl LlvmEmitter {
         }
     }
 
+    fn infer_ast_type(&self, expr: &Expr) -> String {
+        match expr {
+            Expr::Ident(name, _) => {
+                if let Some(ast_ty) = self.locals_ast_type.get(name) {
+                    return ast_ty.clone();
+                }
+                "Unknown".into()
+            }
+            Expr::UnaryOp { op: UnaryOp::Ref, operand, .. } => {
+                let inner = self.infer_ast_type(operand);
+                format!("&{}", inner)
+            }
+            Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } => {
+                let inner = self.infer_ast_type(operand);
+                if inner.starts_with('&') {
+                    inner[1..].to_string()
+                } else {
+                    inner
+                }
+            }
+            Expr::MemberAccess { base, member, .. } => {
+                // Approximate base ty
+                let base_ty = self.infer_ast_type(base);
+                let struct_name = base_ty.trim_start_matches('&');
+                if let Some(fields) = self.structs.get(struct_name) {
+                    for (fname, fty) in fields {
+                        if fname == member {
+                            return fty.clone();
+                        }
+                    }
+                }
+                "Unknown".into()
+            }
+            Expr::Call { func, .. } => {
+                let func_name = self.emit_call_target(func);
+                if let Some((_, ret_ast_ty)) = self.functions.get(&func_name) {
+                    ret_ast_ty.clone()
+                } else {
+                    "Unknown".into()
+                }
+            }
+            Expr::StringLit(_, _) => "String".into(),
+            Expr::IntLit(_, _) => "i64".into(),
+            Expr::FloatLit(_, _) => "f64".into(),
+            Expr::BoolLit(_, _) => "bool".into(),
+            Expr::CharLit(_, _) => "char".into(),
+            _ => "Unknown".into(),
+        }
+    }
+
     fn infer_type(&self, expr: &Expr) -> String {
         match expr {
             Expr::IntLit(_, _) => "i32".into(),
@@ -1342,12 +1556,12 @@ impl LlvmEmitter {
                     }
                     "println" | "print" | "print_int" | "File_write" => "void".into(),
                     "String_new" | "File_read_to_string" => "ptr".into(),
-                    _ => self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into()),
+                    _ => self.functions.get(&func_name).map(|(_, r)| r.clone()).unwrap_or_else(|| "i32".into()),
                 }
             }
             Expr::GenericCall { func, .. } => {
                 let func_name = self.emit_call_target(func);
-                self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into())
+                self.functions.get(&func_name).map(|(_, r)| r.clone()).unwrap_or_else(|| "i32".into())
             }
             Expr::BinaryOp { op, left, .. } => {
                 match op {
@@ -1477,7 +1691,7 @@ impl LlvmEmitter {
                     let enum_name = func_name.split('_').next().unwrap();
                     return format!("%{}", enum_name);
                 }
-                self.functions.get(&func_name).cloned().unwrap_or_else(|| "i32".into())
+                self.functions.get(&func_name).map(|(_, r)| r.clone()).unwrap_or_else(|| "i32".into())
             }
             Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } => self.infer_struct_type(operand),
             _ => "i32".into()
