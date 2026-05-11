@@ -150,7 +150,7 @@ void yprintln_str(const YStr* s) {
 }
 
 void yprint_int(int64_t v) {
-    printf("%lld", (long long)v);
+    printf("%lld\n", (long long)v);
     fflush(stdout);
 }
 
