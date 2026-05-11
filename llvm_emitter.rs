@@ -619,8 +619,18 @@ impl LlvmEmitter {
                             }
                         };
                         self.locals.insert(name.clone(), ir_ty.clone());
-                        if let Some(t) = ty {
-                            self.locals_ast_type.insert(name.clone(), ast_type_to_string(t));
+                        match ty {
+                            Some(t) => {
+                                self.locals_ast_type.insert(name.clone(), ast_type_to_string(t));
+                            }
+                            None => {
+                                if let Some(init_expr) = init {
+                                    let inferred_ast_ty = self.infer_ast_type(init_expr);
+                                    if inferred_ast_ty != "Unknown" {
+                                        self.locals_ast_type.insert(name.clone(), inferred_ast_ty);
+                                    }
+                                }
+                            }
                         }
                         // Track struct/enum-typed locals for GEP base type inference
                         if ir_ty.starts_with('%') {
