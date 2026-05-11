@@ -746,7 +746,24 @@ impl LlvmEmitter {
                         // For ZeroInit, the target pointer has already been memset. No further store needed.
                     } else {
                         let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
-                        self.emit_store(&coerced, &target_ptr, &dst_ty);
+                        if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
+                            let size_tmp_ptr = self.fresh_tmp();
+                            let size_tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
+                            writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
+
+                            let src_ptr = if coerced.starts_with('%') && self.structs.contains_key(dst_ty.trim_start_matches('%')) {
+                                let tmp_ptr = self.fresh_tmp();
+                                writeln!(&mut self.output, "  {} = alloca {}", tmp_ptr, dst_ty).unwrap();
+                                writeln!(&mut self.output, "  store {} {}, ptr {}", dst_ty, coerced, tmp_ptr).unwrap();
+                                tmp_ptr
+                            } else {
+                                coerced.clone()
+                            };
+                            writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_ptr, src_ptr, size_tmp).unwrap();
+                        } else {
+                            self.emit_store(&coerced, &target_ptr, &dst_ty);
+                        }
                     }
                 }
 
@@ -762,7 +779,24 @@ impl LlvmEmitter {
                     // ZeroInit handles memset directly into target_addr.
                 } else {
                     let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
-                    self.emit_store(&coerced, &target_addr, &dst_ty);
+                    if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
+                        let size_tmp_ptr = self.fresh_tmp();
+                        let size_tmp = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
+                        writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
+
+                        let src_ptr = if coerced.starts_with('%') && self.structs.contains_key(dst_ty.trim_start_matches('%')) {
+                            let tmp_ptr = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = alloca {}", tmp_ptr, dst_ty).unwrap();
+                            writeln!(&mut self.output, "  store {} {}, ptr {}", dst_ty, coerced, tmp_ptr).unwrap();
+                            tmp_ptr
+                        } else {
+                            coerced.clone()
+                        };
+                        writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_addr, src_ptr, size_tmp).unwrap();
+                    } else {
+                        self.emit_store(&coerced, &target_addr, &dst_ty);
+                    }
                 }
             }
             Stmt::Return(expr, _) => {
@@ -1064,36 +1098,20 @@ impl LlvmEmitter {
                 let mut l_ty = self.infer_type(left);
                 let r_ty = self.infer_type(right);
 
-                // Promote types only for scalar numeric mismatches.
+                // Promote types if there's a mismatch
                 if l_ty != r_ty {
-                    let is_float_ty = |ty: &str| ty == "float" || ty == "double" || ty == "half";
-                    let is_int_ty = |ty: &str| {
-                        ty.len() > 1 && ty.starts_with('i') && ty[1..].chars().all(|c| c.is_ascii_digit())
-                    };
-
-                    let l_is_float = is_float_ty(&l_ty);
-                    let r_is_float = is_float_ty(&r_ty);
-                    let l_is_int = is_int_ty(&l_ty);
-                    let r_is_int = is_int_ty(&r_ty);
-
-                    if !(l_is_float || l_is_int) || !(r_is_float || r_is_int) {
-                        panic!(
-                            "type mismatch in binary operation: cannot implicitly promote '{}' and '{}'",
-                            l_ty, r_ty
-                        );
-                    }
+                    let l_is_float = l_ty == "float" || l_ty == "double" || l_ty == "half";
+                    let r_is_float = r_ty == "float" || r_ty == "double" || r_ty == "half";
 
                     let common_ty = if l_is_float && r_is_float {
-                        // Both floats: pick the larger one, but normalize half to float
-                        // so later LLVM opcode selection still uses floating-point ops.
+                        // Both floats, pick the larger one
                         let l_bits = if l_ty == "double" { 64 } else if l_ty == "float" { 32 } else { 16 };
                         let r_bits = if r_ty == "double" { 64 } else if r_ty == "float" { 32 } else { 16 };
-                        let widest_ty = if l_bits >= r_bits { l_ty.clone() } else { r_ty.clone() };
-                        if widest_ty == "half" { "float".to_string() } else { widest_ty }
+                        if l_bits >= r_bits { l_ty.clone() } else { r_ty.clone() }
                     } else if l_is_float {
-                        if l_ty == "half" { "float".to_string() } else { l_ty.clone() }
+                        l_ty.clone()
                     } else if r_is_float {
-                        if r_ty == "half" { "float".to_string() } else { r_ty.clone() }
+                        r_ty.clone()
                     } else {
                         // Both ints, pick the larger one
                         let l_bits = Self::int_bits(&l_ty);
