@@ -1,6 +1,6 @@
 // ============================================================
 //  Y-Lang  —  Self-Hosted Parser (Recursive Descent)
-//  parser.yy
+//  parser.ysu
 //
 //  Translates a Vec<Token> stream into a flattened AST using
 //  Data-Oriented Arena Allocation. All recursive tree nodes
@@ -16,7 +16,7 @@ struct Span {
     col: usize
 }
 
-// Removed duplicate Token and TokenKind, they are loaded from lexer.yy
+// Removed duplicate Token and TokenKind, they are loaded from lexer.ysu
 
 // ── Operators ───────────────────────────────────────────────
 enum BinaryOp {

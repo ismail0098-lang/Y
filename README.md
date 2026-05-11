@@ -12,7 +12,7 @@ Y is a systems programming language and self-hosted compiler infrastructure. Ini
   - **Dynamic Hardware Requirements:** Expressive hardware constraints using `@require(condition)` to gate code execution based on probed hardware capabilities (SM version, core counts, specialized intrinsics).
 - **Sentient Backend:** Dynamically tunes instruction selection and thermal unrolling based on a real-time hardware profile (`.ysu_hw_profile`).
 - **Data-Oriented Design:** The parser and AST are built with performance and memory safety in mind using arena allocation.
-- **Self-Hosting Objective:** The ultimate goal of the project is to rewrite the Rust-based compiler modules into Y-Lang itself (`.yy` files) to close the compilation loop.
+- **Self-Hosting Objective:** The ultimate goal of the project is to rewrite the Rust-based compiler modules into Y-Lang itself (`.ysu` files) to close the compilation loop.
 
 ## Dynamic Hardware Requirements
 
@@ -32,7 +32,7 @@ kernel matmul_16x16(...) {
 - `ast.rs`: Abstract Syntax Tree definitions, handling everything from structs and enums to hardware-specific cache policies.
 - `type_checker.rs`: Semantic analysis, variable scoping, and type inference.
 - `llvm_emitter.rs`: The LLVM Intermediate Representation backend.
-- `*.yy`: Y-Lang source files (e.g., testing self-hosted parser logic).
+- `*.ysu`: Y-Lang source files (e.g., testing self-hosted parser logic).
 
 ## Building
 

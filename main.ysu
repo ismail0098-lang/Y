@@ -9,7 +9,7 @@ fn main() {
     println("--- Y-Lang Self-Hosted Compiler ---");
 
     // 1. Read source
-    let source_path: String = String::new("test.yy");
+    let source_path: String = String::new("test.ysu");
     let source: String = File::read_to_string(&source_path);
 
     // 2. Lexer
@@ -46,6 +46,6 @@ fn main() {
     let ll_path: String = String::new("test.ll");
     File::write(&ll_path, &ll_emitter.buffer);
     
-    println("Successfully compiled test.yy -> test.c and test.ll");
+    println("Successfully compiled test.ysu -> test.c and test.ll");
     return;
 }

@@ -2,7 +2,7 @@
 //  Y-Lang  —  Compiler CLI Driver
 //  main.rs
 //
-//  The main entry point for the compiler. Consumes a .y 
+//  The main entry point for the compiler. Consumes a .ysu 
 //  source file, pushes it through the Lexical, Syntax,
 //  and Semantic validation phases, and finally emits PTX.
 // ============================================================

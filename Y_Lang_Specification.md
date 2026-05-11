@@ -40,7 +40,7 @@ Y-Lang provides first-class support for NVIDIA Tensor Cores (MMA Atoms) through 
 
 The ultimate goal of the Y-Lang project is the **Y-Verifier**, which re-imagines logical unification as a **Massively Parallel Reduction Problem**:
 
-1.  **Stage 1: Self-Hosting**: Finalizing the Y-Lang compiler rewritten in Y-Lang (The `parser.yy` and `llvm_emitter.yy` modules).
+1.  **Stage 1: Self-Hosting**: Finalizing the Y-Lang compiler rewritten in Y-Lang (The `parser.ysu` and `llvm_emitter.ysu` modules).
 2.  **Stage 2: The #Math Gold Standard**: Implementing a comprehensive math library, verifying it in Coq, and then using the Y-Verifier to match the results at 100x the speed.
 3.  **Stage 3: Abstract Pruning**: Implementing "Smart Verification" that focuses on the high-sensitivity "middle-zone" of neural network weights, making the verification of AI models computationally tractable.
 

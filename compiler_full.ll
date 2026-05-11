@@ -32,8 +32,6 @@ declare i32 @yvec_free(...)
 declare i8 @yvec_get_char(...)
 declare i1 @ystr_eq(...)
 declare i32 @ystr_free(...)
-declare i32 @yprint_int(...)
-declare i32 @ylexer_log(...)
 declare i32 @TokenKind_Ident(...)
 declare i32 @TokenKind_FloatLit(...)
 declare i32 @TokenKind_IntLit(...)
@@ -476,7 +474,7 @@ declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)
 @.str.390 = private unnamed_addr constant [3 x i8] c")\0A\00"
 @.str.391 = private unnamed_addr constant [2 x i8] c"0\00"
 @.str.392 = private unnamed_addr constant [36 x i8] c"--- Y-Lang Self-Hosted Compiler ---\00"
-@.str.393 = private unnamed_addr constant [16 x i8] c"test_program.yy\00"
+@.str.393 = private unnamed_addr constant [12 x i8] c"compiler.yy\00"
 @.str.394 = private unnamed_addr constant [26 x i8] c"[*] Reading source file: \00"
 @.str.395 = private unnamed_addr constant [16 x i8] c"[1/3] Lexing...\00"
 @.str.396 = private unnamed_addr constant [20 x i8] c"      -> Extracted \00"
@@ -698,54 +696,50 @@ entry:
   %len = alloca i64
   %i = alloca i64
   %ch = alloca i8
-  %t1 = call i32 @yprint_int(i32 999)
-  %t2 = call ptr @Vec_new(i32 1)
-  store ptr %t2, ptr %input_vec
-  %t3 = load ptr, ptr %source
-  %t4 = call i64 @String_len(ptr %t3)
-  store i64 %t4, ptr %len
-  %t5 = sext i32 0 to i64
-  store i64 %t5, ptr %i
+  %t1 = call ptr @Vec_new(i32 1)
+  store ptr %t1, ptr %input_vec
+  %t2 = load ptr, ptr %source
+  %t3 = call i64 @String_len(ptr %t2)
+  store i64 %t3, ptr %len
+  %t4 = sext i32 0 to i64
+  store i64 %t4, ptr %i
   br label %while.cond.1
 while.cond.1:
-  %t6 = load i64, ptr %i
-  %t7 = load i64, ptr %len
-  %t8 = icmp slt i64 %t6, %t7
-  br i1 %t8, label %while.body.2, label %while.end.3
+  %t5 = load i64, ptr %i
+  %t6 = load i64, ptr %len
+  %t7 = icmp slt i64 %t5, %t6
+  br i1 %t7, label %while.body.2, label %while.end.3
 while.body.2:
-  %t9 = load ptr, ptr %source
-  %t10 = load i64, ptr %i
-  %t11 = call i8 @String_char_at(ptr %t9, i64 %t10)
-  store i8 %t11, ptr %ch
-  %t12 = call i32 @yprint_int(i32 666)
-  %t13 = load ptr, ptr %input_vec
-  %t14 = load i8, ptr %ch
-  call void @Vec_push(ptr %t13, ptr %ch)
-  %t17 = call i32 @yprint_int(i32 555)
-  %t18 = load i64, ptr %i
-  %t19 = add i64 %t18, 1
-  store i64 %t19, ptr %i
+  %t8 = load ptr, ptr %source
+  %t9 = load i64, ptr %i
+  %t10 = call i8 @String_char_at(ptr %t8, i64 %t9)
+  store i8 %t10, ptr %ch
+  %t11 = load ptr, ptr %input_vec
+  %t12 = load i8, ptr %ch
+  call void @Vec_push(ptr %t11, ptr %ch)
+  %t15 = load i64, ptr %i
+  %t16 = add i64 %t15, 1
+  store i64 %t16, ptr %i
   br label %while.cond.1
 while.end.3:
-  %t20 = load ptr, ptr %input_vec
+  %t17 = load ptr, ptr %input_vec
   ; lvalue .input
-  %t21 = getelementptr %Lexer, ptr %lx, i32 0, i32 0
-  store ptr %t20, ptr %t21
+  %t18 = getelementptr %Lexer, ptr %lx, i32 0, i32 0
+  store ptr %t17, ptr %t18
   ; lvalue .pos
-  %t22 = getelementptr %Lexer, ptr %lx, i32 0, i32 1
-  %t23 = sext i32 0 to i64
-  store i64 %t23, ptr %t22
+  %t19 = getelementptr %Lexer, ptr %lx, i32 0, i32 1
+  %t20 = sext i32 0 to i64
+  store i64 %t20, ptr %t19
   ; lvalue .line
-  %t24 = getelementptr %Lexer, ptr %lx, i32 0, i32 2
-  %t25 = sext i32 1 to i64
-  store i64 %t25, ptr %t24
+  %t21 = getelementptr %Lexer, ptr %lx, i32 0, i32 2
+  %t22 = sext i32 1 to i64
+  store i64 %t22, ptr %t21
   ; lvalue .col
-  %t26 = getelementptr %Lexer, ptr %lx, i32 0, i32 3
-  %t27 = sext i32 1 to i64
-  store i64 %t27, ptr %t26
-  %t28 = call i32 @yprint_int(i32 777)
-  %t29 = load %Lexer, ptr %lx
-  ret %Lexer %t29
+  %t23 = getelementptr %Lexer, ptr %lx, i32 0, i32 3
+  %t24 = sext i32 1 to i64
+  store i64 %t24, ptr %t23
+  %t25 = load %Lexer, ptr %lx
+  ret %Lexer %t25
 }
 
 define i8 @Lexer_peek(ptr %lx.arg) #0 {
@@ -758,43 +752,31 @@ entry:
   ; lvalue .input
   %t2 = getelementptr %Lexer, ptr %t1, i32 0, i32 0
   %t3 = load ptr, ptr %t2
+  %t4 = call i64 @Vec_len(ptr %t3)
+  store i64 %t4, ptr %max_len
   %t5 = load ptr, ptr %lx
-  ; lvalue .input
-  %t6 = getelementptr %Lexer, ptr %t5, i32 0, i32 0
-  %t7 = call i64 @Vec_len(ptr %t6)
-  store i64 %t7, ptr %max_len
-  %t8 = load ptr, ptr %lx
   ; lvalue .pos
-  %t9 = getelementptr %Lexer, ptr %t8, i32 0, i32 1
-  %t10 = load i64, ptr %t9
-  %t11 = load i64, ptr %max_len
-  %t12 = icmp sge i64 %t10, %t11
-  br i1 %t12, label %then.4, label %merge.6
+  %t6 = getelementptr %Lexer, ptr %t5, i32 0, i32 1
+  %t7 = load i64, ptr %t6
+  %t8 = load i64, ptr %max_len
+  %t9 = icmp sge i64 %t7, %t8
+  br i1 %t9, label %then.4, label %merge.6
 then.4:
   ret i8 0
 merge.6:
+  %t10 = load ptr, ptr %lx
+  ; lvalue .input
+  %t11 = getelementptr %Lexer, ptr %t10, i32 0, i32 0
+  %t12 = load ptr, ptr %t11
   %t13 = load ptr, ptr %lx
-  ; lvalue .input
-  %t14 = getelementptr %Lexer, ptr %t13, i32 0, i32 0
-  %t15 = load ptr, ptr %t14
-  %t17 = load ptr, ptr %lx
-  ; lvalue .input
-  %t18 = getelementptr %Lexer, ptr %t17, i32 0, i32 0
-  %t19 = load ptr, ptr %lx
   ; lvalue .pos
-  %t20 = getelementptr %Lexer, ptr %t19, i32 0, i32 1
-  %t21 = load i64, ptr %t20
-  %t22 = call ptr @yvec_get(ptr %t18, i64 %t21)
-  %t23 = load i8, ptr %t22
-  store i8 %t23, ptr %ch
-  %t24 = load ptr, ptr %lx
-  ; lvalue .pos
-  %t25 = getelementptr %Lexer, ptr %t24, i32 0, i32 1
-  %t26 = load i64, ptr %t25
-  %t27 = load i8, ptr %ch
-  %t28 = call i32 @ylexer_log(i64 %t26, i8 %t27)
-  %t29 = load i8, ptr %ch
-  ret i8 %t29
+  %t14 = getelementptr %Lexer, ptr %t13, i32 0, i32 1
+  %t15 = load i64, ptr %t14
+  %t16 = call ptr @yvec_get(ptr %t12, i64 %t15)
+  %t17 = load i8, ptr %t16
+  store i8 %t17, ptr %ch
+  %t18 = load i8, ptr %ch
+  ret i8 %t18
 }
 
 define i8 @Lexer_peek2(ptr %lx.arg) #0 {
@@ -806,37 +788,31 @@ entry:
   ; lvalue .input
   %t2 = getelementptr %Lexer, ptr %t1, i32 0, i32 0
   %t3 = load ptr, ptr %t2
+  %t4 = call i64 @Vec_len(ptr %t3)
+  store i64 %t4, ptr %max_len
   %t5 = load ptr, ptr %lx
-  ; lvalue .input
-  %t6 = getelementptr %Lexer, ptr %t5, i32 0, i32 0
-  %t7 = call i64 @Vec_len(ptr %t6)
-  store i64 %t7, ptr %max_len
-  %t8 = load ptr, ptr %lx
   ; lvalue .pos
-  %t9 = getelementptr %Lexer, ptr %t8, i32 0, i32 1
-  %t10 = load i64, ptr %t9
-  %t11 = add i64 %t10, 1
-  %t12 = load i64, ptr %max_len
-  %t13 = icmp sge i64 %t11, %t12
-  br i1 %t13, label %then.7, label %merge.9
+  %t6 = getelementptr %Lexer, ptr %t5, i32 0, i32 1
+  %t7 = load i64, ptr %t6
+  %t8 = add i64 %t7, 1
+  %t9 = load i64, ptr %max_len
+  %t10 = icmp sge i64 %t8, %t9
+  br i1 %t10, label %then.7, label %merge.9
 then.7:
   ret i8 0
 merge.9:
+  %t11 = load ptr, ptr %lx
+  ; lvalue .input
+  %t12 = getelementptr %Lexer, ptr %t11, i32 0, i32 0
+  %t13 = load ptr, ptr %t12
   %t14 = load ptr, ptr %lx
-  ; lvalue .input
-  %t15 = getelementptr %Lexer, ptr %t14, i32 0, i32 0
-  %t16 = load ptr, ptr %t15
-  %t18 = load ptr, ptr %lx
-  ; lvalue .input
-  %t19 = getelementptr %Lexer, ptr %t18, i32 0, i32 0
-  %t20 = load ptr, ptr %lx
   ; lvalue .pos
-  %t21 = getelementptr %Lexer, ptr %t20, i32 0, i32 1
-  %t22 = load i64, ptr %t21
-  %t23 = add i64 %t22, 1
-  %t24 = call ptr @yvec_get(ptr %t19, i64 %t23)
-  %t25 = load i8, ptr %t24
-  ret i8 %t25
+  %t15 = getelementptr %Lexer, ptr %t14, i32 0, i32 1
+  %t16 = load i64, ptr %t15
+  %t17 = add i64 %t16, 1
+  %t18 = call ptr @yvec_get(ptr %t13, i64 %t17)
+  %t19 = load i8, ptr %t18
+  ret i8 %t19
 }
 
 define i8 @Lexer_advance(ptr %lx.arg) #0 {
@@ -858,41 +834,35 @@ merge.12:
   ; lvalue .pos
   %t7 = getelementptr %Lexer, ptr %t6, i32 0, i32 1
   %t8 = load i64, ptr %t7
-  %t9 = load i8, ptr %ch
-  %t10 = call i32 @ylexer_log(i64 %t8, i8 %t9)
-  %t11 = load ptr, ptr %lx
-  ; lvalue .pos
-  %t12 = getelementptr %Lexer, ptr %t11, i32 0, i32 1
-  %t13 = load i64, ptr %t12
-  %t14 = add i64 %t13, 1
-  store i64 %t14, ptr %t12
-  %t15 = load i8, ptr %ch
-  %t16 = icmp eq i8 %t15, 10
-  br i1 %t16, label %then.13, label %else.14
+  %t9 = add i64 %t8, 1
+  store i64 %t9, ptr %t7
+  %t10 = load i8, ptr %ch
+  %t11 = icmp eq i8 %t10, 10
+  br i1 %t11, label %then.13, label %else.14
 then.13:
-  %t17 = load ptr, ptr %lx
+  %t12 = load ptr, ptr %lx
   ; lvalue .line
-  %t18 = getelementptr %Lexer, ptr %t17, i32 0, i32 2
-  %t19 = load i64, ptr %t18
-  %t20 = add i64 %t19, 1
-  store i64 %t20, ptr %t18
-  %t21 = load ptr, ptr %lx
+  %t13 = getelementptr %Lexer, ptr %t12, i32 0, i32 2
+  %t14 = load i64, ptr %t13
+  %t15 = add i64 %t14, 1
+  store i64 %t15, ptr %t13
+  %t16 = load ptr, ptr %lx
   ; lvalue .col
-  %t22 = getelementptr %Lexer, ptr %t21, i32 0, i32 3
-  %t23 = sext i32 1 to i64
-  store i64 %t23, ptr %t22
+  %t17 = getelementptr %Lexer, ptr %t16, i32 0, i32 3
+  %t18 = sext i32 1 to i64
+  store i64 %t18, ptr %t17
   br label %merge.15
 else.14:
-  %t24 = load ptr, ptr %lx
+  %t19 = load ptr, ptr %lx
   ; lvalue .col
-  %t25 = getelementptr %Lexer, ptr %t24, i32 0, i32 3
-  %t26 = load i64, ptr %t25
-  %t27 = add i64 %t26, 1
-  store i64 %t27, ptr %t25
+  %t20 = getelementptr %Lexer, ptr %t19, i32 0, i32 3
+  %t21 = load i64, ptr %t20
+  %t22 = add i64 %t21, 1
+  store i64 %t22, ptr %t20
   br label %merge.15
 merge.15:
-  %t28 = load i8, ptr %ch
-  ret i8 %t28
+  %t23 = load i8, ptr %ch
+  ret i8 %t23
 }
 
 define i1 @Lexer_matches_next(ptr %lx.arg, i8 %expected.arg) #0 {
@@ -1084,49 +1054,100 @@ entry:
   store ptr %lx.arg, ptr %lx
   %parsing = alloca i1
   %ch = alloca i8
-  %t1 = call i32 @yprint_int(i32 888)
+  %in_comment = alloca i1
+  %c = alloca i8
   store i1 1, ptr %parsing
   br label %while.cond.76
 while.cond.76:
-  %t2 = load i1, ptr %parsing
-  br i1 %t2, label %while.body.77, label %while.end.78
+  %t1 = load i1, ptr %parsing
+  br i1 %t1, label %while.body.77, label %while.end.78
 while.body.77:
-  %t3 = load ptr, ptr %lx
-  %t4 = call i8 @Lexer_peek(ptr %t3)
-  store i8 %t4, ptr %ch
-  %t5 = load i8, ptr %ch
-  %t6 = icmp eq i8 %t5, 32
-  br i1 %t6, label %then.79, label %else.80
+  %t2 = load ptr, ptr %lx
+  %t3 = call i8 @Lexer_peek(ptr %t2)
+  store i8 %t3, ptr %ch
+  %t4 = load i8, ptr %ch
+  %t5 = icmp eq i8 %t4, 32
+  br i1 %t5, label %then.79, label %else.80
 then.79:
-  %t7 = load ptr, ptr %lx
-  %t8 = call i8 @Lexer_advance(ptr %t7)
+  %t6 = load ptr, ptr %lx
+  %t7 = call i8 @Lexer_advance(ptr %t6)
   br label %merge.81
 else.80:
-  %t9 = load i8, ptr %ch
-  %t10 = icmp eq i8 %t9, 10
-  br i1 %t10, label %then.82, label %else.83
+  %t8 = load i8, ptr %ch
+  %t9 = icmp eq i8 %t8, 10
+  br i1 %t9, label %then.82, label %else.83
 then.82:
-  %t11 = load ptr, ptr %lx
-  %t12 = call i8 @Lexer_advance(ptr %t11)
+  %t10 = load ptr, ptr %lx
+  %t11 = call i8 @Lexer_advance(ptr %t10)
   br label %merge.84
 else.83:
-  %t13 = load i8, ptr %ch
-  %t14 = icmp eq i8 %t13, 13
-  br i1 %t14, label %then.85, label %else.86
+  %t12 = load i8, ptr %ch
+  %t13 = icmp eq i8 %t12, 13
+  br i1 %t13, label %then.85, label %else.86
 then.85:
-  %t15 = load ptr, ptr %lx
-  %t16 = call i8 @Lexer_advance(ptr %t15)
+  %t14 = load ptr, ptr %lx
+  %t15 = call i8 @Lexer_advance(ptr %t14)
   br label %merge.87
 else.86:
-  %t17 = load i8, ptr %ch
-  %t18 = icmp eq i8 %t17, 9
-  br i1 %t18, label %then.88, label %else.89
+  %t16 = load i8, ptr %ch
+  %t17 = icmp eq i8 %t16, 9
+  br i1 %t17, label %then.88, label %else.89
 then.88:
-  %t19 = load ptr, ptr %lx
-  %t20 = call i8 @Lexer_advance(ptr %t19)
+  %t18 = load ptr, ptr %lx
+  %t19 = call i8 @Lexer_advance(ptr %t18)
   br label %merge.90
 else.89:
+  %t20 = load i8, ptr %ch
+  %t21 = icmp eq i8 %t20, 47
+  br i1 %t21, label %then.91, label %else.92
+then.91:
+  %t22 = load ptr, ptr %lx
+  %t23 = call i8 @Lexer_peek2(ptr %t22)
+  %t24 = icmp eq i8 %t23, 47
+  br i1 %t24, label %then.94, label %else.95
+then.94:
+  store i1 1, ptr %in_comment
+  br label %while.cond.97
+while.cond.97:
+  %t25 = load i1, ptr %in_comment
+  br i1 %t25, label %while.body.98, label %while.end.99
+while.body.98:
+  %t26 = load ptr, ptr %lx
+  %t27 = call i8 @Lexer_peek(ptr %t26)
+  store i8 %t27, ptr %c
+  %t28 = load i8, ptr %c
+  %t29 = icmp eq i8 %t28, 10
+  br i1 %t29, label %then.100, label %else.101
+then.100:
+  store i1 0, ptr %in_comment
+  br label %merge.102
+else.101:
+  %t30 = load i8, ptr %c
+  %t31 = icmp eq i8 %t30, 0
+  br i1 %t31, label %then.103, label %else.104
+then.103:
+  store i1 0, ptr %in_comment
   store i1 0, ptr %parsing
+  br label %merge.105
+else.104:
+  %t32 = load ptr, ptr %lx
+  %t33 = call i8 @Lexer_advance(ptr %t32)
+  br label %merge.105
+merge.105:
+  br label %merge.102
+merge.102:
+  br label %while.cond.97
+while.end.99:
+  br label %merge.96
+else.95:
+  store i1 0, ptr %parsing
+  br label %merge.96
+merge.96:
+  br label %merge.93
+else.92:
+  store i1 0, ptr %parsing
+  br label %merge.93
+merge.93:
   br label %merge.90
 merge.90:
   br label %merge.87
@@ -1165,76 +1186,76 @@ entry:
   %t6 = load i8, ptr %first_char
   call void @String_push(ptr %t5, i8 %t6)
   store i1 1, ptr %parsing
-  br label %while.cond.91
-while.cond.91:
+  br label %while.cond.106
+while.cond.106:
   %t8 = load i1, ptr %parsing
-  br i1 %t8, label %while.body.92, label %while.end.93
-while.body.92:
+  br i1 %t8, label %while.body.107, label %while.end.108
+while.body.107:
   %t9 = load ptr, ptr %lx
   %t10 = call i8 @Lexer_peek(ptr %t9)
   store i8 %t10, ptr %ch
   store i1 0, ptr %is_alpha
   %t11 = load i8, ptr %ch
   %t12 = icmp sge i8 %t11, 97
-  br i1 %t12, label %then.94, label %merge.96
-then.94:
+  br i1 %t12, label %then.109, label %merge.111
+then.109:
   %t13 = load i8, ptr %ch
   %t14 = icmp sle i8 %t13, 122
-  br i1 %t14, label %then.97, label %merge.99
-then.97:
-  store i1 1, ptr %is_alpha
-  br label %merge.99
-merge.99:
-  br label %merge.96
-merge.96:
-  %t15 = load i8, ptr %ch
-  %t16 = icmp sge i8 %t15, 65
-  br i1 %t16, label %then.100, label %merge.102
-then.100:
-  %t17 = load i8, ptr %ch
-  %t18 = icmp sle i8 %t17, 90
-  br i1 %t18, label %then.103, label %merge.105
-then.103:
-  store i1 1, ptr %is_alpha
-  br label %merge.105
-merge.105:
-  br label %merge.102
-merge.102:
-  %t19 = load i8, ptr %ch
-  %t20 = icmp sge i8 %t19, 48
-  br i1 %t20, label %then.106, label %merge.108
-then.106:
-  %t21 = load i8, ptr %ch
-  %t22 = icmp sle i8 %t21, 57
-  br i1 %t22, label %then.109, label %merge.111
-then.109:
-  store i1 1, ptr %is_alpha
-  br label %merge.111
-merge.111:
-  br label %merge.108
-merge.108:
-  %t23 = load i8, ptr %ch
-  %t24 = icmp eq i8 %t23, 95
-  br i1 %t24, label %then.112, label %merge.114
+  br i1 %t14, label %then.112, label %merge.114
 then.112:
   store i1 1, ptr %is_alpha
   br label %merge.114
 merge.114:
-  %t25 = load i1, ptr %is_alpha
-  br i1 %t25, label %then.115, label %else.116
+  br label %merge.111
+merge.111:
+  %t15 = load i8, ptr %ch
+  %t16 = icmp sge i8 %t15, 65
+  br i1 %t16, label %then.115, label %merge.117
 then.115:
+  %t17 = load i8, ptr %ch
+  %t18 = icmp sle i8 %t17, 90
+  br i1 %t18, label %then.118, label %merge.120
+then.118:
+  store i1 1, ptr %is_alpha
+  br label %merge.120
+merge.120:
+  br label %merge.117
+merge.117:
+  %t19 = load i8, ptr %ch
+  %t20 = icmp sge i8 %t19, 48
+  br i1 %t20, label %then.121, label %merge.123
+then.121:
+  %t21 = load i8, ptr %ch
+  %t22 = icmp sle i8 %t21, 57
+  br i1 %t22, label %then.124, label %merge.126
+then.124:
+  store i1 1, ptr %is_alpha
+  br label %merge.126
+merge.126:
+  br label %merge.123
+merge.123:
+  %t23 = load i8, ptr %ch
+  %t24 = icmp eq i8 %t23, 95
+  br i1 %t24, label %then.127, label %merge.129
+then.127:
+  store i1 1, ptr %is_alpha
+  br label %merge.129
+merge.129:
+  %t25 = load i1, ptr %is_alpha
+  br i1 %t25, label %then.130, label %else.131
+then.130:
   %t26 = load ptr, ptr %s
   %t27 = load i8, ptr %ch
   call void @String_push(ptr %t26, i8 %t27)
   %t29 = load ptr, ptr %lx
   %t30 = call i8 @Lexer_advance(ptr %t29)
-  br label %merge.117
-else.116:
+  br label %merge.132
+else.131:
   store i1 0, ptr %parsing
-  br label %merge.117
-merge.117:
-  br label %while.cond.91
-while.end.93:
+  br label %merge.132
+merge.132:
+  br label %while.cond.106
+while.end.108:
   %t31 = load ptr, ptr %s
   %t32 = call %TokenKind @Lexer_classify_ident(ptr %t31)
   store %TokenKind %t32, ptr %kind
@@ -1274,60 +1295,60 @@ entry:
   call void @String_push(ptr %t5, i8 %t6)
   store i1 0, ptr %is_float
   store i1 1, ptr %parsing
-  br label %while.cond.118
-while.cond.118:
+  br label %while.cond.133
+while.cond.133:
   %t8 = load i1, ptr %parsing
-  br i1 %t8, label %while.body.119, label %while.end.120
-while.body.119:
+  br i1 %t8, label %while.body.134, label %while.end.135
+while.body.134:
   %t9 = load ptr, ptr %lx
   %t10 = call i8 @Lexer_peek(ptr %t9)
   store i8 %t10, ptr %ch
   store i1 0, ptr %is_digit
   %t11 = load i8, ptr %ch
   %t12 = icmp sge i8 %t11, 48
-  br i1 %t12, label %then.121, label %merge.123
-then.121:
+  br i1 %t12, label %then.136, label %merge.138
+then.136:
   %t13 = load i8, ptr %ch
   %t14 = icmp sle i8 %t13, 57
-  br i1 %t14, label %then.124, label %merge.126
-then.124:
+  br i1 %t14, label %then.139, label %merge.141
+then.139:
   store i1 1, ptr %is_digit
-  br label %merge.126
-merge.126:
-  br label %merge.123
-merge.123:
+  br label %merge.141
+merge.141:
+  br label %merge.138
+merge.138:
   %t15 = load i1, ptr %is_digit
-  br i1 %t15, label %then.127, label %else.128
-then.127:
+  br i1 %t15, label %then.142, label %else.143
+then.142:
   %t16 = load ptr, ptr %s
   %t17 = load i8, ptr %ch
   call void @String_push(ptr %t16, i8 %t17)
   %t19 = load ptr, ptr %lx
   %t20 = call i8 @Lexer_advance(ptr %t19)
-  br label %merge.129
-else.128:
+  br label %merge.144
+else.143:
   %t21 = load i8, ptr %ch
   %t22 = icmp eq i8 %t21, 46
-  br i1 %t22, label %then.130, label %else.131
-then.130:
+  br i1 %t22, label %then.145, label %else.146
+then.145:
   store i1 1, ptr %is_float
   %t23 = load ptr, ptr %s
   %t24 = load i8, ptr %ch
   call void @String_push(ptr %t23, i8 %t24)
   %t26 = load ptr, ptr %lx
   %t27 = call i8 @Lexer_advance(ptr %t26)
-  br label %merge.132
-else.131:
+  br label %merge.147
+else.146:
   store i1 0, ptr %parsing
-  br label %merge.132
-merge.132:
-  br label %merge.129
-merge.129:
-  br label %while.cond.118
-while.end.120:
+  br label %merge.147
+merge.147:
+  br label %merge.144
+merge.144:
+  br label %while.cond.133
+while.end.135:
   %t28 = load i1, ptr %is_float
-  br i1 %t28, label %then.133, label %else.134
-then.133:
+  br i1 %t28, label %then.148, label %else.149
+then.148:
   %t29 = alloca %TokenKind
   %t30 = getelementptr %TokenKind, ptr %t29, i32 0, i32 0
   store i32 128, ptr %t30
@@ -1340,7 +1361,7 @@ then.133:
   %t37 = load ptr, ptr %s
   %t38 = call %Token @Token_new(%TokenKind %t32, i64 %t33, i64 %t34, ptr %t37)
   ret %Token %t38
-else.134:
+else.149:
   %t39 = alloca %TokenKind
   %t40 = getelementptr %TokenKind, ptr %t39, i32 0, i32 0
   store i32 127, ptr %t40
@@ -1353,7 +1374,7 @@ else.134:
   %t47 = load ptr, ptr %s
   %t48 = call %Token @Token_new(%TokenKind %t42, i64 %t43, i64 %t44, ptr %t47)
   ret %Token %t48
-merge.135:
+merge.150:
   ret %Token zeroinitializer
 }
 
@@ -1386,8 +1407,8 @@ entry:
   store i8 %t10, ptr %ch
   %t11 = load i8, ptr %ch
   %t12 = icmp eq i8 %t11, 0
-  br i1 %t12, label %then.136, label %merge.138
-then.136:
+  br i1 %t12, label %then.151, label %merge.153
+then.151:
   %t13 = call ptr @ystr_new(ptr @.str.21)
   store ptr %t13, ptr %empty
   %t14 = load i64, ptr %line
@@ -1396,11 +1417,11 @@ then.136:
   %t18 = load ptr, ptr %empty
   %t19 = call %Token @Token_new(%TokenKind { i32 132, [8 x i64] zeroinitializer }, i64 %t14, i64 %t15, ptr %t18)
   ret %Token %t19
-merge.138:
+merge.153:
   %t20 = load i8, ptr %ch
   %t21 = icmp eq i8 %t20, 123
-  br i1 %t21, label %then.139, label %merge.141
-then.139:
+  br i1 %t21, label %then.154, label %merge.156
+then.154:
   %t22 = call ptr @ystr_new(ptr @.str.22)
   store ptr %t22, ptr %x
   %t23 = load i64, ptr %line
@@ -1409,11 +1430,11 @@ then.139:
   %t27 = load ptr, ptr %x
   %t28 = call %Token @Token_new(%TokenKind { i32 119, [8 x i64] zeroinitializer }, i64 %t23, i64 %t24, ptr %t27)
   ret %Token %t28
-merge.141:
+merge.156:
   %t29 = load i8, ptr %ch
   %t30 = icmp eq i8 %t29, 125
-  br i1 %t30, label %then.142, label %merge.144
-then.142:
+  br i1 %t30, label %then.157, label %merge.159
+then.157:
   %t31 = call ptr @ystr_new(ptr @.str.23)
   store ptr %t31, ptr %x
   %t32 = load i64, ptr %line
@@ -1422,11 +1443,11 @@ then.142:
   %t36 = load ptr, ptr %x
   %t37 = call %Token @Token_new(%TokenKind { i32 120, [8 x i64] zeroinitializer }, i64 %t32, i64 %t33, ptr %t36)
   ret %Token %t37
-merge.144:
+merge.159:
   %t38 = load i8, ptr %ch
   %t39 = icmp eq i8 %t38, 40
-  br i1 %t39, label %then.145, label %merge.147
-then.145:
+  br i1 %t39, label %then.160, label %merge.162
+then.160:
   %t40 = call ptr @ystr_new(ptr @.str.24)
   store ptr %t40, ptr %x
   %t41 = load i64, ptr %line
@@ -1435,11 +1456,11 @@ then.145:
   %t45 = load ptr, ptr %x
   %t46 = call %Token @Token_new(%TokenKind { i32 121, [8 x i64] zeroinitializer }, i64 %t41, i64 %t42, ptr %t45)
   ret %Token %t46
-merge.147:
+merge.162:
   %t47 = load i8, ptr %ch
   %t48 = icmp eq i8 %t47, 41
-  br i1 %t48, label %then.148, label %merge.150
-then.148:
+  br i1 %t48, label %then.163, label %merge.165
+then.163:
   %t49 = call ptr @ystr_new(ptr @.str.25)
   store ptr %t49, ptr %x
   %t50 = load i64, ptr %line
@@ -1448,11 +1469,11 @@ then.148:
   %t54 = load ptr, ptr %x
   %t55 = call %Token @Token_new(%TokenKind { i32 122, [8 x i64] zeroinitializer }, i64 %t50, i64 %t51, ptr %t54)
   ret %Token %t55
-merge.150:
+merge.165:
   %t56 = load i8, ptr %ch
   %t57 = icmp eq i8 %t56, 59
-  br i1 %t57, label %then.151, label %merge.153
-then.151:
+  br i1 %t57, label %then.166, label %merge.168
+then.166:
   %t58 = call ptr @ystr_new(ptr @.str.26)
   store ptr %t58, ptr %x
   %t59 = load i64, ptr %line
@@ -1461,11 +1482,11 @@ then.151:
   %t63 = load ptr, ptr %x
   %t64 = call %Token @Token_new(%TokenKind { i32 125, [8 x i64] zeroinitializer }, i64 %t59, i64 %t60, ptr %t63)
   ret %Token %t64
-merge.153:
+merge.168:
   %t65 = load i8, ptr %ch
   %t66 = icmp eq i8 %t65, 58
-  br i1 %t66, label %then.154, label %merge.156
-then.154:
+  br i1 %t66, label %then.169, label %merge.171
+then.169:
   %t67 = call ptr @ystr_new(ptr @.str.27)
   store ptr %t67, ptr %x
   %t68 = load i64, ptr %line
@@ -1474,11 +1495,11 @@ then.154:
   %t72 = load ptr, ptr %x
   %t73 = call %Token @Token_new(%TokenKind { i32 92, [8 x i64] zeroinitializer }, i64 %t68, i64 %t69, ptr %t72)
   ret %Token %t73
-merge.156:
+merge.171:
   %t74 = load i8, ptr %ch
   %t75 = icmp eq i8 %t74, 44
-  br i1 %t75, label %then.157, label %merge.159
-then.157:
+  br i1 %t75, label %then.172, label %merge.174
+then.172:
   %t76 = call ptr @ystr_new(ptr @.str.28)
   store ptr %t76, ptr %x
   %t77 = load i64, ptr %line
@@ -1487,11 +1508,11 @@ then.157:
   %t81 = load ptr, ptr %x
   %t82 = call %Token @Token_new(%TokenKind { i32 126, [8 x i64] zeroinitializer }, i64 %t77, i64 %t78, ptr %t81)
   ret %Token %t82
-merge.159:
+merge.174:
   %t83 = load i8, ptr %ch
   %t84 = icmp eq i8 %t83, 61
-  br i1 %t84, label %then.160, label %merge.162
-then.160:
+  br i1 %t84, label %then.175, label %merge.177
+then.175:
   %t85 = call ptr @ystr_new(ptr @.str.29)
   store ptr %t85, ptr %x
   %t86 = load i64, ptr %line
@@ -1500,11 +1521,11 @@ then.160:
   %t90 = load ptr, ptr %x
   %t91 = call %Token @Token_new(%TokenKind { i32 93, [8 x i64] zeroinitializer }, i64 %t86, i64 %t87, ptr %t90)
   ret %Token %t91
-merge.162:
+merge.177:
   %t92 = load i8, ptr %ch
   %t93 = icmp eq i8 %t92, 43
-  br i1 %t93, label %then.163, label %merge.165
-then.163:
+  br i1 %t93, label %then.178, label %merge.180
+then.178:
   %t94 = call ptr @ystr_new(ptr @.str.30)
   store ptr %t94, ptr %x
   %t95 = load i64, ptr %line
@@ -1513,11 +1534,11 @@ then.163:
   %t99 = load ptr, ptr %x
   %t100 = call %Token @Token_new(%TokenKind { i32 101, [8 x i64] zeroinitializer }, i64 %t95, i64 %t96, ptr %t99)
   ret %Token %t100
-merge.165:
+merge.180:
   %t101 = load i8, ptr %ch
   %t102 = icmp eq i8 %t101, 42
-  br i1 %t102, label %then.166, label %merge.168
-then.166:
+  br i1 %t102, label %then.181, label %merge.183
+then.181:
   %t103 = call ptr @ystr_new(ptr @.str.31)
   store ptr %t103, ptr %x
   %t104 = load i64, ptr %line
@@ -1526,11 +1547,11 @@ then.166:
   %t108 = load ptr, ptr %x
   %t109 = call %Token @Token_new(%TokenKind { i32 103, [8 x i64] zeroinitializer }, i64 %t104, i64 %t105, ptr %t108)
   ret %Token %t109
-merge.168:
+merge.183:
   %t110 = load i8, ptr %ch
   %t111 = icmp eq i8 %t110, 38
-  br i1 %t111, label %then.169, label %merge.171
-then.169:
+  br i1 %t111, label %then.184, label %merge.186
+then.184:
   %t112 = call ptr @ystr_new(ptr @.str.32)
   store ptr %t112, ptr %x
   %t113 = load i64, ptr %line
@@ -1539,11 +1560,11 @@ then.169:
   %t117 = load ptr, ptr %x
   %t118 = call %Token @Token_new(%TokenKind { i32 106, [8 x i64] zeroinitializer }, i64 %t113, i64 %t114, ptr %t117)
   ret %Token %t118
-merge.171:
+merge.186:
   %t119 = load i8, ptr %ch
   %t120 = icmp eq i8 %t119, 60
-  br i1 %t120, label %then.172, label %merge.174
-then.172:
+  br i1 %t120, label %then.187, label %merge.189
+then.187:
   %t121 = call ptr @ystr_new(ptr @.str.33)
   store ptr %t121, ptr %x
   %t122 = load i64, ptr %line
@@ -1552,11 +1573,11 @@ then.172:
   %t126 = load ptr, ptr %x
   %t127 = call %Token @Token_new(%TokenKind { i32 97, [8 x i64] zeroinitializer }, i64 %t122, i64 %t123, ptr %t126)
   ret %Token %t127
-merge.174:
+merge.189:
   %t128 = load i8, ptr %ch
   %t129 = icmp eq i8 %t128, 62
-  br i1 %t129, label %then.175, label %merge.177
-then.175:
+  br i1 %t129, label %then.190, label %merge.192
+then.190:
   %t130 = call ptr @ystr_new(ptr @.str.34)
   store ptr %t130, ptr %x
   %t131 = load i64, ptr %line
@@ -1565,73 +1586,73 @@ then.175:
   %t135 = load ptr, ptr %x
   %t136 = call %Token @Token_new(%TokenKind { i32 98, [8 x i64] zeroinitializer }, i64 %t131, i64 %t132, ptr %t135)
   ret %Token %t136
-merge.177:
+merge.192:
   store i1 0, ptr %is_alpha
   %t137 = load i8, ptr %ch
   %t138 = icmp sge i8 %t137, 97
-  br i1 %t138, label %then.178, label %merge.180
-then.178:
+  br i1 %t138, label %then.193, label %merge.195
+then.193:
   %t139 = load i8, ptr %ch
   %t140 = icmp sle i8 %t139, 122
-  br i1 %t140, label %then.181, label %merge.183
-then.181:
+  br i1 %t140, label %then.196, label %merge.198
+then.196:
   store i1 1, ptr %is_alpha
-  br label %merge.183
-merge.183:
-  br label %merge.180
-merge.180:
+  br label %merge.198
+merge.198:
+  br label %merge.195
+merge.195:
   %t141 = load i8, ptr %ch
   %t142 = icmp sge i8 %t141, 65
-  br i1 %t142, label %then.184, label %merge.186
-then.184:
+  br i1 %t142, label %then.199, label %merge.201
+then.199:
   %t143 = load i8, ptr %ch
   %t144 = icmp sle i8 %t143, 90
-  br i1 %t144, label %then.187, label %merge.189
-then.187:
+  br i1 %t144, label %then.202, label %merge.204
+then.202:
   store i1 1, ptr %is_alpha
-  br label %merge.189
-merge.189:
-  br label %merge.186
-merge.186:
+  br label %merge.204
+merge.204:
+  br label %merge.201
+merge.201:
   %t145 = load i8, ptr %ch
   %t146 = icmp eq i8 %t145, 95
-  br i1 %t146, label %then.190, label %merge.192
-then.190:
+  br i1 %t146, label %then.205, label %merge.207
+then.205:
   store i1 1, ptr %is_alpha
-  br label %merge.192
-merge.192:
+  br label %merge.207
+merge.207:
   %t147 = load i1, ptr %is_alpha
-  br i1 %t147, label %then.193, label %merge.195
-then.193:
+  br i1 %t147, label %then.208, label %merge.210
+then.208:
   %t148 = load ptr, ptr %lx
   %t149 = load i64, ptr %start_col
   %t150 = load i8, ptr %ch
   %t151 = call %Token @Lexer_scan_ident_or_keyword(ptr %t148, i64 %t149, i8 %t150)
   ret %Token %t151
-merge.195:
+merge.210:
   store i1 0, ptr %is_digit
   %t152 = load i8, ptr %ch
   %t153 = icmp sge i8 %t152, 48
-  br i1 %t153, label %then.196, label %merge.198
-then.196:
+  br i1 %t153, label %then.211, label %merge.213
+then.211:
   %t154 = load i8, ptr %ch
   %t155 = icmp sle i8 %t154, 57
-  br i1 %t155, label %then.199, label %merge.201
-then.199:
+  br i1 %t155, label %then.214, label %merge.216
+then.214:
   store i1 1, ptr %is_digit
-  br label %merge.201
-merge.201:
-  br label %merge.198
-merge.198:
+  br label %merge.216
+merge.216:
+  br label %merge.213
+merge.213:
   %t156 = load i1, ptr %is_digit
-  br i1 %t156, label %then.202, label %merge.204
-then.202:
+  br i1 %t156, label %then.217, label %merge.219
+then.217:
   %t157 = load ptr, ptr %lx
   %t158 = load i64, ptr %start_col
   %t159 = load i8, ptr %ch
   %t160 = call %Token @Lexer_scan_number(ptr %t157, i64 %t158, i8 %t159)
   ret %Token %t160
-merge.204:
+merge.219:
   %t161 = call ptr @ystr_new(ptr @.str.35)
   store ptr %t161, ptr %other
   %t162 = load i8, ptr %ch
@@ -1662,34 +1683,33 @@ entry:
   %t1 = call ptr @Vec_new(i32 96)
   store ptr %t1, ptr %tokens
   store i1 1, ptr %parsing
-  br label %while.cond.205
-while.cond.205:
+  br label %while.cond.220
+while.cond.220:
   %t2 = load i1, ptr %parsing
-  br i1 %t2, label %while.body.206, label %while.end.207
-while.body.206:
+  br i1 %t2, label %while.body.221, label %while.end.222
+while.body.221:
   %t3 = load ptr, ptr %lx
   %t4 = call %Token @Lexer_next_token(ptr %t3)
   store %Token %t4, ptr %tok
   ; lvalue .lexeme
   %t5 = getelementptr %Token, ptr %tok, i32 0, i32 3
   %t6 = load ptr, ptr %t5
-  ; lvalue .lexeme
-  %t8 = getelementptr %Token, ptr %tok, i32 0, i32 3
-  %t9 = call i64 @String_len(ptr %t8)
-  store i64 %t9, ptr %len
-  %t10 = load i64, ptr %len
-  %t11 = icmp eq i64 %t10, 0
-  br i1 %t11, label %then.208, label %else.209
-then.208:
+  %t7 = call i64 @String_len(ptr %t6)
+  store i64 %t7, ptr %len
+  %t8 = load i64, ptr %len
+  %t9 = icmp eq i64 %t8, 0
+  br i1 %t9, label %then.223, label %else.224
+then.223:
   store i1 0, ptr %parsing
-  br label %merge.210
-else.209:
-  %t12 = load ptr, ptr %tokens
-  call void @Vec_push(ptr %t12, ptr %tok)
-  br label %merge.210
-merge.210:
-  br label %while.cond.205
-while.end.207:
+  br label %merge.225
+else.224:
+  %t10 = load ptr, ptr %tokens
+  %t11 = load %Token, ptr %tok
+  call void @Vec_push(ptr %t10, ptr %tok)
+  br label %merge.225
+merge.225:
+  br label %while.cond.220
+while.end.222:
   %t14 = load ptr, ptr %tokens
   ret ptr %t14
 }
@@ -1879,8 +1899,8 @@ entry:
   %t5 = getelementptr %Parser, ptr %t4, i32 0, i32 2
   %t6 = load i64, ptr %t5
   %t7 = icmp slt i64 %t3, %t6
-  br i1 %t7, label %then.211, label %merge.213
-then.211:
+  br i1 %t7, label %then.226, label %merge.228
+then.226:
   %t8 = load ptr, ptr %p
   ; lvalue .tokens
   %t9 = getelementptr %Parser, ptr %t8, i32 0, i32 0
@@ -1895,7 +1915,7 @@ then.211:
   %t17 = call ptr @yvec_get(ptr %t13, i64 %t16)
   %t18 = load %Token, ptr %t17
   ret %Token %t18
-merge.213:
+merge.228:
   ; lvalue .kind
   %t19 = getelementptr %Token, ptr %eof, i32 0, i32 0
   store %TokenKind { i32 132, [8 x i64] zeroinitializer }, ptr %t19
@@ -1933,8 +1953,8 @@ entry:
   %t7 = getelementptr %Parser, ptr %t6, i32 0, i32 2
   %t8 = load i64, ptr %t7
   %t9 = icmp slt i64 %t5, %t8
-  br i1 %t9, label %then.214, label %merge.216
-then.214:
+  br i1 %t9, label %then.229, label %merge.231
+then.229:
   %t10 = load ptr, ptr %p
   ; lvalue .tokens
   %t11 = getelementptr %Parser, ptr %t10, i32 0, i32 0
@@ -1951,7 +1971,7 @@ then.214:
   %t21 = call ptr @yvec_get(ptr %t15, i64 %t20)
   %t22 = load %Token, ptr %t21
   ret %Token %t22
-merge.216:
+merge.231:
   ; lvalue .kind
   %t23 = getelementptr %Token, ptr %eof, i32 0, i32 0
   store %TokenKind { i32 132, [8 x i64] zeroinitializer }, ptr %t23
@@ -1988,16 +2008,16 @@ entry:
   %t7 = getelementptr %Parser, ptr %t6, i32 0, i32 2
   %t8 = load i64, ptr %t7
   %t9 = icmp slt i64 %t5, %t8
-  br i1 %t9, label %then.217, label %merge.219
-then.217:
+  br i1 %t9, label %then.232, label %merge.234
+then.232:
   %t10 = load ptr, ptr %p
   ; lvalue .pos
   %t11 = getelementptr %Parser, ptr %t10, i32 0, i32 1
   %t12 = load i64, ptr %t11
   %t13 = add i64 %t12, 1
   store i64 %t13, ptr %t11
-  br label %merge.219
-merge.219:
+  br label %merge.234
+merge.234:
   %t14 = load %Token, ptr %tok
   ret %Token %t14
 }
@@ -2015,10 +2035,10 @@ entry:
   %t5 = getelementptr %Parser, ptr %t4, i32 0, i32 2
   %t6 = load i64, ptr %t5
   %t7 = icmp sge i64 %t3, %t6
-  br i1 %t7, label %then.220, label %merge.222
-then.220:
+  br i1 %t7, label %then.235, label %merge.237
+then.235:
   ret i1 1
-merge.222:
+merge.237:
   ret i1 0
 }
 
@@ -2046,55 +2066,55 @@ entry:
   store i64 %t10, ptr %len
   %t11 = load i64, ptr %len
   %t12 = icmp sgt i64 %t11, 0
-  br i1 %t12, label %then.223, label %merge.225
-then.223:
+  br i1 %t12, label %then.238, label %merge.240
+then.238:
   %t13 = load ptr, ptr %lex
   %t15 = call i8 @String_char_at(ptr %lex, i32 0)
   store i8 %t15, ptr %ch
   store i1 0, ptr %is_ident
   %t16 = load i8, ptr %ch
   %t17 = icmp sge i8 %t16, 97
-  br i1 %t17, label %then.226, label %merge.228
-then.226:
+  br i1 %t17, label %then.241, label %merge.243
+then.241:
   %t18 = load i8, ptr %ch
   %t19 = icmp sle i8 %t18, 122
-  br i1 %t19, label %then.229, label %merge.231
-then.229:
+  br i1 %t19, label %then.244, label %merge.246
+then.244:
   store i1 1, ptr %is_ident
-  br label %merge.231
-merge.231:
-  br label %merge.228
-merge.228:
+  br label %merge.246
+merge.246:
+  br label %merge.243
+merge.243:
   %t20 = load i8, ptr %ch
   %t21 = icmp sge i8 %t20, 65
-  br i1 %t21, label %then.232, label %merge.234
-then.232:
+  br i1 %t21, label %then.247, label %merge.249
+then.247:
   %t22 = load i8, ptr %ch
   %t23 = icmp sle i8 %t22, 90
-  br i1 %t23, label %then.235, label %merge.237
-then.235:
+  br i1 %t23, label %then.250, label %merge.252
+then.250:
   store i1 1, ptr %is_ident
-  br label %merge.237
-merge.237:
-  br label %merge.234
-merge.234:
+  br label %merge.252
+merge.252:
+  br label %merge.249
+merge.249:
   %t24 = load i8, ptr %ch
   %t25 = icmp eq i8 %t24, 95
-  br i1 %t25, label %then.238, label %merge.240
-then.238:
+  br i1 %t25, label %then.253, label %merge.255
+then.253:
   store i1 1, ptr %is_ident
-  br label %merge.240
-merge.240:
+  br label %merge.255
+merge.255:
   %t26 = load i1, ptr %is_ident
-  br i1 %t26, label %then.241, label %merge.243
-then.241:
+  br i1 %t26, label %then.256, label %merge.258
+then.256:
   %t27 = load ptr, ptr %p
   %t28 = call %Token @Parser_advance(ptr %t27)
   %t29 = load ptr, ptr %lex
   ret ptr %t29
-merge.243:
-  br label %merge.225
-merge.225:
+merge.258:
+  br label %merge.240
+merge.240:
   %t30 = call ptr @ystr_new(ptr @.str.38)
   ret ptr %t30
 }
@@ -2117,10 +2137,10 @@ entry:
   %t6 = call i1 @String_eq_cstr(ptr %t4, ptr %t5)
   store i1 %t6, ptr %matches
   %t7 = load i1, ptr %matches
-  br i1 %t7, label %then.244, label %merge.246
-then.244:
+  br i1 %t7, label %then.259, label %merge.261
+then.259:
   ret void
-merge.246:
+merge.261:
   %t8 = call ptr @ystr_new(ptr @.str.39)
   call void @print(ptr %t8)
   %t10 = load ptr, ptr %expected
@@ -2203,28 +2223,28 @@ entry:
   store i64 %t14, ptr %len
   %t15 = load i64, ptr %len
   %t16 = icmp sgt i64 %t15, 0
-  br i1 %t16, label %then.247, label %merge.249
-then.247:
+  br i1 %t16, label %then.262, label %merge.264
+then.262:
   %t17 = load ptr, ptr %lex
   %t19 = call i8 @String_char_at(ptr %lex, i32 0)
   store i8 %t19, ptr %ch
   store i1 0, ptr %is_digit
   %t20 = load i8, ptr %ch
   %t21 = icmp sge i8 %t20, 48
-  br i1 %t21, label %then.250, label %merge.252
-then.250:
+  br i1 %t21, label %then.265, label %merge.267
+then.265:
   %t22 = load i8, ptr %ch
   %t23 = icmp sle i8 %t22, 57
-  br i1 %t23, label %then.253, label %merge.255
-then.253:
+  br i1 %t23, label %then.268, label %merge.270
+then.268:
   store i1 1, ptr %is_digit
-  br label %merge.255
-merge.255:
-  br label %merge.252
-merge.252:
+  br label %merge.270
+merge.270:
+  br label %merge.267
+merge.267:
   %t24 = load i1, ptr %is_digit
-  br i1 %t24, label %then.256, label %merge.258
-then.256:
+  br i1 %t24, label %then.271, label %merge.273
+then.271:
   %t25 = load ptr, ptr %p
   %t26 = call %Token @Parser_advance(ptr %t25)
   %t27 = alloca %Expr
@@ -2247,11 +2267,11 @@ then.256:
   store i64 %t38, ptr %idx
   %t39 = load i64, ptr %idx
   ret i64 %t39
-merge.258:
+merge.273:
   %t40 = load i8, ptr %ch
   %t41 = icmp eq i8 %t40, 34
-  br i1 %t41, label %then.259, label %merge.261
-then.259:
+  br i1 %t41, label %then.274, label %merge.276
+then.274:
   %t42 = load ptr, ptr %p
   %t43 = call %Token @Parser_advance(ptr %t42)
   %t44 = load ptr, ptr %lex
@@ -2278,12 +2298,12 @@ then.259:
   store i64 %t61, ptr %idx
   %t62 = load i64, ptr %idx
   ret i64 %t62
-merge.261:
+merge.276:
   %t63 = load ptr, ptr %lex
   %t64 = call ptr @ystr_new(ptr @.str.43)
   %t65 = call i1 @String_eq_cstr(ptr %t63, ptr %t64)
-  br i1 %t65, label %then.262, label %merge.264
-then.262:
+  br i1 %t65, label %then.277, label %merge.279
+then.277:
   %t66 = load ptr, ptr %p
   %t67 = call %Token @Parser_advance(ptr %t66)
   %t68 = alloca %Expr
@@ -2306,12 +2326,12 @@ then.262:
   store i64 %t79, ptr %idx
   %t80 = load i64, ptr %idx
   ret i64 %t80
-merge.264:
+merge.279:
   %t81 = load ptr, ptr %lex
   %t82 = call ptr @ystr_new(ptr @.str.44)
   %t83 = call i1 @String_eq_cstr(ptr %t81, ptr %t82)
-  br i1 %t83, label %then.265, label %merge.267
-then.265:
+  br i1 %t83, label %then.280, label %merge.282
+then.280:
   %t84 = load ptr, ptr %p
   %t85 = call %Token @Parser_advance(ptr %t84)
   %t86 = alloca %Expr
@@ -2334,44 +2354,44 @@ then.265:
   store i64 %t97, ptr %idx
   %t98 = load i64, ptr %idx
   ret i64 %t98
-merge.267:
+merge.282:
   store i1 0, ptr %is_ident
   %t99 = load i8, ptr %ch
   %t100 = icmp sge i8 %t99, 97
-  br i1 %t100, label %then.268, label %merge.270
-then.268:
+  br i1 %t100, label %then.283, label %merge.285
+then.283:
   %t101 = load i8, ptr %ch
   %t102 = icmp sle i8 %t101, 122
-  br i1 %t102, label %then.271, label %merge.273
-then.271:
+  br i1 %t102, label %then.286, label %merge.288
+then.286:
   store i1 1, ptr %is_ident
-  br label %merge.273
-merge.273:
-  br label %merge.270
-merge.270:
+  br label %merge.288
+merge.288:
+  br label %merge.285
+merge.285:
   %t103 = load i8, ptr %ch
   %t104 = icmp sge i8 %t103, 65
-  br i1 %t104, label %then.274, label %merge.276
-then.274:
+  br i1 %t104, label %then.289, label %merge.291
+then.289:
   %t105 = load i8, ptr %ch
   %t106 = icmp sle i8 %t105, 90
-  br i1 %t106, label %then.277, label %merge.279
-then.277:
+  br i1 %t106, label %then.292, label %merge.294
+then.292:
   store i1 1, ptr %is_ident
-  br label %merge.279
-merge.279:
-  br label %merge.276
-merge.276:
+  br label %merge.294
+merge.294:
+  br label %merge.291
+merge.291:
   %t107 = load i8, ptr %ch
   %t108 = icmp eq i8 %t107, 95
-  br i1 %t108, label %then.280, label %merge.282
-then.280:
+  br i1 %t108, label %then.295, label %merge.297
+then.295:
   store i1 1, ptr %is_ident
-  br label %merge.282
-merge.282:
+  br label %merge.297
+merge.297:
   %t109 = load i1, ptr %is_ident
-  br i1 %t109, label %then.283, label %merge.285
-then.283:
+  br i1 %t109, label %then.298, label %merge.300
+then.298:
   %t110 = load ptr, ptr %p
   %t111 = call %Token @Parser_advance(ptr %t110)
   %t112 = load ptr, ptr %p
@@ -2382,8 +2402,8 @@ then.283:
   %t115 = load ptr, ptr %t114
   %t116 = call ptr @ystr_new(ptr @.str.45)
   %t117 = call i1 @String_eq_cstr(ptr %t115, ptr %t116)
-  br i1 %t117, label %then.286, label %merge.288
-then.286:
+  br i1 %t117, label %then.301, label %merge.303
+then.301:
   %t118 = load ptr, ptr %p
   %t119 = call %Token @Parser_advance(ptr %t118)
   %t120 = load ptr, ptr %p
@@ -2421,7 +2441,7 @@ then.286:
   store i64 %t145, ptr %idx
   %t146 = load i64, ptr %idx
   ret i64 %t146
-merge.288:
+merge.303:
   %t147 = load ptr, ptr %p
   %t148 = call %Token @Parser_peek_at(ptr %t147, i32 0)
   store %Token %t148, ptr %check1
@@ -2430,8 +2450,8 @@ merge.288:
   %t150 = load ptr, ptr %t149
   %t151 = call ptr @ystr_new(ptr @.str.46)
   %t152 = call i1 @String_eq_cstr(ptr %t150, ptr %t151)
-  br i1 %t152, label %then.289, label %merge.291
-then.289:
+  br i1 %t152, label %then.304, label %merge.306
+then.304:
   %t153 = load ptr, ptr %p
   %t154 = call %Token @Parser_peek_at(ptr %t153, i32 1)
   store %Token %t154, ptr %check2
@@ -2444,26 +2464,26 @@ then.289:
   %t158 = load ptr, ptr %t157
   %t159 = call ptr @ystr_new(ptr @.str.47)
   %t160 = call i1 @String_eq_cstr(ptr %t158, ptr %t159)
-  br i1 %t160, label %then.292, label %else.293
-then.292:
+  br i1 %t160, label %then.307, label %else.308
+then.307:
   store i1 1, ptr %is_struct
-  br label %merge.294
-else.293:
+  br label %merge.309
+else.308:
   ; lvalue .lexeme
   %t161 = getelementptr %Token, ptr %check3, i32 0, i32 3
   %t162 = load ptr, ptr %t161
   %t163 = call ptr @ystr_new(ptr @.str.48)
   %t164 = call i1 @String_eq_cstr(ptr %t162, ptr %t163)
-  br i1 %t164, label %then.295, label %merge.297
-then.295:
+  br i1 %t164, label %then.310, label %merge.312
+then.310:
   store i1 1, ptr %is_struct
-  br label %merge.297
-merge.297:
-  br label %merge.294
-merge.294:
+  br label %merge.312
+merge.312:
+  br label %merge.309
+merge.309:
   %t165 = load i1, ptr %is_struct
-  br i1 %t165, label %then.298, label %merge.300
-then.298:
+  br i1 %t165, label %then.313, label %merge.315
+then.313:
   %t166 = load ptr, ptr %p
   %t167 = call %Token @Parser_advance(ptr %t166)
   %t168 = load ptr, ptr %arena
@@ -2475,11 +2495,11 @@ then.298:
   %t172 = sext i32 0 to i64
   store i64 %t172, ptr %field_count
   store i1 1, ptr %parsing_sfields
-  br label %while.cond.301
-while.cond.301:
+  br label %while.cond.316
+while.cond.316:
   %t173 = load i1, ptr %parsing_sfields
-  br i1 %t173, label %while.body.302, label %while.end.303
-while.body.302:
+  br i1 %t173, label %while.body.317, label %while.end.318
+while.body.317:
   %t174 = load ptr, ptr %p
   %t175 = call %Token @Parser_peek(ptr %t174)
   store %Token %t175, ptr %end_check
@@ -2488,11 +2508,11 @@ while.body.302:
   %t177 = load ptr, ptr %t176
   %t178 = call ptr @ystr_new(ptr @.str.49)
   %t179 = call i1 @String_eq_cstr(ptr %t177, ptr %t178)
-  br i1 %t179, label %then.304, label %else.305
-then.304:
+  br i1 %t179, label %then.319, label %else.320
+then.319:
   store i1 0, ptr %parsing_sfields
-  br label %merge.306
-else.305:
+  br label %merge.321
+else.320:
   %t180 = load ptr, ptr %p
   %t181 = call %Token @Parser_advance(ptr %t180)
   store %Token %t181, ptr %sf_tok
@@ -2533,16 +2553,16 @@ else.305:
   %t209 = load ptr, ptr %t208
   %t210 = call ptr @ystr_new(ptr @.str.52)
   %t211 = call i1 @String_eq_cstr(ptr %t209, ptr %t210)
-  br i1 %t211, label %then.307, label %merge.309
-then.307:
+  br i1 %t211, label %then.322, label %merge.324
+then.322:
   %t212 = load ptr, ptr %p
   %t213 = call %Token @Parser_advance(ptr %t212)
-  br label %merge.309
-merge.309:
-  br label %merge.306
-merge.306:
-  br label %while.cond.301
-while.end.303:
+  br label %merge.324
+merge.324:
+  br label %merge.321
+merge.321:
+  br label %while.cond.316
+while.end.318:
   %t214 = load ptr, ptr %p
   %t215 = call ptr @ystr_new(ptr @.str.53)
   %t217 = call ptr @ystr_new(ptr @.str.54)
@@ -2574,9 +2594,9 @@ while.end.303:
   store i64 %t239, ptr %idx
   %t240 = load i64, ptr %idx
   ret i64 %t240
-merge.300:
-  br label %merge.291
-merge.291:
+merge.315:
+  br label %merge.306
+merge.306:
   %t241 = load ptr, ptr %lex
   %t243 = call ptr @String_clone(ptr %lex)
   %t244 = alloca %Expr
@@ -2601,14 +2621,14 @@ merge.291:
   store i64 %t258, ptr %idx
   %t259 = load i64, ptr %idx
   ret i64 %t259
-merge.285:
-  br label %merge.249
-merge.249:
+merge.300:
+  br label %merge.264
+merge.264:
   %t260 = load ptr, ptr %lex
   %t261 = call ptr @ystr_new(ptr @.str.55)
   %t262 = call i1 @String_eq_cstr(ptr %t260, ptr %t261)
-  br i1 %t262, label %then.310, label %merge.312
-then.310:
+  br i1 %t262, label %then.325, label %merge.327
+then.325:
   %t263 = load ptr, ptr %p
   %t264 = call %Token @Parser_advance(ptr %t263)
   %t265 = load ptr, ptr %p
@@ -2622,12 +2642,12 @@ then.310:
   call void @Parser_expect_token(ptr %t268, ptr %t272)
   %t274 = load i64, ptr %inner_idx
   ret i64 %t274
-merge.312:
+merge.327:
   %t275 = load ptr, ptr %lex
   %t276 = call ptr @ystr_new(ptr @.str.58)
   %t277 = call i1 @String_eq_cstr(ptr %t275, ptr %t276)
-  br i1 %t277, label %then.313, label %merge.315
-then.313:
+  br i1 %t277, label %then.328, label %merge.330
+then.328:
   %t278 = load ptr, ptr %p
   %t279 = call %Token @Parser_advance(ptr %t278)
   %t280 = load ptr, ptr %p
@@ -2655,12 +2675,12 @@ then.313:
   store i64 %t295, ptr %idx
   %t296 = load i64, ptr %idx
   ret i64 %t296
-merge.315:
+merge.330:
   %t297 = load ptr, ptr %lex
   %t298 = call ptr @ystr_new(ptr @.str.59)
   %t299 = call i1 @String_eq_cstr(ptr %t297, ptr %t298)
-  br i1 %t299, label %then.316, label %merge.318
-then.316:
+  br i1 %t299, label %then.331, label %merge.333
+then.331:
   %t300 = load ptr, ptr %p
   %t301 = call %Token @Parser_advance(ptr %t300)
   %t302 = load ptr, ptr %p
@@ -2688,12 +2708,12 @@ then.316:
   store i64 %t317, ptr %idx
   %t318 = load i64, ptr %idx
   ret i64 %t318
-merge.318:
+merge.333:
   %t319 = load ptr, ptr %lex
   %t320 = call ptr @ystr_new(ptr @.str.60)
   %t321 = call i1 @String_eq_cstr(ptr %t319, ptr %t320)
-  br i1 %t321, label %then.319, label %merge.321
-then.319:
+  br i1 %t321, label %then.334, label %merge.336
+then.334:
   %t322 = load ptr, ptr %p
   %t323 = call %Token @Parser_advance(ptr %t322)
   %t324 = load ptr, ptr %p
@@ -2721,12 +2741,12 @@ then.319:
   store i64 %t339, ptr %idx
   %t340 = load i64, ptr %idx
   ret i64 %t340
-merge.321:
+merge.336:
   %t341 = load ptr, ptr %lex
   %t342 = call ptr @ystr_new(ptr @.str.61)
   %t343 = call i1 @String_eq_cstr(ptr %t341, ptr %t342)
-  br i1 %t343, label %then.322, label %merge.324
-then.322:
+  br i1 %t343, label %then.337, label %merge.339
+then.337:
   %t344 = load ptr, ptr %p
   %t345 = call %Token @Parser_advance(ptr %t344)
   %t346 = load ptr, ptr %p
@@ -2754,7 +2774,7 @@ then.322:
   store i64 %t361, ptr %idx
   %t362 = load i64, ptr %idx
   ret i64 %t362
-merge.324:
+merge.339:
   %t363 = call ptr @ystr_new(ptr @.str.62)
   call void @print(ptr %t363)
   %t365 = load ptr, ptr %lex
@@ -2817,11 +2837,11 @@ entry:
   %t1 = load i64, ptr %lhs_idx
   store i64 %t1, ptr %current
   store i1 1, ptr %running
-  br label %while.cond.325
-while.cond.325:
+  br label %while.cond.340
+while.cond.340:
   %t2 = load i1, ptr %running
-  br i1 %t2, label %while.body.326, label %while.end.327
-while.body.326:
+  br i1 %t2, label %while.body.341, label %while.end.342
+while.body.341:
   %t3 = load ptr, ptr %p
   %t4 = call %Token @Parser_peek(ptr %t3)
   store %Token %t4, ptr %tok
@@ -2835,8 +2855,8 @@ while.body.326:
   %t10 = load ptr, ptr %lex
   %t11 = call ptr @ystr_new(ptr @.str.65)
   %t12 = call i1 @String_eq_cstr(ptr %t10, ptr %t11)
-  br i1 %t12, label %then.328, label %else.329
-then.328:
+  br i1 %t12, label %then.343, label %else.344
+then.343:
   %t13 = load ptr, ptr %p
   %t14 = call %Token @Parser_advance(ptr %t13)
   %t15 = load ptr, ptr %arena
@@ -2848,11 +2868,11 @@ then.328:
   %t19 = sext i32 0 to i64
   store i64 %t19, ptr %arg_count
   store i1 1, ptr %parsing_args
-  br label %while.cond.331
-while.cond.331:
+  br label %while.cond.346
+while.cond.346:
   %t20 = load i1, ptr %parsing_args
-  br i1 %t20, label %while.body.332, label %while.end.333
-while.body.332:
+  br i1 %t20, label %while.body.347, label %while.end.348
+while.body.347:
   %t21 = load ptr, ptr %p
   %t22 = call %Token @Parser_peek(ptr %t21)
   store %Token %t22, ptr %check
@@ -2861,11 +2881,11 @@ while.body.332:
   %t24 = load ptr, ptr %t23
   %t25 = call ptr @ystr_new(ptr @.str.66)
   %t26 = call i1 @String_eq_cstr(ptr %t24, ptr %t25)
-  br i1 %t26, label %then.334, label %else.335
-then.334:
+  br i1 %t26, label %then.349, label %else.350
+then.349:
   store i1 0, ptr %parsing_args
-  br label %merge.336
-else.335:
+  br label %merge.351
+else.350:
   %t27 = load ptr, ptr %p
   %t28 = load ptr, ptr %arena
   %t29 = call i64 @Parser_parse_expr(ptr %t27, ptr %t28)
@@ -2886,19 +2906,19 @@ else.335:
   %t39 = load ptr, ptr %t38
   %t40 = call ptr @ystr_new(ptr @.str.67)
   %t41 = call i1 @String_eq_cstr(ptr %t39, ptr %t40)
-  br i1 %t41, label %then.337, label %else.338
-then.337:
+  br i1 %t41, label %then.352, label %else.353
+then.352:
   %t42 = load ptr, ptr %p
   %t43 = call %Token @Parser_advance(ptr %t42)
-  br label %merge.339
-else.338:
+  br label %merge.354
+else.353:
   store i1 0, ptr %parsing_args
-  br label %merge.339
-merge.339:
-  br label %merge.336
-merge.336:
-  br label %while.cond.331
-while.end.333:
+  br label %merge.354
+merge.354:
+  br label %merge.351
+merge.351:
+  br label %while.cond.346
+while.end.348:
   %t44 = load ptr, ptr %p
   %t45 = call ptr @ystr_new(ptr @.str.68)
   %t47 = call ptr @ystr_new(ptr @.str.69)
@@ -2926,13 +2946,13 @@ while.end.333:
   %t64 = load ptr, ptr %t63
   %t65 = call i64 @Vec_len(ptr %t64)
   store i64 %t65, ptr %current
-  br label %merge.330
-else.329:
+  br label %merge.345
+else.344:
   %t66 = load ptr, ptr %lex
   %t67 = call ptr @ystr_new(ptr @.str.70)
   %t68 = call i1 @String_eq_cstr(ptr %t66, ptr %t67)
-  br i1 %t68, label %then.340, label %else.341
-then.340:
+  br i1 %t68, label %then.355, label %else.356
+then.355:
   %t69 = load ptr, ptr %p
   %t70 = call %Token @Parser_advance(ptr %t69)
   %t71 = load ptr, ptr %p
@@ -2966,13 +2986,13 @@ then.340:
   %t91 = load ptr, ptr %t90
   %t92 = call i64 @Vec_len(ptr %t91)
   store i64 %t92, ptr %current
-  br label %merge.342
-else.341:
+  br label %merge.357
+else.356:
   %t93 = load ptr, ptr %lex
   %t94 = call ptr @ystr_new(ptr @.str.71)
   %t95 = call i1 @String_eq_cstr(ptr %t93, ptr %t94)
-  br i1 %t95, label %then.343, label %else.344
-then.343:
+  br i1 %t95, label %then.358, label %else.359
+then.358:
   %t96 = load ptr, ptr %p
   %t97 = call %Token @Parser_advance(ptr %t96)
   %t98 = load ptr, ptr %p
@@ -3005,17 +3025,17 @@ then.343:
   %t120 = load ptr, ptr %t119
   %t121 = call i64 @Vec_len(ptr %t120)
   store i64 %t121, ptr %current
-  br label %merge.345
-else.344:
+  br label %merge.360
+else.359:
   store i1 0, ptr %running
+  br label %merge.360
+merge.360:
+  br label %merge.357
+merge.357:
   br label %merge.345
 merge.345:
-  br label %merge.342
-merge.342:
-  br label %merge.330
-merge.330:
-  br label %while.cond.325
-while.end.327:
+  br label %while.cond.340
+while.end.342:
   %t122 = load i64, ptr %current
   ret i64 %t122
 }
@@ -3027,131 +3047,131 @@ entry:
   %t1 = load ptr, ptr %lex
   %t2 = call ptr @ystr_new(ptr @.str.74)
   %t3 = call i1 @String_eq_cstr(ptr %t1, ptr %t2)
-  br i1 %t3, label %then.346, label %merge.348
-then.346:
+  br i1 %t3, label %then.361, label %merge.363
+then.361:
   %t4 = sext i32 1 to i64
   ret i64 %t4
-merge.348:
+merge.363:
   %t5 = load ptr, ptr %lex
   %t6 = call ptr @ystr_new(ptr @.str.75)
   %t7 = call i1 @String_eq_cstr(ptr %t5, ptr %t6)
-  br i1 %t7, label %then.349, label %merge.351
-then.349:
+  br i1 %t7, label %then.364, label %merge.366
+then.364:
   %t8 = sext i32 3 to i64
   ret i64 %t8
-merge.351:
+merge.366:
   %t9 = load ptr, ptr %lex
   %t10 = call ptr @ystr_new(ptr @.str.76)
   %t11 = call i1 @String_eq_cstr(ptr %t9, ptr %t10)
-  br i1 %t11, label %then.352, label %merge.354
-then.352:
+  br i1 %t11, label %then.367, label %merge.369
+then.367:
   %t12 = sext i32 5 to i64
   ret i64 %t12
-merge.354:
+merge.369:
   %t13 = load ptr, ptr %lex
   %t14 = call ptr @ystr_new(ptr @.str.77)
   %t15 = call i1 @String_eq_cstr(ptr %t13, ptr %t14)
-  br i1 %t15, label %then.355, label %merge.357
-then.355:
+  br i1 %t15, label %then.370, label %merge.372
+then.370:
   %t16 = sext i32 5 to i64
   ret i64 %t16
-merge.357:
+merge.372:
   %t17 = load ptr, ptr %lex
   %t18 = call ptr @ystr_new(ptr @.str.78)
   %t19 = call i1 @String_eq_cstr(ptr %t17, ptr %t18)
-  br i1 %t19, label %then.358, label %merge.360
-then.358:
+  br i1 %t19, label %then.373, label %merge.375
+then.373:
   %t20 = sext i32 7 to i64
   ret i64 %t20
-merge.360:
+merge.375:
   %t21 = load ptr, ptr %lex
   %t22 = call ptr @ystr_new(ptr @.str.79)
   %t23 = call i1 @String_eq_cstr(ptr %t21, ptr %t22)
-  br i1 %t23, label %then.361, label %merge.363
-then.361:
+  br i1 %t23, label %then.376, label %merge.378
+then.376:
   %t24 = sext i32 7 to i64
   ret i64 %t24
-merge.363:
+merge.378:
   %t25 = load ptr, ptr %lex
   %t26 = call ptr @ystr_new(ptr @.str.80)
   %t27 = call i1 @String_eq_cstr(ptr %t25, ptr %t26)
-  br i1 %t27, label %then.364, label %merge.366
-then.364:
+  br i1 %t27, label %then.379, label %merge.381
+then.379:
   %t28 = sext i32 7 to i64
   ret i64 %t28
-merge.366:
+merge.381:
   %t29 = load ptr, ptr %lex
   %t30 = call ptr @ystr_new(ptr @.str.81)
   %t31 = call i1 @String_eq_cstr(ptr %t29, ptr %t30)
-  br i1 %t31, label %then.367, label %merge.369
-then.367:
+  br i1 %t31, label %then.382, label %merge.384
+then.382:
   %t32 = sext i32 7 to i64
   ret i64 %t32
-merge.369:
+merge.384:
   %t33 = load ptr, ptr %lex
   %t34 = call ptr @ystr_new(ptr @.str.82)
   %t35 = call i1 @String_eq_cstr(ptr %t33, ptr %t34)
-  br i1 %t35, label %then.370, label %merge.372
-then.370:
+  br i1 %t35, label %then.385, label %merge.387
+then.385:
   %t36 = sext i32 9 to i64
   ret i64 %t36
-merge.372:
+merge.387:
   %t37 = load ptr, ptr %lex
   %t38 = call ptr @ystr_new(ptr @.str.83)
   %t39 = call i1 @String_eq_cstr(ptr %t37, ptr %t38)
-  br i1 %t39, label %then.373, label %merge.375
-then.373:
+  br i1 %t39, label %then.388, label %merge.390
+then.388:
   %t40 = sext i32 9 to i64
   ret i64 %t40
-merge.375:
+merge.390:
   %t41 = load ptr, ptr %lex
   %t42 = call ptr @ystr_new(ptr @.str.84)
   %t43 = call i1 @String_eq_cstr(ptr %t41, ptr %t42)
-  br i1 %t43, label %then.376, label %merge.378
-then.376:
+  br i1 %t43, label %then.391, label %merge.393
+then.391:
   %t44 = sext i32 11 to i64
   ret i64 %t44
-merge.378:
+merge.393:
   %t45 = load ptr, ptr %lex
   %t46 = call ptr @ystr_new(ptr @.str.85)
   %t47 = call i1 @String_eq_cstr(ptr %t45, ptr %t46)
-  br i1 %t47, label %then.379, label %merge.381
-then.379:
+  br i1 %t47, label %then.394, label %merge.396
+then.394:
   %t48 = sext i32 15 to i64
   ret i64 %t48
-merge.381:
+merge.396:
   %t49 = load ptr, ptr %lex
   %t50 = call ptr @ystr_new(ptr @.str.86)
   %t51 = call i1 @String_eq_cstr(ptr %t49, ptr %t50)
-  br i1 %t51, label %then.382, label %merge.384
-then.382:
+  br i1 %t51, label %then.397, label %merge.399
+then.397:
   %t52 = sext i32 15 to i64
   ret i64 %t52
-merge.384:
+merge.399:
   %t53 = load ptr, ptr %lex
   %t54 = call ptr @ystr_new(ptr @.str.87)
   %t55 = call i1 @String_eq_cstr(ptr %t53, ptr %t54)
-  br i1 %t55, label %then.385, label %merge.387
-then.385:
+  br i1 %t55, label %then.400, label %merge.402
+then.400:
   %t56 = sext i32 17 to i64
   ret i64 %t56
-merge.387:
+merge.402:
   %t57 = load ptr, ptr %lex
   %t58 = call ptr @ystr_new(ptr @.str.88)
   %t59 = call i1 @String_eq_cstr(ptr %t57, ptr %t58)
-  br i1 %t59, label %then.388, label %merge.390
-then.388:
+  br i1 %t59, label %then.403, label %merge.405
+then.403:
   %t60 = sext i32 17 to i64
   ret i64 %t60
-merge.390:
+merge.405:
   %t61 = load ptr, ptr %lex
   %t62 = call ptr @ystr_new(ptr @.str.89)
   %t63 = call i1 @String_eq_cstr(ptr %t61, ptr %t62)
-  br i1 %t63, label %then.391, label %merge.393
-then.391:
+  br i1 %t63, label %then.406, label %merge.408
+then.406:
   %t64 = sext i32 17 to i64
   ret i64 %t64
-merge.393:
+merge.408:
   %t65 = sext i32 0 to i64
   ret i64 %t65
 }
@@ -3163,115 +3183,115 @@ entry:
   %t1 = load ptr, ptr %lex
   %t2 = call ptr @ystr_new(ptr @.str.90)
   %t3 = call i1 @String_eq_cstr(ptr %t1, ptr %t2)
-  br i1 %t3, label %then.394, label %merge.396
-then.394:
+  br i1 %t3, label %then.409, label %merge.411
+then.409:
   ret i32 0
-merge.396:
+merge.411:
   %t4 = load ptr, ptr %lex
   %t5 = call ptr @ystr_new(ptr @.str.91)
   %t6 = call i1 @String_eq_cstr(ptr %t4, ptr %t5)
-  br i1 %t6, label %then.397, label %merge.399
-then.397:
+  br i1 %t6, label %then.412, label %merge.414
+then.412:
   ret i32 1
-merge.399:
+merge.414:
   %t7 = load ptr, ptr %lex
   %t8 = call ptr @ystr_new(ptr @.str.92)
   %t9 = call i1 @String_eq_cstr(ptr %t7, ptr %t8)
-  br i1 %t9, label %then.400, label %merge.402
-then.400:
+  br i1 %t9, label %then.415, label %merge.417
+then.415:
   ret i32 2
-merge.402:
+merge.417:
   %t10 = load ptr, ptr %lex
   %t11 = call ptr @ystr_new(ptr @.str.93)
   %t12 = call i1 @String_eq_cstr(ptr %t10, ptr %t11)
-  br i1 %t12, label %then.403, label %merge.405
-then.403:
+  br i1 %t12, label %then.418, label %merge.420
+then.418:
   ret i32 3
-merge.405:
+merge.420:
   %t13 = load ptr, ptr %lex
   %t14 = call ptr @ystr_new(ptr @.str.94)
   %t15 = call i1 @String_eq_cstr(ptr %t13, ptr %t14)
-  br i1 %t15, label %then.406, label %merge.408
-then.406:
+  br i1 %t15, label %then.421, label %merge.423
+then.421:
   ret i32 4
-merge.408:
+merge.423:
   %t16 = load ptr, ptr %lex
   %t17 = call ptr @ystr_new(ptr @.str.95)
   %t18 = call i1 @String_eq_cstr(ptr %t16, ptr %t17)
-  br i1 %t18, label %then.409, label %merge.411
-then.409:
+  br i1 %t18, label %then.424, label %merge.426
+then.424:
   ret i32 5
-merge.411:
+merge.426:
   %t19 = load ptr, ptr %lex
   %t20 = call ptr @ystr_new(ptr @.str.96)
   %t21 = call i1 @String_eq_cstr(ptr %t19, ptr %t20)
-  br i1 %t21, label %then.412, label %merge.414
-then.412:
+  br i1 %t21, label %then.427, label %merge.429
+then.427:
   ret i32 6
-merge.414:
+merge.429:
   %t22 = load ptr, ptr %lex
   %t23 = call ptr @ystr_new(ptr @.str.97)
   %t24 = call i1 @String_eq_cstr(ptr %t22, ptr %t23)
-  br i1 %t24, label %then.415, label %merge.417
-then.415:
+  br i1 %t24, label %then.430, label %merge.432
+then.430:
   ret i32 7
-merge.417:
+merge.432:
   %t25 = load ptr, ptr %lex
   %t26 = call ptr @ystr_new(ptr @.str.98)
   %t27 = call i1 @String_eq_cstr(ptr %t25, ptr %t26)
-  br i1 %t27, label %then.418, label %merge.420
-then.418:
+  br i1 %t27, label %then.433, label %merge.435
+then.433:
   ret i32 8
-merge.420:
+merge.435:
   %t28 = load ptr, ptr %lex
   %t29 = call ptr @ystr_new(ptr @.str.99)
   %t30 = call i1 @String_eq_cstr(ptr %t28, ptr %t29)
-  br i1 %t30, label %then.421, label %merge.423
-then.421:
+  br i1 %t30, label %then.436, label %merge.438
+then.436:
   ret i32 9
-merge.423:
+merge.438:
   %t31 = load ptr, ptr %lex
   %t32 = call ptr @ystr_new(ptr @.str.100)
   %t33 = call i1 @String_eq_cstr(ptr %t31, ptr %t32)
-  br i1 %t33, label %then.424, label %merge.426
-then.424:
+  br i1 %t33, label %then.439, label %merge.441
+then.439:
   ret i32 10
-merge.426:
+merge.441:
   %t34 = load ptr, ptr %lex
   %t35 = call ptr @ystr_new(ptr @.str.101)
   %t36 = call i1 @String_eq_cstr(ptr %t34, ptr %t35)
-  br i1 %t36, label %then.427, label %merge.429
-then.427:
+  br i1 %t36, label %then.442, label %merge.444
+then.442:
   ret i32 11
-merge.429:
+merge.444:
   %t37 = load ptr, ptr %lex
   %t38 = call ptr @ystr_new(ptr @.str.102)
   %t39 = call i1 @String_eq_cstr(ptr %t37, ptr %t38)
-  br i1 %t39, label %then.430, label %merge.432
-then.430:
+  br i1 %t39, label %then.445, label %merge.447
+then.445:
   ret i32 12
-merge.432:
+merge.447:
   %t40 = load ptr, ptr %lex
   %t41 = call ptr @ystr_new(ptr @.str.103)
   %t42 = call i1 @String_eq_cstr(ptr %t40, ptr %t41)
-  br i1 %t42, label %then.433, label %merge.435
-then.433:
+  br i1 %t42, label %then.448, label %merge.450
+then.448:
   ret i32 13
-merge.435:
+merge.450:
   %t43 = load ptr, ptr %lex
   %t44 = call ptr @ystr_new(ptr @.str.104)
   %t45 = call i1 @String_eq_cstr(ptr %t43, ptr %t44)
-  br i1 %t45, label %then.436, label %merge.438
-then.436:
+  br i1 %t45, label %then.451, label %merge.453
+then.451:
   ret i32 14
-merge.438:
+merge.453:
   %t46 = load ptr, ptr %lex
   %t47 = call ptr @ystr_new(ptr @.str.105)
   %t48 = call i1 @String_eq_cstr(ptr %t46, ptr %t47)
-  br i1 %t48, label %then.439, label %merge.441
-then.439:
+  br i1 %t48, label %then.454, label %merge.456
+then.454:
   ret i32 15
-merge.441:
+merge.456:
   ret i32 0
 }
 
@@ -3301,11 +3321,11 @@ entry:
   %t7 = call i64 @Parser_parse_postfix(ptr %t4, ptr %t5, i64 %t6)
   store i64 %t7, ptr %lhs
   store i1 1, ptr %looping
-  br label %while.cond.442
-while.cond.442:
+  br label %while.cond.457
+while.cond.457:
   %t8 = load i1, ptr %looping
-  br i1 %t8, label %while.body.443, label %while.end.444
-while.body.443:
+  br i1 %t8, label %while.body.458, label %while.end.459
+while.body.458:
   %t9 = load ptr, ptr %p
   %t10 = call %Token @Parser_peek(ptr %t9)
   store %Token %t10, ptr %tok
@@ -3322,19 +3342,19 @@ while.body.443:
   store i64 %t19, ptr %prec
   %t20 = load i64, ptr %prec
   %t21 = icmp eq i64 %t20, 0
-  br i1 %t21, label %then.445, label %else.446
-then.445:
+  br i1 %t21, label %then.460, label %else.461
+then.460:
   store i1 0, ptr %looping
-  br label %merge.447
-else.446:
+  br label %merge.462
+else.461:
   %t22 = load i64, ptr %prec
   %t23 = load i64, ptr %min_bp
   %t24 = icmp slt i64 %t22, %t23
-  br i1 %t24, label %then.448, label %else.449
-then.448:
+  br i1 %t24, label %then.463, label %else.464
+then.463:
   store i1 0, ptr %looping
-  br label %merge.450
-else.449:
+  br label %merge.465
+else.464:
   %t25 = load ptr, ptr %p
   %t26 = call %Token @Parser_advance(ptr %t25)
   %t27 = load ptr, ptr %lex
@@ -3374,12 +3394,12 @@ else.449:
   %t54 = load i64, ptr %lhs
   %t55 = call i64 @Parser_parse_postfix(ptr %t52, ptr %t53, i64 %t54)
   store i64 %t55, ptr %lhs
-  br label %merge.450
-merge.450:
-  br label %merge.447
-merge.447:
-  br label %while.cond.442
-while.end.444:
+  br label %merge.465
+merge.465:
+  br label %merge.462
+merge.462:
+  br label %while.cond.457
+while.end.459:
   %t56 = load i64, ptr %lhs
   ret i64 %t56
 }
@@ -3467,8 +3487,8 @@ entry:
   %t8 = load ptr, ptr %lex
   %t9 = call ptr @ystr_new(ptr @.str.106)
   %t10 = call i1 @String_eq_cstr(ptr %t8, ptr %t9)
-  br i1 %t10, label %then.451, label %merge.453
-then.451:
+  br i1 %t10, label %then.466, label %merge.468
+then.466:
   %t11 = load ptr, ptr %p
   %t12 = call %Token @Parser_advance(ptr %t11)
   %t13 = load ptr, ptr %p
@@ -3479,12 +3499,12 @@ then.451:
   %t16 = load ptr, ptr %t15
   %t17 = call ptr @ystr_new(ptr @.str.107)
   %t18 = call i1 @String_eq_cstr(ptr %t16, ptr %t17)
-  br i1 %t18, label %then.454, label %merge.456
-then.454:
+  br i1 %t18, label %then.469, label %merge.471
+then.469:
   %t19 = load ptr, ptr %p
   %t20 = call %Token @Parser_advance(ptr %t19)
-  br label %merge.456
-merge.456:
+  br label %merge.471
+merge.471:
   %t21 = load ptr, ptr %p
   %t22 = call %Token @Parser_advance(ptr %t21)
   store %Token %t22, ptr %name_tok
@@ -3505,16 +3525,16 @@ merge.456:
   %t32 = load ptr, ptr %t31
   %t33 = call ptr @ystr_new(ptr @.str.108)
   %t34 = call i1 @String_eq_cstr(ptr %t32, ptr %t33)
-  br i1 %t34, label %then.457, label %merge.459
-then.457:
+  br i1 %t34, label %then.472, label %merge.474
+then.472:
   %t35 = load ptr, ptr %p
   %t36 = call %Token @Parser_advance(ptr %t35)
   store i1 1, ptr %skipping_type
-  br label %while.cond.460
-while.cond.460:
+  br label %while.cond.475
+while.cond.475:
   %t37 = load i1, ptr %skipping_type
-  br i1 %t37, label %while.body.461, label %while.end.462
-while.body.461:
+  br i1 %t37, label %while.body.476, label %while.end.477
+while.body.476:
   %t38 = load ptr, ptr %p
   %t39 = call %Token @Parser_peek(ptr %t38)
   store %Token %t39, ptr %t
@@ -3523,31 +3543,31 @@ while.body.461:
   %t41 = load ptr, ptr %t40
   %t42 = call ptr @ystr_new(ptr @.str.109)
   %t43 = call i1 @String_eq_cstr(ptr %t41, ptr %t42)
-  br i1 %t43, label %then.463, label %else.464
-then.463:
+  br i1 %t43, label %then.478, label %else.479
+then.478:
   store i1 0, ptr %skipping_type
-  br label %merge.465
-else.464:
+  br label %merge.480
+else.479:
   ; lvalue .lexeme
   %t44 = getelementptr %Token, ptr %t, i32 0, i32 3
   %t45 = load ptr, ptr %t44
   %t46 = call ptr @ystr_new(ptr @.str.110)
   %t47 = call i1 @String_eq_cstr(ptr %t45, ptr %t46)
-  br i1 %t47, label %then.466, label %else.467
-then.466:
+  br i1 %t47, label %then.481, label %else.482
+then.481:
   store i1 0, ptr %skipping_type
-  br label %merge.468
-else.467:
+  br label %merge.483
+else.482:
   %t48 = load ptr, ptr %p
   %t49 = call %Token @Parser_advance(ptr %t48)
-  br label %merge.468
-merge.468:
-  br label %merge.465
-merge.465:
-  br label %while.cond.460
-while.end.462:
-  br label %merge.459
-merge.459:
+  br label %merge.483
+merge.483:
+  br label %merge.480
+merge.480:
+  br label %while.cond.475
+while.end.477:
+  br label %merge.474
+merge.474:
   %t50 = sext i32 0 to i64
   store i64 %t50, ptr %init_idx
   %t51 = load ptr, ptr %p
@@ -3558,16 +3578,16 @@ merge.459:
   %t54 = load ptr, ptr %t53
   %t55 = call ptr @ystr_new(ptr @.str.111)
   %t56 = call i1 @String_eq_cstr(ptr %t54, ptr %t55)
-  br i1 %t56, label %then.469, label %merge.471
-then.469:
+  br i1 %t56, label %then.484, label %merge.486
+then.484:
   %t57 = load ptr, ptr %p
   %t58 = call %Token @Parser_advance(ptr %t57)
   %t59 = load ptr, ptr %p
   %t60 = load ptr, ptr %arena
   %t61 = call i64 @Parser_parse_expr(ptr %t59, ptr %t60)
   store i64 %t61, ptr %init_idx
-  br label %merge.471
-merge.471:
+  br label %merge.486
+merge.486:
   %t62 = load ptr, ptr %p
   %t63 = call ptr @ystr_new(ptr @.str.112)
   %t65 = call ptr @ystr_new(ptr @.str.113)
@@ -3597,12 +3617,12 @@ merge.471:
   store i64 %t83, ptr %idx
   %t84 = load i64, ptr %idx
   ret i64 %t84
-merge.453:
+merge.468:
   %t85 = load ptr, ptr %lex
   %t86 = call ptr @ystr_new(ptr @.str.114)
   %t87 = call i1 @String_eq_cstr(ptr %t85, ptr %t86)
-  br i1 %t87, label %then.472, label %merge.474
-then.472:
+  br i1 %t87, label %then.487, label %merge.489
+then.487:
   %t88 = load ptr, ptr %p
   %t89 = call %Token @Parser_advance(ptr %t88)
   %t90 = sext i32 0 to i64
@@ -3615,16 +3635,16 @@ then.472:
   %t94 = load ptr, ptr %t93
   %t95 = call ptr @ystr_new(ptr @.str.115)
   %t96 = call i1 @String_eq_cstr(ptr %t94, ptr %t95)
-  br i1 %t96, label %then.475, label %else.476
-then.475:
-  br label %merge.477
-else.476:
+  br i1 %t96, label %then.490, label %else.491
+then.490:
+  br label %merge.492
+else.491:
   %t97 = load ptr, ptr %p
   %t98 = load ptr, ptr %arena
   %t99 = call i64 @Parser_parse_expr(ptr %t97, ptr %t98)
   store i64 %t99, ptr %ret_idx
-  br label %merge.477
-merge.477:
+  br label %merge.492
+merge.492:
   %t100 = load ptr, ptr %p
   %t101 = call ptr @ystr_new(ptr @.str.116)
   %t103 = call ptr @ystr_new(ptr @.str.117)
@@ -3652,12 +3672,12 @@ merge.477:
   store i64 %t119, ptr %idx
   %t120 = load i64, ptr %idx
   ret i64 %t120
-merge.474:
+merge.489:
   %t121 = load ptr, ptr %lex
   %t122 = call ptr @ystr_new(ptr @.str.118)
   %t123 = call i1 @String_eq_cstr(ptr %t121, ptr %t122)
-  br i1 %t123, label %then.478, label %merge.480
-then.478:
+  br i1 %t123, label %then.493, label %merge.495
+then.493:
   %t124 = load ptr, ptr %p
   %t125 = call %Token @Parser_advance(ptr %t124)
   %t126 = load ptr, ptr %p
@@ -3678,11 +3698,11 @@ then.478:
   %t139 = sext i32 0 to i64
   store i64 %t139, ptr %then_count
   store i1 1, ptr %parsing_then
-  br label %while.cond.481
-while.cond.481:
+  br label %while.cond.496
+while.cond.496:
   %t140 = load i1, ptr %parsing_then
-  br i1 %t140, label %while.body.482, label %while.end.483
-while.body.482:
+  br i1 %t140, label %while.body.497, label %while.end.498
+while.body.497:
   %t141 = load ptr, ptr %p
   %t142 = call %Token @Parser_peek(ptr %t141)
   store %Token %t142, ptr %check
@@ -3691,21 +3711,21 @@ while.body.482:
   %t144 = load ptr, ptr %t143
   %t145 = call ptr @ystr_new(ptr @.str.121)
   %t146 = call i1 @String_eq_cstr(ptr %t144, ptr %t145)
-  br i1 %t146, label %then.484, label %else.485
-then.484:
+  br i1 %t146, label %then.499, label %else.500
+then.499:
   store i1 0, ptr %parsing_then
-  br label %merge.486
-else.485:
+  br label %merge.501
+else.500:
   %t147 = load ptr, ptr %p
   %t148 = load ptr, ptr %arena
   %t149 = call i64 @Parser_parse_stmt(ptr %t147, ptr %t148)
   %t150 = load i64, ptr %then_count
   %t151 = add i64 %t150, 1
   store i64 %t151, ptr %then_count
-  br label %merge.486
-merge.486:
-  br label %while.cond.481
-while.end.483:
+  br label %merge.501
+merge.501:
+  br label %while.cond.496
+while.end.498:
   %t152 = load ptr, ptr %p
   %t153 = call ptr @ystr_new(ptr @.str.122)
   %t155 = call ptr @ystr_new(ptr @.str.123)
@@ -3723,8 +3743,8 @@ while.end.483:
   %t163 = load ptr, ptr %t162
   %t164 = call ptr @ystr_new(ptr @.str.124)
   %t165 = call i1 @String_eq_cstr(ptr %t163, ptr %t164)
-  br i1 %t165, label %then.487, label %merge.489
-then.487:
+  br i1 %t165, label %then.502, label %merge.504
+then.502:
   %t166 = load ptr, ptr %p
   %t167 = call %Token @Parser_advance(ptr %t166)
   %t168 = load ptr, ptr %p
@@ -3739,11 +3759,11 @@ then.487:
   %t177 = call i64 @Vec_len(ptr %t176)
   store i64 %t177, ptr %else_start
   store i1 1, ptr %parsing_else
-  br label %while.cond.490
-while.cond.490:
+  br label %while.cond.505
+while.cond.505:
   %t178 = load i1, ptr %parsing_else
-  br i1 %t178, label %while.body.491, label %while.end.492
-while.body.491:
+  br i1 %t178, label %while.body.506, label %while.end.507
+while.body.506:
   %t179 = load ptr, ptr %p
   %t180 = call %Token @Parser_peek(ptr %t179)
   store %Token %t180, ptr %check2
@@ -3752,28 +3772,28 @@ while.body.491:
   %t182 = load ptr, ptr %t181
   %t183 = call ptr @ystr_new(ptr @.str.127)
   %t184 = call i1 @String_eq_cstr(ptr %t182, ptr %t183)
-  br i1 %t184, label %then.493, label %else.494
-then.493:
+  br i1 %t184, label %then.508, label %else.509
+then.508:
   store i1 0, ptr %parsing_else
-  br label %merge.495
-else.494:
+  br label %merge.510
+else.509:
   %t185 = load ptr, ptr %p
   %t186 = load ptr, ptr %arena
   %t187 = call i64 @Parser_parse_stmt(ptr %t185, ptr %t186)
   %t188 = load i64, ptr %else_count
   %t189 = add i64 %t188, 1
   store i64 %t189, ptr %else_count
-  br label %merge.495
-merge.495:
-  br label %while.cond.490
-while.end.492:
+  br label %merge.510
+merge.510:
+  br label %while.cond.505
+while.end.507:
   %t190 = load ptr, ptr %p
   %t191 = call ptr @ystr_new(ptr @.str.128)
   %t193 = call ptr @ystr_new(ptr @.str.129)
   %t194 = load ptr, ptr %t193
   call void @Parser_expect_token(ptr %t190, ptr %t194)
-  br label %merge.489
-merge.489:
+  br label %merge.504
+merge.504:
   %t196 = load i64, ptr %cond_idx
   %t197 = load i64, ptr %then_start
   %t198 = load i64, ptr %then_count
@@ -3800,12 +3820,12 @@ merge.489:
   store i64 %t213, ptr %idx
   %t214 = load i64, ptr %idx
   ret i64 %t214
-merge.480:
+merge.495:
   %t215 = load ptr, ptr %lex
   %t216 = call ptr @ystr_new(ptr @.str.130)
   %t217 = call i1 @String_eq_cstr(ptr %t215, ptr %t216)
-  br i1 %t217, label %then.496, label %merge.498
-then.496:
+  br i1 %t217, label %then.511, label %merge.513
+then.511:
   %t218 = load ptr, ptr %p
   %t219 = call %Token @Parser_advance(ptr %t218)
   %t220 = load ptr, ptr %p
@@ -3826,11 +3846,11 @@ then.496:
   %t233 = sext i32 0 to i64
   store i64 %t233, ptr %body_count
   store i1 1, ptr %parsing_body
-  br label %while.cond.499
-while.cond.499:
+  br label %while.cond.514
+while.cond.514:
   %t234 = load i1, ptr %parsing_body
-  br i1 %t234, label %while.body.500, label %while.end.501
-while.body.500:
+  br i1 %t234, label %while.body.515, label %while.end.516
+while.body.515:
   %t235 = load ptr, ptr %p
   %t236 = call %Token @Parser_peek(ptr %t235)
   store %Token %t236, ptr %check
@@ -3839,21 +3859,21 @@ while.body.500:
   %t238 = load ptr, ptr %t237
   %t239 = call ptr @ystr_new(ptr @.str.133)
   %t240 = call i1 @String_eq_cstr(ptr %t238, ptr %t239)
-  br i1 %t240, label %then.502, label %else.503
-then.502:
+  br i1 %t240, label %then.517, label %else.518
+then.517:
   store i1 0, ptr %parsing_body
-  br label %merge.504
-else.503:
+  br label %merge.519
+else.518:
   %t241 = load ptr, ptr %p
   %t242 = load ptr, ptr %arena
   %t243 = call i64 @Parser_parse_stmt(ptr %t241, ptr %t242)
   %t244 = load i64, ptr %body_count
   %t245 = add i64 %t244, 1
   store i64 %t245, ptr %body_count
-  br label %merge.504
-merge.504:
-  br label %while.cond.499
-while.end.501:
+  br label %merge.519
+merge.519:
+  br label %while.cond.514
+while.end.516:
   %t246 = load ptr, ptr %p
   %t247 = call ptr @ystr_new(ptr @.str.134)
   %t249 = call ptr @ystr_new(ptr @.str.135)
@@ -3883,12 +3903,12 @@ while.end.501:
   store i64 %t267, ptr %idx
   %t268 = load i64, ptr %idx
   ret i64 %t268
-merge.498:
+merge.513:
   %t269 = load ptr, ptr %lex
   %t270 = call ptr @ystr_new(ptr @.str.136)
   %t271 = call i1 @String_eq_cstr(ptr %t269, ptr %t270)
-  br i1 %t271, label %then.505, label %merge.507
-then.505:
+  br i1 %t271, label %then.520, label %merge.522
+then.520:
   %t272 = load ptr, ptr %p
   %t273 = call %Token @Parser_advance(ptr %t272)
   %t274 = load ptr, ptr %p
@@ -3929,16 +3949,16 @@ then.505:
   %t303 = load ptr, ptr %t302
   %t304 = call ptr @ystr_new(ptr @.str.141)
   %t305 = call i1 @String_eq_cstr(ptr %t303, ptr %t304)
-  br i1 %t305, label %then.508, label %merge.510
-then.508:
+  br i1 %t305, label %then.523, label %merge.525
+then.523:
   %t306 = load ptr, ptr %p
   %t307 = call %Token @Parser_advance(ptr %t306)
   %t308 = load ptr, ptr %p
   %t309 = load ptr, ptr %arena
   %t310 = call i64 @Parser_parse_expr(ptr %t308, ptr %t309)
   store i64 %t310, ptr %step_idx
-  br label %merge.510
-merge.510:
+  br label %merge.525
+merge.525:
   %t311 = load ptr, ptr %p
   %t312 = call ptr @ystr_new(ptr @.str.142)
   %t314 = call ptr @ystr_new(ptr @.str.143)
@@ -3953,11 +3973,11 @@ merge.510:
   %t321 = sext i32 0 to i64
   store i64 %t321, ptr %body_count
   store i1 1, ptr %parsing_body
-  br label %while.cond.511
-while.cond.511:
+  br label %while.cond.526
+while.cond.526:
   %t322 = load i1, ptr %parsing_body
-  br i1 %t322, label %while.body.512, label %while.end.513
-while.body.512:
+  br i1 %t322, label %while.body.527, label %while.end.528
+while.body.527:
   %t323 = load ptr, ptr %p
   %t324 = call %Token @Parser_peek(ptr %t323)
   store %Token %t324, ptr %check
@@ -3966,21 +3986,21 @@ while.body.512:
   %t326 = load ptr, ptr %t325
   %t327 = call ptr @ystr_new(ptr @.str.144)
   %t328 = call i1 @String_eq_cstr(ptr %t326, ptr %t327)
-  br i1 %t328, label %then.514, label %else.515
-then.514:
+  br i1 %t328, label %then.529, label %else.530
+then.529:
   store i1 0, ptr %parsing_body
-  br label %merge.516
-else.515:
+  br label %merge.531
+else.530:
   %t329 = load ptr, ptr %p
   %t330 = load ptr, ptr %arena
   %t331 = call i64 @Parser_parse_stmt(ptr %t329, ptr %t330)
   %t332 = load i64, ptr %body_count
   %t333 = add i64 %t332, 1
   store i64 %t333, ptr %body_count
-  br label %merge.516
-merge.516:
-  br label %while.cond.511
-while.end.513:
+  br label %merge.531
+merge.531:
+  br label %while.cond.526
+while.end.528:
   %t334 = load ptr, ptr %p
   %t335 = call ptr @ystr_new(ptr @.str.145)
   %t337 = call ptr @ystr_new(ptr @.str.146)
@@ -4013,12 +4033,12 @@ while.end.513:
   store i64 %t358, ptr %idx
   %t359 = load i64, ptr %idx
   ret i64 %t359
-merge.507:
+merge.522:
   %t360 = load ptr, ptr %lex
   %t361 = call ptr @ystr_new(ptr @.str.147)
   %t362 = call i1 @String_eq_cstr(ptr %t360, ptr %t361)
-  br i1 %t362, label %then.517, label %merge.519
-then.517:
+  br i1 %t362, label %then.532, label %merge.534
+then.532:
   %t363 = load ptr, ptr %p
   %t364 = call %Token @Parser_advance(ptr %t363)
   %t365 = load ptr, ptr %p
@@ -4039,11 +4059,11 @@ then.517:
   %t378 = sext i32 0 to i64
   store i64 %t378, ptr %arm_count
   store i1 1, ptr %parsing_arms
-  br label %while.cond.520
-while.cond.520:
+  br label %while.cond.535
+while.cond.535:
   %t379 = load i1, ptr %parsing_arms
-  br i1 %t379, label %while.body.521, label %while.end.522
-while.body.521:
+  br i1 %t379, label %while.body.536, label %while.end.537
+while.body.536:
   %t380 = load ptr, ptr %p
   %t381 = call %Token @Parser_peek(ptr %t380)
   store %Token %t381, ptr %check
@@ -4052,11 +4072,11 @@ while.body.521:
   %t383 = load ptr, ptr %t382
   %t384 = call ptr @ystr_new(ptr @.str.150)
   %t385 = call i1 @String_eq_cstr(ptr %t383, ptr %t384)
-  br i1 %t385, label %then.523, label %else.524
-then.523:
+  br i1 %t385, label %then.538, label %else.539
+then.538:
   store i1 0, ptr %parsing_arms
-  br label %merge.525
-else.524:
+  br label %merge.540
+else.539:
   %t386 = load ptr, ptr %p
   %t387 = call %Token @Parser_advance(ptr %t386)
   store %Token %t387, ptr %pat_tok
@@ -4071,11 +4091,11 @@ else.524:
   %t393 = load ptr, ptr %pat_lex
   %t394 = call ptr @ystr_new(ptr @.str.151)
   %t395 = call i1 @String_eq_cstr(ptr %t393, ptr %t394)
-  br i1 %t395, label %then.526, label %else.527
-then.526:
+  br i1 %t395, label %then.541, label %else.542
+then.541:
   store %MatchPattern { i32 3, [8 x i64] zeroinitializer }, ptr %pattern
-  br label %merge.528
-else.527:
+  br label %merge.543
+else.542:
   %t396 = load ptr, ptr %p
   %t397 = call %Token @Parser_peek(ptr %t396)
   store %Token %t397, ptr %next_tok
@@ -4084,8 +4104,8 @@ else.527:
   %t399 = load ptr, ptr %t398
   %t400 = call ptr @ystr_new(ptr @.str.152)
   %t401 = call i1 @String_eq_cstr(ptr %t399, ptr %t400)
-  br i1 %t401, label %then.529, label %else.530
-then.529:
+  br i1 %t401, label %then.544, label %else.545
+then.544:
   %t402 = load ptr, ptr %p
   %t403 = call %Token @Parser_advance(ptr %t402)
   %t404 = load ptr, ptr %p
@@ -4108,8 +4128,8 @@ then.529:
   store ptr %t416, ptr %t415
   %t417 = load %MatchPattern, ptr %t413
   store %MatchPattern %t417, ptr %pattern
-  br label %merge.531
-else.530:
+  br label %merge.546
+else.545:
   %t418 = load ptr, ptr %pat_lex
   %t419 = alloca %MatchPattern
   %t420 = getelementptr %MatchPattern, ptr %t419, i32 0, i32 0
@@ -4119,10 +4139,10 @@ else.530:
   store ptr %t422, ptr %t421
   %t423 = load %MatchPattern, ptr %t419
   store %MatchPattern %t423, ptr %pattern
-  br label %merge.531
-merge.531:
-  br label %merge.528
-merge.528:
+  br label %merge.546
+merge.546:
+  br label %merge.543
+merge.543:
   %t424 = load ptr, ptr %p
   %t425 = call ptr @ystr_new(ptr @.str.153)
   %t427 = call ptr @ystr_new(ptr @.str.154)
@@ -4140,12 +4160,12 @@ merge.528:
   %t436 = load ptr, ptr %t435
   %t437 = call ptr @ystr_new(ptr @.str.155)
   %t438 = call i1 @String_eq_cstr(ptr %t436, ptr %t437)
-  br i1 %t438, label %then.532, label %merge.534
-then.532:
+  br i1 %t438, label %then.547, label %merge.549
+then.547:
   %t439 = load ptr, ptr %p
   %t440 = call %Token @Parser_advance(ptr %t439)
-  br label %merge.534
-merge.534:
+  br label %merge.549
+merge.549:
   %t441 = load %MatchPattern, ptr %pattern
   ; lvalue .pattern
   %t442 = getelementptr %MatchArm, ptr %arm, i32 0, i32 0
@@ -4166,10 +4186,10 @@ merge.534:
   %t451 = load i64, ptr %arm_count
   %t452 = add i64 %t451, 1
   store i64 %t452, ptr %arm_count
-  br label %merge.525
-merge.525:
-  br label %while.cond.520
-while.end.522:
+  br label %merge.540
+merge.540:
+  br label %while.cond.535
+while.end.537:
   %t453 = load ptr, ptr %p
   %t454 = call ptr @ystr_new(ptr @.str.156)
   %t456 = call ptr @ystr_new(ptr @.str.157)
@@ -4199,7 +4219,7 @@ while.end.522:
   store i64 %t474, ptr %idx
   %t475 = load i64, ptr %idx
   ret i64 %t475
-merge.519:
+merge.534:
   %t476 = load ptr, ptr %p
   %t477 = load ptr, ptr %arena
   %t478 = call i64 @Parser_parse_expr(ptr %t476, ptr %t477)
@@ -4212,8 +4232,8 @@ merge.519:
   %t482 = load ptr, ptr %t481
   %t483 = call ptr @ystr_new(ptr @.str.158)
   %t484 = call i1 @String_eq_cstr(ptr %t482, ptr %t483)
-  br i1 %t484, label %then.535, label %merge.537
-then.535:
+  br i1 %t484, label %then.550, label %merge.552
+then.550:
   %t485 = load ptr, ptr %p
   %t486 = call %Token @Parser_advance(ptr %t485)
   %t487 = load ptr, ptr %p
@@ -4248,14 +4268,14 @@ then.535:
   store i64 %t510, ptr %idx
   %t511 = load i64, ptr %idx
   ret i64 %t511
-merge.537:
+merge.552:
   ; lvalue .lexeme
   %t512 = getelementptr %Token, ptr %assign_check, i32 0, i32 3
   %t513 = load ptr, ptr %t512
   %t514 = call ptr @ystr_new(ptr @.str.161)
   %t515 = call i1 @String_eq_cstr(ptr %t513, ptr %t514)
-  br i1 %t515, label %then.538, label %merge.540
-then.538:
+  br i1 %t515, label %then.553, label %merge.555
+then.553:
   %t516 = load ptr, ptr %p
   %t517 = call %Token @Parser_advance(ptr %t516)
   %t518 = load ptr, ptr %p
@@ -4290,14 +4310,14 @@ then.538:
   store i64 %t541, ptr %idx
   %t542 = load i64, ptr %idx
   ret i64 %t542
-merge.540:
+merge.555:
   ; lvalue .lexeme
   %t543 = getelementptr %Token, ptr %assign_check, i32 0, i32 3
   %t544 = load ptr, ptr %t543
   %t545 = call ptr @ystr_new(ptr @.str.164)
   %t546 = call i1 @String_eq_cstr(ptr %t544, ptr %t545)
-  br i1 %t546, label %then.541, label %merge.543
-then.541:
+  br i1 %t546, label %then.556, label %merge.558
+then.556:
   %t547 = load ptr, ptr %p
   %t548 = call %Token @Parser_advance(ptr %t547)
   %t549 = load ptr, ptr %p
@@ -4332,7 +4352,7 @@ then.541:
   store i64 %t572, ptr %idx
   %t573 = load i64, ptr %idx
   ret i64 %t573
-merge.543:
+merge.558:
   %t574 = load ptr, ptr %p
   %t575 = call ptr @ystr_new(ptr @.str.167)
   %t577 = call ptr @ystr_new(ptr @.str.168)
@@ -4426,11 +4446,11 @@ entry:
   %t22 = sext i32 0 to i64
   store i64 %t22, ptr %param_count
   store i1 1, ptr %parsing_params
-  br label %while.cond.544
-while.cond.544:
+  br label %while.cond.559
+while.cond.559:
   %t23 = load i1, ptr %parsing_params
-  br i1 %t23, label %while.body.545, label %while.end.546
-while.body.545:
+  br i1 %t23, label %while.body.560, label %while.end.561
+while.body.560:
   %t24 = load ptr, ptr %p
   %t25 = call %Token @Parser_peek(ptr %t24)
   store %Token %t25, ptr %check
@@ -4439,11 +4459,11 @@ while.body.545:
   %t27 = load ptr, ptr %t26
   %t28 = call ptr @ystr_new(ptr @.str.171)
   %t29 = call i1 @String_eq_cstr(ptr %t27, ptr %t28)
-  br i1 %t29, label %then.547, label %else.548
-then.547:
+  br i1 %t29, label %then.562, label %else.563
+then.562:
   store i1 0, ptr %parsing_params
-  br label %merge.549
-else.548:
+  br label %merge.564
+else.563:
   %t30 = load ptr, ptr %p
   %t31 = call %Token @Parser_advance(ptr %t30)
   store %Token %t31, ptr %pname_tok
@@ -4462,11 +4482,11 @@ else.548:
   %t43 = call ptr @ystr_new(ptr @.str.174)
   store ptr %t43, ptr %type_str
   store i1 1, ptr %skipping
-  br label %while.cond.550
-while.cond.550:
+  br label %while.cond.565
+while.cond.565:
   %t44 = load i1, ptr %skipping
-  br i1 %t44, label %while.body.551, label %while.end.552
-while.body.551:
+  br i1 %t44, label %while.body.566, label %while.end.567
+while.body.566:
   %t45 = load ptr, ptr %p
   %t46 = call %Token @Parser_peek(ptr %t45)
   store %Token %t46, ptr %t
@@ -4475,21 +4495,21 @@ while.body.551:
   %t48 = load ptr, ptr %t47
   %t49 = call ptr @ystr_new(ptr @.str.175)
   %t50 = call i1 @String_eq_cstr(ptr %t48, ptr %t49)
-  br i1 %t50, label %then.553, label %else.554
-then.553:
+  br i1 %t50, label %then.568, label %else.569
+then.568:
   store i1 0, ptr %skipping
-  br label %merge.555
-else.554:
+  br label %merge.570
+else.569:
   ; lvalue .lexeme
   %t51 = getelementptr %Token, ptr %t, i32 0, i32 3
   %t52 = load ptr, ptr %t51
   %t53 = call ptr @ystr_new(ptr @.str.176)
   %t54 = call i1 @String_eq_cstr(ptr %t52, ptr %t53)
-  br i1 %t54, label %then.556, label %else.557
-then.556:
+  br i1 %t54, label %then.571, label %else.572
+then.571:
   store i1 0, ptr %skipping
-  br label %merge.558
-else.557:
+  br label %merge.573
+else.572:
   ; lvalue .lexeme
   %t55 = getelementptr %Token, ptr %t, i32 0, i32 3
   %t56 = load ptr, ptr %t55
@@ -4501,12 +4521,12 @@ else.557:
   call void @String_push(ptr %t60, i8 32)
   %t62 = load ptr, ptr %p
   %t63 = call %Token @Parser_advance(ptr %t62)
-  br label %merge.558
-merge.558:
-  br label %merge.555
-merge.555:
-  br label %while.cond.550
-while.end.552:
+  br label %merge.573
+merge.573:
+  br label %merge.570
+merge.570:
+  br label %while.cond.565
+while.end.567:
   %t64 = load ptr, ptr %pname
   ; lvalue .name
   %t65 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
@@ -4531,16 +4551,16 @@ while.end.552:
   %t77 = load ptr, ptr %t76
   %t78 = call ptr @ystr_new(ptr @.str.177)
   %t79 = call i1 @String_eq_cstr(ptr %t77, ptr %t78)
-  br i1 %t79, label %then.559, label %merge.561
-then.559:
+  br i1 %t79, label %then.574, label %merge.576
+then.574:
   %t80 = load ptr, ptr %p
   %t81 = call %Token @Parser_advance(ptr %t80)
-  br label %merge.561
-merge.561:
-  br label %merge.549
-merge.549:
-  br label %while.cond.544
-while.end.546:
+  br label %merge.576
+merge.576:
+  br label %merge.564
+merge.564:
+  br label %while.cond.559
+while.end.561:
   %t82 = load ptr, ptr %p
   %t83 = call ptr @ystr_new(ptr @.str.178)
   %t85 = call ptr @ystr_new(ptr @.str.179)
@@ -4554,16 +4574,16 @@ while.end.546:
   %t91 = load ptr, ptr %t90
   %t92 = call ptr @ystr_new(ptr @.str.180)
   %t93 = call i1 @String_eq_cstr(ptr %t91, ptr %t92)
-  br i1 %t93, label %then.562, label %merge.564
-then.562:
+  br i1 %t93, label %then.577, label %merge.579
+then.577:
   %t94 = load ptr, ptr %p
   %t95 = call %Token @Parser_advance(ptr %t94)
   store i1 1, ptr %skip_ret
-  br label %while.cond.565
-while.cond.565:
+  br label %while.cond.580
+while.cond.580:
   %t96 = load i1, ptr %skip_ret
-  br i1 %t96, label %while.body.566, label %while.end.567
-while.body.566:
+  br i1 %t96, label %while.body.581, label %while.end.582
+while.body.581:
   %t97 = load ptr, ptr %p
   %t98 = call %Token @Parser_peek(ptr %t97)
   store %Token %t98, ptr %t
@@ -4572,19 +4592,19 @@ while.body.566:
   %t100 = load ptr, ptr %t99
   %t101 = call ptr @ystr_new(ptr @.str.181)
   %t102 = call i1 @String_eq_cstr(ptr %t100, ptr %t101)
-  br i1 %t102, label %then.568, label %else.569
-then.568:
+  br i1 %t102, label %then.583, label %else.584
+then.583:
   store i1 0, ptr %skip_ret
-  br label %merge.570
-else.569:
+  br label %merge.585
+else.584:
   %t103 = load ptr, ptr %p
   %t104 = call %Token @Parser_advance(ptr %t103)
-  br label %merge.570
-merge.570:
-  br label %while.cond.565
-while.end.567:
-  br label %merge.564
-merge.564:
+  br label %merge.585
+merge.585:
+  br label %while.cond.580
+while.end.582:
+  br label %merge.579
+merge.579:
   %t105 = load ptr, ptr %p
   %t106 = call ptr @ystr_new(ptr @.str.182)
   %t108 = call ptr @ystr_new(ptr @.str.183)
@@ -4599,11 +4619,11 @@ merge.564:
   %t115 = sext i32 0 to i64
   store i64 %t115, ptr %body_count
   store i1 1, ptr %parsing_body
-  br label %while.cond.571
-while.cond.571:
+  br label %while.cond.586
+while.cond.586:
   %t116 = load i1, ptr %parsing_body
-  br i1 %t116, label %while.body.572, label %while.end.573
-while.body.572:
+  br i1 %t116, label %while.body.587, label %while.end.588
+while.body.587:
   %t117 = load ptr, ptr %p
   %t118 = call %Token @Parser_peek(ptr %t117)
   store %Token %t118, ptr %check
@@ -4612,21 +4632,21 @@ while.body.572:
   %t120 = load ptr, ptr %t119
   %t121 = call ptr @ystr_new(ptr @.str.184)
   %t122 = call i1 @String_eq_cstr(ptr %t120, ptr %t121)
-  br i1 %t122, label %then.574, label %else.575
-then.574:
+  br i1 %t122, label %then.589, label %else.590
+then.589:
   store i1 0, ptr %parsing_body
-  br label %merge.576
-else.575:
+  br label %merge.591
+else.590:
   %t123 = load ptr, ptr %p
   %t124 = load ptr, ptr %arena
   %t125 = call i64 @Parser_parse_stmt(ptr %t123, ptr %t124)
   %t126 = load i64, ptr %body_count
   %t127 = add i64 %t126, 1
   store i64 %t127, ptr %body_count
-  br label %merge.576
-merge.576:
-  br label %while.cond.571
-while.end.573:
+  br label %merge.591
+merge.591:
+  br label %while.cond.586
+while.end.588:
   %t128 = load ptr, ptr %p
   %t129 = call ptr @ystr_new(ptr @.str.185)
   %t131 = call ptr @ystr_new(ptr @.str.186)
@@ -4722,20 +4742,20 @@ entry:
   %t8 = load ptr, ptr %lex
   %t9 = call ptr @ystr_new(ptr @.str.187)
   %t10 = call i1 @String_eq_cstr(ptr %t8, ptr %t9)
-  br i1 %t10, label %then.577, label %merge.579
-then.577:
+  br i1 %t10, label %then.592, label %merge.594
+then.592:
   %t11 = load ptr, ptr %p
   %t12 = call %Token @Parser_advance(ptr %t11)
   %t13 = load ptr, ptr %p
   %t14 = load ptr, ptr %arena
   %t15 = call i64 @Parser_parse_func_decl(ptr %t13, ptr %t14, i32 1)
   ret i1 1
-merge.579:
+merge.594:
   %t16 = load ptr, ptr %lex
   %t17 = call ptr @ystr_new(ptr @.str.188)
   %t18 = call i1 @String_eq_cstr(ptr %t16, ptr %t17)
-  br i1 %t18, label %then.580, label %merge.582
-then.580:
+  br i1 %t18, label %then.595, label %merge.597
+then.595:
   %t19 = load ptr, ptr %p
   %t20 = call %Token @Parser_advance(ptr %t19)
   %t21 = load ptr, ptr %p
@@ -4747,12 +4767,12 @@ then.580:
   %t28 = load ptr, ptr %arena
   %t29 = call i64 @Parser_parse_func_decl(ptr %t27, ptr %t28, i32 1)
   ret i1 1
-merge.582:
+merge.597:
   %t30 = load ptr, ptr %lex
   %t31 = call ptr @ystr_new(ptr @.str.191)
   %t32 = call i1 @String_eq_cstr(ptr %t30, ptr %t31)
-  br i1 %t32, label %then.583, label %merge.585
-then.583:
+  br i1 %t32, label %then.598, label %merge.600
+then.598:
   %t33 = load ptr, ptr %p
   %t34 = call %Token @Parser_advance(ptr %t33)
   %t35 = load ptr, ptr %p
@@ -4764,12 +4784,12 @@ then.583:
   %t42 = load ptr, ptr %arena
   %t43 = call i64 @Parser_parse_func_decl(ptr %t41, ptr %t42, i32 0)
   ret i1 1
-merge.585:
+merge.600:
   %t44 = load ptr, ptr %lex
   %t45 = call ptr @ystr_new(ptr @.str.194)
   %t46 = call i1 @String_eq_cstr(ptr %t44, ptr %t45)
-  br i1 %t46, label %then.586, label %merge.588
-then.586:
+  br i1 %t46, label %then.601, label %merge.603
+then.601:
   %t47 = load ptr, ptr %p
   %t48 = call %Token @Parser_advance(ptr %t47)
   %t49 = load ptr, ptr %p
@@ -4796,11 +4816,11 @@ then.586:
   %t66 = sext i32 0 to i64
   store i64 %t66, ptr %field_count
   store i1 1, ptr %parsing_fields
-  br label %while.cond.589
-while.cond.589:
+  br label %while.cond.604
+while.cond.604:
   %t67 = load i1, ptr %parsing_fields
-  br i1 %t67, label %while.body.590, label %while.end.591
-while.body.590:
+  br i1 %t67, label %while.body.605, label %while.end.606
+while.body.605:
   %t68 = load ptr, ptr %p
   %t69 = call %Token @Parser_peek(ptr %t68)
   store %Token %t69, ptr %check
@@ -4809,11 +4829,11 @@ while.body.590:
   %t71 = load ptr, ptr %t70
   %t72 = call ptr @ystr_new(ptr @.str.197)
   %t73 = call i1 @String_eq_cstr(ptr %t71, ptr %t72)
-  br i1 %t73, label %then.592, label %else.593
-then.592:
+  br i1 %t73, label %then.607, label %else.608
+then.607:
   store i1 0, ptr %parsing_fields
-  br label %merge.594
-else.593:
+  br label %merge.609
+else.608:
   %t74 = load ptr, ptr %p
   %t75 = call %Token @Parser_advance(ptr %t74)
   store %Token %t75, ptr %fname_tok
@@ -4832,11 +4852,11 @@ else.593:
   %t87 = call ptr @ystr_new(ptr @.str.200)
   store ptr %t87, ptr %type_str
   store i1 1, ptr %skipping
-  br label %while.cond.595
-while.cond.595:
+  br label %while.cond.610
+while.cond.610:
   %t88 = load i1, ptr %skipping
-  br i1 %t88, label %while.body.596, label %while.end.597
-while.body.596:
+  br i1 %t88, label %while.body.611, label %while.end.612
+while.body.611:
   %t89 = load ptr, ptr %p
   %t90 = call %Token @Parser_peek(ptr %t89)
   store %Token %t90, ptr %t
@@ -4845,29 +4865,29 @@ while.body.596:
   %t92 = load ptr, ptr %t91
   %t93 = call ptr @ystr_new(ptr @.str.201)
   %t94 = call i1 @String_eq_cstr(ptr %t92, ptr %t93)
-  br i1 %t94, label %then.598, label %else.599
-then.598:
+  br i1 %t94, label %then.613, label %else.614
+then.613:
   store i1 0, ptr %skipping
-  br label %merge.600
-else.599:
+  br label %merge.615
+else.614:
   ; lvalue .lexeme
   %t95 = getelementptr %Token, ptr %t, i32 0, i32 3
   %t96 = load ptr, ptr %t95
   %t97 = call ptr @ystr_new(ptr @.str.202)
   %t98 = call i1 @String_eq_cstr(ptr %t96, ptr %t97)
-  br i1 %t98, label %then.601, label %else.602
-then.601:
+  br i1 %t98, label %then.616, label %else.617
+then.616:
   store i1 0, ptr %skipping
-  br label %merge.603
-else.602:
+  br label %merge.618
+else.617:
   %t99 = load ptr, ptr %p
   %t100 = call %Token @Parser_advance(ptr %t99)
-  br label %merge.603
-merge.603:
-  br label %merge.600
-merge.600:
-  br label %while.cond.595
-while.end.597:
+  br label %merge.618
+merge.618:
+  br label %merge.615
+merge.615:
+  br label %while.cond.610
+while.end.612:
   %t101 = load ptr, ptr %fname
   ; lvalue .name
   %t102 = getelementptr %FieldDecl, ptr %field, i32 0, i32 0
@@ -4892,16 +4912,16 @@ while.end.597:
   %t114 = load ptr, ptr %t113
   %t115 = call ptr @ystr_new(ptr @.str.203)
   %t116 = call i1 @String_eq_cstr(ptr %t114, ptr %t115)
-  br i1 %t116, label %then.604, label %merge.606
-then.604:
+  br i1 %t116, label %then.619, label %merge.621
+then.619:
   %t117 = load ptr, ptr %p
   %t118 = call %Token @Parser_advance(ptr %t117)
-  br label %merge.606
-merge.606:
-  br label %merge.594
-merge.594:
-  br label %while.cond.589
-while.end.591:
+  br label %merge.621
+merge.621:
+  br label %merge.609
+merge.609:
+  br label %while.cond.604
+while.end.606:
   %t119 = load ptr, ptr %p
   %t120 = call ptr @ystr_new(ptr @.str.204)
   %t122 = call ptr @ystr_new(ptr @.str.205)
@@ -4925,12 +4945,12 @@ while.end.591:
   %t133 = load ptr, ptr %t132
   call void @Vec_push(ptr %t133, ptr %sdecl)
   ret i1 1
-merge.588:
+merge.603:
   %t135 = load ptr, ptr %lex
   %t136 = call ptr @ystr_new(ptr @.str.206)
   %t137 = call i1 @String_eq_cstr(ptr %t135, ptr %t136)
-  br i1 %t137, label %then.607, label %merge.609
-then.607:
+  br i1 %t137, label %then.622, label %merge.624
+then.622:
   %t138 = load ptr, ptr %p
   %t139 = call %Token @Parser_advance(ptr %t138)
   %t140 = load ptr, ptr %p
@@ -4943,12 +4963,12 @@ then.607:
   call void @Parser_expect_token(ptr %t142, ptr %t146)
   %t148 = sext i32 1 to i64
   store i64 %t148, ptr %depth
-  br label %while.cond.610
-while.cond.610:
+  br label %while.cond.625
+while.cond.625:
   %t149 = load i64, ptr %depth
   %t150 = icmp sgt i64 %t149, 0
-  br i1 %t150, label %while.body.611, label %while.end.612
-while.body.611:
+  br i1 %t150, label %while.body.626, label %while.end.627
+while.body.626:
   %t151 = load ptr, ptr %p
   %t152 = call %Token @Parser_advance(ptr %t151)
   store %Token %t152, ptr %t
@@ -4957,34 +4977,34 @@ while.body.611:
   %t154 = load ptr, ptr %t153
   %t155 = call ptr @ystr_new(ptr @.str.209)
   %t156 = call i1 @String_eq_cstr(ptr %t154, ptr %t155)
-  br i1 %t156, label %then.613, label %merge.615
-then.613:
+  br i1 %t156, label %then.628, label %merge.630
+then.628:
   %t157 = load i64, ptr %depth
   %t158 = add i64 %t157, 1
   store i64 %t158, ptr %depth
-  br label %merge.615
-merge.615:
+  br label %merge.630
+merge.630:
   ; lvalue .lexeme
   %t159 = getelementptr %Token, ptr %t, i32 0, i32 3
   %t160 = load ptr, ptr %t159
   %t161 = call ptr @ystr_new(ptr @.str.210)
   %t162 = call i1 @String_eq_cstr(ptr %t160, ptr %t161)
-  br i1 %t162, label %then.616, label %merge.618
-then.616:
+  br i1 %t162, label %then.631, label %merge.633
+then.631:
   %t163 = load i64, ptr %depth
   %t164 = sub i64 %t163, 1
   store i64 %t164, ptr %depth
-  br label %merge.618
-merge.618:
-  br label %while.cond.610
-while.end.612:
+  br label %merge.633
+merge.633:
+  br label %while.cond.625
+while.end.627:
   ret i1 1
-merge.609:
+merge.624:
   %t165 = load ptr, ptr %lex
   %t166 = call ptr @ystr_new(ptr @.str.211)
   %t167 = call i1 @String_eq_cstr(ptr %t165, ptr %t166)
-  br i1 %t167, label %then.619, label %merge.621
-then.619:
+  br i1 %t167, label %then.634, label %merge.636
+then.634:
   %t168 = load ptr, ptr %p
   %t169 = call %Token @Parser_advance(ptr %t168)
   %t170 = load ptr, ptr %p
@@ -4996,11 +5016,11 @@ then.619:
   %t176 = load ptr, ptr %t175
   call void @Parser_expect_token(ptr %t172, ptr %t176)
   store i1 1, ptr %parsing_impl
-  br label %while.cond.622
-while.cond.622:
+  br label %while.cond.637
+while.cond.637:
   %t178 = load i1, ptr %parsing_impl
-  br i1 %t178, label %while.body.623, label %while.end.624
-while.body.623:
+  br i1 %t178, label %while.body.638, label %while.end.639
+while.body.638:
   %t179 = load ptr, ptr %p
   %t180 = call %Token @Parser_peek(ptr %t179)
   store %Token %t180, ptr %check
@@ -5009,37 +5029,37 @@ while.body.623:
   %t182 = load ptr, ptr %t181
   %t183 = call ptr @ystr_new(ptr @.str.214)
   %t184 = call i1 @String_eq_cstr(ptr %t182, ptr %t183)
-  br i1 %t184, label %then.625, label %else.626
-then.625:
+  br i1 %t184, label %then.640, label %else.641
+then.640:
   store i1 0, ptr %parsing_impl
-  br label %merge.627
-else.626:
+  br label %merge.642
+else.641:
   store i32 1, ptr %method_safe
   ; lvalue .lexeme
   %t185 = getelementptr %Token, ptr %check, i32 0, i32 3
   %t186 = load ptr, ptr %t185
   %t187 = call ptr @ystr_new(ptr @.str.215)
   %t188 = call i1 @String_eq_cstr(ptr %t186, ptr %t187)
-  br i1 %t188, label %then.628, label %else.629
-then.628:
+  br i1 %t188, label %then.643, label %else.644
+then.643:
   %t189 = load ptr, ptr %p
   %t190 = call %Token @Parser_advance(ptr %t189)
   store i32 0, ptr %method_safe
-  br label %merge.630
-else.629:
+  br label %merge.645
+else.644:
   ; lvalue .lexeme
   %t191 = getelementptr %Token, ptr %check, i32 0, i32 3
   %t192 = load ptr, ptr %t191
   %t193 = call ptr @ystr_new(ptr @.str.216)
   %t194 = call i1 @String_eq_cstr(ptr %t192, ptr %t193)
-  br i1 %t194, label %then.631, label %merge.633
-then.631:
+  br i1 %t194, label %then.646, label %merge.648
+then.646:
   %t195 = load ptr, ptr %p
   %t196 = call %Token @Parser_advance(ptr %t195)
-  br label %merge.633
-merge.633:
-  br label %merge.630
-merge.630:
+  br label %merge.648
+merge.648:
+  br label %merge.645
+merge.645:
   %t197 = load ptr, ptr %p
   %t198 = call %Token @Parser_peek(ptr %t197)
   store %Token %t198, ptr %pub_check
@@ -5048,12 +5068,12 @@ merge.630:
   %t200 = load ptr, ptr %t199
   %t201 = call ptr @ystr_new(ptr @.str.217)
   %t202 = call i1 @String_eq_cstr(ptr %t200, ptr %t201)
-  br i1 %t202, label %then.634, label %merge.636
-then.634:
+  br i1 %t202, label %then.649, label %merge.651
+then.649:
   %t203 = load ptr, ptr %p
   %t204 = call %Token @Parser_advance(ptr %t203)
-  br label %merge.636
-merge.636:
+  br label %merge.651
+merge.651:
   %t205 = load ptr, ptr %p
   %t206 = call ptr @ystr_new(ptr @.str.218)
   %t208 = call ptr @ystr_new(ptr @.str.219)
@@ -5063,30 +5083,30 @@ merge.636:
   %t212 = load ptr, ptr %arena
   %t213 = load i32, ptr %method_safe
   %t214 = call i64 @Parser_parse_func_decl(ptr %t211, ptr %t212, i32 %t213)
-  br label %merge.627
-merge.627:
-  br label %while.cond.622
-while.end.624:
+  br label %merge.642
+merge.642:
+  br label %while.cond.637
+while.end.639:
   %t215 = load ptr, ptr %p
   %t216 = call ptr @ystr_new(ptr @.str.220)
   %t218 = call ptr @ystr_new(ptr @.str.221)
   %t219 = load ptr, ptr %t218
   call void @Parser_expect_token(ptr %t215, ptr %t219)
   ret i1 1
-merge.621:
+merge.636:
   %t221 = load ptr, ptr %lex
   %t222 = call ptr @ystr_new(ptr @.str.222)
   %t223 = call i1 @String_eq_cstr(ptr %t221, ptr %t222)
-  br i1 %t223, label %then.637, label %merge.639
-then.637:
+  br i1 %t223, label %then.652, label %merge.654
+then.652:
   %t224 = load ptr, ptr %p
   %t225 = call %Token @Parser_advance(ptr %t224)
   store i1 1, ptr %skip_import
-  br label %while.cond.640
-while.cond.640:
+  br label %while.cond.655
+while.cond.655:
   %t226 = load i1, ptr %skip_import
-  br i1 %t226, label %while.body.641, label %while.end.642
-while.body.641:
+  br i1 %t226, label %while.body.656, label %while.end.657
+while.body.656:
   %t227 = load ptr, ptr %p
   %t228 = call %Token @Parser_advance(ptr %t227)
   store %Token %t228, ptr %t
@@ -5095,22 +5115,22 @@ while.body.641:
   %t230 = load ptr, ptr %t229
   %t231 = call ptr @ystr_new(ptr @.str.223)
   %t232 = call i1 @String_eq_cstr(ptr %t230, ptr %t231)
-  br i1 %t232, label %then.643, label %merge.645
-then.643:
+  br i1 %t232, label %then.658, label %merge.660
+then.658:
   store i1 0, ptr %skip_import
-  br label %merge.645
-merge.645:
-  br label %while.cond.640
-while.end.642:
+  br label %merge.660
+merge.660:
+  br label %while.cond.655
+while.end.657:
   ret i1 1
-merge.639:
+merge.654:
   %t233 = load ptr, ptr %lex
   %t234 = call ptr @ystr_new(ptr @.str.224)
   %t235 = call i1 @String_eq_cstr(ptr %t233, ptr %t234)
-  br i1 %t235, label %then.646, label %merge.648
-then.646:
+  br i1 %t235, label %then.661, label %merge.663
+then.661:
   ret i1 0
-merge.648:
+merge.663:
   %t236 = call ptr @ystr_new(ptr @.str.225)
   call void @print(ptr %t236)
   %t238 = load ptr, ptr %lex
@@ -5132,24 +5152,24 @@ entry:
   %parsing = alloca i1
   %has_more = alloca i1
   store i1 1, ptr %parsing
-  br label %while.cond.649
-while.cond.649:
+  br label %while.cond.664
+while.cond.664:
   %t1 = load i1, ptr %parsing
-  br i1 %t1, label %while.body.650, label %while.end.651
-while.body.650:
+  br i1 %t1, label %while.body.665, label %while.end.666
+while.body.665:
   %t2 = load ptr, ptr %p
   %t3 = load ptr, ptr %arena
   %t4 = call i1 @Parser_parse_item(ptr %t2, ptr %t3)
   store i1 %t4, ptr %has_more
   %t5 = load i1, ptr %has_more
   %t6 = icmp eq i1 %t5, 0
-  br i1 %t6, label %then.652, label %merge.654
-then.652:
+  br i1 %t6, label %then.667, label %merge.669
+then.667:
   store i1 0, ptr %parsing
-  br label %merge.654
-merge.654:
-  br label %while.cond.649
-while.end.651:
+  br label %merge.669
+merge.669:
+  br label %while.cond.664
+while.end.666:
   ret void
 }
 
@@ -5212,102 +5232,112 @@ entry:
   %digit = alloca i64
   %t1 = load i64, ptr %val
   %t2 = icmp eq i64 %t1, 0
-  br i1 %t2, label %then.655, label %merge.657
-then.655:
+  br i1 %t2, label %then.670, label %merge.672
+then.670:
   %t3 = call ptr @ystr_new(ptr @.str.238)
   ret ptr %t3
-merge.657:
+merge.672:
   %t4 = load i64, ptr %val
   store i64 %t4, ptr %temp
   %t5 = call ptr @ystr_new(ptr @.str.239)
   store ptr %t5, ptr %s
-  br label %while.cond.658
-while.cond.658:
+  br label %while.cond.673
+while.cond.673:
   %t6 = load i64, ptr %temp
   %t7 = icmp sgt i64 %t6, 0
-  br i1 %t7, label %while.body.659, label %while.end.660
-while.body.659:
+  br i1 %t7, label %while.body.674, label %while.end.675
+while.body.674:
   %t8 = load i64, ptr %temp
   %t9 = srem i64 %t8, 10
   store i64 %t9, ptr %digit
   %t10 = load i64, ptr %digit
   %t11 = icmp eq i64 %t10, 0
-  br i1 %t11, label %then.661, label %else.662
-then.661:
+  br i1 %t11, label %then.676, label %else.677
+then.676:
   %t12 = load ptr, ptr %s
   call void @String_push(ptr %t12, i8 48)
-  br label %merge.663
-else.662:
-  %t14 = load i64, ptr %digit
-  %t15 = icmp eq i64 %t14, 1
-  br i1 %t15, label %then.664, label %else.665
-then.664:
-  %t16 = load ptr, ptr %s
-  call void @String_push(ptr %t16, i8 49)
-  br label %merge.666
-else.665:
-  %t18 = load i64, ptr %digit
-  %t19 = icmp eq i64 %t18, 2
-  br i1 %t19, label %then.667, label %else.668
-then.667:
-  %t20 = load ptr, ptr %s
-  call void @String_push(ptr %t20, i8 50)
-  br label %merge.669
-else.668:
-  %t22 = load i64, ptr %digit
-  %t23 = icmp eq i64 %t22, 3
-  br i1 %t23, label %then.670, label %else.671
-then.670:
-  %t24 = load ptr, ptr %s
-  call void @String_push(ptr %t24, i8 51)
-  br label %merge.672
-else.671:
-  %t26 = load i64, ptr %digit
-  %t27 = icmp eq i64 %t26, 4
-  br i1 %t27, label %then.673, label %else.674
-then.673:
-  %t28 = load ptr, ptr %s
-  call void @String_push(ptr %t28, i8 52)
-  br label %merge.675
-else.674:
-  %t30 = load i64, ptr %digit
-  %t31 = icmp eq i64 %t30, 5
-  br i1 %t31, label %then.676, label %else.677
-then.676:
-  %t32 = load ptr, ptr %s
-  call void @String_push(ptr %t32, i8 53)
   br label %merge.678
 else.677:
-  %t34 = load i64, ptr %digit
-  %t35 = icmp eq i64 %t34, 6
-  br i1 %t35, label %then.679, label %else.680
+  %t14 = load i64, ptr %digit
+  %t15 = icmp eq i64 %t14, 1
+  br i1 %t15, label %then.679, label %else.680
 then.679:
-  %t36 = load ptr, ptr %s
-  call void @String_push(ptr %t36, i8 54)
+  %t16 = load ptr, ptr %s
+  call void @String_push(ptr %t16, i8 49)
   br label %merge.681
 else.680:
-  %t38 = load i64, ptr %digit
-  %t39 = icmp eq i64 %t38, 7
-  br i1 %t39, label %then.682, label %else.683
+  %t18 = load i64, ptr %digit
+  %t19 = icmp eq i64 %t18, 2
+  br i1 %t19, label %then.682, label %else.683
 then.682:
-  %t40 = load ptr, ptr %s
-  call void @String_push(ptr %t40, i8 55)
+  %t20 = load ptr, ptr %s
+  call void @String_push(ptr %t20, i8 50)
   br label %merge.684
 else.683:
-  %t42 = load i64, ptr %digit
-  %t43 = icmp eq i64 %t42, 8
-  br i1 %t43, label %then.685, label %else.686
+  %t22 = load i64, ptr %digit
+  %t23 = icmp eq i64 %t22, 3
+  br i1 %t23, label %then.685, label %else.686
 then.685:
-  %t44 = load ptr, ptr %s
-  call void @String_push(ptr %t44, i8 56)
+  %t24 = load ptr, ptr %s
+  call void @String_push(ptr %t24, i8 51)
   br label %merge.687
 else.686:
+  %t26 = load i64, ptr %digit
+  %t27 = icmp eq i64 %t26, 4
+  br i1 %t27, label %then.688, label %else.689
+then.688:
+  %t28 = load ptr, ptr %s
+  call void @String_push(ptr %t28, i8 52)
+  br label %merge.690
+else.689:
+  %t30 = load i64, ptr %digit
+  %t31 = icmp eq i64 %t30, 5
+  br i1 %t31, label %then.691, label %else.692
+then.691:
+  %t32 = load ptr, ptr %s
+  call void @String_push(ptr %t32, i8 53)
+  br label %merge.693
+else.692:
+  %t34 = load i64, ptr %digit
+  %t35 = icmp eq i64 %t34, 6
+  br i1 %t35, label %then.694, label %else.695
+then.694:
+  %t36 = load ptr, ptr %s
+  call void @String_push(ptr %t36, i8 54)
+  br label %merge.696
+else.695:
+  %t38 = load i64, ptr %digit
+  %t39 = icmp eq i64 %t38, 7
+  br i1 %t39, label %then.697, label %else.698
+then.697:
+  %t40 = load ptr, ptr %s
+  call void @String_push(ptr %t40, i8 55)
+  br label %merge.699
+else.698:
+  %t42 = load i64, ptr %digit
+  %t43 = icmp eq i64 %t42, 8
+  br i1 %t43, label %then.700, label %else.701
+then.700:
+  %t44 = load ptr, ptr %s
+  call void @String_push(ptr %t44, i8 56)
+  br label %merge.702
+else.701:
   %t46 = load i64, ptr %digit
   %t47 = icmp eq i64 %t46, 9
-  br i1 %t47, label %then.688, label %merge.690
-then.688:
+  br i1 %t47, label %then.703, label %merge.705
+then.703:
   %t48 = load ptr, ptr %s
   call void @String_push(ptr %t48, i8 57)
+  br label %merge.705
+merge.705:
+  br label %merge.702
+merge.702:
+  br label %merge.699
+merge.699:
+  br label %merge.696
+merge.696:
+  br label %merge.693
+merge.693:
   br label %merge.690
 merge.690:
   br label %merge.687
@@ -5318,21 +5348,11 @@ merge.684:
 merge.681:
   br label %merge.678
 merge.678:
-  br label %merge.675
-merge.675:
-  br label %merge.672
-merge.672:
-  br label %merge.669
-merge.669:
-  br label %merge.666
-merge.666:
-  br label %merge.663
-merge.663:
   %t50 = load i64, ptr %temp
   %t51 = sdiv i64 %t50, 10
   store i64 %t51, ptr %temp
-  br label %while.cond.658
-while.end.660:
+  br label %while.cond.673
+while.end.675:
   %t52 = load ptr, ptr %s
   ret ptr %t52
 }
@@ -5457,15 +5477,15 @@ entry:
   call void @String_push_str(ptr %t30, ptr %t33)
   %t35 = sext i32 0 to i64
   store i64 %t35, ptr %p
-  br label %while.cond.691
-while.cond.691:
+  br label %while.cond.706
+while.cond.706:
   %t36 = load i64, ptr %p
   ; lvalue .param_count
   %t37 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 3
   %t38 = load i64, ptr %t37
   %t39 = icmp slt i64 %t36, %t38
-  br i1 %t39, label %while.body.692, label %while.end.693
-while.body.692:
+  br i1 %t39, label %while.body.707, label %while.end.708
+while.body.707:
   %t40 = load ptr, ptr %arena
   ; lvalue .params
   %t41 = getelementptr %AstArena, ptr %t40, i32 0, i32 2
@@ -5511,8 +5531,8 @@ while.body.692:
   %t76 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 3
   %t77 = load i64, ptr %t76
   %t78 = icmp slt i64 %t75, %t77
-  br i1 %t78, label %then.694, label %merge.696
-then.694:
+  br i1 %t78, label %then.709, label %merge.711
+then.709:
   %t79 = load ptr, ptr %e
   ; lvalue .buffer
   %t80 = getelementptr %LlvmEmitter, ptr %t79, i32 0, i32 0
@@ -5520,13 +5540,13 @@ then.694:
   %t82 = call ptr @ystr_new(ptr @.str.251)
   %t84 = call ptr @ystr_new(ptr @.str.252)
   call void @String_push_str(ptr %t81, ptr %t84)
-  br label %merge.696
-merge.696:
+  br label %merge.711
+merge.711:
   %t86 = load i64, ptr %p
   %t87 = add i64 %t86, 1
   store i64 %t87, ptr %p
-  br label %while.cond.691
-while.end.693:
+  br label %while.cond.706
+while.end.708:
   %t88 = load ptr, ptr %e
   ; lvalue .buffer
   %t89 = getelementptr %LlvmEmitter, ptr %t88, i32 0, i32 0
@@ -5536,15 +5556,15 @@ while.end.693:
   call void @String_push_str(ptr %t90, ptr %t93)
   %t95 = sext i32 0 to i64
   store i64 %t95, ptr %ap
-  br label %while.cond.697
-while.cond.697:
+  br label %while.cond.712
+while.cond.712:
   %t96 = load i64, ptr %ap
   ; lvalue .param_count
   %t97 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 3
   %t98 = load i64, ptr %t97
   %t99 = icmp slt i64 %t96, %t98
-  br i1 %t99, label %while.body.698, label %while.end.699
-while.body.698:
+  br i1 %t99, label %while.body.713, label %while.end.714
+while.body.713:
   %t100 = load ptr, ptr %arena
   ; lvalue .params
   %t101 = getelementptr %AstArena, ptr %t100, i32 0, i32 2
@@ -5628,19 +5648,19 @@ while.body.698:
   %t171 = load i64, ptr %ap
   %t172 = add i64 %t171, 1
   store i64 %t172, ptr %ap
-  br label %while.cond.697
-while.end.699:
+  br label %while.cond.712
+while.end.714:
   %t173 = sext i32 0 to i64
   store i64 %t173, ptr %s
-  br label %while.cond.700
-while.cond.700:
+  br label %while.cond.715
+while.cond.715:
   %t174 = load i64, ptr %s
   ; lvalue .body_count
   %t175 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 5
   %t176 = load i64, ptr %t175
   %t177 = icmp slt i64 %t174, %t176
-  br i1 %t177, label %while.body.701, label %while.end.702
-while.body.701:
+  br i1 %t177, label %while.body.716, label %while.end.717
+while.body.716:
   %t178 = load ptr, ptr %e
   %t179 = load ptr, ptr %arena
   ; lvalue .body_start
@@ -5652,8 +5672,8 @@ while.body.701:
   %t185 = load i64, ptr %s
   %t186 = add i64 %t185, 1
   store i64 %t186, ptr %s
-  br label %while.cond.700
-while.end.702:
+  br label %while.cond.715
+while.end.717:
   %t187 = load ptr, ptr %e
   ; lvalue .buffer
   %t188 = getelementptr %LlvmEmitter, ptr %t187, i32 0, i32 0
@@ -5713,8 +5733,8 @@ entry:
   %t10 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
   %t11 = load i32, ptr %t10
   %t12 = icmp eq i32 %t11, 0
-  br i1 %t12, label %then.703, label %else.704
-then.703:
+  br i1 %t12, label %then.718, label %else.719
+then.718:
   ; lvalue .data
   %t13 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
   ; lvalue payload overlay .Let
@@ -5752,8 +5772,8 @@ then.703:
   call void @String_push_str(ptr %t37, ptr %t40)
   %t42 = load i64, ptr %init_idx
   %t43 = icmp sgt i64 %t42, 0
-  br i1 %t43, label %then.706, label %merge.708
-then.706:
+  br i1 %t43, label %then.721, label %merge.723
+then.721:
   %t44 = load ptr, ptr %e
   %t45 = load ptr, ptr %arena
   %t46 = load i64, ptr %init_idx
@@ -5793,16 +5813,16 @@ then.706:
   %t78 = call ptr @ystr_new(ptr @.str.275)
   %t80 = call ptr @ystr_new(ptr @.str.276)
   call void @String_push_str(ptr %t77, ptr %t80)
-  br label %merge.708
-merge.708:
-  br label %merge.705
-else.704:
+  br label %merge.723
+merge.723:
+  br label %merge.720
+else.719:
   ; lvalue .tag
   %t82 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
   %t83 = load i32, ptr %t82
   %t84 = icmp eq i32 %t83, 6
-  br i1 %t84, label %then.709, label %else.710
-then.709:
+  br i1 %t84, label %then.724, label %else.725
+then.724:
   ; lvalue .data
   %t85 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
   ; lvalue payload overlay .Assign
@@ -5862,14 +5882,14 @@ then.709:
   %t132 = call ptr @ystr_new(ptr @.str.281)
   %t134 = call ptr @ystr_new(ptr @.str.282)
   call void @String_push_str(ptr %t131, ptr %t134)
-  br label %merge.711
-else.710:
+  br label %merge.726
+else.725:
   ; lvalue .tag
   %t136 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
   %t137 = load i32, ptr %t136
   %t138 = icmp eq i32 %t137, 1
-  br i1 %t138, label %then.712, label %else.713
-then.712:
+  br i1 %t138, label %then.727, label %else.728
+then.727:
   ; lvalue .data
   %t139 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
   ; lvalue payload overlay .Return
@@ -5879,8 +5899,8 @@ then.712:
   store i64 %t142, ptr %ret_idx
   %t143 = load i64, ptr %ret_idx
   %t144 = icmp sgt i64 %t143, 0
-  br i1 %t144, label %then.715, label %else.716
-then.715:
+  br i1 %t144, label %then.730, label %else.731
+then.730:
   %t145 = load ptr, ptr %e
   %t146 = load ptr, ptr %arena
   %t147 = load i64, ptr %ret_idx
@@ -5907,8 +5927,8 @@ then.715:
   %t166 = call ptr @ystr_new(ptr @.str.285)
   %t168 = call ptr @ystr_new(ptr @.str.286)
   call void @String_push_str(ptr %t165, ptr %t168)
-  br label %merge.717
-else.716:
+  br label %merge.732
+else.731:
   %t170 = load ptr, ptr %e
   ; lvalue .buffer
   %t171 = getelementptr %LlvmEmitter, ptr %t170, i32 0, i32 0
@@ -5916,16 +5936,16 @@ else.716:
   %t173 = call ptr @ystr_new(ptr @.str.287)
   %t175 = call ptr @ystr_new(ptr @.str.288)
   call void @String_push_str(ptr %t172, ptr %t175)
-  br label %merge.717
-merge.717:
-  br label %merge.714
-else.713:
+  br label %merge.732
+merge.732:
+  br label %merge.729
+else.728:
   ; lvalue .tag
   %t177 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
   %t178 = load i32, ptr %t177
   %t179 = icmp eq i32 %t178, 2
-  br i1 %t179, label %then.718, label %else.719
-then.718:
+  br i1 %t179, label %then.733, label %else.734
+then.733:
   ; lvalue .data
   %t180 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
   ; lvalue payload overlay .If
@@ -6020,24 +6040,24 @@ then.718:
   call void @String_push_str(ptr %t251, ptr %t254)
   %t256 = load i64, ptr %else_count
   %t257 = icmp sgt i64 %t256, 0
-  br i1 %t257, label %then.721, label %else.722
-then.721:
+  br i1 %t257, label %then.736, label %else.737
+then.736:
   %t258 = load ptr, ptr %e
   ; lvalue .buffer
   %t259 = getelementptr %LlvmEmitter, ptr %t258, i32 0, i32 0
   %t260 = load ptr, ptr %t259
   %t261 = load ptr, ptr %else_lbl
   call void @String_push_str(ptr %t260, ptr %else_lbl)
-  br label %merge.723
-else.722:
+  br label %merge.738
+else.737:
   %t264 = load ptr, ptr %e
   ; lvalue .buffer
   %t265 = getelementptr %LlvmEmitter, ptr %t264, i32 0, i32 0
   %t266 = load ptr, ptr %t265
   %t267 = load ptr, ptr %merge_lbl
   call void @String_push_str(ptr %t266, ptr %merge_lbl)
-  br label %merge.723
-merge.723:
+  br label %merge.738
+merge.738:
   %t270 = load ptr, ptr %e
   ; lvalue .buffer
   %t271 = getelementptr %LlvmEmitter, ptr %t270, i32 0, i32 0
@@ -6060,13 +6080,13 @@ merge.723:
   call void @String_push_str(ptr %t285, ptr %t288)
   %t290 = sext i32 0 to i64
   store i64 %t290, ptr %i
-  br label %while.cond.724
-while.cond.724:
+  br label %while.cond.739
+while.cond.739:
   %t291 = load i64, ptr %i
   %t292 = load i64, ptr %then_count
   %t293 = icmp slt i64 %t291, %t292
-  br i1 %t293, label %while.body.725, label %while.end.726
-while.body.725:
+  br i1 %t293, label %while.body.740, label %while.end.741
+while.body.740:
   %t294 = load ptr, ptr %e
   %t295 = load ptr, ptr %arena
   %t296 = load i64, ptr %then_start
@@ -6076,8 +6096,8 @@ while.body.725:
   %t300 = load i64, ptr %i
   %t301 = add i64 %t300, 1
   store i64 %t301, ptr %i
-  br label %while.cond.724
-while.end.726:
+  br label %while.cond.739
+while.end.741:
   %t302 = load ptr, ptr %e
   ; lvalue .buffer
   %t303 = getelementptr %LlvmEmitter, ptr %t302, i32 0, i32 0
@@ -6100,8 +6120,8 @@ while.end.726:
   call void @String_push_str(ptr %t317, ptr %t320)
   %t322 = load i64, ptr %else_count
   %t323 = icmp sgt i64 %t322, 0
-  br i1 %t323, label %then.727, label %merge.729
-then.727:
+  br i1 %t323, label %then.742, label %merge.744
+then.742:
   %t324 = load ptr, ptr %e
   ; lvalue .buffer
   %t325 = getelementptr %LlvmEmitter, ptr %t324, i32 0, i32 0
@@ -6117,13 +6137,13 @@ then.727:
   call void @String_push_str(ptr %t332, ptr %t335)
   %t337 = sext i32 0 to i64
   store i64 %t337, ptr %j
-  br label %while.cond.730
-while.cond.730:
+  br label %while.cond.745
+while.cond.745:
   %t338 = load i64, ptr %j
   %t339 = load i64, ptr %else_count
   %t340 = icmp slt i64 %t338, %t339
-  br i1 %t340, label %while.body.731, label %while.end.732
-while.body.731:
+  br i1 %t340, label %while.body.746, label %while.end.747
+while.body.746:
   %t341 = load ptr, ptr %e
   %t342 = load ptr, ptr %arena
   %t343 = load i64, ptr %else_start
@@ -6133,8 +6153,8 @@ while.body.731:
   %t347 = load i64, ptr %j
   %t348 = add i64 %t347, 1
   store i64 %t348, ptr %j
-  br label %while.cond.730
-while.end.732:
+  br label %while.cond.745
+while.end.747:
   %t349 = load ptr, ptr %e
   ; lvalue .buffer
   %t350 = getelementptr %LlvmEmitter, ptr %t349, i32 0, i32 0
@@ -6155,8 +6175,8 @@ while.end.732:
   %t365 = call ptr @ystr_new(ptr @.str.313)
   %t367 = call ptr @ystr_new(ptr @.str.314)
   call void @String_push_str(ptr %t364, ptr %t367)
-  br label %merge.729
-merge.729:
+  br label %merge.744
+merge.744:
   %t369 = load ptr, ptr %e
   ; lvalue .buffer
   %t370 = getelementptr %LlvmEmitter, ptr %t369, i32 0, i32 0
@@ -6170,14 +6190,14 @@ merge.729:
   %t378 = call ptr @ystr_new(ptr @.str.315)
   %t380 = call ptr @ystr_new(ptr @.str.316)
   call void @String_push_str(ptr %t377, ptr %t380)
-  br label %merge.720
-else.719:
+  br label %merge.735
+else.734:
   ; lvalue .tag
   %t382 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
   %t383 = load i32, ptr %t382
   %t384 = icmp eq i32 %t383, 3
-  br i1 %t384, label %then.733, label %else.734
-then.733:
+  br i1 %t384, label %then.748, label %else.749
+then.748:
   ; lvalue .data
   %t385 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
   ; lvalue payload overlay .While
@@ -6317,13 +6337,13 @@ then.733:
   call void @String_push_str(ptr %t507, ptr %t510)
   %t512 = sext i32 0 to i64
   store i64 %t512, ptr %k
-  br label %while.cond.736
-while.cond.736:
+  br label %while.cond.751
+while.cond.751:
   %t513 = load i64, ptr %k
   %t514 = load i64, ptr %body_count
   %t515 = icmp slt i64 %t513, %t514
-  br i1 %t515, label %while.body.737, label %while.end.738
-while.body.737:
+  br i1 %t515, label %while.body.752, label %while.end.753
+while.body.752:
   %t516 = load ptr, ptr %e
   %t517 = load ptr, ptr %arena
   %t518 = load i64, ptr %body_start
@@ -6333,8 +6353,8 @@ while.body.737:
   %t522 = load i64, ptr %k
   %t523 = add i64 %t522, 1
   store i64 %t523, ptr %k
-  br label %while.cond.736
-while.end.738:
+  br label %while.cond.751
+while.end.753:
   %t524 = load ptr, ptr %e
   ; lvalue .buffer
   %t525 = getelementptr %LlvmEmitter, ptr %t524, i32 0, i32 0
@@ -6368,14 +6388,14 @@ while.end.738:
   %t553 = call ptr @ystr_new(ptr @.str.343)
   %t555 = call ptr @ystr_new(ptr @.str.344)
   call void @String_push_str(ptr %t552, ptr %t555)
-  br label %merge.735
-else.734:
+  br label %merge.750
+else.749:
   ; lvalue .tag
   %t557 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
   %t558 = load i32, ptr %t557
   %t559 = icmp eq i32 %t558, 8
-  br i1 %t559, label %then.739, label %merge.741
-then.739:
+  br i1 %t559, label %then.754, label %merge.756
+then.754:
   ; lvalue .data
   %t560 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
   ; lvalue payload overlay .ExprStmt
@@ -6388,18 +6408,18 @@ then.739:
   %t566 = load i64, ptr %expr_idx
   %t567 = sub i64 %t566, 1
   %t568 = call ptr @LlvmEmitter_emit_expr(ptr %t564, ptr %t565, i64 %t567)
-  br label %merge.741
-merge.741:
+  br label %merge.756
+merge.756:
+  br label %merge.750
+merge.750:
   br label %merge.735
 merge.735:
+  br label %merge.729
+merge.729:
+  br label %merge.726
+merge.726:
   br label %merge.720
 merge.720:
-  br label %merge.714
-merge.714:
-  br label %merge.711
-merge.711:
-  br label %merge.705
-merge.705:
   ret void
 }
 
@@ -6428,8 +6448,8 @@ entry:
   %t10 = getelementptr %Expr, ptr %expr, i32 0, i32 0
   %t11 = load i32, ptr %t10
   %t12 = icmp eq i32 %t11, 0
-  br i1 %t12, label %then.742, label %merge.744
-then.742:
+  br i1 %t12, label %then.757, label %merge.759
+then.757:
   %t13 = call ptr @ystr_new(ptr @.str.345)
   store ptr %t13, ptr %res
   %t14 = load ptr, ptr %res
@@ -6447,7 +6467,7 @@ then.742:
   call void @String_push_str(ptr %t14, ptr %t22)
   %t24 = load ptr, ptr %res
   ret ptr %t24
-merge.744:
+merge.759:
   %t25 = load ptr, ptr %e
   %t26 = load ptr, ptr %arena
   %t27 = load i64, ptr %expr_idx
@@ -6491,8 +6511,8 @@ entry:
   %t10 = getelementptr %Expr, ptr %expr, i32 0, i32 0
   %t11 = load i32, ptr %t10
   %t12 = icmp eq i32 %t11, 1
-  br i1 %t12, label %then.745, label %else.746
-then.745:
+  br i1 %t12, label %then.760, label %else.761
+then.760:
   ; lvalue .data
   %t13 = getelementptr %Expr, ptr %expr, i32 0, i32 1
   ; lvalue payload overlay .IntLit
@@ -6501,13 +6521,13 @@ then.745:
   %t16 = load i64, ptr %t15
   %t17 = call ptr @LlvmEmitter_int_to_str(i64 %t16)
   ret ptr %t17
-else.746:
+else.761:
   ; lvalue .tag
   %t18 = getelementptr %Expr, ptr %expr, i32 0, i32 0
   %t19 = load i32, ptr %t18
   %t20 = icmp eq i32 %t19, 0
-  br i1 %t20, label %then.748, label %else.749
-then.748:
+  br i1 %t20, label %then.763, label %else.764
+then.763:
   %t21 = load ptr, ptr %e
   %t22 = call ptr @LlvmEmitter_fresh_tmp(ptr %t21)
   store ptr %t22, ptr %tmp
@@ -6556,13 +6576,13 @@ then.748:
   call void @String_push_str(ptr %t57, ptr %t60)
   %t62 = load ptr, ptr %tmp
   ret ptr %t62
-else.749:
+else.764:
   ; lvalue .tag
   %t63 = getelementptr %Expr, ptr %expr, i32 0, i32 0
   %t64 = load i32, ptr %t63
   %t65 = icmp eq i32 %t64, 11
-  br i1 %t65, label %then.751, label %else.752
-then.751:
+  br i1 %t65, label %then.766, label %else.767
+then.766:
   %t66 = load ptr, ptr %e
   %t67 = load ptr, ptr %arena
   ; lvalue .data
@@ -6618,8 +6638,8 @@ then.751:
   call void @String_push_str(ptr %t104, ptr %t107)
   %t109 = load i32, ptr %op
   %t110 = icmp eq i32 %t109, 0
-  br i1 %t110, label %then.754, label %else.755
-then.754:
+  br i1 %t110, label %then.769, label %else.770
+then.769:
   %t111 = load ptr, ptr %e
   ; lvalue .buffer
   %t112 = getelementptr %LlvmEmitter, ptr %t111, i32 0, i32 0
@@ -6627,12 +6647,12 @@ then.754:
   %t114 = call ptr @ystr_new(ptr @.str.356)
   %t116 = call ptr @ystr_new(ptr @.str.357)
   call void @String_push_str(ptr %t113, ptr %t116)
-  br label %merge.756
-else.755:
+  br label %merge.771
+else.770:
   %t118 = load i32, ptr %op
   %t119 = icmp eq i32 %t118, 1
-  br i1 %t119, label %then.757, label %else.758
-then.757:
+  br i1 %t119, label %then.772, label %else.773
+then.772:
   %t120 = load ptr, ptr %e
   ; lvalue .buffer
   %t121 = getelementptr %LlvmEmitter, ptr %t120, i32 0, i32 0
@@ -6640,12 +6660,12 @@ then.757:
   %t123 = call ptr @ystr_new(ptr @.str.358)
   %t125 = call ptr @ystr_new(ptr @.str.359)
   call void @String_push_str(ptr %t122, ptr %t125)
-  br label %merge.759
-else.758:
+  br label %merge.774
+else.773:
   %t127 = load i32, ptr %op
   %t128 = icmp eq i32 %t127, 2
-  br i1 %t128, label %then.760, label %else.761
-then.760:
+  br i1 %t128, label %then.775, label %else.776
+then.775:
   %t129 = load ptr, ptr %e
   ; lvalue .buffer
   %t130 = getelementptr %LlvmEmitter, ptr %t129, i32 0, i32 0
@@ -6653,12 +6673,12 @@ then.760:
   %t132 = call ptr @ystr_new(ptr @.str.360)
   %t134 = call ptr @ystr_new(ptr @.str.361)
   call void @String_push_str(ptr %t131, ptr %t134)
-  br label %merge.762
-else.761:
+  br label %merge.777
+else.776:
   %t136 = load i32, ptr %op
   %t137 = icmp eq i32 %t136, 3
-  br i1 %t137, label %then.763, label %else.764
-then.763:
+  br i1 %t137, label %then.778, label %else.779
+then.778:
   %t138 = load ptr, ptr %e
   ; lvalue .buffer
   %t139 = getelementptr %LlvmEmitter, ptr %t138, i32 0, i32 0
@@ -6666,12 +6686,12 @@ then.763:
   %t141 = call ptr @ystr_new(ptr @.str.362)
   %t143 = call ptr @ystr_new(ptr @.str.363)
   call void @String_push_str(ptr %t140, ptr %t143)
-  br label %merge.765
-else.764:
+  br label %merge.780
+else.779:
   %t145 = load i32, ptr %op
   %t146 = icmp eq i32 %t145, 5
-  br i1 %t146, label %then.766, label %else.767
-then.766:
+  br i1 %t146, label %then.781, label %else.782
+then.781:
   %t147 = load ptr, ptr %e
   ; lvalue .buffer
   %t148 = getelementptr %LlvmEmitter, ptr %t147, i32 0, i32 0
@@ -6679,12 +6699,12 @@ then.766:
   %t150 = call ptr @ystr_new(ptr @.str.364)
   %t152 = call ptr @ystr_new(ptr @.str.365)
   call void @String_push_str(ptr %t149, ptr %t152)
-  br label %merge.768
-else.767:
+  br label %merge.783
+else.782:
   %t154 = load i32, ptr %op
   %t155 = icmp eq i32 %t154, 6
-  br i1 %t155, label %then.769, label %else.770
-then.769:
+  br i1 %t155, label %then.784, label %else.785
+then.784:
   %t156 = load ptr, ptr %e
   ; lvalue .buffer
   %t157 = getelementptr %LlvmEmitter, ptr %t156, i32 0, i32 0
@@ -6692,12 +6712,12 @@ then.769:
   %t159 = call ptr @ystr_new(ptr @.str.366)
   %t161 = call ptr @ystr_new(ptr @.str.367)
   call void @String_push_str(ptr %t158, ptr %t161)
-  br label %merge.771
-else.770:
+  br label %merge.786
+else.785:
   %t163 = load i32, ptr %op
   %t164 = icmp eq i32 %t163, 7
-  br i1 %t164, label %then.772, label %else.773
-then.772:
+  br i1 %t164, label %then.787, label %else.788
+then.787:
   %t165 = load ptr, ptr %e
   ; lvalue .buffer
   %t166 = getelementptr %LlvmEmitter, ptr %t165, i32 0, i32 0
@@ -6705,12 +6725,12 @@ then.772:
   %t168 = call ptr @ystr_new(ptr @.str.368)
   %t170 = call ptr @ystr_new(ptr @.str.369)
   call void @String_push_str(ptr %t167, ptr %t170)
-  br label %merge.774
-else.773:
+  br label %merge.789
+else.788:
   %t172 = load i32, ptr %op
   %t173 = icmp eq i32 %t172, 8
-  br i1 %t173, label %then.775, label %else.776
-then.775:
+  br i1 %t173, label %then.790, label %else.791
+then.790:
   %t174 = load ptr, ptr %e
   ; lvalue .buffer
   %t175 = getelementptr %LlvmEmitter, ptr %t174, i32 0, i32 0
@@ -6718,8 +6738,8 @@ then.775:
   %t177 = call ptr @ystr_new(ptr @.str.370)
   %t179 = call ptr @ystr_new(ptr @.str.371)
   call void @String_push_str(ptr %t176, ptr %t179)
-  br label %merge.777
-else.776:
+  br label %merge.792
+else.791:
   %t181 = load ptr, ptr %e
   ; lvalue .buffer
   %t182 = getelementptr %LlvmEmitter, ptr %t181, i32 0, i32 0
@@ -6727,22 +6747,22 @@ else.776:
   %t184 = call ptr @ystr_new(ptr @.str.372)
   %t186 = call ptr @ystr_new(ptr @.str.373)
   call void @String_push_str(ptr %t183, ptr %t186)
+  br label %merge.792
+merge.792:
+  br label %merge.789
+merge.789:
+  br label %merge.786
+merge.786:
+  br label %merge.783
+merge.783:
+  br label %merge.780
+merge.780:
   br label %merge.777
 merge.777:
   br label %merge.774
 merge.774:
   br label %merge.771
 merge.771:
-  br label %merge.768
-merge.768:
-  br label %merge.765
-merge.765:
-  br label %merge.762
-merge.762:
-  br label %merge.759
-merge.759:
-  br label %merge.756
-merge.756:
   %t188 = load ptr, ptr %e
   ; lvalue .buffer
   %t189 = getelementptr %LlvmEmitter, ptr %t188, i32 0, i32 0
@@ -6771,13 +6791,13 @@ merge.756:
   call void @String_push_str(ptr %t209, ptr %t212)
   %t214 = load ptr, ptr %tmp
   ret ptr %t214
-else.752:
+else.767:
   ; lvalue .tag
   %t215 = getelementptr %Expr, ptr %expr, i32 0, i32 0
   %t216 = load i32, ptr %t215
   %t217 = icmp eq i32 %t216, 7
-  br i1 %t217, label %then.778, label %merge.780
-then.778:
+  br i1 %t217, label %then.793, label %merge.795
+then.793:
   ; lvalue .data
   %t218 = getelementptr %Expr, ptr %expr, i32 0, i32 1
   ; lvalue payload overlay .Call
@@ -6803,8 +6823,8 @@ then.778:
   %t233 = getelementptr %Expr, ptr %func_expr, i32 0, i32 0
   %t234 = load i32, ptr %t233
   %t235 = icmp eq i32 %t234, 0
-  br i1 %t235, label %then.781, label %merge.783
-then.781:
+  br i1 %t235, label %then.796, label %merge.798
+then.796:
   ; lvalue .data
   %t236 = getelementptr %Expr, ptr %func_expr, i32 0, i32 1
   ; lvalue payload overlay .Ident
@@ -6818,8 +6838,8 @@ then.781:
   %t243 = getelementptr [8 x i64], ptr %t241, i32 0, i32 0
   %t244 = call ptr @String_clone(ptr %t243)
   store ptr %t244, ptr %func_name
-  br label %merge.783
-merge.783:
+  br label %merge.798
+merge.798:
   %t245 = load ptr, ptr %e
   %t246 = call ptr @LlvmEmitter_fresh_tmp(ptr %t245)
   store ptr %t246, ptr %tmp
@@ -6872,13 +6892,13 @@ merge.783:
   store i64 %t287, ptr %arg_count
   %t288 = sext i32 0 to i64
   store i64 %t288, ptr %i
-  br label %while.cond.784
-while.cond.784:
+  br label %while.cond.799
+while.cond.799:
   %t289 = load i64, ptr %i
   %t290 = load i64, ptr %arg_count
   %t291 = icmp slt i64 %t289, %t290
-  br i1 %t291, label %while.body.785, label %while.end.786
-while.body.785:
+  br i1 %t291, label %while.body.800, label %while.end.801
+while.body.800:
   %t292 = load ptr, ptr %arena
   ; lvalue .arg_indices
   %t293 = getelementptr %AstArena, ptr %t292, i32 0, i32 7
@@ -6915,8 +6935,8 @@ while.body.785:
   %t322 = add i64 %t321, 1
   %t323 = load i64, ptr %arg_count
   %t324 = icmp slt i64 %t322, %t323
-  br i1 %t324, label %then.787, label %merge.789
-then.787:
+  br i1 %t324, label %then.802, label %merge.804
+then.802:
   %t325 = load ptr, ptr %e
   ; lvalue .buffer
   %t326 = getelementptr %LlvmEmitter, ptr %t325, i32 0, i32 0
@@ -6924,13 +6944,13 @@ then.787:
   %t328 = call ptr @ystr_new(ptr @.str.387)
   %t330 = call ptr @ystr_new(ptr @.str.388)
   call void @String_push_str(ptr %t327, ptr %t330)
-  br label %merge.789
-merge.789:
+  br label %merge.804
+merge.804:
   %t332 = load i64, ptr %i
   %t333 = add i64 %t332, 1
   store i64 %t333, ptr %i
-  br label %while.cond.784
-while.end.786:
+  br label %while.cond.799
+while.end.801:
   %t334 = load ptr, ptr %e
   ; lvalue .buffer
   %t335 = getelementptr %LlvmEmitter, ptr %t334, i32 0, i32 0
@@ -6940,13 +6960,13 @@ while.end.786:
   call void @String_push_str(ptr %t336, ptr %t339)
   %t341 = load ptr, ptr %tmp
   ret ptr %t341
-merge.780:
-  br label %merge.753
-merge.753:
-  br label %merge.750
-merge.750:
-  br label %merge.747
-merge.747:
+merge.795:
+  br label %merge.768
+merge.768:
+  br label %merge.765
+merge.765:
+  br label %merge.762
+merge.762:
   %t342 = call ptr @ystr_new(ptr @.str.391)
   ret ptr %t342
 }
@@ -6977,81 +6997,78 @@ entry:
   store ptr %t9, ptr %source
   %t10 = call ptr @ystr_new(ptr @.str.395)
   call void @println(ptr %t10)
-  %t12 = call i32 @yprint_int(i32 123)
-  %t13 = load ptr, ptr %source
-  %t15 = load ptr, ptr %source
-  %t16 = call %Lexer @Lexer_new(ptr %t15)
-  store %Lexer %t16, ptr %lexer
-  %t17 = call i32 @yprint_int(i32 321)
-  %t18 = load %Lexer, ptr %lexer
-  %t20 = call ptr @Lexer_tokenize(ptr %lexer)
-  store ptr %t20, ptr %tokens
-  %t21 = load ptr, ptr %tokens
-  %t22 = call i64 @Vec_len(ptr %t21)
-  store i64 %t22, ptr %token_count
-  %t23 = call ptr @ystr_new(ptr @.str.396)
-  call void @print(ptr %t23)
-  %t25 = load i64, ptr %token_count
-  call void @print_int(i64 %t25)
-  %t27 = call ptr @ystr_new(ptr @.str.397)
-  call void @println(ptr %t27)
-  %t29 = call ptr @ystr_new(ptr @.str.398)
-  call void @println(ptr %t29)
-  %t31 = call %AstArena @AstArena_new()
-  store %AstArena %t31, ptr %arena
-  %t32 = load ptr, ptr %tokens
-  %t33 = load i64, ptr %token_count
-  %t34 = call %Parser @Parser_new(ptr %t32, i64 %t33)
-  store %Parser %t34, ptr %parser
-  %t35 = load %Parser, ptr %parser
-  %t36 = load %AstArena, ptr %arena
-  call void @Parser_parse_program(%Parser %t35, ptr %arena)
+  %t12 = load ptr, ptr %source
+  %t13 = call %Lexer @Lexer_new(ptr %t12)
+  store %Lexer %t13, ptr %lexer
+  %t14 = load %Lexer, ptr %lexer
+  %t16 = call ptr @Lexer_tokenize(ptr %lexer)
+  store ptr %t16, ptr %tokens
+  %t17 = load ptr, ptr %tokens
+  %t18 = call i64 @Vec_len(ptr %t17)
+  store i64 %t18, ptr %token_count
+  %t19 = call ptr @ystr_new(ptr @.str.396)
+  call void @print(ptr %t19)
+  %t21 = load i64, ptr %token_count
+  call void @print_int(i64 %t21)
+  %t23 = call ptr @ystr_new(ptr @.str.397)
+  call void @println(ptr %t23)
+  %t25 = call ptr @ystr_new(ptr @.str.398)
+  call void @println(ptr %t25)
+  %t27 = call %AstArena @AstArena_new()
+  store %AstArena %t27, ptr %arena
+  %t28 = load ptr, ptr %tokens
+  %t29 = load i64, ptr %token_count
+  %t30 = call %Parser @Parser_new(ptr %t28, i64 %t29)
+  store %Parser %t30, ptr %parser
+  %t31 = load %Parser, ptr %parser
+  %t32 = load %AstArena, ptr %arena
+  call void @Parser_parse_program(%Parser %t31, ptr %arena)
   ; lvalue .funcs
-  %t39 = getelementptr %AstArena, ptr %arena, i32 0, i32 3
-  %t40 = load ptr, ptr %t39
-  %t41 = call i64 @Vec_len(ptr %t40)
-  store i64 %t41, ptr %func_count
-  %t42 = call ptr @ystr_new(ptr @.str.399)
-  call void @print(ptr %t42)
-  %t44 = load i64, ptr %func_count
-  call void @print_int(i64 %t44)
-  %t46 = call ptr @ystr_new(ptr @.str.400)
-  call void @println(ptr %t46)
-  %t48 = call ptr @ystr_new(ptr @.str.401)
-  call void @println(ptr %t48)
-  %t50 = call %LlvmEmitter @LlvmEmitter_new()
-  store %LlvmEmitter %t50, ptr %emitter
-  %t51 = sext i32 0 to i64
-  store i64 %t51, ptr %i
-  br label %while.cond.790
-while.cond.790:
-  %t52 = load i64, ptr %i
-  %t53 = load i64, ptr %func_count
-  %t54 = icmp slt i64 %t52, %t53
-  br i1 %t54, label %while.body.791, label %while.end.792
-while.body.791:
-  %t55 = load %LlvmEmitter, ptr %emitter
-  %t57 = load %AstArena, ptr %arena
-  %t59 = load i64, ptr %i
-  call void @LlvmEmitter_emit_func(ptr %emitter, ptr %arena, i64 %t59)
-  %t61 = load i64, ptr %i
-  %t62 = add i64 %t61, 1
-  store i64 %t62, ptr %i
-  br label %while.cond.790
-while.end.792:
-  %t63 = call ptr @ystr_new(ptr @.str.402)
-  store ptr %t63, ptr %out_path
-  %t64 = load ptr, ptr %out_path
+  %t35 = getelementptr %AstArena, ptr %arena, i32 0, i32 3
+  %t36 = load ptr, ptr %t35
+  %t37 = call i64 @Vec_len(ptr %t36)
+  store i64 %t37, ptr %func_count
+  %t38 = call ptr @ystr_new(ptr @.str.399)
+  call void @print(ptr %t38)
+  %t40 = load i64, ptr %func_count
+  call void @print_int(i64 %t40)
+  %t42 = call ptr @ystr_new(ptr @.str.400)
+  call void @println(ptr %t42)
+  %t44 = call ptr @ystr_new(ptr @.str.401)
+  call void @println(ptr %t44)
+  %t46 = call %LlvmEmitter @LlvmEmitter_new()
+  store %LlvmEmitter %t46, ptr %emitter
+  %t47 = sext i32 0 to i64
+  store i64 %t47, ptr %i
+  br label %while.cond.805
+while.cond.805:
+  %t48 = load i64, ptr %i
+  %t49 = load i64, ptr %func_count
+  %t50 = icmp slt i64 %t48, %t49
+  br i1 %t50, label %while.body.806, label %while.end.807
+while.body.806:
+  %t51 = load %LlvmEmitter, ptr %emitter
+  %t53 = load %AstArena, ptr %arena
+  %t55 = load i64, ptr %i
+  call void @LlvmEmitter_emit_func(ptr %emitter, ptr %arena, i64 %t55)
+  %t57 = load i64, ptr %i
+  %t58 = add i64 %t57, 1
+  store i64 %t58, ptr %i
+  br label %while.cond.805
+while.end.807:
+  %t59 = call ptr @ystr_new(ptr @.str.402)
+  store ptr %t59, ptr %out_path
+  %t60 = load ptr, ptr %out_path
   ; lvalue .buffer
-  %t65 = getelementptr %LlvmEmitter, ptr %emitter, i32 0, i32 0
-  %t66 = load ptr, ptr %t65
+  %t61 = getelementptr %LlvmEmitter, ptr %emitter, i32 0, i32 0
+  %t62 = load ptr, ptr %t61
   ; lvalue .buffer
-  %t68 = getelementptr %LlvmEmitter, ptr %emitter, i32 0, i32 0
-  call void @File_write(ptr %t64, ptr %t68)
-  %t70 = call ptr @ystr_new(ptr @.str.403)
-  call void @println(ptr %t70)
-  %t72 = call ptr @ystr_new(ptr @.str.404)
-  call void @println(ptr %t72)
+  %t64 = getelementptr %LlvmEmitter, ptr %emitter, i32 0, i32 0
+  call void @File_write(ptr %t60, ptr %t64)
+  %t66 = call ptr @ystr_new(ptr @.str.403)
+  call void @println(ptr %t66)
+  %t68 = call ptr @ystr_new(ptr @.str.404)
+  call void @println(ptr %t68)
   ret i32 0
 }
 

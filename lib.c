@@ -12,9 +12,9 @@ typedef struct {
     size_t cap;
 } YStr;
 
-void ylexer_log(size_t pos, char ch) {
-    fprintf(stderr, "DEBUG: Lexer at pos=%zu, char='%c'\n", pos, ch);
-    fflush(stderr);
+void yprint_char(char c) {
+    printf("%c", c);
+    fflush(stdout);
 }
 
 typedef struct {
@@ -120,8 +120,6 @@ void* yvec_get(const YVec* v, size_t i) {
 char yvec_get_char(const YVec* v, size_t i) {
     void* ptr = yvec_get(v, i);
     char ch = ptr ? *((char*)ptr) : '\0';
-    fprintf(stderr, "DEBUG: yvec_get_char(pos=%zu) -> '%c'\n", i, ch);
-    fflush(stderr);
     return ch;
 }
 
