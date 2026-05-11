@@ -326,11 +326,14 @@ pub enum Expr {
         fields: Vec<(String, Box<Expr>)>,
         span: Span,
     },
+    /// Zero-initialization: `{}`
+    ZeroInit(Span),
 }
 
 impl Expr {
     pub fn span(&self) -> Span {
         match self {
+            Expr::ZeroInit(s) => s.clone(),
             Expr::Ident(_, s) => s.clone(),
             Expr::IntLit(_, s) => s.clone(),
             Expr::FloatLit(_, s) => s.clone(),
