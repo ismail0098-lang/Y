@@ -751,6 +751,34 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_empty() {
+        let mut lexer = Lexer::new("");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_tokenize_complex() {
+        let mut lexer = Lexer::new("let x = 42; // comment\n y -> z;");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 10);
+
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[1].kind, TokenKind::Ident("x".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Assign);
+        assert_eq!(tokens[3].kind, TokenKind::IntLit(42));
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[5].kind, TokenKind::Ident("y".to_string()));
+        assert_eq!(tokens[6].kind, TokenKind::Arrow);
+        assert_eq!(tokens[7].kind, TokenKind::Ident("z".to_string()));
+        assert_eq!(tokens[8].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[9].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_kernel_keyword() {
         let kinds = lex("kernel matmul");
         assert_eq!(kinds[0], TokenKind::Kernel);
