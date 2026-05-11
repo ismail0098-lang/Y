@@ -976,6 +976,16 @@ impl Parser {
             TokenKind::True => { self.advance(); Ok(Expr::BoolLit(true, span)) },
             TokenKind::False => { self.advance(); Ok(Expr::BoolLit(false, span)) },
             TokenKind::SelfKw => { self.advance(); Ok(Expr::SelfLit(span)) },
+            TokenKind::LBrace => {
+                // Check if it's `{}` for ZeroInit
+                let lookahead = self.tokens.get(self.pos + 1).map(|t| &t.kind).unwrap_or(&TokenKind::Eof);
+                if matches!(lookahead, TokenKind::RBrace) {
+                    self.advance(); // consume '{'
+                    self.advance(); // consume '}'
+                    return Ok(Expr::ZeroInit(span));
+                }
+                Err(format!("Line {}: Expected expression, found {:?}", tok.line, tok.kind))
+            },
             _ => {
                 if let Ok(name) = self.parse_any_ident() {
                     // Check for Struct Literal: `Ident { field: expr }` or `Ident {}`
