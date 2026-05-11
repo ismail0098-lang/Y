@@ -746,20 +746,7 @@ impl LlvmEmitter {
                         // For ZeroInit, the target pointer has already been memset. No further store needed.
                     } else {
                         let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
-                        if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
-                            let size_tmp_ptr = self.fresh_tmp();
-                            let size_tmp = self.fresh_tmp();
-                            writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
-                            writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
-
-                            let src_ptr = self.fresh_tmp();
-                            writeln!(&mut self.output, "  {} = alloca {}", src_ptr, dst_ty).unwrap();
-                            writeln!(&mut self.output, "  store {} {}, ptr {}", dst_ty, coerced, src_ptr).unwrap();
-
-                            writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_ptr, src_ptr, size_tmp).unwrap();
-                        } else {
-                            self.emit_store(&coerced, &target_ptr, &dst_ty);
-                        }
+                        self.emit_store(&coerced, &target_ptr, &dst_ty);
                     }
                 }
 
@@ -775,20 +762,7 @@ impl LlvmEmitter {
                     // ZeroInit handles memset directly into target_addr.
                 } else {
                     let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
-                    if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
-                        let size_tmp_ptr = self.fresh_tmp();
-                        let size_tmp = self.fresh_tmp();
-                        writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
-                        writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
-
-                        let src_ptr = self.fresh_tmp();
-                        writeln!(&mut self.output, "  {} = alloca {}", src_ptr, dst_ty).unwrap();
-                        writeln!(&mut self.output, "  store {} {}, ptr {}", dst_ty, coerced, src_ptr).unwrap();
-
-                        writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_addr, src_ptr, size_tmp).unwrap();
-                    } else {
-                        self.emit_store(&coerced, &target_addr, &dst_ty);
-                    }
+                    self.emit_store(&coerced, &target_addr, &dst_ty);
                 }
             }
             Stmt::Return(expr, _) => {
