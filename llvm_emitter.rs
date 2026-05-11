@@ -1496,10 +1496,37 @@ impl LlvmEmitter {
                 // Approximate base ty
                 let base_ty = self.infer_ast_type(base);
                 let struct_name = base_ty.trim_start_matches('&');
+                let normalize_field_ast_type = |fty: &str| -> Option<String> {
+                    match fty {
+                        // Already-valid AST spellings used elsewhere in this emitter.
+                        "Unknown" | "String" | "bool" | "char" | "i64" | "f64" | "f32" | "usize" => {
+                            Some(fty.to_string())
+                        }
+                        // Common LLVM IR spellings that can be losslessly mapped back.
+                        "i1" => Some("bool".into()),
+                        "i8" => Some("char".into()),
+                        "float" => Some("f32".into()),
+                        "double" => Some("f64".into()),
+                        "%YStr" => Some("String".into()),
+                        // `ptr` has lost the referent type, so it cannot safely participate
+                        // in later AST-based comparisons such as `&T`.
+                        "ptr" => None,
+                        // Struct IR types are emitted as `%Foo`; convert back to `Foo`.
+                        _ if fty.starts_with('%') => Some(fty.trim_start_matches('%').to_string()),
+                        // Preserve AST reference spellings if they are already present.
+                        _ if fty.starts_with('&') => Some(fty.to_string()),
+                        // For overlapping primitive spellings such as `i32`/`i64`, keep the
+                        // existing value rather than returning an LLVM-only pointer type.
+                        _ => Some(fty.to_string()),
+                    }
+                };
                 if let Some(fields) = self.structs.get(struct_name) {
                     for (fname, fty) in fields {
                         if fname == member {
-                            return fty.clone();
+                            if let Some(ast_fty) = normalize_field_ast_type(fty) {
+                                return ast_fty;
+                            }
+                            return "Unknown".into();
                         }
                     }
                 }
