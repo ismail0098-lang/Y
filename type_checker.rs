@@ -638,3 +638,24 @@ impl TypeChecker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{EnumDecl, Span};
+
+    #[test]
+    fn test_register_enum() {
+        let mut tc = TypeChecker::new();
+        let enum_decl = EnumDecl {
+            name: "TestEnum".to_string(),
+            generic_params: vec![],
+            variants: vec![],
+            span: Span { line: 1, col: 1 },
+        };
+
+        tc.register_enum(&enum_decl);
+
+        assert_eq!(tc.enums.get("TestEnum"), Some(&enum_decl));
+    }
+}
