@@ -6,7 +6,7 @@ fn probe_cpu_features(out_buffer: &mut [u32; 4]) {
     // Mock AVX and AVX512, cache line size
     out_buffer[0] = 1 << 28; // AVX
     out_buffer[2] = 1 << 16; // AVX512
-    out_buffer[3] = 64;      // L2 line size
+    out_buffer[3] = 64; // L2 line size
 }
 
 fn measure_l1_latency() -> u64 {
@@ -20,7 +20,7 @@ pub struct HardwareProfile {
     pub l1_latency_cycles: u64,
     // GPU hardware characteristics
     pub gpu_name: String,
-    
+
     // Compute Latencies
     pub fma_latency_cycles: f64,
     pub imad_latency_cycles: f64,
@@ -95,7 +95,7 @@ pub struct HardwareProfile {
     pub total_global_mem_mb: u64,
 
     // e.g. "Q32.32", "FP64"
-    pub drift_free_types: Vec<String>, 
+    pub drift_free_types: Vec<String>,
     // Cycle cost for switching to a drift-free path
     pub zero_drift_penalty_cycles: u64,
 }
@@ -132,14 +132,18 @@ fn parse_f64_field(contents: &str, key: &str) -> Option<f64> {
 
 pub fn check_or_probe_hardware() -> HardwareProfile {
     let profile_path = ".ysu_hw_profile";
-    
+
     if Path::new(profile_path).exists() {
-        println!("[*] Found existing {}, skipping Sentinel Probe.", profile_path);
+        println!(
+            "[*] Found existing {}, skipping Sentinel Probe.",
+            profile_path
+        );
         let contents = fs::read_to_string(profile_path).unwrap_or_default();
-        
+
         // Parse drift free types list (comma separated)
         let drift_types_str = parse_profile_value(&contents, "DRIFT_FREE_TYPES").unwrap_or("");
-        let drift_free_types = drift_types_str.split(',')
+        let drift_free_types = drift_types_str
+            .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
@@ -149,7 +153,9 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             has_avx512: parse_bool_field(&contents, "AVX512").unwrap_or(false),
             l2_line_size: parse_u32_field(&contents, "L2_LINE").unwrap_or(64),
             l1_latency_cycles: parse_u64_field(&contents, "L1_CYCLES").unwrap_or(4),
-            gpu_name: parse_profile_value(&contents, "GPU_NAME").unwrap_or("Unknown GPU").to_string(),
+            gpu_name: parse_profile_value(&contents, "GPU_NAME")
+                .unwrap_or("Unknown GPU")
+                .to_string(),
             fma_latency_cycles: parse_f64_field(&contents, "FMA_LATENCY").unwrap_or(4.0),
             imad_latency_cycles: parse_f64_field(&contents, "IMAD_LATENCY").unwrap_or(4.0),
             thermal_latency_40c: parse_f64_field(&contents, "THERMAL_LATENCY_40C").unwrap_or(4.0),
@@ -164,26 +170,37 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             hmma_f16_latency_cycles: parse_f64_field(&contents, "HMMA_F16_LATENCY").unwrap_or(42.0),
             tf32_latency_cycles: parse_f64_field(&contents, "TF32_LATENCY").unwrap_or(66.0),
             bar_sync_latency_cycles: parse_f64_field(&contents, "BAR_SYNC_LATENCY").unwrap_or(35.0),
-            shfl_sync_latency_cycles: parse_f64_field(&contents, "SHFL_SYNC_LATENCY").unwrap_or(1.0),
-            smem_exchange_latency_cycles: parse_f64_field(&contents, "SMEM_EXCHANGE_LATENCY").unwrap_or(5.0),
+            shfl_sync_latency_cycles: parse_f64_field(&contents, "SHFL_SYNC_LATENCY")
+                .unwrap_or(1.0),
+            smem_exchange_latency_cycles: parse_f64_field(&contents, "SMEM_EXCHANGE_LATENCY")
+                .unwrap_or(5.0),
             bfe_latency_cycles: parse_f64_field(&contents, "BFE_LATENCY").unwrap_or(4.5),
             bfi_latency_cycles: parse_f64_field(&contents, "BFI_LATENCY").unwrap_or(4.5),
-            and_shift_latency_cycles: parse_f64_field(&contents, "AND_SHIFT_LATENCY").unwrap_or(7.0),
+            and_shift_latency_cycles: parse_f64_field(&contents, "AND_SHIFT_LATENCY")
+                .unwrap_or(7.0),
             branch_uniform_cycles: parse_f64_field(&contents, "BRANCH_UNIFORM").unwrap_or(4.5),
             branch_divergent_cycles: parse_f64_field(&contents, "BRANCH_DIVERGENT").unwrap_or(9.0),
-            branch_divergence_penalty_cycles: parse_f64_field(&contents, "BRANCH_DIVERGENCE_PENALTY").unwrap_or(4.5),
+            branch_divergence_penalty_cycles: parse_f64_field(
+                &contents,
+                "BRANCH_DIVERGENCE_PENALTY",
+            )
+            .unwrap_or(4.5),
             tex1d_latency_cycles: parse_f64_field(&contents, "TEX1D_LATENCY").unwrap_or(70.0),
-            imad_wide_latency_cycles: parse_f64_field(&contents, "IMAD_WIDE_LATENCY").unwrap_or(2.6),
+            imad_wide_latency_cycles: parse_f64_field(&contents, "IMAD_WIDE_LATENCY")
+                .unwrap_or(2.6),
             mufu_ex2_latency_cycles: parse_f64_field(&contents, "MUFU_EX2_LATENCY").unwrap_or(17.5),
             mufu_sin_latency_cycles: parse_f64_field(&contents, "MUFU_SIN_LATENCY").unwrap_or(23.5),
             mufu_rsq_latency_cycles: parse_f64_field(&contents, "MUFU_RSQ_LATENCY").unwrap_or(39.5),
             mufu_lg2_latency_cycles: parse_f64_field(&contents, "MUFU_LG2_LATENCY").unwrap_or(39.5),
             hfma2_latency_cycles: parse_f64_field(&contents, "HFMA2_LATENCY").unwrap_or(4.5),
-            bf16x2_fma_latency_cycles: parse_f64_field(&contents, "BF16X2_FMA_LATENCY").unwrap_or(4.0),
+            bf16x2_fma_latency_cycles: parse_f64_field(&contents, "BF16X2_FMA_LATENCY")
+                .unwrap_or(4.0),
             lop3_lut_latency_cycles: parse_f64_field(&contents, "LOP3_LUT_LATENCY").unwrap_or(4.5),
             dadd_latency_cycles: parse_f64_field(&contents, "DADD_LATENCY").unwrap_or(48.5),
-            redux_sum_latency_cycles: parse_f64_field(&contents, "REDUX_SUM_LATENCY").unwrap_or(60.0),
-            membar_gpu_latency_cycles: parse_f64_field(&contents, "MEMBAR_GPU_LATENCY").unwrap_or(205.0),
+            redux_sum_latency_cycles: parse_f64_field(&contents, "REDUX_SUM_LATENCY")
+                .unwrap_or(60.0),
+            membar_gpu_latency_cycles: parse_f64_field(&contents, "MEMBAR_GPU_LATENCY")
+                .unwrap_or(205.0),
             ldc_latency_cycles: parse_f64_field(&contents, "LDC_LATENCY").unwrap_or(70.0),
             max_regs_per_thread: parse_u32_field(&contents, "MAX_REGS_PER_THREAD").unwrap_or(255),
             max_regs_per_sm: parse_u32_field(&contents, "MAX_REGS_PER_SM").unwrap_or(65536),
@@ -192,25 +209,86 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             max_warps_per_sm: parse_u32_field(&contents, "MAX_WARPS_PER_SM").unwrap_or(48),
             total_global_mem_mb: parse_u64_field(&contents, "TOTAL_GLOBAL_MEM_MB").unwrap_or(0),
             drift_free_types,
-            zero_drift_penalty_cycles: parse_u64_field(&contents, "ZERO_DRIFT_PENALTY").unwrap_or(0),
+            zero_drift_penalty_cycles: parse_u64_field(&contents, "ZERO_DRIFT_PENALTY")
+                .unwrap_or(0),
         };
 
         println!("    -> Loaded AVX: {}", profile.has_avx);
         println!("    -> Loaded AVX-512: {}", profile.has_avx512);
-        println!("    -> Loaded L2 Cache Line Size: {} bytes", profile.l2_line_size);
-        println!("    -> Loaded Baseline L1 Latency: {} cycles", profile.l1_latency_cycles);
+        println!(
+            "    -> Loaded L2 Cache Line Size: {} bytes",
+            profile.l2_line_size
+        );
+        println!(
+            "    -> Loaded Baseline L1 Latency: {} cycles",
+            profile.l1_latency_cycles
+        );
         println!("    -> Loaded GPU Name: {}", profile.gpu_name);
-        println!("    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}", profile.fma_latency_cycles, profile.imad_latency_cycles, profile.mufu_rcp_latency_cycles);
-        println!("    -> GPU Memory Latencies (SMEM/L1/L2/VRAM): {} / {} / {} / {}", profile.smem_latency_cycles, profile.l1_gpu_latency_cycles, profile.l2_gpu_latency_cycles, profile.vram_latency_cycles);
-        println!("    -> GPU Tensor Core Latencies (F16/TF32): {} / {}", profile.hmma_f16_latency_cycles, profile.tf32_latency_cycles);
-        println!("    -> Warp Shuffle vs SMEM Exchange: {} / {} cycles", profile.shfl_sync_latency_cycles, profile.smem_exchange_latency_cycles);
-        println!("    -> Bit-Field (BFE/BFI vs AND+SHIFT): {} / {} vs {}", profile.bfe_latency_cycles, profile.bfi_latency_cycles, profile.and_shift_latency_cycles);
-        println!("    -> Branch Divergence Penalty: {} cycles (uniform={}, divergent={})", profile.branch_divergence_penalty_cycles, profile.branch_uniform_cycles, profile.branch_divergent_cycles);
-        println!("    -> Texture Unit (TEX1D): {} cycles", profile.tex1d_latency_cycles);
-        println!("    -> IMAD.WIDE: {} cycles | SFU (EX2/SIN/RSQ/LG2): {} / {} / {} / {}", profile.imad_wide_latency_cycles, profile.mufu_ex2_latency_cycles, profile.mufu_sin_latency_cycles, profile.mufu_rsq_latency_cycles, profile.mufu_lg2_latency_cycles);
-        println!("    -> Reduced Precision (HFMA2/BF16x2): {} / {} | LOP3.LUT: {}", profile.hfma2_latency_cycles, profile.bf16x2_fma_latency_cycles, profile.lop3_lut_latency_cycles);
-        println!("    -> FP64 DADD: {} | REDUX.SUM: {} | MEMBAR.GPU: {} | LDC: {}", profile.dadd_latency_cycles, profile.redux_sum_latency_cycles, profile.membar_gpu_latency_cycles, profile.ldc_latency_cycles);
-        println!("    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}MB VRAM", profile.max_regs_per_thread, profile.max_regs_per_sm, profile.warp_size, profile.total_global_mem_mb);
+        println!(
+            "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
+            profile.fma_latency_cycles,
+            profile.imad_latency_cycles,
+            profile.mufu_rcp_latency_cycles
+        );
+        println!(
+            "    -> GPU Memory Latencies (SMEM/L1/L2/VRAM): {} / {} / {} / {}",
+            profile.smem_latency_cycles,
+            profile.l1_gpu_latency_cycles,
+            profile.l2_gpu_latency_cycles,
+            profile.vram_latency_cycles
+        );
+        println!(
+            "    -> GPU Tensor Core Latencies (F16/TF32): {} / {}",
+            profile.hmma_f16_latency_cycles, profile.tf32_latency_cycles
+        );
+        println!(
+            "    -> Warp Shuffle vs SMEM Exchange: {} / {} cycles",
+            profile.shfl_sync_latency_cycles, profile.smem_exchange_latency_cycles
+        );
+        println!(
+            "    -> Bit-Field (BFE/BFI vs AND+SHIFT): {} / {} vs {}",
+            profile.bfe_latency_cycles,
+            profile.bfi_latency_cycles,
+            profile.and_shift_latency_cycles
+        );
+        println!(
+            "    -> Branch Divergence Penalty: {} cycles (uniform={}, divergent={})",
+            profile.branch_divergence_penalty_cycles,
+            profile.branch_uniform_cycles,
+            profile.branch_divergent_cycles
+        );
+        println!(
+            "    -> Texture Unit (TEX1D): {} cycles",
+            profile.tex1d_latency_cycles
+        );
+        println!(
+            "    -> IMAD.WIDE: {} cycles | SFU (EX2/SIN/RSQ/LG2): {} / {} / {} / {}",
+            profile.imad_wide_latency_cycles,
+            profile.mufu_ex2_latency_cycles,
+            profile.mufu_sin_latency_cycles,
+            profile.mufu_rsq_latency_cycles,
+            profile.mufu_lg2_latency_cycles
+        );
+        println!(
+            "    -> Reduced Precision (HFMA2/BF16x2): {} / {} | LOP3.LUT: {}",
+            profile.hfma2_latency_cycles,
+            profile.bf16x2_fma_latency_cycles,
+            profile.lop3_lut_latency_cycles
+        );
+        println!(
+            "    -> FP64 DADD: {} | REDUX.SUM: {} | MEMBAR.GPU: {} | LDC: {}",
+            profile.dadd_latency_cycles,
+            profile.redux_sum_latency_cycles,
+            profile.membar_gpu_latency_cycles,
+            profile.ldc_latency_cycles
+        );
+        println!(
+            "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}MB VRAM",
+            profile.max_regs_per_thread,
+            profile.max_regs_per_sm,
+            profile.warp_size,
+            profile.total_global_mem_mb
+        );
         println!("    -> Zero Drift Types: {:?}", profile.drift_free_types);
 
         return profile;
@@ -230,11 +308,11 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let l2_line_size = features[3] & 0xFF;
 
     println!("[*] Executing external GPU Microbenchmark Payload (ysu_gpu_probe.exe)...");
-    
-    // In production, this binary is shipped alongside the compiler and runs 
+
+    // In production, this binary is shipped alongside the compiler and runs
     // actual CUDA/PTX microbenchmarks on the user's silicon.
     let probe_cmd = std::process::Command::new("./ysu_gpu_probe.exe").output();
-    
+
     let mut gpu_name = "Unknown GPU".to_string();
     let mut fma_latency_cycles = 4.0;
     let mut imad_latency_cycles = 4.0;
@@ -284,44 +362,64 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     match probe_cmd {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            
-            gpu_name = parse_profile_value(&stdout, "GPU_NAME").unwrap_or("Unknown").to_string();
+
+            gpu_name = parse_profile_value(&stdout, "GPU_NAME")
+                .unwrap_or("Unknown")
+                .to_string();
             zero_drift_penalty_cycles = parse_u64_field(&stdout, "ZERO_DRIFT_PENALTY").unwrap_or(0);
-            
+
             fma_latency_cycles = parse_f64_field(&stdout, "FMA_LATENCY_CYCLES").unwrap_or(4.0);
             imad_latency_cycles = parse_f64_field(&stdout, "IMAD_LATENCY_CYCLES").unwrap_or(4.0);
             thermal_latency_40c = parse_f64_field(&stdout, "THERMAL_LATENCY_40C").unwrap_or(4.0);
             thermal_latency_60c = parse_f64_field(&stdout, "THERMAL_LATENCY_60C").unwrap_or(4.0);
             thermal_latency_80c = parse_f64_field(&stdout, "THERMAL_LATENCY_80C").unwrap_or(4.0);
-            mufu_rcp_latency_cycles = parse_f64_field(&stdout, "MUFU_RCP_LATENCY_CYCLES").unwrap_or(40.0);
+            mufu_rcp_latency_cycles =
+                parse_f64_field(&stdout, "MUFU_RCP_LATENCY_CYCLES").unwrap_or(40.0);
             dfma_latency_cycles = parse_f64_field(&stdout, "DFMA_LATENCY_CYCLES").unwrap_or(50.0);
             smem_latency_cycles = parse_f64_field(&stdout, "SMEM_LATENCY_CYCLES").unwrap_or(28.0);
             l1_gpu_latency_cycles = parse_f64_field(&stdout, "L1_LATENCY_CYCLES").unwrap_or(33.0);
             l2_gpu_latency_cycles = parse_f64_field(&stdout, "L2_LATENCY_CYCLES").unwrap_or(90.0);
             vram_latency_cycles = parse_f64_field(&stdout, "VRAM_LATENCY_CYCLES").unwrap_or(300.0);
-            hmma_f16_latency_cycles = parse_f64_field(&stdout, "HMMA_F16_LATENCY_CYCLES").unwrap_or(42.0);
+            hmma_f16_latency_cycles =
+                parse_f64_field(&stdout, "HMMA_F16_LATENCY_CYCLES").unwrap_or(42.0);
             tf32_latency_cycles = parse_f64_field(&stdout, "TF32_LATENCY_CYCLES").unwrap_or(66.0);
-            bar_sync_latency_cycles = parse_f64_field(&stdout, "BAR_SYNC_LATENCY_CYCLES").unwrap_or(35.0);
-            shfl_sync_latency_cycles = parse_f64_field(&stdout, "SHFL_SYNC_LATENCY_CYCLES").unwrap_or(1.0);
-            smem_exchange_latency_cycles = parse_f64_field(&stdout, "SMEM_EXCHANGE_LATENCY_CYCLES").unwrap_or(5.0);
+            bar_sync_latency_cycles =
+                parse_f64_field(&stdout, "BAR_SYNC_LATENCY_CYCLES").unwrap_or(35.0);
+            shfl_sync_latency_cycles =
+                parse_f64_field(&stdout, "SHFL_SYNC_LATENCY_CYCLES").unwrap_or(1.0);
+            smem_exchange_latency_cycles =
+                parse_f64_field(&stdout, "SMEM_EXCHANGE_LATENCY_CYCLES").unwrap_or(5.0);
             bfe_latency_cycles = parse_f64_field(&stdout, "BFE_LATENCY_CYCLES").unwrap_or(4.5);
             bfi_latency_cycles = parse_f64_field(&stdout, "BFI_LATENCY_CYCLES").unwrap_or(4.5);
-            and_shift_latency_cycles = parse_f64_field(&stdout, "AND_SHIFT_LATENCY_CYCLES").unwrap_or(7.0);
-            branch_uniform_cycles = parse_f64_field(&stdout, "BRANCH_UNIFORM_CYCLES").unwrap_or(4.5);
-            branch_divergent_cycles = parse_f64_field(&stdout, "BRANCH_DIVERGENT_CYCLES").unwrap_or(9.0);
-            branch_divergence_penalty_cycles = parse_f64_field(&stdout, "BRANCH_DIVERGENCE_PENALTY_CYCLES").unwrap_or(4.5);
+            and_shift_latency_cycles =
+                parse_f64_field(&stdout, "AND_SHIFT_LATENCY_CYCLES").unwrap_or(7.0);
+            branch_uniform_cycles =
+                parse_f64_field(&stdout, "BRANCH_UNIFORM_CYCLES").unwrap_or(4.5);
+            branch_divergent_cycles =
+                parse_f64_field(&stdout, "BRANCH_DIVERGENT_CYCLES").unwrap_or(9.0);
+            branch_divergence_penalty_cycles =
+                parse_f64_field(&stdout, "BRANCH_DIVERGENCE_PENALTY_CYCLES").unwrap_or(4.5);
             tex1d_latency_cycles = parse_f64_field(&stdout, "TEX1D_LATENCY_CYCLES").unwrap_or(70.0);
-            imad_wide_latency_cycles = parse_f64_field(&stdout, "IMAD_WIDE_LATENCY_CYCLES").unwrap_or(2.6);
-            mufu_ex2_latency_cycles = parse_f64_field(&stdout, "MUFU_EX2_LATENCY_CYCLES").unwrap_or(17.5);
-            mufu_sin_latency_cycles = parse_f64_field(&stdout, "MUFU_SIN_LATENCY_CYCLES").unwrap_or(23.5);
-            mufu_rsq_latency_cycles = parse_f64_field(&stdout, "MUFU_RSQ_LATENCY_CYCLES").unwrap_or(39.5);
-            mufu_lg2_latency_cycles = parse_f64_field(&stdout, "MUFU_LG2_LATENCY_CYCLES").unwrap_or(39.5);
+            imad_wide_latency_cycles =
+                parse_f64_field(&stdout, "IMAD_WIDE_LATENCY_CYCLES").unwrap_or(2.6);
+            mufu_ex2_latency_cycles =
+                parse_f64_field(&stdout, "MUFU_EX2_LATENCY_CYCLES").unwrap_or(17.5);
+            mufu_sin_latency_cycles =
+                parse_f64_field(&stdout, "MUFU_SIN_LATENCY_CYCLES").unwrap_or(23.5);
+            mufu_rsq_latency_cycles =
+                parse_f64_field(&stdout, "MUFU_RSQ_LATENCY_CYCLES").unwrap_or(39.5);
+            mufu_lg2_latency_cycles =
+                parse_f64_field(&stdout, "MUFU_LG2_LATENCY_CYCLES").unwrap_or(39.5);
             hfma2_latency_cycles = parse_f64_field(&stdout, "HFMA2_LATENCY_CYCLES").unwrap_or(4.5);
-            bf16x2_fma_latency_cycles = parse_f64_field(&stdout, "BF16X2_FMA_LATENCY_CYCLES").unwrap_or(4.0);
-            lop3_lut_latency_cycles = parse_f64_field(&stdout, "LOP3_LUT_LATENCY_CYCLES").unwrap_or(4.5);
+            bf16x2_fma_latency_cycles =
+                parse_f64_field(&stdout, "BF16X2_FMA_LATENCY_CYCLES").unwrap_or(4.0);
+            lop3_lut_latency_cycles =
+                parse_f64_field(&stdout, "LOP3_LUT_LATENCY_CYCLES").unwrap_or(4.5);
             dadd_latency_cycles = parse_f64_field(&stdout, "DADD_LATENCY_CYCLES").unwrap_or(48.5);
-            redux_sum_latency_cycles = parse_f64_field(&stdout, "REDUX_SUM_LATENCY_CYCLES").unwrap_or(60.0);
-            membar_gpu_latency_cycles = parse_f64_field(&stdout, "MEMBAR_GPU_LATENCY_CYCLES").unwrap_or(205.0);
+            redux_sum_latency_cycles =
+                parse_f64_field(&stdout, "REDUX_SUM_LATENCY_CYCLES").unwrap_or(60.0);
+            membar_gpu_latency_cycles =
+                parse_f64_field(&stdout, "MEMBAR_GPU_LATENCY_CYCLES").unwrap_or(205.0);
             ldc_latency_cycles = parse_f64_field(&stdout, "LDC_LATENCY_CYCLES").unwrap_or(70.0);
             max_regs_per_thread = parse_u32_field(&stdout, "MAX_REGS_PER_THREAD").unwrap_or(255);
             max_regs_per_sm = parse_u32_field(&stdout, "MAX_REGS_PER_SM").unwrap_or(65536);
@@ -331,11 +429,12 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             total_global_mem_mb = parse_u64_field(&stdout, "TOTAL_GLOBAL_MEM_MB").unwrap_or(0);
 
             let drift_types_str = parse_profile_value(&stdout, "DRIFT_FREE_TYPES").unwrap_or("");
-            drift_free_types = drift_types_str.split(',')
+            drift_free_types = drift_types_str
+                .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-                
+
             println!("    -> GPU Probe returned successfully.");
         }
         _ => {
@@ -397,28 +496,87 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     println!("    -> Detected AVX: {}", profile.has_avx);
     println!("    -> Detected AVX-512: {}", profile.has_avx512);
     println!("    -> L2 Cache Line Size: {} bytes", profile.l2_line_size);
-    println!("    -> Baseline L1 Latency: {} cycles", profile.l1_latency_cycles);
+    println!(
+        "    -> Baseline L1 Latency: {} cycles",
+        profile.l1_latency_cycles
+    );
     println!("    -> Detected GPU: {}", profile.gpu_name);
-    println!("    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}", profile.fma_latency_cycles, profile.imad_latency_cycles, profile.mufu_rcp_latency_cycles);
-    println!("    -> GPU Thermal Latency Gradient (40C/60C/80C): {} / {} / {}", profile.thermal_latency_40c, profile.thermal_latency_60c, profile.thermal_latency_80c);
-    println!("    -> GPU Memory Latencies (SMEM/L1/L2/VRAM): {} / {} / {} / {}", profile.smem_latency_cycles, profile.l1_gpu_latency_cycles, profile.l2_gpu_latency_cycles, profile.vram_latency_cycles);
-    println!("    -> GPU Tensor Core Latencies (F16/TF32): {} / {}", profile.hmma_f16_latency_cycles, profile.tf32_latency_cycles);
-    println!("    -> Warp Shuffle vs SMEM Exchange: {} / {} cycles", profile.shfl_sync_latency_cycles, profile.smem_exchange_latency_cycles);
-    println!("    -> Bit-Field (BFE/BFI vs AND+SHIFT): {} / {} vs {}", profile.bfe_latency_cycles, profile.bfi_latency_cycles, profile.and_shift_latency_cycles);
-    println!("    -> Branch Divergence Penalty: {} cycles (uniform={}, divergent={})", profile.branch_divergence_penalty_cycles, profile.branch_uniform_cycles, profile.branch_divergent_cycles);
-    println!("    -> Texture Unit (TEX1D): {} cycles", profile.tex1d_latency_cycles);
-    println!("    -> IMAD.WIDE: {} cycles | SFU (EX2/SIN/RSQ/LG2): {} / {} / {} / {}", profile.imad_wide_latency_cycles, profile.mufu_ex2_latency_cycles, profile.mufu_sin_latency_cycles, profile.mufu_rsq_latency_cycles, profile.mufu_lg2_latency_cycles);
-    println!("    -> Reduced Precision (HFMA2/BF16x2): {} / {} | LOP3.LUT: {}", profile.hfma2_latency_cycles, profile.bf16x2_fma_latency_cycles, profile.lop3_lut_latency_cycles);
-    println!("    -> FP64 DADD: {} | REDUX.SUM: {} | MEMBAR.GPU: {} | LDC: {}", profile.dadd_latency_cycles, profile.redux_sum_latency_cycles, profile.membar_gpu_latency_cycles, profile.ldc_latency_cycles);
-    println!("    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}MB VRAM", profile.max_regs_per_thread, profile.max_regs_per_sm, profile.warp_size, profile.total_global_mem_mb);
-    println!("    -> Verified Zero Drift Types: {:?}", profile.drift_free_types);
+    println!(
+        "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
+        profile.fma_latency_cycles, profile.imad_latency_cycles, profile.mufu_rcp_latency_cycles
+    );
+    println!(
+        "    -> GPU Thermal Latency Gradient (40C/60C/80C): {} / {} / {}",
+        profile.thermal_latency_40c, profile.thermal_latency_60c, profile.thermal_latency_80c
+    );
+    println!(
+        "    -> GPU Memory Latencies (SMEM/L1/L2/VRAM): {} / {} / {} / {}",
+        profile.smem_latency_cycles,
+        profile.l1_gpu_latency_cycles,
+        profile.l2_gpu_latency_cycles,
+        profile.vram_latency_cycles
+    );
+    println!(
+        "    -> GPU Tensor Core Latencies (F16/TF32): {} / {}",
+        profile.hmma_f16_latency_cycles, profile.tf32_latency_cycles
+    );
+    println!(
+        "    -> Warp Shuffle vs SMEM Exchange: {} / {} cycles",
+        profile.shfl_sync_latency_cycles, profile.smem_exchange_latency_cycles
+    );
+    println!(
+        "    -> Bit-Field (BFE/BFI vs AND+SHIFT): {} / {} vs {}",
+        profile.bfe_latency_cycles, profile.bfi_latency_cycles, profile.and_shift_latency_cycles
+    );
+    println!(
+        "    -> Branch Divergence Penalty: {} cycles (uniform={}, divergent={})",
+        profile.branch_divergence_penalty_cycles,
+        profile.branch_uniform_cycles,
+        profile.branch_divergent_cycles
+    );
+    println!(
+        "    -> Texture Unit (TEX1D): {} cycles",
+        profile.tex1d_latency_cycles
+    );
+    println!(
+        "    -> IMAD.WIDE: {} cycles | SFU (EX2/SIN/RSQ/LG2): {} / {} / {} / {}",
+        profile.imad_wide_latency_cycles,
+        profile.mufu_ex2_latency_cycles,
+        profile.mufu_sin_latency_cycles,
+        profile.mufu_rsq_latency_cycles,
+        profile.mufu_lg2_latency_cycles
+    );
+    println!(
+        "    -> Reduced Precision (HFMA2/BF16x2): {} / {} | LOP3.LUT: {}",
+        profile.hfma2_latency_cycles,
+        profile.bf16x2_fma_latency_cycles,
+        profile.lop3_lut_latency_cycles
+    );
+    println!(
+        "    -> FP64 DADD: {} | REDUX.SUM: {} | MEMBAR.GPU: {} | LDC: {}",
+        profile.dadd_latency_cycles,
+        profile.redux_sum_latency_cycles,
+        profile.membar_gpu_latency_cycles,
+        profile.ldc_latency_cycles
+    );
+    println!(
+        "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}MB VRAM",
+        profile.max_regs_per_thread,
+        profile.max_regs_per_sm,
+        profile.warp_size,
+        profile.total_global_mem_mb
+    );
+    println!(
+        "    -> Verified Zero Drift Types: {:?}",
+        profile.drift_free_types
+    );
 
     println!("[*] Saving hardware topology to {}...", profile_path);
     let serialized = format!(
-        "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nGPU_NAME={}\nFMA_LATENCY={}\nIMAD_LATENCY={}\nTHERMAL_LATENCY_40C={}\nTHERMAL_LATENCY_60C={}\nTHERMAL_LATENCY_80C={}\nMUFU_RCP_LATENCY={}\nDFMA_LATENCY={}\nSMEM_LATENCY={}\nL1_GPU_LATENCY={}\nL2_GPU_LATENCY={}\nVRAM_LATENCY={}\nHMMA_F16_LATENCY={}\nTF32_LATENCY={}\nBAR_SYNC_LATENCY={}\nSHFL_SYNC_LATENCY={}\nSMEM_EXCHANGE_LATENCY={}\nBFE_LATENCY={}\nBFI_LATENCY={}\nAND_SHIFT_LATENCY={}\nBRANCH_UNIFORM={}\nBRANCH_DIVERGENT={}\nBRANCH_DIVERGENCE_PENALTY={}\nTEX1D_LATENCY={}\nIMAD_WIDE_LATENCY={}\nMUFU_EX2_LATENCY={}\nMUFU_SIN_LATENCY={}\nMUFU_RSQ_LATENCY={}\nMUFU_LG2_LATENCY={}\nHFMA2_LATENCY={}\nBF16X2_FMA_LATENCY={}\nLOP3_LUT_LATENCY={}\nDADD_LATENCY={}\nREDUX_SUM_LATENCY={}\nMEMBAR_GPU_LATENCY={}\nLDC_LATENCY={}\nMAX_REGS_PER_THREAD={}\nMAX_REGS_PER_SM={}\nWARP_SIZE={}\nMAX_THREADS_PER_SM={}\nMAX_WARPS_PER_SM={}\nTOTAL_GLOBAL_MEM_MB={}\nDRIFT_FREE_TYPES={}\nZERO_DRIFT_PENALTY={}\n", 
-        profile.has_avx, 
-        profile.has_avx512, 
-        profile.l2_line_size, 
+        "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nGPU_NAME={}\nFMA_LATENCY={}\nIMAD_LATENCY={}\nTHERMAL_LATENCY_40C={}\nTHERMAL_LATENCY_60C={}\nTHERMAL_LATENCY_80C={}\nMUFU_RCP_LATENCY={}\nDFMA_LATENCY={}\nSMEM_LATENCY={}\nL1_GPU_LATENCY={}\nL2_GPU_LATENCY={}\nVRAM_LATENCY={}\nHMMA_F16_LATENCY={}\nTF32_LATENCY={}\nBAR_SYNC_LATENCY={}\nSHFL_SYNC_LATENCY={}\nSMEM_EXCHANGE_LATENCY={}\nBFE_LATENCY={}\nBFI_LATENCY={}\nAND_SHIFT_LATENCY={}\nBRANCH_UNIFORM={}\nBRANCH_DIVERGENT={}\nBRANCH_DIVERGENCE_PENALTY={}\nTEX1D_LATENCY={}\nIMAD_WIDE_LATENCY={}\nMUFU_EX2_LATENCY={}\nMUFU_SIN_LATENCY={}\nMUFU_RSQ_LATENCY={}\nMUFU_LG2_LATENCY={}\nHFMA2_LATENCY={}\nBF16X2_FMA_LATENCY={}\nLOP3_LUT_LATENCY={}\nDADD_LATENCY={}\nREDUX_SUM_LATENCY={}\nMEMBAR_GPU_LATENCY={}\nLDC_LATENCY={}\nMAX_REGS_PER_THREAD={}\nMAX_REGS_PER_SM={}\nWARP_SIZE={}\nMAX_THREADS_PER_SM={}\nMAX_WARPS_PER_SM={}\nTOTAL_GLOBAL_MEM_MB={}\nDRIFT_FREE_TYPES={}\nZERO_DRIFT_PENALTY={}\n",
+        profile.has_avx,
+        profile.has_avx512,
+        profile.l2_line_size,
         profile.l1_latency_cycles,
         profile.gpu_name,
         profile.fma_latency_cycles,

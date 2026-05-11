@@ -94,7 +94,7 @@ pub struct EnumDecl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumVariant {
     pub name: String,
-    pub fields: Option<Vec<Type>>,  // None = unit, Some = tuple variant
+    pub fields: Option<Vec<Type>>, // None = unit, Some = tuple variant
     pub span: Span,
 }
 
@@ -168,11 +168,7 @@ pub enum Stmt {
         span: Span,
     },
     /// `type ATile = SmemLayout<...>;`
-    TypeAlias {
-        name: String,
-        ty: Type,
-        span: Span,
-    },
+    TypeAlias { name: String, ty: Type, span: Span },
     /// `for k in 0..K step 16 { ... }`
     For {
         loop_var: String,
@@ -254,7 +250,12 @@ pub enum MatchPattern {
     /// `Ident` — matches an enum variant or binds a variable
     Ident(String, Span),
     /// `SomeEnum::Variant(binding)` — destructuring
-    EnumVariant { path: String, variant: String, bindings: Vec<String>, span: Span },
+    EnumVariant {
+        path: String,
+        variant: String,
+        bindings: Vec<String>,
+        span: Span,
+    },
     /// `42` or `"hello"` — literal match
     Literal(Expr),
     /// `_` — wildcard
@@ -386,32 +387,32 @@ pub enum Type {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinaryOp {
-    Add,      // +
-    Sub,      // -
-    Mul,      // *
-    Div,      // /
-    Mod,      // %
-    Eq,       // ==
-    NotEq,    // !=
-    Lt,       // <
-    Gt,       // >
-    Le,       // <=
-    Ge,       // >=
-    And,      // &&
-    Or,       // ||
-    BitAnd,   // &
-    BitOr,    // |
-    BitXor,   // ^
-    Shl,      // <<
-    Shr,      // >>
+    Add,    // +
+    Sub,    // -
+    Mul,    // *
+    Div,    // /
+    Mod,    // %
+    Eq,     // ==
+    NotEq,  // !=
+    Lt,     // <
+    Gt,     // >
+    Le,     // <=
+    Ge,     // >=
+    And,    // &&
+    Or,     // ||
+    BitAnd, // &
+    BitOr,  // |
+    BitXor, // ^
+    Shl,    // <<
+    Shr,    // >>
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
-    Neg,      // -
-    Not,      // !
-    Ref,      // &
-    Deref,    // *
+    Neg,   // -
+    Not,   // !
+    Ref,   // &
+    Deref, // *
 }
 
 /// Generic arguments can be Types (`F16`), Values (`3`), or Named (`rows=16`)

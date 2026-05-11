@@ -9,8 +9,8 @@
 
 #![allow(dead_code)]
 
-use std::fmt::Write;
 use crate::ast::*;
+use std::fmt::Write;
 
 pub struct CpuEmitter {
     pub host_buffer: String,
@@ -20,9 +20,17 @@ pub struct CpuEmitter {
 impl CpuEmitter {
     pub fn new() -> Self {
         let mut buffer = String::new();
-        writeln!(&mut buffer, "// ===========================================================").unwrap();
+        writeln!(
+            &mut buffer,
+            "// ==========================================================="
+        )
+        .unwrap();
         writeln!(&mut buffer, "// GENERATED NATIVE CPU EXECUTABLE").unwrap();
-        writeln!(&mut buffer, "// ===========================================================").unwrap();
+        writeln!(
+            &mut buffer,
+            "// ==========================================================="
+        )
+        .unwrap();
         writeln!(&mut buffer, "use crate::avx_wrapper::*;").unwrap();
         writeln!(&mut buffer, "use std::cell::RefCell;").unwrap();
         writeln!(&mut buffer, "").unwrap();
@@ -37,7 +45,8 @@ impl CpuEmitter {
         writeln!(
             &mut buffer,
             "    Y_SHARED_SCRATCH_F32.with(|buf| buf.borrow_mut().as_mut_ptr())"
-        ).unwrap();
+        )
+        .unwrap();
         writeln!(&mut buffer, "}}").unwrap();
         writeln!(&mut buffer, "").unwrap();
         writeln!(&mut buffer, "fn y_pipeline_init() {{}}").unwrap();
@@ -83,29 +92,29 @@ impl CpuEmitter {
             }
             Type::Ident(name, _) => name.clone(),
             Type::Generic { base, args, .. } => {
-                 if base == "GlobalMemory" { 
-                     "*mut f32".into() 
-                 } else if base == "Vec" {
-                     let mut inner_ty = "()".to_string();
-                     let mut alloc = "std::alloc::Global".to_string();
-                     if args.len() >= 1 {
-                         if let GenericArg::Type(t) = &args[0] {
-                             inner_ty = self.emit_type(t);
-                         }
-                     }
-                     if args.len() >= 2 {
-                         if let GenericArg::Type(Type::Ident(a, _)) = &args[1] {
-                             alloc = a.clone();
-                         }
-                     }
-                     if alloc == "Standard" {
-                         format!("Vec<{}>", inner_ty)
-                     } else {
-                         format!("Vec<{}, {}>", inner_ty, alloc)
-                     }
-                 } else { 
-                     "()".into() 
-                 }
+                if base == "GlobalMemory" {
+                    "*mut f32".into()
+                } else if base == "Vec" {
+                    let mut inner_ty = "()".to_string();
+                    let mut alloc = "std::alloc::Global".to_string();
+                    if args.len() >= 1 {
+                        if let GenericArg::Type(t) = &args[0] {
+                            inner_ty = self.emit_type(t);
+                        }
+                    }
+                    if args.len() >= 2 {
+                        if let GenericArg::Type(Type::Ident(a, _)) = &args[1] {
+                            alloc = a.clone();
+                        }
+                    }
+                    if alloc == "Standard" {
+                        format!("Vec<{}>", inner_ty)
+                    } else {
+                        format!("Vec<{}, {}>", inner_ty, alloc)
+                    }
+                } else {
+                    "()".into()
+                }
             }
             Type::Array { element, size, .. } => {
                 let elem_str = self.emit_type(element);
@@ -153,7 +162,13 @@ impl CpuEmitter {
             self.indent();
             if let Some(fields) = &variant.fields {
                 let field_strs: Vec<String> = fields.iter().map(|ty| self.emit_type(ty)).collect();
-                writeln!(&mut self.host_buffer, "{}({}),", variant.name, field_strs.join(", ")).unwrap();
+                writeln!(
+                    &mut self.host_buffer,
+                    "{}({}),",
+                    variant.name,
+                    field_strs.join(", ")
+                )
+                .unwrap();
             } else {
                 writeln!(&mut self.host_buffer, "{},", variant.name).unwrap();
             }
@@ -167,7 +182,7 @@ impl CpuEmitter {
         self.indent();
         let safe_prefix = if f.is_safe { "" } else { "unsafe " };
         write!(&mut self.host_buffer, "pub {}fn {}(", safe_prefix, f.name).unwrap();
-        
+
         let param_count = f.params.len();
         for (i, param) in f.params.iter().enumerate() {
             let ty_str = self.emit_type(&param.ty);
@@ -177,17 +192,17 @@ impl CpuEmitter {
             }
         }
         write!(&mut self.host_buffer, ")").unwrap();
-        
+
         if let Some(ret_ty) = &f.ret_ty {
-             let ret_str = self.emit_type(ret_ty);
-             write!(&mut self.host_buffer, " -> {}", ret_str).unwrap();
+            let ret_str = self.emit_type(ret_ty);
+            write!(&mut self.host_buffer, " -> {}", ret_str).unwrap();
         }
         writeln!(&mut self.host_buffer, " {{").unwrap();
-        
+
         self.indent_level += 1;
         self.emit_block(&f.body);
         self.indent_level -= 1;
-        
+
         self.indent();
         writeln!(&mut self.host_buffer, "}}\n").unwrap();
     }
@@ -195,23 +210,23 @@ impl CpuEmitter {
     fn emit_kernel(&mut self, kernel: &KernelDecl) {
         self.indent();
         write!(&mut self.host_buffer, "pub unsafe fn {}(", kernel.name).unwrap();
-        
+
         let param_count = kernel.params.len();
         for (i, param) in kernel.params.iter().enumerate() {
             // Lower Y-Lang types to Rust/C pointer types
             let host_type = self.emit_type(&param.ty);
-            
+
             write!(&mut self.host_buffer, "{}: {}", param.name, host_type).unwrap();
             if i < param_count - 1 {
                 write!(&mut self.host_buffer, ", ").unwrap();
             }
         }
         writeln!(&mut self.host_buffer, ") {{").unwrap();
-        
+
         self.indent_level += 1;
         self.emit_block(&kernel.body);
         self.indent_level -= 1;
-        
+
         self.indent();
         writeln!(&mut self.host_buffer, "}}").unwrap();
     }
@@ -234,18 +249,39 @@ impl CpuEmitter {
                     }
                     writeln!(&mut self.host_buffer, "").unwrap();
                 }
-                Stmt::For { loop_var, start, end, body, step, .. } => {
+                Stmt::For {
+                    loop_var,
+                    start,
+                    end,
+                    body,
+                    step,
+                    ..
+                } => {
                     self.indent();
-                    let step_val = if let Some(Expr::IntLit(s, _)) = step { *s } else { 1 };
+                    let step_val = if let Some(Expr::IntLit(s, _)) = step {
+                        *s
+                    } else {
+                        1
+                    };
                     let start_expr = self.emit_expr(start);
-                    writeln!(&mut self.host_buffer, "let mut {} = {};", loop_var, start_expr).unwrap();
+                    writeln!(
+                        &mut self.host_buffer,
+                        "let mut {} = {};",
+                        loop_var, start_expr
+                    )
+                    .unwrap();
                     self.indent();
                     let end_expr = self.emit_expr(end);
-                    writeln!(&mut self.host_buffer, "while {} < {} {{", loop_var, end_expr).unwrap();
-                    
+                    writeln!(
+                        &mut self.host_buffer,
+                        "while {} < {} {{",
+                        loop_var, end_expr
+                    )
+                    .unwrap();
+
                     self.indent_level += 1;
                     self.emit_block(body);
-                    
+
                     self.indent();
                     writeln!(&mut self.host_buffer, "{} += {};", loop_var, step_val).unwrap();
                     self.indent_level -= 1;
@@ -289,15 +325,17 @@ impl CpuEmitter {
         if fname == "cp_async" {
             return format!(
                 "std::ptr::copy_nonoverlapping({}, {}, 32)",
-                arg_strs[0],
-                arg_strs[1]
+                arg_strs[0], arg_strs[1]
             );
         } else if fname == "ldmatrix" {
             return format!("Y256f32::load_aligned_ptr({} as *const f32)", arg_strs[0]);
         } else if fname == "mma_sync" {
             return format!("{}.fmadd({}, {})", arg_strs[0], arg_strs[1], arg_strs[2]);
         } else if fname == "store" {
-            return format!("{}.store_aligned_ptr({} as *mut f32)", arg_strs[0], arg_strs[1]);
+            return format!(
+                "{}.store_aligned_ptr({} as *mut f32)",
+                arg_strs[0], arg_strs[1]
+            );
         }
 
         format!("{}({})", fname, arg_strs.join(", "))
@@ -314,7 +352,9 @@ impl CpuEmitter {
                 let index_expr = self.emit_expr(index);
                 format!("{}.add({} as usize)", base_expr, index_expr)
             }
-            Expr::Path { namespace, member, .. } => {
+            Expr::Path {
+                namespace, member, ..
+            } => {
                 if namespace == "Fragment" && member == "zero" {
                     return "Y256f32::zero".into();
                 }
@@ -339,7 +379,7 @@ impl CpuEmitter {
                 }
                 "".into()
             }
-            _ => "0 // Fallback".into()
+            _ => "0 // Fallback".into(),
         }
     }
 }

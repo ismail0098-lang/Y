@@ -2,16 +2,16 @@
 //  Y-Lang  —  Linear Type Tracker
 //  linear_tracker.rs
 //
-//  Tracks synchronization obligations in the AST. 
-//  Whenever an async transfer (e.g. `cp_async`) creates a 
+//  Tracks synchronization obligations in the AST.
+//  Whenever an async transfer (e.g. `cp_async`) creates a
 //  `Transfer` type, this tracker binds it to the scope.
 //  It enforces exactly-once consumption by `pipe.wait`.
 // ============================================================
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use crate::ast::Span;
+use std::collections::HashMap;
 
 /// An obligation to synchronize memory before use.
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ pub struct Obligation {
     pub barrier_synchronized: bool,
 }
 
-/// The LinearTracker manages lexical scopes and enforces 
+/// The LinearTracker manages lexical scopes and enforces
 /// linear typing rules on Transfer obligations.
 #[derive(Debug, Default)]
 pub struct LinearTracker {
@@ -71,13 +71,16 @@ impl LinearTracker {
                     ));
                 }
             }
-            scope.insert(name.clone(), Obligation {
-                name,
-                created_at: span,
-                destination,
-                consumed: false,
-                barrier_synchronized: false,
-            });
+            scope.insert(
+                name.clone(),
+                Obligation {
+                    name,
+                    created_at: span,
+                    destination,
+                    consumed: false,
+                    barrier_synchronized: false,
+                },
+            );
         }
     }
 
@@ -99,10 +102,10 @@ impl LinearTracker {
                 }
             }
         }
-        
+
         // Not a tracked linear transfer (or it was never defined/is just a normal variable)
         // Handled by standard type checking elsewhere.
-        true 
+        true
     }
 
     pub fn is_tracked_obligation(&self, name: &str) -> bool {

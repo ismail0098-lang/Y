@@ -4,22 +4,30 @@
 //
 //  The core brain of Y-Lang's safety guarantees.
 //  Traverses AST, enforces Fragment roles (A vs B vs C),
-//  manages linear memory obligations, and runs the 
+//  manages linear memory obligations, and runs the
 //  0-Bank-Conflict math prover.
 // ============================================================
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use crate::ast::*;
-use crate::linear_tracker::LinearTracker;
 use crate::bank_conflict::{BankConflictProver, SmemLayout as ProverLayout, SwizzlePattern};
+use crate::linear_tracker::LinearTracker;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SemanticType {
     Primitive(String),
-    Fragment { op: String, role: String, dtype: String },
-    SharedMemoryTile { rows: u32, cols: u32, swizzle: Option<SwizzlePattern> },
+    Fragment {
+        op: String,
+        role: String,
+        dtype: String,
+    },
+    SharedMemoryTile {
+        rows: u32,
+        cols: u32,
+        swizzle: Option<SwizzlePattern>,
+    },
     GlobalMemory(String),
     Vector(Box<SemanticType>, String), // Tuple of inner type and allocator
     TransferObligation,
@@ -114,7 +122,8 @@ impl TypeChecker {
 
     fn require_destination_ready(&mut self, expr: &Expr, span: &Span) {
         if let Some(name) = Self::root_ident(expr) {
-            self.linear_tracker.require_destination_ready(&name, span.clone());
+            self.linear_tracker
+                .require_destination_ready(&name, span.clone());
         }
     }
 
@@ -148,7 +157,8 @@ impl TypeChecker {
                     ));
                     continue;
                 }
-                self.linear_tracker.consume_obligation(var_name, span.clone());
+                self.linear_tracker
+                    .consume_obligation(var_name, span.clone());
             } else {
                 self.errors.push(format!(
                     "Line {}: `pipe.wait(...)` requires named Transfer bindings so the obligation can be consumed exactly once.",
@@ -179,7 +189,8 @@ impl TypeChecker {
                         for p in &f.params {
                             params.push(self.resolve_type(&p.ty));
                         }
-                        self.functions.insert(format!("{}_{}", imp.target_type, f.name), params);
+                        self.functions
+                            .insert(format!("{}_{}", imp.target_type, f.name), params);
                     }
                 }
                 _ => {}
@@ -195,7 +206,7 @@ impl TypeChecker {
                         self.check_func(f);
                     }
                 }
-                _ => {} 
+                _ => {}
             }
         }
     }
@@ -264,7 +275,7 @@ impl TypeChecker {
         // Linear obligations are scoped to the block they are defined in.
         // Wait, loop bodies require their own scope.
         self.push_scope();
-        
+
         for stmt in &block.stmts {
             self.check_stmt(stmt);
         }
@@ -274,7 +285,13 @@ impl TypeChecker {
 
     fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
-            Stmt::Let { name, ty, init, span, .. } => {
+            Stmt::Let {
+                name,
+                ty,
+                init,
+                span,
+                ..
+            } => {
                 let mut inferred_type = SemanticType::Unknown;
                 let mut explicit_resolved = None;
 
@@ -283,15 +300,21 @@ impl TypeChecker {
                 }
 
                 if let Some(init_expr) = init {
-                    inferred_type = self.check_expr_with_expected(init_expr, explicit_resolved.as_ref());
+                    inferred_type =
+                        self.check_expr_with_expected(init_expr, explicit_resolved.as_ref());
                 }
 
                 if let Some(resolved) = explicit_resolved {
                     // Minimal type unification
                     if inferred_type == SemanticType::Unknown {
                         inferred_type = resolved.clone();
-                    } else if inferred_type != resolved && inferred_type != SemanticType::TransferObligation {
-                        self.errors.push(format!("Line {}: Type mismatch in let assignment.", span.line));
+                    } else if inferred_type != resolved
+                        && inferred_type != SemanticType::TransferObligation
+                    {
+                        self.errors.push(format!(
+                            "Line {}: Type mismatch in let assignment.",
+                            span.line
+                        ));
                     }
                 }
 
@@ -317,39 +340,53 @@ impl TypeChecker {
                         ));
                     }
 
-                    self.linear_tracker
-                        .register_obligation(name.clone(), span.clone(), destination);
+                    self.linear_tracker.register_obligation(
+                        name.clone(),
+                        span.clone(),
+                        destination,
+                    );
                 }
             }
             Stmt::TypeAlias { name, ty, span } => {
                 let resolved = self.resolve_type(ty);
                 // If defining a new SmemLayout, run the Bank Conflict Prover!
-                if let SemanticType::SharedMemoryTile { rows, cols, swizzle } = &resolved {
+                if let SemanticType::SharedMemoryTile {
+                    rows,
+                    cols,
+                    swizzle,
+                } = &resolved
+                {
                     let prover_layout = ProverLayout {
                         rows: *rows,
                         cols: *cols,
                         swizzle: swizzle.clone(),
                         bytes_per_element: 2, // Defaulting F16 for prototype logic
                     };
-                    
-                    if let Err(conflict_err) = BankConflictProver::prove_ldmatrix_m16n8(&prover_layout) {
+
+                    if let Err(conflict_err) =
+                        BankConflictProver::prove_ldmatrix_m16n8(&prover_layout)
+                    {
                         // Allow compilation to proceed for prototype PTX emit exhibition
                         println!("    [Warning] Line {}: {}", span.line, conflict_err);
                     }
                 }
-                self.insert_var(name.clone(), resolved); 
+                self.insert_var(name.clone(), resolved);
             }
             Stmt::For { loop_var, body, .. } => {
                 self.push_scope();
                 self.insert_var(loop_var.clone(), SemanticType::Primitive("I32".into()));
-                
+
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
-                
+
                 self.pop_scope();
             }
-            Stmt::Assign { target, value, span } => {
+            Stmt::Assign {
+                target,
+                value,
+                span,
+            } => {
                 let t1 = self.check_expr(target);
                 let t2 = self.check_expr_with_expected(value, Some(&t1));
                 if t1 == SemanticType::TransferObligation {
@@ -365,7 +402,10 @@ impl TypeChecker {
                     ));
                 }
                 if t1 != t2 && t1 != SemanticType::Unknown && t2 != SemanticType::Unknown {
-                    self.errors.push(format!("Line {}: Invalid assignment, types do not match.", span.line));
+                    self.errors.push(format!(
+                        "Line {}: Invalid assignment, types do not match.",
+                        span.line
+                    ));
                 }
             }
             Stmt::Expr(expr) => {
@@ -393,18 +433,27 @@ impl TypeChecker {
                 // Chisel blocks are privileged — type-check their contents normally
                 self.check_block(block);
             }
-            Stmt::If { condition, then_block, else_block, .. } => {
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+                ..
+            } => {
                 self.check_expr(condition);
                 self.check_block(then_block);
                 if let Some(eb) = else_block {
                     self.check_block(eb);
                 }
             }
-            Stmt::While { condition, body, .. } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 self.check_expr(condition);
                 self.check_block(body);
             }
-            Stmt::Match { scrutinee, arms, .. } => {
+            Stmt::Match {
+                scrutinee, arms, ..
+            } => {
                 self.check_expr(scrutinee);
                 for arm in arms {
                     let arm_ty = self.check_expr(&arm.body);
@@ -424,14 +473,21 @@ impl TypeChecker {
         self.check_expr_with_expected(expr, None)
     }
 
-    fn check_expr_with_expected(&mut self, expr: &Expr, expected_type: Option<&SemanticType>) -> SemanticType {
+    fn check_expr_with_expected(
+        &mut self,
+        expr: &Expr,
+        expected_type: Option<&SemanticType>,
+    ) -> SemanticType {
         let span = expr.span();
         match expr {
             Expr::ZeroInit(span) => {
                 if let Some(expected) = expected_type {
                     expected.clone()
                 } else {
-                    self.errors.push(format!("Line {}: Ambiguous zero-initializer: cannot infer struct type.", span.line));
+                    self.errors.push(format!(
+                        "Line {}: Ambiguous zero-initializer: cannot infer struct type.",
+                        span.line
+                    ));
                     SemanticType::Unknown
                 }
             }
@@ -447,7 +503,7 @@ impl TypeChecker {
                     ty
                 } else {
                     // Could be a Type Alias reference (e.g., `smem_A: ATile`)
-                    SemanticType::Unknown 
+                    SemanticType::Unknown
                 }
             }
             Expr::Call { func, args, .. } => {
@@ -455,7 +511,11 @@ impl TypeChecker {
                     if fname == "cp_async" {
                         for arg in args {
                             let arg_ty = self.check_expr(arg);
-                            self.reject_transfer_escape(&arg_ty, &arg.span(), "as an operand to `cp_async`");
+                            self.reject_transfer_escape(
+                                &arg_ty,
+                                &arg.span(),
+                                "as an operand to `cp_async`",
+                            );
                         }
                         // Creates an obligation
                         return SemanticType::TransferObligation;
@@ -468,7 +528,11 @@ impl TypeChecker {
                     if fname == "mma_sync" {
                         self.check_mma_sync(args, &span);
                         // Returns 'D' fragment (Accumulator)
-                        return SemanticType::Fragment { op: "MMA_m16n8k16".into(), role: "D".into(), dtype: "F32".into() };
+                        return SemanticType::Fragment {
+                            op: "MMA_m16n8k16".into(),
+                            role: "D".into(),
+                            dtype: "F32".into(),
+                        };
                     }
                 }
                 if let Expr::MemberAccess { base, member, .. } = &**func {
@@ -476,11 +540,18 @@ impl TypeChecker {
                         return self.check_wait_call(base, args, &span);
                     }
                 }
-                if let Expr::Path { namespace, member, .. } = &**func {
+                if let Expr::Path {
+                    namespace, member, ..
+                } = &**func
+                {
                     if namespace == "File" && member == "read" {
                         for arg in args {
                             let arg_ty = self.check_expr(arg);
-                            self.reject_transfer_escape(&arg_ty, &arg.span(), "as an argument to `File::read`");
+                            self.reject_transfer_escape(
+                                &arg_ty,
+                                &arg.span(),
+                                "as an argument to `File::read`",
+                            );
                         }
                         // Prototype read evaluation guarantees String return
                         return SemanticType::Primitive("String".into());
@@ -488,7 +559,11 @@ impl TypeChecker {
                     if namespace == "Vec" || namespace == "String" {
                         for arg in args {
                             let arg_ty = self.check_expr(arg);
-                            self.reject_transfer_escape(&arg_ty, &arg.span(), "as an argument to a dynamic allocation API");
+                            self.reject_transfer_escape(
+                                &arg_ty,
+                                &arg.span(),
+                                "as an argument to a dynamic allocation API",
+                            );
                         }
                         if !self.in_unsafe {
                             self.errors.push(format!("Line {}: Dynamic memory operations like {}::{} are mapped to raw void* and require an @unsafe function context.", span.line, namespace, member));
@@ -502,8 +577,14 @@ impl TypeChecker {
                 let mut expected_params = None;
                 if let Expr::Ident(fname, _) = &**func {
                     expected_params = self.functions.get(fname).cloned();
-                } else if let Expr::Path { namespace, member, .. } = &**func {
-                    expected_params = self.functions.get(&format!("{}_{}", namespace, member)).cloned();
+                } else if let Expr::Path {
+                    namespace, member, ..
+                } = &**func
+                {
+                    expected_params = self
+                        .functions
+                        .get(&format!("{}_{}", namespace, member))
+                        .cloned();
                 }
 
                 for (i, arg) in args.iter().enumerate() {
@@ -518,16 +599,32 @@ impl TypeChecker {
                 if member == "wait" {
                     SemanticType::Unknown
                 } else {
-                    self.reject_transfer_escape(&base_ty, &base.span(), "as the base of member access");
+                    self.reject_transfer_escape(
+                        &base_ty,
+                        &base.span(),
+                        "as the base of member access",
+                    );
                     SemanticType::Unknown
                 }
             }
-            Expr::GenericCall { func, generic_args, args, .. } => {
-                if let Expr::Path { namespace, member, .. } = &**func {
+            Expr::GenericCall {
+                func,
+                generic_args,
+                args,
+                ..
+            } => {
+                if let Expr::Path {
+                    namespace, member, ..
+                } = &**func
+                {
                     if namespace == "SharedMemory" && member == "alloc" {
                         for arg in args {
                             let arg_ty = self.check_expr(arg);
-                            self.reject_transfer_escape(&arg_ty, &arg.span(), "as an argument to `SharedMemory::alloc`");
+                            self.reject_transfer_escape(
+                                &arg_ty,
+                                &arg.span(),
+                                "as an argument to `SharedMemory::alloc`",
+                            );
                         }
                         if let Some(layout_ty) = generic_args.first() {
                             return self.resolve_type(layout_ty);
@@ -537,7 +634,11 @@ impl TypeChecker {
                     if namespace == "Pipeline" && member == "init" {
                         for arg in args {
                             let arg_ty = self.check_expr(arg);
-                            self.reject_transfer_escape(&arg_ty, &arg.span(), "as an argument to `Pipeline::init`");
+                            self.reject_transfer_escape(
+                                &arg_ty,
+                                &arg.span(),
+                                "as an argument to `Pipeline::init`",
+                            );
                         }
                         return SemanticType::Pipeline;
                     }
@@ -582,7 +683,7 @@ impl TypeChecker {
                 self.check_block(block);
                 SemanticType::Unknown
             }
-            _ => SemanticType::Unknown
+            _ => SemanticType::Unknown,
         }
     }
 
@@ -591,10 +692,13 @@ impl TypeChecker {
     /// Enforces Phantom Fragment Role types. (A + B + C -> D)
     fn check_mma_sync(&mut self, args: &[Expr], span: &Span) {
         if args.len() != 3 {
-             self.errors.push(format!("Line {}: mma_sync requires exactly 3 operands (A, B, C).", span.line));
-             return;
+            self.errors.push(format!(
+                "Line {}: mma_sync requires exactly 3 operands (A, B, C).",
+                span.line
+            ));
+            return;
         }
-        
+
         let t_a = self.check_expr(&args[0]);
         let t_b = self.check_expr(&args[1]);
         let t_c = self.check_expr(&args[2]);
@@ -629,31 +733,37 @@ impl TypeChecker {
             }
             Type::Generic { base, args, .. } => {
                 if base == "Fragment" && args.len() >= 3 {
-                     let mut op = "Unknown".to_string();
-                     let mut role = "Unknown".to_string();
-                     let mut dtype = "Unknown".to_string();
+                    let mut op = "Unknown".to_string();
+                    let mut role = "Unknown".to_string();
+                    let mut dtype = "Unknown".to_string();
 
-                     if let GenericArg::Type(Type::Ident(o, _)) = &args[0] { op = o.clone(); }
-                     if let GenericArg::Type(Type::Ident(r, _)) = &args[1] { role = r.clone(); }
-                     if let GenericArg::Type(Type::Primitive(d, _)) = &args[2] { dtype = d.clone(); }
+                    if let GenericArg::Type(Type::Ident(o, _)) = &args[0] {
+                        op = o.clone();
+                    }
+                    if let GenericArg::Type(Type::Ident(r, _)) = &args[1] {
+                        role = r.clone();
+                    }
+                    if let GenericArg::Type(Type::Primitive(d, _)) = &args[2] {
+                        dtype = d.clone();
+                    }
 
-                     return SemanticType::Fragment { op, role, dtype };
+                    return SemanticType::Fragment { op, role, dtype };
                 }
 
                 if base == "Vec" {
-                     let mut inner_ty = SemanticType::Unknown;
-                     let mut allocator = "Standard".to_string();
-                     if args.len() >= 1 {
-                         if let GenericArg::Type(t) = &args[0] {
-                             inner_ty = self.resolve_type(t);
-                         }
-                     }
-                     if args.len() >= 2 {
-                         if let GenericArg::Type(Type::Ident(alloc, _)) = &args[1] {
-                             allocator = alloc.clone();
-                         }
-                     }
-                     return SemanticType::Vector(Box::new(inner_ty), allocator);
+                    let mut inner_ty = SemanticType::Unknown;
+                    let mut allocator = "Standard".to_string();
+                    if args.len() >= 1 {
+                        if let GenericArg::Type(t) = &args[0] {
+                            inner_ty = self.resolve_type(t);
+                        }
+                    }
+                    if args.len() >= 2 {
+                        if let GenericArg::Type(Type::Ident(alloc, _)) = &args[1] {
+                            allocator = alloc.clone();
+                        }
+                    }
+                    return SemanticType::Vector(Box::new(inner_ty), allocator);
                 }
 
                 if base == "SmemLayout" {
@@ -664,23 +774,35 @@ impl TypeChecker {
                     for arg in args {
                         if let GenericArg::Named { name, val } = arg {
                             if name == "rows" {
-                                if let Expr::IntLit(r, _) = val { rows = *r as u32; }
+                                if let Expr::IntLit(r, _) = val {
+                                    rows = *r as u32;
+                                }
                             }
                             if name == "cols" {
-                                if let Expr::IntLit(c, _) = val { cols = *c as u32; }
+                                if let Expr::IntLit(c, _) = val {
+                                    cols = *c as u32;
+                                }
                             }
                             if name == "swizzle" {
                                 // Dummy fill for parser validation context
-                                swizzle = Some(SwizzlePattern { xor_bits: 3, base_shift: 3, offset: 0 });
+                                swizzle = Some(SwizzlePattern {
+                                    xor_bits: 3,
+                                    base_shift: 3,
+                                    offset: 0,
+                                });
                             }
                         }
                     }
 
-                    return SemanticType::SharedMemoryTile { rows, cols, swizzle };
+                    return SemanticType::SharedMemoryTile {
+                        rows,
+                        cols,
+                        swizzle,
+                    };
                 }
 
                 if base == "Transfer" {
-                     return SemanticType::TransferObligation;
+                    return SemanticType::TransferObligation;
                 }
 
                 SemanticType::Unknown

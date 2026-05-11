@@ -74,7 +74,10 @@ impl Y256f32 {
     /// Panics if the slice has fewer than 8 elements or is unaligned.
     #[inline]
     pub fn load_aligned(src: &[f32]) -> Self {
-        assert!(src.len() >= 8, "Y256f32::load_aligned requires at least 8 elements");
+        assert!(
+            src.len() >= 8,
+            "Y256f32::load_aligned requires at least 8 elements"
+        );
         assert!(
             src.as_ptr() as usize % 32 == 0,
             "Y256f32::load_aligned: pointer must be 32-byte aligned"
@@ -90,7 +93,10 @@ impl Y256f32 {
     /// Load 8 f32 values from a 32-byte aligned raw pointer.
     #[inline]
     pub fn load_aligned_ptr(src: *const f32) -> Self {
-        assert!(!src.is_null(), "Y256f32::load_aligned_ptr requires a non-null pointer");
+        assert!(
+            !src.is_null(),
+            "Y256f32::load_aligned_ptr requires a non-null pointer"
+        );
         assert!(
             src as usize % 32 == 0,
             "Y256f32::load_aligned_ptr: pointer must be 32-byte aligned"
@@ -119,7 +125,10 @@ impl Y256f32 {
     #[inline]
     pub fn store_aligned(self, dst: &mut [f32]) {
         assert!(dst.len() >= 8);
-        assert!(dst.as_ptr() as usize % 32 == 0, "store_aligned: pointer not 32-byte aligned");
+        assert!(
+            dst.as_ptr() as usize % 32 == 0,
+            "store_aligned: pointer not 32-byte aligned"
+        );
         #[cfg(target_arch = "x86_64")]
         unsafe {
             _mm256_store_ps(dst.as_mut_ptr(), self.0)
@@ -129,7 +138,10 @@ impl Y256f32 {
     /// Store 8 f32 values into a 32-byte aligned raw pointer.
     #[inline]
     pub fn store_aligned_ptr(self, dst: *mut f32) {
-        assert!(!dst.is_null(), "Y256f32::store_aligned_ptr requires a non-null pointer");
+        assert!(
+            !dst.is_null(),
+            "Y256f32::store_aligned_ptr requires a non-null pointer"
+        );
         assert!(
             dst as usize % 32 == 0,
             "Y256f32::store_aligned_ptr: pointer must be 32-byte aligned"
@@ -389,9 +401,7 @@ impl Y256f64 {
             if is_x86_feature_detected!("fma") {
                 unsafe { Self(_mm256_fmadd_pd(self.0, b.0, c.0)) }
             } else {
-                unsafe {
-                    Self(_mm256_add_pd(_mm256_mul_pd(self.0, b.0), c.0))
-                }
+                unsafe { Self(_mm256_add_pd(_mm256_mul_pd(self.0, b.0), c.0)) }
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
@@ -403,45 +413,65 @@ impl Y256f64 {
 //  Operator overloads — lets Y-Lang IR use  a + b  syntax
 // ────────────────────────────────────────────────────────────
 
-use std::ops::{Add, Sub, Mul, Div};
+use std::ops::{Add, Div, Mul, Sub};
 
 impl Add for Y256f32 {
     type Output = Self;
-    fn add(self, rhs: Self) -> Self { Y256f32::add(self, rhs) }
+    fn add(self, rhs: Self) -> Self {
+        Y256f32::add(self, rhs)
+    }
 }
 impl Sub for Y256f32 {
     type Output = Self;
-    fn sub(self, rhs: Self) -> Self { Y256f32::sub(self, rhs) }
+    fn sub(self, rhs: Self) -> Self {
+        Y256f32::sub(self, rhs)
+    }
 }
 impl Mul for Y256f32 {
     type Output = Self;
-    fn mul(self, rhs: Self) -> Self { Y256f32::mul(self, rhs) }
+    fn mul(self, rhs: Self) -> Self {
+        Y256f32::mul(self, rhs)
+    }
 }
 impl Div for Y256f32 {
     type Output = Self;
-    fn div(self, rhs: Self) -> Self { Y256f32::div(self, rhs) }
+    fn div(self, rhs: Self) -> Self {
+        Y256f32::div(self, rhs)
+    }
 }
 
 impl Add for Y256i32 {
     type Output = Self;
     #[cfg(target_arch = "x86_64")]
-    fn add(self, rhs: Self) -> Self { unsafe { Y256i32(std::arch::x86_64::_mm256_add_epi32(self.0, rhs.0)) } }
+    fn add(self, rhs: Self) -> Self {
+        unsafe { Y256i32(std::arch::x86_64::_mm256_add_epi32(self.0, rhs.0)) }
+    }
     #[cfg(not(target_arch = "x86_64"))]
-    fn add(self, _rhs: Self) -> Self { unimplemented!() }
+    fn add(self, _rhs: Self) -> Self {
+        unimplemented!()
+    }
 }
 impl Sub for Y256i32 {
     type Output = Self;
     #[cfg(target_arch = "x86_64")]
-    fn sub(self, rhs: Self) -> Self { unsafe { Y256i32(std::arch::x86_64::_mm256_sub_epi32(self.0, rhs.0)) } }
+    fn sub(self, rhs: Self) -> Self {
+        unsafe { Y256i32(std::arch::x86_64::_mm256_sub_epi32(self.0, rhs.0)) }
+    }
     #[cfg(not(target_arch = "x86_64"))]
-    fn sub(self, _rhs: Self) -> Self { unimplemented!() }
+    fn sub(self, _rhs: Self) -> Self {
+        unimplemented!()
+    }
 }
 impl Mul for Y256i32 {
     type Output = Self;
     #[cfg(target_arch = "x86_64")]
-    fn mul(self, rhs: Self) -> Self { unsafe { Y256i32(std::arch::x86_64::_mm256_mullo_epi32(self.0, rhs.0)) } }
+    fn mul(self, rhs: Self) -> Self {
+        unsafe { Y256i32(std::arch::x86_64::_mm256_mullo_epi32(self.0, rhs.0)) }
+    }
     #[cfg(not(target_arch = "x86_64"))]
-    fn mul(self, _rhs: Self) -> Self { unimplemented!() }
+    fn mul(self, _rhs: Self) -> Self {
+        unimplemented!()
+    }
 }
 
 // ────────────────────────────────────────────────────────────
