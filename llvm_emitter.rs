@@ -1064,10 +1064,24 @@ impl LlvmEmitter {
                 let mut l_ty = self.infer_type(left);
                 let r_ty = self.infer_type(right);
 
-                // Promote types if there's a mismatch
+                // Promote types only for scalar numeric mismatches.
                 if l_ty != r_ty {
-                    let l_is_float = l_ty == "float" || l_ty == "double" || l_ty == "half";
-                    let r_is_float = r_ty == "float" || r_ty == "double" || r_ty == "half";
+                    let is_float_ty = |ty: &str| ty == "float" || ty == "double" || ty == "half";
+                    let is_int_ty = |ty: &str| {
+                        ty.len() > 1 && ty.starts_with('i') && ty[1..].chars().all(|c| c.is_ascii_digit())
+                    };
+
+                    let l_is_float = is_float_ty(&l_ty);
+                    let r_is_float = is_float_ty(&r_ty);
+                    let l_is_int = is_int_ty(&l_ty);
+                    let r_is_int = is_int_ty(&r_ty);
+
+                    if !(l_is_float || l_is_int) || !(r_is_float || r_is_int) {
+                        panic!(
+                            "type mismatch in binary operation: cannot implicitly promote '{}' and '{}'",
+                            l_ty, r_ty
+                        );
+                    }
 
                     let common_ty = if l_is_float && r_is_float {
                         // Both floats: pick the larger one, but normalize half to float
