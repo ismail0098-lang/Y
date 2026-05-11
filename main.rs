@@ -45,11 +45,15 @@ fn main() {
 
     // Find source file (first arg that isn't a flag)
     let source_file = args.iter().skip(1)
-        .find(|a| !a.starts_with("--"));
+        .find(|a| !a.starts_with("--"))
+        .map(|s| s.clone());
     
-    let source_code = if let Some(file_path) = source_file {
+    let source_code = if let Some(mut file_path) = source_file {
+        if std::path::Path::new(&file_path).extension().is_none() {
+            file_path.push_str(".ysu");
+        }
         println!("[*] Reading source: {}", file_path);
-        match fs::read_to_string(file_path) {
+        match fs::read_to_string(&file_path) {
             Ok(content) => content,
             Err(e) => {
                 eprintln!("[!] Failed to read file: {}", e);
