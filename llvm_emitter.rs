@@ -751,7 +751,12 @@ impl LlvmEmitter {
                             let size_tmp = self.fresh_tmp();
                             writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
                             writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
-                            writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_ptr, coerced, size_tmp).unwrap();
+
+                            let src_ptr = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = alloca {}", src_ptr, dst_ty).unwrap();
+                            writeln!(&mut self.output, "  store {} {}, ptr {}", dst_ty, coerced, src_ptr).unwrap();
+
+                            writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_ptr, src_ptr, size_tmp).unwrap();
                         } else {
                             self.emit_store(&coerced, &target_ptr, &dst_ty);
                         }
@@ -775,7 +780,12 @@ impl LlvmEmitter {
                         let size_tmp = self.fresh_tmp();
                         writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", size_tmp_ptr, dst_ty).unwrap();
                         writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size_tmp, size_tmp_ptr).unwrap();
-                        writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_addr, coerced, size_tmp).unwrap();
+
+                        let src_ptr = self.fresh_tmp();
+                        writeln!(&mut self.output, "  {} = alloca {}", src_ptr, dst_ty).unwrap();
+                        writeln!(&mut self.output, "  store {} {}, ptr {}", dst_ty, coerced, src_ptr).unwrap();
+
+                        writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_addr, src_ptr, size_tmp).unwrap();
                     } else {
                         self.emit_store(&coerced, &target_addr, &dst_ty);
                     }
@@ -1075,9 +1085,43 @@ impl LlvmEmitter {
                 tmp
             }
             Expr::BinaryOp { left, op, right, .. } => {
-                let l = self.emit_expr(left, None, None);
-                let r = self.emit_expr(right, None, None);
-                let ty = self.infer_type(left);
+                let mut l = self.emit_expr(left, None, None);
+                let mut r = self.emit_expr(right, None, None);
+                let mut l_ty = self.infer_type(left);
+                let r_ty = self.infer_type(right);
+
+                // Promote types if there's a mismatch
+                if l_ty != r_ty {
+                    let l_is_float = l_ty == "float" || l_ty == "double" || l_ty == "half";
+                    let r_is_float = r_ty == "float" || r_ty == "double" || r_ty == "half";
+
+                    let common_ty = if l_is_float && r_is_float {
+                        // Both floats, pick the larger one
+                        let l_bits = if l_ty == "double" { 64 } else if l_ty == "float" { 32 } else { 16 };
+                        let r_bits = if r_ty == "double" { 64 } else if r_ty == "float" { 32 } else { 16 };
+                        if l_bits >= r_bits { l_ty.clone() } else { r_ty.clone() }
+                    } else if l_is_float {
+                        l_ty.clone()
+                    } else if r_is_float {
+                        r_ty.clone()
+                    } else {
+                        // Both ints, pick the larger one
+                        let l_bits = Self::int_bits(&l_ty);
+                        let r_bits = Self::int_bits(&r_ty);
+                        if l_bits >= r_bits { l_ty.clone() } else { r_ty.clone() }
+                    };
+
+                    if l_ty != common_ty {
+                        l = self.emit_coerce(&l, &l_ty, &common_ty);
+                        l_ty = common_ty.clone();
+                    }
+                    if r_ty != common_ty {
+                        r = self.emit_coerce(&r, &r_ty, &common_ty);
+                        // r_ty = common_ty.clone(); // Not needed anymore
+                    }
+                }
+
+                let ty = l_ty;
                 let tmp = self.fresh_tmp();
                 
                 // Special case: Enum comparison (compare tags)
