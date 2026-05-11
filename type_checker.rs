@@ -638,3 +638,16 @@ impl TypeChecker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_type_checker_starts_with_clean_state() {
+        let tc = TypeChecker::new();
+
+        assert!(tc.errors.is_empty());
+        assert!(!tc.in_unsafe);
+    }
+}
