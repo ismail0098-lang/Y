@@ -1131,10 +1131,6 @@ impl LlvmEmitter {
                             let tmp = self.fresh_tmp();
                             writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val).unwrap();
                             arg_val = tmp;
-                        } else if arg_ty == "ptr" && param_ty == "String" {
-                            let tmp = self.fresh_tmp();
-                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val).unwrap();
-                            arg_val = tmp;
                         } else if arg_ast.starts_with('&') && param_ty == arg_ast && arg_val.starts_with("%") && is_runtime_func {
                             // If param is &String and arg is &String, but arg is a double pointer (e.g., alloca'd local variable yielding pointer to ptr), we load it to get the YStr* pointer instead of passing the alloca YStr**.
                             let tmp = self.fresh_tmp();
