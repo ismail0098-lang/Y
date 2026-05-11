@@ -9,12 +9,56 @@ target triple = "x86_64-pc-windows-msvc"
 attributes #0 = { "target-cpu"="skylake-avx512" "target-features"="+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl" }
 
 ; --- Struct Definitions ---
-%MyStruct = type { i64, ptr }
+%Token = type { %TokenKind, i64, i64, ptr }
+%Lexer = type { ptr, i64, i64, i64 }
+%Span = type { i64, i64 }
+%FuncDecl = type { ptr, i32, i64, i64, i64, i64, i64, i64 }
+%ParamDecl = type { ptr, ptr }
+%FieldDecl = type { ptr, ptr }
+%StructDecl = type { ptr, i64, i64 }
+%MatchArm = type { %MatchPattern, i64, i64 }
+%AstArena = type { ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr }
+%Parser = type { ptr, i64, i64 }
+%LlvmEmitter = type { ptr, i64, i64 }
 
 ; --- Enum Definitions ---
+%TokenKind = type { i32, [8 x i64] }
+%Expr = type { i32, [8 x i64] }
+%Stmt = type { i32, [8 x i64] }
+%MatchPattern = type { i32, [8 x i64] }
 
 ; --- External Runtime Declarations ---
-declare ptr @String_new(...)
+declare void @yvec_free(...)
+declare i8 @yvec_get_char(...)
+declare i1 @ystr_eq(...)
+declare void @ystr_free(...)
+declare i32 @TokenKind_Ident(...)
+declare i32 @TokenKind_FloatLit(...)
+declare i32 @TokenKind_IntLit(...)
+declare i32 @TokenKind_Unknown(...)
+declare void @print(...)
+declare i32 @Expr_IntLit(...)
+declare i32 @Expr_StringLit(...)
+declare i32 @Expr_BoolLit(...)
+declare i32 @Expr_Path(...)
+declare i32 @Expr_StructLit(...)
+declare i32 @Expr_Ident(...)
+declare i32 @Expr_UnaryExpr(...)
+declare i32 @Expr_Call(...)
+declare i32 @Expr_MemberAccess(...)
+declare i32 @Expr_Index(...)
+declare i32 @Expr_BinaryExpr(...)
+declare i32 @Stmt_Let(...)
+declare i32 @Stmt_Return(...)
+declare i32 @Stmt_If(...)
+declare i32 @Stmt_While(...)
+declare i32 @Stmt_For(...)
+declare i32 @MatchPattern_EnumVariant(...)
+declare i32 @MatchPattern_Ident(...)
+declare i32 @Stmt_Match(...)
+declare i32 @Stmt_Assign(...)
+declare i32 @Stmt_CompoundAssign(...)
+declare i32 @Stmt_ExprStmt(...)
 declare ptr @ystr_new(ptr)
 declare void @ystr_push(ptr, i8)
 declare void @ystr_push_str(ptr, ptr)
@@ -35,42 +79,7322 @@ declare void @exit(i32) noreturn
 declare void @println(ptr)
 declare void @print_int(i64)
 declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)
+declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)
 
 ; --- String Constants ---
-@.str.0 = private unnamed_addr constant [6 x i8] c"hello\00"
+@.str.0 = private unnamed_addr constant [5 x i8] c"enum\00"
+@.str.1 = private unnamed_addr constant [7 x i8] c"struct\00"
+@.str.2 = private unnamed_addr constant [5 x i8] c"impl\00"
+@.str.3 = private unnamed_addr constant [3 x i8] c"fn\00"
+@.str.4 = private unnamed_addr constant [4 x i8] c"let\00"
+@.str.5 = private unnamed_addr constant [7 x i8] c"return\00"
+@.str.6 = private unnamed_addr constant [3 x i8] c"if\00"
+@.str.7 = private unnamed_addr constant [5 x i8] c"else\00"
+@.str.8 = private unnamed_addr constant [6 x i8] c"while\00"
+@.str.9 = private unnamed_addr constant [5 x i8] c"true\00"
+@.str.10 = private unnamed_addr constant [6 x i8] c"false\00"
+@.str.11 = private unnamed_addr constant [4 x i8] c"mut\00"
+@.str.12 = private unnamed_addr constant [7 x i8] c"String\00"
+@.str.13 = private unnamed_addr constant [4 x i8] c"Vec\00"
+@.str.14 = private unnamed_addr constant [5 x i8] c"char\00"
+@.str.15 = private unnamed_addr constant [6 x i8] c"usize\00"
+@.str.16 = private unnamed_addr constant [4 x i8] c"I32\00"
+@.str.17 = private unnamed_addr constant [4 x i8] c"I64\00"
+@.str.18 = private unnamed_addr constant [5 x i8] c"bool\00"
+@.str.19 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.20 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.21 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.22 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.23 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.24 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.25 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.26 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.27 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.28 = private unnamed_addr constant [2 x i8] c",\00"
+@.str.29 = private unnamed_addr constant [2 x i8] c"=\00"
+@.str.30 = private unnamed_addr constant [2 x i8] c"+\00"
+@.str.31 = private unnamed_addr constant [2 x i8] c"*\00"
+@.str.32 = private unnamed_addr constant [2 x i8] c"&\00"
+@.str.33 = private unnamed_addr constant [2 x i8] c"<\00"
+@.str.34 = private unnamed_addr constant [2 x i8] c">\00"
+@.str.35 = private unnamed_addr constant [2 x i8] c"?\00"
+@.str.36 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.37 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.38 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.39 = private unnamed_addr constant [25 x i8] c"Syntax Error: Expected '\00"
+@.str.40 = private unnamed_addr constant [14 x i8] c"' but found '\00"
+@.str.41 = private unnamed_addr constant [11 x i8] c"' at line \00"
+@.str.42 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.43 = private unnamed_addr constant [5 x i8] c"true\00"
+@.str.44 = private unnamed_addr constant [6 x i8] c"false\00"
+@.str.45 = private unnamed_addr constant [3 x i8] c"::\00"
+@.str.46 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.47 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.48 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.49 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.50 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.51 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.52 = private unnamed_addr constant [2 x i8] c",\00"
+@.str.53 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.54 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.55 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.56 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.57 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.58 = private unnamed_addr constant [2 x i8] c"&\00"
+@.str.59 = private unnamed_addr constant [2 x i8] c"*\00"
+@.str.60 = private unnamed_addr constant [2 x i8] c"-\00"
+@.str.61 = private unnamed_addr constant [2 x i8] c"!\00"
+@.str.62 = private unnamed_addr constant [36 x i8] c"[!] Parse error: unexpected token '\00"
+@.str.63 = private unnamed_addr constant [11 x i8] c"' at line \00"
+@.str.64 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.65 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.66 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.67 = private unnamed_addr constant [2 x i8] c",\00"
+@.str.68 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.69 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.70 = private unnamed_addr constant [2 x i8] c".\00"
+@.str.71 = private unnamed_addr constant [2 x i8] c"[\00"
+@.str.72 = private unnamed_addr constant [2 x i8] c"]\00"
+@.str.73 = private unnamed_addr constant [2 x i8] c"]\00"
+@.str.74 = private unnamed_addr constant [3 x i8] c"||\00"
+@.str.75 = private unnamed_addr constant [3 x i8] c"&&\00"
+@.str.76 = private unnamed_addr constant [3 x i8] c"==\00"
+@.str.77 = private unnamed_addr constant [3 x i8] c"!=\00"
+@.str.78 = private unnamed_addr constant [2 x i8] c"<\00"
+@.str.79 = private unnamed_addr constant [2 x i8] c">\00"
+@.str.80 = private unnamed_addr constant [3 x i8] c"<=\00"
+@.str.81 = private unnamed_addr constant [3 x i8] c">=\00"
+@.str.82 = private unnamed_addr constant [2 x i8] c"|\00"
+@.str.83 = private unnamed_addr constant [2 x i8] c"^\00"
+@.str.84 = private unnamed_addr constant [2 x i8] c"&\00"
+@.str.85 = private unnamed_addr constant [2 x i8] c"+\00"
+@.str.86 = private unnamed_addr constant [2 x i8] c"-\00"
+@.str.87 = private unnamed_addr constant [2 x i8] c"*\00"
+@.str.88 = private unnamed_addr constant [2 x i8] c"/\00"
+@.str.89 = private unnamed_addr constant [2 x i8] c"%\00"
+@.str.90 = private unnamed_addr constant [2 x i8] c"+\00"
+@.str.91 = private unnamed_addr constant [2 x i8] c"-\00"
+@.str.92 = private unnamed_addr constant [2 x i8] c"*\00"
+@.str.93 = private unnamed_addr constant [2 x i8] c"/\00"
+@.str.94 = private unnamed_addr constant [2 x i8] c"%\00"
+@.str.95 = private unnamed_addr constant [3 x i8] c"==\00"
+@.str.96 = private unnamed_addr constant [3 x i8] c"!=\00"
+@.str.97 = private unnamed_addr constant [2 x i8] c"<\00"
+@.str.98 = private unnamed_addr constant [2 x i8] c">\00"
+@.str.99 = private unnamed_addr constant [3 x i8] c"<=\00"
+@.str.100 = private unnamed_addr constant [3 x i8] c">=\00"
+@.str.101 = private unnamed_addr constant [3 x i8] c"&&\00"
+@.str.102 = private unnamed_addr constant [3 x i8] c"||\00"
+@.str.103 = private unnamed_addr constant [2 x i8] c"&\00"
+@.str.104 = private unnamed_addr constant [2 x i8] c"|\00"
+@.str.105 = private unnamed_addr constant [2 x i8] c"^\00"
+@.str.106 = private unnamed_addr constant [4 x i8] c"let\00"
+@.str.107 = private unnamed_addr constant [4 x i8] c"mut\00"
+@.str.108 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.109 = private unnamed_addr constant [2 x i8] c"=\00"
+@.str.110 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.111 = private unnamed_addr constant [2 x i8] c"=\00"
+@.str.112 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.113 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.114 = private unnamed_addr constant [7 x i8] c"return\00"
+@.str.115 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.116 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.117 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.118 = private unnamed_addr constant [3 x i8] c"if\00"
+@.str.119 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.120 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.121 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.122 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.123 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.124 = private unnamed_addr constant [5 x i8] c"else\00"
+@.str.125 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.126 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.127 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.128 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.129 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.130 = private unnamed_addr constant [6 x i8] c"while\00"
+@.str.131 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.132 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.133 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.134 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.135 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.136 = private unnamed_addr constant [4 x i8] c"for\00"
+@.str.137 = private unnamed_addr constant [3 x i8] c"in\00"
+@.str.138 = private unnamed_addr constant [3 x i8] c"in\00"
+@.str.139 = private unnamed_addr constant [3 x i8] c"..\00"
+@.str.140 = private unnamed_addr constant [3 x i8] c"..\00"
+@.str.141 = private unnamed_addr constant [5 x i8] c"step\00"
+@.str.142 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.143 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.144 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.145 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.146 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.147 = private unnamed_addr constant [6 x i8] c"match\00"
+@.str.148 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.149 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.150 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.151 = private unnamed_addr constant [2 x i8] c"_\00"
+@.str.152 = private unnamed_addr constant [3 x i8] c"::\00"
+@.str.153 = private unnamed_addr constant [3 x i8] c"=>\00"
+@.str.154 = private unnamed_addr constant [3 x i8] c"=>\00"
+@.str.155 = private unnamed_addr constant [2 x i8] c",\00"
+@.str.156 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.157 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.158 = private unnamed_addr constant [2 x i8] c"=\00"
+@.str.159 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.160 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.161 = private unnamed_addr constant [3 x i8] c"+=\00"
+@.str.162 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.163 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.164 = private unnamed_addr constant [3 x i8] c"-=\00"
+@.str.165 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.166 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.167 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.168 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.169 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.170 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.171 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.172 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.173 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.174 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.175 = private unnamed_addr constant [2 x i8] c",\00"
+@.str.176 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.177 = private unnamed_addr constant [2 x i8] c",\00"
+@.str.178 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.179 = private unnamed_addr constant [2 x i8] c")\00"
+@.str.180 = private unnamed_addr constant [3 x i8] c"->\00"
+@.str.181 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.182 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.183 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.184 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.185 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.186 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.187 = private unnamed_addr constant [3 x i8] c"fn\00"
+@.str.188 = private unnamed_addr constant [6 x i8] c"@safe\00"
+@.str.189 = private unnamed_addr constant [3 x i8] c"fn\00"
+@.str.190 = private unnamed_addr constant [3 x i8] c"fn\00"
+@.str.191 = private unnamed_addr constant [8 x i8] c"@unsafe\00"
+@.str.192 = private unnamed_addr constant [3 x i8] c"fn\00"
+@.str.193 = private unnamed_addr constant [3 x i8] c"fn\00"
+@.str.194 = private unnamed_addr constant [7 x i8] c"struct\00"
+@.str.195 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.196 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.197 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.198 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.199 = private unnamed_addr constant [2 x i8] c":\00"
+@.str.200 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.201 = private unnamed_addr constant [2 x i8] c",\00"
+@.str.202 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.203 = private unnamed_addr constant [2 x i8] c",\00"
+@.str.204 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.205 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.206 = private unnamed_addr constant [5 x i8] c"enum\00"
+@.str.207 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.208 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.209 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.210 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.211 = private unnamed_addr constant [5 x i8] c"impl\00"
+@.str.212 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.213 = private unnamed_addr constant [2 x i8] c"{\00"
+@.str.214 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.215 = private unnamed_addr constant [8 x i8] c"@unsafe\00"
+@.str.216 = private unnamed_addr constant [6 x i8] c"@safe\00"
+@.str.217 = private unnamed_addr constant [4 x i8] c"pub\00"
+@.str.218 = private unnamed_addr constant [3 x i8] c"fn\00"
+@.str.219 = private unnamed_addr constant [3 x i8] c"fn\00"
+@.str.220 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.221 = private unnamed_addr constant [2 x i8] c"}\00"
+@.str.222 = private unnamed_addr constant [7 x i8] c"import\00"
+@.str.223 = private unnamed_addr constant [2 x i8] c";\00"
+@.str.224 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.225 = private unnamed_addr constant [40 x i8] c"[!] Skipping unknown top-level token: '\00"
+@.str.226 = private unnamed_addr constant [2 x i8] c"'\00"
+@.str.227 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.228 = private unnamed_addr constant [52 x i8] c"; ================================================\0A\00"
+@.str.229 = private unnamed_addr constant [52 x i8] c"; ================================================\0A\00"
+@.str.230 = private unnamed_addr constant [52 x i8] c";  Generated by Y-Lang Self-Hosted Compiler (LLVM)\0A\00"
+@.str.231 = private unnamed_addr constant [52 x i8] c";  Generated by Y-Lang Self-Hosted Compiler (LLVM)\0A\00"
+@.str.232 = private unnamed_addr constant [53 x i8] c"; ================================================\0A\0A\00"
+@.str.233 = private unnamed_addr constant [53 x i8] c"; ================================================\0A\0A\00"
+@.str.234 = private unnamed_addr constant [94 x i8] c"target datalayout = \22e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\22\0A\00"
+@.str.235 = private unnamed_addr constant [94 x i8] c"target datalayout = \22e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\22\0A\00"
+@.str.236 = private unnamed_addr constant [43 x i8] c"target triple = \22x86_64-pc-windows-msvc\22\0A\0A\00"
+@.str.237 = private unnamed_addr constant [43 x i8] c"target triple = \22x86_64-pc-windows-msvc\22\0A\0A\00"
+@.str.238 = private unnamed_addr constant [2 x i8] c"0\00"
+@.str.239 = private unnamed_addr constant [1 x i8] c"\00"
+@.str.240 = private unnamed_addr constant [3 x i8] c"%t\00"
+@.str.241 = private unnamed_addr constant [2 x i8] c".\00"
+@.str.242 = private unnamed_addr constant [2 x i8] c".\00"
+@.str.243 = private unnamed_addr constant [13 x i8] c"define i32 @\00"
+@.str.244 = private unnamed_addr constant [13 x i8] c"define i32 @\00"
+@.str.245 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.246 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.247 = private unnamed_addr constant [6 x i8] c"i32 %\00"
+@.str.248 = private unnamed_addr constant [6 x i8] c"i32 %\00"
+@.str.249 = private unnamed_addr constant [5 x i8] c".arg\00"
+@.str.250 = private unnamed_addr constant [5 x i8] c".arg\00"
+@.str.251 = private unnamed_addr constant [3 x i8] c", \00"
+@.str.252 = private unnamed_addr constant [3 x i8] c", \00"
+@.str.253 = private unnamed_addr constant [12 x i8] c") {\0Aentry:\0A\00"
+@.str.254 = private unnamed_addr constant [12 x i8] c") {\0Aentry:\0A\00"
+@.str.255 = private unnamed_addr constant [4 x i8] c"  %\00"
+@.str.256 = private unnamed_addr constant [4 x i8] c"  %\00"
+@.str.257 = private unnamed_addr constant [15 x i8] c" = alloca i32\0A\00"
+@.str.258 = private unnamed_addr constant [15 x i8] c" = alloca i32\0A\00"
+@.str.259 = private unnamed_addr constant [14 x i8] c"  store i32 %\00"
+@.str.260 = private unnamed_addr constant [14 x i8] c"  store i32 %\00"
+@.str.261 = private unnamed_addr constant [12 x i8] c".arg, ptr %\00"
+@.str.262 = private unnamed_addr constant [12 x i8] c".arg, ptr %\00"
+@.str.263 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.264 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.265 = private unnamed_addr constant [16 x i8] c"  ret i32 0\0A}\0A\0A\00"
+@.str.266 = private unnamed_addr constant [16 x i8] c"  ret i32 0\0A}\0A\0A\00"
+@.str.267 = private unnamed_addr constant [4 x i8] c"  %\00"
+@.str.268 = private unnamed_addr constant [4 x i8] c"  %\00"
+@.str.269 = private unnamed_addr constant [15 x i8] c" = alloca i32\0A\00"
+@.str.270 = private unnamed_addr constant [15 x i8] c" = alloca i32\0A\00"
+@.str.271 = private unnamed_addr constant [13 x i8] c"  store i32 \00"
+@.str.272 = private unnamed_addr constant [13 x i8] c"  store i32 \00"
+@.str.273 = private unnamed_addr constant [8 x i8] c", ptr %\00"
+@.str.274 = private unnamed_addr constant [8 x i8] c", ptr %\00"
+@.str.275 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.276 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.277 = private unnamed_addr constant [13 x i8] c"  store i32 \00"
+@.str.278 = private unnamed_addr constant [13 x i8] c"  store i32 \00"
+@.str.279 = private unnamed_addr constant [7 x i8] c", ptr \00"
+@.str.280 = private unnamed_addr constant [7 x i8] c", ptr \00"
+@.str.281 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.282 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.283 = private unnamed_addr constant [11 x i8] c"  ret i32 \00"
+@.str.284 = private unnamed_addr constant [11 x i8] c"  ret i32 \00"
+@.str.285 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.286 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.287 = private unnamed_addr constant [13 x i8] c"  ret i32 0\0A\00"
+@.str.288 = private unnamed_addr constant [13 x i8] c"  ret i32 0\0A\00"
+@.str.289 = private unnamed_addr constant [5 x i8] c"then\00"
+@.str.290 = private unnamed_addr constant [5 x i8] c"then\00"
+@.str.291 = private unnamed_addr constant [5 x i8] c"else\00"
+@.str.292 = private unnamed_addr constant [5 x i8] c"else\00"
+@.str.293 = private unnamed_addr constant [6 x i8] c"merge\00"
+@.str.294 = private unnamed_addr constant [6 x i8] c"merge\00"
+@.str.295 = private unnamed_addr constant [9 x i8] c"  br i1 \00"
+@.str.296 = private unnamed_addr constant [9 x i8] c"  br i1 \00"
+@.str.297 = private unnamed_addr constant [10 x i8] c", label %\00"
+@.str.298 = private unnamed_addr constant [10 x i8] c", label %\00"
+@.str.299 = private unnamed_addr constant [10 x i8] c", label %\00"
+@.str.300 = private unnamed_addr constant [10 x i8] c", label %\00"
+@.str.301 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.302 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.303 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.304 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.305 = private unnamed_addr constant [13 x i8] c"  br label %\00"
+@.str.306 = private unnamed_addr constant [13 x i8] c"  br label %\00"
+@.str.307 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.308 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.309 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.310 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.311 = private unnamed_addr constant [13 x i8] c"  br label %\00"
+@.str.312 = private unnamed_addr constant [13 x i8] c"  br label %\00"
+@.str.313 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.314 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.315 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.316 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.317 = private unnamed_addr constant [11 x i8] c"while.cond\00"
+@.str.318 = private unnamed_addr constant [11 x i8] c"while.cond\00"
+@.str.319 = private unnamed_addr constant [11 x i8] c"while.body\00"
+@.str.320 = private unnamed_addr constant [11 x i8] c"while.body\00"
+@.str.321 = private unnamed_addr constant [10 x i8] c"while.end\00"
+@.str.322 = private unnamed_addr constant [10 x i8] c"while.end\00"
+@.str.323 = private unnamed_addr constant [13 x i8] c"  br label %\00"
+@.str.324 = private unnamed_addr constant [13 x i8] c"  br label %\00"
+@.str.325 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.326 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.327 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.328 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.329 = private unnamed_addr constant [9 x i8] c"  br i1 \00"
+@.str.330 = private unnamed_addr constant [9 x i8] c"  br i1 \00"
+@.str.331 = private unnamed_addr constant [10 x i8] c", label %\00"
+@.str.332 = private unnamed_addr constant [10 x i8] c", label %\00"
+@.str.333 = private unnamed_addr constant [10 x i8] c", label %\00"
+@.str.334 = private unnamed_addr constant [10 x i8] c", label %\00"
+@.str.335 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.336 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.337 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.338 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.339 = private unnamed_addr constant [13 x i8] c"  br label %\00"
+@.str.340 = private unnamed_addr constant [13 x i8] c"  br label %\00"
+@.str.341 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.342 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.343 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.344 = private unnamed_addr constant [3 x i8] c":\0A\00"
+@.str.345 = private unnamed_addr constant [2 x i8] c"%\00"
+@.str.346 = private unnamed_addr constant [3 x i8] c"  \00"
+@.str.347 = private unnamed_addr constant [3 x i8] c"  \00"
+@.str.348 = private unnamed_addr constant [19 x i8] c" = load i32, ptr %\00"
+@.str.349 = private unnamed_addr constant [19 x i8] c" = load i32, ptr %\00"
+@.str.350 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.351 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.352 = private unnamed_addr constant [3 x i8] c"  \00"
+@.str.353 = private unnamed_addr constant [3 x i8] c"  \00"
+@.str.354 = private unnamed_addr constant [4 x i8] c" = \00"
+@.str.355 = private unnamed_addr constant [4 x i8] c" = \00"
+@.str.356 = private unnamed_addr constant [9 x i8] c"add i32 \00"
+@.str.357 = private unnamed_addr constant [9 x i8] c"add i32 \00"
+@.str.358 = private unnamed_addr constant [9 x i8] c"sub i32 \00"
+@.str.359 = private unnamed_addr constant [9 x i8] c"sub i32 \00"
+@.str.360 = private unnamed_addr constant [9 x i8] c"mul i32 \00"
+@.str.361 = private unnamed_addr constant [9 x i8] c"mul i32 \00"
+@.str.362 = private unnamed_addr constant [10 x i8] c"sdiv i32 \00"
+@.str.363 = private unnamed_addr constant [10 x i8] c"sdiv i32 \00"
+@.str.364 = private unnamed_addr constant [13 x i8] c"icmp eq i32 \00"
+@.str.365 = private unnamed_addr constant [13 x i8] c"icmp eq i32 \00"
+@.str.366 = private unnamed_addr constant [13 x i8] c"icmp ne i32 \00"
+@.str.367 = private unnamed_addr constant [13 x i8] c"icmp ne i32 \00"
+@.str.368 = private unnamed_addr constant [14 x i8] c"icmp slt i32 \00"
+@.str.369 = private unnamed_addr constant [14 x i8] c"icmp slt i32 \00"
+@.str.370 = private unnamed_addr constant [14 x i8] c"icmp sgt i32 \00"
+@.str.371 = private unnamed_addr constant [14 x i8] c"icmp sgt i32 \00"
+@.str.372 = private unnamed_addr constant [9 x i8] c"add i32 \00"
+@.str.373 = private unnamed_addr constant [9 x i8] c"add i32 \00"
+@.str.374 = private unnamed_addr constant [3 x i8] c", \00"
+@.str.375 = private unnamed_addr constant [3 x i8] c", \00"
+@.str.376 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.377 = private unnamed_addr constant [2 x i8] c"\0A\00"
+@.str.378 = private unnamed_addr constant [8 x i8] c"unknown\00"
+@.str.379 = private unnamed_addr constant [3 x i8] c"  \00"
+@.str.380 = private unnamed_addr constant [3 x i8] c"  \00"
+@.str.381 = private unnamed_addr constant [14 x i8] c" = call i32 @\00"
+@.str.382 = private unnamed_addr constant [14 x i8] c" = call i32 @\00"
+@.str.383 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.384 = private unnamed_addr constant [2 x i8] c"(\00"
+@.str.385 = private unnamed_addr constant [5 x i8] c"i32 \00"
+@.str.386 = private unnamed_addr constant [5 x i8] c"i32 \00"
+@.str.387 = private unnamed_addr constant [3 x i8] c", \00"
+@.str.388 = private unnamed_addr constant [3 x i8] c", \00"
+@.str.389 = private unnamed_addr constant [3 x i8] c")\0A\00"
+@.str.390 = private unnamed_addr constant [3 x i8] c")\0A\00"
+@.str.391 = private unnamed_addr constant [2 x i8] c"0\00"
+@.str.392 = private unnamed_addr constant [36 x i8] c"--- Y-Lang Self-Hosted Compiler ---\00"
+@.str.393 = private unnamed_addr constant [13 x i8] c"compiler.ysu\00"
+@.str.394 = private unnamed_addr constant [26 x i8] c"[*] Reading source file: \00"
+@.str.395 = private unnamed_addr constant [16 x i8] c"[1/3] Lexing...\00"
+@.str.396 = private unnamed_addr constant [20 x i8] c"      -> Extracted \00"
+@.str.397 = private unnamed_addr constant [9 x i8] c" tokens.\00"
+@.str.398 = private unnamed_addr constant [17 x i8] c"[2/3] Parsing...\00"
+@.str.399 = private unnamed_addr constant [17 x i8] c"      -> Parsed \00"
+@.str.400 = private unnamed_addr constant [12 x i8] c" functions.\00"
+@.str.401 = private unnamed_addr constant [26 x i8] c"[3/3] Emitting LLVM IR...\00"
+@.str.402 = private unnamed_addr constant [10 x i8] c"output.ll\00"
+@.str.403 = private unnamed_addr constant [30 x i8] c"      -> Written to output.ll\00"
+@.str.404 = private unnamed_addr constant [34 x i8] c"--- Self-Compilation Complete ---\00"
 
 @.fmt.sn = private unnamed_addr constant [4 x i8] c"%s\0A\00"
 @.fmt.s = private unnamed_addr constant [3 x i8] c"%s\00"
 @.fmt.d = private unnamed_addr constant [4 x i8] c"%ld\00"
 
-define %MyStruct @MyStruct_new(i64 %a.arg, ptr %b.arg) #0 {
+; impl Vec
+define ptr @Vec_new(i64 %elem_size.arg) #0 {
 entry:
-  %a = alloca i64
-  store i64 %a.arg, ptr %a
+  %elem_size = alloca i64
+  store i64 %elem_size.arg, ptr %elem_size
+  %t1 = load i64, ptr %elem_size
+  %t2 = call ptr @yvec_new(i64 %t1)
+  ret ptr %t2
+}
+
+define void @Vec_push(ptr %v.arg, ptr %elem.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %elem = alloca ptr
+  store ptr %elem.arg, ptr %elem
+  %t1 = load ptr, ptr %v
+  %t2 = load ptr, ptr %elem
+  call void @yvec_push(ptr %t1, ptr %t2)
+  ret void
+}
+
+define void @Vec_free(ptr %v.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %t1 = load ptr, ptr %v
+  call void @yvec_free(ptr %t1)
+  ret void
+}
+
+define i64 @Vec_len(ptr %v.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %t1 = load ptr, ptr %v
+  %t2 = call i64 @yvec_len(ptr %t1)
+  ret i64 %t2
+}
+
+define i8 @Vec_get_char(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %t1 = load ptr, ptr %v
+  %t2 = load i64, ptr %i
+  %t3 = call i8 @yvec_get_char(ptr %t1, i64 %t2)
+  ret i8 %t3
+}
+
+; impl String
+define i64 @String_len(ptr %s.arg) #0 {
+entry:
+  %s = alloca ptr
+  store ptr %s.arg, ptr %s
+  %t1 = load ptr, ptr %s
+  %t2 = call i64 @ystr_len(ptr %t1)
+  ret i64 %t2
+}
+
+define ptr @String_clone(ptr %s.arg) #0 {
+entry:
+  %s = alloca ptr
+  store ptr %s.arg, ptr %s
+  %t1 = load ptr, ptr %s
+  %t2 = call ptr @ystr_clone(ptr %t1)
+  ret ptr %t2
+}
+
+define void @String_push(ptr %s.arg, i8 %c.arg) #0 {
+entry:
+  %s = alloca ptr
+  store ptr %s.arg, ptr %s
+  %c = alloca i8
+  store i8 %c.arg, ptr %c
+  %t1 = load ptr, ptr %s
+  %t2 = load i8, ptr %c
+  call void @ystr_push(ptr %t1, i8 %t2)
+  ret void
+}
+
+define void @String_push_str(ptr %s.arg, ptr %other.arg) #0 {
+entry:
+  %s = alloca ptr
+  store ptr %s.arg, ptr %s
+  %other = alloca ptr
+  store ptr %other.arg, ptr %other
+  %t1 = load ptr, ptr %s
+  %t2 = load ptr, ptr %other
+  call void @ystr_push_str(ptr %t1, ptr %t2)
+  ret void
+}
+
+define i1 @String_eq(ptr %a.arg, ptr %b.arg) #0 {
+entry:
+  %a = alloca ptr
+  store ptr %a.arg, ptr %a
   %b = alloca ptr
   store ptr %b.arg, ptr %b
-  %t1 = load i64, ptr %a
-  %t2 = insertvalue %MyStruct undef, i64 %t1, 0
-  %t3 = load ptr, ptr %b
-  %t4 = insertvalue %MyStruct %t2, ptr %t3, 1
-  ret %MyStruct %t4
+  %t1 = load ptr, ptr %a
+  %t2 = load ptr, ptr %b
+  %t3 = call i1 @ystr_eq(ptr %t1, ptr %t2)
+  ret i1 %t3
+}
+
+define i1 @String_eq_cstr(ptr %a.arg, ptr %b.arg) #0 {
+entry:
+  %a = alloca ptr
+  store ptr %a.arg, ptr %a
+  %b = alloca ptr
+  store ptr %b.arg, ptr %b
+  %t1 = load ptr, ptr %a
+  %t2 = load ptr, ptr %b
+  %t3 = call i1 @ystr_eq_cstr(ptr %t1, ptr %t2)
+  ret i1 %t3
+}
+
+define i8 @String_char_at(ptr %s.arg, i64 %i.arg) #0 {
+entry:
+  %s = alloca ptr
+  store ptr %s.arg, ptr %s
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %t1 = load ptr, ptr %s
+  %t2 = load i64, ptr %i
+  %t3 = call i8 @ystr_char_at(ptr %t1, i64 %t2)
+  ret i8 %t3
+}
+
+define void @String_free(ptr %s.arg) #0 {
+entry:
+  %s = alloca ptr
+  store ptr %s.arg, ptr %s
+  %t1 = load ptr, ptr %s
+  call void @ystr_free(ptr %t1)
+  ret void
+}
+
+; impl File
+define ptr @File_read_to_string(ptr %path.arg) #0 {
+entry:
+  %path = alloca ptr
+  store ptr %path.arg, ptr %path
+  %t1 = load ptr, ptr %path
+  %t2 = load ptr, ptr %t1
+  %t3 = call ptr @yfile_read_to_string(ptr %t2)
+  ret ptr %t3
+}
+
+define void @File_write(ptr %path.arg, ptr %content.arg) #0 {
+entry:
+  %path = alloca ptr
+  store ptr %path.arg, ptr %path
+  %content = alloca ptr
+  store ptr %content.arg, ptr %content
+  %t1 = load ptr, ptr %path
+  %t2 = load ptr, ptr %t1
+  %t3 = load ptr, ptr %content
+  %t4 = load ptr, ptr %t3
+  call void @yfile_write(ptr %t2, ptr %t4)
+  ret void
+}
+
+; impl Token
+define %Token @Token_new(%TokenKind %kind.arg, i64 %line.arg, i64 %col.arg, ptr %lexeme.arg) #0 {
+entry:
+  %kind = alloca %TokenKind
+  store %TokenKind %kind.arg, ptr %kind
+  %line = alloca i64
+  store i64 %line.arg, ptr %line
+  %col = alloca i64
+  store i64 %col.arg, ptr %col
+  %lexeme = alloca ptr
+  store ptr %lexeme.arg, ptr %lexeme
+  %tok = alloca %Token
+  ; lvalue .kind
+  %t1 = getelementptr %Token, ptr %tok, i32 0, i32 0
+  %t2 = load %TokenKind, ptr %kind
+  %t3 = getelementptr %TokenKind, ptr null, i32 1
+  %t4 = ptrtoint ptr %t3 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t1, ptr align 8 %t2, i64 %t4, i1 false)
+  ; lvalue .line
+  %t5 = getelementptr %Token, ptr %tok, i32 0, i32 1
+  %t6 = load i64, ptr %line
+  store i64 %t6, ptr %t5
+  ; lvalue .col
+  %t7 = getelementptr %Token, ptr %tok, i32 0, i32 2
+  %t8 = load i64, ptr %col
+  store i64 %t8, ptr %t7
+  ; lvalue .lexeme
+  %t9 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t10 = load ptr, ptr %lexeme
+  %t11 = load ptr, ptr %t10
+  %t12 = call ptr @String_clone(ptr %t11)
+  store ptr %t12, ptr %t9
+  %t13 = load %Token, ptr %tok
+  ret %Token %t13
+}
+
+; impl Lexer
+define %Lexer @Lexer_new(ptr %source.arg) #0 {
+entry:
+  %source = alloca ptr
+  store ptr %source.arg, ptr %source
+  %lx = alloca %Lexer
+  %input_vec = alloca ptr
+  %len = alloca i64
+  %i = alloca i64
+  %ch = alloca i8
+  %t1 = call ptr @Vec_new(i64 1)
+  store ptr %t1, ptr %input_vec
+  %t2 = load ptr, ptr %source
+  %t3 = call i64 @String_len(ptr %t2)
+  store i64 %t3, ptr %len
+  %t4 = sext i32 0 to i64
+  store i64 %t4, ptr %i
+  br label %while.cond.1
+while.cond.1:
+  %t5 = load i64, ptr %i
+  %t6 = load i64, ptr %len
+  %t7 = icmp slt i64 %t5, %t6
+  br i1 %t7, label %while.body.2, label %while.end.3
+while.body.2:
+  %t8 = load ptr, ptr %source
+  %t9 = load i64, ptr %i
+  %t10 = call i8 @String_char_at(ptr %t8, i64 %t9)
+  store i8 %t10, ptr %ch
+  %t11 = load ptr, ptr %input_vec
+  %t12 = load i8, ptr %ch
+  call void @Vec_push(ptr %t11, ptr %ch)
+  %t15 = load i64, ptr %i
+  %t16 = add i64 %t15, 1
+  store i64 %t16, ptr %i
+  br label %while.cond.1
+while.end.3:
+  ; lvalue .input
+  %t17 = getelementptr %Lexer, ptr %lx, i32 0, i32 0
+  %t18 = load ptr, ptr %input_vec
+  store ptr %t18, ptr %t17
+  ; lvalue .pos
+  %t19 = getelementptr %Lexer, ptr %lx, i32 0, i32 1
+  %t20 = sext i32 0 to i64
+  store i64 %t20, ptr %t19
+  ; lvalue .line
+  %t21 = getelementptr %Lexer, ptr %lx, i32 0, i32 2
+  %t22 = sext i32 1 to i64
+  store i64 %t22, ptr %t21
+  ; lvalue .col
+  %t23 = getelementptr %Lexer, ptr %lx, i32 0, i32 3
+  %t24 = sext i32 1 to i64
+  store i64 %t24, ptr %t23
+  %t25 = load %Lexer, ptr %lx
+  ret %Lexer %t25
+}
+
+define i8 @Lexer_peek(ptr %lx.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %max_len = alloca i64
+  %ch = alloca i8
+  %t1 = load ptr, ptr %lx
+  ; lvalue .input
+  %t2 = getelementptr %Lexer, ptr %t1, i32 0, i32 0
+  %t3 = load ptr, ptr %t2
+  %t4 = call i64 @Vec_len(ptr %t3)
+  store i64 %t4, ptr %max_len
+  %t5 = load ptr, ptr %lx
+  ; lvalue .pos
+  %t6 = getelementptr %Lexer, ptr %t5, i32 0, i32 1
+  %t7 = load i64, ptr %t6
+  %t8 = load i64, ptr %max_len
+  %t9 = icmp sge i64 %t7, %t8
+  br i1 %t9, label %then.4, label %merge.6
+then.4:
+  ret i8 0
+merge.6:
+  %t10 = load ptr, ptr %lx
+  ; lvalue .input
+  %t11 = getelementptr %Lexer, ptr %t10, i32 0, i32 0
+  %t12 = load ptr, ptr %t11
+  %t13 = load ptr, ptr %lx
+  ; lvalue .pos
+  %t14 = getelementptr %Lexer, ptr %t13, i32 0, i32 1
+  %t15 = load i64, ptr %t14
+  %t16 = call ptr @yvec_get(ptr %t12, i64 %t15)
+  %t17 = load i8, ptr %t16
+  store i8 %t17, ptr %ch
+  %t18 = load i8, ptr %ch
+  ret i8 %t18
+}
+
+define i8 @Lexer_peek2(ptr %lx.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %max_len = alloca i64
+  %t1 = load ptr, ptr %lx
+  ; lvalue .input
+  %t2 = getelementptr %Lexer, ptr %t1, i32 0, i32 0
+  %t3 = load ptr, ptr %t2
+  %t4 = call i64 @Vec_len(ptr %t3)
+  store i64 %t4, ptr %max_len
+  %t5 = load ptr, ptr %lx
+  ; lvalue .pos
+  %t6 = getelementptr %Lexer, ptr %t5, i32 0, i32 1
+  %t7 = load i64, ptr %t6
+  %t8 = add i64 %t7, 1
+  %t9 = load i64, ptr %max_len
+  %t10 = icmp sge i64 %t8, %t9
+  br i1 %t10, label %then.7, label %merge.9
+then.7:
+  ret i8 0
+merge.9:
+  %t11 = load ptr, ptr %lx
+  ; lvalue .input
+  %t12 = getelementptr %Lexer, ptr %t11, i32 0, i32 0
+  %t13 = load ptr, ptr %t12
+  %t14 = load ptr, ptr %lx
+  ; lvalue .pos
+  %t15 = getelementptr %Lexer, ptr %t14, i32 0, i32 1
+  %t16 = load i64, ptr %t15
+  %t17 = add i64 %t16, 1
+  %t18 = call ptr @yvec_get(ptr %t13, i64 %t17)
+  %t19 = load i8, ptr %t18
+  ret i8 %t19
+}
+
+define i8 @Lexer_advance(ptr %lx.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %ch = alloca i8
+  %t1 = load ptr, ptr %lx
+  %t2 = call i8 @Lexer_peek(ptr %t1)
+  store i8 %t2, ptr %ch
+  %t3 = load i8, ptr %ch
+  %t4 = icmp eq i8 %t3, 0
+  br i1 %t4, label %then.10, label %merge.12
+then.10:
+  %t5 = load i8, ptr %ch
+  ret i8 %t5
+merge.12:
+  %t6 = load ptr, ptr %lx
+  ; lvalue .pos
+  %t7 = getelementptr %Lexer, ptr %t6, i32 0, i32 1
+  %t8 = load i64, ptr %t7
+  %t9 = add i64 %t8, 1
+  store i64 %t9, ptr %t7
+  %t10 = load i8, ptr %ch
+  %t11 = icmp eq i8 %t10, 10
+  br i1 %t11, label %then.13, label %else.14
+then.13:
+  %t12 = load ptr, ptr %lx
+  ; lvalue .line
+  %t13 = getelementptr %Lexer, ptr %t12, i32 0, i32 2
+  %t14 = load i64, ptr %t13
+  %t15 = add i64 %t14, 1
+  store i64 %t15, ptr %t13
+  %t16 = load ptr, ptr %lx
+  ; lvalue .col
+  %t17 = getelementptr %Lexer, ptr %t16, i32 0, i32 3
+  %t18 = sext i32 1 to i64
+  store i64 %t18, ptr %t17
+  br label %merge.15
+else.14:
+  %t19 = load ptr, ptr %lx
+  ; lvalue .col
+  %t20 = getelementptr %Lexer, ptr %t19, i32 0, i32 3
+  %t21 = load i64, ptr %t20
+  %t22 = add i64 %t21, 1
+  store i64 %t22, ptr %t20
+  br label %merge.15
+merge.15:
+  %t23 = load i8, ptr %ch
+  ret i8 %t23
+}
+
+define i1 @Lexer_matches_next(ptr %lx.arg, i8 %expected.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %expected = alloca i8
+  store i8 %expected.arg, ptr %expected
+  %ch = alloca i8
+  %t1 = load ptr, ptr %lx
+  %t2 = call i8 @Lexer_peek(ptr %t1)
+  store i8 %t2, ptr %ch
+  %t3 = load i8, ptr %ch
+  %t4 = load i8, ptr %expected
+  %t5 = icmp eq i8 %t3, %t4
+  br i1 %t5, label %then.16, label %merge.18
+then.16:
+  %t6 = load ptr, ptr %lx
+  %t7 = call i8 @Lexer_advance(ptr %t6)
+  ret i1 1
+merge.18:
+  ret i1 0
+}
+
+; impl Lexer
+define %TokenKind @Lexer_classify_ident(ptr %s.arg) #0 {
+entry:
+  %s = alloca ptr
+  store ptr %s.arg, ptr %s
+  %t1 = load ptr, ptr %s
+  %t2 = call ptr @ystr_new(ptr @.str.0)
+  %t3 = call i1 @String_eq(ptr %t1, ptr %t2)
+  br i1 %t3, label %then.19, label %merge.21
+then.19:
+  ret %TokenKind { i32 17, [8 x i64] zeroinitializer }
+merge.21:
+  %t4 = load ptr, ptr %s
+  %t5 = call ptr @ystr_new(ptr @.str.1)
+  %t6 = call i1 @String_eq(ptr %t4, ptr %t5)
+  br i1 %t6, label %then.22, label %merge.24
+then.22:
+  ret %TokenKind { i32 16, [8 x i64] zeroinitializer }
+merge.24:
+  %t7 = load ptr, ptr %s
+  %t8 = call ptr @ystr_new(ptr @.str.2)
+  %t9 = call i1 @String_eq(ptr %t7, ptr %t8)
+  br i1 %t9, label %then.25, label %merge.27
+then.25:
+  ret %TokenKind { i32 24, [8 x i64] zeroinitializer }
+merge.27:
+  %t10 = load ptr, ptr %s
+  %t11 = call ptr @ystr_new(ptr @.str.3)
+  %t12 = call i1 @String_eq(ptr %t10, ptr %t11)
+  br i1 %t12, label %then.28, label %merge.30
+then.28:
+  ret %TokenKind { i32 18, [8 x i64] zeroinitializer }
+merge.30:
+  %t13 = load ptr, ptr %s
+  %t14 = call ptr @ystr_new(ptr @.str.4)
+  %t15 = call i1 @String_eq(ptr %t13, ptr %t14)
+  br i1 %t15, label %then.31, label %merge.33
+then.31:
+  ret %TokenKind { i32 1, [8 x i64] zeroinitializer }
+merge.33:
+  %t16 = load ptr, ptr %s
+  %t17 = call ptr @ystr_new(ptr @.str.5)
+  %t18 = call i1 @String_eq(ptr %t16, ptr %t17)
+  br i1 %t18, label %then.34, label %merge.36
+then.34:
+  ret %TokenKind { i32 6, [8 x i64] zeroinitializer }
+merge.36:
+  %t19 = load ptr, ptr %s
+  %t20 = call ptr @ystr_new(ptr @.str.6)
+  %t21 = call i1 @String_eq(ptr %t19, ptr %t20)
+  br i1 %t21, label %then.37, label %merge.39
+then.37:
+  ret %TokenKind { i32 26, [8 x i64] zeroinitializer }
+merge.39:
+  %t22 = load ptr, ptr %s
+  %t23 = call ptr @ystr_new(ptr @.str.7)
+  %t24 = call i1 @String_eq(ptr %t22, ptr %t23)
+  br i1 %t24, label %then.40, label %merge.42
+then.40:
+  ret %TokenKind { i32 27, [8 x i64] zeroinitializer }
+merge.42:
+  %t25 = load ptr, ptr %s
+  %t26 = call ptr @ystr_new(ptr @.str.8)
+  %t27 = call i1 @String_eq(ptr %t25, ptr %t26)
+  br i1 %t27, label %then.43, label %merge.45
+then.43:
+  ret %TokenKind { i32 23, [8 x i64] zeroinitializer }
+merge.45:
+  %t28 = load ptr, ptr %s
+  %t29 = call ptr @ystr_new(ptr @.str.9)
+  %t30 = call i1 @String_eq(ptr %t28, ptr %t29)
+  br i1 %t30, label %then.46, label %merge.48
+then.46:
+  ret %TokenKind { i32 28, [8 x i64] zeroinitializer }
+merge.48:
+  %t31 = load ptr, ptr %s
+  %t32 = call ptr @ystr_new(ptr @.str.10)
+  %t33 = call i1 @String_eq(ptr %t31, ptr %t32)
+  br i1 %t33, label %then.49, label %merge.51
+then.49:
+  ret %TokenKind { i32 29, [8 x i64] zeroinitializer }
+merge.51:
+  %t34 = load ptr, ptr %s
+  %t35 = call ptr @ystr_new(ptr @.str.11)
+  %t36 = call i1 @String_eq(ptr %t34, ptr %t35)
+  br i1 %t36, label %then.52, label %merge.54
+then.52:
+  ret %TokenKind { i32 9, [8 x i64] zeroinitializer }
+merge.54:
+  %t37 = load ptr, ptr %s
+  %t38 = call ptr @ystr_new(ptr @.str.12)
+  %t39 = call i1 @String_eq(ptr %t37, ptr %t38)
+  br i1 %t39, label %then.55, label %merge.57
+then.55:
+  ret %TokenKind { i32 60, [8 x i64] zeroinitializer }
+merge.57:
+  %t40 = load ptr, ptr %s
+  %t41 = call ptr @ystr_new(ptr @.str.13)
+  %t42 = call i1 @String_eq(ptr %t40, ptr %t41)
+  br i1 %t42, label %then.58, label %merge.60
+then.58:
+  ret %TokenKind { i32 62, [8 x i64] zeroinitializer }
+merge.60:
+  %t43 = load ptr, ptr %s
+  %t44 = call ptr @ystr_new(ptr @.str.14)
+  %t45 = call i1 @String_eq(ptr %t43, ptr %t44)
+  br i1 %t45, label %then.61, label %merge.63
+then.61:
+  ret %TokenKind { i32 61, [8 x i64] zeroinitializer }
+merge.63:
+  %t46 = load ptr, ptr %s
+  %t47 = call ptr @ystr_new(ptr @.str.15)
+  %t48 = call i1 @String_eq(ptr %t46, ptr %t47)
+  br i1 %t48, label %then.64, label %merge.66
+then.64:
+  %t49 = load ptr, ptr %s
+  %t50 = call ptr @String_clone(ptr %t49)
+  %t51 = alloca %TokenKind
+  %t52 = getelementptr %TokenKind, ptr %t51, i32 0, i32 0
+  store i32 131, ptr %t52
+  %t53 = getelementptr %TokenKind, ptr %t51, i32 0, i32 1
+  %t54 = load ptr, ptr %s
+  %t55 = call ptr @String_clone(ptr %t54)
+  store ptr %t55, ptr %t53
+  %t56 = load %TokenKind, ptr %t51
+  ret %TokenKind %t56
+merge.66:
+  %t57 = load ptr, ptr %s
+  %t58 = call ptr @ystr_new(ptr @.str.16)
+  %t59 = call i1 @String_eq(ptr %t57, ptr %t58)
+  br i1 %t59, label %then.67, label %merge.69
+then.67:
+  ret %TokenKind { i32 52, [8 x i64] zeroinitializer }
+merge.69:
+  %t60 = load ptr, ptr %s
+  %t61 = call ptr @ystr_new(ptr @.str.17)
+  %t62 = call i1 @String_eq(ptr %t60, ptr %t61)
+  br i1 %t62, label %then.70, label %merge.72
+then.70:
+  ret %TokenKind { i32 53, [8 x i64] zeroinitializer }
+merge.72:
+  %t63 = load ptr, ptr %s
+  %t64 = call ptr @ystr_new(ptr @.str.18)
+  %t65 = call i1 @String_eq(ptr %t63, ptr %t64)
+  br i1 %t65, label %then.73, label %merge.75
+then.73:
+  ret %TokenKind { i32 59, [8 x i64] zeroinitializer }
+merge.75:
+  %t66 = load ptr, ptr %s
+  %t67 = call ptr @String_clone(ptr %t66)
+  %t68 = alloca %TokenKind
+  %t69 = getelementptr %TokenKind, ptr %t68, i32 0, i32 0
+  store i32 131, ptr %t69
+  %t70 = getelementptr %TokenKind, ptr %t68, i32 0, i32 1
+  %t71 = load ptr, ptr %s
+  %t72 = call ptr @String_clone(ptr %t71)
+  store ptr %t72, ptr %t70
+  %t73 = load %TokenKind, ptr %t68
+  ret %TokenKind %t73
+}
+
+define void @Lexer_skip_whitespace(ptr %lx.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %parsing = alloca i1
+  %ch = alloca i8
+  %in_comment = alloca i1
+  %c = alloca i8
+  store i1 1, ptr %parsing
+  br label %while.cond.76
+while.cond.76:
+  %t1 = load i1, ptr %parsing
+  br i1 %t1, label %while.body.77, label %while.end.78
+while.body.77:
+  %t2 = load ptr, ptr %lx
+  %t3 = call i8 @Lexer_peek(ptr %t2)
+  store i8 %t3, ptr %ch
+  %t4 = load i8, ptr %ch
+  %t5 = icmp eq i8 %t4, 32
+  br i1 %t5, label %then.79, label %else.80
+then.79:
+  %t6 = load ptr, ptr %lx
+  %t7 = call i8 @Lexer_advance(ptr %t6)
+  br label %merge.81
+else.80:
+  %t8 = load i8, ptr %ch
+  %t9 = icmp eq i8 %t8, 10
+  br i1 %t9, label %then.82, label %else.83
+then.82:
+  %t10 = load ptr, ptr %lx
+  %t11 = call i8 @Lexer_advance(ptr %t10)
+  br label %merge.84
+else.83:
+  %t12 = load i8, ptr %ch
+  %t13 = icmp eq i8 %t12, 13
+  br i1 %t13, label %then.85, label %else.86
+then.85:
+  %t14 = load ptr, ptr %lx
+  %t15 = call i8 @Lexer_advance(ptr %t14)
+  br label %merge.87
+else.86:
+  %t16 = load i8, ptr %ch
+  %t17 = icmp eq i8 %t16, 9
+  br i1 %t17, label %then.88, label %else.89
+then.88:
+  %t18 = load ptr, ptr %lx
+  %t19 = call i8 @Lexer_advance(ptr %t18)
+  br label %merge.90
+else.89:
+  %t20 = load i8, ptr %ch
+  %t21 = icmp eq i8 %t20, 47
+  br i1 %t21, label %then.91, label %else.92
+then.91:
+  %t22 = load ptr, ptr %lx
+  %t23 = call i8 @Lexer_peek2(ptr %t22)
+  %t24 = icmp eq i8 %t23, 47
+  br i1 %t24, label %then.94, label %else.95
+then.94:
+  store i1 1, ptr %in_comment
+  br label %while.cond.97
+while.cond.97:
+  %t25 = load i1, ptr %in_comment
+  br i1 %t25, label %while.body.98, label %while.end.99
+while.body.98:
+  %t26 = load ptr, ptr %lx
+  %t27 = call i8 @Lexer_peek(ptr %t26)
+  store i8 %t27, ptr %c
+  %t28 = load i8, ptr %c
+  %t29 = icmp eq i8 %t28, 10
+  br i1 %t29, label %then.100, label %else.101
+then.100:
+  store i1 0, ptr %in_comment
+  br label %merge.102
+else.101:
+  %t30 = load i8, ptr %c
+  %t31 = icmp eq i8 %t30, 0
+  br i1 %t31, label %then.103, label %else.104
+then.103:
+  store i1 0, ptr %in_comment
+  store i1 0, ptr %parsing
+  br label %merge.105
+else.104:
+  %t32 = load ptr, ptr %lx
+  %t33 = call i8 @Lexer_advance(ptr %t32)
+  br label %merge.105
+merge.105:
+  br label %merge.102
+merge.102:
+  br label %while.cond.97
+while.end.99:
+  br label %merge.96
+else.95:
+  store i1 0, ptr %parsing
+  br label %merge.96
+merge.96:
+  br label %merge.93
+else.92:
+  store i1 0, ptr %parsing
+  br label %merge.93
+merge.93:
+  br label %merge.90
+merge.90:
+  br label %merge.87
+merge.87:
+  br label %merge.84
+merge.84:
+  br label %merge.81
+merge.81:
+  br label %while.cond.76
+while.end.78:
+  ret void
+}
+
+define %Token @Lexer_scan_ident_or_keyword(ptr %lx.arg, i64 %start_col.arg, i8 %first_char.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %start_col = alloca i64
+  store i64 %start_col.arg, ptr %start_col
+  %first_char = alloca i8
+  store i8 %first_char.arg, ptr %first_char
+  %line = alloca i64
+  %s = alloca ptr
+  %parsing = alloca i1
+  %ch = alloca i8
+  %is_alpha = alloca i1
+  %kind = alloca %TokenKind
+  %t1 = load ptr, ptr %lx
+  ; lvalue .line
+  %t2 = getelementptr %Lexer, ptr %t1, i32 0, i32 2
+  %t3 = load i64, ptr %t2
+  store i64 %t3, ptr %line
+  %t4 = call ptr @ystr_new(ptr @.str.19)
+  store ptr %t4, ptr %s
+  %t5 = load ptr, ptr %s
+  %t6 = load i8, ptr %first_char
+  call void @String_push(ptr %t5, i8 %t6)
+  store i1 1, ptr %parsing
+  br label %while.cond.106
+while.cond.106:
+  %t8 = load i1, ptr %parsing
+  br i1 %t8, label %while.body.107, label %while.end.108
+while.body.107:
+  %t9 = load ptr, ptr %lx
+  %t10 = call i8 @Lexer_peek(ptr %t9)
+  store i8 %t10, ptr %ch
+  store i1 0, ptr %is_alpha
+  %t11 = load i8, ptr %ch
+  %t12 = icmp sge i8 %t11, 97
+  br i1 %t12, label %then.109, label %merge.111
+then.109:
+  %t13 = load i8, ptr %ch
+  %t14 = icmp sle i8 %t13, 122
+  br i1 %t14, label %then.112, label %merge.114
+then.112:
+  store i1 1, ptr %is_alpha
+  br label %merge.114
+merge.114:
+  br label %merge.111
+merge.111:
+  %t15 = load i8, ptr %ch
+  %t16 = icmp sge i8 %t15, 65
+  br i1 %t16, label %then.115, label %merge.117
+then.115:
+  %t17 = load i8, ptr %ch
+  %t18 = icmp sle i8 %t17, 90
+  br i1 %t18, label %then.118, label %merge.120
+then.118:
+  store i1 1, ptr %is_alpha
+  br label %merge.120
+merge.120:
+  br label %merge.117
+merge.117:
+  %t19 = load i8, ptr %ch
+  %t20 = icmp sge i8 %t19, 48
+  br i1 %t20, label %then.121, label %merge.123
+then.121:
+  %t21 = load i8, ptr %ch
+  %t22 = icmp sle i8 %t21, 57
+  br i1 %t22, label %then.124, label %merge.126
+then.124:
+  store i1 1, ptr %is_alpha
+  br label %merge.126
+merge.126:
+  br label %merge.123
+merge.123:
+  %t23 = load i8, ptr %ch
+  %t24 = icmp eq i8 %t23, 95
+  br i1 %t24, label %then.127, label %merge.129
+then.127:
+  store i1 1, ptr %is_alpha
+  br label %merge.129
+merge.129:
+  %t25 = load i1, ptr %is_alpha
+  br i1 %t25, label %then.130, label %else.131
+then.130:
+  %t26 = load ptr, ptr %s
+  %t27 = load i8, ptr %ch
+  call void @String_push(ptr %t26, i8 %t27)
+  %t29 = load ptr, ptr %lx
+  %t30 = call i8 @Lexer_advance(ptr %t29)
+  br label %merge.132
+else.131:
+  store i1 0, ptr %parsing
+  br label %merge.132
+merge.132:
+  br label %while.cond.106
+while.end.108:
+  %t31 = load ptr, ptr %s
+  %t32 = load ptr, ptr %t31
+  %t33 = call %TokenKind @Lexer_classify_ident(ptr %t32)
+  %t34 = getelementptr %TokenKind, ptr null, i32 1
+  %t35 = ptrtoint ptr %t34 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %kind, ptr align 8 %t33, i64 %t35, i1 false)
+  %t36 = load %TokenKind, ptr %kind
+  %t37 = load i64, ptr %line
+  %t38 = load i64, ptr %start_col
+  %t39 = load ptr, ptr %s
+  %t41 = call %Token @Token_new(%TokenKind %t36, i64 %t37, i64 %t38, ptr %s)
+  ret %Token %t41
+}
+
+; impl Lexer
+define %Token @Lexer_scan_number(ptr %lx.arg, i64 %start_col.arg, i8 %first_char.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %start_col = alloca i64
+  store i64 %start_col.arg, ptr %start_col
+  %first_char = alloca i8
+  store i8 %first_char.arg, ptr %first_char
+  %line = alloca i64
+  %s = alloca ptr
+  %is_float = alloca i1
+  %parsing = alloca i1
+  %ch = alloca i8
+  %is_digit = alloca i1
+  %t1 = load ptr, ptr %lx
+  ; lvalue .line
+  %t2 = getelementptr %Lexer, ptr %t1, i32 0, i32 2
+  %t3 = load i64, ptr %t2
+  store i64 %t3, ptr %line
+  %t4 = call ptr @ystr_new(ptr @.str.20)
+  store ptr %t4, ptr %s
+  %t5 = load ptr, ptr %s
+  %t6 = load i8, ptr %first_char
+  call void @String_push(ptr %t5, i8 %t6)
+  store i1 0, ptr %is_float
+  store i1 1, ptr %parsing
+  br label %while.cond.133
+while.cond.133:
+  %t8 = load i1, ptr %parsing
+  br i1 %t8, label %while.body.134, label %while.end.135
+while.body.134:
+  %t9 = load ptr, ptr %lx
+  %t10 = call i8 @Lexer_peek(ptr %t9)
+  store i8 %t10, ptr %ch
+  store i1 0, ptr %is_digit
+  %t11 = load i8, ptr %ch
+  %t12 = icmp sge i8 %t11, 48
+  br i1 %t12, label %then.136, label %merge.138
+then.136:
+  %t13 = load i8, ptr %ch
+  %t14 = icmp sle i8 %t13, 57
+  br i1 %t14, label %then.139, label %merge.141
+then.139:
+  store i1 1, ptr %is_digit
+  br label %merge.141
+merge.141:
+  br label %merge.138
+merge.138:
+  %t15 = load i1, ptr %is_digit
+  br i1 %t15, label %then.142, label %else.143
+then.142:
+  %t16 = load ptr, ptr %s
+  %t17 = load i8, ptr %ch
+  call void @String_push(ptr %t16, i8 %t17)
+  %t19 = load ptr, ptr %lx
+  %t20 = call i8 @Lexer_advance(ptr %t19)
+  br label %merge.144
+else.143:
+  %t21 = load i8, ptr %ch
+  %t22 = icmp eq i8 %t21, 46
+  br i1 %t22, label %then.145, label %else.146
+then.145:
+  store i1 1, ptr %is_float
+  %t23 = load ptr, ptr %s
+  %t24 = load i8, ptr %ch
+  call void @String_push(ptr %t23, i8 %t24)
+  %t26 = load ptr, ptr %lx
+  %t27 = call i8 @Lexer_advance(ptr %t26)
+  br label %merge.147
+else.146:
+  store i1 0, ptr %parsing
+  br label %merge.147
+merge.147:
+  br label %merge.144
+merge.144:
+  br label %while.cond.133
+while.end.135:
+  %t28 = load i1, ptr %is_float
+  br i1 %t28, label %then.148, label %else.149
+then.148:
+  %t29 = alloca %TokenKind
+  %t30 = getelementptr %TokenKind, ptr %t29, i32 0, i32 0
+  store i32 128, ptr %t30
+  %t31 = getelementptr %TokenKind, ptr %t29, i32 0, i32 1
+  store double 0.000000e0, ptr %t31
+  %t32 = load %TokenKind, ptr %t29
+  %t33 = load i64, ptr %line
+  %t34 = load i64, ptr %start_col
+  %t35 = load ptr, ptr %s
+  %t37 = call %Token @Token_new(%TokenKind %t32, i64 %t33, i64 %t34, ptr %s)
+  ret %Token %t37
+else.149:
+  %t38 = alloca %TokenKind
+  %t39 = getelementptr %TokenKind, ptr %t38, i32 0, i32 0
+  store i32 127, ptr %t39
+  %t40 = getelementptr %TokenKind, ptr %t38, i32 0, i32 1
+  store i32 0, ptr %t40
+  %t41 = load %TokenKind, ptr %t38
+  %t42 = load i64, ptr %line
+  %t43 = load i64, ptr %start_col
+  %t44 = load ptr, ptr %s
+  %t46 = call %Token @Token_new(%TokenKind %t41, i64 %t42, i64 %t43, ptr %s)
+  ret %Token %t46
+merge.150:
+  ret %Token zeroinitializer
+}
+
+define %Token @Lexer_next_token(ptr %lx.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %line = alloca i64
+  %start_col = alloca i64
+  %ch = alloca i8
+  %empty = alloca ptr
+  %x = alloca ptr
+  %is_alpha = alloca i1
+  %is_digit = alloca i1
+  %other = alloca ptr
+  %t1 = load ptr, ptr %lx
+  call void @Lexer_skip_whitespace(ptr %t1)
+  %t3 = load ptr, ptr %lx
+  ; lvalue .line
+  %t4 = getelementptr %Lexer, ptr %t3, i32 0, i32 2
+  %t5 = load i64, ptr %t4
+  store i64 %t5, ptr %line
+  %t6 = load ptr, ptr %lx
+  ; lvalue .col
+  %t7 = getelementptr %Lexer, ptr %t6, i32 0, i32 3
+  %t8 = load i64, ptr %t7
+  store i64 %t8, ptr %start_col
+  %t9 = load ptr, ptr %lx
+  %t10 = call i8 @Lexer_advance(ptr %t9)
+  store i8 %t10, ptr %ch
+  %t11 = load i8, ptr %ch
+  %t12 = icmp eq i8 %t11, 0
+  br i1 %t12, label %then.151, label %merge.153
+then.151:
+  %t13 = call ptr @ystr_new(ptr @.str.21)
+  store ptr %t13, ptr %empty
+  %t14 = load i64, ptr %line
+  %t15 = load i64, ptr %start_col
+  %t16 = load ptr, ptr %empty
+  %t18 = call %Token @Token_new(%TokenKind { i32 132, [8 x i64] zeroinitializer }, i64 %t14, i64 %t15, ptr %empty)
+  ret %Token %t18
+merge.153:
+  %t19 = load i8, ptr %ch
+  %t20 = icmp eq i8 %t19, 123
+  br i1 %t20, label %then.154, label %merge.156
+then.154:
+  %t21 = call ptr @ystr_new(ptr @.str.22)
+  store ptr %t21, ptr %x
+  %t22 = load i64, ptr %line
+  %t23 = load i64, ptr %start_col
+  %t24 = load ptr, ptr %x
+  %t26 = call %Token @Token_new(%TokenKind { i32 119, [8 x i64] zeroinitializer }, i64 %t22, i64 %t23, ptr %x)
+  ret %Token %t26
+merge.156:
+  %t27 = load i8, ptr %ch
+  %t28 = icmp eq i8 %t27, 125
+  br i1 %t28, label %then.157, label %merge.159
+then.157:
+  %t29 = call ptr @ystr_new(ptr @.str.23)
+  store ptr %t29, ptr %x
+  %t30 = load i64, ptr %line
+  %t31 = load i64, ptr %start_col
+  %t32 = load ptr, ptr %x
+  %t34 = call %Token @Token_new(%TokenKind { i32 120, [8 x i64] zeroinitializer }, i64 %t30, i64 %t31, ptr %x)
+  ret %Token %t34
+merge.159:
+  %t35 = load i8, ptr %ch
+  %t36 = icmp eq i8 %t35, 40
+  br i1 %t36, label %then.160, label %merge.162
+then.160:
+  %t37 = call ptr @ystr_new(ptr @.str.24)
+  store ptr %t37, ptr %x
+  %t38 = load i64, ptr %line
+  %t39 = load i64, ptr %start_col
+  %t40 = load ptr, ptr %x
+  %t42 = call %Token @Token_new(%TokenKind { i32 121, [8 x i64] zeroinitializer }, i64 %t38, i64 %t39, ptr %x)
+  ret %Token %t42
+merge.162:
+  %t43 = load i8, ptr %ch
+  %t44 = icmp eq i8 %t43, 41
+  br i1 %t44, label %then.163, label %merge.165
+then.163:
+  %t45 = call ptr @ystr_new(ptr @.str.25)
+  store ptr %t45, ptr %x
+  %t46 = load i64, ptr %line
+  %t47 = load i64, ptr %start_col
+  %t48 = load ptr, ptr %x
+  %t50 = call %Token @Token_new(%TokenKind { i32 122, [8 x i64] zeroinitializer }, i64 %t46, i64 %t47, ptr %x)
+  ret %Token %t50
+merge.165:
+  %t51 = load i8, ptr %ch
+  %t52 = icmp eq i8 %t51, 59
+  br i1 %t52, label %then.166, label %merge.168
+then.166:
+  %t53 = call ptr @ystr_new(ptr @.str.26)
+  store ptr %t53, ptr %x
+  %t54 = load i64, ptr %line
+  %t55 = load i64, ptr %start_col
+  %t56 = load ptr, ptr %x
+  %t58 = call %Token @Token_new(%TokenKind { i32 125, [8 x i64] zeroinitializer }, i64 %t54, i64 %t55, ptr %x)
+  ret %Token %t58
+merge.168:
+  %t59 = load i8, ptr %ch
+  %t60 = icmp eq i8 %t59, 58
+  br i1 %t60, label %then.169, label %merge.171
+then.169:
+  %t61 = call ptr @ystr_new(ptr @.str.27)
+  store ptr %t61, ptr %x
+  %t62 = load i64, ptr %line
+  %t63 = load i64, ptr %start_col
+  %t64 = load ptr, ptr %x
+  %t66 = call %Token @Token_new(%TokenKind { i32 92, [8 x i64] zeroinitializer }, i64 %t62, i64 %t63, ptr %x)
+  ret %Token %t66
+merge.171:
+  %t67 = load i8, ptr %ch
+  %t68 = icmp eq i8 %t67, 44
+  br i1 %t68, label %then.172, label %merge.174
+then.172:
+  %t69 = call ptr @ystr_new(ptr @.str.28)
+  store ptr %t69, ptr %x
+  %t70 = load i64, ptr %line
+  %t71 = load i64, ptr %start_col
+  %t72 = load ptr, ptr %x
+  %t74 = call %Token @Token_new(%TokenKind { i32 126, [8 x i64] zeroinitializer }, i64 %t70, i64 %t71, ptr %x)
+  ret %Token %t74
+merge.174:
+  %t75 = load i8, ptr %ch
+  %t76 = icmp eq i8 %t75, 61
+  br i1 %t76, label %then.175, label %merge.177
+then.175:
+  %t77 = call ptr @ystr_new(ptr @.str.29)
+  store ptr %t77, ptr %x
+  %t78 = load i64, ptr %line
+  %t79 = load i64, ptr %start_col
+  %t80 = load ptr, ptr %x
+  %t82 = call %Token @Token_new(%TokenKind { i32 93, [8 x i64] zeroinitializer }, i64 %t78, i64 %t79, ptr %x)
+  ret %Token %t82
+merge.177:
+  %t83 = load i8, ptr %ch
+  %t84 = icmp eq i8 %t83, 43
+  br i1 %t84, label %then.178, label %merge.180
+then.178:
+  %t85 = call ptr @ystr_new(ptr @.str.30)
+  store ptr %t85, ptr %x
+  %t86 = load i64, ptr %line
+  %t87 = load i64, ptr %start_col
+  %t88 = load ptr, ptr %x
+  %t90 = call %Token @Token_new(%TokenKind { i32 101, [8 x i64] zeroinitializer }, i64 %t86, i64 %t87, ptr %x)
+  ret %Token %t90
+merge.180:
+  %t91 = load i8, ptr %ch
+  %t92 = icmp eq i8 %t91, 42
+  br i1 %t92, label %then.181, label %merge.183
+then.181:
+  %t93 = call ptr @ystr_new(ptr @.str.31)
+  store ptr %t93, ptr %x
+  %t94 = load i64, ptr %line
+  %t95 = load i64, ptr %start_col
+  %t96 = load ptr, ptr %x
+  %t98 = call %Token @Token_new(%TokenKind { i32 103, [8 x i64] zeroinitializer }, i64 %t94, i64 %t95, ptr %x)
+  ret %Token %t98
+merge.183:
+  %t99 = load i8, ptr %ch
+  %t100 = icmp eq i8 %t99, 38
+  br i1 %t100, label %then.184, label %merge.186
+then.184:
+  %t101 = call ptr @ystr_new(ptr @.str.32)
+  store ptr %t101, ptr %x
+  %t102 = load i64, ptr %line
+  %t103 = load i64, ptr %start_col
+  %t104 = load ptr, ptr %x
+  %t106 = call %Token @Token_new(%TokenKind { i32 106, [8 x i64] zeroinitializer }, i64 %t102, i64 %t103, ptr %x)
+  ret %Token %t106
+merge.186:
+  %t107 = load i8, ptr %ch
+  %t108 = icmp eq i8 %t107, 60
+  br i1 %t108, label %then.187, label %merge.189
+then.187:
+  %t109 = call ptr @ystr_new(ptr @.str.33)
+  store ptr %t109, ptr %x
+  %t110 = load i64, ptr %line
+  %t111 = load i64, ptr %start_col
+  %t112 = load ptr, ptr %x
+  %t114 = call %Token @Token_new(%TokenKind { i32 97, [8 x i64] zeroinitializer }, i64 %t110, i64 %t111, ptr %x)
+  ret %Token %t114
+merge.189:
+  %t115 = load i8, ptr %ch
+  %t116 = icmp eq i8 %t115, 62
+  br i1 %t116, label %then.190, label %merge.192
+then.190:
+  %t117 = call ptr @ystr_new(ptr @.str.34)
+  store ptr %t117, ptr %x
+  %t118 = load i64, ptr %line
+  %t119 = load i64, ptr %start_col
+  %t120 = load ptr, ptr %x
+  %t122 = call %Token @Token_new(%TokenKind { i32 98, [8 x i64] zeroinitializer }, i64 %t118, i64 %t119, ptr %x)
+  ret %Token %t122
+merge.192:
+  store i1 0, ptr %is_alpha
+  %t123 = load i8, ptr %ch
+  %t124 = icmp sge i8 %t123, 97
+  br i1 %t124, label %then.193, label %merge.195
+then.193:
+  %t125 = load i8, ptr %ch
+  %t126 = icmp sle i8 %t125, 122
+  br i1 %t126, label %then.196, label %merge.198
+then.196:
+  store i1 1, ptr %is_alpha
+  br label %merge.198
+merge.198:
+  br label %merge.195
+merge.195:
+  %t127 = load i8, ptr %ch
+  %t128 = icmp sge i8 %t127, 65
+  br i1 %t128, label %then.199, label %merge.201
+then.199:
+  %t129 = load i8, ptr %ch
+  %t130 = icmp sle i8 %t129, 90
+  br i1 %t130, label %then.202, label %merge.204
+then.202:
+  store i1 1, ptr %is_alpha
+  br label %merge.204
+merge.204:
+  br label %merge.201
+merge.201:
+  %t131 = load i8, ptr %ch
+  %t132 = icmp eq i8 %t131, 95
+  br i1 %t132, label %then.205, label %merge.207
+then.205:
+  store i1 1, ptr %is_alpha
+  br label %merge.207
+merge.207:
+  %t133 = load i1, ptr %is_alpha
+  br i1 %t133, label %then.208, label %merge.210
+then.208:
+  %t134 = load ptr, ptr %lx
+  %t135 = load i64, ptr %start_col
+  %t136 = load i8, ptr %ch
+  %t137 = call %Token @Lexer_scan_ident_or_keyword(ptr %t134, i64 %t135, i8 %t136)
+  ret %Token %t137
+merge.210:
+  store i1 0, ptr %is_digit
+  %t138 = load i8, ptr %ch
+  %t139 = icmp sge i8 %t138, 48
+  br i1 %t139, label %then.211, label %merge.213
+then.211:
+  %t140 = load i8, ptr %ch
+  %t141 = icmp sle i8 %t140, 57
+  br i1 %t141, label %then.214, label %merge.216
+then.214:
+  store i1 1, ptr %is_digit
+  br label %merge.216
+merge.216:
+  br label %merge.213
+merge.213:
+  %t142 = load i1, ptr %is_digit
+  br i1 %t142, label %then.217, label %merge.219
+then.217:
+  %t143 = load ptr, ptr %lx
+  %t144 = load i64, ptr %start_col
+  %t145 = load i8, ptr %ch
+  %t146 = call %Token @Lexer_scan_number(ptr %t143, i64 %t144, i8 %t145)
+  ret %Token %t146
+merge.219:
+  %t147 = call ptr @ystr_new(ptr @.str.35)
+  store ptr %t147, ptr %other
+  %t148 = load i8, ptr %ch
+  %t149 = alloca %TokenKind
+  %t150 = getelementptr %TokenKind, ptr %t149, i32 0, i32 0
+  store i32 133, ptr %t150
+  %t151 = getelementptr %TokenKind, ptr %t149, i32 0, i32 1
+  %t152 = load i8, ptr %ch
+  store i8 %t152, ptr %t151
+  %t153 = load %TokenKind, ptr %t149
+  %t154 = load i64, ptr %line
+  %t155 = load i64, ptr %start_col
+  %t156 = load ptr, ptr %other
+  %t158 = call %Token @Token_new(%TokenKind %t153, i64 %t154, i64 %t155, ptr %other)
+  ret %Token %t158
+}
+
+; impl Lexer
+define ptr @Lexer_tokenize(ptr %lx.arg) #0 {
+entry:
+  %lx = alloca ptr
+  store ptr %lx.arg, ptr %lx
+  %tokens = alloca ptr
+  %parsing = alloca i1
+  %tok = alloca %Token
+  %len = alloca i64
+  %t1 = call ptr @Vec_new(i64 96)
+  store ptr %t1, ptr %tokens
+  store i1 1, ptr %parsing
+  br label %while.cond.220
+while.cond.220:
+  %t2 = load i1, ptr %parsing
+  br i1 %t2, label %while.body.221, label %while.end.222
+while.body.221:
+  %t3 = load ptr, ptr %lx
+  %t4 = call %Token @Lexer_next_token(ptr %t3)
+  %t5 = getelementptr %Token, ptr null, i32 1
+  %t6 = ptrtoint ptr %t5 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t4, i64 %t6, i1 false)
+  ; lvalue .lexeme
+  %t7 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t8 = load ptr, ptr %t7
+  %t9 = call i64 @String_len(ptr %t8)
+  store i64 %t9, ptr %len
+  %t10 = load i64, ptr %len
+  %t11 = icmp eq i64 %t10, 0
+  br i1 %t11, label %then.223, label %else.224
+then.223:
+  store i1 0, ptr %parsing
+  br label %merge.225
+else.224:
+  %t12 = load ptr, ptr %tokens
+  %t13 = load %Token, ptr %tok
+  call void @Vec_push(ptr %t12, ptr %tok)
+  br label %merge.225
+merge.225:
+  br label %while.cond.220
+while.end.222:
+  %t16 = load ptr, ptr %tokens
+  ret ptr %t16
+}
+
+; impl Vec
+define %Token @Vec_get_Token(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca %Token
+  %t1 = load %Token, ptr %res
+  ret %Token %t1
+}
+
+define %Expr @Vec_get_Expr(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca %Expr
+  %t1 = load %Expr, ptr %res
+  ret %Expr %t1
+}
+
+define %Stmt @Vec_get_Stmt(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca %Stmt
+  %t1 = load %Stmt, ptr %res
+  ret %Stmt %t1
+}
+
+define %FuncDecl @Vec_get_FuncDecl(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca %FuncDecl
+  %t1 = load %FuncDecl, ptr %res
+  ret %FuncDecl %t1
+}
+
+define %ParamDecl @Vec_get_ParamDecl(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca %ParamDecl
+  %t1 = load %ParamDecl, ptr %res
+  ret %ParamDecl %t1
+}
+
+define %StructDecl @Vec_get_StructDecl(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca %StructDecl
+  %t1 = load %StructDecl, ptr %res
+  ret %StructDecl %t1
+}
+
+define %FieldDecl @Vec_get_FieldDecl(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca %FieldDecl
+  %t1 = load %FieldDecl, ptr %res
+  ret %FieldDecl %t1
+}
+
+define %MatchArm @Vec_get_MatchArm(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca %MatchArm
+  %t1 = load %MatchArm, ptr %res
+  ret %MatchArm %t1
+}
+
+define i64 @Vec_get_usize(ptr %v.arg, i64 %i.arg) #0 {
+entry:
+  %v = alloca ptr
+  store ptr %v.arg, ptr %v
+  %i = alloca i64
+  store i64 %i.arg, ptr %i
+  %res = alloca i64
+  %t1 = sext i32 0 to i64
+  store i64 %t1, ptr %res
+  %t2 = load i64, ptr %res
+  ret i64 %t2
+}
+
+; impl AstArena
+define %AstArena @AstArena_new() #0 {
+entry:
+  %arena = alloca %AstArena
+  ; lvalue .exprs
+  %t1 = getelementptr %AstArena, ptr %arena, i32 0, i32 0
+  %t2 = call ptr @Vec_new(i64 72)
+  store ptr %t2, ptr %t1
+  ; lvalue .stmts
+  %t3 = getelementptr %AstArena, ptr %arena, i32 0, i32 1
+  %t4 = call ptr @Vec_new(i64 72)
+  store ptr %t4, ptr %t3
+  ; lvalue .params
+  %t5 = getelementptr %AstArena, ptr %arena, i32 0, i32 2
+  %t6 = call ptr @Vec_new(i64 16)
+  store ptr %t6, ptr %t5
+  ; lvalue .funcs
+  %t7 = getelementptr %AstArena, ptr %arena, i32 0, i32 3
+  %t8 = call ptr @Vec_new(i64 64)
+  store ptr %t8, ptr %t7
+  ; lvalue .structs
+  %t9 = getelementptr %AstArena, ptr %arena, i32 0, i32 4
+  %t10 = call ptr @Vec_new(i64 24)
+  store ptr %t10, ptr %t9
+  ; lvalue .fields
+  %t11 = getelementptr %AstArena, ptr %arena, i32 0, i32 5
+  %t12 = call ptr @Vec_new(i64 16)
+  store ptr %t12, ptr %t11
+  ; lvalue .match_arms
+  %t13 = getelementptr %AstArena, ptr %arena, i32 0, i32 6
+  %t14 = call ptr @Vec_new(i64 88)
+  store ptr %t14, ptr %t13
+  ; lvalue .arg_indices
+  %t15 = getelementptr %AstArena, ptr %arena, i32 0, i32 7
+  %t16 = call ptr @Vec_new(i64 8)
+  store ptr %t16, ptr %t15
+  ; lvalue .struct_lit_names
+  %t17 = getelementptr %AstArena, ptr %arena, i32 0, i32 8
+  %t18 = call ptr @Vec_new(i64 8)
+  store ptr %t18, ptr %t17
+  ; lvalue .struct_lit_exprs
+  %t19 = getelementptr %AstArena, ptr %arena, i32 0, i32 9
+  %t20 = call ptr @Vec_new(i64 8)
+  store ptr %t20, ptr %t19
+  %t21 = load %AstArena, ptr %arena
+  ret %AstArena %t21
+}
+
+; impl Parser
+define %Parser @Parser_new(ptr %tokens.arg, i64 %count.arg) #0 {
+entry:
+  %tokens = alloca ptr
+  store ptr %tokens.arg, ptr %tokens
+  %count = alloca i64
+  store i64 %count.arg, ptr %count
+  %p = alloca %Parser
+  ; lvalue .tokens
+  %t1 = getelementptr %Parser, ptr %p, i32 0, i32 0
+  %t2 = load ptr, ptr %tokens
+  store ptr %t2, ptr %t1
+  ; lvalue .pos
+  %t3 = getelementptr %Parser, ptr %p, i32 0, i32 1
+  %t4 = sext i32 0 to i64
+  store i64 %t4, ptr %t3
+  ; lvalue .token_count
+  %t5 = getelementptr %Parser, ptr %p, i32 0, i32 2
+  %t6 = load i64, ptr %count
+  store i64 %t6, ptr %t5
+  %t7 = load %Parser, ptr %p
+  ret %Parser %t7
+}
+
+define %Token @Parser_peek(ptr %p.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %eof = alloca %Token
+  %t1 = load ptr, ptr %p
+  ; lvalue .pos
+  %t2 = getelementptr %Parser, ptr %t1, i32 0, i32 1
+  %t3 = load i64, ptr %t2
+  %t4 = load ptr, ptr %p
+  ; lvalue .token_count
+  %t5 = getelementptr %Parser, ptr %t4, i32 0, i32 2
+  %t6 = load i64, ptr %t5
+  %t7 = icmp slt i64 %t3, %t6
+  br i1 %t7, label %then.226, label %merge.228
+then.226:
+  %t8 = load ptr, ptr %p
+  ; lvalue .tokens
+  %t9 = getelementptr %Parser, ptr %t8, i32 0, i32 0
+  %t10 = load ptr, ptr %t9
+  %t11 = load ptr, ptr %p
+  ; lvalue .pos
+  %t12 = getelementptr %Parser, ptr %t11, i32 0, i32 1
+  %t13 = load i64, ptr %t12
+  %t14 = call ptr @yvec_get(ptr %t10, i64 %t13)
+  %t15 = load %Token, ptr %t14
+  ret %Token %t15
+merge.228:
+  ; lvalue .kind
+  %t16 = getelementptr %Token, ptr %eof, i32 0, i32 0
+  %t17 = getelementptr %TokenKind, ptr null, i32 1
+  %t18 = ptrtoint ptr %t17 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t16, ptr align 8 { i32 132, [8 x i64] zeroinitializer }, i64 %t18, i1 false)
+  ; lvalue .line
+  %t19 = getelementptr %Token, ptr %eof, i32 0, i32 1
+  %t20 = sext i32 0 to i64
+  store i64 %t20, ptr %t19
+  ; lvalue .col
+  %t21 = getelementptr %Token, ptr %eof, i32 0, i32 2
+  %t22 = sext i32 0 to i64
+  store i64 %t22, ptr %t21
+  ; lvalue .lexeme
+  %t23 = getelementptr %Token, ptr %eof, i32 0, i32 3
+  %t24 = call ptr @ystr_new(ptr @.str.36)
+  store ptr %t24, ptr %t23
+  %t25 = load %Token, ptr %eof
+  ret %Token %t25
+}
+
+define %Token @Parser_peek_at(ptr %p.arg, i64 %offset.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %offset = alloca i64
+  store i64 %offset.arg, ptr %offset
+  %eof = alloca %Token
+  %t1 = load ptr, ptr %p
+  ; lvalue .pos
+  %t2 = getelementptr %Parser, ptr %t1, i32 0, i32 1
+  %t3 = load i64, ptr %t2
+  %t4 = load i64, ptr %offset
+  %t5 = add i64 %t3, %t4
+  %t6 = load ptr, ptr %p
+  ; lvalue .token_count
+  %t7 = getelementptr %Parser, ptr %t6, i32 0, i32 2
+  %t8 = load i64, ptr %t7
+  %t9 = icmp slt i64 %t5, %t8
+  br i1 %t9, label %then.229, label %merge.231
+then.229:
+  %t10 = load ptr, ptr %p
+  ; lvalue .tokens
+  %t11 = getelementptr %Parser, ptr %t10, i32 0, i32 0
+  %t12 = load ptr, ptr %t11
+  %t13 = load ptr, ptr %p
+  ; lvalue .pos
+  %t14 = getelementptr %Parser, ptr %t13, i32 0, i32 1
+  %t15 = load i64, ptr %t14
+  %t16 = load i64, ptr %offset
+  %t17 = add i64 %t15, %t16
+  %t18 = call ptr @yvec_get(ptr %t12, i64 %t17)
+  %t19 = load %Token, ptr %t18
+  ret %Token %t19
+merge.231:
+  ; lvalue .kind
+  %t20 = getelementptr %Token, ptr %eof, i32 0, i32 0
+  %t21 = getelementptr %TokenKind, ptr null, i32 1
+  %t22 = ptrtoint ptr %t21 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t20, ptr align 8 { i32 132, [8 x i64] zeroinitializer }, i64 %t22, i1 false)
+  ; lvalue .line
+  %t23 = getelementptr %Token, ptr %eof, i32 0, i32 1
+  %t24 = sext i32 0 to i64
+  store i64 %t24, ptr %t23
+  ; lvalue .col
+  %t25 = getelementptr %Token, ptr %eof, i32 0, i32 2
+  %t26 = sext i32 0 to i64
+  store i64 %t26, ptr %t25
+  ; lvalue .lexeme
+  %t27 = getelementptr %Token, ptr %eof, i32 0, i32 3
+  %t28 = call ptr @ystr_new(ptr @.str.37)
+  store ptr %t28, ptr %t27
+  %t29 = load %Token, ptr %eof
+  ret %Token %t29
+}
+
+define %Token @Parser_advance(ptr %p.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %tok = alloca %Token
+  %t1 = load ptr, ptr %p
+  %t2 = call %Token @Parser_peek(ptr %t1)
+  %t3 = getelementptr %Token, ptr null, i32 1
+  %t4 = ptrtoint ptr %t3 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t2, i64 %t4, i1 false)
+  %t5 = load ptr, ptr %p
+  ; lvalue .pos
+  %t6 = getelementptr %Parser, ptr %t5, i32 0, i32 1
+  %t7 = load i64, ptr %t6
+  %t8 = load ptr, ptr %p
+  ; lvalue .token_count
+  %t9 = getelementptr %Parser, ptr %t8, i32 0, i32 2
+  %t10 = load i64, ptr %t9
+  %t11 = icmp slt i64 %t7, %t10
+  br i1 %t11, label %then.232, label %merge.234
+then.232:
+  %t12 = load ptr, ptr %p
+  ; lvalue .pos
+  %t13 = getelementptr %Parser, ptr %t12, i32 0, i32 1
+  %t14 = load i64, ptr %t13
+  %t15 = add i64 %t14, 1
+  store i64 %t15, ptr %t13
+  br label %merge.234
+merge.234:
+  %t16 = load %Token, ptr %tok
+  ret %Token %t16
+}
+
+define i1 @Parser_check_eof(ptr %p.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %t1 = load ptr, ptr %p
+  ; lvalue .pos
+  %t2 = getelementptr %Parser, ptr %t1, i32 0, i32 1
+  %t3 = load i64, ptr %t2
+  %t4 = load ptr, ptr %p
+  ; lvalue .token_count
+  %t5 = getelementptr %Parser, ptr %t4, i32 0, i32 2
+  %t6 = load i64, ptr %t5
+  %t7 = icmp sge i64 %t3, %t6
+  br i1 %t7, label %then.235, label %merge.237
+then.235:
+  ret i1 1
+merge.237:
+  ret i1 0
+}
+
+define ptr @Parser_match_ident(ptr %p.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %tok = alloca %Token
+  %lex = alloca ptr
+  %len = alloca i64
+  %ch = alloca i8
+  %is_ident = alloca i1
+  %t1 = load ptr, ptr %p
+  %t2 = call %Token @Parser_peek(ptr %t1)
+  %t3 = getelementptr %Token, ptr null, i32 1
+  %t4 = ptrtoint ptr %t3 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t2, i64 %t4, i1 false)
+  ; lvalue .lexeme
+  %t5 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t6 = load ptr, ptr %t5
+  ; lvalue .lexeme
+  %t8 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t9 = load ptr, ptr %t8
+  %t10 = call ptr @String_clone(ptr %t9)
+  store ptr %t10, ptr %lex
+  %t11 = load ptr, ptr %lex
+  %t13 = load ptr, ptr %lex
+  %t14 = call i64 @String_len(ptr %t13)
+  store i64 %t14, ptr %len
+  %t15 = load i64, ptr %len
+  %t16 = icmp sgt i64 %t15, 0
+  br i1 %t16, label %then.238, label %merge.240
+then.238:
+  %t17 = load ptr, ptr %lex
+  %t19 = load ptr, ptr %lex
+  %t20 = call i8 @String_char_at(ptr %t19, i64 0)
+  store i8 %t20, ptr %ch
+  store i1 0, ptr %is_ident
+  %t21 = load i8, ptr %ch
+  %t22 = icmp sge i8 %t21, 97
+  br i1 %t22, label %then.241, label %merge.243
+then.241:
+  %t23 = load i8, ptr %ch
+  %t24 = icmp sle i8 %t23, 122
+  br i1 %t24, label %then.244, label %merge.246
+then.244:
+  store i1 1, ptr %is_ident
+  br label %merge.246
+merge.246:
+  br label %merge.243
+merge.243:
+  %t25 = load i8, ptr %ch
+  %t26 = icmp sge i8 %t25, 65
+  br i1 %t26, label %then.247, label %merge.249
+then.247:
+  %t27 = load i8, ptr %ch
+  %t28 = icmp sle i8 %t27, 90
+  br i1 %t28, label %then.250, label %merge.252
+then.250:
+  store i1 1, ptr %is_ident
+  br label %merge.252
+merge.252:
+  br label %merge.249
+merge.249:
+  %t29 = load i8, ptr %ch
+  %t30 = icmp eq i8 %t29, 95
+  br i1 %t30, label %then.253, label %merge.255
+then.253:
+  store i1 1, ptr %is_ident
+  br label %merge.255
+merge.255:
+  %t31 = load i1, ptr %is_ident
+  br i1 %t31, label %then.256, label %merge.258
+then.256:
+  %t32 = load ptr, ptr %p
+  %t33 = call %Token @Parser_advance(ptr %t32)
+  %t34 = load ptr, ptr %lex
+  ret ptr %t34
+merge.258:
+  br label %merge.240
+merge.240:
+  %t35 = call ptr @ystr_new(ptr @.str.38)
+  ret ptr %t35
+}
+
+define void @Parser_expect_token(ptr %p.arg, ptr %expected.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %expected = alloca ptr
+  store ptr %expected.arg, ptr %expected
+  %tok = alloca %Token
+  %matches = alloca i1
+  %t1 = load ptr, ptr %p
+  %t2 = call %Token @Parser_advance(ptr %t1)
+  %t3 = getelementptr %Token, ptr null, i32 1
+  %t4 = ptrtoint ptr %t3 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t2, i64 %t4, i1 false)
+  ; lvalue .lexeme
+  %t5 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t6 = load ptr, ptr %t5
+  %t7 = load ptr, ptr %expected
+  %t8 = call i1 @String_eq_cstr(ptr %t6, ptr %t7)
+  store i1 %t8, ptr %matches
+  %t9 = load i1, ptr %matches
+  br i1 %t9, label %then.259, label %merge.261
+then.259:
+  ret void
+merge.261:
+  %t10 = call ptr @ystr_new(ptr @.str.39)
+  call void @print(ptr %t10)
+  %t12 = load ptr, ptr %expected
+  call void @print(ptr %t12)
+  %t14 = call ptr @ystr_new(ptr @.str.40)
+  call void @print(ptr %t14)
+  ; lvalue .lexeme
+  %t16 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t17 = load ptr, ptr %t16
+  ; lvalue .lexeme
+  %t19 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  call void @print(ptr %t19)
+  %t21 = call ptr @ystr_new(ptr @.str.41)
+  call void @print(ptr %t21)
+  ; lvalue .line
+  %t23 = getelementptr %Token, ptr %tok, i32 0, i32 1
+  %t24 = load i64, ptr %t23
+  call void @print_int(i64 %t24)
+  %t26 = call ptr @ystr_new(ptr @.str.42)
+  call void @println(ptr %t26)
+  ret void
+}
+
+; impl Parser
+define i64 @Parser_parse_primary(ptr %p.arg, ptr %arena.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %tok = alloca %Token
+  %lex = alloca ptr
+  %line = alloca i64
+  %col = alloca i64
+  %len = alloca i64
+  %ch = alloca i8
+  %is_digit = alloca i1
+  %expr = alloca %Expr
+  %idx = alloca i64
+  %is_ident = alloca i1
+  %next = alloca %Token
+  %member_tok = alloca %Token
+  %member_lex = alloca ptr
+  %check1 = alloca %Token
+  %check2 = alloca %Token
+  %check3 = alloca %Token
+  %is_struct = alloca i1
+  %field_start = alloca i64
+  %field_count = alloca i64
+  %parsing_sfields = alloca i1
+  %end_check = alloca %Token
+  %sf_tok = alloca %Token
+  %sf_name = alloca ptr
+  %sf_expr = alloca i64
+  %comma_check = alloca %Token
+  %inner_idx = alloca i64
+  %operand_idx = alloca i64
+  %dummy = alloca %Expr
+  %t1 = load ptr, ptr %p
+  %t2 = call %Token @Parser_peek(ptr %t1)
+  %t3 = getelementptr %Token, ptr null, i32 1
+  %t4 = ptrtoint ptr %t3 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t2, i64 %t4, i1 false)
+  ; lvalue .lexeme
+  %t5 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t6 = load ptr, ptr %t5
+  ; lvalue .lexeme
+  %t8 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t9 = load ptr, ptr %t8
+  %t10 = call ptr @String_clone(ptr %t9)
+  store ptr %t10, ptr %lex
+  ; lvalue .line
+  %t11 = getelementptr %Token, ptr %tok, i32 0, i32 1
+  %t12 = load i64, ptr %t11
+  store i64 %t12, ptr %line
+  ; lvalue .col
+  %t13 = getelementptr %Token, ptr %tok, i32 0, i32 2
+  %t14 = load i64, ptr %t13
+  store i64 %t14, ptr %col
+  %t15 = load ptr, ptr %lex
+  %t17 = load ptr, ptr %lex
+  %t18 = call i64 @String_len(ptr %t17)
+  store i64 %t18, ptr %len
+  %t19 = load i64, ptr %len
+  %t20 = icmp sgt i64 %t19, 0
+  br i1 %t20, label %then.262, label %merge.264
+then.262:
+  %t21 = load ptr, ptr %lex
+  %t23 = load ptr, ptr %lex
+  %t24 = call i8 @String_char_at(ptr %t23, i64 0)
+  store i8 %t24, ptr %ch
+  store i1 0, ptr %is_digit
+  %t25 = load i8, ptr %ch
+  %t26 = icmp sge i8 %t25, 48
+  br i1 %t26, label %then.265, label %merge.267
+then.265:
+  %t27 = load i8, ptr %ch
+  %t28 = icmp sle i8 %t27, 57
+  br i1 %t28, label %then.268, label %merge.270
+then.268:
+  store i1 1, ptr %is_digit
+  br label %merge.270
+merge.270:
+  br label %merge.267
+merge.267:
+  %t29 = load i1, ptr %is_digit
+  br i1 %t29, label %then.271, label %merge.273
+then.271:
+  %t30 = load ptr, ptr %p
+  %t31 = call %Token @Parser_advance(ptr %t30)
+  %t32 = alloca %Expr
+  %t33 = getelementptr %Expr, ptr %t32, i32 0, i32 0
+  store i32 1, ptr %t33
+  %t34 = getelementptr %Expr, ptr %t32, i32 0, i32 1
+  store i32 0, ptr %t34
+  %t35 = load %Expr, ptr %t32
+  %t36 = getelementptr %Expr, ptr null, i32 1
+  %t37 = ptrtoint ptr %t36 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t35, i64 %t37, i1 false)
+  %t38 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t39 = getelementptr %AstArena, ptr %t38, i32 0, i32 0
+  %t40 = load ptr, ptr %t39
+  call void @Vec_push(ptr %t40, ptr %expr)
+  %t42 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t43 = getelementptr %AstArena, ptr %t42, i32 0, i32 0
+  %t44 = load ptr, ptr %t43
+  %t45 = call i64 @Vec_len(ptr %t44)
+  store i64 %t45, ptr %idx
+  %t46 = load i64, ptr %idx
+  ret i64 %t46
+merge.273:
+  %t47 = load i8, ptr %ch
+  %t48 = icmp eq i8 %t47, 34
+  br i1 %t48, label %then.274, label %merge.276
+then.274:
+  %t49 = load ptr, ptr %p
+  %t50 = call %Token @Parser_advance(ptr %t49)
+  %t51 = load ptr, ptr %lex
+  %t53 = load ptr, ptr %lex
+  %t54 = call ptr @String_clone(ptr %t53)
+  %t55 = alloca %Expr
+  %t56 = getelementptr %Expr, ptr %t55, i32 0, i32 0
+  store i32 3, ptr %t56
+  %t57 = getelementptr %Expr, ptr %t55, i32 0, i32 1
+  %t58 = load ptr, ptr %lex
+  %t60 = load ptr, ptr %lex
+  %t61 = call ptr @String_clone(ptr %t60)
+  store ptr %t61, ptr %t57
+  %t62 = load %Expr, ptr %t55
+  %t63 = getelementptr %Expr, ptr null, i32 1
+  %t64 = ptrtoint ptr %t63 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t62, i64 %t64, i1 false)
+  %t65 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t66 = getelementptr %AstArena, ptr %t65, i32 0, i32 0
+  %t67 = load ptr, ptr %t66
+  call void @Vec_push(ptr %t67, ptr %expr)
+  %t69 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t70 = getelementptr %AstArena, ptr %t69, i32 0, i32 0
+  %t71 = load ptr, ptr %t70
+  %t72 = call i64 @Vec_len(ptr %t71)
+  store i64 %t72, ptr %idx
+  %t73 = load i64, ptr %idx
+  ret i64 %t73
+merge.276:
+  %t74 = load ptr, ptr %lex
+  %t75 = call ptr @ystr_new(ptr @.str.43)
+  %t76 = call i1 @String_eq_cstr(ptr %t74, ptr %t75)
+  br i1 %t76, label %then.277, label %merge.279
+then.277:
+  %t77 = load ptr, ptr %p
+  %t78 = call %Token @Parser_advance(ptr %t77)
+  %t79 = alloca %Expr
+  %t80 = getelementptr %Expr, ptr %t79, i32 0, i32 0
+  store i32 5, ptr %t80
+  %t81 = getelementptr %Expr, ptr %t79, i32 0, i32 1
+  store i32 1, ptr %t81
+  %t82 = load %Expr, ptr %t79
+  %t83 = getelementptr %Expr, ptr null, i32 1
+  %t84 = ptrtoint ptr %t83 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t82, i64 %t84, i1 false)
+  %t85 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t86 = getelementptr %AstArena, ptr %t85, i32 0, i32 0
+  %t87 = load ptr, ptr %t86
+  call void @Vec_push(ptr %t87, ptr %expr)
+  %t89 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t90 = getelementptr %AstArena, ptr %t89, i32 0, i32 0
+  %t91 = load ptr, ptr %t90
+  %t92 = call i64 @Vec_len(ptr %t91)
+  store i64 %t92, ptr %idx
+  %t93 = load i64, ptr %idx
+  ret i64 %t93
+merge.279:
+  %t94 = load ptr, ptr %lex
+  %t95 = call ptr @ystr_new(ptr @.str.44)
+  %t96 = call i1 @String_eq_cstr(ptr %t94, ptr %t95)
+  br i1 %t96, label %then.280, label %merge.282
+then.280:
+  %t97 = load ptr, ptr %p
+  %t98 = call %Token @Parser_advance(ptr %t97)
+  %t99 = alloca %Expr
+  %t100 = getelementptr %Expr, ptr %t99, i32 0, i32 0
+  store i32 5, ptr %t100
+  %t101 = getelementptr %Expr, ptr %t99, i32 0, i32 1
+  store i32 0, ptr %t101
+  %t102 = load %Expr, ptr %t99
+  %t103 = getelementptr %Expr, ptr null, i32 1
+  %t104 = ptrtoint ptr %t103 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t102, i64 %t104, i1 false)
+  %t105 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t106 = getelementptr %AstArena, ptr %t105, i32 0, i32 0
+  %t107 = load ptr, ptr %t106
+  call void @Vec_push(ptr %t107, ptr %expr)
+  %t109 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t110 = getelementptr %AstArena, ptr %t109, i32 0, i32 0
+  %t111 = load ptr, ptr %t110
+  %t112 = call i64 @Vec_len(ptr %t111)
+  store i64 %t112, ptr %idx
+  %t113 = load i64, ptr %idx
+  ret i64 %t113
+merge.282:
+  store i1 0, ptr %is_ident
+  %t114 = load i8, ptr %ch
+  %t115 = icmp sge i8 %t114, 97
+  br i1 %t115, label %then.283, label %merge.285
+then.283:
+  %t116 = load i8, ptr %ch
+  %t117 = icmp sle i8 %t116, 122
+  br i1 %t117, label %then.286, label %merge.288
+then.286:
+  store i1 1, ptr %is_ident
+  br label %merge.288
+merge.288:
+  br label %merge.285
+merge.285:
+  %t118 = load i8, ptr %ch
+  %t119 = icmp sge i8 %t118, 65
+  br i1 %t119, label %then.289, label %merge.291
+then.289:
+  %t120 = load i8, ptr %ch
+  %t121 = icmp sle i8 %t120, 90
+  br i1 %t121, label %then.292, label %merge.294
+then.292:
+  store i1 1, ptr %is_ident
+  br label %merge.294
+merge.294:
+  br label %merge.291
+merge.291:
+  %t122 = load i8, ptr %ch
+  %t123 = icmp eq i8 %t122, 95
+  br i1 %t123, label %then.295, label %merge.297
+then.295:
+  store i1 1, ptr %is_ident
+  br label %merge.297
+merge.297:
+  %t124 = load i1, ptr %is_ident
+  br i1 %t124, label %then.298, label %merge.300
+then.298:
+  %t125 = load ptr, ptr %p
+  %t126 = call %Token @Parser_advance(ptr %t125)
+  %t127 = load ptr, ptr %p
+  %t128 = call %Token @Parser_peek(ptr %t127)
+  %t129 = getelementptr %Token, ptr null, i32 1
+  %t130 = ptrtoint ptr %t129 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %next, ptr align 8 %t128, i64 %t130, i1 false)
+  ; lvalue .lexeme
+  %t131 = getelementptr %Token, ptr %next, i32 0, i32 3
+  %t132 = load ptr, ptr %t131
+  %t133 = call ptr @ystr_new(ptr @.str.45)
+  %t134 = call i1 @String_eq_cstr(ptr %t132, ptr %t133)
+  br i1 %t134, label %then.301, label %merge.303
+then.301:
+  %t135 = load ptr, ptr %p
+  %t136 = call %Token @Parser_advance(ptr %t135)
+  %t137 = load ptr, ptr %p
+  %t138 = call %Token @Parser_advance(ptr %t137)
+  %t139 = getelementptr %Token, ptr null, i32 1
+  %t140 = ptrtoint ptr %t139 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %member_tok, ptr align 8 %t138, i64 %t140, i1 false)
+  ; lvalue .lexeme
+  %t141 = getelementptr %Token, ptr %member_tok, i32 0, i32 3
+  %t142 = load ptr, ptr %t141
+  ; lvalue .lexeme
+  %t144 = getelementptr %Token, ptr %member_tok, i32 0, i32 3
+  %t145 = load ptr, ptr %t144
+  %t146 = call ptr @String_clone(ptr %t145)
+  store ptr %t146, ptr %member_lex
+  %t147 = load ptr, ptr %lex
+  %t149 = load ptr, ptr %lex
+  %t150 = call ptr @String_clone(ptr %t149)
+  %t151 = load ptr, ptr %member_lex
+  %t152 = alloca %Expr
+  %t153 = getelementptr %Expr, ptr %t152, i32 0, i32 0
+  store i32 10, ptr %t153
+  %t154 = getelementptr %Expr, ptr %t152, i32 0, i32 1
+  %t155 = load ptr, ptr %lex
+  %t157 = load ptr, ptr %lex
+  %t158 = call ptr @String_clone(ptr %t157)
+  store ptr %t158, ptr %t154
+  %t159 = load %Expr, ptr %t152
+  %t160 = getelementptr %Expr, ptr null, i32 1
+  %t161 = ptrtoint ptr %t160 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t159, i64 %t161, i1 false)
+  %t162 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t163 = getelementptr %AstArena, ptr %t162, i32 0, i32 0
+  %t164 = load ptr, ptr %t163
+  call void @Vec_push(ptr %t164, ptr %expr)
+  %t166 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t167 = getelementptr %AstArena, ptr %t166, i32 0, i32 0
+  %t168 = load ptr, ptr %t167
+  %t169 = call i64 @Vec_len(ptr %t168)
+  store i64 %t169, ptr %idx
+  %t170 = load i64, ptr %idx
+  ret i64 %t170
+merge.303:
+  %t171 = load ptr, ptr %p
+  %t172 = call %Token @Parser_peek_at(ptr %t171, i64 0)
+  %t173 = getelementptr %Token, ptr null, i32 1
+  %t174 = ptrtoint ptr %t173 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check1, ptr align 8 %t172, i64 %t174, i1 false)
+  ; lvalue .lexeme
+  %t175 = getelementptr %Token, ptr %check1, i32 0, i32 3
+  %t176 = load ptr, ptr %t175
+  %t177 = call ptr @ystr_new(ptr @.str.46)
+  %t178 = call i1 @String_eq_cstr(ptr %t176, ptr %t177)
+  br i1 %t178, label %then.304, label %merge.306
+then.304:
+  %t179 = load ptr, ptr %p
+  %t180 = call %Token @Parser_peek_at(ptr %t179, i64 1)
+  %t181 = getelementptr %Token, ptr null, i32 1
+  %t182 = ptrtoint ptr %t181 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check2, ptr align 8 %t180, i64 %t182, i1 false)
+  %t183 = load ptr, ptr %p
+  %t184 = call %Token @Parser_peek_at(ptr %t183, i64 2)
+  %t185 = getelementptr %Token, ptr null, i32 1
+  %t186 = ptrtoint ptr %t185 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check3, ptr align 8 %t184, i64 %t186, i1 false)
+  store i1 0, ptr %is_struct
+  ; lvalue .lexeme
+  %t187 = getelementptr %Token, ptr %check2, i32 0, i32 3
+  %t188 = load ptr, ptr %t187
+  %t189 = call ptr @ystr_new(ptr @.str.47)
+  %t190 = call i1 @String_eq_cstr(ptr %t188, ptr %t189)
+  br i1 %t190, label %then.307, label %else.308
+then.307:
+  store i1 1, ptr %is_struct
+  br label %merge.309
+else.308:
+  ; lvalue .lexeme
+  %t191 = getelementptr %Token, ptr %check3, i32 0, i32 3
+  %t192 = load ptr, ptr %t191
+  %t193 = call ptr @ystr_new(ptr @.str.48)
+  %t194 = call i1 @String_eq_cstr(ptr %t192, ptr %t193)
+  br i1 %t194, label %then.310, label %merge.312
+then.310:
+  store i1 1, ptr %is_struct
+  br label %merge.312
+merge.312:
+  br label %merge.309
+merge.309:
+  %t195 = load i1, ptr %is_struct
+  br i1 %t195, label %then.313, label %merge.315
+then.313:
+  %t196 = load ptr, ptr %p
+  %t197 = call %Token @Parser_advance(ptr %t196)
+  %t198 = load ptr, ptr %arena
+  ; lvalue .struct_lit_exprs
+  %t199 = getelementptr %AstArena, ptr %t198, i32 0, i32 9
+  %t200 = load ptr, ptr %t199
+  %t201 = call i64 @Vec_len(ptr %t200)
+  store i64 %t201, ptr %field_start
+  %t202 = sext i32 0 to i64
+  store i64 %t202, ptr %field_count
+  store i1 1, ptr %parsing_sfields
+  br label %while.cond.316
+while.cond.316:
+  %t203 = load i1, ptr %parsing_sfields
+  br i1 %t203, label %while.body.317, label %while.end.318
+while.body.317:
+  %t204 = load ptr, ptr %p
+  %t205 = call %Token @Parser_peek(ptr %t204)
+  %t206 = getelementptr %Token, ptr null, i32 1
+  %t207 = ptrtoint ptr %t206 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %end_check, ptr align 8 %t205, i64 %t207, i1 false)
+  ; lvalue .lexeme
+  %t208 = getelementptr %Token, ptr %end_check, i32 0, i32 3
+  %t209 = load ptr, ptr %t208
+  %t210 = call ptr @ystr_new(ptr @.str.49)
+  %t211 = call i1 @String_eq_cstr(ptr %t209, ptr %t210)
+  br i1 %t211, label %then.319, label %else.320
+then.319:
+  store i1 0, ptr %parsing_sfields
+  br label %merge.321
+else.320:
+  %t212 = load ptr, ptr %p
+  %t213 = call %Token @Parser_advance(ptr %t212)
+  %t214 = getelementptr %Token, ptr null, i32 1
+  %t215 = ptrtoint ptr %t214 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %sf_tok, ptr align 8 %t213, i64 %t215, i1 false)
+  ; lvalue .lexeme
+  %t216 = getelementptr %Token, ptr %sf_tok, i32 0, i32 3
+  %t217 = load ptr, ptr %t216
+  ; lvalue .lexeme
+  %t219 = getelementptr %Token, ptr %sf_tok, i32 0, i32 3
+  %t220 = load ptr, ptr %t219
+  %t221 = call ptr @String_clone(ptr %t220)
+  store ptr %t221, ptr %sf_name
+  %t222 = load ptr, ptr %p
+  %t223 = call ptr @ystr_new(ptr @.str.50)
+  %t225 = call ptr @ystr_new(ptr @.str.51)
+  call void @Parser_expect_token(ptr %t222, ptr %t225)
+  %t227 = load ptr, ptr %p
+  %t228 = load ptr, ptr %arena
+  %t229 = call i64 @Parser_parse_expr(ptr %t227, ptr %t228)
+  store i64 %t229, ptr %sf_expr
+  %t230 = load ptr, ptr %arena
+  ; lvalue .struct_lit_names
+  %t231 = getelementptr %AstArena, ptr %t230, i32 0, i32 8
+  %t232 = load ptr, ptr %t231
+  call void @Vec_push(ptr %t232, ptr %sf_name)
+  %t234 = load ptr, ptr %arena
+  ; lvalue .struct_lit_exprs
+  %t235 = getelementptr %AstArena, ptr %t234, i32 0, i32 9
+  %t236 = load ptr, ptr %t235
+  call void @Vec_push(ptr %t236, ptr %sf_expr)
+  %t238 = load i64, ptr %field_count
+  %t239 = add i64 %t238, 1
+  store i64 %t239, ptr %field_count
+  %t240 = load ptr, ptr %p
+  %t241 = call %Token @Parser_peek(ptr %t240)
+  %t242 = getelementptr %Token, ptr null, i32 1
+  %t243 = ptrtoint ptr %t242 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %comma_check, ptr align 8 %t241, i64 %t243, i1 false)
+  ; lvalue .lexeme
+  %t244 = getelementptr %Token, ptr %comma_check, i32 0, i32 3
+  %t245 = load ptr, ptr %t244
+  %t246 = call ptr @ystr_new(ptr @.str.52)
+  %t247 = call i1 @String_eq_cstr(ptr %t245, ptr %t246)
+  br i1 %t247, label %then.322, label %merge.324
+then.322:
+  %t248 = load ptr, ptr %p
+  %t249 = call %Token @Parser_advance(ptr %t248)
+  br label %merge.324
+merge.324:
+  br label %merge.321
+merge.321:
+  br label %while.cond.316
+while.end.318:
+  %t250 = load ptr, ptr %p
+  %t251 = call ptr @ystr_new(ptr @.str.53)
+  %t253 = call ptr @ystr_new(ptr @.str.54)
+  call void @Parser_expect_token(ptr %t250, ptr %t253)
+  %t255 = load ptr, ptr %lex
+  %t257 = load ptr, ptr %lex
+  %t258 = call ptr @String_clone(ptr %t257)
+  %t259 = load i64, ptr %field_start
+  %t260 = load i64, ptr %field_count
+  %t261 = alloca %Expr
+  %t262 = getelementptr %Expr, ptr %t261, i32 0, i32 0
+  store i32 13, ptr %t262
+  %t263 = getelementptr %Expr, ptr %t261, i32 0, i32 1
+  %t264 = load ptr, ptr %lex
+  %t266 = load ptr, ptr %lex
+  %t267 = call ptr @String_clone(ptr %t266)
+  store ptr %t267, ptr %t263
+  %t268 = load %Expr, ptr %t261
+  %t269 = getelementptr %Expr, ptr null, i32 1
+  %t270 = ptrtoint ptr %t269 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t268, i64 %t270, i1 false)
+  %t271 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t272 = getelementptr %AstArena, ptr %t271, i32 0, i32 0
+  %t273 = load ptr, ptr %t272
+  call void @Vec_push(ptr %t273, ptr %expr)
+  %t275 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t276 = getelementptr %AstArena, ptr %t275, i32 0, i32 0
+  %t277 = load ptr, ptr %t276
+  %t278 = call i64 @Vec_len(ptr %t277)
+  store i64 %t278, ptr %idx
+  %t279 = load i64, ptr %idx
+  ret i64 %t279
+merge.315:
+  br label %merge.306
+merge.306:
+  %t280 = load ptr, ptr %lex
+  %t282 = load ptr, ptr %lex
+  %t283 = call ptr @String_clone(ptr %t282)
+  %t284 = alloca %Expr
+  %t285 = getelementptr %Expr, ptr %t284, i32 0, i32 0
+  store i32 0, ptr %t285
+  %t286 = getelementptr %Expr, ptr %t284, i32 0, i32 1
+  %t287 = load ptr, ptr %lex
+  %t289 = load ptr, ptr %lex
+  %t290 = call ptr @String_clone(ptr %t289)
+  store ptr %t290, ptr %t286
+  %t291 = load %Expr, ptr %t284
+  %t292 = getelementptr %Expr, ptr null, i32 1
+  %t293 = ptrtoint ptr %t292 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t291, i64 %t293, i1 false)
+  %t294 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t295 = getelementptr %AstArena, ptr %t294, i32 0, i32 0
+  %t296 = load ptr, ptr %t295
+  call void @Vec_push(ptr %t296, ptr %expr)
+  %t298 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t299 = getelementptr %AstArena, ptr %t298, i32 0, i32 0
+  %t300 = load ptr, ptr %t299
+  %t301 = call i64 @Vec_len(ptr %t300)
+  store i64 %t301, ptr %idx
+  %t302 = load i64, ptr %idx
+  ret i64 %t302
+merge.300:
+  br label %merge.264
+merge.264:
+  %t303 = load ptr, ptr %lex
+  %t304 = call ptr @ystr_new(ptr @.str.55)
+  %t305 = call i1 @String_eq_cstr(ptr %t303, ptr %t304)
+  br i1 %t305, label %then.325, label %merge.327
+then.325:
+  %t306 = load ptr, ptr %p
+  %t307 = call %Token @Parser_advance(ptr %t306)
+  %t308 = load ptr, ptr %p
+  %t309 = load ptr, ptr %arena
+  %t310 = call i64 @Parser_parse_expr(ptr %t308, ptr %t309)
+  store i64 %t310, ptr %inner_idx
+  %t311 = load ptr, ptr %p
+  %t312 = call ptr @ystr_new(ptr @.str.56)
+  %t314 = call ptr @ystr_new(ptr @.str.57)
+  call void @Parser_expect_token(ptr %t311, ptr %t314)
+  %t316 = load i64, ptr %inner_idx
+  ret i64 %t316
+merge.327:
+  %t317 = load ptr, ptr %lex
+  %t318 = call ptr @ystr_new(ptr @.str.58)
+  %t319 = call i1 @String_eq_cstr(ptr %t317, ptr %t318)
+  br i1 %t319, label %then.328, label %merge.330
+then.328:
+  %t320 = load ptr, ptr %p
+  %t321 = call %Token @Parser_advance(ptr %t320)
+  %t322 = load ptr, ptr %p
+  %t323 = load ptr, ptr %arena
+  %t324 = call i64 @Parser_parse_primary(ptr %t322, ptr %t323)
+  store i64 %t324, ptr %operand_idx
+  %t325 = load i64, ptr %operand_idx
+  %t326 = alloca %Expr
+  %t327 = getelementptr %Expr, ptr %t326, i32 0, i32 0
+  store i32 12, ptr %t327
+  %t328 = getelementptr %Expr, ptr %t326, i32 0, i32 1
+  store i32 2, ptr %t328
+  %t329 = load %Expr, ptr %t326
+  %t330 = getelementptr %Expr, ptr null, i32 1
+  %t331 = ptrtoint ptr %t330 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t329, i64 %t331, i1 false)
+  %t332 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t333 = getelementptr %AstArena, ptr %t332, i32 0, i32 0
+  %t334 = load ptr, ptr %t333
+  call void @Vec_push(ptr %t334, ptr %expr)
+  %t336 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t337 = getelementptr %AstArena, ptr %t336, i32 0, i32 0
+  %t338 = load ptr, ptr %t337
+  %t339 = call i64 @Vec_len(ptr %t338)
+  store i64 %t339, ptr %idx
+  %t340 = load i64, ptr %idx
+  ret i64 %t340
+merge.330:
+  %t341 = load ptr, ptr %lex
+  %t342 = call ptr @ystr_new(ptr @.str.59)
+  %t343 = call i1 @String_eq_cstr(ptr %t341, ptr %t342)
+  br i1 %t343, label %then.331, label %merge.333
+then.331:
+  %t344 = load ptr, ptr %p
+  %t345 = call %Token @Parser_advance(ptr %t344)
+  %t346 = load ptr, ptr %p
+  %t347 = load ptr, ptr %arena
+  %t348 = call i64 @Parser_parse_primary(ptr %t346, ptr %t347)
+  store i64 %t348, ptr %operand_idx
+  %t349 = load i64, ptr %operand_idx
+  %t350 = alloca %Expr
+  %t351 = getelementptr %Expr, ptr %t350, i32 0, i32 0
+  store i32 12, ptr %t351
+  %t352 = getelementptr %Expr, ptr %t350, i32 0, i32 1
+  store i32 3, ptr %t352
+  %t353 = load %Expr, ptr %t350
+  %t354 = getelementptr %Expr, ptr null, i32 1
+  %t355 = ptrtoint ptr %t354 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t353, i64 %t355, i1 false)
+  %t356 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t357 = getelementptr %AstArena, ptr %t356, i32 0, i32 0
+  %t358 = load ptr, ptr %t357
+  call void @Vec_push(ptr %t358, ptr %expr)
+  %t360 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t361 = getelementptr %AstArena, ptr %t360, i32 0, i32 0
+  %t362 = load ptr, ptr %t361
+  %t363 = call i64 @Vec_len(ptr %t362)
+  store i64 %t363, ptr %idx
+  %t364 = load i64, ptr %idx
+  ret i64 %t364
+merge.333:
+  %t365 = load ptr, ptr %lex
+  %t366 = call ptr @ystr_new(ptr @.str.60)
+  %t367 = call i1 @String_eq_cstr(ptr %t365, ptr %t366)
+  br i1 %t367, label %then.334, label %merge.336
+then.334:
+  %t368 = load ptr, ptr %p
+  %t369 = call %Token @Parser_advance(ptr %t368)
+  %t370 = load ptr, ptr %p
+  %t371 = load ptr, ptr %arena
+  %t372 = call i64 @Parser_parse_primary(ptr %t370, ptr %t371)
+  store i64 %t372, ptr %operand_idx
+  %t373 = load i64, ptr %operand_idx
+  %t374 = alloca %Expr
+  %t375 = getelementptr %Expr, ptr %t374, i32 0, i32 0
+  store i32 12, ptr %t375
+  %t376 = getelementptr %Expr, ptr %t374, i32 0, i32 1
+  store i32 0, ptr %t376
+  %t377 = load %Expr, ptr %t374
+  %t378 = getelementptr %Expr, ptr null, i32 1
+  %t379 = ptrtoint ptr %t378 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t377, i64 %t379, i1 false)
+  %t380 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t381 = getelementptr %AstArena, ptr %t380, i32 0, i32 0
+  %t382 = load ptr, ptr %t381
+  call void @Vec_push(ptr %t382, ptr %expr)
+  %t384 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t385 = getelementptr %AstArena, ptr %t384, i32 0, i32 0
+  %t386 = load ptr, ptr %t385
+  %t387 = call i64 @Vec_len(ptr %t386)
+  store i64 %t387, ptr %idx
+  %t388 = load i64, ptr %idx
+  ret i64 %t388
+merge.336:
+  %t389 = load ptr, ptr %lex
+  %t390 = call ptr @ystr_new(ptr @.str.61)
+  %t391 = call i1 @String_eq_cstr(ptr %t389, ptr %t390)
+  br i1 %t391, label %then.337, label %merge.339
+then.337:
+  %t392 = load ptr, ptr %p
+  %t393 = call %Token @Parser_advance(ptr %t392)
+  %t394 = load ptr, ptr %p
+  %t395 = load ptr, ptr %arena
+  %t396 = call i64 @Parser_parse_primary(ptr %t394, ptr %t395)
+  store i64 %t396, ptr %operand_idx
+  %t397 = load i64, ptr %operand_idx
+  %t398 = alloca %Expr
+  %t399 = getelementptr %Expr, ptr %t398, i32 0, i32 0
+  store i32 12, ptr %t399
+  %t400 = getelementptr %Expr, ptr %t398, i32 0, i32 1
+  store i32 1, ptr %t400
+  %t401 = load %Expr, ptr %t398
+  %t402 = getelementptr %Expr, ptr null, i32 1
+  %t403 = ptrtoint ptr %t402 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t401, i64 %t403, i1 false)
+  %t404 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t405 = getelementptr %AstArena, ptr %t404, i32 0, i32 0
+  %t406 = load ptr, ptr %t405
+  call void @Vec_push(ptr %t406, ptr %expr)
+  %t408 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t409 = getelementptr %AstArena, ptr %t408, i32 0, i32 0
+  %t410 = load ptr, ptr %t409
+  %t411 = call i64 @Vec_len(ptr %t410)
+  store i64 %t411, ptr %idx
+  %t412 = load i64, ptr %idx
+  ret i64 %t412
+merge.339:
+  %t413 = call ptr @ystr_new(ptr @.str.62)
+  call void @print(ptr %t413)
+  %t415 = load ptr, ptr %lex
+  call void @print(ptr %lex)
+  %t418 = call ptr @ystr_new(ptr @.str.63)
+  call void @print(ptr %t418)
+  ; lvalue .line
+  %t420 = getelementptr %Token, ptr %tok, i32 0, i32 1
+  %t421 = load i64, ptr %t420
+  call void @print_int(i64 %t421)
+  %t423 = call ptr @ystr_new(ptr @.str.64)
+  call void @println(ptr %t423)
+  %t425 = alloca %Expr
+  %t426 = getelementptr %Expr, ptr %t425, i32 0, i32 0
+  store i32 1, ptr %t426
+  %t427 = getelementptr %Expr, ptr %t425, i32 0, i32 1
+  store i32 0, ptr %t427
+  %t428 = load %Expr, ptr %t425
+  %t429 = getelementptr %Expr, ptr null, i32 1
+  %t430 = ptrtoint ptr %t429 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %dummy, ptr align 8 %t428, i64 %t430, i1 false)
+  %t431 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t432 = getelementptr %AstArena, ptr %t431, i32 0, i32 0
+  %t433 = load ptr, ptr %t432
+  call void @Vec_push(ptr %t433, ptr %dummy)
+  %t435 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t436 = getelementptr %AstArena, ptr %t435, i32 0, i32 0
+  %t437 = load ptr, ptr %t436
+  %t438 = call i64 @Vec_len(ptr %t437)
+  store i64 %t438, ptr %idx
+  %t439 = load i64, ptr %idx
+  ret i64 %t439
+}
+
+define i64 @Parser_parse_postfix(ptr %p.arg, ptr %arena.arg, i64 %lhs_idx.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %lhs_idx = alloca i64
+  store i64 %lhs_idx.arg, ptr %lhs_idx
+  %current = alloca i64
+  %running = alloca i1
+  %tok = alloca %Token
+  %lex = alloca ptr
+  %args_start = alloca i64
+  %arg_count = alloca i64
+  %parsing_args = alloca i1
+  %check = alloca %Token
+  %arg_idx = alloca i64
+  %comma_check = alloca %Token
+  %call_expr = alloca %Expr
+  %member_tok = alloca %Token
+  %member_name = alloca ptr
+  %acc_expr = alloca %Expr
+  %index_idx = alloca i64
+  %idx_expr = alloca %Expr
+  %t1 = load i64, ptr %lhs_idx
+  store i64 %t1, ptr %current
+  store i1 1, ptr %running
+  br label %while.cond.340
+while.cond.340:
+  %t2 = load i1, ptr %running
+  br i1 %t2, label %while.body.341, label %while.end.342
+while.body.341:
+  %t3 = load ptr, ptr %p
+  %t4 = call %Token @Parser_peek(ptr %t3)
+  %t5 = getelementptr %Token, ptr null, i32 1
+  %t6 = ptrtoint ptr %t5 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t4, i64 %t6, i1 false)
+  ; lvalue .lexeme
+  %t7 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t8 = load ptr, ptr %t7
+  ; lvalue .lexeme
+  %t10 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t11 = load ptr, ptr %t10
+  %t12 = call ptr @String_clone(ptr %t11)
+  store ptr %t12, ptr %lex
+  %t13 = load ptr, ptr %lex
+  %t14 = call ptr @ystr_new(ptr @.str.65)
+  %t15 = call i1 @String_eq_cstr(ptr %t13, ptr %t14)
+  br i1 %t15, label %then.343, label %else.344
+then.343:
+  %t16 = load ptr, ptr %p
+  %t17 = call %Token @Parser_advance(ptr %t16)
+  %t18 = load ptr, ptr %arena
+  ; lvalue .arg_indices
+  %t19 = getelementptr %AstArena, ptr %t18, i32 0, i32 7
+  %t20 = load ptr, ptr %t19
+  %t21 = call i64 @Vec_len(ptr %t20)
+  store i64 %t21, ptr %args_start
+  %t22 = sext i32 0 to i64
+  store i64 %t22, ptr %arg_count
+  store i1 1, ptr %parsing_args
+  br label %while.cond.346
+while.cond.346:
+  %t23 = load i1, ptr %parsing_args
+  br i1 %t23, label %while.body.347, label %while.end.348
+while.body.347:
+  %t24 = load ptr, ptr %p
+  %t25 = call %Token @Parser_peek(ptr %t24)
+  %t26 = getelementptr %Token, ptr null, i32 1
+  %t27 = ptrtoint ptr %t26 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t25, i64 %t27, i1 false)
+  ; lvalue .lexeme
+  %t28 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t29 = load ptr, ptr %t28
+  %t30 = call ptr @ystr_new(ptr @.str.66)
+  %t31 = call i1 @String_eq_cstr(ptr %t29, ptr %t30)
+  br i1 %t31, label %then.349, label %else.350
+then.349:
+  store i1 0, ptr %parsing_args
+  br label %merge.351
+else.350:
+  %t32 = load ptr, ptr %p
+  %t33 = load ptr, ptr %arena
+  %t34 = call i64 @Parser_parse_expr(ptr %t32, ptr %t33)
+  store i64 %t34, ptr %arg_idx
+  %t35 = load ptr, ptr %arena
+  ; lvalue .arg_indices
+  %t36 = getelementptr %AstArena, ptr %t35, i32 0, i32 7
+  %t37 = load ptr, ptr %t36
+  call void @Vec_push(ptr %t37, ptr %arg_idx)
+  %t39 = load i64, ptr %arg_count
+  %t40 = add i64 %t39, 1
+  store i64 %t40, ptr %arg_count
+  %t41 = load ptr, ptr %p
+  %t42 = call %Token @Parser_peek(ptr %t41)
+  %t43 = getelementptr %Token, ptr null, i32 1
+  %t44 = ptrtoint ptr %t43 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %comma_check, ptr align 8 %t42, i64 %t44, i1 false)
+  ; lvalue .lexeme
+  %t45 = getelementptr %Token, ptr %comma_check, i32 0, i32 3
+  %t46 = load ptr, ptr %t45
+  %t47 = call ptr @ystr_new(ptr @.str.67)
+  %t48 = call i1 @String_eq_cstr(ptr %t46, ptr %t47)
+  br i1 %t48, label %then.352, label %else.353
+then.352:
+  %t49 = load ptr, ptr %p
+  %t50 = call %Token @Parser_advance(ptr %t49)
+  br label %merge.354
+else.353:
+  store i1 0, ptr %parsing_args
+  br label %merge.354
+merge.354:
+  br label %merge.351
+merge.351:
+  br label %while.cond.346
+while.end.348:
+  %t51 = load ptr, ptr %p
+  %t52 = call ptr @ystr_new(ptr @.str.68)
+  %t54 = call ptr @ystr_new(ptr @.str.69)
+  call void @Parser_expect_token(ptr %t51, ptr %t54)
+  %t56 = load i64, ptr %current
+  %t57 = load i64, ptr %args_start
+  %t58 = load i64, ptr %arg_count
+  %t59 = alloca %Expr
+  %t60 = getelementptr %Expr, ptr %t59, i32 0, i32 0
+  store i32 7, ptr %t60
+  %t61 = getelementptr %Expr, ptr %t59, i32 0, i32 1
+  %t62 = load i64, ptr %current
+  store i64 %t62, ptr %t61
+  %t63 = load %Expr, ptr %t59
+  %t64 = getelementptr %Expr, ptr null, i32 1
+  %t65 = ptrtoint ptr %t64 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %call_expr, ptr align 8 %t63, i64 %t65, i1 false)
+  %t66 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t67 = getelementptr %AstArena, ptr %t66, i32 0, i32 0
+  %t68 = load ptr, ptr %t67
+  call void @Vec_push(ptr %t68, ptr %call_expr)
+  %t70 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t71 = getelementptr %AstArena, ptr %t70, i32 0, i32 0
+  %t72 = load ptr, ptr %t71
+  %t73 = call i64 @Vec_len(ptr %t72)
+  store i64 %t73, ptr %current
+  br label %merge.345
+else.344:
+  %t74 = load ptr, ptr %lex
+  %t75 = call ptr @ystr_new(ptr @.str.70)
+  %t76 = call i1 @String_eq_cstr(ptr %t74, ptr %t75)
+  br i1 %t76, label %then.355, label %else.356
+then.355:
+  %t77 = load ptr, ptr %p
+  %t78 = call %Token @Parser_advance(ptr %t77)
+  %t79 = load ptr, ptr %p
+  %t80 = call %Token @Parser_advance(ptr %t79)
+  %t81 = getelementptr %Token, ptr null, i32 1
+  %t82 = ptrtoint ptr %t81 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %member_tok, ptr align 8 %t80, i64 %t82, i1 false)
+  ; lvalue .lexeme
+  %t83 = getelementptr %Token, ptr %member_tok, i32 0, i32 3
+  %t84 = load ptr, ptr %t83
+  ; lvalue .lexeme
+  %t86 = getelementptr %Token, ptr %member_tok, i32 0, i32 3
+  %t87 = load ptr, ptr %t86
+  %t88 = call ptr @String_clone(ptr %t87)
+  store ptr %t88, ptr %member_name
+  %t89 = load i64, ptr %current
+  %t90 = load ptr, ptr %member_name
+  %t91 = alloca %Expr
+  %t92 = getelementptr %Expr, ptr %t91, i32 0, i32 0
+  store i32 9, ptr %t92
+  %t93 = getelementptr %Expr, ptr %t91, i32 0, i32 1
+  %t94 = load i64, ptr %current
+  store i64 %t94, ptr %t93
+  %t95 = load %Expr, ptr %t91
+  %t96 = getelementptr %Expr, ptr null, i32 1
+  %t97 = ptrtoint ptr %t96 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %acc_expr, ptr align 8 %t95, i64 %t97, i1 false)
+  %t98 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t99 = getelementptr %AstArena, ptr %t98, i32 0, i32 0
+  %t100 = load ptr, ptr %t99
+  call void @Vec_push(ptr %t100, ptr %acc_expr)
+  %t102 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t103 = getelementptr %AstArena, ptr %t102, i32 0, i32 0
+  %t104 = load ptr, ptr %t103
+  %t105 = call i64 @Vec_len(ptr %t104)
+  store i64 %t105, ptr %current
+  br label %merge.357
+else.356:
+  %t106 = load ptr, ptr %lex
+  %t107 = call ptr @ystr_new(ptr @.str.71)
+  %t108 = call i1 @String_eq_cstr(ptr %t106, ptr %t107)
+  br i1 %t108, label %then.358, label %else.359
+then.358:
+  %t109 = load ptr, ptr %p
+  %t110 = call %Token @Parser_advance(ptr %t109)
+  %t111 = load ptr, ptr %p
+  %t112 = load ptr, ptr %arena
+  %t113 = call i64 @Parser_parse_expr(ptr %t111, ptr %t112)
+  store i64 %t113, ptr %index_idx
+  %t114 = load ptr, ptr %p
+  %t115 = call ptr @ystr_new(ptr @.str.72)
+  %t117 = call ptr @ystr_new(ptr @.str.73)
+  call void @Parser_expect_token(ptr %t114, ptr %t117)
+  %t119 = load i64, ptr %current
+  %t120 = load i64, ptr %index_idx
+  %t121 = alloca %Expr
+  %t122 = getelementptr %Expr, ptr %t121, i32 0, i32 0
+  store i32 8, ptr %t122
+  %t123 = getelementptr %Expr, ptr %t121, i32 0, i32 1
+  %t124 = load i64, ptr %current
+  store i64 %t124, ptr %t123
+  %t125 = load %Expr, ptr %t121
+  %t126 = getelementptr %Expr, ptr null, i32 1
+  %t127 = ptrtoint ptr %t126 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %idx_expr, ptr align 8 %t125, i64 %t127, i1 false)
+  %t128 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t129 = getelementptr %AstArena, ptr %t128, i32 0, i32 0
+  %t130 = load ptr, ptr %t129
+  call void @Vec_push(ptr %t130, ptr %idx_expr)
+  %t132 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t133 = getelementptr %AstArena, ptr %t132, i32 0, i32 0
+  %t134 = load ptr, ptr %t133
+  %t135 = call i64 @Vec_len(ptr %t134)
+  store i64 %t135, ptr %current
+  br label %merge.360
+else.359:
+  store i1 0, ptr %running
+  br label %merge.360
+merge.360:
+  br label %merge.357
+merge.357:
+  br label %merge.345
+merge.345:
+  br label %while.cond.340
+while.end.342:
+  %t136 = load i64, ptr %current
+  ret i64 %t136
+}
+
+define i64 @Parser_get_binop_precedence(ptr %lex.arg) #0 {
+entry:
+  %lex = alloca ptr
+  store ptr %lex.arg, ptr %lex
+  %t1 = load ptr, ptr %lex
+  %t2 = load ptr, ptr %t1
+  %t3 = call ptr @ystr_new(ptr @.str.74)
+  %t4 = call i1 @String_eq_cstr(ptr %t2, ptr %t3)
+  br i1 %t4, label %then.361, label %merge.363
+then.361:
+  %t5 = sext i32 1 to i64
+  ret i64 %t5
+merge.363:
+  %t6 = load ptr, ptr %lex
+  %t7 = load ptr, ptr %t6
+  %t8 = call ptr @ystr_new(ptr @.str.75)
+  %t9 = call i1 @String_eq_cstr(ptr %t7, ptr %t8)
+  br i1 %t9, label %then.364, label %merge.366
+then.364:
+  %t10 = sext i32 3 to i64
+  ret i64 %t10
+merge.366:
+  %t11 = load ptr, ptr %lex
+  %t12 = load ptr, ptr %t11
+  %t13 = call ptr @ystr_new(ptr @.str.76)
+  %t14 = call i1 @String_eq_cstr(ptr %t12, ptr %t13)
+  br i1 %t14, label %then.367, label %merge.369
+then.367:
+  %t15 = sext i32 5 to i64
+  ret i64 %t15
+merge.369:
+  %t16 = load ptr, ptr %lex
+  %t17 = load ptr, ptr %t16
+  %t18 = call ptr @ystr_new(ptr @.str.77)
+  %t19 = call i1 @String_eq_cstr(ptr %t17, ptr %t18)
+  br i1 %t19, label %then.370, label %merge.372
+then.370:
+  %t20 = sext i32 5 to i64
+  ret i64 %t20
+merge.372:
+  %t21 = load ptr, ptr %lex
+  %t22 = load ptr, ptr %t21
+  %t23 = call ptr @ystr_new(ptr @.str.78)
+  %t24 = call i1 @String_eq_cstr(ptr %t22, ptr %t23)
+  br i1 %t24, label %then.373, label %merge.375
+then.373:
+  %t25 = sext i32 7 to i64
+  ret i64 %t25
+merge.375:
+  %t26 = load ptr, ptr %lex
+  %t27 = load ptr, ptr %t26
+  %t28 = call ptr @ystr_new(ptr @.str.79)
+  %t29 = call i1 @String_eq_cstr(ptr %t27, ptr %t28)
+  br i1 %t29, label %then.376, label %merge.378
+then.376:
+  %t30 = sext i32 7 to i64
+  ret i64 %t30
+merge.378:
+  %t31 = load ptr, ptr %lex
+  %t32 = load ptr, ptr %t31
+  %t33 = call ptr @ystr_new(ptr @.str.80)
+  %t34 = call i1 @String_eq_cstr(ptr %t32, ptr %t33)
+  br i1 %t34, label %then.379, label %merge.381
+then.379:
+  %t35 = sext i32 7 to i64
+  ret i64 %t35
+merge.381:
+  %t36 = load ptr, ptr %lex
+  %t37 = load ptr, ptr %t36
+  %t38 = call ptr @ystr_new(ptr @.str.81)
+  %t39 = call i1 @String_eq_cstr(ptr %t37, ptr %t38)
+  br i1 %t39, label %then.382, label %merge.384
+then.382:
+  %t40 = sext i32 7 to i64
+  ret i64 %t40
+merge.384:
+  %t41 = load ptr, ptr %lex
+  %t42 = load ptr, ptr %t41
+  %t43 = call ptr @ystr_new(ptr @.str.82)
+  %t44 = call i1 @String_eq_cstr(ptr %t42, ptr %t43)
+  br i1 %t44, label %then.385, label %merge.387
+then.385:
+  %t45 = sext i32 9 to i64
+  ret i64 %t45
+merge.387:
+  %t46 = load ptr, ptr %lex
+  %t47 = load ptr, ptr %t46
+  %t48 = call ptr @ystr_new(ptr @.str.83)
+  %t49 = call i1 @String_eq_cstr(ptr %t47, ptr %t48)
+  br i1 %t49, label %then.388, label %merge.390
+then.388:
+  %t50 = sext i32 9 to i64
+  ret i64 %t50
+merge.390:
+  %t51 = load ptr, ptr %lex
+  %t52 = load ptr, ptr %t51
+  %t53 = call ptr @ystr_new(ptr @.str.84)
+  %t54 = call i1 @String_eq_cstr(ptr %t52, ptr %t53)
+  br i1 %t54, label %then.391, label %merge.393
+then.391:
+  %t55 = sext i32 11 to i64
+  ret i64 %t55
+merge.393:
+  %t56 = load ptr, ptr %lex
+  %t57 = load ptr, ptr %t56
+  %t58 = call ptr @ystr_new(ptr @.str.85)
+  %t59 = call i1 @String_eq_cstr(ptr %t57, ptr %t58)
+  br i1 %t59, label %then.394, label %merge.396
+then.394:
+  %t60 = sext i32 15 to i64
+  ret i64 %t60
+merge.396:
+  %t61 = load ptr, ptr %lex
+  %t62 = load ptr, ptr %t61
+  %t63 = call ptr @ystr_new(ptr @.str.86)
+  %t64 = call i1 @String_eq_cstr(ptr %t62, ptr %t63)
+  br i1 %t64, label %then.397, label %merge.399
+then.397:
+  %t65 = sext i32 15 to i64
+  ret i64 %t65
+merge.399:
+  %t66 = load ptr, ptr %lex
+  %t67 = load ptr, ptr %t66
+  %t68 = call ptr @ystr_new(ptr @.str.87)
+  %t69 = call i1 @String_eq_cstr(ptr %t67, ptr %t68)
+  br i1 %t69, label %then.400, label %merge.402
+then.400:
+  %t70 = sext i32 17 to i64
+  ret i64 %t70
+merge.402:
+  %t71 = load ptr, ptr %lex
+  %t72 = load ptr, ptr %t71
+  %t73 = call ptr @ystr_new(ptr @.str.88)
+  %t74 = call i1 @String_eq_cstr(ptr %t72, ptr %t73)
+  br i1 %t74, label %then.403, label %merge.405
+then.403:
+  %t75 = sext i32 17 to i64
+  ret i64 %t75
+merge.405:
+  %t76 = load ptr, ptr %lex
+  %t77 = load ptr, ptr %t76
+  %t78 = call ptr @ystr_new(ptr @.str.89)
+  %t79 = call i1 @String_eq_cstr(ptr %t77, ptr %t78)
+  br i1 %t79, label %then.406, label %merge.408
+then.406:
+  %t80 = sext i32 17 to i64
+  ret i64 %t80
+merge.408:
+  %t81 = sext i32 0 to i64
+  ret i64 %t81
+}
+
+define i32 @Parser_lex_to_binop(ptr %lex.arg) #0 {
+entry:
+  %lex = alloca ptr
+  store ptr %lex.arg, ptr %lex
+  %t1 = load ptr, ptr %lex
+  %t2 = load ptr, ptr %t1
+  %t3 = call ptr @ystr_new(ptr @.str.90)
+  %t4 = call i1 @String_eq_cstr(ptr %t2, ptr %t3)
+  br i1 %t4, label %then.409, label %merge.411
+then.409:
+  ret i32 0
+merge.411:
+  %t5 = load ptr, ptr %lex
+  %t6 = load ptr, ptr %t5
+  %t7 = call ptr @ystr_new(ptr @.str.91)
+  %t8 = call i1 @String_eq_cstr(ptr %t6, ptr %t7)
+  br i1 %t8, label %then.412, label %merge.414
+then.412:
+  ret i32 1
+merge.414:
+  %t9 = load ptr, ptr %lex
+  %t10 = load ptr, ptr %t9
+  %t11 = call ptr @ystr_new(ptr @.str.92)
+  %t12 = call i1 @String_eq_cstr(ptr %t10, ptr %t11)
+  br i1 %t12, label %then.415, label %merge.417
+then.415:
+  ret i32 2
+merge.417:
+  %t13 = load ptr, ptr %lex
+  %t14 = load ptr, ptr %t13
+  %t15 = call ptr @ystr_new(ptr @.str.93)
+  %t16 = call i1 @String_eq_cstr(ptr %t14, ptr %t15)
+  br i1 %t16, label %then.418, label %merge.420
+then.418:
+  ret i32 3
+merge.420:
+  %t17 = load ptr, ptr %lex
+  %t18 = load ptr, ptr %t17
+  %t19 = call ptr @ystr_new(ptr @.str.94)
+  %t20 = call i1 @String_eq_cstr(ptr %t18, ptr %t19)
+  br i1 %t20, label %then.421, label %merge.423
+then.421:
+  ret i32 4
+merge.423:
+  %t21 = load ptr, ptr %lex
+  %t22 = load ptr, ptr %t21
+  %t23 = call ptr @ystr_new(ptr @.str.95)
+  %t24 = call i1 @String_eq_cstr(ptr %t22, ptr %t23)
+  br i1 %t24, label %then.424, label %merge.426
+then.424:
+  ret i32 5
+merge.426:
+  %t25 = load ptr, ptr %lex
+  %t26 = load ptr, ptr %t25
+  %t27 = call ptr @ystr_new(ptr @.str.96)
+  %t28 = call i1 @String_eq_cstr(ptr %t26, ptr %t27)
+  br i1 %t28, label %then.427, label %merge.429
+then.427:
+  ret i32 6
+merge.429:
+  %t29 = load ptr, ptr %lex
+  %t30 = load ptr, ptr %t29
+  %t31 = call ptr @ystr_new(ptr @.str.97)
+  %t32 = call i1 @String_eq_cstr(ptr %t30, ptr %t31)
+  br i1 %t32, label %then.430, label %merge.432
+then.430:
+  ret i32 7
+merge.432:
+  %t33 = load ptr, ptr %lex
+  %t34 = load ptr, ptr %t33
+  %t35 = call ptr @ystr_new(ptr @.str.98)
+  %t36 = call i1 @String_eq_cstr(ptr %t34, ptr %t35)
+  br i1 %t36, label %then.433, label %merge.435
+then.433:
+  ret i32 8
+merge.435:
+  %t37 = load ptr, ptr %lex
+  %t38 = load ptr, ptr %t37
+  %t39 = call ptr @ystr_new(ptr @.str.99)
+  %t40 = call i1 @String_eq_cstr(ptr %t38, ptr %t39)
+  br i1 %t40, label %then.436, label %merge.438
+then.436:
+  ret i32 9
+merge.438:
+  %t41 = load ptr, ptr %lex
+  %t42 = load ptr, ptr %t41
+  %t43 = call ptr @ystr_new(ptr @.str.100)
+  %t44 = call i1 @String_eq_cstr(ptr %t42, ptr %t43)
+  br i1 %t44, label %then.439, label %merge.441
+then.439:
+  ret i32 10
+merge.441:
+  %t45 = load ptr, ptr %lex
+  %t46 = load ptr, ptr %t45
+  %t47 = call ptr @ystr_new(ptr @.str.101)
+  %t48 = call i1 @String_eq_cstr(ptr %t46, ptr %t47)
+  br i1 %t48, label %then.442, label %merge.444
+then.442:
+  ret i32 11
+merge.444:
+  %t49 = load ptr, ptr %lex
+  %t50 = load ptr, ptr %t49
+  %t51 = call ptr @ystr_new(ptr @.str.102)
+  %t52 = call i1 @String_eq_cstr(ptr %t50, ptr %t51)
+  br i1 %t52, label %then.445, label %merge.447
+then.445:
+  ret i32 12
+merge.447:
+  %t53 = load ptr, ptr %lex
+  %t54 = load ptr, ptr %t53
+  %t55 = call ptr @ystr_new(ptr @.str.103)
+  %t56 = call i1 @String_eq_cstr(ptr %t54, ptr %t55)
+  br i1 %t56, label %then.448, label %merge.450
+then.448:
+  ret i32 13
+merge.450:
+  %t57 = load ptr, ptr %lex
+  %t58 = load ptr, ptr %t57
+  %t59 = call ptr @ystr_new(ptr @.str.104)
+  %t60 = call i1 @String_eq_cstr(ptr %t58, ptr %t59)
+  br i1 %t60, label %then.451, label %merge.453
+then.451:
+  ret i32 14
+merge.453:
+  %t61 = load ptr, ptr %lex
+  %t62 = load ptr, ptr %t61
+  %t63 = call ptr @ystr_new(ptr @.str.105)
+  %t64 = call i1 @String_eq_cstr(ptr %t62, ptr %t63)
+  br i1 %t64, label %then.454, label %merge.456
+then.454:
+  ret i32 15
+merge.456:
+  ret i32 0
+}
+
+define i64 @Parser_parse_expr_bp(ptr %p.arg, ptr %arena.arg, i64 %min_bp.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %min_bp = alloca i64
+  store i64 %min_bp.arg, ptr %min_bp
+  %lhs = alloca i64
+  %looping = alloca i1
+  %tok = alloca %Token
+  %lex = alloca ptr
+  %prec = alloca i64
+  %op = alloca i32
+  %rhs = alloca i64
+  %bin_expr = alloca %Expr
+  %t1 = load ptr, ptr %p
+  %t2 = load ptr, ptr %arena
+  %t3 = call i64 @Parser_parse_primary(ptr %t1, ptr %t2)
+  store i64 %t3, ptr %lhs
+  %t4 = load ptr, ptr %p
+  %t5 = load ptr, ptr %arena
+  %t6 = load i64, ptr %lhs
+  %t7 = call i64 @Parser_parse_postfix(ptr %t4, ptr %t5, i64 %t6)
+  store i64 %t7, ptr %lhs
+  store i1 1, ptr %looping
+  br label %while.cond.457
+while.cond.457:
+  %t8 = load i1, ptr %looping
+  br i1 %t8, label %while.body.458, label %while.end.459
+while.body.458:
+  %t9 = load ptr, ptr %p
+  %t10 = call %Token @Parser_peek(ptr %t9)
+  %t11 = getelementptr %Token, ptr null, i32 1
+  %t12 = ptrtoint ptr %t11 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t10, i64 %t12, i1 false)
+  ; lvalue .lexeme
+  %t13 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t14 = load ptr, ptr %t13
+  ; lvalue .lexeme
+  %t16 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t17 = load ptr, ptr %t16
+  %t18 = call ptr @String_clone(ptr %t17)
+  store ptr %t18, ptr %lex
+  %t19 = load ptr, ptr %lex
+  %t21 = call i64 @Parser_get_binop_precedence(ptr %lex)
+  store i64 %t21, ptr %prec
+  %t22 = load i64, ptr %prec
+  %t23 = icmp eq i64 %t22, 0
+  br i1 %t23, label %then.460, label %else.461
+then.460:
+  store i1 0, ptr %looping
+  br label %merge.462
+else.461:
+  %t24 = load i64, ptr %prec
+  %t25 = load i64, ptr %min_bp
+  %t26 = icmp slt i64 %t24, %t25
+  br i1 %t26, label %then.463, label %else.464
+then.463:
+  store i1 0, ptr %looping
+  br label %merge.465
+else.464:
+  %t27 = load ptr, ptr %p
+  %t28 = call %Token @Parser_advance(ptr %t27)
+  %t29 = load ptr, ptr %lex
+  %t31 = call i32 @Parser_lex_to_binop(ptr %lex)
+  store i32 %t31, ptr %op
+  %t32 = load ptr, ptr %p
+  %t33 = load ptr, ptr %arena
+  %t34 = load i64, ptr %prec
+  %t35 = add i64 %t34, 1
+  %t36 = call i64 @Parser_parse_expr_bp(ptr %t32, ptr %t33, i64 %t35)
+  store i64 %t36, ptr %rhs
+  %t37 = load i64, ptr %lhs
+  %t38 = load i32, ptr %op
+  %t39 = load i64, ptr %rhs
+  %t40 = alloca %Expr
+  %t41 = getelementptr %Expr, ptr %t40, i32 0, i32 0
+  store i32 11, ptr %t41
+  %t42 = getelementptr %Expr, ptr %t40, i32 0, i32 1
+  %t43 = load i64, ptr %lhs
+  store i64 %t43, ptr %t42
+  %t44 = load %Expr, ptr %t40
+  %t45 = getelementptr %Expr, ptr null, i32 1
+  %t46 = ptrtoint ptr %t45 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %bin_expr, ptr align 8 %t44, i64 %t46, i1 false)
+  %t47 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t48 = getelementptr %AstArena, ptr %t47, i32 0, i32 0
+  %t49 = load ptr, ptr %t48
+  call void @Vec_push(ptr %t49, ptr %bin_expr)
+  %t51 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t52 = getelementptr %AstArena, ptr %t51, i32 0, i32 0
+  %t53 = load ptr, ptr %t52
+  %t54 = call i64 @Vec_len(ptr %t53)
+  store i64 %t54, ptr %lhs
+  %t55 = load ptr, ptr %p
+  %t56 = load ptr, ptr %arena
+  %t57 = load i64, ptr %lhs
+  %t58 = call i64 @Parser_parse_postfix(ptr %t55, ptr %t56, i64 %t57)
+  store i64 %t58, ptr %lhs
+  br label %merge.465
+merge.465:
+  br label %merge.462
+merge.462:
+  br label %while.cond.457
+while.end.459:
+  %t59 = load i64, ptr %lhs
+  ret i64 %t59
+}
+
+define i64 @Parser_parse_expr(ptr %p.arg, ptr %arena.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %t1 = load ptr, ptr %p
+  %t2 = load ptr, ptr %arena
+  %t3 = call i64 @Parser_parse_expr_bp(ptr %t1, ptr %t2, i64 0)
+  ret i64 %t3
+}
+
+; impl Parser
+define i64 @Parser_parse_stmt(ptr %p.arg, ptr %arena.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %tok = alloca %Token
+  %lex = alloca ptr
+  %mut_check = alloca %Token
+  %name_tok = alloca %Token
+  %var_name = alloca ptr
+  %type_idx = alloca i64
+  %colon_check = alloca %Token
+  %skipping_type = alloca i1
+  %t = alloca %Token
+  %init_idx = alloca i64
+  %eq_check = alloca %Token
+  %stmt = alloca %Stmt
+  %idx = alloca i64
+  %ret_idx = alloca i64
+  %semi_check = alloca %Token
+  %cond_idx = alloca i64
+  %then_start = alloca i64
+  %then_count = alloca i64
+  %parsing_then = alloca i1
+  %check = alloca %Token
+  %else_start = alloca i64
+  %else_count = alloca i64
+  %else_check = alloca %Token
+  %parsing_else = alloca i1
+  %check2 = alloca %Token
+  %body_start = alloca i64
+  %body_count = alloca i64
+  %parsing_body = alloca i1
+  %var_tok = alloca %Token
+  %loop_var = alloca ptr
+  %start_idx = alloca i64
+  %end_idx = alloca i64
+  %step_idx = alloca i64
+  %step_check = alloca %Token
+  %scrutinee_idx = alloca i64
+  %arm_start = alloca i64
+  %arm_count = alloca i64
+  %parsing_arms = alloca i1
+  %pat_tok = alloca %Token
+  %pat_lex = alloca ptr
+  %pattern = alloca %MatchPattern
+  %next_tok = alloca %Token
+  %variant_tok = alloca %Token
+  %variant_lex = alloca ptr
+  %body_idx = alloca i64
+  %comma_check = alloca %Token
+  %arm = alloca %MatchArm
+  %expr_idx = alloca i64
+  %assign_check = alloca %Token
+  %value_idx = alloca i64
+  %val_idx = alloca i64
+  %t1 = load ptr, ptr %p
+  %t2 = call %Token @Parser_peek(ptr %t1)
+  %t3 = getelementptr %Token, ptr null, i32 1
+  %t4 = ptrtoint ptr %t3 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t2, i64 %t4, i1 false)
+  ; lvalue .lexeme
+  %t5 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t6 = load ptr, ptr %t5
+  ; lvalue .lexeme
+  %t8 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t9 = load ptr, ptr %t8
+  %t10 = call ptr @String_clone(ptr %t9)
+  store ptr %t10, ptr %lex
+  %t11 = load ptr, ptr %lex
+  %t12 = call ptr @ystr_new(ptr @.str.106)
+  %t13 = call i1 @String_eq_cstr(ptr %t11, ptr %t12)
+  br i1 %t13, label %then.466, label %merge.468
+then.466:
+  %t14 = load ptr, ptr %p
+  %t15 = call %Token @Parser_advance(ptr %t14)
+  %t16 = load ptr, ptr %p
+  %t17 = call %Token @Parser_peek(ptr %t16)
+  %t18 = getelementptr %Token, ptr null, i32 1
+  %t19 = ptrtoint ptr %t18 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %mut_check, ptr align 8 %t17, i64 %t19, i1 false)
+  ; lvalue .lexeme
+  %t20 = getelementptr %Token, ptr %mut_check, i32 0, i32 3
+  %t21 = load ptr, ptr %t20
+  %t22 = call ptr @ystr_new(ptr @.str.107)
+  %t23 = call i1 @String_eq_cstr(ptr %t21, ptr %t22)
+  br i1 %t23, label %then.469, label %merge.471
+then.469:
+  %t24 = load ptr, ptr %p
+  %t25 = call %Token @Parser_advance(ptr %t24)
+  br label %merge.471
+merge.471:
+  %t26 = load ptr, ptr %p
+  %t27 = call %Token @Parser_advance(ptr %t26)
+  %t28 = getelementptr %Token, ptr null, i32 1
+  %t29 = ptrtoint ptr %t28 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %name_tok, ptr align 8 %t27, i64 %t29, i1 false)
+  ; lvalue .lexeme
+  %t30 = getelementptr %Token, ptr %name_tok, i32 0, i32 3
+  %t31 = load ptr, ptr %t30
+  ; lvalue .lexeme
+  %t33 = getelementptr %Token, ptr %name_tok, i32 0, i32 3
+  %t34 = load ptr, ptr %t33
+  %t35 = call ptr @String_clone(ptr %t34)
+  store ptr %t35, ptr %var_name
+  %t36 = sext i32 0 to i64
+  store i64 %t36, ptr %type_idx
+  %t37 = load ptr, ptr %p
+  %t38 = call %Token @Parser_peek(ptr %t37)
+  %t39 = getelementptr %Token, ptr null, i32 1
+  %t40 = ptrtoint ptr %t39 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %colon_check, ptr align 8 %t38, i64 %t40, i1 false)
+  ; lvalue .lexeme
+  %t41 = getelementptr %Token, ptr %colon_check, i32 0, i32 3
+  %t42 = load ptr, ptr %t41
+  %t43 = call ptr @ystr_new(ptr @.str.108)
+  %t44 = call i1 @String_eq_cstr(ptr %t42, ptr %t43)
+  br i1 %t44, label %then.472, label %merge.474
+then.472:
+  %t45 = load ptr, ptr %p
+  %t46 = call %Token @Parser_advance(ptr %t45)
+  store i1 1, ptr %skipping_type
+  br label %while.cond.475
+while.cond.475:
+  %t47 = load i1, ptr %skipping_type
+  br i1 %t47, label %while.body.476, label %while.end.477
+while.body.476:
+  %t48 = load ptr, ptr %p
+  %t49 = call %Token @Parser_peek(ptr %t48)
+  %t50 = getelementptr %Token, ptr null, i32 1
+  %t51 = ptrtoint ptr %t50 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t, ptr align 8 %t49, i64 %t51, i1 false)
+  ; lvalue .lexeme
+  %t52 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t53 = load ptr, ptr %t52
+  %t54 = call ptr @ystr_new(ptr @.str.109)
+  %t55 = call i1 @String_eq_cstr(ptr %t53, ptr %t54)
+  br i1 %t55, label %then.478, label %else.479
+then.478:
+  store i1 0, ptr %skipping_type
+  br label %merge.480
+else.479:
+  ; lvalue .lexeme
+  %t56 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t57 = load ptr, ptr %t56
+  %t58 = call ptr @ystr_new(ptr @.str.110)
+  %t59 = call i1 @String_eq_cstr(ptr %t57, ptr %t58)
+  br i1 %t59, label %then.481, label %else.482
+then.481:
+  store i1 0, ptr %skipping_type
+  br label %merge.483
+else.482:
+  %t60 = load ptr, ptr %p
+  %t61 = call %Token @Parser_advance(ptr %t60)
+  br label %merge.483
+merge.483:
+  br label %merge.480
+merge.480:
+  br label %while.cond.475
+while.end.477:
+  br label %merge.474
+merge.474:
+  %t62 = sext i32 0 to i64
+  store i64 %t62, ptr %init_idx
+  %t63 = load ptr, ptr %p
+  %t64 = call %Token @Parser_peek(ptr %t63)
+  %t65 = getelementptr %Token, ptr null, i32 1
+  %t66 = ptrtoint ptr %t65 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %eq_check, ptr align 8 %t64, i64 %t66, i1 false)
+  ; lvalue .lexeme
+  %t67 = getelementptr %Token, ptr %eq_check, i32 0, i32 3
+  %t68 = load ptr, ptr %t67
+  %t69 = call ptr @ystr_new(ptr @.str.111)
+  %t70 = call i1 @String_eq_cstr(ptr %t68, ptr %t69)
+  br i1 %t70, label %then.484, label %merge.486
+then.484:
+  %t71 = load ptr, ptr %p
+  %t72 = call %Token @Parser_advance(ptr %t71)
+  %t73 = load ptr, ptr %p
+  %t74 = load ptr, ptr %arena
+  %t75 = call i64 @Parser_parse_expr(ptr %t73, ptr %t74)
+  store i64 %t75, ptr %init_idx
+  br label %merge.486
+merge.486:
+  %t76 = load ptr, ptr %p
+  %t77 = call ptr @ystr_new(ptr @.str.112)
+  %t79 = call ptr @ystr_new(ptr @.str.113)
+  call void @Parser_expect_token(ptr %t76, ptr %t79)
+  %t81 = load ptr, ptr %var_name
+  %t82 = load i64, ptr %type_idx
+  %t83 = load i64, ptr %init_idx
+  %t84 = alloca %Stmt
+  %t85 = getelementptr %Stmt, ptr %t84, i32 0, i32 0
+  store i32 0, ptr %t85
+  %t86 = getelementptr %Stmt, ptr %t84, i32 0, i32 1
+  %t87 = load ptr, ptr %var_name
+  store ptr %t87, ptr %t86
+  %t88 = load %Stmt, ptr %t84
+  %t89 = getelementptr %Stmt, ptr null, i32 1
+  %t90 = ptrtoint ptr %t89 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t88, i64 %t90, i1 false)
+  %t91 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t92 = getelementptr %AstArena, ptr %t91, i32 0, i32 1
+  %t93 = load ptr, ptr %t92
+  call void @Vec_push(ptr %t93, ptr %stmt)
+  %t95 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t96 = getelementptr %AstArena, ptr %t95, i32 0, i32 1
+  %t97 = load ptr, ptr %t96
+  %t98 = call i64 @Vec_len(ptr %t97)
+  store i64 %t98, ptr %idx
+  %t99 = load i64, ptr %idx
+  ret i64 %t99
+merge.468:
+  %t100 = load ptr, ptr %lex
+  %t101 = call ptr @ystr_new(ptr @.str.114)
+  %t102 = call i1 @String_eq_cstr(ptr %t100, ptr %t101)
+  br i1 %t102, label %then.487, label %merge.489
+then.487:
+  %t103 = load ptr, ptr %p
+  %t104 = call %Token @Parser_advance(ptr %t103)
+  %t105 = sext i32 0 to i64
+  store i64 %t105, ptr %ret_idx
+  %t106 = load ptr, ptr %p
+  %t107 = call %Token @Parser_peek(ptr %t106)
+  %t108 = getelementptr %Token, ptr null, i32 1
+  %t109 = ptrtoint ptr %t108 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %semi_check, ptr align 8 %t107, i64 %t109, i1 false)
+  ; lvalue .lexeme
+  %t110 = getelementptr %Token, ptr %semi_check, i32 0, i32 3
+  %t111 = load ptr, ptr %t110
+  %t112 = call ptr @ystr_new(ptr @.str.115)
+  %t113 = call i1 @String_eq_cstr(ptr %t111, ptr %t112)
+  br i1 %t113, label %then.490, label %else.491
+then.490:
+  br label %merge.492
+else.491:
+  %t114 = load ptr, ptr %p
+  %t115 = load ptr, ptr %arena
+  %t116 = call i64 @Parser_parse_expr(ptr %t114, ptr %t115)
+  store i64 %t116, ptr %ret_idx
+  br label %merge.492
+merge.492:
+  %t117 = load ptr, ptr %p
+  %t118 = call ptr @ystr_new(ptr @.str.116)
+  %t120 = call ptr @ystr_new(ptr @.str.117)
+  call void @Parser_expect_token(ptr %t117, ptr %t120)
+  %t122 = load i64, ptr %ret_idx
+  %t123 = alloca %Stmt
+  %t124 = getelementptr %Stmt, ptr %t123, i32 0, i32 0
+  store i32 1, ptr %t124
+  %t125 = getelementptr %Stmt, ptr %t123, i32 0, i32 1
+  %t126 = load i64, ptr %ret_idx
+  store i64 %t126, ptr %t125
+  %t127 = load %Stmt, ptr %t123
+  %t128 = getelementptr %Stmt, ptr null, i32 1
+  %t129 = ptrtoint ptr %t128 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t127, i64 %t129, i1 false)
+  %t130 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t131 = getelementptr %AstArena, ptr %t130, i32 0, i32 1
+  %t132 = load ptr, ptr %t131
+  call void @Vec_push(ptr %t132, ptr %stmt)
+  %t134 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t135 = getelementptr %AstArena, ptr %t134, i32 0, i32 1
+  %t136 = load ptr, ptr %t135
+  %t137 = call i64 @Vec_len(ptr %t136)
+  store i64 %t137, ptr %idx
+  %t138 = load i64, ptr %idx
+  ret i64 %t138
+merge.489:
+  %t139 = load ptr, ptr %lex
+  %t140 = call ptr @ystr_new(ptr @.str.118)
+  %t141 = call i1 @String_eq_cstr(ptr %t139, ptr %t140)
+  br i1 %t141, label %then.493, label %merge.495
+then.493:
+  %t142 = load ptr, ptr %p
+  %t143 = call %Token @Parser_advance(ptr %t142)
+  %t144 = load ptr, ptr %p
+  %t145 = load ptr, ptr %arena
+  %t146 = call i64 @Parser_parse_expr(ptr %t144, ptr %t145)
+  store i64 %t146, ptr %cond_idx
+  %t147 = load ptr, ptr %p
+  %t148 = call ptr @ystr_new(ptr @.str.119)
+  %t150 = call ptr @ystr_new(ptr @.str.120)
+  call void @Parser_expect_token(ptr %t147, ptr %t150)
+  %t152 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t153 = getelementptr %AstArena, ptr %t152, i32 0, i32 1
+  %t154 = load ptr, ptr %t153
+  %t155 = call i64 @Vec_len(ptr %t154)
+  store i64 %t155, ptr %then_start
+  %t156 = sext i32 0 to i64
+  store i64 %t156, ptr %then_count
+  store i1 1, ptr %parsing_then
+  br label %while.cond.496
+while.cond.496:
+  %t157 = load i1, ptr %parsing_then
+  br i1 %t157, label %while.body.497, label %while.end.498
+while.body.497:
+  %t158 = load ptr, ptr %p
+  %t159 = call %Token @Parser_peek(ptr %t158)
+  %t160 = getelementptr %Token, ptr null, i32 1
+  %t161 = ptrtoint ptr %t160 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t159, i64 %t161, i1 false)
+  ; lvalue .lexeme
+  %t162 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t163 = load ptr, ptr %t162
+  %t164 = call ptr @ystr_new(ptr @.str.121)
+  %t165 = call i1 @String_eq_cstr(ptr %t163, ptr %t164)
+  br i1 %t165, label %then.499, label %else.500
+then.499:
+  store i1 0, ptr %parsing_then
+  br label %merge.501
+else.500:
+  %t166 = load ptr, ptr %p
+  %t167 = load ptr, ptr %arena
+  %t168 = call i64 @Parser_parse_stmt(ptr %t166, ptr %t167)
+  %t169 = load i64, ptr %then_count
+  %t170 = add i64 %t169, 1
+  store i64 %t170, ptr %then_count
+  br label %merge.501
+merge.501:
+  br label %while.cond.496
+while.end.498:
+  %t171 = load ptr, ptr %p
+  %t172 = call ptr @ystr_new(ptr @.str.122)
+  %t174 = call ptr @ystr_new(ptr @.str.123)
+  call void @Parser_expect_token(ptr %t171, ptr %t174)
+  %t176 = sext i32 0 to i64
+  store i64 %t176, ptr %else_start
+  %t177 = sext i32 0 to i64
+  store i64 %t177, ptr %else_count
+  %t178 = load ptr, ptr %p
+  %t179 = call %Token @Parser_peek(ptr %t178)
+  %t180 = getelementptr %Token, ptr null, i32 1
+  %t181 = ptrtoint ptr %t180 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %else_check, ptr align 8 %t179, i64 %t181, i1 false)
+  ; lvalue .lexeme
+  %t182 = getelementptr %Token, ptr %else_check, i32 0, i32 3
+  %t183 = load ptr, ptr %t182
+  %t184 = call ptr @ystr_new(ptr @.str.124)
+  %t185 = call i1 @String_eq_cstr(ptr %t183, ptr %t184)
+  br i1 %t185, label %then.502, label %merge.504
+then.502:
+  %t186 = load ptr, ptr %p
+  %t187 = call %Token @Parser_advance(ptr %t186)
+  %t188 = load ptr, ptr %p
+  %t189 = call ptr @ystr_new(ptr @.str.125)
+  %t191 = call ptr @ystr_new(ptr @.str.126)
+  call void @Parser_expect_token(ptr %t188, ptr %t191)
+  %t193 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t194 = getelementptr %AstArena, ptr %t193, i32 0, i32 1
+  %t195 = load ptr, ptr %t194
+  %t196 = call i64 @Vec_len(ptr %t195)
+  store i64 %t196, ptr %else_start
+  store i1 1, ptr %parsing_else
+  br label %while.cond.505
+while.cond.505:
+  %t197 = load i1, ptr %parsing_else
+  br i1 %t197, label %while.body.506, label %while.end.507
+while.body.506:
+  %t198 = load ptr, ptr %p
+  %t199 = call %Token @Parser_peek(ptr %t198)
+  %t200 = getelementptr %Token, ptr null, i32 1
+  %t201 = ptrtoint ptr %t200 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check2, ptr align 8 %t199, i64 %t201, i1 false)
+  ; lvalue .lexeme
+  %t202 = getelementptr %Token, ptr %check2, i32 0, i32 3
+  %t203 = load ptr, ptr %t202
+  %t204 = call ptr @ystr_new(ptr @.str.127)
+  %t205 = call i1 @String_eq_cstr(ptr %t203, ptr %t204)
+  br i1 %t205, label %then.508, label %else.509
+then.508:
+  store i1 0, ptr %parsing_else
+  br label %merge.510
+else.509:
+  %t206 = load ptr, ptr %p
+  %t207 = load ptr, ptr %arena
+  %t208 = call i64 @Parser_parse_stmt(ptr %t206, ptr %t207)
+  %t209 = load i64, ptr %else_count
+  %t210 = add i64 %t209, 1
+  store i64 %t210, ptr %else_count
+  br label %merge.510
+merge.510:
+  br label %while.cond.505
+while.end.507:
+  %t211 = load ptr, ptr %p
+  %t212 = call ptr @ystr_new(ptr @.str.128)
+  %t214 = call ptr @ystr_new(ptr @.str.129)
+  call void @Parser_expect_token(ptr %t211, ptr %t214)
+  br label %merge.504
+merge.504:
+  %t216 = load i64, ptr %cond_idx
+  %t217 = load i64, ptr %then_start
+  %t218 = load i64, ptr %then_count
+  %t219 = load i64, ptr %else_start
+  %t220 = load i64, ptr %else_count
+  %t221 = alloca %Stmt
+  %t222 = getelementptr %Stmt, ptr %t221, i32 0, i32 0
+  store i32 2, ptr %t222
+  %t223 = getelementptr %Stmt, ptr %t221, i32 0, i32 1
+  %t224 = load i64, ptr %cond_idx
+  store i64 %t224, ptr %t223
+  %t225 = load %Stmt, ptr %t221
+  %t226 = getelementptr %Stmt, ptr null, i32 1
+  %t227 = ptrtoint ptr %t226 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t225, i64 %t227, i1 false)
+  %t228 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t229 = getelementptr %AstArena, ptr %t228, i32 0, i32 1
+  %t230 = load ptr, ptr %t229
+  call void @Vec_push(ptr %t230, ptr %stmt)
+  %t232 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t233 = getelementptr %AstArena, ptr %t232, i32 0, i32 1
+  %t234 = load ptr, ptr %t233
+  %t235 = call i64 @Vec_len(ptr %t234)
+  store i64 %t235, ptr %idx
+  %t236 = load i64, ptr %idx
+  ret i64 %t236
+merge.495:
+  %t237 = load ptr, ptr %lex
+  %t238 = call ptr @ystr_new(ptr @.str.130)
+  %t239 = call i1 @String_eq_cstr(ptr %t237, ptr %t238)
+  br i1 %t239, label %then.511, label %merge.513
+then.511:
+  %t240 = load ptr, ptr %p
+  %t241 = call %Token @Parser_advance(ptr %t240)
+  %t242 = load ptr, ptr %p
+  %t243 = load ptr, ptr %arena
+  %t244 = call i64 @Parser_parse_expr(ptr %t242, ptr %t243)
+  store i64 %t244, ptr %cond_idx
+  %t245 = load ptr, ptr %p
+  %t246 = call ptr @ystr_new(ptr @.str.131)
+  %t248 = call ptr @ystr_new(ptr @.str.132)
+  call void @Parser_expect_token(ptr %t245, ptr %t248)
+  %t250 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t251 = getelementptr %AstArena, ptr %t250, i32 0, i32 1
+  %t252 = load ptr, ptr %t251
+  %t253 = call i64 @Vec_len(ptr %t252)
+  store i64 %t253, ptr %body_start
+  %t254 = sext i32 0 to i64
+  store i64 %t254, ptr %body_count
+  store i1 1, ptr %parsing_body
+  br label %while.cond.514
+while.cond.514:
+  %t255 = load i1, ptr %parsing_body
+  br i1 %t255, label %while.body.515, label %while.end.516
+while.body.515:
+  %t256 = load ptr, ptr %p
+  %t257 = call %Token @Parser_peek(ptr %t256)
+  %t258 = getelementptr %Token, ptr null, i32 1
+  %t259 = ptrtoint ptr %t258 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t257, i64 %t259, i1 false)
+  ; lvalue .lexeme
+  %t260 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t261 = load ptr, ptr %t260
+  %t262 = call ptr @ystr_new(ptr @.str.133)
+  %t263 = call i1 @String_eq_cstr(ptr %t261, ptr %t262)
+  br i1 %t263, label %then.517, label %else.518
+then.517:
+  store i1 0, ptr %parsing_body
+  br label %merge.519
+else.518:
+  %t264 = load ptr, ptr %p
+  %t265 = load ptr, ptr %arena
+  %t266 = call i64 @Parser_parse_stmt(ptr %t264, ptr %t265)
+  %t267 = load i64, ptr %body_count
+  %t268 = add i64 %t267, 1
+  store i64 %t268, ptr %body_count
+  br label %merge.519
+merge.519:
+  br label %while.cond.514
+while.end.516:
+  %t269 = load ptr, ptr %p
+  %t270 = call ptr @ystr_new(ptr @.str.134)
+  %t272 = call ptr @ystr_new(ptr @.str.135)
+  call void @Parser_expect_token(ptr %t269, ptr %t272)
+  %t274 = load i64, ptr %cond_idx
+  %t275 = load i64, ptr %body_start
+  %t276 = load i64, ptr %body_count
+  %t277 = alloca %Stmt
+  %t278 = getelementptr %Stmt, ptr %t277, i32 0, i32 0
+  store i32 3, ptr %t278
+  %t279 = getelementptr %Stmt, ptr %t277, i32 0, i32 1
+  %t280 = load i64, ptr %cond_idx
+  store i64 %t280, ptr %t279
+  %t281 = load %Stmt, ptr %t277
+  %t282 = getelementptr %Stmt, ptr null, i32 1
+  %t283 = ptrtoint ptr %t282 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t281, i64 %t283, i1 false)
+  %t284 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t285 = getelementptr %AstArena, ptr %t284, i32 0, i32 1
+  %t286 = load ptr, ptr %t285
+  call void @Vec_push(ptr %t286, ptr %stmt)
+  %t288 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t289 = getelementptr %AstArena, ptr %t288, i32 0, i32 1
+  %t290 = load ptr, ptr %t289
+  %t291 = call i64 @Vec_len(ptr %t290)
+  store i64 %t291, ptr %idx
+  %t292 = load i64, ptr %idx
+  ret i64 %t292
+merge.513:
+  %t293 = load ptr, ptr %lex
+  %t294 = call ptr @ystr_new(ptr @.str.136)
+  %t295 = call i1 @String_eq_cstr(ptr %t293, ptr %t294)
+  br i1 %t295, label %then.520, label %merge.522
+then.520:
+  %t296 = load ptr, ptr %p
+  %t297 = call %Token @Parser_advance(ptr %t296)
+  %t298 = load ptr, ptr %p
+  %t299 = call %Token @Parser_advance(ptr %t298)
+  %t300 = getelementptr %Token, ptr null, i32 1
+  %t301 = ptrtoint ptr %t300 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %var_tok, ptr align 8 %t299, i64 %t301, i1 false)
+  ; lvalue .lexeme
+  %t302 = getelementptr %Token, ptr %var_tok, i32 0, i32 3
+  %t303 = load ptr, ptr %t302
+  ; lvalue .lexeme
+  %t305 = getelementptr %Token, ptr %var_tok, i32 0, i32 3
+  %t306 = load ptr, ptr %t305
+  %t307 = call ptr @String_clone(ptr %t306)
+  store ptr %t307, ptr %loop_var
+  %t308 = load ptr, ptr %p
+  %t309 = call ptr @ystr_new(ptr @.str.137)
+  %t311 = call ptr @ystr_new(ptr @.str.138)
+  call void @Parser_expect_token(ptr %t308, ptr %t311)
+  %t313 = load ptr, ptr %p
+  %t314 = load ptr, ptr %arena
+  %t315 = call i64 @Parser_parse_expr(ptr %t313, ptr %t314)
+  store i64 %t315, ptr %start_idx
+  %t316 = load ptr, ptr %p
+  %t317 = call ptr @ystr_new(ptr @.str.139)
+  %t319 = call ptr @ystr_new(ptr @.str.140)
+  call void @Parser_expect_token(ptr %t316, ptr %t319)
+  %t321 = load ptr, ptr %p
+  %t322 = load ptr, ptr %arena
+  %t323 = call i64 @Parser_parse_expr(ptr %t321, ptr %t322)
+  store i64 %t323, ptr %end_idx
+  %t324 = sext i32 0 to i64
+  store i64 %t324, ptr %step_idx
+  %t325 = load ptr, ptr %p
+  %t326 = call %Token @Parser_peek(ptr %t325)
+  %t327 = getelementptr %Token, ptr null, i32 1
+  %t328 = ptrtoint ptr %t327 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %step_check, ptr align 8 %t326, i64 %t328, i1 false)
+  ; lvalue .lexeme
+  %t329 = getelementptr %Token, ptr %step_check, i32 0, i32 3
+  %t330 = load ptr, ptr %t329
+  %t331 = call ptr @ystr_new(ptr @.str.141)
+  %t332 = call i1 @String_eq_cstr(ptr %t330, ptr %t331)
+  br i1 %t332, label %then.523, label %merge.525
+then.523:
+  %t333 = load ptr, ptr %p
+  %t334 = call %Token @Parser_advance(ptr %t333)
+  %t335 = load ptr, ptr %p
+  %t336 = load ptr, ptr %arena
+  %t337 = call i64 @Parser_parse_expr(ptr %t335, ptr %t336)
+  store i64 %t337, ptr %step_idx
+  br label %merge.525
+merge.525:
+  %t338 = load ptr, ptr %p
+  %t339 = call ptr @ystr_new(ptr @.str.142)
+  %t341 = call ptr @ystr_new(ptr @.str.143)
+  call void @Parser_expect_token(ptr %t338, ptr %t341)
+  %t343 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t344 = getelementptr %AstArena, ptr %t343, i32 0, i32 1
+  %t345 = load ptr, ptr %t344
+  %t346 = call i64 @Vec_len(ptr %t345)
+  store i64 %t346, ptr %body_start
+  %t347 = sext i32 0 to i64
+  store i64 %t347, ptr %body_count
+  store i1 1, ptr %parsing_body
+  br label %while.cond.526
+while.cond.526:
+  %t348 = load i1, ptr %parsing_body
+  br i1 %t348, label %while.body.527, label %while.end.528
+while.body.527:
+  %t349 = load ptr, ptr %p
+  %t350 = call %Token @Parser_peek(ptr %t349)
+  %t351 = getelementptr %Token, ptr null, i32 1
+  %t352 = ptrtoint ptr %t351 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t350, i64 %t352, i1 false)
+  ; lvalue .lexeme
+  %t353 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t354 = load ptr, ptr %t353
+  %t355 = call ptr @ystr_new(ptr @.str.144)
+  %t356 = call i1 @String_eq_cstr(ptr %t354, ptr %t355)
+  br i1 %t356, label %then.529, label %else.530
+then.529:
+  store i1 0, ptr %parsing_body
+  br label %merge.531
+else.530:
+  %t357 = load ptr, ptr %p
+  %t358 = load ptr, ptr %arena
+  %t359 = call i64 @Parser_parse_stmt(ptr %t357, ptr %t358)
+  %t360 = load i64, ptr %body_count
+  %t361 = add i64 %t360, 1
+  store i64 %t361, ptr %body_count
+  br label %merge.531
+merge.531:
+  br label %while.cond.526
+while.end.528:
+  %t362 = load ptr, ptr %p
+  %t363 = call ptr @ystr_new(ptr @.str.145)
+  %t365 = call ptr @ystr_new(ptr @.str.146)
+  call void @Parser_expect_token(ptr %t362, ptr %t365)
+  %t367 = load ptr, ptr %loop_var
+  %t368 = load i64, ptr %start_idx
+  %t369 = load i64, ptr %end_idx
+  %t370 = load i64, ptr %step_idx
+  %t371 = load i64, ptr %body_start
+  %t372 = load i64, ptr %body_count
+  %t373 = alloca %Stmt
+  %t374 = getelementptr %Stmt, ptr %t373, i32 0, i32 0
+  store i32 4, ptr %t374
+  %t375 = getelementptr %Stmt, ptr %t373, i32 0, i32 1
+  %t376 = load ptr, ptr %loop_var
+  store ptr %t376, ptr %t375
+  %t377 = load %Stmt, ptr %t373
+  %t378 = getelementptr %Stmt, ptr null, i32 1
+  %t379 = ptrtoint ptr %t378 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t377, i64 %t379, i1 false)
+  %t380 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t381 = getelementptr %AstArena, ptr %t380, i32 0, i32 1
+  %t382 = load ptr, ptr %t381
+  call void @Vec_push(ptr %t382, ptr %stmt)
+  %t384 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t385 = getelementptr %AstArena, ptr %t384, i32 0, i32 1
+  %t386 = load ptr, ptr %t385
+  %t387 = call i64 @Vec_len(ptr %t386)
+  store i64 %t387, ptr %idx
+  %t388 = load i64, ptr %idx
+  ret i64 %t388
+merge.522:
+  %t389 = load ptr, ptr %lex
+  %t390 = call ptr @ystr_new(ptr @.str.147)
+  %t391 = call i1 @String_eq_cstr(ptr %t389, ptr %t390)
+  br i1 %t391, label %then.532, label %merge.534
+then.532:
+  %t392 = load ptr, ptr %p
+  %t393 = call %Token @Parser_advance(ptr %t392)
+  %t394 = load ptr, ptr %p
+  %t395 = load ptr, ptr %arena
+  %t396 = call i64 @Parser_parse_expr(ptr %t394, ptr %t395)
+  store i64 %t396, ptr %scrutinee_idx
+  %t397 = load ptr, ptr %p
+  %t398 = call ptr @ystr_new(ptr @.str.148)
+  %t400 = call ptr @ystr_new(ptr @.str.149)
+  call void @Parser_expect_token(ptr %t397, ptr %t400)
+  %t402 = load ptr, ptr %arena
+  ; lvalue .match_arms
+  %t403 = getelementptr %AstArena, ptr %t402, i32 0, i32 6
+  %t404 = load ptr, ptr %t403
+  %t405 = call i64 @Vec_len(ptr %t404)
+  store i64 %t405, ptr %arm_start
+  %t406 = sext i32 0 to i64
+  store i64 %t406, ptr %arm_count
+  store i1 1, ptr %parsing_arms
+  br label %while.cond.535
+while.cond.535:
+  %t407 = load i1, ptr %parsing_arms
+  br i1 %t407, label %while.body.536, label %while.end.537
+while.body.536:
+  %t408 = load ptr, ptr %p
+  %t409 = call %Token @Parser_peek(ptr %t408)
+  %t410 = getelementptr %Token, ptr null, i32 1
+  %t411 = ptrtoint ptr %t410 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t409, i64 %t411, i1 false)
+  ; lvalue .lexeme
+  %t412 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t413 = load ptr, ptr %t412
+  %t414 = call ptr @ystr_new(ptr @.str.150)
+  %t415 = call i1 @String_eq_cstr(ptr %t413, ptr %t414)
+  br i1 %t415, label %then.538, label %else.539
+then.538:
+  store i1 0, ptr %parsing_arms
+  br label %merge.540
+else.539:
+  %t416 = load ptr, ptr %p
+  %t417 = call %Token @Parser_advance(ptr %t416)
+  %t418 = getelementptr %Token, ptr null, i32 1
+  %t419 = ptrtoint ptr %t418 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %pat_tok, ptr align 8 %t417, i64 %t419, i1 false)
+  ; lvalue .lexeme
+  %t420 = getelementptr %Token, ptr %pat_tok, i32 0, i32 3
+  %t421 = load ptr, ptr %t420
+  ; lvalue .lexeme
+  %t423 = getelementptr %Token, ptr %pat_tok, i32 0, i32 3
+  %t424 = load ptr, ptr %t423
+  %t425 = call ptr @String_clone(ptr %t424)
+  store ptr %t425, ptr %pat_lex
+  %t426 = getelementptr %MatchPattern, ptr null, i32 1
+  %t427 = ptrtoint ptr %t426 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %pattern, ptr align 8 { i32 3, [8 x i64] zeroinitializer }, i64 %t427, i1 false)
+  %t428 = load ptr, ptr %pat_lex
+  %t429 = call ptr @ystr_new(ptr @.str.151)
+  %t430 = call i1 @String_eq_cstr(ptr %t428, ptr %t429)
+  br i1 %t430, label %then.541, label %else.542
+then.541:
+  %t431 = getelementptr %MatchPattern, ptr null, i32 1
+  %t432 = ptrtoint ptr %t431 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %pattern, ptr align 8 { i32 3, [8 x i64] zeroinitializer }, i64 %t432, i1 false)
+  br label %merge.543
+else.542:
+  %t433 = load ptr, ptr %p
+  %t434 = call %Token @Parser_peek(ptr %t433)
+  %t435 = getelementptr %Token, ptr null, i32 1
+  %t436 = ptrtoint ptr %t435 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %next_tok, ptr align 8 %t434, i64 %t436, i1 false)
+  ; lvalue .lexeme
+  %t437 = getelementptr %Token, ptr %next_tok, i32 0, i32 3
+  %t438 = load ptr, ptr %t437
+  %t439 = call ptr @ystr_new(ptr @.str.152)
+  %t440 = call i1 @String_eq_cstr(ptr %t438, ptr %t439)
+  br i1 %t440, label %then.544, label %else.545
+then.544:
+  %t441 = load ptr, ptr %p
+  %t442 = call %Token @Parser_advance(ptr %t441)
+  %t443 = load ptr, ptr %p
+  %t444 = call %Token @Parser_advance(ptr %t443)
+  %t445 = getelementptr %Token, ptr null, i32 1
+  %t446 = ptrtoint ptr %t445 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %variant_tok, ptr align 8 %t444, i64 %t446, i1 false)
+  ; lvalue .lexeme
+  %t447 = getelementptr %Token, ptr %variant_tok, i32 0, i32 3
+  %t448 = load ptr, ptr %t447
+  ; lvalue .lexeme
+  %t450 = getelementptr %Token, ptr %variant_tok, i32 0, i32 3
+  %t451 = load ptr, ptr %t450
+  %t452 = call ptr @String_clone(ptr %t451)
+  store ptr %t452, ptr %variant_lex
+  %t453 = load ptr, ptr %pat_lex
+  %t454 = load ptr, ptr %variant_lex
+  %t455 = alloca %MatchPattern
+  %t456 = getelementptr %MatchPattern, ptr %t455, i32 0, i32 0
+  store i32 1, ptr %t456
+  %t457 = getelementptr %MatchPattern, ptr %t455, i32 0, i32 1
+  %t458 = load ptr, ptr %pat_lex
+  store ptr %t458, ptr %t457
+  %t459 = load %MatchPattern, ptr %t455
+  %t460 = getelementptr %MatchPattern, ptr null, i32 1
+  %t461 = ptrtoint ptr %t460 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %pattern, ptr align 8 %t459, i64 %t461, i1 false)
+  br label %merge.546
+else.545:
+  %t462 = load ptr, ptr %pat_lex
+  %t463 = alloca %MatchPattern
+  %t464 = getelementptr %MatchPattern, ptr %t463, i32 0, i32 0
+  store i32 0, ptr %t464
+  %t465 = getelementptr %MatchPattern, ptr %t463, i32 0, i32 1
+  %t466 = load ptr, ptr %pat_lex
+  store ptr %t466, ptr %t465
+  %t467 = load %MatchPattern, ptr %t463
+  %t468 = getelementptr %MatchPattern, ptr null, i32 1
+  %t469 = ptrtoint ptr %t468 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %pattern, ptr align 8 %t467, i64 %t469, i1 false)
+  br label %merge.546
+merge.546:
+  br label %merge.543
+merge.543:
+  %t470 = load ptr, ptr %p
+  %t471 = call ptr @ystr_new(ptr @.str.153)
+  %t473 = call ptr @ystr_new(ptr @.str.154)
+  call void @Parser_expect_token(ptr %t470, ptr %t473)
+  %t475 = load ptr, ptr %p
+  %t476 = load ptr, ptr %arena
+  %t477 = call i64 @Parser_parse_expr(ptr %t475, ptr %t476)
+  store i64 %t477, ptr %body_idx
+  %t478 = load ptr, ptr %p
+  %t479 = call %Token @Parser_peek(ptr %t478)
+  %t480 = getelementptr %Token, ptr null, i32 1
+  %t481 = ptrtoint ptr %t480 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %comma_check, ptr align 8 %t479, i64 %t481, i1 false)
+  ; lvalue .lexeme
+  %t482 = getelementptr %Token, ptr %comma_check, i32 0, i32 3
+  %t483 = load ptr, ptr %t482
+  %t484 = call ptr @ystr_new(ptr @.str.155)
+  %t485 = call i1 @String_eq_cstr(ptr %t483, ptr %t484)
+  br i1 %t485, label %then.547, label %merge.549
+then.547:
+  %t486 = load ptr, ptr %p
+  %t487 = call %Token @Parser_advance(ptr %t486)
+  br label %merge.549
+merge.549:
+  ; lvalue .pattern
+  %t488 = getelementptr %MatchArm, ptr %arm, i32 0, i32 0
+  %t489 = load %MatchPattern, ptr %pattern
+  %t490 = getelementptr %MatchPattern, ptr null, i32 1
+  %t491 = ptrtoint ptr %t490 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t488, ptr align 8 %t489, i64 %t491, i1 false)
+  ; lvalue .body_start
+  %t492 = getelementptr %MatchArm, ptr %arm, i32 0, i32 1
+  %t493 = load i64, ptr %body_idx
+  store i64 %t493, ptr %t492
+  ; lvalue .body_count
+  %t494 = getelementptr %MatchArm, ptr %arm, i32 0, i32 2
+  %t495 = sext i32 1 to i64
+  store i64 %t495, ptr %t494
+  %t496 = load ptr, ptr %arena
+  ; lvalue .match_arms
+  %t497 = getelementptr %AstArena, ptr %t496, i32 0, i32 6
+  %t498 = load ptr, ptr %t497
+  call void @Vec_push(ptr %t498, ptr %arm)
+  %t500 = load i64, ptr %arm_count
+  %t501 = add i64 %t500, 1
+  store i64 %t501, ptr %arm_count
+  br label %merge.540
+merge.540:
+  br label %while.cond.535
+while.end.537:
+  %t502 = load ptr, ptr %p
+  %t503 = call ptr @ystr_new(ptr @.str.156)
+  %t505 = call ptr @ystr_new(ptr @.str.157)
+  call void @Parser_expect_token(ptr %t502, ptr %t505)
+  %t507 = load i64, ptr %scrutinee_idx
+  %t508 = load i64, ptr %arm_start
+  %t509 = load i64, ptr %arm_count
+  %t510 = alloca %Stmt
+  %t511 = getelementptr %Stmt, ptr %t510, i32 0, i32 0
+  store i32 5, ptr %t511
+  %t512 = getelementptr %Stmt, ptr %t510, i32 0, i32 1
+  %t513 = load i64, ptr %scrutinee_idx
+  store i64 %t513, ptr %t512
+  %t514 = load %Stmt, ptr %t510
+  %t515 = getelementptr %Stmt, ptr null, i32 1
+  %t516 = ptrtoint ptr %t515 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t514, i64 %t516, i1 false)
+  %t517 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t518 = getelementptr %AstArena, ptr %t517, i32 0, i32 1
+  %t519 = load ptr, ptr %t518
+  call void @Vec_push(ptr %t519, ptr %stmt)
+  %t521 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t522 = getelementptr %AstArena, ptr %t521, i32 0, i32 1
+  %t523 = load ptr, ptr %t522
+  %t524 = call i64 @Vec_len(ptr %t523)
+  store i64 %t524, ptr %idx
+  %t525 = load i64, ptr %idx
+  ret i64 %t525
+merge.534:
+  %t526 = load ptr, ptr %p
+  %t527 = load ptr, ptr %arena
+  %t528 = call i64 @Parser_parse_expr(ptr %t526, ptr %t527)
+  store i64 %t528, ptr %expr_idx
+  %t529 = load ptr, ptr %p
+  %t530 = call %Token @Parser_peek(ptr %t529)
+  %t531 = getelementptr %Token, ptr null, i32 1
+  %t532 = ptrtoint ptr %t531 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %assign_check, ptr align 8 %t530, i64 %t532, i1 false)
+  ; lvalue .lexeme
+  %t533 = getelementptr %Token, ptr %assign_check, i32 0, i32 3
+  %t534 = load ptr, ptr %t533
+  %t535 = call ptr @ystr_new(ptr @.str.158)
+  %t536 = call i1 @String_eq_cstr(ptr %t534, ptr %t535)
+  br i1 %t536, label %then.550, label %merge.552
+then.550:
+  %t537 = load ptr, ptr %p
+  %t538 = call %Token @Parser_advance(ptr %t537)
+  %t539 = load ptr, ptr %p
+  %t540 = load ptr, ptr %arena
+  %t541 = call i64 @Parser_parse_expr(ptr %t539, ptr %t540)
+  store i64 %t541, ptr %value_idx
+  %t542 = load ptr, ptr %p
+  %t543 = call ptr @ystr_new(ptr @.str.159)
+  %t545 = call ptr @ystr_new(ptr @.str.160)
+  call void @Parser_expect_token(ptr %t542, ptr %t545)
+  %t547 = load i64, ptr %expr_idx
+  %t548 = load i64, ptr %value_idx
+  %t549 = alloca %Stmt
+  %t550 = getelementptr %Stmt, ptr %t549, i32 0, i32 0
+  store i32 6, ptr %t550
+  %t551 = getelementptr %Stmt, ptr %t549, i32 0, i32 1
+  %t552 = load i64, ptr %expr_idx
+  store i64 %t552, ptr %t551
+  %t553 = load %Stmt, ptr %t549
+  %t554 = getelementptr %Stmt, ptr null, i32 1
+  %t555 = ptrtoint ptr %t554 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t553, i64 %t555, i1 false)
+  %t556 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t557 = getelementptr %AstArena, ptr %t556, i32 0, i32 1
+  %t558 = load ptr, ptr %t557
+  call void @Vec_push(ptr %t558, ptr %stmt)
+  %t560 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t561 = getelementptr %AstArena, ptr %t560, i32 0, i32 1
+  %t562 = load ptr, ptr %t561
+  %t563 = call i64 @Vec_len(ptr %t562)
+  store i64 %t563, ptr %idx
+  %t564 = load i64, ptr %idx
+  ret i64 %t564
+merge.552:
+  ; lvalue .lexeme
+  %t565 = getelementptr %Token, ptr %assign_check, i32 0, i32 3
+  %t566 = load ptr, ptr %t565
+  %t567 = call ptr @ystr_new(ptr @.str.161)
+  %t568 = call i1 @String_eq_cstr(ptr %t566, ptr %t567)
+  br i1 %t568, label %then.553, label %merge.555
+then.553:
+  %t569 = load ptr, ptr %p
+  %t570 = call %Token @Parser_advance(ptr %t569)
+  %t571 = load ptr, ptr %p
+  %t572 = load ptr, ptr %arena
+  %t573 = call i64 @Parser_parse_expr(ptr %t571, ptr %t572)
+  store i64 %t573, ptr %val_idx
+  %t574 = load ptr, ptr %p
+  %t575 = call ptr @ystr_new(ptr @.str.162)
+  %t577 = call ptr @ystr_new(ptr @.str.163)
+  call void @Parser_expect_token(ptr %t574, ptr %t577)
+  %t579 = load i64, ptr %expr_idx
+  %t580 = load i64, ptr %val_idx
+  %t581 = alloca %Stmt
+  %t582 = getelementptr %Stmt, ptr %t581, i32 0, i32 0
+  store i32 7, ptr %t582
+  %t583 = getelementptr %Stmt, ptr %t581, i32 0, i32 1
+  %t584 = load i64, ptr %expr_idx
+  store i64 %t584, ptr %t583
+  %t585 = load %Stmt, ptr %t581
+  %t586 = getelementptr %Stmt, ptr null, i32 1
+  %t587 = ptrtoint ptr %t586 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t585, i64 %t587, i1 false)
+  %t588 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t589 = getelementptr %AstArena, ptr %t588, i32 0, i32 1
+  %t590 = load ptr, ptr %t589
+  call void @Vec_push(ptr %t590, ptr %stmt)
+  %t592 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t593 = getelementptr %AstArena, ptr %t592, i32 0, i32 1
+  %t594 = load ptr, ptr %t593
+  %t595 = call i64 @Vec_len(ptr %t594)
+  store i64 %t595, ptr %idx
+  %t596 = load i64, ptr %idx
+  ret i64 %t596
+merge.555:
+  ; lvalue .lexeme
+  %t597 = getelementptr %Token, ptr %assign_check, i32 0, i32 3
+  %t598 = load ptr, ptr %t597
+  %t599 = call ptr @ystr_new(ptr @.str.164)
+  %t600 = call i1 @String_eq_cstr(ptr %t598, ptr %t599)
+  br i1 %t600, label %then.556, label %merge.558
+then.556:
+  %t601 = load ptr, ptr %p
+  %t602 = call %Token @Parser_advance(ptr %t601)
+  %t603 = load ptr, ptr %p
+  %t604 = load ptr, ptr %arena
+  %t605 = call i64 @Parser_parse_expr(ptr %t603, ptr %t604)
+  store i64 %t605, ptr %val_idx
+  %t606 = load ptr, ptr %p
+  %t607 = call ptr @ystr_new(ptr @.str.165)
+  %t609 = call ptr @ystr_new(ptr @.str.166)
+  call void @Parser_expect_token(ptr %t606, ptr %t609)
+  %t611 = load i64, ptr %expr_idx
+  %t612 = load i64, ptr %val_idx
+  %t613 = alloca %Stmt
+  %t614 = getelementptr %Stmt, ptr %t613, i32 0, i32 0
+  store i32 7, ptr %t614
+  %t615 = getelementptr %Stmt, ptr %t613, i32 0, i32 1
+  %t616 = load i64, ptr %expr_idx
+  store i64 %t616, ptr %t615
+  %t617 = load %Stmt, ptr %t613
+  %t618 = getelementptr %Stmt, ptr null, i32 1
+  %t619 = ptrtoint ptr %t618 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t617, i64 %t619, i1 false)
+  %t620 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t621 = getelementptr %AstArena, ptr %t620, i32 0, i32 1
+  %t622 = load ptr, ptr %t621
+  call void @Vec_push(ptr %t622, ptr %stmt)
+  %t624 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t625 = getelementptr %AstArena, ptr %t624, i32 0, i32 1
+  %t626 = load ptr, ptr %t625
+  %t627 = call i64 @Vec_len(ptr %t626)
+  store i64 %t627, ptr %idx
+  %t628 = load i64, ptr %idx
+  ret i64 %t628
+merge.558:
+  %t629 = load ptr, ptr %p
+  %t630 = call ptr @ystr_new(ptr @.str.167)
+  %t632 = call ptr @ystr_new(ptr @.str.168)
+  call void @Parser_expect_token(ptr %t629, ptr %t632)
+  %t634 = load i64, ptr %expr_idx
+  %t635 = alloca %Stmt
+  %t636 = getelementptr %Stmt, ptr %t635, i32 0, i32 0
+  store i32 8, ptr %t636
+  %t637 = getelementptr %Stmt, ptr %t635, i32 0, i32 1
+  %t638 = load i64, ptr %expr_idx
+  store i64 %t638, ptr %t637
+  %t639 = load %Stmt, ptr %t635
+  %t640 = getelementptr %Stmt, ptr null, i32 1
+  %t641 = ptrtoint ptr %t640 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t639, i64 %t641, i1 false)
+  %t642 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t643 = getelementptr %AstArena, ptr %t642, i32 0, i32 1
+  %t644 = load ptr, ptr %t643
+  call void @Vec_push(ptr %t644, ptr %stmt)
+  %t646 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t647 = getelementptr %AstArena, ptr %t646, i32 0, i32 1
+  %t648 = load ptr, ptr %t647
+  %t649 = call i64 @Vec_len(ptr %t648)
+  store i64 %t649, ptr %idx
+  %t650 = load i64, ptr %idx
+  ret i64 %t650
+}
+
+; impl Parser
+define i64 @Parser_parse_func_decl(ptr %p.arg, ptr %arena.arg, i32 %is_safe.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %is_safe = alloca i32
+  store i32 %is_safe.arg, ptr %is_safe
+  %name_tok = alloca %Token
+  %fn_name = alloca ptr
+  %line = alloca i64
+  %col = alloca i64
+  %param_start = alloca i64
+  %param_count = alloca i64
+  %parsing_params = alloca i1
+  %check = alloca %Token
+  %pname_tok = alloca %Token
+  %pname = alloca ptr
+  %type_str = alloca ptr
+  %skipping = alloca i1
+  %t = alloca %Token
+  %tlex = alloca ptr
+  %param = alloca %ParamDecl
+  %comma_check = alloca %Token
+  %arrow_check = alloca %Token
+  %skip_ret = alloca i1
+  %body_start = alloca i64
+  %body_count = alloca i64
+  %parsing_body = alloca i1
+  %fdecl = alloca %FuncDecl
+  %idx = alloca i64
+  %t1 = load ptr, ptr %p
+  %t2 = call %Token @Parser_advance(ptr %t1)
+  %t3 = getelementptr %Token, ptr null, i32 1
+  %t4 = ptrtoint ptr %t3 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %name_tok, ptr align 8 %t2, i64 %t4, i1 false)
+  ; lvalue .lexeme
+  %t5 = getelementptr %Token, ptr %name_tok, i32 0, i32 3
+  %t6 = load ptr, ptr %t5
+  ; lvalue .lexeme
+  %t8 = getelementptr %Token, ptr %name_tok, i32 0, i32 3
+  %t9 = load ptr, ptr %t8
+  %t10 = call ptr @String_clone(ptr %t9)
+  store ptr %t10, ptr %fn_name
+  ; lvalue .line
+  %t11 = getelementptr %Token, ptr %name_tok, i32 0, i32 1
+  %t12 = load i64, ptr %t11
+  store i64 %t12, ptr %line
+  ; lvalue .col
+  %t13 = getelementptr %Token, ptr %name_tok, i32 0, i32 2
+  %t14 = load i64, ptr %t13
+  store i64 %t14, ptr %col
+  %t15 = load ptr, ptr %p
+  %t16 = call ptr @ystr_new(ptr @.str.169)
+  %t18 = call ptr @ystr_new(ptr @.str.170)
+  call void @Parser_expect_token(ptr %t15, ptr %t18)
+  %t20 = load ptr, ptr %arena
+  ; lvalue .params
+  %t21 = getelementptr %AstArena, ptr %t20, i32 0, i32 2
+  %t22 = load ptr, ptr %t21
+  %t23 = call i64 @Vec_len(ptr %t22)
+  store i64 %t23, ptr %param_start
+  %t24 = sext i32 0 to i64
+  store i64 %t24, ptr %param_count
+  store i1 1, ptr %parsing_params
+  br label %while.cond.559
+while.cond.559:
+  %t25 = load i1, ptr %parsing_params
+  br i1 %t25, label %while.body.560, label %while.end.561
+while.body.560:
+  %t26 = load ptr, ptr %p
+  %t27 = call %Token @Parser_peek(ptr %t26)
+  %t28 = getelementptr %Token, ptr null, i32 1
+  %t29 = ptrtoint ptr %t28 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t27, i64 %t29, i1 false)
+  ; lvalue .lexeme
+  %t30 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t31 = load ptr, ptr %t30
+  %t32 = call ptr @ystr_new(ptr @.str.171)
+  %t33 = call i1 @String_eq_cstr(ptr %t31, ptr %t32)
+  br i1 %t33, label %then.562, label %else.563
+then.562:
+  store i1 0, ptr %parsing_params
+  br label %merge.564
+else.563:
+  %t34 = load ptr, ptr %p
+  %t35 = call %Token @Parser_advance(ptr %t34)
+  %t36 = getelementptr %Token, ptr null, i32 1
+  %t37 = ptrtoint ptr %t36 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %pname_tok, ptr align 8 %t35, i64 %t37, i1 false)
+  ; lvalue .lexeme
+  %t38 = getelementptr %Token, ptr %pname_tok, i32 0, i32 3
+  %t39 = load ptr, ptr %t38
+  ; lvalue .lexeme
+  %t41 = getelementptr %Token, ptr %pname_tok, i32 0, i32 3
+  %t42 = load ptr, ptr %t41
+  %t43 = call ptr @String_clone(ptr %t42)
+  store ptr %t43, ptr %pname
+  %t44 = load ptr, ptr %p
+  %t45 = call ptr @ystr_new(ptr @.str.172)
+  %t47 = call ptr @ystr_new(ptr @.str.173)
+  call void @Parser_expect_token(ptr %t44, ptr %t47)
+  %t49 = call ptr @ystr_new(ptr @.str.174)
+  store ptr %t49, ptr %type_str
+  store i1 1, ptr %skipping
+  br label %while.cond.565
+while.cond.565:
+  %t50 = load i1, ptr %skipping
+  br i1 %t50, label %while.body.566, label %while.end.567
+while.body.566:
+  %t51 = load ptr, ptr %p
+  %t52 = call %Token @Parser_peek(ptr %t51)
+  %t53 = getelementptr %Token, ptr null, i32 1
+  %t54 = ptrtoint ptr %t53 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t, ptr align 8 %t52, i64 %t54, i1 false)
+  ; lvalue .lexeme
+  %t55 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t56 = load ptr, ptr %t55
+  %t57 = call ptr @ystr_new(ptr @.str.175)
+  %t58 = call i1 @String_eq_cstr(ptr %t56, ptr %t57)
+  br i1 %t58, label %then.568, label %else.569
+then.568:
+  store i1 0, ptr %skipping
+  br label %merge.570
+else.569:
+  ; lvalue .lexeme
+  %t59 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t60 = load ptr, ptr %t59
+  %t61 = call ptr @ystr_new(ptr @.str.176)
+  %t62 = call i1 @String_eq_cstr(ptr %t60, ptr %t61)
+  br i1 %t62, label %then.571, label %else.572
+then.571:
+  store i1 0, ptr %skipping
+  br label %merge.573
+else.572:
+  ; lvalue .lexeme
+  %t63 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t64 = load ptr, ptr %t63
+  ; lvalue .lexeme
+  %t66 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t67 = load ptr, ptr %t66
+  %t68 = call ptr @String_clone(ptr %t67)
+  store ptr %t68, ptr %tlex
+  %t69 = load ptr, ptr %type_str
+  call void @String_push(ptr %t69, i8 32)
+  %t71 = load ptr, ptr %p
+  %t72 = call %Token @Parser_advance(ptr %t71)
+  br label %merge.573
+merge.573:
+  br label %merge.570
+merge.570:
+  br label %while.cond.565
+while.end.567:
+  ; lvalue .name
+  %t73 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t74 = load ptr, ptr %pname
+  store ptr %t74, ptr %t73
+  ; lvalue .type_str
+  %t75 = getelementptr %ParamDecl, ptr %param, i32 0, i32 1
+  %t76 = load ptr, ptr %type_str
+  store ptr %t76, ptr %t75
+  %t77 = load ptr, ptr %arena
+  ; lvalue .params
+  %t78 = getelementptr %AstArena, ptr %t77, i32 0, i32 2
+  %t79 = load ptr, ptr %t78
+  call void @Vec_push(ptr %t79, ptr %param)
+  %t81 = load i64, ptr %param_count
+  %t82 = add i64 %t81, 1
+  store i64 %t82, ptr %param_count
+  %t83 = load ptr, ptr %p
+  %t84 = call %Token @Parser_peek(ptr %t83)
+  %t85 = getelementptr %Token, ptr null, i32 1
+  %t86 = ptrtoint ptr %t85 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %comma_check, ptr align 8 %t84, i64 %t86, i1 false)
+  ; lvalue .lexeme
+  %t87 = getelementptr %Token, ptr %comma_check, i32 0, i32 3
+  %t88 = load ptr, ptr %t87
+  %t89 = call ptr @ystr_new(ptr @.str.177)
+  %t90 = call i1 @String_eq_cstr(ptr %t88, ptr %t89)
+  br i1 %t90, label %then.574, label %merge.576
+then.574:
+  %t91 = load ptr, ptr %p
+  %t92 = call %Token @Parser_advance(ptr %t91)
+  br label %merge.576
+merge.576:
+  br label %merge.564
+merge.564:
+  br label %while.cond.559
+while.end.561:
+  %t93 = load ptr, ptr %p
+  %t94 = call ptr @ystr_new(ptr @.str.178)
+  %t96 = call ptr @ystr_new(ptr @.str.179)
+  call void @Parser_expect_token(ptr %t93, ptr %t96)
+  %t98 = load ptr, ptr %p
+  %t99 = call %Token @Parser_peek(ptr %t98)
+  %t100 = getelementptr %Token, ptr null, i32 1
+  %t101 = ptrtoint ptr %t100 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %arrow_check, ptr align 8 %t99, i64 %t101, i1 false)
+  ; lvalue .lexeme
+  %t102 = getelementptr %Token, ptr %arrow_check, i32 0, i32 3
+  %t103 = load ptr, ptr %t102
+  %t104 = call ptr @ystr_new(ptr @.str.180)
+  %t105 = call i1 @String_eq_cstr(ptr %t103, ptr %t104)
+  br i1 %t105, label %then.577, label %merge.579
+then.577:
+  %t106 = load ptr, ptr %p
+  %t107 = call %Token @Parser_advance(ptr %t106)
+  store i1 1, ptr %skip_ret
+  br label %while.cond.580
+while.cond.580:
+  %t108 = load i1, ptr %skip_ret
+  br i1 %t108, label %while.body.581, label %while.end.582
+while.body.581:
+  %t109 = load ptr, ptr %p
+  %t110 = call %Token @Parser_peek(ptr %t109)
+  %t111 = getelementptr %Token, ptr null, i32 1
+  %t112 = ptrtoint ptr %t111 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t, ptr align 8 %t110, i64 %t112, i1 false)
+  ; lvalue .lexeme
+  %t113 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t114 = load ptr, ptr %t113
+  %t115 = call ptr @ystr_new(ptr @.str.181)
+  %t116 = call i1 @String_eq_cstr(ptr %t114, ptr %t115)
+  br i1 %t116, label %then.583, label %else.584
+then.583:
+  store i1 0, ptr %skip_ret
+  br label %merge.585
+else.584:
+  %t117 = load ptr, ptr %p
+  %t118 = call %Token @Parser_advance(ptr %t117)
+  br label %merge.585
+merge.585:
+  br label %while.cond.580
+while.end.582:
+  br label %merge.579
+merge.579:
+  %t119 = load ptr, ptr %p
+  %t120 = call ptr @ystr_new(ptr @.str.182)
+  %t122 = call ptr @ystr_new(ptr @.str.183)
+  call void @Parser_expect_token(ptr %t119, ptr %t122)
+  %t124 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t125 = getelementptr %AstArena, ptr %t124, i32 0, i32 1
+  %t126 = load ptr, ptr %t125
+  %t127 = call i64 @Vec_len(ptr %t126)
+  store i64 %t127, ptr %body_start
+  %t128 = sext i32 0 to i64
+  store i64 %t128, ptr %body_count
+  store i1 1, ptr %parsing_body
+  br label %while.cond.586
+while.cond.586:
+  %t129 = load i1, ptr %parsing_body
+  br i1 %t129, label %while.body.587, label %while.end.588
+while.body.587:
+  %t130 = load ptr, ptr %p
+  %t131 = call %Token @Parser_peek(ptr %t130)
+  %t132 = getelementptr %Token, ptr null, i32 1
+  %t133 = ptrtoint ptr %t132 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t131, i64 %t133, i1 false)
+  ; lvalue .lexeme
+  %t134 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t135 = load ptr, ptr %t134
+  %t136 = call ptr @ystr_new(ptr @.str.184)
+  %t137 = call i1 @String_eq_cstr(ptr %t135, ptr %t136)
+  br i1 %t137, label %then.589, label %else.590
+then.589:
+  store i1 0, ptr %parsing_body
+  br label %merge.591
+else.590:
+  %t138 = load ptr, ptr %p
+  %t139 = load ptr, ptr %arena
+  %t140 = call i64 @Parser_parse_stmt(ptr %t138, ptr %t139)
+  %t141 = load i64, ptr %body_count
+  %t142 = add i64 %t141, 1
+  store i64 %t142, ptr %body_count
+  br label %merge.591
+merge.591:
+  br label %while.cond.586
+while.end.588:
+  %t143 = load ptr, ptr %p
+  %t144 = call ptr @ystr_new(ptr @.str.185)
+  %t146 = call ptr @ystr_new(ptr @.str.186)
+  call void @Parser_expect_token(ptr %t143, ptr %t146)
+  ; lvalue .name
+  %t148 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 0
+  %t149 = load ptr, ptr %fn_name
+  store ptr %t149, ptr %t148
+  ; lvalue .is_safe
+  %t150 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 1
+  %t151 = load i32, ptr %is_safe
+  store i32 %t151, ptr %t150
+  ; lvalue .param_start
+  %t152 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 2
+  %t153 = load i64, ptr %param_start
+  store i64 %t153, ptr %t152
+  ; lvalue .param_count
+  %t154 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 3
+  %t155 = load i64, ptr %param_count
+  store i64 %t155, ptr %t154
+  ; lvalue .body_start
+  %t156 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 4
+  %t157 = load i64, ptr %body_start
+  store i64 %t157, ptr %t156
+  ; lvalue .body_count
+  %t158 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 5
+  %t159 = load i64, ptr %body_count
+  store i64 %t159, ptr %t158
+  ; lvalue .line
+  %t160 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 6
+  %t161 = load i64, ptr %line
+  store i64 %t161, ptr %t160
+  ; lvalue .col
+  %t162 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 7
+  %t163 = load i64, ptr %col
+  store i64 %t163, ptr %t162
+  %t164 = load ptr, ptr %arena
+  ; lvalue .funcs
+  %t165 = getelementptr %AstArena, ptr %t164, i32 0, i32 3
+  %t166 = load ptr, ptr %t165
+  call void @Vec_push(ptr %t166, ptr %fdecl)
+  %t168 = load ptr, ptr %arena
+  ; lvalue .funcs
+  %t169 = getelementptr %AstArena, ptr %t168, i32 0, i32 3
+  %t170 = load ptr, ptr %t169
+  %t171 = call i64 @Vec_len(ptr %t170)
+  store i64 %t171, ptr %idx
+  %t172 = load i64, ptr %idx
+  ret i64 %t172
+}
+
+; impl Parser
+define i1 @Parser_parse_item(ptr %p.arg, ptr %arena.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %tok = alloca %Token
+  %lex = alloca ptr
+  %name_tok = alloca %Token
+  %s_name = alloca ptr
+  %field_start = alloca i64
+  %field_count = alloca i64
+  %parsing_fields = alloca i1
+  %check = alloca %Token
+  %fname_tok = alloca %Token
+  %fname = alloca ptr
+  %type_str = alloca ptr
+  %skipping = alloca i1
+  %t = alloca %Token
+  %field = alloca %FieldDecl
+  %comma_check = alloca %Token
+  %sdecl = alloca %StructDecl
+  %_name = alloca %Token
+  %depth = alloca i64
+  %_type_name = alloca %Token
+  %parsing_impl = alloca i1
+  %method_safe = alloca i32
+  %pub_check = alloca %Token
+  %skip_import = alloca i1
+  %t1 = load ptr, ptr %p
+  %t2 = call %Token @Parser_peek(ptr %t1)
+  %t3 = getelementptr %Token, ptr null, i32 1
+  %t4 = ptrtoint ptr %t3 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tok, ptr align 8 %t2, i64 %t4, i1 false)
+  ; lvalue .lexeme
+  %t5 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t6 = load ptr, ptr %t5
+  ; lvalue .lexeme
+  %t8 = getelementptr %Token, ptr %tok, i32 0, i32 3
+  %t9 = load ptr, ptr %t8
+  %t10 = call ptr @String_clone(ptr %t9)
+  store ptr %t10, ptr %lex
+  %t11 = load ptr, ptr %lex
+  %t12 = call ptr @ystr_new(ptr @.str.187)
+  %t13 = call i1 @String_eq_cstr(ptr %t11, ptr %t12)
+  br i1 %t13, label %then.592, label %merge.594
+then.592:
+  %t14 = load ptr, ptr %p
+  %t15 = call %Token @Parser_advance(ptr %t14)
+  %t16 = load ptr, ptr %p
+  %t17 = load ptr, ptr %arena
+  %t18 = call i64 @Parser_parse_func_decl(ptr %t16, ptr %t17, i32 1)
+  ret i1 1
+merge.594:
+  %t19 = load ptr, ptr %lex
+  %t20 = call ptr @ystr_new(ptr @.str.188)
+  %t21 = call i1 @String_eq_cstr(ptr %t19, ptr %t20)
+  br i1 %t21, label %then.595, label %merge.597
+then.595:
+  %t22 = load ptr, ptr %p
+  %t23 = call %Token @Parser_advance(ptr %t22)
+  %t24 = load ptr, ptr %p
+  %t25 = call ptr @ystr_new(ptr @.str.189)
+  %t27 = call ptr @ystr_new(ptr @.str.190)
+  call void @Parser_expect_token(ptr %t24, ptr %t27)
+  %t29 = load ptr, ptr %p
+  %t30 = load ptr, ptr %arena
+  %t31 = call i64 @Parser_parse_func_decl(ptr %t29, ptr %t30, i32 1)
+  ret i1 1
+merge.597:
+  %t32 = load ptr, ptr %lex
+  %t33 = call ptr @ystr_new(ptr @.str.191)
+  %t34 = call i1 @String_eq_cstr(ptr %t32, ptr %t33)
+  br i1 %t34, label %then.598, label %merge.600
+then.598:
+  %t35 = load ptr, ptr %p
+  %t36 = call %Token @Parser_advance(ptr %t35)
+  %t37 = load ptr, ptr %p
+  %t38 = call ptr @ystr_new(ptr @.str.192)
+  %t40 = call ptr @ystr_new(ptr @.str.193)
+  call void @Parser_expect_token(ptr %t37, ptr %t40)
+  %t42 = load ptr, ptr %p
+  %t43 = load ptr, ptr %arena
+  %t44 = call i64 @Parser_parse_func_decl(ptr %t42, ptr %t43, i32 0)
+  ret i1 1
+merge.600:
+  %t45 = load ptr, ptr %lex
+  %t46 = call ptr @ystr_new(ptr @.str.194)
+  %t47 = call i1 @String_eq_cstr(ptr %t45, ptr %t46)
+  br i1 %t47, label %then.601, label %merge.603
+then.601:
+  %t48 = load ptr, ptr %p
+  %t49 = call %Token @Parser_advance(ptr %t48)
+  %t50 = load ptr, ptr %p
+  %t51 = call %Token @Parser_advance(ptr %t50)
+  %t52 = getelementptr %Token, ptr null, i32 1
+  %t53 = ptrtoint ptr %t52 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %name_tok, ptr align 8 %t51, i64 %t53, i1 false)
+  ; lvalue .lexeme
+  %t54 = getelementptr %Token, ptr %name_tok, i32 0, i32 3
+  %t55 = load ptr, ptr %t54
+  ; lvalue .lexeme
+  %t57 = getelementptr %Token, ptr %name_tok, i32 0, i32 3
+  %t58 = load ptr, ptr %t57
+  %t59 = call ptr @String_clone(ptr %t58)
+  store ptr %t59, ptr %s_name
+  %t60 = load ptr, ptr %p
+  %t61 = call ptr @ystr_new(ptr @.str.195)
+  %t63 = call ptr @ystr_new(ptr @.str.196)
+  call void @Parser_expect_token(ptr %t60, ptr %t63)
+  %t65 = load ptr, ptr %arena
+  ; lvalue .fields
+  %t66 = getelementptr %AstArena, ptr %t65, i32 0, i32 5
+  %t67 = load ptr, ptr %t66
+  %t68 = call i64 @Vec_len(ptr %t67)
+  store i64 %t68, ptr %field_start
+  %t69 = sext i32 0 to i64
+  store i64 %t69, ptr %field_count
+  store i1 1, ptr %parsing_fields
+  br label %while.cond.604
+while.cond.604:
+  %t70 = load i1, ptr %parsing_fields
+  br i1 %t70, label %while.body.605, label %while.end.606
+while.body.605:
+  %t71 = load ptr, ptr %p
+  %t72 = call %Token @Parser_peek(ptr %t71)
+  %t73 = getelementptr %Token, ptr null, i32 1
+  %t74 = ptrtoint ptr %t73 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t72, i64 %t74, i1 false)
+  ; lvalue .lexeme
+  %t75 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t76 = load ptr, ptr %t75
+  %t77 = call ptr @ystr_new(ptr @.str.197)
+  %t78 = call i1 @String_eq_cstr(ptr %t76, ptr %t77)
+  br i1 %t78, label %then.607, label %else.608
+then.607:
+  store i1 0, ptr %parsing_fields
+  br label %merge.609
+else.608:
+  %t79 = load ptr, ptr %p
+  %t80 = call %Token @Parser_advance(ptr %t79)
+  %t81 = getelementptr %Token, ptr null, i32 1
+  %t82 = ptrtoint ptr %t81 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %fname_tok, ptr align 8 %t80, i64 %t82, i1 false)
+  ; lvalue .lexeme
+  %t83 = getelementptr %Token, ptr %fname_tok, i32 0, i32 3
+  %t84 = load ptr, ptr %t83
+  ; lvalue .lexeme
+  %t86 = getelementptr %Token, ptr %fname_tok, i32 0, i32 3
+  %t87 = load ptr, ptr %t86
+  %t88 = call ptr @String_clone(ptr %t87)
+  store ptr %t88, ptr %fname
+  %t89 = load ptr, ptr %p
+  %t90 = call ptr @ystr_new(ptr @.str.198)
+  %t92 = call ptr @ystr_new(ptr @.str.199)
+  call void @Parser_expect_token(ptr %t89, ptr %t92)
+  %t94 = call ptr @ystr_new(ptr @.str.200)
+  store ptr %t94, ptr %type_str
+  store i1 1, ptr %skipping
+  br label %while.cond.610
+while.cond.610:
+  %t95 = load i1, ptr %skipping
+  br i1 %t95, label %while.body.611, label %while.end.612
+while.body.611:
+  %t96 = load ptr, ptr %p
+  %t97 = call %Token @Parser_peek(ptr %t96)
+  %t98 = getelementptr %Token, ptr null, i32 1
+  %t99 = ptrtoint ptr %t98 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t, ptr align 8 %t97, i64 %t99, i1 false)
+  ; lvalue .lexeme
+  %t100 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t101 = load ptr, ptr %t100
+  %t102 = call ptr @ystr_new(ptr @.str.201)
+  %t103 = call i1 @String_eq_cstr(ptr %t101, ptr %t102)
+  br i1 %t103, label %then.613, label %else.614
+then.613:
+  store i1 0, ptr %skipping
+  br label %merge.615
+else.614:
+  ; lvalue .lexeme
+  %t104 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t105 = load ptr, ptr %t104
+  %t106 = call ptr @ystr_new(ptr @.str.202)
+  %t107 = call i1 @String_eq_cstr(ptr %t105, ptr %t106)
+  br i1 %t107, label %then.616, label %else.617
+then.616:
+  store i1 0, ptr %skipping
+  br label %merge.618
+else.617:
+  %t108 = load ptr, ptr %p
+  %t109 = call %Token @Parser_advance(ptr %t108)
+  br label %merge.618
+merge.618:
+  br label %merge.615
+merge.615:
+  br label %while.cond.610
+while.end.612:
+  ; lvalue .name
+  %t110 = getelementptr %FieldDecl, ptr %field, i32 0, i32 0
+  %t111 = load ptr, ptr %fname
+  store ptr %t111, ptr %t110
+  ; lvalue .type_str
+  %t112 = getelementptr %FieldDecl, ptr %field, i32 0, i32 1
+  %t113 = load ptr, ptr %type_str
+  store ptr %t113, ptr %t112
+  %t114 = load ptr, ptr %arena
+  ; lvalue .fields
+  %t115 = getelementptr %AstArena, ptr %t114, i32 0, i32 5
+  %t116 = load ptr, ptr %t115
+  call void @Vec_push(ptr %t116, ptr %field)
+  %t118 = load i64, ptr %field_count
+  %t119 = add i64 %t118, 1
+  store i64 %t119, ptr %field_count
+  %t120 = load ptr, ptr %p
+  %t121 = call %Token @Parser_peek(ptr %t120)
+  %t122 = getelementptr %Token, ptr null, i32 1
+  %t123 = ptrtoint ptr %t122 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %comma_check, ptr align 8 %t121, i64 %t123, i1 false)
+  ; lvalue .lexeme
+  %t124 = getelementptr %Token, ptr %comma_check, i32 0, i32 3
+  %t125 = load ptr, ptr %t124
+  %t126 = call ptr @ystr_new(ptr @.str.203)
+  %t127 = call i1 @String_eq_cstr(ptr %t125, ptr %t126)
+  br i1 %t127, label %then.619, label %merge.621
+then.619:
+  %t128 = load ptr, ptr %p
+  %t129 = call %Token @Parser_advance(ptr %t128)
+  br label %merge.621
+merge.621:
+  br label %merge.609
+merge.609:
+  br label %while.cond.604
+while.end.606:
+  %t130 = load ptr, ptr %p
+  %t131 = call ptr @ystr_new(ptr @.str.204)
+  %t133 = call ptr @ystr_new(ptr @.str.205)
+  call void @Parser_expect_token(ptr %t130, ptr %t133)
+  ; lvalue .name
+  %t135 = getelementptr %StructDecl, ptr %sdecl, i32 0, i32 0
+  %t136 = load ptr, ptr %s_name
+  store ptr %t136, ptr %t135
+  ; lvalue .field_start
+  %t137 = getelementptr %StructDecl, ptr %sdecl, i32 0, i32 1
+  %t138 = load i64, ptr %field_start
+  store i64 %t138, ptr %t137
+  ; lvalue .field_count
+  %t139 = getelementptr %StructDecl, ptr %sdecl, i32 0, i32 2
+  %t140 = load i64, ptr %field_count
+  store i64 %t140, ptr %t139
+  %t141 = load ptr, ptr %arena
+  ; lvalue .structs
+  %t142 = getelementptr %AstArena, ptr %t141, i32 0, i32 4
+  %t143 = load ptr, ptr %t142
+  call void @Vec_push(ptr %t143, ptr %sdecl)
+  ret i1 1
+merge.603:
+  %t145 = load ptr, ptr %lex
+  %t146 = call ptr @ystr_new(ptr @.str.206)
+  %t147 = call i1 @String_eq_cstr(ptr %t145, ptr %t146)
+  br i1 %t147, label %then.622, label %merge.624
+then.622:
+  %t148 = load ptr, ptr %p
+  %t149 = call %Token @Parser_advance(ptr %t148)
+  %t150 = load ptr, ptr %p
+  %t151 = call %Token @Parser_advance(ptr %t150)
+  %t152 = getelementptr %Token, ptr null, i32 1
+  %t153 = ptrtoint ptr %t152 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %_name, ptr align 8 %t151, i64 %t153, i1 false)
+  %t154 = load ptr, ptr %p
+  %t155 = call ptr @ystr_new(ptr @.str.207)
+  %t157 = call ptr @ystr_new(ptr @.str.208)
+  call void @Parser_expect_token(ptr %t154, ptr %t157)
+  %t159 = sext i32 1 to i64
+  store i64 %t159, ptr %depth
+  br label %while.cond.625
+while.cond.625:
+  %t160 = load i64, ptr %depth
+  %t161 = icmp sgt i64 %t160, 0
+  br i1 %t161, label %while.body.626, label %while.end.627
+while.body.626:
+  %t162 = load ptr, ptr %p
+  %t163 = call %Token @Parser_advance(ptr %t162)
+  %t164 = getelementptr %Token, ptr null, i32 1
+  %t165 = ptrtoint ptr %t164 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t, ptr align 8 %t163, i64 %t165, i1 false)
+  ; lvalue .lexeme
+  %t166 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t167 = load ptr, ptr %t166
+  %t168 = call ptr @ystr_new(ptr @.str.209)
+  %t169 = call i1 @String_eq_cstr(ptr %t167, ptr %t168)
+  br i1 %t169, label %then.628, label %merge.630
+then.628:
+  %t170 = load i64, ptr %depth
+  %t171 = add i64 %t170, 1
+  store i64 %t171, ptr %depth
+  br label %merge.630
+merge.630:
+  ; lvalue .lexeme
+  %t172 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t173 = load ptr, ptr %t172
+  %t174 = call ptr @ystr_new(ptr @.str.210)
+  %t175 = call i1 @String_eq_cstr(ptr %t173, ptr %t174)
+  br i1 %t175, label %then.631, label %merge.633
+then.631:
+  %t176 = load i64, ptr %depth
+  %t177 = sub i64 %t176, 1
+  store i64 %t177, ptr %depth
+  br label %merge.633
+merge.633:
+  br label %while.cond.625
+while.end.627:
+  ret i1 1
+merge.624:
+  %t178 = load ptr, ptr %lex
+  %t179 = call ptr @ystr_new(ptr @.str.211)
+  %t180 = call i1 @String_eq_cstr(ptr %t178, ptr %t179)
+  br i1 %t180, label %then.634, label %merge.636
+then.634:
+  %t181 = load ptr, ptr %p
+  %t182 = call %Token @Parser_advance(ptr %t181)
+  %t183 = load ptr, ptr %p
+  %t184 = call %Token @Parser_advance(ptr %t183)
+  %t185 = getelementptr %Token, ptr null, i32 1
+  %t186 = ptrtoint ptr %t185 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %_type_name, ptr align 8 %t184, i64 %t186, i1 false)
+  %t187 = load ptr, ptr %p
+  %t188 = call ptr @ystr_new(ptr @.str.212)
+  %t190 = call ptr @ystr_new(ptr @.str.213)
+  call void @Parser_expect_token(ptr %t187, ptr %t190)
+  store i1 1, ptr %parsing_impl
+  br label %while.cond.637
+while.cond.637:
+  %t192 = load i1, ptr %parsing_impl
+  br i1 %t192, label %while.body.638, label %while.end.639
+while.body.638:
+  %t193 = load ptr, ptr %p
+  %t194 = call %Token @Parser_peek(ptr %t193)
+  %t195 = getelementptr %Token, ptr null, i32 1
+  %t196 = ptrtoint ptr %t195 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %check, ptr align 8 %t194, i64 %t196, i1 false)
+  ; lvalue .lexeme
+  %t197 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t198 = load ptr, ptr %t197
+  %t199 = call ptr @ystr_new(ptr @.str.214)
+  %t200 = call i1 @String_eq_cstr(ptr %t198, ptr %t199)
+  br i1 %t200, label %then.640, label %else.641
+then.640:
+  store i1 0, ptr %parsing_impl
+  br label %merge.642
+else.641:
+  store i32 1, ptr %method_safe
+  ; lvalue .lexeme
+  %t201 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t202 = load ptr, ptr %t201
+  %t203 = call ptr @ystr_new(ptr @.str.215)
+  %t204 = call i1 @String_eq_cstr(ptr %t202, ptr %t203)
+  br i1 %t204, label %then.643, label %else.644
+then.643:
+  %t205 = load ptr, ptr %p
+  %t206 = call %Token @Parser_advance(ptr %t205)
+  store i32 0, ptr %method_safe
+  br label %merge.645
+else.644:
+  ; lvalue .lexeme
+  %t207 = getelementptr %Token, ptr %check, i32 0, i32 3
+  %t208 = load ptr, ptr %t207
+  %t209 = call ptr @ystr_new(ptr @.str.216)
+  %t210 = call i1 @String_eq_cstr(ptr %t208, ptr %t209)
+  br i1 %t210, label %then.646, label %merge.648
+then.646:
+  %t211 = load ptr, ptr %p
+  %t212 = call %Token @Parser_advance(ptr %t211)
+  br label %merge.648
+merge.648:
+  br label %merge.645
+merge.645:
+  %t213 = load ptr, ptr %p
+  %t214 = call %Token @Parser_peek(ptr %t213)
+  %t215 = getelementptr %Token, ptr null, i32 1
+  %t216 = ptrtoint ptr %t215 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %pub_check, ptr align 8 %t214, i64 %t216, i1 false)
+  ; lvalue .lexeme
+  %t217 = getelementptr %Token, ptr %pub_check, i32 0, i32 3
+  %t218 = load ptr, ptr %t217
+  %t219 = call ptr @ystr_new(ptr @.str.217)
+  %t220 = call i1 @String_eq_cstr(ptr %t218, ptr %t219)
+  br i1 %t220, label %then.649, label %merge.651
+then.649:
+  %t221 = load ptr, ptr %p
+  %t222 = call %Token @Parser_advance(ptr %t221)
+  br label %merge.651
+merge.651:
+  %t223 = load ptr, ptr %p
+  %t224 = call ptr @ystr_new(ptr @.str.218)
+  %t226 = call ptr @ystr_new(ptr @.str.219)
+  call void @Parser_expect_token(ptr %t223, ptr %t226)
+  %t228 = load ptr, ptr %p
+  %t229 = load ptr, ptr %arena
+  %t230 = load i32, ptr %method_safe
+  %t231 = call i64 @Parser_parse_func_decl(ptr %t228, ptr %t229, i32 %t230)
+  br label %merge.642
+merge.642:
+  br label %while.cond.637
+while.end.639:
+  %t232 = load ptr, ptr %p
+  %t233 = call ptr @ystr_new(ptr @.str.220)
+  %t235 = call ptr @ystr_new(ptr @.str.221)
+  call void @Parser_expect_token(ptr %t232, ptr %t235)
+  ret i1 1
+merge.636:
+  %t237 = load ptr, ptr %lex
+  %t238 = call ptr @ystr_new(ptr @.str.222)
+  %t239 = call i1 @String_eq_cstr(ptr %t237, ptr %t238)
+  br i1 %t239, label %then.652, label %merge.654
+then.652:
+  %t240 = load ptr, ptr %p
+  %t241 = call %Token @Parser_advance(ptr %t240)
+  store i1 1, ptr %skip_import
+  br label %while.cond.655
+while.cond.655:
+  %t242 = load i1, ptr %skip_import
+  br i1 %t242, label %while.body.656, label %while.end.657
+while.body.656:
+  %t243 = load ptr, ptr %p
+  %t244 = call %Token @Parser_advance(ptr %t243)
+  %t245 = getelementptr %Token, ptr null, i32 1
+  %t246 = ptrtoint ptr %t245 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t, ptr align 8 %t244, i64 %t246, i1 false)
+  ; lvalue .lexeme
+  %t247 = getelementptr %Token, ptr %t, i32 0, i32 3
+  %t248 = load ptr, ptr %t247
+  %t249 = call ptr @ystr_new(ptr @.str.223)
+  %t250 = call i1 @String_eq_cstr(ptr %t248, ptr %t249)
+  br i1 %t250, label %then.658, label %merge.660
+then.658:
+  store i1 0, ptr %skip_import
+  br label %merge.660
+merge.660:
+  br label %while.cond.655
+while.end.657:
+  ret i1 1
+merge.654:
+  %t251 = load ptr, ptr %lex
+  %t252 = call ptr @ystr_new(ptr @.str.224)
+  %t253 = call i1 @String_eq_cstr(ptr %t251, ptr %t252)
+  br i1 %t253, label %then.661, label %merge.663
+then.661:
+  ret i1 0
+merge.663:
+  %t254 = call ptr @ystr_new(ptr @.str.225)
+  call void @print(ptr %t254)
+  %t256 = load ptr, ptr %lex
+  call void @print(ptr %lex)
+  %t259 = call ptr @ystr_new(ptr @.str.226)
+  call void @println(ptr %t259)
+  %t261 = load ptr, ptr %p
+  %t262 = call %Token @Parser_advance(ptr %t261)
+  ret i1 1
+}
+
+define void @Parser_parse_program(ptr %p.arg, ptr %arena.arg) #0 {
+entry:
+  %p = alloca ptr
+  store ptr %p.arg, ptr %p
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %parsing = alloca i1
+  %has_more = alloca i1
+  store i1 1, ptr %parsing
+  br label %while.cond.664
+while.cond.664:
+  %t1 = load i1, ptr %parsing
+  br i1 %t1, label %while.body.665, label %while.end.666
+while.body.665:
+  %t2 = load ptr, ptr %p
+  %t3 = load ptr, ptr %arena
+  %t4 = call i1 @Parser_parse_item(ptr %t2, ptr %t3)
+  store i1 %t4, ptr %has_more
+  %t5 = load i1, ptr %has_more
+  %t6 = icmp eq i1 %t5, 0
+  br i1 %t6, label %then.667, label %merge.669
+then.667:
+  store i1 0, ptr %parsing
+  br label %merge.669
+merge.669:
+  br label %while.cond.664
+while.end.666:
+  ret void
+}
+
+; impl LlvmEmitter
+define %LlvmEmitter @LlvmEmitter_new() #0 {
+entry:
+  %e = alloca %LlvmEmitter
+  ; lvalue .buffer
+  %t1 = getelementptr %LlvmEmitter, ptr %e, i32 0, i32 0
+  %t2 = call ptr @ystr_new(ptr @.str.227)
+  store ptr %t2, ptr %t1
+  ; lvalue .tmp_counter
+  %t3 = getelementptr %LlvmEmitter, ptr %e, i32 0, i32 1
+  %t4 = sext i32 0 to i64
+  store i64 %t4, ptr %t3
+  ; lvalue .label_counter
+  %t5 = getelementptr %LlvmEmitter, ptr %e, i32 0, i32 2
+  %t6 = sext i32 0 to i64
+  store i64 %t6, ptr %t5
+  ; lvalue .buffer
+  %t7 = getelementptr %LlvmEmitter, ptr %e, i32 0, i32 0
+  %t8 = load ptr, ptr %t7
+  %t9 = call ptr @ystr_new(ptr @.str.228)
+  %t11 = call ptr @ystr_new(ptr @.str.229)
+  %t12 = load ptr, ptr %t11
+  call void @String_push_str(ptr %t8, ptr %t12)
+  ; lvalue .buffer
+  %t14 = getelementptr %LlvmEmitter, ptr %e, i32 0, i32 0
+  %t15 = load ptr, ptr %t14
+  %t16 = call ptr @ystr_new(ptr @.str.230)
+  %t18 = call ptr @ystr_new(ptr @.str.231)
+  %t19 = load ptr, ptr %t18
+  call void @String_push_str(ptr %t15, ptr %t19)
+  ; lvalue .buffer
+  %t21 = getelementptr %LlvmEmitter, ptr %e, i32 0, i32 0
+  %t22 = load ptr, ptr %t21
+  %t23 = call ptr @ystr_new(ptr @.str.232)
+  %t25 = call ptr @ystr_new(ptr @.str.233)
+  %t26 = load ptr, ptr %t25
+  call void @String_push_str(ptr %t22, ptr %t26)
+  ; lvalue .buffer
+  %t28 = getelementptr %LlvmEmitter, ptr %e, i32 0, i32 0
+  %t29 = load ptr, ptr %t28
+  %t30 = call ptr @ystr_new(ptr @.str.234)
+  %t32 = call ptr @ystr_new(ptr @.str.235)
+  %t33 = load ptr, ptr %t32
+  call void @String_push_str(ptr %t29, ptr %t33)
+  ; lvalue .buffer
+  %t35 = getelementptr %LlvmEmitter, ptr %e, i32 0, i32 0
+  %t36 = load ptr, ptr %t35
+  %t37 = call ptr @ystr_new(ptr @.str.236)
+  %t39 = call ptr @ystr_new(ptr @.str.237)
+  %t40 = load ptr, ptr %t39
+  call void @String_push_str(ptr %t36, ptr %t40)
+  %t42 = load %LlvmEmitter, ptr %e
+  ret %LlvmEmitter %t42
+}
+
+define ptr @LlvmEmitter_int_to_str(i64 %val.arg) #0 {
+entry:
+  %val = alloca i64
+  store i64 %val.arg, ptr %val
+  %temp = alloca i64
+  %s = alloca ptr
+  %digit = alloca i64
+  %t1 = load i64, ptr %val
+  %t2 = icmp eq i64 %t1, 0
+  br i1 %t2, label %then.670, label %merge.672
+then.670:
+  %t3 = call ptr @ystr_new(ptr @.str.238)
+  ret ptr %t3
+merge.672:
+  %t4 = load i64, ptr %val
+  store i64 %t4, ptr %temp
+  %t5 = call ptr @ystr_new(ptr @.str.239)
+  store ptr %t5, ptr %s
+  br label %while.cond.673
+while.cond.673:
+  %t6 = load i64, ptr %temp
+  %t7 = icmp sgt i64 %t6, 0
+  br i1 %t7, label %while.body.674, label %while.end.675
+while.body.674:
+  %t8 = load i64, ptr %temp
+  %t9 = srem i64 %t8, 10
+  store i64 %t9, ptr %digit
+  %t10 = load i64, ptr %digit
+  %t11 = icmp eq i64 %t10, 0
+  br i1 %t11, label %then.676, label %else.677
+then.676:
+  %t12 = load ptr, ptr %s
+  call void @String_push(ptr %t12, i8 48)
+  br label %merge.678
+else.677:
+  %t14 = load i64, ptr %digit
+  %t15 = icmp eq i64 %t14, 1
+  br i1 %t15, label %then.679, label %else.680
+then.679:
+  %t16 = load ptr, ptr %s
+  call void @String_push(ptr %t16, i8 49)
+  br label %merge.681
+else.680:
+  %t18 = load i64, ptr %digit
+  %t19 = icmp eq i64 %t18, 2
+  br i1 %t19, label %then.682, label %else.683
+then.682:
+  %t20 = load ptr, ptr %s
+  call void @String_push(ptr %t20, i8 50)
+  br label %merge.684
+else.683:
+  %t22 = load i64, ptr %digit
+  %t23 = icmp eq i64 %t22, 3
+  br i1 %t23, label %then.685, label %else.686
+then.685:
+  %t24 = load ptr, ptr %s
+  call void @String_push(ptr %t24, i8 51)
+  br label %merge.687
+else.686:
+  %t26 = load i64, ptr %digit
+  %t27 = icmp eq i64 %t26, 4
+  br i1 %t27, label %then.688, label %else.689
+then.688:
+  %t28 = load ptr, ptr %s
+  call void @String_push(ptr %t28, i8 52)
+  br label %merge.690
+else.689:
+  %t30 = load i64, ptr %digit
+  %t31 = icmp eq i64 %t30, 5
+  br i1 %t31, label %then.691, label %else.692
+then.691:
+  %t32 = load ptr, ptr %s
+  call void @String_push(ptr %t32, i8 53)
+  br label %merge.693
+else.692:
+  %t34 = load i64, ptr %digit
+  %t35 = icmp eq i64 %t34, 6
+  br i1 %t35, label %then.694, label %else.695
+then.694:
+  %t36 = load ptr, ptr %s
+  call void @String_push(ptr %t36, i8 54)
+  br label %merge.696
+else.695:
+  %t38 = load i64, ptr %digit
+  %t39 = icmp eq i64 %t38, 7
+  br i1 %t39, label %then.697, label %else.698
+then.697:
+  %t40 = load ptr, ptr %s
+  call void @String_push(ptr %t40, i8 55)
+  br label %merge.699
+else.698:
+  %t42 = load i64, ptr %digit
+  %t43 = icmp eq i64 %t42, 8
+  br i1 %t43, label %then.700, label %else.701
+then.700:
+  %t44 = load ptr, ptr %s
+  call void @String_push(ptr %t44, i8 56)
+  br label %merge.702
+else.701:
+  %t46 = load i64, ptr %digit
+  %t47 = icmp eq i64 %t46, 9
+  br i1 %t47, label %then.703, label %merge.705
+then.703:
+  %t48 = load ptr, ptr %s
+  call void @String_push(ptr %t48, i8 57)
+  br label %merge.705
+merge.705:
+  br label %merge.702
+merge.702:
+  br label %merge.699
+merge.699:
+  br label %merge.696
+merge.696:
+  br label %merge.693
+merge.693:
+  br label %merge.690
+merge.690:
+  br label %merge.687
+merge.687:
+  br label %merge.684
+merge.684:
+  br label %merge.681
+merge.681:
+  br label %merge.678
+merge.678:
+  %t50 = load i64, ptr %temp
+  %t51 = sdiv i64 %t50, 10
+  store i64 %t51, ptr %temp
+  br label %while.cond.673
+while.end.675:
+  %t52 = load ptr, ptr %s
+  ret ptr %t52
+}
+
+define ptr @LlvmEmitter_fresh_tmp(ptr %e.arg) #0 {
+entry:
+  %e = alloca ptr
+  store ptr %e.arg, ptr %e
+  %s = alloca ptr
+  %t1 = load ptr, ptr %e
+  ; lvalue .tmp_counter
+  %t2 = getelementptr %LlvmEmitter, ptr %t1, i32 0, i32 1
+  %t3 = load i64, ptr %t2
+  %t4 = add i64 %t3, 1
+  store i64 %t4, ptr %t2
+  %t5 = call ptr @ystr_new(ptr @.str.240)
+  store ptr %t5, ptr %s
+  %t6 = load ptr, ptr %s
+  %t7 = load ptr, ptr %e
+  ; lvalue .tmp_counter
+  %t8 = getelementptr %LlvmEmitter, ptr %t7, i32 0, i32 1
+  %t9 = load i64, ptr %t8
+  %t10 = call ptr @LlvmEmitter_int_to_str(i64 %t9)
+  %t12 = load ptr, ptr %e
+  ; lvalue .tmp_counter
+  %t13 = getelementptr %LlvmEmitter, ptr %t12, i32 0, i32 1
+  %t14 = load i64, ptr %t13
+  %t15 = call ptr @LlvmEmitter_int_to_str(i64 %t14)
+  call void @String_push_str(ptr %t6, ptr %t15)
+  %t17 = load ptr, ptr %s
+  ret ptr %t17
+}
+
+define ptr @LlvmEmitter_fresh_label(ptr %e.arg, ptr %prefix.arg) #0 {
+entry:
+  %e = alloca ptr
+  store ptr %e.arg, ptr %e
+  %prefix = alloca ptr
+  store ptr %prefix.arg, ptr %prefix
+  %s = alloca ptr
+  %t1 = load ptr, ptr %e
+  ; lvalue .label_counter
+  %t2 = getelementptr %LlvmEmitter, ptr %t1, i32 0, i32 2
+  %t3 = load i64, ptr %t2
+  %t4 = add i64 %t3, 1
+  store i64 %t4, ptr %t2
+  %t5 = load ptr, ptr %prefix
+  %t6 = load ptr, ptr %t5
+  %t7 = call ptr @String_clone(ptr %t6)
+  store ptr %t7, ptr %s
+  %t8 = load ptr, ptr %s
+  %t9 = call ptr @ystr_new(ptr @.str.241)
+  %t11 = call ptr @ystr_new(ptr @.str.242)
+  %t12 = load ptr, ptr %t11
+  call void @String_push_str(ptr %t8, ptr %t12)
+  %t14 = load ptr, ptr %s
+  %t15 = load ptr, ptr %e
+  ; lvalue .label_counter
+  %t16 = getelementptr %LlvmEmitter, ptr %t15, i32 0, i32 2
+  %t17 = load i64, ptr %t16
+  %t18 = call ptr @LlvmEmitter_int_to_str(i64 %t17)
+  %t20 = load ptr, ptr %e
+  ; lvalue .label_counter
+  %t21 = getelementptr %LlvmEmitter, ptr %t20, i32 0, i32 2
+  %t22 = load i64, ptr %t21
+  %t23 = call ptr @LlvmEmitter_int_to_str(i64 %t22)
+  call void @String_push_str(ptr %t14, ptr %t23)
+  %t25 = load ptr, ptr %s
+  ret ptr %t25
+}
+
+define void @LlvmEmitter_emit_func(ptr %e.arg, ptr %arena.arg, i64 %func_idx.arg) #0 {
+entry:
+  %e = alloca ptr
+  store ptr %e.arg, ptr %e
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %func_idx = alloca i64
+  store i64 %func_idx.arg, ptr %func_idx
+  %fdecl = alloca %FuncDecl
+  %p = alloca i64
+  %param = alloca %ParamDecl
+  %ap = alloca i64
+  %s = alloca i64
+  %t1 = load ptr, ptr %arena
+  ; lvalue .funcs
+  %t2 = getelementptr %AstArena, ptr %t1, i32 0, i32 3
+  %t3 = load ptr, ptr %t2
+  %t5 = load ptr, ptr %arena
+  ; lvalue .funcs
+  %t6 = getelementptr %AstArena, ptr %t5, i32 0, i32 3
+  %t7 = load ptr, ptr %t6
+  %t8 = load i64, ptr %func_idx
+  %t9 = call ptr @yvec_get(ptr %t7, i64 %t8)
+  %t10 = load %FuncDecl, ptr %t9
+  %t11 = getelementptr %FuncDecl, ptr null, i32 1
+  %t12 = ptrtoint ptr %t11 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %fdecl, ptr align 8 %t10, i64 %t12, i1 false)
+  %t13 = load ptr, ptr %e
+  ; lvalue .tmp_counter
+  %t14 = getelementptr %LlvmEmitter, ptr %t13, i32 0, i32 1
+  %t15 = sext i32 0 to i64
+  store i64 %t15, ptr %t14
+  %t16 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t17 = getelementptr %LlvmEmitter, ptr %t16, i32 0, i32 0
+  %t18 = load ptr, ptr %t17
+  %t19 = call ptr @ystr_new(ptr @.str.243)
+  %t21 = call ptr @ystr_new(ptr @.str.244)
+  %t22 = load ptr, ptr %t21
+  call void @String_push_str(ptr %t18, ptr %t22)
+  %t24 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t25 = getelementptr %LlvmEmitter, ptr %t24, i32 0, i32 0
+  %t26 = load ptr, ptr %t25
+  ; lvalue .name
+  %t27 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 0
+  %t28 = load ptr, ptr %t27
+  ; lvalue .name
+  %t30 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 0
+  %t31 = load ptr, ptr %t30
+  call void @String_push_str(ptr %t26, ptr %t31)
+  %t33 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t34 = getelementptr %LlvmEmitter, ptr %t33, i32 0, i32 0
+  %t35 = load ptr, ptr %t34
+  %t36 = call ptr @ystr_new(ptr @.str.245)
+  %t38 = call ptr @ystr_new(ptr @.str.246)
+  %t39 = load ptr, ptr %t38
+  call void @String_push_str(ptr %t35, ptr %t39)
+  %t41 = sext i32 0 to i64
+  store i64 %t41, ptr %p
+  br label %while.cond.706
+while.cond.706:
+  %t42 = load i64, ptr %p
+  ; lvalue .param_count
+  %t43 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 3
+  %t44 = load i64, ptr %t43
+  %t45 = icmp slt i64 %t42, %t44
+  br i1 %t45, label %while.body.707, label %while.end.708
+while.body.707:
+  %t46 = load ptr, ptr %arena
+  ; lvalue .params
+  %t47 = getelementptr %AstArena, ptr %t46, i32 0, i32 2
+  %t48 = load ptr, ptr %t47
+  %t50 = load ptr, ptr %arena
+  ; lvalue .params
+  %t51 = getelementptr %AstArena, ptr %t50, i32 0, i32 2
+  %t52 = load ptr, ptr %t51
+  ; lvalue .param_start
+  %t53 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 2
+  %t54 = load i64, ptr %t53
+  %t55 = load i64, ptr %p
+  %t56 = add i64 %t54, %t55
+  %t57 = call ptr @yvec_get(ptr %t52, i64 %t56)
+  %t58 = load %ParamDecl, ptr %t57
+  %t59 = getelementptr %ParamDecl, ptr null, i32 1
+  %t60 = ptrtoint ptr %t59 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %param, ptr align 8 %t58, i64 %t60, i1 false)
+  %t61 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t62 = getelementptr %LlvmEmitter, ptr %t61, i32 0, i32 0
+  %t63 = load ptr, ptr %t62
+  %t64 = call ptr @ystr_new(ptr @.str.247)
+  %t66 = call ptr @ystr_new(ptr @.str.248)
+  %t67 = load ptr, ptr %t66
+  call void @String_push_str(ptr %t63, ptr %t67)
+  %t69 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t70 = getelementptr %LlvmEmitter, ptr %t69, i32 0, i32 0
+  %t71 = load ptr, ptr %t70
+  ; lvalue .name
+  %t72 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t73 = load ptr, ptr %t72
+  ; lvalue .name
+  %t75 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t76 = load ptr, ptr %t75
+  call void @String_push_str(ptr %t71, ptr %t76)
+  %t78 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t79 = getelementptr %LlvmEmitter, ptr %t78, i32 0, i32 0
+  %t80 = load ptr, ptr %t79
+  %t81 = call ptr @ystr_new(ptr @.str.249)
+  %t83 = call ptr @ystr_new(ptr @.str.250)
+  %t84 = load ptr, ptr %t83
+  call void @String_push_str(ptr %t80, ptr %t84)
+  %t86 = load i64, ptr %p
+  %t87 = add i64 %t86, 1
+  ; lvalue .param_count
+  %t88 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 3
+  %t89 = load i64, ptr %t88
+  %t90 = icmp slt i64 %t87, %t89
+  br i1 %t90, label %then.709, label %merge.711
+then.709:
+  %t91 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t92 = getelementptr %LlvmEmitter, ptr %t91, i32 0, i32 0
+  %t93 = load ptr, ptr %t92
+  %t94 = call ptr @ystr_new(ptr @.str.251)
+  %t96 = call ptr @ystr_new(ptr @.str.252)
+  %t97 = load ptr, ptr %t96
+  call void @String_push_str(ptr %t93, ptr %t97)
+  br label %merge.711
+merge.711:
+  %t99 = load i64, ptr %p
+  %t100 = add i64 %t99, 1
+  store i64 %t100, ptr %p
+  br label %while.cond.706
+while.end.708:
+  %t101 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t102 = getelementptr %LlvmEmitter, ptr %t101, i32 0, i32 0
+  %t103 = load ptr, ptr %t102
+  %t104 = call ptr @ystr_new(ptr @.str.253)
+  %t106 = call ptr @ystr_new(ptr @.str.254)
+  %t107 = load ptr, ptr %t106
+  call void @String_push_str(ptr %t103, ptr %t107)
+  %t109 = sext i32 0 to i64
+  store i64 %t109, ptr %ap
+  br label %while.cond.712
+while.cond.712:
+  %t110 = load i64, ptr %ap
+  ; lvalue .param_count
+  %t111 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 3
+  %t112 = load i64, ptr %t111
+  %t113 = icmp slt i64 %t110, %t112
+  br i1 %t113, label %while.body.713, label %while.end.714
+while.body.713:
+  %t114 = load ptr, ptr %arena
+  ; lvalue .params
+  %t115 = getelementptr %AstArena, ptr %t114, i32 0, i32 2
+  %t116 = load ptr, ptr %t115
+  %t118 = load ptr, ptr %arena
+  ; lvalue .params
+  %t119 = getelementptr %AstArena, ptr %t118, i32 0, i32 2
+  %t120 = load ptr, ptr %t119
+  ; lvalue .param_start
+  %t121 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 2
+  %t122 = load i64, ptr %t121
+  %t123 = load i64, ptr %ap
+  %t124 = add i64 %t122, %t123
+  %t125 = call ptr @yvec_get(ptr %t120, i64 %t124)
+  %t126 = load %ParamDecl, ptr %t125
+  %t127 = getelementptr %ParamDecl, ptr null, i32 1
+  %t128 = ptrtoint ptr %t127 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %param, ptr align 8 %t126, i64 %t128, i1 false)
+  %t129 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t130 = getelementptr %LlvmEmitter, ptr %t129, i32 0, i32 0
+  %t131 = load ptr, ptr %t130
+  %t132 = call ptr @ystr_new(ptr @.str.255)
+  %t134 = call ptr @ystr_new(ptr @.str.256)
+  %t135 = load ptr, ptr %t134
+  call void @String_push_str(ptr %t131, ptr %t135)
+  %t137 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t138 = getelementptr %LlvmEmitter, ptr %t137, i32 0, i32 0
+  %t139 = load ptr, ptr %t138
+  ; lvalue .name
+  %t140 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t141 = load ptr, ptr %t140
+  ; lvalue .name
+  %t143 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t144 = load ptr, ptr %t143
+  call void @String_push_str(ptr %t139, ptr %t144)
+  %t146 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t147 = getelementptr %LlvmEmitter, ptr %t146, i32 0, i32 0
+  %t148 = load ptr, ptr %t147
+  %t149 = call ptr @ystr_new(ptr @.str.257)
+  %t151 = call ptr @ystr_new(ptr @.str.258)
+  %t152 = load ptr, ptr %t151
+  call void @String_push_str(ptr %t148, ptr %t152)
+  %t154 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t155 = getelementptr %LlvmEmitter, ptr %t154, i32 0, i32 0
+  %t156 = load ptr, ptr %t155
+  %t157 = call ptr @ystr_new(ptr @.str.259)
+  %t159 = call ptr @ystr_new(ptr @.str.260)
+  %t160 = load ptr, ptr %t159
+  call void @String_push_str(ptr %t156, ptr %t160)
+  %t162 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t163 = getelementptr %LlvmEmitter, ptr %t162, i32 0, i32 0
+  %t164 = load ptr, ptr %t163
+  ; lvalue .name
+  %t165 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t166 = load ptr, ptr %t165
+  ; lvalue .name
+  %t168 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t169 = load ptr, ptr %t168
+  call void @String_push_str(ptr %t164, ptr %t169)
+  %t171 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t172 = getelementptr %LlvmEmitter, ptr %t171, i32 0, i32 0
+  %t173 = load ptr, ptr %t172
+  %t174 = call ptr @ystr_new(ptr @.str.261)
+  %t176 = call ptr @ystr_new(ptr @.str.262)
+  %t177 = load ptr, ptr %t176
+  call void @String_push_str(ptr %t173, ptr %t177)
+  %t179 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t180 = getelementptr %LlvmEmitter, ptr %t179, i32 0, i32 0
+  %t181 = load ptr, ptr %t180
+  ; lvalue .name
+  %t182 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t183 = load ptr, ptr %t182
+  ; lvalue .name
+  %t185 = getelementptr %ParamDecl, ptr %param, i32 0, i32 0
+  %t186 = load ptr, ptr %t185
+  call void @String_push_str(ptr %t181, ptr %t186)
+  %t188 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t189 = getelementptr %LlvmEmitter, ptr %t188, i32 0, i32 0
+  %t190 = load ptr, ptr %t189
+  %t191 = call ptr @ystr_new(ptr @.str.263)
+  %t193 = call ptr @ystr_new(ptr @.str.264)
+  %t194 = load ptr, ptr %t193
+  call void @String_push_str(ptr %t190, ptr %t194)
+  %t196 = load i64, ptr %ap
+  %t197 = add i64 %t196, 1
+  store i64 %t197, ptr %ap
+  br label %while.cond.712
+while.end.714:
+  %t198 = sext i32 0 to i64
+  store i64 %t198, ptr %s
+  br label %while.cond.715
+while.cond.715:
+  %t199 = load i64, ptr %s
+  ; lvalue .body_count
+  %t200 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 5
+  %t201 = load i64, ptr %t200
+  %t202 = icmp slt i64 %t199, %t201
+  br i1 %t202, label %while.body.716, label %while.end.717
+while.body.716:
+  %t203 = load ptr, ptr %e
+  %t204 = load ptr, ptr %arena
+  ; lvalue .body_start
+  %t205 = getelementptr %FuncDecl, ptr %fdecl, i32 0, i32 4
+  %t206 = load i64, ptr %t205
+  %t207 = load i64, ptr %s
+  %t208 = add i64 %t206, %t207
+  call void @LlvmEmitter_emit_stmt(ptr %t203, ptr %t204, i64 %t208)
+  %t210 = load i64, ptr %s
+  %t211 = add i64 %t210, 1
+  store i64 %t211, ptr %s
+  br label %while.cond.715
+while.end.717:
+  %t212 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t213 = getelementptr %LlvmEmitter, ptr %t212, i32 0, i32 0
+  %t214 = load ptr, ptr %t213
+  %t215 = call ptr @ystr_new(ptr @.str.265)
+  %t217 = call ptr @ystr_new(ptr @.str.266)
+  %t218 = load ptr, ptr %t217
+  call void @String_push_str(ptr %t214, ptr %t218)
+  ret void
+}
+
+define void @LlvmEmitter_emit_stmt(ptr %e.arg, ptr %arena.arg, i64 %stmt_idx.arg) #0 {
+entry:
+  %e = alloca ptr
+  store ptr %e.arg, ptr %e
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %stmt_idx = alloca i64
+  store i64 %stmt_idx.arg, ptr %stmt_idx
+  %stmt = alloca %Stmt
+  %var_name = alloca ptr
+  %init_idx = alloca i64
+  %val = alloca ptr
+  %target_idx = alloca i64
+  %value_idx = alloca i64
+  %target_addr = alloca ptr
+  %ret_idx = alloca i64
+  %cond_idx = alloca i64
+  %then_start = alloca i64
+  %then_count = alloca i64
+  %else_start = alloca i64
+  %else_count = alloca i64
+  %cond = alloca ptr
+  %then_lbl = alloca ptr
+  %else_lbl = alloca ptr
+  %merge_lbl = alloca ptr
+  %i = alloca i64
+  %j = alloca i64
+  %body_start = alloca i64
+  %body_count = alloca i64
+  %cond_lbl = alloca ptr
+  %body_lbl = alloca ptr
+  %end_lbl = alloca ptr
+  %k = alloca i64
+  %expr_idx = alloca i64
+  %t1 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t2 = getelementptr %AstArena, ptr %t1, i32 0, i32 1
+  %t3 = load ptr, ptr %t2
+  %t5 = load ptr, ptr %arena
+  ; lvalue .stmts
+  %t6 = getelementptr %AstArena, ptr %t5, i32 0, i32 1
+  %t7 = load ptr, ptr %t6
+  %t8 = load i64, ptr %stmt_idx
+  %t9 = call ptr @yvec_get(ptr %t7, i64 %t8)
+  %t10 = load %Stmt, ptr %t9
+  %t11 = getelementptr %Stmt, ptr null, i32 1
+  %t12 = ptrtoint ptr %t11 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %stmt, ptr align 8 %t10, i64 %t12, i1 false)
+  ; lvalue .tag
+  %t13 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
+  %t14 = load i32, ptr %t13
+  %t15 = icmp eq i32 %t14, 0
+  br i1 %t15, label %then.718, label %else.719
+then.718:
+  ; lvalue .data
+  %t16 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .Let
+  ; lvalue payload overlay ._0
+  %t18 = getelementptr [8 x i64], ptr %t16, i32 0, i32 0
+  %t19 = load i64, ptr %t18
+  %t20 = inttoptr i64 %t19 to ptr
+  store ptr %t20, ptr %var_name
+  ; lvalue .data
+  %t21 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .Let
+  ; lvalue payload overlay ._2
+  %t23 = getelementptr [8 x i64], ptr %t21, i32 0, i32 2
+  %t24 = load i64, ptr %t23
+  store i64 %t24, ptr %init_idx
+  %t25 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t26 = getelementptr %LlvmEmitter, ptr %t25, i32 0, i32 0
+  %t27 = load ptr, ptr %t26
+  %t28 = call ptr @ystr_new(ptr @.str.267)
+  %t30 = call ptr @ystr_new(ptr @.str.268)
+  %t31 = load ptr, ptr %t30
+  call void @String_push_str(ptr %t27, ptr %t31)
+  %t33 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t34 = getelementptr %LlvmEmitter, ptr %t33, i32 0, i32 0
+  %t35 = load ptr, ptr %t34
+  %t36 = load ptr, ptr %var_name
+  %t38 = load ptr, ptr %var_name
+  call void @String_push_str(ptr %t35, ptr %t38)
+  %t40 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t41 = getelementptr %LlvmEmitter, ptr %t40, i32 0, i32 0
+  %t42 = load ptr, ptr %t41
+  %t43 = call ptr @ystr_new(ptr @.str.269)
+  %t45 = call ptr @ystr_new(ptr @.str.270)
+  %t46 = load ptr, ptr %t45
+  call void @String_push_str(ptr %t42, ptr %t46)
+  %t48 = load i64, ptr %init_idx
+  %t49 = icmp sgt i64 %t48, 0
+  br i1 %t49, label %then.721, label %merge.723
+then.721:
+  %t50 = load ptr, ptr %e
+  %t51 = load ptr, ptr %arena
+  %t52 = load i64, ptr %init_idx
+  %t53 = sub i64 %t52, 1
+  %t54 = call ptr @LlvmEmitter_emit_expr(ptr %t50, ptr %t51, i64 %t53)
+  store ptr %t54, ptr %val
+  %t55 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t56 = getelementptr %LlvmEmitter, ptr %t55, i32 0, i32 0
+  %t57 = load ptr, ptr %t56
+  %t58 = call ptr @ystr_new(ptr @.str.271)
+  %t60 = call ptr @ystr_new(ptr @.str.272)
+  %t61 = load ptr, ptr %t60
+  call void @String_push_str(ptr %t57, ptr %t61)
+  %t63 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t64 = getelementptr %LlvmEmitter, ptr %t63, i32 0, i32 0
+  %t65 = load ptr, ptr %t64
+  %t66 = load ptr, ptr %val
+  %t68 = load ptr, ptr %val
+  call void @String_push_str(ptr %t65, ptr %t68)
+  %t70 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t71 = getelementptr %LlvmEmitter, ptr %t70, i32 0, i32 0
+  %t72 = load ptr, ptr %t71
+  %t73 = call ptr @ystr_new(ptr @.str.273)
+  %t75 = call ptr @ystr_new(ptr @.str.274)
+  %t76 = load ptr, ptr %t75
+  call void @String_push_str(ptr %t72, ptr %t76)
+  %t78 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t79 = getelementptr %LlvmEmitter, ptr %t78, i32 0, i32 0
+  %t80 = load ptr, ptr %t79
+  %t81 = load ptr, ptr %var_name
+  %t83 = load ptr, ptr %var_name
+  call void @String_push_str(ptr %t80, ptr %t83)
+  %t85 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t86 = getelementptr %LlvmEmitter, ptr %t85, i32 0, i32 0
+  %t87 = load ptr, ptr %t86
+  %t88 = call ptr @ystr_new(ptr @.str.275)
+  %t90 = call ptr @ystr_new(ptr @.str.276)
+  %t91 = load ptr, ptr %t90
+  call void @String_push_str(ptr %t87, ptr %t91)
+  br label %merge.723
+merge.723:
+  br label %merge.720
+else.719:
+  ; lvalue .tag
+  %t93 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
+  %t94 = load i32, ptr %t93
+  %t95 = icmp eq i32 %t94, 6
+  br i1 %t95, label %then.724, label %else.725
+then.724:
+  ; lvalue .data
+  %t96 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .Assign
+  ; lvalue payload overlay ._0
+  %t98 = getelementptr [8 x i64], ptr %t96, i32 0, i32 0
+  %t99 = load i64, ptr %t98
+  store i64 %t99, ptr %target_idx
+  ; lvalue .data
+  %t100 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .Assign
+  ; lvalue payload overlay ._1
+  %t102 = getelementptr [8 x i64], ptr %t100, i32 0, i32 1
+  %t103 = load i64, ptr %t102
+  store i64 %t103, ptr %value_idx
+  %t104 = load ptr, ptr %e
+  %t105 = load ptr, ptr %arena
+  %t106 = load i64, ptr %value_idx
+  %t107 = sub i64 %t106, 1
+  %t108 = call ptr @LlvmEmitter_emit_expr(ptr %t104, ptr %t105, i64 %t107)
+  store ptr %t108, ptr %val
+  %t109 = load ptr, ptr %e
+  %t110 = load ptr, ptr %arena
+  %t111 = load i64, ptr %target_idx
+  %t112 = sub i64 %t111, 1
+  %t113 = call ptr @LlvmEmitter_emit_lvalue(ptr %t109, ptr %t110, i64 %t112)
+  store ptr %t113, ptr %target_addr
+  %t114 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t115 = getelementptr %LlvmEmitter, ptr %t114, i32 0, i32 0
+  %t116 = load ptr, ptr %t115
+  %t117 = call ptr @ystr_new(ptr @.str.277)
+  %t119 = call ptr @ystr_new(ptr @.str.278)
+  %t120 = load ptr, ptr %t119
+  call void @String_push_str(ptr %t116, ptr %t120)
+  %t122 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t123 = getelementptr %LlvmEmitter, ptr %t122, i32 0, i32 0
+  %t124 = load ptr, ptr %t123
+  %t125 = load ptr, ptr %val
+  %t127 = load ptr, ptr %val
+  call void @String_push_str(ptr %t124, ptr %t127)
+  %t129 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t130 = getelementptr %LlvmEmitter, ptr %t129, i32 0, i32 0
+  %t131 = load ptr, ptr %t130
+  %t132 = call ptr @ystr_new(ptr @.str.279)
+  %t134 = call ptr @ystr_new(ptr @.str.280)
+  %t135 = load ptr, ptr %t134
+  call void @String_push_str(ptr %t131, ptr %t135)
+  %t137 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t138 = getelementptr %LlvmEmitter, ptr %t137, i32 0, i32 0
+  %t139 = load ptr, ptr %t138
+  %t140 = load ptr, ptr %target_addr
+  %t142 = load ptr, ptr %target_addr
+  call void @String_push_str(ptr %t139, ptr %t142)
+  %t144 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t145 = getelementptr %LlvmEmitter, ptr %t144, i32 0, i32 0
+  %t146 = load ptr, ptr %t145
+  %t147 = call ptr @ystr_new(ptr @.str.281)
+  %t149 = call ptr @ystr_new(ptr @.str.282)
+  %t150 = load ptr, ptr %t149
+  call void @String_push_str(ptr %t146, ptr %t150)
+  br label %merge.726
+else.725:
+  ; lvalue .tag
+  %t152 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
+  %t153 = load i32, ptr %t152
+  %t154 = icmp eq i32 %t153, 1
+  br i1 %t154, label %then.727, label %else.728
+then.727:
+  ; lvalue .data
+  %t155 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .Return
+  ; lvalue payload overlay ._0
+  %t157 = getelementptr [8 x i64], ptr %t155, i32 0, i32 0
+  %t158 = load i64, ptr %t157
+  store i64 %t158, ptr %ret_idx
+  %t159 = load i64, ptr %ret_idx
+  %t160 = icmp sgt i64 %t159, 0
+  br i1 %t160, label %then.730, label %else.731
+then.730:
+  %t161 = load ptr, ptr %e
+  %t162 = load ptr, ptr %arena
+  %t163 = load i64, ptr %ret_idx
+  %t164 = sub i64 %t163, 1
+  %t165 = call ptr @LlvmEmitter_emit_expr(ptr %t161, ptr %t162, i64 %t164)
+  store ptr %t165, ptr %val
+  %t166 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t167 = getelementptr %LlvmEmitter, ptr %t166, i32 0, i32 0
+  %t168 = load ptr, ptr %t167
+  %t169 = call ptr @ystr_new(ptr @.str.283)
+  %t171 = call ptr @ystr_new(ptr @.str.284)
+  %t172 = load ptr, ptr %t171
+  call void @String_push_str(ptr %t168, ptr %t172)
+  %t174 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t175 = getelementptr %LlvmEmitter, ptr %t174, i32 0, i32 0
+  %t176 = load ptr, ptr %t175
+  %t177 = load ptr, ptr %val
+  %t179 = load ptr, ptr %val
+  call void @String_push_str(ptr %t176, ptr %t179)
+  %t181 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t182 = getelementptr %LlvmEmitter, ptr %t181, i32 0, i32 0
+  %t183 = load ptr, ptr %t182
+  %t184 = call ptr @ystr_new(ptr @.str.285)
+  %t186 = call ptr @ystr_new(ptr @.str.286)
+  %t187 = load ptr, ptr %t186
+  call void @String_push_str(ptr %t183, ptr %t187)
+  br label %merge.732
+else.731:
+  %t189 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t190 = getelementptr %LlvmEmitter, ptr %t189, i32 0, i32 0
+  %t191 = load ptr, ptr %t190
+  %t192 = call ptr @ystr_new(ptr @.str.287)
+  %t194 = call ptr @ystr_new(ptr @.str.288)
+  %t195 = load ptr, ptr %t194
+  call void @String_push_str(ptr %t191, ptr %t195)
+  br label %merge.732
+merge.732:
+  br label %merge.729
+else.728:
+  ; lvalue .tag
+  %t197 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
+  %t198 = load i32, ptr %t197
+  %t199 = icmp eq i32 %t198, 2
+  br i1 %t199, label %then.733, label %else.734
+then.733:
+  ; lvalue .data
+  %t200 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .If
+  ; lvalue payload overlay ._0
+  %t202 = getelementptr [8 x i64], ptr %t200, i32 0, i32 0
+  %t203 = load i64, ptr %t202
+  store i64 %t203, ptr %cond_idx
+  ; lvalue .data
+  %t204 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .If
+  ; lvalue payload overlay ._1
+  %t206 = getelementptr [8 x i64], ptr %t204, i32 0, i32 1
+  %t207 = load i64, ptr %t206
+  store i64 %t207, ptr %then_start
+  ; lvalue .data
+  %t208 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .If
+  ; lvalue payload overlay ._2
+  %t210 = getelementptr [8 x i64], ptr %t208, i32 0, i32 2
+  %t211 = load i64, ptr %t210
+  store i64 %t211, ptr %then_count
+  ; lvalue .data
+  %t212 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .If
+  ; lvalue payload overlay ._3
+  %t214 = getelementptr [8 x i64], ptr %t212, i32 0, i32 3
+  %t215 = load i64, ptr %t214
+  store i64 %t215, ptr %else_start
+  ; lvalue .data
+  %t216 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .If
+  ; lvalue payload overlay ._4
+  %t218 = getelementptr [8 x i64], ptr %t216, i32 0, i32 4
+  %t219 = load i64, ptr %t218
+  store i64 %t219, ptr %else_count
+  %t220 = load ptr, ptr %e
+  %t221 = load ptr, ptr %arena
+  %t222 = load i64, ptr %cond_idx
+  %t223 = sub i64 %t222, 1
+  %t224 = call ptr @LlvmEmitter_emit_expr(ptr %t220, ptr %t221, i64 %t223)
+  store ptr %t224, ptr %cond
+  %t225 = load ptr, ptr %e
+  %t226 = call ptr @ystr_new(ptr @.str.289)
+  %t228 = call ptr @ystr_new(ptr @.str.290)
+  %t229 = call ptr @LlvmEmitter_fresh_label(ptr %t225, ptr %t228)
+  store ptr %t229, ptr %then_lbl
+  %t230 = load ptr, ptr %e
+  %t231 = call ptr @ystr_new(ptr @.str.291)
+  %t233 = call ptr @ystr_new(ptr @.str.292)
+  %t234 = call ptr @LlvmEmitter_fresh_label(ptr %t230, ptr %t233)
+  store ptr %t234, ptr %else_lbl
+  %t235 = load ptr, ptr %e
+  %t236 = call ptr @ystr_new(ptr @.str.293)
+  %t238 = call ptr @ystr_new(ptr @.str.294)
+  %t239 = call ptr @LlvmEmitter_fresh_label(ptr %t235, ptr %t238)
+  store ptr %t239, ptr %merge_lbl
+  %t240 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t241 = getelementptr %LlvmEmitter, ptr %t240, i32 0, i32 0
+  %t242 = load ptr, ptr %t241
+  %t243 = call ptr @ystr_new(ptr @.str.295)
+  %t245 = call ptr @ystr_new(ptr @.str.296)
+  %t246 = load ptr, ptr %t245
+  call void @String_push_str(ptr %t242, ptr %t246)
+  %t248 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t249 = getelementptr %LlvmEmitter, ptr %t248, i32 0, i32 0
+  %t250 = load ptr, ptr %t249
+  %t251 = load ptr, ptr %cond
+  %t253 = load ptr, ptr %cond
+  call void @String_push_str(ptr %t250, ptr %t253)
+  %t255 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t256 = getelementptr %LlvmEmitter, ptr %t255, i32 0, i32 0
+  %t257 = load ptr, ptr %t256
+  %t258 = call ptr @ystr_new(ptr @.str.297)
+  %t260 = call ptr @ystr_new(ptr @.str.298)
+  %t261 = load ptr, ptr %t260
+  call void @String_push_str(ptr %t257, ptr %t261)
+  %t263 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t264 = getelementptr %LlvmEmitter, ptr %t263, i32 0, i32 0
+  %t265 = load ptr, ptr %t264
+  %t266 = load ptr, ptr %then_lbl
+  %t268 = load ptr, ptr %then_lbl
+  call void @String_push_str(ptr %t265, ptr %t268)
+  %t270 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t271 = getelementptr %LlvmEmitter, ptr %t270, i32 0, i32 0
+  %t272 = load ptr, ptr %t271
+  %t273 = call ptr @ystr_new(ptr @.str.299)
+  %t275 = call ptr @ystr_new(ptr @.str.300)
+  %t276 = load ptr, ptr %t275
+  call void @String_push_str(ptr %t272, ptr %t276)
+  %t278 = load i64, ptr %else_count
+  %t279 = icmp sgt i64 %t278, 0
+  br i1 %t279, label %then.736, label %else.737
+then.736:
+  %t280 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t281 = getelementptr %LlvmEmitter, ptr %t280, i32 0, i32 0
+  %t282 = load ptr, ptr %t281
+  %t283 = load ptr, ptr %else_lbl
+  %t285 = load ptr, ptr %else_lbl
+  call void @String_push_str(ptr %t282, ptr %t285)
+  br label %merge.738
+else.737:
+  %t287 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t288 = getelementptr %LlvmEmitter, ptr %t287, i32 0, i32 0
+  %t289 = load ptr, ptr %t288
+  %t290 = load ptr, ptr %merge_lbl
+  %t292 = load ptr, ptr %merge_lbl
+  call void @String_push_str(ptr %t289, ptr %t292)
+  br label %merge.738
+merge.738:
+  %t294 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t295 = getelementptr %LlvmEmitter, ptr %t294, i32 0, i32 0
+  %t296 = load ptr, ptr %t295
+  %t297 = call ptr @ystr_new(ptr @.str.301)
+  %t299 = call ptr @ystr_new(ptr @.str.302)
+  %t300 = load ptr, ptr %t299
+  call void @String_push_str(ptr %t296, ptr %t300)
+  %t302 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t303 = getelementptr %LlvmEmitter, ptr %t302, i32 0, i32 0
+  %t304 = load ptr, ptr %t303
+  %t305 = load ptr, ptr %then_lbl
+  %t307 = load ptr, ptr %then_lbl
+  call void @String_push_str(ptr %t304, ptr %t307)
+  %t309 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t310 = getelementptr %LlvmEmitter, ptr %t309, i32 0, i32 0
+  %t311 = load ptr, ptr %t310
+  %t312 = call ptr @ystr_new(ptr @.str.303)
+  %t314 = call ptr @ystr_new(ptr @.str.304)
+  %t315 = load ptr, ptr %t314
+  call void @String_push_str(ptr %t311, ptr %t315)
+  %t317 = sext i32 0 to i64
+  store i64 %t317, ptr %i
+  br label %while.cond.739
+while.cond.739:
+  %t318 = load i64, ptr %i
+  %t319 = load i64, ptr %then_count
+  %t320 = icmp slt i64 %t318, %t319
+  br i1 %t320, label %while.body.740, label %while.end.741
+while.body.740:
+  %t321 = load ptr, ptr %e
+  %t322 = load ptr, ptr %arena
+  %t323 = load i64, ptr %then_start
+  %t324 = load i64, ptr %i
+  %t325 = add i64 %t323, %t324
+  call void @LlvmEmitter_emit_stmt(ptr %t321, ptr %t322, i64 %t325)
+  %t327 = load i64, ptr %i
+  %t328 = add i64 %t327, 1
+  store i64 %t328, ptr %i
+  br label %while.cond.739
+while.end.741:
+  %t329 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t330 = getelementptr %LlvmEmitter, ptr %t329, i32 0, i32 0
+  %t331 = load ptr, ptr %t330
+  %t332 = call ptr @ystr_new(ptr @.str.305)
+  %t334 = call ptr @ystr_new(ptr @.str.306)
+  %t335 = load ptr, ptr %t334
+  call void @String_push_str(ptr %t331, ptr %t335)
+  %t337 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t338 = getelementptr %LlvmEmitter, ptr %t337, i32 0, i32 0
+  %t339 = load ptr, ptr %t338
+  %t340 = load ptr, ptr %merge_lbl
+  %t342 = load ptr, ptr %merge_lbl
+  call void @String_push_str(ptr %t339, ptr %t342)
+  %t344 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t345 = getelementptr %LlvmEmitter, ptr %t344, i32 0, i32 0
+  %t346 = load ptr, ptr %t345
+  %t347 = call ptr @ystr_new(ptr @.str.307)
+  %t349 = call ptr @ystr_new(ptr @.str.308)
+  %t350 = load ptr, ptr %t349
+  call void @String_push_str(ptr %t346, ptr %t350)
+  %t352 = load i64, ptr %else_count
+  %t353 = icmp sgt i64 %t352, 0
+  br i1 %t353, label %then.742, label %merge.744
+then.742:
+  %t354 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t355 = getelementptr %LlvmEmitter, ptr %t354, i32 0, i32 0
+  %t356 = load ptr, ptr %t355
+  %t357 = load ptr, ptr %else_lbl
+  %t359 = load ptr, ptr %else_lbl
+  call void @String_push_str(ptr %t356, ptr %t359)
+  %t361 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t362 = getelementptr %LlvmEmitter, ptr %t361, i32 0, i32 0
+  %t363 = load ptr, ptr %t362
+  %t364 = call ptr @ystr_new(ptr @.str.309)
+  %t366 = call ptr @ystr_new(ptr @.str.310)
+  %t367 = load ptr, ptr %t366
+  call void @String_push_str(ptr %t363, ptr %t367)
+  %t369 = sext i32 0 to i64
+  store i64 %t369, ptr %j
+  br label %while.cond.745
+while.cond.745:
+  %t370 = load i64, ptr %j
+  %t371 = load i64, ptr %else_count
+  %t372 = icmp slt i64 %t370, %t371
+  br i1 %t372, label %while.body.746, label %while.end.747
+while.body.746:
+  %t373 = load ptr, ptr %e
+  %t374 = load ptr, ptr %arena
+  %t375 = load i64, ptr %else_start
+  %t376 = load i64, ptr %j
+  %t377 = add i64 %t375, %t376
+  call void @LlvmEmitter_emit_stmt(ptr %t373, ptr %t374, i64 %t377)
+  %t379 = load i64, ptr %j
+  %t380 = add i64 %t379, 1
+  store i64 %t380, ptr %j
+  br label %while.cond.745
+while.end.747:
+  %t381 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t382 = getelementptr %LlvmEmitter, ptr %t381, i32 0, i32 0
+  %t383 = load ptr, ptr %t382
+  %t384 = call ptr @ystr_new(ptr @.str.311)
+  %t386 = call ptr @ystr_new(ptr @.str.312)
+  %t387 = load ptr, ptr %t386
+  call void @String_push_str(ptr %t383, ptr %t387)
+  %t389 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t390 = getelementptr %LlvmEmitter, ptr %t389, i32 0, i32 0
+  %t391 = load ptr, ptr %t390
+  %t392 = load ptr, ptr %merge_lbl
+  %t394 = load ptr, ptr %merge_lbl
+  call void @String_push_str(ptr %t391, ptr %t394)
+  %t396 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t397 = getelementptr %LlvmEmitter, ptr %t396, i32 0, i32 0
+  %t398 = load ptr, ptr %t397
+  %t399 = call ptr @ystr_new(ptr @.str.313)
+  %t401 = call ptr @ystr_new(ptr @.str.314)
+  %t402 = load ptr, ptr %t401
+  call void @String_push_str(ptr %t398, ptr %t402)
+  br label %merge.744
+merge.744:
+  %t404 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t405 = getelementptr %LlvmEmitter, ptr %t404, i32 0, i32 0
+  %t406 = load ptr, ptr %t405
+  %t407 = load ptr, ptr %merge_lbl
+  %t409 = load ptr, ptr %merge_lbl
+  call void @String_push_str(ptr %t406, ptr %t409)
+  %t411 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t412 = getelementptr %LlvmEmitter, ptr %t411, i32 0, i32 0
+  %t413 = load ptr, ptr %t412
+  %t414 = call ptr @ystr_new(ptr @.str.315)
+  %t416 = call ptr @ystr_new(ptr @.str.316)
+  %t417 = load ptr, ptr %t416
+  call void @String_push_str(ptr %t413, ptr %t417)
+  br label %merge.735
+else.734:
+  ; lvalue .tag
+  %t419 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
+  %t420 = load i32, ptr %t419
+  %t421 = icmp eq i32 %t420, 3
+  br i1 %t421, label %then.748, label %else.749
+then.748:
+  ; lvalue .data
+  %t422 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .While
+  ; lvalue payload overlay ._0
+  %t424 = getelementptr [8 x i64], ptr %t422, i32 0, i32 0
+  %t425 = load i64, ptr %t424
+  store i64 %t425, ptr %cond_idx
+  ; lvalue .data
+  %t426 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .While
+  ; lvalue payload overlay ._1
+  %t428 = getelementptr [8 x i64], ptr %t426, i32 0, i32 1
+  %t429 = load i64, ptr %t428
+  store i64 %t429, ptr %body_start
+  ; lvalue .data
+  %t430 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .While
+  ; lvalue payload overlay ._2
+  %t432 = getelementptr [8 x i64], ptr %t430, i32 0, i32 2
+  %t433 = load i64, ptr %t432
+  store i64 %t433, ptr %body_count
+  %t434 = load ptr, ptr %e
+  %t435 = call ptr @ystr_new(ptr @.str.317)
+  %t437 = call ptr @ystr_new(ptr @.str.318)
+  %t438 = call ptr @LlvmEmitter_fresh_label(ptr %t434, ptr %t437)
+  store ptr %t438, ptr %cond_lbl
+  %t439 = load ptr, ptr %e
+  %t440 = call ptr @ystr_new(ptr @.str.319)
+  %t442 = call ptr @ystr_new(ptr @.str.320)
+  %t443 = call ptr @LlvmEmitter_fresh_label(ptr %t439, ptr %t442)
+  store ptr %t443, ptr %body_lbl
+  %t444 = load ptr, ptr %e
+  %t445 = call ptr @ystr_new(ptr @.str.321)
+  %t447 = call ptr @ystr_new(ptr @.str.322)
+  %t448 = call ptr @LlvmEmitter_fresh_label(ptr %t444, ptr %t447)
+  store ptr %t448, ptr %end_lbl
+  %t449 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t450 = getelementptr %LlvmEmitter, ptr %t449, i32 0, i32 0
+  %t451 = load ptr, ptr %t450
+  %t452 = call ptr @ystr_new(ptr @.str.323)
+  %t454 = call ptr @ystr_new(ptr @.str.324)
+  %t455 = load ptr, ptr %t454
+  call void @String_push_str(ptr %t451, ptr %t455)
+  %t457 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t458 = getelementptr %LlvmEmitter, ptr %t457, i32 0, i32 0
+  %t459 = load ptr, ptr %t458
+  %t460 = load ptr, ptr %cond_lbl
+  %t462 = load ptr, ptr %cond_lbl
+  call void @String_push_str(ptr %t459, ptr %t462)
+  %t464 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t465 = getelementptr %LlvmEmitter, ptr %t464, i32 0, i32 0
+  %t466 = load ptr, ptr %t465
+  %t467 = call ptr @ystr_new(ptr @.str.325)
+  %t469 = call ptr @ystr_new(ptr @.str.326)
+  %t470 = load ptr, ptr %t469
+  call void @String_push_str(ptr %t466, ptr %t470)
+  %t472 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t473 = getelementptr %LlvmEmitter, ptr %t472, i32 0, i32 0
+  %t474 = load ptr, ptr %t473
+  %t475 = load ptr, ptr %cond_lbl
+  %t477 = load ptr, ptr %cond_lbl
+  call void @String_push_str(ptr %t474, ptr %t477)
+  %t479 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t480 = getelementptr %LlvmEmitter, ptr %t479, i32 0, i32 0
+  %t481 = load ptr, ptr %t480
+  %t482 = call ptr @ystr_new(ptr @.str.327)
+  %t484 = call ptr @ystr_new(ptr @.str.328)
+  %t485 = load ptr, ptr %t484
+  call void @String_push_str(ptr %t481, ptr %t485)
+  %t487 = load ptr, ptr %e
+  %t488 = load ptr, ptr %arena
+  %t489 = load i64, ptr %cond_idx
+  %t490 = sub i64 %t489, 1
+  %t491 = call ptr @LlvmEmitter_emit_expr(ptr %t487, ptr %t488, i64 %t490)
+  store ptr %t491, ptr %cond
+  %t492 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t493 = getelementptr %LlvmEmitter, ptr %t492, i32 0, i32 0
+  %t494 = load ptr, ptr %t493
+  %t495 = call ptr @ystr_new(ptr @.str.329)
+  %t497 = call ptr @ystr_new(ptr @.str.330)
+  %t498 = load ptr, ptr %t497
+  call void @String_push_str(ptr %t494, ptr %t498)
+  %t500 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t501 = getelementptr %LlvmEmitter, ptr %t500, i32 0, i32 0
+  %t502 = load ptr, ptr %t501
+  %t503 = load ptr, ptr %cond
+  %t505 = load ptr, ptr %cond
+  call void @String_push_str(ptr %t502, ptr %t505)
+  %t507 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t508 = getelementptr %LlvmEmitter, ptr %t507, i32 0, i32 0
+  %t509 = load ptr, ptr %t508
+  %t510 = call ptr @ystr_new(ptr @.str.331)
+  %t512 = call ptr @ystr_new(ptr @.str.332)
+  %t513 = load ptr, ptr %t512
+  call void @String_push_str(ptr %t509, ptr %t513)
+  %t515 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t516 = getelementptr %LlvmEmitter, ptr %t515, i32 0, i32 0
+  %t517 = load ptr, ptr %t516
+  %t518 = load ptr, ptr %body_lbl
+  %t520 = load ptr, ptr %body_lbl
+  call void @String_push_str(ptr %t517, ptr %t520)
+  %t522 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t523 = getelementptr %LlvmEmitter, ptr %t522, i32 0, i32 0
+  %t524 = load ptr, ptr %t523
+  %t525 = call ptr @ystr_new(ptr @.str.333)
+  %t527 = call ptr @ystr_new(ptr @.str.334)
+  %t528 = load ptr, ptr %t527
+  call void @String_push_str(ptr %t524, ptr %t528)
+  %t530 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t531 = getelementptr %LlvmEmitter, ptr %t530, i32 0, i32 0
+  %t532 = load ptr, ptr %t531
+  %t533 = load ptr, ptr %end_lbl
+  %t535 = load ptr, ptr %end_lbl
+  call void @String_push_str(ptr %t532, ptr %t535)
+  %t537 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t538 = getelementptr %LlvmEmitter, ptr %t537, i32 0, i32 0
+  %t539 = load ptr, ptr %t538
+  %t540 = call ptr @ystr_new(ptr @.str.335)
+  %t542 = call ptr @ystr_new(ptr @.str.336)
+  %t543 = load ptr, ptr %t542
+  call void @String_push_str(ptr %t539, ptr %t543)
+  %t545 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t546 = getelementptr %LlvmEmitter, ptr %t545, i32 0, i32 0
+  %t547 = load ptr, ptr %t546
+  %t548 = load ptr, ptr %body_lbl
+  %t550 = load ptr, ptr %body_lbl
+  call void @String_push_str(ptr %t547, ptr %t550)
+  %t552 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t553 = getelementptr %LlvmEmitter, ptr %t552, i32 0, i32 0
+  %t554 = load ptr, ptr %t553
+  %t555 = call ptr @ystr_new(ptr @.str.337)
+  %t557 = call ptr @ystr_new(ptr @.str.338)
+  %t558 = load ptr, ptr %t557
+  call void @String_push_str(ptr %t554, ptr %t558)
+  %t560 = sext i32 0 to i64
+  store i64 %t560, ptr %k
+  br label %while.cond.751
+while.cond.751:
+  %t561 = load i64, ptr %k
+  %t562 = load i64, ptr %body_count
+  %t563 = icmp slt i64 %t561, %t562
+  br i1 %t563, label %while.body.752, label %while.end.753
+while.body.752:
+  %t564 = load ptr, ptr %e
+  %t565 = load ptr, ptr %arena
+  %t566 = load i64, ptr %body_start
+  %t567 = load i64, ptr %k
+  %t568 = add i64 %t566, %t567
+  call void @LlvmEmitter_emit_stmt(ptr %t564, ptr %t565, i64 %t568)
+  %t570 = load i64, ptr %k
+  %t571 = add i64 %t570, 1
+  store i64 %t571, ptr %k
+  br label %while.cond.751
+while.end.753:
+  %t572 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t573 = getelementptr %LlvmEmitter, ptr %t572, i32 0, i32 0
+  %t574 = load ptr, ptr %t573
+  %t575 = call ptr @ystr_new(ptr @.str.339)
+  %t577 = call ptr @ystr_new(ptr @.str.340)
+  %t578 = load ptr, ptr %t577
+  call void @String_push_str(ptr %t574, ptr %t578)
+  %t580 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t581 = getelementptr %LlvmEmitter, ptr %t580, i32 0, i32 0
+  %t582 = load ptr, ptr %t581
+  %t583 = load ptr, ptr %cond_lbl
+  %t585 = load ptr, ptr %cond_lbl
+  call void @String_push_str(ptr %t582, ptr %t585)
+  %t587 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t588 = getelementptr %LlvmEmitter, ptr %t587, i32 0, i32 0
+  %t589 = load ptr, ptr %t588
+  %t590 = call ptr @ystr_new(ptr @.str.341)
+  %t592 = call ptr @ystr_new(ptr @.str.342)
+  %t593 = load ptr, ptr %t592
+  call void @String_push_str(ptr %t589, ptr %t593)
+  %t595 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t596 = getelementptr %LlvmEmitter, ptr %t595, i32 0, i32 0
+  %t597 = load ptr, ptr %t596
+  %t598 = load ptr, ptr %end_lbl
+  %t600 = load ptr, ptr %end_lbl
+  call void @String_push_str(ptr %t597, ptr %t600)
+  %t602 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t603 = getelementptr %LlvmEmitter, ptr %t602, i32 0, i32 0
+  %t604 = load ptr, ptr %t603
+  %t605 = call ptr @ystr_new(ptr @.str.343)
+  %t607 = call ptr @ystr_new(ptr @.str.344)
+  %t608 = load ptr, ptr %t607
+  call void @String_push_str(ptr %t604, ptr %t608)
+  br label %merge.750
+else.749:
+  ; lvalue .tag
+  %t610 = getelementptr %Stmt, ptr %stmt, i32 0, i32 0
+  %t611 = load i32, ptr %t610
+  %t612 = icmp eq i32 %t611, 8
+  br i1 %t612, label %then.754, label %merge.756
+then.754:
+  ; lvalue .data
+  %t613 = getelementptr %Stmt, ptr %stmt, i32 0, i32 1
+  ; lvalue payload overlay .ExprStmt
+  ; lvalue payload overlay ._0
+  %t615 = getelementptr [8 x i64], ptr %t613, i32 0, i32 0
+  %t616 = load i64, ptr %t615
+  store i64 %t616, ptr %expr_idx
+  %t617 = load ptr, ptr %e
+  %t618 = load ptr, ptr %arena
+  %t619 = load i64, ptr %expr_idx
+  %t620 = sub i64 %t619, 1
+  %t621 = call ptr @LlvmEmitter_emit_expr(ptr %t617, ptr %t618, i64 %t620)
+  br label %merge.756
+merge.756:
+  br label %merge.750
+merge.750:
+  br label %merge.735
+merge.735:
+  br label %merge.729
+merge.729:
+  br label %merge.726
+merge.726:
+  br label %merge.720
+merge.720:
+  ret void
+}
+
+define ptr @LlvmEmitter_emit_lvalue(ptr %e.arg, ptr %arena.arg, i64 %expr_idx.arg) #0 {
+entry:
+  %e = alloca ptr
+  store ptr %e.arg, ptr %e
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %expr_idx = alloca i64
+  store i64 %expr_idx.arg, ptr %expr_idx
+  %expr = alloca %Expr
+  %res = alloca ptr
+  %t1 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t2 = getelementptr %AstArena, ptr %t1, i32 0, i32 0
+  %t3 = load ptr, ptr %t2
+  %t5 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t6 = getelementptr %AstArena, ptr %t5, i32 0, i32 0
+  %t7 = load ptr, ptr %t6
+  %t8 = load i64, ptr %expr_idx
+  %t9 = call ptr @yvec_get(ptr %t7, i64 %t8)
+  %t10 = load %Expr, ptr %t9
+  %t11 = getelementptr %Expr, ptr null, i32 1
+  %t12 = ptrtoint ptr %t11 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t10, i64 %t12, i1 false)
+  ; lvalue .tag
+  %t13 = getelementptr %Expr, ptr %expr, i32 0, i32 0
+  %t14 = load i32, ptr %t13
+  %t15 = icmp eq i32 %t14, 0
+  br i1 %t15, label %then.757, label %merge.759
+then.757:
+  %t16 = call ptr @ystr_new(ptr @.str.345)
+  store ptr %t16, ptr %res
+  %t17 = load ptr, ptr %res
+  ; lvalue .data
+  %t18 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .Ident
+  ; lvalue payload overlay ._0
+  %t20 = getelementptr [8 x i64], ptr %t18, i32 0, i32 0
+  %t21 = load i64, ptr %t20
+  ; lvalue .data
+  %t23 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .Ident
+  ; lvalue payload overlay ._0
+  %t25 = getelementptr [8 x i64], ptr %t23, i32 0, i32 0
+  call void @String_push_str(ptr %t17, ptr %t25)
+  %t27 = load ptr, ptr %res
+  ret ptr %t27
+merge.759:
+  %t28 = load ptr, ptr %e
+  %t29 = load ptr, ptr %arena
+  %t30 = load i64, ptr %expr_idx
+  %t31 = call ptr @LlvmEmitter_emit_expr(ptr %t28, ptr %t29, i64 %t30)
+  ret ptr %t31
+}
+
+define ptr @LlvmEmitter_emit_expr(ptr %e.arg, ptr %arena.arg, i64 %expr_idx.arg) #0 {
+entry:
+  %e = alloca ptr
+  store ptr %e.arg, ptr %e
+  %arena = alloca ptr
+  store ptr %arena.arg, ptr %arena
+  %expr_idx = alloca i64
+  store i64 %expr_idx.arg, ptr %expr_idx
+  %expr = alloca %Expr
+  %tmp = alloca ptr
+  %lhs = alloca ptr
+  %rhs = alloca ptr
+  %op = alloca i32
+  %func_idx = alloca i64
+  %func_expr = alloca %Expr
+  %func_name = alloca ptr
+  %args_start = alloca i64
+  %arg_count = alloca i64
+  %i = alloca i64
+  %arg_idx = alloca i64
+  %arg_val = alloca ptr
+  %t1 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t2 = getelementptr %AstArena, ptr %t1, i32 0, i32 0
+  %t3 = load ptr, ptr %t2
+  %t5 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t6 = getelementptr %AstArena, ptr %t5, i32 0, i32 0
+  %t7 = load ptr, ptr %t6
+  %t8 = load i64, ptr %expr_idx
+  %t9 = call ptr @yvec_get(ptr %t7, i64 %t8)
+  %t10 = load %Expr, ptr %t9
+  %t11 = getelementptr %Expr, ptr null, i32 1
+  %t12 = ptrtoint ptr %t11 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %expr, ptr align 8 %t10, i64 %t12, i1 false)
+  ; lvalue .tag
+  %t13 = getelementptr %Expr, ptr %expr, i32 0, i32 0
+  %t14 = load i32, ptr %t13
+  %t15 = icmp eq i32 %t14, 1
+  br i1 %t15, label %then.760, label %else.761
+then.760:
+  ; lvalue .data
+  %t16 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .IntLit
+  ; lvalue payload overlay ._0
+  %t18 = getelementptr [8 x i64], ptr %t16, i32 0, i32 0
+  %t19 = load i64, ptr %t18
+  %t20 = call ptr @LlvmEmitter_int_to_str(i64 %t19)
+  ret ptr %t20
+else.761:
+  ; lvalue .tag
+  %t21 = getelementptr %Expr, ptr %expr, i32 0, i32 0
+  %t22 = load i32, ptr %t21
+  %t23 = icmp eq i32 %t22, 0
+  br i1 %t23, label %then.763, label %else.764
+then.763:
+  %t24 = load ptr, ptr %e
+  %t25 = call ptr @LlvmEmitter_fresh_tmp(ptr %t24)
+  store ptr %t25, ptr %tmp
+  %t26 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t27 = getelementptr %LlvmEmitter, ptr %t26, i32 0, i32 0
+  %t28 = load ptr, ptr %t27
+  %t29 = call ptr @ystr_new(ptr @.str.346)
+  %t31 = call ptr @ystr_new(ptr @.str.347)
+  %t32 = load ptr, ptr %t31
+  call void @String_push_str(ptr %t28, ptr %t32)
+  %t34 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t35 = getelementptr %LlvmEmitter, ptr %t34, i32 0, i32 0
+  %t36 = load ptr, ptr %t35
+  %t37 = load ptr, ptr %tmp
+  %t39 = load ptr, ptr %tmp
+  call void @String_push_str(ptr %t36, ptr %t39)
+  %t41 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t42 = getelementptr %LlvmEmitter, ptr %t41, i32 0, i32 0
+  %t43 = load ptr, ptr %t42
+  %t44 = call ptr @ystr_new(ptr @.str.348)
+  %t46 = call ptr @ystr_new(ptr @.str.349)
+  %t47 = load ptr, ptr %t46
+  call void @String_push_str(ptr %t43, ptr %t47)
+  %t49 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t50 = getelementptr %LlvmEmitter, ptr %t49, i32 0, i32 0
+  %t51 = load ptr, ptr %t50
+  ; lvalue .data
+  %t52 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .Ident
+  ; lvalue payload overlay ._0
+  %t54 = getelementptr [8 x i64], ptr %t52, i32 0, i32 0
+  %t55 = load i64, ptr %t54
+  ; lvalue .data
+  %t57 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .Ident
+  ; lvalue payload overlay ._0
+  %t59 = getelementptr [8 x i64], ptr %t57, i32 0, i32 0
+  call void @String_push_str(ptr %t51, ptr %t59)
+  %t61 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t62 = getelementptr %LlvmEmitter, ptr %t61, i32 0, i32 0
+  %t63 = load ptr, ptr %t62
+  %t64 = call ptr @ystr_new(ptr @.str.350)
+  %t66 = call ptr @ystr_new(ptr @.str.351)
+  %t67 = load ptr, ptr %t66
+  call void @String_push_str(ptr %t63, ptr %t67)
+  %t69 = load ptr, ptr %tmp
+  ret ptr %t69
+else.764:
+  ; lvalue .tag
+  %t70 = getelementptr %Expr, ptr %expr, i32 0, i32 0
+  %t71 = load i32, ptr %t70
+  %t72 = icmp eq i32 %t71, 11
+  br i1 %t72, label %then.766, label %else.767
+then.766:
+  %t73 = load ptr, ptr %e
+  %t74 = load ptr, ptr %arena
+  ; lvalue .data
+  %t75 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .BinaryExpr
+  ; lvalue payload overlay ._0
+  %t77 = getelementptr [8 x i64], ptr %t75, i32 0, i32 0
+  %t78 = load i64, ptr %t77
+  %t79 = sub i64 %t78, 1
+  %t80 = call ptr @LlvmEmitter_emit_expr(ptr %t73, ptr %t74, i64 %t79)
+  store ptr %t80, ptr %lhs
+  %t81 = load ptr, ptr %e
+  %t82 = load ptr, ptr %arena
+  ; lvalue .data
+  %t83 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .BinaryExpr
+  ; lvalue payload overlay ._2
+  %t85 = getelementptr [8 x i64], ptr %t83, i32 0, i32 2
+  %t86 = load i64, ptr %t85
+  %t87 = sub i64 %t86, 1
+  %t88 = call ptr @LlvmEmitter_emit_expr(ptr %t81, ptr %t82, i64 %t87)
+  store ptr %t88, ptr %rhs
+  ; lvalue .data
+  %t89 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .BinaryExpr
+  ; lvalue payload overlay ._1
+  %t91 = getelementptr [8 x i64], ptr %t89, i32 0, i32 1
+  %t92 = load i64, ptr %t91
+  %t93 = trunc i64 %t92 to i32
+  store i32 %t93, ptr %op
+  %t94 = load ptr, ptr %e
+  %t95 = call ptr @LlvmEmitter_fresh_tmp(ptr %t94)
+  store ptr %t95, ptr %tmp
+  %t96 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t97 = getelementptr %LlvmEmitter, ptr %t96, i32 0, i32 0
+  %t98 = load ptr, ptr %t97
+  %t99 = call ptr @ystr_new(ptr @.str.352)
+  %t101 = call ptr @ystr_new(ptr @.str.353)
+  %t102 = load ptr, ptr %t101
+  call void @String_push_str(ptr %t98, ptr %t102)
+  %t104 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t105 = getelementptr %LlvmEmitter, ptr %t104, i32 0, i32 0
+  %t106 = load ptr, ptr %t105
+  %t107 = load ptr, ptr %tmp
+  %t109 = load ptr, ptr %tmp
+  call void @String_push_str(ptr %t106, ptr %t109)
+  %t111 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t112 = getelementptr %LlvmEmitter, ptr %t111, i32 0, i32 0
+  %t113 = load ptr, ptr %t112
+  %t114 = call ptr @ystr_new(ptr @.str.354)
+  %t116 = call ptr @ystr_new(ptr @.str.355)
+  %t117 = load ptr, ptr %t116
+  call void @String_push_str(ptr %t113, ptr %t117)
+  %t119 = load i32, ptr %op
+  %t120 = icmp eq i32 %t119, 0
+  br i1 %t120, label %then.769, label %else.770
+then.769:
+  %t121 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t122 = getelementptr %LlvmEmitter, ptr %t121, i32 0, i32 0
+  %t123 = load ptr, ptr %t122
+  %t124 = call ptr @ystr_new(ptr @.str.356)
+  %t126 = call ptr @ystr_new(ptr @.str.357)
+  %t127 = load ptr, ptr %t126
+  call void @String_push_str(ptr %t123, ptr %t127)
+  br label %merge.771
+else.770:
+  %t129 = load i32, ptr %op
+  %t130 = icmp eq i32 %t129, 1
+  br i1 %t130, label %then.772, label %else.773
+then.772:
+  %t131 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t132 = getelementptr %LlvmEmitter, ptr %t131, i32 0, i32 0
+  %t133 = load ptr, ptr %t132
+  %t134 = call ptr @ystr_new(ptr @.str.358)
+  %t136 = call ptr @ystr_new(ptr @.str.359)
+  %t137 = load ptr, ptr %t136
+  call void @String_push_str(ptr %t133, ptr %t137)
+  br label %merge.774
+else.773:
+  %t139 = load i32, ptr %op
+  %t140 = icmp eq i32 %t139, 2
+  br i1 %t140, label %then.775, label %else.776
+then.775:
+  %t141 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t142 = getelementptr %LlvmEmitter, ptr %t141, i32 0, i32 0
+  %t143 = load ptr, ptr %t142
+  %t144 = call ptr @ystr_new(ptr @.str.360)
+  %t146 = call ptr @ystr_new(ptr @.str.361)
+  %t147 = load ptr, ptr %t146
+  call void @String_push_str(ptr %t143, ptr %t147)
+  br label %merge.777
+else.776:
+  %t149 = load i32, ptr %op
+  %t150 = icmp eq i32 %t149, 3
+  br i1 %t150, label %then.778, label %else.779
+then.778:
+  %t151 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t152 = getelementptr %LlvmEmitter, ptr %t151, i32 0, i32 0
+  %t153 = load ptr, ptr %t152
+  %t154 = call ptr @ystr_new(ptr @.str.362)
+  %t156 = call ptr @ystr_new(ptr @.str.363)
+  %t157 = load ptr, ptr %t156
+  call void @String_push_str(ptr %t153, ptr %t157)
+  br label %merge.780
+else.779:
+  %t159 = load i32, ptr %op
+  %t160 = icmp eq i32 %t159, 5
+  br i1 %t160, label %then.781, label %else.782
+then.781:
+  %t161 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t162 = getelementptr %LlvmEmitter, ptr %t161, i32 0, i32 0
+  %t163 = load ptr, ptr %t162
+  %t164 = call ptr @ystr_new(ptr @.str.364)
+  %t166 = call ptr @ystr_new(ptr @.str.365)
+  %t167 = load ptr, ptr %t166
+  call void @String_push_str(ptr %t163, ptr %t167)
+  br label %merge.783
+else.782:
+  %t169 = load i32, ptr %op
+  %t170 = icmp eq i32 %t169, 6
+  br i1 %t170, label %then.784, label %else.785
+then.784:
+  %t171 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t172 = getelementptr %LlvmEmitter, ptr %t171, i32 0, i32 0
+  %t173 = load ptr, ptr %t172
+  %t174 = call ptr @ystr_new(ptr @.str.366)
+  %t176 = call ptr @ystr_new(ptr @.str.367)
+  %t177 = load ptr, ptr %t176
+  call void @String_push_str(ptr %t173, ptr %t177)
+  br label %merge.786
+else.785:
+  %t179 = load i32, ptr %op
+  %t180 = icmp eq i32 %t179, 7
+  br i1 %t180, label %then.787, label %else.788
+then.787:
+  %t181 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t182 = getelementptr %LlvmEmitter, ptr %t181, i32 0, i32 0
+  %t183 = load ptr, ptr %t182
+  %t184 = call ptr @ystr_new(ptr @.str.368)
+  %t186 = call ptr @ystr_new(ptr @.str.369)
+  %t187 = load ptr, ptr %t186
+  call void @String_push_str(ptr %t183, ptr %t187)
+  br label %merge.789
+else.788:
+  %t189 = load i32, ptr %op
+  %t190 = icmp eq i32 %t189, 8
+  br i1 %t190, label %then.790, label %else.791
+then.790:
+  %t191 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t192 = getelementptr %LlvmEmitter, ptr %t191, i32 0, i32 0
+  %t193 = load ptr, ptr %t192
+  %t194 = call ptr @ystr_new(ptr @.str.370)
+  %t196 = call ptr @ystr_new(ptr @.str.371)
+  %t197 = load ptr, ptr %t196
+  call void @String_push_str(ptr %t193, ptr %t197)
+  br label %merge.792
+else.791:
+  %t199 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t200 = getelementptr %LlvmEmitter, ptr %t199, i32 0, i32 0
+  %t201 = load ptr, ptr %t200
+  %t202 = call ptr @ystr_new(ptr @.str.372)
+  %t204 = call ptr @ystr_new(ptr @.str.373)
+  %t205 = load ptr, ptr %t204
+  call void @String_push_str(ptr %t201, ptr %t205)
+  br label %merge.792
+merge.792:
+  br label %merge.789
+merge.789:
+  br label %merge.786
+merge.786:
+  br label %merge.783
+merge.783:
+  br label %merge.780
+merge.780:
+  br label %merge.777
+merge.777:
+  br label %merge.774
+merge.774:
+  br label %merge.771
+merge.771:
+  %t207 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t208 = getelementptr %LlvmEmitter, ptr %t207, i32 0, i32 0
+  %t209 = load ptr, ptr %t208
+  %t210 = load ptr, ptr %lhs
+  %t212 = load ptr, ptr %lhs
+  call void @String_push_str(ptr %t209, ptr %t212)
+  %t214 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t215 = getelementptr %LlvmEmitter, ptr %t214, i32 0, i32 0
+  %t216 = load ptr, ptr %t215
+  %t217 = call ptr @ystr_new(ptr @.str.374)
+  %t219 = call ptr @ystr_new(ptr @.str.375)
+  %t220 = load ptr, ptr %t219
+  call void @String_push_str(ptr %t216, ptr %t220)
+  %t222 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t223 = getelementptr %LlvmEmitter, ptr %t222, i32 0, i32 0
+  %t224 = load ptr, ptr %t223
+  %t225 = load ptr, ptr %rhs
+  %t227 = load ptr, ptr %rhs
+  call void @String_push_str(ptr %t224, ptr %t227)
+  %t229 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t230 = getelementptr %LlvmEmitter, ptr %t229, i32 0, i32 0
+  %t231 = load ptr, ptr %t230
+  %t232 = call ptr @ystr_new(ptr @.str.376)
+  %t234 = call ptr @ystr_new(ptr @.str.377)
+  %t235 = load ptr, ptr %t234
+  call void @String_push_str(ptr %t231, ptr %t235)
+  %t237 = load ptr, ptr %tmp
+  ret ptr %t237
+else.767:
+  ; lvalue .tag
+  %t238 = getelementptr %Expr, ptr %expr, i32 0, i32 0
+  %t239 = load i32, ptr %t238
+  %t240 = icmp eq i32 %t239, 7
+  br i1 %t240, label %then.793, label %merge.795
+then.793:
+  ; lvalue .data
+  %t241 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .Call
+  ; lvalue payload overlay ._0
+  %t243 = getelementptr [8 x i64], ptr %t241, i32 0, i32 0
+  %t244 = load i64, ptr %t243
+  store i64 %t244, ptr %func_idx
+  %t245 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t246 = getelementptr %AstArena, ptr %t245, i32 0, i32 0
+  %t247 = load ptr, ptr %t246
+  %t249 = load ptr, ptr %arena
+  ; lvalue .exprs
+  %t250 = getelementptr %AstArena, ptr %t249, i32 0, i32 0
+  %t251 = load ptr, ptr %t250
+  %t252 = load i64, ptr %func_idx
+  %t253 = sub i64 %t252, 1
+  %t254 = call ptr @yvec_get(ptr %t251, i64 %t253)
+  %t255 = load %Expr, ptr %t254
+  %t256 = getelementptr %Expr, ptr null, i32 1
+  %t257 = ptrtoint ptr %t256 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %func_expr, ptr align 8 %t255, i64 %t257, i1 false)
+  %t258 = call ptr @ystr_new(ptr @.str.378)
+  store ptr %t258, ptr %func_name
+  ; lvalue .tag
+  %t259 = getelementptr %Expr, ptr %func_expr, i32 0, i32 0
+  %t260 = load i32, ptr %t259
+  %t261 = icmp eq i32 %t260, 0
+  br i1 %t261, label %then.796, label %merge.798
+then.796:
+  ; lvalue .data
+  %t262 = getelementptr %Expr, ptr %func_expr, i32 0, i32 1
+  ; lvalue payload overlay .Ident
+  ; lvalue payload overlay ._0
+  %t264 = getelementptr [8 x i64], ptr %t262, i32 0, i32 0
+  %t265 = load i64, ptr %t264
+  ; lvalue .data
+  %t267 = getelementptr %Expr, ptr %func_expr, i32 0, i32 1
+  ; lvalue payload overlay .Ident
+  ; lvalue payload overlay ._0
+  %t269 = getelementptr [8 x i64], ptr %t267, i32 0, i32 0
+  %t270 = call ptr @String_clone(ptr %t269)
+  store ptr %t270, ptr %func_name
+  br label %merge.798
+merge.798:
+  %t271 = load ptr, ptr %e
+  %t272 = call ptr @LlvmEmitter_fresh_tmp(ptr %t271)
+  store ptr %t272, ptr %tmp
+  %t273 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t274 = getelementptr %LlvmEmitter, ptr %t273, i32 0, i32 0
+  %t275 = load ptr, ptr %t274
+  %t276 = call ptr @ystr_new(ptr @.str.379)
+  %t278 = call ptr @ystr_new(ptr @.str.380)
+  %t279 = load ptr, ptr %t278
+  call void @String_push_str(ptr %t275, ptr %t279)
+  %t281 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t282 = getelementptr %LlvmEmitter, ptr %t281, i32 0, i32 0
+  %t283 = load ptr, ptr %t282
+  %t284 = load ptr, ptr %tmp
+  %t286 = load ptr, ptr %tmp
+  call void @String_push_str(ptr %t283, ptr %t286)
+  %t288 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t289 = getelementptr %LlvmEmitter, ptr %t288, i32 0, i32 0
+  %t290 = load ptr, ptr %t289
+  %t291 = call ptr @ystr_new(ptr @.str.381)
+  %t293 = call ptr @ystr_new(ptr @.str.382)
+  %t294 = load ptr, ptr %t293
+  call void @String_push_str(ptr %t290, ptr %t294)
+  %t296 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t297 = getelementptr %LlvmEmitter, ptr %t296, i32 0, i32 0
+  %t298 = load ptr, ptr %t297
+  %t299 = load ptr, ptr %func_name
+  %t301 = load ptr, ptr %func_name
+  call void @String_push_str(ptr %t298, ptr %t301)
+  %t303 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t304 = getelementptr %LlvmEmitter, ptr %t303, i32 0, i32 0
+  %t305 = load ptr, ptr %t304
+  %t306 = call ptr @ystr_new(ptr @.str.383)
+  %t308 = call ptr @ystr_new(ptr @.str.384)
+  %t309 = load ptr, ptr %t308
+  call void @String_push_str(ptr %t305, ptr %t309)
+  ; lvalue .data
+  %t311 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .Call
+  ; lvalue payload overlay ._1
+  %t313 = getelementptr [8 x i64], ptr %t311, i32 0, i32 1
+  %t314 = load i64, ptr %t313
+  store i64 %t314, ptr %args_start
+  ; lvalue .data
+  %t315 = getelementptr %Expr, ptr %expr, i32 0, i32 1
+  ; lvalue payload overlay .Call
+  ; lvalue payload overlay ._2
+  %t317 = getelementptr [8 x i64], ptr %t315, i32 0, i32 2
+  %t318 = load i64, ptr %t317
+  store i64 %t318, ptr %arg_count
+  %t319 = sext i32 0 to i64
+  store i64 %t319, ptr %i
+  br label %while.cond.799
+while.cond.799:
+  %t320 = load i64, ptr %i
+  %t321 = load i64, ptr %arg_count
+  %t322 = icmp slt i64 %t320, %t321
+  br i1 %t322, label %while.body.800, label %while.end.801
+while.body.800:
+  %t323 = load ptr, ptr %arena
+  ; lvalue .arg_indices
+  %t324 = getelementptr %AstArena, ptr %t323, i32 0, i32 7
+  %t325 = load ptr, ptr %t324
+  %t327 = load ptr, ptr %arena
+  ; lvalue .arg_indices
+  %t328 = getelementptr %AstArena, ptr %t327, i32 0, i32 7
+  %t329 = load ptr, ptr %t328
+  %t330 = load i64, ptr %args_start
+  %t331 = load i64, ptr %i
+  %t332 = add i64 %t330, %t331
+  %t333 = call ptr @yvec_get(ptr %t329, i64 %t332)
+  %t334 = load i64, ptr %t333
+  store i64 %t334, ptr %arg_idx
+  %t335 = load ptr, ptr %e
+  %t336 = load ptr, ptr %arena
+  %t337 = load i64, ptr %arg_idx
+  %t338 = sub i64 %t337, 1
+  %t339 = call ptr @LlvmEmitter_emit_expr(ptr %t335, ptr %t336, i64 %t338)
+  store ptr %t339, ptr %arg_val
+  %t340 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t341 = getelementptr %LlvmEmitter, ptr %t340, i32 0, i32 0
+  %t342 = load ptr, ptr %t341
+  %t343 = call ptr @ystr_new(ptr @.str.385)
+  %t345 = call ptr @ystr_new(ptr @.str.386)
+  %t346 = load ptr, ptr %t345
+  call void @String_push_str(ptr %t342, ptr %t346)
+  %t348 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t349 = getelementptr %LlvmEmitter, ptr %t348, i32 0, i32 0
+  %t350 = load ptr, ptr %t349
+  %t351 = load ptr, ptr %arg_val
+  %t353 = load ptr, ptr %arg_val
+  call void @String_push_str(ptr %t350, ptr %t353)
+  %t355 = load i64, ptr %i
+  %t356 = add i64 %t355, 1
+  %t357 = load i64, ptr %arg_count
+  %t358 = icmp slt i64 %t356, %t357
+  br i1 %t358, label %then.802, label %merge.804
+then.802:
+  %t359 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t360 = getelementptr %LlvmEmitter, ptr %t359, i32 0, i32 0
+  %t361 = load ptr, ptr %t360
+  %t362 = call ptr @ystr_new(ptr @.str.387)
+  %t364 = call ptr @ystr_new(ptr @.str.388)
+  %t365 = load ptr, ptr %t364
+  call void @String_push_str(ptr %t361, ptr %t365)
+  br label %merge.804
+merge.804:
+  %t367 = load i64, ptr %i
+  %t368 = add i64 %t367, 1
+  store i64 %t368, ptr %i
+  br label %while.cond.799
+while.end.801:
+  %t369 = load ptr, ptr %e
+  ; lvalue .buffer
+  %t370 = getelementptr %LlvmEmitter, ptr %t369, i32 0, i32 0
+  %t371 = load ptr, ptr %t370
+  %t372 = call ptr @ystr_new(ptr @.str.389)
+  %t374 = call ptr @ystr_new(ptr @.str.390)
+  %t375 = load ptr, ptr %t374
+  call void @String_push_str(ptr %t371, ptr %t375)
+  %t377 = load ptr, ptr %tmp
+  ret ptr %t377
+merge.795:
+  br label %merge.768
+merge.768:
+  br label %merge.765
+merge.765:
+  br label %merge.762
+merge.762:
+  %t378 = call ptr @ystr_new(ptr @.str.391)
+  ret ptr %t378
 }
 
 define i32 @main() #0 {
 entry:
-  %s_str = alloca ptr
-  %s = alloca %MyStruct
-  %t1 = call ptr @ystr_new(ptr @.str.0)
-  %t2 = load ptr, ptr %t1
-  %t3 = call ptr @String_new(ptr %t2)
-  store ptr %t3, ptr %s_str
-  %t4 = load ptr, ptr %s_str
-  %t7 = alloca %MyStruct
-  call void @MyStruct_new(ptr %t7, i64 42, ptr %s_str)
-  %t8 = load %MyStruct, ptr %t7
-  %t9 = getelementptr %MyStruct, ptr null, i32 1
-  %t10 = ptrtoint ptr %t9 to i64
-  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %s, ptr align 8 %t8, i64 %t10, i1 false)
+  %source_file = alloca ptr
+  %source = alloca ptr
+  %lexer = alloca %Lexer
+  %tokens = alloca ptr
+  %token_count = alloca i64
+  %arena = alloca %AstArena
+  %parser = alloca %Parser
+  %func_count = alloca i64
+  %emitter = alloca %LlvmEmitter
+  %i = alloca i64
+  %out_path = alloca ptr
+  %t1 = call ptr @ystr_new(ptr @.str.392)
+  call void @println(ptr %t1)
+  %t3 = call ptr @ystr_new(ptr @.str.393)
+  store ptr %t3, ptr %source_file
+  %t4 = call ptr @ystr_new(ptr @.str.394)
+  call void @print(ptr %t4)
+  %t6 = load ptr, ptr %source_file
+  call void @println(ptr %t6)
+  %t8 = load ptr, ptr %source_file
+  %t9 = call ptr @File_read_to_string(ptr %t8)
+  store ptr %t9, ptr %source
+  %t10 = call ptr @ystr_new(ptr @.str.395)
+  call void @println(ptr %t10)
+  %t12 = load ptr, ptr %source
+  %t13 = load ptr, ptr %t12
+  %t14 = call %Lexer @Lexer_new(ptr %t13)
+  %t15 = getelementptr %Lexer, ptr null, i32 1
+  %t16 = ptrtoint ptr %t15 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %lexer, ptr align 8 %t14, i64 %t16, i1 false)
+  %t17 = load %Lexer, ptr %lexer
+  %t19 = call ptr @Lexer_tokenize(ptr %lexer)
+  store ptr %t19, ptr %tokens
+  %t20 = load ptr, ptr %tokens
+  %t21 = call i64 @Vec_len(ptr %t20)
+  store i64 %t21, ptr %token_count
+  %t22 = call ptr @ystr_new(ptr @.str.396)
+  call void @print(ptr %t22)
+  %t24 = load i64, ptr %token_count
+  call void @print_int(i64 %t24)
+  %t26 = call ptr @ystr_new(ptr @.str.397)
+  call void @println(ptr %t26)
+  %t28 = call ptr @ystr_new(ptr @.str.398)
+  call void @println(ptr %t28)
+  %t30 = call %AstArena @AstArena_new()
+  %t31 = getelementptr %AstArena, ptr null, i32 1
+  %t32 = ptrtoint ptr %t31 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %arena, ptr align 8 %t30, i64 %t32, i1 false)
+  %t33 = load ptr, ptr %tokens
+  %t34 = load i64, ptr %token_count
+  %t35 = call %Parser @Parser_new(ptr %t33, i64 %t34)
+  %t36 = getelementptr %Parser, ptr null, i32 1
+  %t37 = ptrtoint ptr %t36 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %parser, ptr align 8 %t35, i64 %t37, i1 false)
+  %t38 = load %Parser, ptr %parser
+  %t39 = alloca %Parser
+  store %Parser %t38, ptr %t39
+  %t40 = load %AstArena, ptr %arena
+  call void @Parser_parse_program(ptr %t39, ptr %arena)
+  ; lvalue .funcs
+  %t43 = getelementptr %AstArena, ptr %arena, i32 0, i32 3
+  %t44 = load ptr, ptr %t43
+  %t45 = call i64 @Vec_len(ptr %t44)
+  store i64 %t45, ptr %func_count
+  %t46 = call ptr @ystr_new(ptr @.str.399)
+  call void @print(ptr %t46)
+  %t48 = load i64, ptr %func_count
+  call void @print_int(i64 %t48)
+  %t50 = call ptr @ystr_new(ptr @.str.400)
+  call void @println(ptr %t50)
+  %t52 = call ptr @ystr_new(ptr @.str.401)
+  call void @println(ptr %t52)
+  %t54 = call %LlvmEmitter @LlvmEmitter_new()
+  %t55 = getelementptr %LlvmEmitter, ptr null, i32 1
+  %t56 = ptrtoint ptr %t55 to i64
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %emitter, ptr align 8 %t54, i64 %t56, i1 false)
+  %t57 = sext i32 0 to i64
+  store i64 %t57, ptr %i
+  br label %while.cond.805
+while.cond.805:
+  %t58 = load i64, ptr %i
+  %t59 = load i64, ptr %func_count
+  %t60 = icmp slt i64 %t58, %t59
+  br i1 %t60, label %while.body.806, label %while.end.807
+while.body.806:
+  %t61 = load %LlvmEmitter, ptr %emitter
+  %t63 = load %AstArena, ptr %arena
+  %t65 = load i64, ptr %i
+  call void @LlvmEmitter_emit_func(ptr %emitter, ptr %arena, i64 %t65)
+  %t67 = load i64, ptr %i
+  %t68 = add i64 %t67, 1
+  store i64 %t68, ptr %i
+  br label %while.cond.805
+while.end.807:
+  %t69 = call ptr @ystr_new(ptr @.str.402)
+  store ptr %t69, ptr %out_path
+  %t70 = load ptr, ptr %out_path
+  ; lvalue .buffer
+  %t71 = getelementptr %LlvmEmitter, ptr %emitter, i32 0, i32 0
+  %t72 = load ptr, ptr %t71
+  ; lvalue .buffer
+  %t74 = getelementptr %LlvmEmitter, ptr %emitter, i32 0, i32 0
+  call void @File_write(ptr %t70, ptr %t74)
+  %t76 = call ptr @ystr_new(ptr @.str.403)
+  call void @println(ptr %t76)
+  %t78 = call ptr @ystr_new(ptr @.str.404)
+  call void @println(ptr %t78)
   ret i32 0
 }
 
