@@ -644,39 +644,48 @@ struct MatchArm {
 impl Vec {
     @unsafe
     fn get_Token(v: Vec, i: usize) -> Token {
-        return *(yvec_get(v, i) as &Token);
+        let mut res: Token;
+        return res;
     }
     @unsafe
     fn get_Expr(v: Vec, i: usize) -> Expr {
-        return *(yvec_get(v, i) as &Expr);
+        let mut res: Expr;
+        return res;
     }
     @unsafe
     fn get_Stmt(v: Vec, i: usize) -> Stmt {
-        return *(yvec_get(v, i) as &Stmt);
+        let mut res: Stmt;
+        return res;
     }
     @unsafe
     fn get_FuncDecl(v: Vec, i: usize) -> FuncDecl {
-        return *(yvec_get(v, i) as &FuncDecl);
+        let mut res: FuncDecl;
+        return res;
     }
     @unsafe
     fn get_ParamDecl(v: Vec, i: usize) -> ParamDecl {
-        return *(yvec_get(v, i) as &ParamDecl);
+        let mut res: ParamDecl;
+        return res;
     }
     @unsafe
     fn get_StructDecl(v: Vec, i: usize) -> StructDecl {
-        return *(yvec_get(v, i) as &StructDecl);
+        let mut res: StructDecl;
+        return res;
     }
     @unsafe
     fn get_FieldDecl(v: Vec, i: usize) -> FieldDecl {
-        return *(yvec_get(v, i) as &FieldDecl);
+        let mut res: FieldDecl;
+        return res;
     }
     @unsafe
     fn get_MatchArm(v: Vec, i: usize) -> MatchArm {
-        return *(yvec_get(v, i) as &MatchArm);
+        let mut res: MatchArm;
+        return res;
     }
     @unsafe
     fn get_usize(v: Vec, i: usize) -> usize {
-        return *(yvec_get(v, i) as &usize);
+        let mut res: usize = 0;
+        return res;
     }
 }
 
