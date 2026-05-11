@@ -14,7 +14,7 @@ impl Vec {
     
     // Allocates a new empty Vec.
     // In C: maps directly to yvec_new(sizeof(T))
-    fn new(elem_size: I32) -> Vec {
+    fn new(elem_size: usize) -> Vec {
         // Backend intercepts this or we use native C runtime name
         return yvec_new(elem_size);
     }

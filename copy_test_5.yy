@@ -1,0 +1,15 @@
+struct MyStruct {
+    a: i64,
+    b: i64,
+}
+
+fn test(s: &MyStruct) {
+    print_int(s.a);
+}
+
+@unsafe
+fn main() -> i32 {
+    let s = MyStruct { a: 42, b: 100 };
+    test(&s);
+    return 0;
+}
