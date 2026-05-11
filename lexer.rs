@@ -843,6 +843,8 @@ mod tests {
     #[test]
     fn test_unterminated_string() {
         let kinds = lex("\"unterminated");
+        assert_eq!(kinds.len(), 2);
         assert_eq!(kinds[0], TokenKind::StringLit("unterminated".to_string()));
+        assert_eq!(kinds[1], TokenKind::Eof);
     }
 }
