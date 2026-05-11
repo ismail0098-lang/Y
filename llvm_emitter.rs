@@ -1096,14 +1096,16 @@ impl LlvmEmitter {
                     let r_is_float = r_ty == "float" || r_ty == "double" || r_ty == "half";
 
                     let common_ty = if l_is_float && r_is_float {
-                        // Both floats, pick the larger one
+                        // Both floats: pick the larger one, but normalize half to float
+                        // so later LLVM opcode selection still uses floating-point ops.
                         let l_bits = if l_ty == "double" { 64 } else if l_ty == "float" { 32 } else { 16 };
                         let r_bits = if r_ty == "double" { 64 } else if r_ty == "float" { 32 } else { 16 };
-                        if l_bits >= r_bits { l_ty.clone() } else { r_ty.clone() }
+                        let widest_ty = if l_bits >= r_bits { l_ty.clone() } else { r_ty.clone() };
+                        if widest_ty == "half" { "float".to_string() } else { widest_ty }
                     } else if l_is_float {
-                        l_ty.clone()
+                        if l_ty == "half" { "float".to_string() } else { l_ty.clone() }
                     } else if r_is_float {
-                        r_ty.clone()
+                        if r_ty == "half" { "float".to_string() } else { r_ty.clone() }
                     } else {
                         // Both ints, pick the larger one
                         let l_bits = Self::int_bits(&l_ty);
