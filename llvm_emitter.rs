@@ -1082,9 +1082,11 @@ impl LlvmEmitter {
                             )
                             .unwrap();
 
-                            let src_ptr = if coerced.starts_with('%')
-                                && self.structs.contains_key(dst_ty.trim_start_matches('%'))
-                            {
+                            let is_aggregate_type = val_ty.starts_with('%') || val_ty.starts_with('[');
+                            let is_registered_type = self.structs.contains_key(dst_ty.trim_start_matches('%'))
+                                || self.enums.contains_key(dst_ty.trim_start_matches('%'));
+
+                            let src_ptr = if is_aggregate_type && is_registered_type {
                                 let tmp_ptr = self.fresh_tmp();
                                 writeln!(&mut self.output, "  {} = alloca {}", tmp_ptr, dst_ty)
                                     .unwrap();
@@ -1135,9 +1137,11 @@ impl LlvmEmitter {
                         )
                         .unwrap();
 
-                        let src_ptr = if coerced.starts_with('%')
-                            && self.structs.contains_key(dst_ty.trim_start_matches('%'))
-                        {
+                        let is_aggregate_type = val_ty.starts_with('%') || val_ty.starts_with('[');
+                        let is_registered_type = self.structs.contains_key(dst_ty.trim_start_matches('%'))
+                            || self.enums.contains_key(dst_ty.trim_start_matches('%'));
+
+                        let src_ptr = if is_aggregate_type && is_registered_type {
                             let tmp_ptr = self.fresh_tmp();
                             writeln!(&mut self.output, "  {} = alloca {}", tmp_ptr, dst_ty)
                                 .unwrap();
