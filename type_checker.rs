@@ -830,4 +830,21 @@ mod tests {
         assert!(tc.errors.is_empty());
         assert!(!tc.in_unsafe);
     }
+
+    #[test]
+    fn test_enum_item_does_not_produce_type_errors() {
+        let mut tc = TypeChecker::new();
+        let program = Program {
+            items: vec![Item::Enum(EnumDecl {
+                name: "TestEnum".into(),
+                generic_params: vec![],
+                variants: vec![],
+                span: Span { line: 0, col: 0 },
+            })],
+        };
+
+        tc.check_program(&program);
+
+        assert!(tc.errors.is_empty());
+    }
 }
