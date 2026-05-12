@@ -67,7 +67,7 @@ pub enum TokenKind {
     Fragment,
 
     // ── MMA atom identifiers ─────────────────────────────────
-    MmaMod(String),  // MMA_m16n8k16, etc.
+    MmaMod(String), // MMA_m16n8k16, etc.
 
     // ── Fragment roles ───────────────────────────────────────
     RoleA,
@@ -76,9 +76,20 @@ pub enum TokenKind {
     RoleD,
 
     // ── Primitive / scalar dtypes ────────────────────────────
-    F16, BF16, TF32, F32, F64,
-    I8, I16, I32, I64,
-    U3, U8, U16, U32, U64,
+    F16,
+    BF16,
+    TF32,
+    F32,
+    F64,
+    I8,
+    I16,
+    I32,
+    I64,
+    U3,
+    U8,
+    U16,
+    U32,
+    U64,
     QFixed(String), // e.g. "Q32.32"
     Bool,
     StringTy,
@@ -98,7 +109,7 @@ pub enum TokenKind {
     L2Stream,
 
     // ── Hardware targets ─────────────────────────────────────
-    HardwareTarget(String),  // RTX_4070, H100, CPU_AVX512, …
+    HardwareTarget(String), // RTX_4070, H100, CPU_AVX512, …
 
     // ── Built-in functions ───────────────────────────────────
     CpAsync,
@@ -119,8 +130,8 @@ pub enum TokenKind {
     AtGpuUncached,
     AtAtomic,
     AtStaticAssert,
-    AtZeroDrift,      // @ZeroDrift — enforce zero numerical drift
-    AtUnknown(String),  // future-proof
+    AtZeroDrift,       // @ZeroDrift — enforce zero numerical drift
+    AtUnknown(String), // future-proof
 
     // ── Operators ────────────────────────────────────────────
     Arrow,       // ->
@@ -188,16 +199,21 @@ pub enum TokenKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
-    pub kind:   TokenKind,
-    pub line:   usize,
-    pub col:    usize,
+    pub kind: TokenKind,
+    pub line: usize,
+    pub col: usize,
     /// The raw text slice that produced this token.
     pub lexeme: String,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, line: usize, col: usize, lexeme: impl Into<String>) -> Self {
-        Self { kind, line, col, lexeme: lexeme.into() }
+        Self {
+            kind,
+            line,
+            col,
+            lexeme: lexeme.into(),
+        }
     }
 }
 
@@ -206,19 +222,19 @@ impl Token {
 // ────────────────────────────────────────────────────────────
 
 pub struct Lexer {
-    input:  Vec<char>,
-    pos:    usize,
-    line:   usize,
-    col:    usize,
+    input: Vec<char>,
+    pos: usize,
+    line: usize,
+    col: usize,
 }
 
 impl Lexer {
     pub fn new(source: &str) -> Self {
         Self {
             input: source.chars().collect(),
-            pos:   0,
-            line:  1,
-            col:   1,
+            pos: 0,
+            line: 1,
+            col: 1,
         }
     }
 
@@ -235,8 +251,12 @@ impl Lexer {
     fn advance(&mut self) -> Option<char> {
         let ch = self.input.get(self.pos).copied()?;
         self.pos += 1;
-        if ch == '\n' { self.line += 1; self.col = 1; }
-        else          { self.col  += 1; }
+        if ch == '\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
         Some(ch)
     }
 
@@ -251,8 +271,11 @@ impl Lexer {
 
     fn skip_whitespace(&mut self) {
         while let Some(ch) = self.peek() {
-            if ch.is_whitespace() { self.advance(); }
-            else { break; }
+            if ch.is_whitespace() {
+                self.advance();
+            } else {
+                break;
+            }
         }
     }
 
@@ -260,7 +283,9 @@ impl Lexer {
         // consume until newline or EOF
         while let Some(ch) = self.peek() {
             self.advance();
-            if ch == '\n' { break; }
+            if ch == '\n' {
+                break;
+            }
         }
     }
 
@@ -268,8 +293,11 @@ impl Lexer {
         // already consumed '/*'; skip until '*/'
         loop {
             match self.advance() {
-                None => break,  // unterminated — let parser error
-                Some('*') if self.peek() == Some('/') => { self.advance(); break; }
+                None => break, // unterminated — let parser error
+                Some('*') if self.peek() == Some('/') => {
+                    self.advance();
+                    break;
+                }
                 _ => {}
             }
         }
@@ -315,11 +343,14 @@ impl Lexer {
                 Some('\\') => {
                     if let Some(esc) = self.advance() {
                         match esc {
-                            'n'  => s.push('\n'),
-                            't'  => s.push('\t'),
-                            '"'  => s.push('"'),
+                            'n' => s.push('\n'),
+                            't' => s.push('\t'),
+                            '"' => s.push('"'),
                             '\\' => s.push('\\'),
-                            other => { s.push('\\'); s.push(other); }
+                            other => {
+                                s.push('\\');
+                                s.push(other);
+                            }
                         }
                     }
                 }
@@ -361,51 +392,51 @@ impl Lexer {
     fn classify_ident(s: &str) -> TokenKind {
         match s {
             // Keywords
-            "kernel"   => TokenKind::Kernel,
-            "let"      => TokenKind::Let,
-            "type"     => TokenKind::Type,
-            "for"      => TokenKind::For,
-            "in"       => TokenKind::In,
-            "step"     => TokenKind::Step,
-            "return"   => TokenKind::Return,
-            "if"       => TokenKind::If,
-            "else"     => TokenKind::Else,
-            "true"     => TokenKind::True,
-            "false"    => TokenKind::False,
-            "const"    => TokenKind::Const,
-            "pub"      => TokenKind::Pub,
-            "mut"      => TokenKind::Mut,
-            "unsafe"   => TokenKind::Unsafe,
-            "wait"     => TokenKind::Wait,
-            "emit"     => TokenKind::Emit,
-            "load"     => TokenKind::Load,
-            "store"    => TokenKind::Store,
-            "barrier"  => TokenKind::Barrier,
-            "struct"   => TokenKind::Struct,
-            "enum"     => TokenKind::Enum,
-            "fn"       => TokenKind::Fn,
-            "match"    => TokenKind::Match,
-            "safe"     => TokenKind::Safe,
-            "chisel"   => TokenKind::Chisel,
-            "import"   => TokenKind::Import,
-            "func"     => TokenKind::Fn,
-            "while"    => TokenKind::While,
-            "impl"     => TokenKind::Impl,
-            "self"     => TokenKind::SelfKw,
+            "kernel" => TokenKind::Kernel,
+            "let" => TokenKind::Let,
+            "type" => TokenKind::Type,
+            "for" => TokenKind::For,
+            "in" => TokenKind::In,
+            "step" => TokenKind::Step,
+            "return" => TokenKind::Return,
+            "if" => TokenKind::If,
+            "else" => TokenKind::Else,
+            "true" => TokenKind::True,
+            "false" => TokenKind::False,
+            "const" => TokenKind::Const,
+            "pub" => TokenKind::Pub,
+            "mut" => TokenKind::Mut,
+            "unsafe" => TokenKind::Unsafe,
+            "wait" => TokenKind::Wait,
+            "emit" => TokenKind::Emit,
+            "load" => TokenKind::Load,
+            "store" => TokenKind::Store,
+            "barrier" => TokenKind::Barrier,
+            "struct" => TokenKind::Struct,
+            "enum" => TokenKind::Enum,
+            "fn" => TokenKind::Fn,
+            "match" => TokenKind::Match,
+            "safe" => TokenKind::Safe,
+            "chisel" => TokenKind::Chisel,
+            "import" => TokenKind::Import,
+            "func" => TokenKind::Fn,
+            "while" => TokenKind::While,
+            "impl" => TokenKind::Impl,
+            "self" => TokenKind::SelfKw,
 
             // Memory space types
-            "GlobalMemory"  => TokenKind::GlobalMemory,
-            "L2Memory"      => TokenKind::L2Memory,
-            "SharedMemory"  => TokenKind::SharedMemory,
-            "RegisterFile"  => TokenKind::RegisterFile,
+            "GlobalMemory" => TokenKind::GlobalMemory,
+            "L2Memory" => TokenKind::L2Memory,
+            "SharedMemory" => TokenKind::SharedMemory,
+            "RegisterFile" => TokenKind::RegisterFile,
 
             // Layout / structural types
             "SmemLayout" => TokenKind::SmemLayout,
-            "Swizzle"    => TokenKind::Swizzle,
-            "NoSwizzle"  => TokenKind::NoSwizzle,
-            "Pipeline"   => TokenKind::Pipeline,
-            "Transfer"   => TokenKind::Transfer,
-            "Fragment"   => TokenKind::Fragment,
+            "Swizzle" => TokenKind::Swizzle,
+            "NoSwizzle" => TokenKind::NoSwizzle,
+            "Pipeline" => TokenKind::Pipeline,
+            "Transfer" => TokenKind::Transfer,
+            "Fragment" => TokenKind::Fragment,
 
             // Fragment roles (single-char uppercase — checked AFTER MMA_*)
             "A" => TokenKind::RoleA,
@@ -414,32 +445,32 @@ impl Lexer {
             "D" => TokenKind::RoleD,
 
             // Dtypes
-            "F16"  => TokenKind::F16,
+            "F16" => TokenKind::F16,
             "BF16" => TokenKind::BF16,
             "TF32" => TokenKind::TF32,
-            "F32"  => TokenKind::F32,
-            "F64"  => TokenKind::F64,
-            "I8"   => TokenKind::I8,
-            "I16"  => TokenKind::I16,
-            "I32"  => TokenKind::I32,
-            "I64"  => TokenKind::I64,
-            "U3"   => TokenKind::U3,
-            "U8"   => TokenKind::U8,
-            "U16"  => TokenKind::U16,
-            "U32"  => TokenKind::U32,
-            "U64"  => TokenKind::U64,
-            "u3"   => TokenKind::U3,
-            "u8"   => TokenKind::U8,
-            "u16"  => TokenKind::U16,
-            "u32"  => TokenKind::U32,
-            "u64"  => TokenKind::U64,
-            "i8"   => TokenKind::I8,
-            "i16"  => TokenKind::I16,
-            "i32"  => TokenKind::I32,
-            "i64"  => TokenKind::I64,
-            "f16"  => TokenKind::F16,
-            "f32"  => TokenKind::F32,
-            "f64"  => TokenKind::F64,
+            "F32" => TokenKind::F32,
+            "F64" => TokenKind::F64,
+            "I8" => TokenKind::I8,
+            "I16" => TokenKind::I16,
+            "I32" => TokenKind::I32,
+            "I64" => TokenKind::I64,
+            "U3" => TokenKind::U3,
+            "U8" => TokenKind::U8,
+            "U16" => TokenKind::U16,
+            "U32" => TokenKind::U32,
+            "U64" => TokenKind::U64,
+            "u3" => TokenKind::U3,
+            "u8" => TokenKind::U8,
+            "u16" => TokenKind::U16,
+            "u32" => TokenKind::U32,
+            "u64" => TokenKind::U64,
+            "i8" => TokenKind::I8,
+            "i16" => TokenKind::I16,
+            "i32" => TokenKind::I32,
+            "i64" => TokenKind::I64,
+            "f16" => TokenKind::F16,
+            "f32" => TokenKind::F32,
+            "f64" => TokenKind::F64,
             "bool" => TokenKind::Bool,
             "String" => TokenKind::StringTy,
             "char" => TokenKind::CharTy,
@@ -449,23 +480,23 @@ impl Lexer {
 
             // Transfer policies
             "Async" => TokenKind::Async,
-            "Sync"  => TokenKind::Sync,
+            "Sync" => TokenKind::Sync,
 
             // Cache policies
-            "L2_PERSIST"      => TokenKind::L2Persist,
-            "L2_EVICT_FIRST"  => TokenKind::L2EvictFirst,
-            "L2_EVICT_LAST"   => TokenKind::L2EvictLast,
-            "L2_STREAM"       => TokenKind::L2Stream,
+            "L2_PERSIST" => TokenKind::L2Persist,
+            "L2_EVICT_FIRST" => TokenKind::L2EvictFirst,
+            "L2_EVICT_LAST" => TokenKind::L2EvictLast,
+            "L2_STREAM" => TokenKind::L2Stream,
 
             // Hardware targets
-            "RTX_4070"    | "RTX_4090"   | "RTX_3090"
-            | "H100"      | "A100"
-            | "CPU_AVX2"  | "CPU_AVX512" => TokenKind::HardwareTarget(s.to_string()),
+            "RTX_4070" | "RTX_4090" | "RTX_3090" | "H100" | "A100" | "CPU_AVX2" | "CPU_AVX512" => {
+                TokenKind::HardwareTarget(s.to_string())
+            }
 
             // Built-in functions
-            "cp_async"  => TokenKind::CpAsync,
-            "ldmatrix"  => TokenKind::LdMatrix,
-            "mma_sync"  => TokenKind::MmaSync,
+            "cp_async" => TokenKind::CpAsync,
+            "ldmatrix" => TokenKind::LdMatrix,
+            "mma_sync" => TokenKind::MmaSync,
 
             // MMA atom names   MMA_m16n8k16 etc.
             s if s.starts_with("MMA_") => TokenKind::MmaMod(s.to_string()),
@@ -492,20 +523,20 @@ impl Lexer {
             }
         }
         let kind = match name.as_str() {
-            "@require"      => TokenKind::AtRequire,
+            "@require" => TokenKind::AtRequire,
             "@cache_policy" => TokenKind::AtCachePolicy,
-            "@ptx_emit"     => TokenKind::AtPtxEmit,
-            "@avx_emit"     => TokenKind::AtAvxEmit,
-            "@inline"       => TokenKind::AtInline,
-            "@noinline"     => TokenKind::AtNoInline,
-            "@align"        => TokenKind::AtAlign,
-            "@safe"         => TokenKind::AtSafe,
-            "@unsafe"       => TokenKind::AtUnsafe,
-            "@gpu_uncached"  => TokenKind::AtGpuUncached,
-            "@atomic"        => TokenKind::AtAtomic,
+            "@ptx_emit" => TokenKind::AtPtxEmit,
+            "@avx_emit" => TokenKind::AtAvxEmit,
+            "@inline" => TokenKind::AtInline,
+            "@noinline" => TokenKind::AtNoInline,
+            "@align" => TokenKind::AtAlign,
+            "@safe" => TokenKind::AtSafe,
+            "@unsafe" => TokenKind::AtUnsafe,
+            "@gpu_uncached" => TokenKind::AtGpuUncached,
+            "@atomic" => TokenKind::AtAtomic,
             "@static_assert" => TokenKind::AtStaticAssert,
-            "@ZeroDrift"    => TokenKind::AtZeroDrift,
-            other           => TokenKind::AtUnknown(other.to_string()),
+            "@ZeroDrift" => TokenKind::AtZeroDrift,
+            other => TokenKind::AtUnknown(other.to_string()),
         };
         Token::new(kind, line, start_col, &name)
     }
@@ -515,11 +546,11 @@ impl Lexer {
     fn next_token(&mut self) -> Token {
         self.skip_whitespace();
 
-        let line      = self.line;
+        let line = self.line;
         let start_col = self.col;
 
         let ch = match self.advance() {
-            None     => return Token::new(TokenKind::Eof, line, start_col, ""),
+            None => return Token::new(TokenKind::Eof, line, start_col, ""),
             Some(ch) => ch,
         };
 
@@ -527,7 +558,7 @@ impl Lexer {
             // ── Comments ──────────────────────────────────────
             '/' if self.peek() == Some('/') => {
                 self.skip_line_comment();
-                self.next_token()  // recurse past comment
+                self.next_token() // recurse past comment
             }
             '/' if self.peek() == Some('*') => {
                 self.advance();
@@ -544,31 +575,39 @@ impl Lexer {
             // ── Character literal ─────────────────────────────
             '\'' => {
                 let tok_char = match self.advance() {
-                    Some('\\') => {
-                        match self.advance() {
-                            Some('n') => '\n',
-                            Some('r') => '\r',
-                            Some('t') => '\t',
-                            Some('0') => '\0',
-                            Some('\\') => '\\',
-                            Some('\'') => '\'',
-                            Some(c) => c,
-                            None => return Token::new(TokenKind::Unknown('\\'), line, start_col, "'\\"),
+                    Some('\\') => match self.advance() {
+                        Some('n') => '\n',
+                        Some('r') => '\r',
+                        Some('t') => '\t',
+                        Some('0') => '\0',
+                        Some('\\') => '\\',
+                        Some('\'') => '\'',
+                        Some(c) => c,
+                        None => {
+                            return Token::new(TokenKind::Unknown('\\'), line, start_col, "'\\")
                         }
-                    }
+                    },
                     Some(c) => c,
                     None => return Token::new(TokenKind::Unknown('\''), line, start_col, "'"),
                 };
                 if self.peek() == Some('\'') {
                     self.advance();
                 }
-                let lexeme = if tok_char == '\n' { "'\\n'".to_string() }
-                             else if tok_char == '\r' { "'\\r'".to_string() }
-                             else if tok_char == '\t' { "'\\t'".to_string() }
-                             else if tok_char == '\0' { "'\\0'".to_string() }
-                             else if tok_char == '\\' { "'\\\\'".to_string() }
-                             else if tok_char == '\'' { "'\\''".to_string() }
-                             else { format!("'{}'", tok_char) };
+                let lexeme = if tok_char == '\n' {
+                    "'\\n'".to_string()
+                } else if tok_char == '\r' {
+                    "'\\r'".to_string()
+                } else if tok_char == '\t' {
+                    "'\\t'".to_string()
+                } else if tok_char == '\0' {
+                    "'\\0'".to_string()
+                } else if tok_char == '\\' {
+                    "'\\\\'".to_string()
+                } else if tok_char == '\'' {
+                    "'\\''".to_string()
+                } else {
+                    format!("'{}'", tok_char)
+                };
                 Token::new(TokenKind::CharLit(tok_char), line, start_col, &lexeme)
             }
 
@@ -576,9 +615,7 @@ impl Lexer {
             c if c.is_ascii_digit() => self.scan_number(start_col, c),
 
             // ── Identifier / keyword ─────────────────────────
-            c if c.is_alphabetic() || c == '_' => {
-                self.scan_ident_or_keyword(start_col, c)
-            }
+            c if c.is_alphabetic() || c == '_' => self.scan_ident_or_keyword(start_col, c),
 
             // ── Two-char operators first ──────────────────────
             '-' if self.peek() == Some('>') => {
@@ -647,31 +684,35 @@ impl Lexer {
             }
 
             // ── Single-char operators / delimiters ────────────
-            ':'  => Token::new(TokenKind::Colon,     line, start_col, ":"),
-            '='  => Token::new(TokenKind::Assign,    line, start_col, "="),
-            '<'  => Token::new(TokenKind::Lt,        line, start_col, "<"),
-            '>'  => Token::new(TokenKind::Gt,        line, start_col, ">"),
-            '+'  => Token::new(TokenKind::Plus,      line, start_col, "+"),
-            '-'  => Token::new(TokenKind::Minus,     line, start_col, "-"),
-            '*'  => Token::new(TokenKind::Star,      line, start_col, "*"),
-            '/'  => Token::new(TokenKind::Slash,     line, start_col, "/"),
-            '%'  => Token::new(TokenKind::Percent,   line, start_col, "%"),
-            '&'  => Token::new(TokenKind::Ampersand, line, start_col, "&"),
-            '|'  => Token::new(TokenKind::Pipe,      line, start_col, "|"),
-            '^'  => Token::new(TokenKind::Caret,     line, start_col, "^"),
-            '!'  => Token::new(TokenKind::Bang,      line, start_col, "!"),
-            '.'  => Token::new(TokenKind::Dot,       line, start_col, "."),
-            '{'  => Token::new(TokenKind::LBrace,    line, start_col, "{"),
-            '}'  => Token::new(TokenKind::RBrace,    line, start_col, "}"),
-            '('  => Token::new(TokenKind::LParen,    line, start_col, "("),
-            ')'  => Token::new(TokenKind::RParen,    line, start_col, ")"),
-            '['  => Token::new(TokenKind::LBracket,  line, start_col, "["),
-            ']'  => Token::new(TokenKind::RBracket,  line, start_col, "]"),
-            ';'  => Token::new(TokenKind::Semicolon, line, start_col, ";"),
-            ','  => Token::new(TokenKind::Comma,     line, start_col, ","),
+            ':' => Token::new(TokenKind::Colon, line, start_col, ":"),
+            '=' => Token::new(TokenKind::Assign, line, start_col, "="),
+            '<' => Token::new(TokenKind::Lt, line, start_col, "<"),
+            '>' => Token::new(TokenKind::Gt, line, start_col, ">"),
+            '+' => Token::new(TokenKind::Plus, line, start_col, "+"),
+            '-' => Token::new(TokenKind::Minus, line, start_col, "-"),
+            '*' => Token::new(TokenKind::Star, line, start_col, "*"),
+            '/' => Token::new(TokenKind::Slash, line, start_col, "/"),
+            '%' => Token::new(TokenKind::Percent, line, start_col, "%"),
+            '&' => Token::new(TokenKind::Ampersand, line, start_col, "&"),
+            '|' => Token::new(TokenKind::Pipe, line, start_col, "|"),
+            '^' => Token::new(TokenKind::Caret, line, start_col, "^"),
+            '!' => Token::new(TokenKind::Bang, line, start_col, "!"),
+            '.' => Token::new(TokenKind::Dot, line, start_col, "."),
+            '{' => Token::new(TokenKind::LBrace, line, start_col, "{"),
+            '}' => Token::new(TokenKind::RBrace, line, start_col, "}"),
+            '(' => Token::new(TokenKind::LParen, line, start_col, "("),
+            ')' => Token::new(TokenKind::RParen, line, start_col, ")"),
+            '[' => Token::new(TokenKind::LBracket, line, start_col, "["),
+            ']' => Token::new(TokenKind::RBracket, line, start_col, "]"),
+            ';' => Token::new(TokenKind::Semicolon, line, start_col, ";"),
+            ',' => Token::new(TokenKind::Comma, line, start_col, ","),
 
-            other => Token::new(TokenKind::Unknown(other), line, start_col,
-                                other.to_string()),
+            other => Token::new(
+                TokenKind::Unknown(other),
+                line,
+                start_col,
+                other.to_string(),
+            ),
         }
     }
 
@@ -685,7 +726,9 @@ impl Lexer {
             let tok = self.next_token();
             let done = tok.kind == TokenKind::Eof;
             tokens.push(tok);
-            if done { break; }
+            if done {
+                break;
+            }
         }
         tokens
     }
@@ -710,9 +753,12 @@ mod tests {
     use super::*;
 
     fn lex(src: &str) -> Vec<TokenKind> {
-        Lexer::new(src).tokenize().into_iter().map(|t| t.kind).collect()
+        Lexer::new(src)
+            .tokenize()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
     }
-
 
     #[test]
     fn test_tokenize() {

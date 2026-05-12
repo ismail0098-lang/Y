@@ -2,36 +2,36 @@
 //  Y-Lang  —  Compiler CLI Driver
 //  main.rs
 //
-//  The main entry point for the compiler. Consumes a .ysu 
+//  The main entry point for the compiler. Consumes a .ysu
 //  source file, pushes it through the Lexical, Syntax,
 //  and Semantic validation phases, and finally emits PTX.
 // ============================================================
 
-mod lexer;
 mod ast;
-mod parser;
-mod type_checker;
-mod linear_tracker;
-mod bank_conflict;
-mod ptx_emitter;
-mod cpu_emitter;
-mod c_emitter;
-mod llvm_emitter;
 mod avx_wrapper;
+mod bank_conflict;
+mod c_emitter;
+mod cpu_emitter;
+mod lexer;
+mod linear_tracker;
+mod llvm_emitter;
+mod parser;
+mod ptx_emitter;
 mod sentinel;
+mod type_checker;
 
 use std::env;
 use std::fs;
 use std::process::exit;
 
-use lexer::Lexer;
-use parser::Parser;
-use type_checker::TypeChecker;
-use ptx_emitter::PtxEmitter;
-use cpu_emitter::CpuEmitter;
-use c_emitter::CEmitter;
-use llvm_emitter::LlvmEmitter;
 use ast::Item;
+use c_emitter::CEmitter;
+use cpu_emitter::CpuEmitter;
+use lexer::Lexer;
+use llvm_emitter::LlvmEmitter;
+use parser::Parser;
+use ptx_emitter::PtxEmitter;
+use type_checker::TypeChecker;
 
 fn main() {
     println!("========================================");
@@ -44,10 +44,8 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     // Find source file (first arg that isn't a flag)
-    let source_file = args.iter().skip(1)
-        .find(|a| !a.starts_with("--"))
-        .cloned();
-    
+    let source_file = args.iter().skip(1).find(|a| !a.starts_with("--")).cloned();
+
     let source_code = if let Some(mut file_path) = source_file {
         if std::path::Path::new(&file_path).extension().is_none() {
             file_path.push_str(".ysu");
@@ -125,7 +123,8 @@ fn main() {
 
             store(acc, C);
         }
-        "#.to_string()
+        "#
+        .to_string()
     };
 
     // ────────────────────────────────────────────────────────
@@ -159,14 +158,17 @@ fn main() {
     type_checker.check_program(&ast);
 
     if !type_checker.errors.is_empty() {
-        eprintln!("\n[!] The Type-Checker caught {} semantic errors:", type_checker.errors.len());
+        eprintln!(
+            "\n[!] The Type-Checker caught {} semantic errors:",
+            type_checker.errors.len()
+        );
         for err in type_checker.errors {
             eprintln!("    ❌ {}", err);
         }
         eprintln!("\nCompilation aborted to prevent undefined hardware behavior.");
         exit(1);
     }
-    
+
     // Check if any transfer obligations were left unconsumed via linear tracking
     if type_checker.linear_tracker.has_errors() {
         eprintln!("\n[!] Linear Type Check Failed!");
@@ -175,7 +177,7 @@ fn main() {
         }
         exit(1);
     }
-    
+
     println!("      -> 0 Bank Conflicts Detected.");
     println!("      -> Fragment Roles & Linear Obligations verified.");
 
@@ -188,26 +190,42 @@ fn main() {
             fn walk_block(b: &ast::Block, profile: &sentinel::HardwareProfile, count: &mut usize) {
                 for stmt in &b.stmts {
                     match stmt {
-                        ast::Stmt::Let { zero_drift: Some(_), ty, .. } => {
+                        ast::Stmt::Let {
+                            zero_drift: Some(_),
+                            ty,
+                            ..
+                        } => {
                             let type_name = match ty {
                                 Some(ast::Type::Ident(name, _)) => name.clone(),
                                 Some(ast::Type::Primitive(name, _)) => name.clone(),
                                 _ => "Unknown".to_string(),
                             };
-                            
-                            println!("      [Advisory] @ZeroDrift requested on type: {}", type_name);
+
+                            println!(
+                                "      [Advisory] @ZeroDrift requested on type: {}",
+                                type_name
+                            );
                             if profile.drift_free_types.contains(&type_name) {
                                 println!("        -> Hardware target ({}) natively supports zero drift for {}.", profile.gpu_name, type_name);
-                                println!("        -> Performance tradeoff: +{} cycles penalty.", profile.zero_drift_penalty_cycles);
+                                println!(
+                                    "        -> Performance tradeoff: +{} cycles penalty.",
+                                    profile.zero_drift_penalty_cycles
+                                );
                             } else {
                                 println!("        -> WARNING: Target ({}) lacks native zero drift for {}.", profile.gpu_name, type_name);
-                                println!("        -> Compiler must insert software compensation path.");
+                                println!(
+                                    "        -> Compiler must insert software compensation path."
+                                );
                             }
                             *count += 1;
                         }
                         ast::Stmt::For { body, .. } => walk_block(body, profile, count),
                         ast::Stmt::While { body, .. } => walk_block(body, profile, count),
-                        ast::Stmt::If { then_block, else_block, .. } => {
+                        ast::Stmt::If {
+                            then_block,
+                            else_block,
+                            ..
+                        } => {
                             walk_block(then_block, profile, count);
                             if let Some(eb) = else_block {
                                 walk_block(eb, profile, count);
@@ -221,7 +239,10 @@ fn main() {
         }
     }
     if zero_drift_count > 0 {
-        println!("      -> Processed {} @ZeroDrift annotations.", zero_drift_count);
+        println!(
+            "      -> Processed {} @ZeroDrift annotations.",
+            zero_drift_count
+        );
     }
 
     // ────────────────────────────────────────────────────────
@@ -248,8 +269,11 @@ fn main() {
 
     // Check for --emit-c flag
     let emit_c = args.iter().any(|a| a == "--emit-c" || a == "--target=c");
-    let emit_llvm = args.iter().any(|a| a == "--emit-llvm" || a == "--target=llvm");
-    let mut output_path = args.iter()
+    let emit_llvm = args
+        .iter()
+        .any(|a| a == "--emit-llvm" || a == "--target=llvm");
+    let mut output_path = args
+        .iter()
         .find(|a| a.starts_with("--output="))
         .map(|a| a.trim_start_matches("--output=").to_string())
         .unwrap_or_else(|| "output.c".to_string());
@@ -299,12 +323,18 @@ fn main() {
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     eprintln!("      [!] gcc failed:\n{}", stderr);
-                    println!("      -> C source saved to {} for manual compilation.", output_path);
+                    println!(
+                        "      -> C source saved to {} for manual compilation.",
+                        output_path
+                    );
                 }
             }
             Err(_) => {
                 println!("      -> gcc not found. C source saved to {}.", output_path);
-                println!("         Compile manually: gcc -std=c11 -O2 -o output {} -lm", output_path);
+                println!(
+                    "         Compile manually: gcc -std=c11 -O2 -o output {} -lm",
+                    output_path
+                );
             }
         }
     } else if target_is_cpu {
@@ -323,4 +353,3 @@ fn main() {
         println!("==================================");
     }
 }
-
