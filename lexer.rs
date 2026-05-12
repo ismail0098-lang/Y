@@ -266,10 +266,12 @@ impl Lexer {
 
     fn skip_block_comment(&mut self) {
         // already consumed '/*'; skip until '*/'
-        loop {
+        let mut depth = 1;
+        while depth > 0 {
             match self.advance() {
                 None => break,  // unterminated — let parser error
-                Some('*') if self.peek() == Some('/') => { self.advance(); break; }
+                Some('/') if self.peek() == Some('*') => { self.advance(); depth += 1; }
+                Some('*') if self.peek() == Some('/') => { self.advance(); depth -= 1; }
                 _ => {}
             }
         }
@@ -859,6 +861,19 @@ mod tests {
     #[test]
     fn test_unterminated_block_comment() {
         let kinds = lex("/* unterminated comment");
+        assert_eq!(kinds[0], TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_nested_block_comment() {
+        let kinds = lex("/* level 1 /* level 2 */ level 1 */ let");
+        assert_eq!(kinds.len(), 2); // Let, Eof
+        assert_eq!(kinds[0], TokenKind::Let);
+    }
+
+    #[test]
+    fn test_unterminated_nested_block_comment() {
+        let kinds = lex("/* level 1 /* level 2 */ level 1 ");
         assert_eq!(kinds[0], TokenKind::Eof);
     }
 
