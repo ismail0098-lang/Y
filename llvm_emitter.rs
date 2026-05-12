@@ -1777,6 +1777,7 @@ impl LlvmEmitter {
                     for (i, arg) in args.iter().enumerate() {
                         let mut arg_val = self.emit_expr(arg, None, None);
                         let arg_ty = self.infer_type(arg);
+                        let arg_ast = self.infer_ast_type(arg);
 
                         let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
 
@@ -1796,6 +1797,18 @@ impl LlvmEmitter {
                                 }
                             }
                         };
+
+                        if llvm_param_ty == "ptr" && arg_ast.starts_with('&') {
+                            let pointee_ast_ty = &arg_ast[1..];
+                            if matches!(pointee_ast_ty, "String" | "Vec" | "ptr")
+                                || pointee_ast_ty.starts_with('&')
+                            {
+                                let tmp = self.fresh_tmp();
+                                writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
+                                    .unwrap();
+                                arg_val = tmp;
+                            }
+                        }
 
                         if !arg_ty.starts_with('%')
                             && !llvm_param_ty.starts_with('%')
@@ -1915,6 +1928,7 @@ impl LlvmEmitter {
 
                     let mut arg_val = self.emit_expr(a, None, None);
                     let arg_ty = self.infer_type(a);
+                    let arg_ast = self.infer_ast_type(a);
 
 
 
@@ -1932,6 +1946,18 @@ impl LlvmEmitter {
                             }
                         }
                     };
+
+                    if llvm_param_ty == "ptr" && arg_ast.starts_with('&') {
+                        let pointee_ast_ty = &arg_ast[1..];
+                        if matches!(pointee_ast_ty, "String" | "Vec" | "ptr")
+                            || pointee_ast_ty.starts_with('&')
+                        {
+                            let tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
+                                .unwrap();
+                            arg_val = tmp;
+                        }
+                    }
 
                     if llvm_param_ty != "ptr" && !llvm_param_ty.starts_with('%') {
                         arg_val = self.emit_coerce(&arg_val, &arg_ty, &llvm_param_ty);
