@@ -881,30 +881,38 @@ mod tests {
         let mut lexer = Lexer::new("let a = 1;\nlet b = 2;");
         let tokens = lexer.tokenize();
 
+        // "let"
+        assert_eq!(tokens[0].kind, TokenKind::Let);
         assert_eq!(tokens[0].line, 1);
         assert_eq!(tokens[0].col, 1);
 
         // "a"
+        assert_eq!(tokens[1].kind, TokenKind::Ident("a".to_string()));
         assert_eq!(tokens[1].line, 1);
         assert_eq!(tokens[1].col, 5);
 
         // "="
+        assert_eq!(tokens[2].kind, TokenKind::Assign);
         assert_eq!(tokens[2].line, 1);
         assert_eq!(tokens[2].col, 7);
 
         // "1"
+        assert_eq!(tokens[3].kind, TokenKind::IntLit(1));
         assert_eq!(tokens[3].line, 1);
         assert_eq!(tokens[3].col, 9);
 
         // ";"
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
         assert_eq!(tokens[4].line, 1);
         assert_eq!(tokens[4].col, 10);
 
         // "let"
+        assert_eq!(tokens[5].kind, TokenKind::Let);
         assert_eq!(tokens[5].line, 2);
         assert_eq!(tokens[5].col, 1);
 
         // "b"
+        assert_eq!(tokens[6].kind, TokenKind::Ident("b".to_string()));
         assert_eq!(tokens[6].line, 2);
         assert_eq!(tokens[6].col, 5);
     }
