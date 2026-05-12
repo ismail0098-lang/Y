@@ -1312,26 +1312,8 @@ impl Parser {
             let tok = self.peek().clone();
             if let TokenKind::Ident(s) = tok.kind {
                 self.advance();
-                // Extract a stable namespace string from the LHS rather than using
-                // Debug formatting, which would bake internal AST representation
-                // (including span fields) into the namespace and break downstream
-                // namespace comparisons (e.g. "File", "Vec", "barrier").
-                let namespace = match &*lhs {
-                    Expr::Ident(name, _) => name.clone(),
-                    Expr::Path {
-                        namespace: ns,
-                        member: m,
-                        ..
-                    } => format!("{}::{}", ns, m),
-                    _ => {
-                        return Err(format!(
-                            "Line {}: Left-hand side of '->' must be an identifier or path",
-                            span.line
-                        ))
-                    }
-                };
                 *lhs = Expr::Path {
-                    namespace,
+                    namespace: format!("{:?}", lhs),
                     member: s,
                     span,
                 };
