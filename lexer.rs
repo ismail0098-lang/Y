@@ -875,4 +875,47 @@ mod tests {
         assert_eq!(kinds[0], TokenKind::StringLit("unterminated".to_string()));
         assert_eq!(kinds[1], TokenKind::Eof);
     }
+
+    #[test]
+    fn test_tokenize_lines_and_columns() {
+        let mut lexer = Lexer::new("let a = 1;\nlet b = 2;");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens[0].line, 1);
+        assert_eq!(tokens[0].col, 1);
+
+        // "a"
+        assert_eq!(tokens[1].line, 1);
+        assert_eq!(tokens[1].col, 5);
+
+        // "="
+        assert_eq!(tokens[2].line, 1);
+        assert_eq!(tokens[2].col, 7);
+
+        // "1"
+        assert_eq!(tokens[3].line, 1);
+        assert_eq!(tokens[3].col, 9);
+
+        // ";"
+        assert_eq!(tokens[4].line, 1);
+        assert_eq!(tokens[4].col, 10);
+
+        // "let"
+        assert_eq!(tokens[5].line, 2);
+        assert_eq!(tokens[5].col, 1);
+
+        // "b"
+        assert_eq!(tokens[6].line, 2);
+        assert_eq!(tokens[6].col, 5);
+    }
+
+    #[test]
+    fn test_tokenize_unknown_characters() {
+        let mut lexer = Lexer::new("let $ = 1;");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[1].kind, TokenKind::Unknown('$'));
+        assert_eq!(tokens[2].kind, TokenKind::Assign);
+    }
 }
