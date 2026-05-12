@@ -708,4 +708,17 @@ mod tests {
         assert!(tc.errors.is_empty());
         assert!(!tc.in_unsafe);
     }
+
+    #[test]
+    fn test_register_enum() {
+        let mut tc = TypeChecker::new();
+        let e = EnumDecl {
+            name: "TestEnum".into(),
+            generic_params: vec![],
+            variants: vec![],
+            span: Span { line: 0, col: 0 },
+        };
+        tc.register_enum(&e);
+        assert!(tc.enums.contains_key("TestEnum"));
+    }
 }
