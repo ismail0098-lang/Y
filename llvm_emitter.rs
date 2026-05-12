@@ -1777,18 +1777,10 @@ impl LlvmEmitter {
                     for (i, arg) in args.iter().enumerate() {
                         let mut arg_val = self.emit_expr(arg, None, None);
                         let arg_ty = self.infer_type(arg);
-                        let arg_ast = self.infer_ast_type(arg);
 
                         let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
 
 
-
-                        if arg_ast.starts_with('&') && param_ty == &arg_ast[1..] {
-                            let tmp = self.fresh_tmp();
-                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
-                                .unwrap();
-                            arg_val = tmp;
-                        }
 
                         let llvm_param_ty = match param_ty {
                             "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
@@ -1923,16 +1915,8 @@ impl LlvmEmitter {
 
                     let mut arg_val = self.emit_expr(a, None, None);
                     let arg_ty = self.infer_type(a);
-                    let arg_ast = self.infer_ast_type(a);
 
 
-
-                    if arg_ast.starts_with('&') && param_ty == &arg_ast[1..] {
-                        let tmp = self.fresh_tmp();
-                        writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
-                            .unwrap();
-                        arg_val = tmp;
-                    }
 
                     let llvm_param_ty = match param_ty {
                         "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
