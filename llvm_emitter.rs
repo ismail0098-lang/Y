@@ -2376,7 +2376,7 @@ impl LlvmEmitter {
     // ── Helpers ─────────────────────────────────────────────
 
     fn binop_to_llvm(&self, op: &BinaryOp, ty: &str) -> &'static str {
-        let is_float = ty == "float" || ty == "double";
+        let is_float = ty == "float" || ty == "double" || ty == "half";
         match op {
             BinaryOp::Add => {
                 if is_float {
