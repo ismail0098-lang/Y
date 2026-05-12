@@ -1781,46 +1781,9 @@ impl LlvmEmitter {
 
                         let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
 
-                        // Universal Context-aware deref
-                        let is_runtime_func = [
-                            "ystr_new",
-                            "ystr_push",
-                            "ystr_push_str",
-                            "ystr_eq_cstr",
-                            "ystr_len",
-                            "ystr_char_at",
-                            "ystr_clone",
-                            "yvec_new",
-                            "yvec_push",
-                            "yvec_get",
-                            "yvec_len",
-                            "yfile_read_to_string",
-                            "yfile_write",
-                            "printf",
-                            "malloc",
-                            "free",
-                            "exit",
-                            "println",
-                            "print_int",
-                            "llvm.prefetch.p0",
-                            "load",
-                            "yvec_free",
-                            "ystr_free",
-                            "ylexer_log",
-                        ]
-                        .contains(&func_name.as_str());
+
 
                         if arg_ast.starts_with('&') && param_ty == &arg_ast[1..] {
-                            let tmp = self.fresh_tmp();
-                            writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
-                                .unwrap();
-                            arg_val = tmp;
-                        } else if arg_ast.starts_with('&')
-                            && param_ty == arg_ast
-                            && arg_val.starts_with("%")
-                            && is_runtime_func
-                        {
-                            // If param is &String and arg is &String, but arg is a double pointer (e.g., alloca'd local variable yielding pointer to ptr), we load it to get the YStr* pointer instead of passing the alloca YStr**.
                             let tmp = self.fresh_tmp();
                             writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
                                 .unwrap();
@@ -1962,34 +1925,7 @@ impl LlvmEmitter {
                     let arg_ty = self.infer_type(a);
                     let arg_ast = self.infer_ast_type(a);
 
-                    // Universal Context-aware deref
-                    let is_runtime_func = [
-                        "ystr_new",
-                        "ystr_push",
-                        "ystr_push_str",
-                        "ystr_eq_cstr",
-                        "ystr_len",
-                        "ystr_char_at",
-                        "ystr_clone",
-                        "yvec_new",
-                        "yvec_push",
-                        "yvec_get",
-                        "yvec_len",
-                        "yfile_read_to_string",
-                        "yfile_write",
-                        "printf",
-                        "malloc",
-                        "free",
-                        "exit",
-                        "println",
-                        "print_int",
-                        "llvm.prefetch.p0",
-                        "load",
-                        "yvec_free",
-                        "ystr_free",
-                        "ylexer_log",
-                    ]
-                    .contains(&func_name.as_str());
+
 
                     if arg_ast.starts_with('&') && param_ty == &arg_ast[1..] {
                         let tmp = self.fresh_tmp();
@@ -1997,15 +1933,6 @@ impl LlvmEmitter {
                             .unwrap();
                         arg_val = tmp;
                     } else if arg_ty == "ptr" && param_ty == "String" {
-                        let tmp = self.fresh_tmp();
-                        writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
-                            .unwrap();
-                        arg_val = tmp;
-                    } else if arg_ast.starts_with('&')
-                        && param_ty == arg_ast
-                        && arg_val.starts_with("%")
-                        && is_runtime_func
-                    {
                         let tmp = self.fresh_tmp();
                         writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
                             .unwrap();
