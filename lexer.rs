@@ -875,4 +875,12 @@ mod tests {
         assert_eq!(kinds[0], TokenKind::StringLit("unterminated".to_string()));
         assert_eq!(kinds[1], TokenKind::Eof);
     }
+
+    #[test]
+    fn test_unexpected_eof() {
+        let kinds = lex("\"unterminated");
+        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds[0], TokenKind::StringLit("unterminated".to_string()));
+        assert_eq!(kinds[1], TokenKind::Eof);
+    }
 }
