@@ -1932,11 +1932,6 @@ impl LlvmEmitter {
                         writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
                             .unwrap();
                         arg_val = tmp;
-                    } else if arg_ty == "ptr" && param_ty == "String" {
-                        let tmp = self.fresh_tmp();
-                        writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
-                            .unwrap();
-                        arg_val = tmp;
                     }
 
                     let llvm_param_ty = match param_ty {
