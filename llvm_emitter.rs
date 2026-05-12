@@ -1781,9 +1781,7 @@ impl LlvmEmitter {
 
                         let param_ty = expected_params.get(i).map(|s| s.as_str()).unwrap_or("i32");
 
-
-
-                        if arg_ast.starts_with('&') && param_ty == &arg_ast[1..] {
+                        if arg_ast.starts_with('&') && arg_ast[1..] == *param_ty {
                             let tmp = self.fresh_tmp();
                             writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
                                 .unwrap();
@@ -1925,9 +1923,7 @@ impl LlvmEmitter {
                     let arg_ty = self.infer_type(a);
                     let arg_ast = self.infer_ast_type(a);
 
-
-
-                    if arg_ast.starts_with('&') && param_ty == &arg_ast[1..] {
+                    if arg_ast.starts_with('&') && arg_ast[1..] == *param_ty {
                         let tmp = self.fresh_tmp();
                         writeln!(&mut self.output, "  {} = load ptr, ptr {}", tmp, arg_val)
                             .unwrap();
