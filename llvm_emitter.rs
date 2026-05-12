@@ -1082,9 +1082,7 @@ impl LlvmEmitter {
                             )
                             .unwrap();
 
-                            let src_ptr = if coerced.starts_with('%')
-                                && self.structs.contains_key(dst_ty.trim_start_matches('%'))
-                            {
+                            let src_ptr = if val_ty.starts_with('%') || val_ty.starts_with('[') {
                                 let tmp_ptr = self.fresh_tmp();
                                 writeln!(&mut self.output, "  {} = alloca {}", tmp_ptr, dst_ty)
                                     .unwrap();
@@ -1135,9 +1133,7 @@ impl LlvmEmitter {
                         )
                         .unwrap();
 
-                        let src_ptr = if coerced.starts_with('%')
-                            && self.structs.contains_key(dst_ty.trim_start_matches('%'))
-                        {
+                        let src_ptr = if val_ty.starts_with('%') || val_ty.starts_with('[') {
                             let tmp_ptr = self.fresh_tmp();
                             writeln!(&mut self.output, "  {} = alloca {}", tmp_ptr, dst_ty)
                                 .unwrap();
