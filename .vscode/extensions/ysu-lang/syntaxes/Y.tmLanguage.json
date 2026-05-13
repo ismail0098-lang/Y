@@ -1,0 +1,343 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Y",
+  "scopeName": "source.Y",
+  "fileTypes": ["ysu"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#directives" },
+    { "include": "#strings" },
+    { "include": "#characters" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#functions" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.Y",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.Y",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "captures": {
+            "0": { "name": "punctuation.definition.comment.Y" }
+          }
+        }
+      ]
+    },
+
+    "directives": {
+      "patterns": [
+        {
+          "comment": "Fortress directives — formally verified safety proofs",
+          "name": "entity.name.function.directive.safe.Y",
+          "match": "@(safe|bounds|invariant)\\b"
+        },
+        {
+          "comment": "Fortress @bounds with inline arguments",
+          "name": "entity.name.function.directive.safe.Y",
+          "match": "@bounds\\s*\\([^)]*\\)"
+        },
+        {
+          "comment": "Fortress @invariant with inline arguments",
+          "name": "entity.name.function.directive.safe.Y",
+          "match": "@invariant\\s*\\([^)]*\\)"
+        },
+        {
+          "comment": "Trapdoor directive — raw hardware access",
+          "name": "invalid.deprecated.directive.unsafe.Y",
+          "match": "@unsafe\\b"
+        },
+        {
+          "comment": "General compiler directives",
+          "name": "support.function.directive.Y",
+          "match": "@(inline|noinline|static_assert|require|cache_policy|ptx_emit|avx_emit|align|gpu_uncached|atomic)\\b"
+        },
+        {
+          "comment": "General directives with arguments",
+          "name": "support.function.directive.Y",
+          "match": "@(require|cache_policy|align|static_assert)\\s*\\([^)]*\\)"
+        },
+        {
+          "comment": "Unknown @ directives fallback",
+          "name": "variable.annotation.directive.Y",
+          "match": "@[a-zA-Z_][a-zA-Z0-9_]*"
+        }
+      ]
+    },
+
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.Y",
+          "begin": "\"",
+          "end": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.Y" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.Y" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.Y",
+              "match": "\\\\(n|r|t|0|\\\\|\"|'|x[0-9a-fA-F]{2})"
+            }
+          ]
+        }
+      ]
+    },
+
+    "characters": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.Y",
+          "match": "'(\\\\(n|r|t|0|\\\\|'|\"|x[0-9a-fA-F]{2})|[^'\\\\])'",
+          "captures": {
+            "1": { "name": "constant.character.escape.Y" }
+          }
+        }
+      ]
+    },
+
+    "numbers": {
+      "patterns": [
+        {
+          "comment": "Hex literals: 0x1A2B",
+          "name": "constant.numeric.hex.Y",
+          "match": "\\b0x[0-9a-fA-F][0-9a-fA-F_]*\\b"
+        },
+        {
+          "comment": "Binary literals: 0b1010",
+          "name": "constant.numeric.binary.Y",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "comment": "Float literals: 3.14, 1.0e-5",
+          "name": "constant.numeric.float.Y",
+          "match": "\\b[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9]+)?\\b(?=\\.\\D|[^.])"
+        },
+        {
+          "comment": "Float literals with mandatory decimal",
+          "name": "constant.numeric.float.Y",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b"
+        },
+        {
+          "comment": "Integer literals: 42, 1_000",
+          "name": "constant.numeric.integer.Y",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+
+    "keywords": {
+      "patterns": [
+        {
+          "comment": "Control flow keywords",
+          "name": "keyword.control.Y",
+          "match": "\\b(if|else|while|for|in|step|return|match|break|continue)\\b"
+        },
+        {
+          "comment": "Declaration keywords",
+          "name": "keyword.declaration.Y",
+          "match": "\\b(let|mut|fn|struct|enum|impl|import|as|pub|const|type|kernel|chisel)\\b"
+        },
+        {
+          "comment": "Self keyword",
+          "name": "variable.language.self.Y",
+          "match": "\\bself\\b"
+        }
+      ]
+    },
+
+    "types": {
+      "patterns": [
+        {
+          "comment": "Primitive scalar types",
+          "name": "storage.type.primitive.Y",
+          "match": "\\b(I8|I16|I32|I64|U3|U8|U16|U32|U64|F16|BF16|TF32|F32|F64|bool|usize|char)\\b"
+        },
+        {
+          "comment": "Built-in compound types",
+          "name": "storage.type.builtin.Y",
+          "match": "\\b(String|Vec|File|Option)\\b"
+        },
+        {
+          "comment": "Memory space types",
+          "name": "storage.type.memory.Y",
+          "match": "\\b(GlobalMemory|L2Memory|SharedMemory|RegisterFile)\\b"
+        },
+        {
+          "comment": "Layout / transfer / fragment types",
+          "name": "storage.type.layout.Y",
+          "match": "\\b(SmemLayout|Swizzle|NoSwizzle|Pipeline|Transfer|Fragment)\\b"
+        },
+        {
+          "comment": "Fragment roles",
+          "name": "storage.type.role.Y",
+          "match": "\\b(RoleA|RoleB|RoleC|RoleD)\\b"
+        },
+        {
+          "comment": "Transfer policies",
+          "name": "storage.type.policy.Y",
+          "match": "\\b(Async|Sync)\\b"
+        },
+        {
+          "comment": "Cache policies",
+          "name": "storage.type.cache.Y",
+          "match": "\\b(L2_PERSIST|L2_EVICT_FIRST|L2_EVICT_LAST|L2_STREAM)\\b"
+        },
+        {
+          "comment": "User-defined types (PascalCase identifiers)",
+          "name": "entity.name.type.Y",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.Y",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+
+    "functions": {
+      "patterns": [
+        {
+          "comment": "Function definition: fn name(",
+          "match": "\\b(fn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "keyword.declaration.Y" },
+            "2": { "name": "entity.name.function.Y" }
+          }
+        },
+        {
+          "comment": "Function/method call: name(",
+          "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.function.call.Y" }
+          }
+        },
+        {
+          "comment": "Namespace path call: Ns::method(",
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\s*::\\s*([a-zA-Z_][a-zA-Z0-9_]*)\\s*\\(",
+          "captures": {
+            "1": { "name": "entity.name.type.Y" },
+            "2": { "name": "entity.name.function.call.Y" }
+          }
+        },
+        {
+          "comment": "Namespace path without call: Ns::member",
+          "match": "\\b([A-Z][a-zA-Z0-9_]*)\\s*::\\s*([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.type.Y" },
+            "2": { "name": "variable.other.enummember.Y" }
+          }
+        },
+        {
+          "comment": "Built-in intrinsics",
+          "name": "support.function.builtin.Y",
+          "match": "\\b(println|print|print_int|str_to_i64|cp_async|ldmatrix|mma_sync|barrier_sync)\\b"
+        }
+      ]
+    },
+
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.Y",
+          "match": "->|=>"
+        },
+        {
+          "name": "keyword.operator.range.Y",
+          "match": "\\.\\."
+        },
+        {
+          "name": "keyword.operator.namespace.Y",
+          "match": "::"
+        },
+        {
+          "name": "keyword.operator.comparison.Y",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.Y",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.assignment.compound.Y",
+          "match": "\\+=|-=|\\*=|/=|%="
+        },
+        {
+          "name": "keyword.operator.assignment.Y",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.Y",
+          "match": "\\+|-|\\*|/|%"
+        },
+        {
+          "name": "keyword.operator.bitwise.Y",
+          "match": "<<|>>|&|\\||\\^"
+        }
+      ]
+    },
+
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.comma.Y",
+          "match": ","
+        },
+        {
+          "name": "punctuation.terminator.semicolon.Y",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.colon.Y",
+          "match": ":"
+        },
+        {
+          "name": "punctuation.section.braces.begin.Y",
+          "match": "\\{"
+        },
+        {
+          "name": "punctuation.section.braces.end.Y",
+          "match": "\\}"
+        },
+        {
+          "name": "punctuation.section.parens.begin.Y",
+          "match": "\\("
+        },
+        {
+          "name": "punctuation.section.parens.end.Y",
+          "match": "\\)"
+        },
+        {
+          "name": "punctuation.section.brackets.begin.Y",
+          "match": "\\["
+        },
+        {
+          "name": "punctuation.section.brackets.end.Y",
+          "match": "\\]"
+        },
+        {
+          "name": "punctuation.accessor.dot.Y",
+          "match": "\\."
+        }
+      ]
+    }
+  }
+}
