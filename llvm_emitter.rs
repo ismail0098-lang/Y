@@ -2409,7 +2409,14 @@ impl LlvmEmitter {
                 operand,
                 ..
             } => {
-                self.infer_ast_type(operand)
+                let inner = self.infer_ast_type(operand);
+                if let Some(stripped) = inner.strip_prefix("&mut ") {
+                    stripped.to_string()
+                } else if let Some(stripped) = inner.strip_prefix('&') {
+                    stripped.to_string()
+                } else {
+                    inner
+                }
             }
             Expr::MemberAccess { base, member, .. } => {
                 // Approximate base ty
