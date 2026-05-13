@@ -1,0 +1,30 @@
+--- llvm_emitter.rs
++++ llvm_emitter.rs
+@@ -2596,25 +2596,23 @@
+     fn infer_struct_type(&self, expr: &Expr) -> String {
+         match expr {
+             Expr::Ident(name, _) => {
+                 if let Some(t) = self.locals_ast_type.get(name) {
+-                    let cleaned = t.trim_start_matches('&');
++                    let cleaned = t.trim_start_matches('&').trim_start_matches("mut ");
+                     if self.structs.contains_key(cleaned) {
+                         return format!("%{}", cleaned);
+                     }
+                 }
+                 self.pointee_types
+                     .get(name)
+                     .cloned()
+                     .unwrap_or_else(|| {
+                         if let Some(t) = self.locals_ast_type.get(name) {
+-                            let cleaned = t.trim_start_matches('&');
++                            let cleaned = t.trim_start_matches('&').trim_start_matches("mut ");
+                             if self.ast_structs.contains_key(cleaned) {
+                                 format!("%{}", cleaned)
+                             } else {
+                                 "Unknown".into()
+                             }
+                         } else {
+                             "Unknown".into()
+                         }
+                     })
+             }

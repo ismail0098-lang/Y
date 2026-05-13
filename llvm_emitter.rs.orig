@@ -2409,14 +2409,7 @@ impl LlvmEmitter {
                 operand,
                 ..
             } => {
-                let inner = self.infer_ast_type(operand);
-                if let Some(stripped) = inner.strip_prefix("&mut ") {
-                    stripped.to_string()
-                } else if let Some(stripped) = inner.strip_prefix('&') {
-                    stripped.to_string()
-                } else {
-                    inner
-                }
+                self.infer_ast_type(operand)
             }
             Expr::MemberAccess { base, member, .. } => {
                 // Approximate base ty
@@ -2449,7 +2442,6 @@ impl LlvmEmitter {
             Expr::FloatLit(_, _) => "f64".into(),
             Expr::BoolLit(_, _) => "bool".into(),
             Expr::CharLit(_, _) => "char".into(),
-            Expr::StructLit { name, .. } => name.clone(),
             _ => "Unknown".into(),
         }
     }
@@ -2622,10 +2614,10 @@ impl LlvmEmitter {
                             if self.ast_structs.contains_key(cleaned) {
                                 format!("%{}", cleaned)
                             } else {
-                                "i32".into()
+                                "Unknown".into()
                             }
                         } else {
-                            "i32".into()
+                            "Unknown".into()
                         }
                     })
             }
