@@ -728,7 +728,13 @@ impl Parser {
             let colon_check: Token = Parser::peek(p);
             if String::eq_cstr(&colon_check.lexeme, ":") {
                 Parser::advance(p);
-                // For bootstrap, skip type tokens until = or ;
+                
+                let ty_tok: Token = Parser::advance(p);
+                let t_expr: Expr = Expr::Ident(String::clone(&ty_tok.lexeme));
+                Vec::push(&mut (*arena).exprs, &t_expr);
+                type_idx = Vec::len(&(*arena).exprs);
+                
+                // For bootstrap, skip remaining type tokens until = or ;
                 let mut skipping_type: bool = true;
                 while skipping_type {
                     let t: Token = Parser::peek(p);

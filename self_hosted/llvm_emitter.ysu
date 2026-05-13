@@ -58,7 +58,7 @@ impl LlvmEmitter {
     @unsafe
     fn fresh_tmp(e: &mut LlvmEmitter) -> String {
         (*e).tmp_counter += 1;
-        let mut s: String = String::new("%t");
+        let mut s: String = String::new("%_t");
         String::push_str(&mut s, &LlvmEmitter::int_to_str((*e).tmp_counter));
         return s;
     }

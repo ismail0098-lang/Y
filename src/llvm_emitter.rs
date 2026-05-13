@@ -157,7 +157,7 @@ impl LlvmEmitter {
 
     fn fresh_tmp(&mut self) -> String {
         self.tmp_counter += 1;
-        format!("%t{}", self.tmp_counter)
+        format!("%_t{}", self.tmp_counter)
     }
 
     fn fresh_label(&mut self, prefix: &str) -> String {
@@ -1927,7 +1927,7 @@ impl LlvmEmitter {
                             func_name, args_joined
                         )
                         .unwrap();
-                        return tmp.replace("%t", "%_void");
+                        return tmp.replace("%_t", "%_void");
                     } else {
                         writeln!(
                             &mut self.output,

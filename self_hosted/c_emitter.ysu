@@ -66,15 +66,46 @@ impl CEmitter {
         
         if stmt.tag == Stmt_TAG_Let {
             let var_name: String = stmt.data.Let._0;
+            let type_idx: usize = stmt.data.Let._1;
             let init_idx: usize = stmt.data.Let._2;
             
-            String::push_str(&mut (*e).c_buffer, &String::new("int32_t "));
+            let mut ty_str: String = String::new("int32_t");
+            if type_idx > 0 {
+                let ty_expr: Expr = Vec::get_Expr(&(*arena).exprs, type_idx - 1);
+                if ty_expr.tag == Expr_TAG_Ident {
+                    let s: String = String::clone(&ty_expr.data.Ident._0);
+                    if String::eq_cstr(&s, "I32") { ty_str = String::new("int32_t"); }
+                    else if String::eq_cstr(&s, "i32") { ty_str = String::new("int32_t"); }
+                    else if String::eq_cstr(&s, "I64") { ty_str = String::new("int64_t"); }
+                    else if String::eq_cstr(&s, "i64") { ty_str = String::new("int64_t"); }
+                    else if String::eq_cstr(&s, "F32") { ty_str = String::new("float"); }
+                    else if String::eq_cstr(&s, "f32") { ty_str = String::new("float"); }
+                    else if String::eq_cstr(&s, "F64") { ty_str = String::new("double"); }
+                    else if String::eq_cstr(&s, "f64") { ty_str = String::new("double"); }
+                    else if String::eq_cstr(&s, "bool") { ty_str = String::new("bool"); }
+                    else if String::eq_cstr(&s, "char") { ty_str = String::new("char"); }
+                    else if String::eq_cstr(&s, "usize") { ty_str = String::new("size_t"); }
+                    else if String::eq_cstr(&s, "String") { ty_str = String::new("YStr"); }
+                    else if String::eq_cstr(&s, "Vec") { ty_str = String::new("YVec"); }
+                    else if String::eq_cstr(&s, "File") { ty_str = String::new("YFile"); }
+                    else { ty_str = s; }
+                }
+            }
+            
+            String::push_str(&mut (*e).c_buffer, &ty_str);
+            String::push_str(&mut (*e).c_buffer, &String::new(" "));
             String::push_str(&mut (*e).c_buffer, &var_name);
             if init_idx > 0 {
                 String::push_str(&mut (*e).c_buffer, &String::new(" = "));
                 CEmitter::emit_expr(e, arena, init_idx - 1);
             } else {
-                String::push_str(&mut (*e).c_buffer, &String::new(" = 0"));
+                if String::eq_cstr(&ty_str, "int32_t") {
+                    String::push_str(&mut (*e).c_buffer, &String::new(" = 0"));
+                } else if String::eq_cstr(&ty_str, "float") {
+                    String::push_str(&mut (*e).c_buffer, &String::new(" = 0.0f"));
+                } else {
+                    String::push_str(&mut (*e).c_buffer, &String::new(" = {0}"));
+                }
             }
             String::push_str(&mut (*e).c_buffer, &String::new(";\n"));
         } else if stmt.tag == Stmt_TAG_Return {
