@@ -83,6 +83,12 @@ enum TokenKind {
     AtNoInline, AtAlign, AtSafe, AtUnsafe, AtGpuUncached,
     AtAtomic, AtStaticAssert, AtUnknown(String),
 
+    // @bounds(min, max) — compile-time index proof directive
+    AtBounds(I64, I64),
+
+    // @invariant(expr) — compile-time loop invariant proof directive
+    AtInvariant(String),
+
     // ── Operators ────────────────────────────────────────────
     Arrow, DotDot, ColonColon, Colon, Assign, FatArrow,
     EqEq, NotEq, Lt, Gt, LtEq, GtEq, Plus, Minus, Star,
@@ -334,6 +340,127 @@ impl Lexer {
         if ch == '&' { let x: String = String::new("&"); return Token::new(TokenKind::Ampersand, line, start_col, &x); }
         if ch == '<' { let x: String = String::new("<"); return Token::new(TokenKind::Lt, line, start_col, &x); }
         if ch == '>' { let x: String = String::new(">"); return Token::new(TokenKind::Gt, line, start_col, &x); }
+
+        // ── @bounds(min, max) directive ──
+        if ch == '@' {
+            let mut dir_name: String = String::new("");
+            let mut scanning_dir: bool = true;
+            while scanning_dir {
+                let dc: char = Lexer::peek(lx);
+                let mut is_dir_char: bool = false;
+                if dc >= 'a' { if dc <= 'z' { is_dir_char = true; } }
+                if dc >= 'A' { if dc <= 'Z' { is_dir_char = true; } }
+                if dc == '_' { is_dir_char = true; }
+                if is_dir_char {
+                    String::push(&mut dir_name, dc);
+                    Lexer::advance(lx);
+                } else {
+                    scanning_dir = false;
+                }
+            }
+
+            if String::eq_cstr(&dir_name, "invariant") {
+                Lexer::skip_whitespace(lx);
+                Lexer::advance(lx); // consume '('
+
+                // Capture everything inside parens as raw string,
+                // handling nested parens via depth tracking
+                let mut inv_expr: String = String::new("");
+                let mut paren_depth: usize = 1;
+                let mut scanning_inv: bool = true;
+                while scanning_inv {
+                    let ic: char = Lexer::peek(lx);
+                    if ic == '(' {
+                        paren_depth += 1;
+                        String::push(&mut inv_expr, ic);
+                        Lexer::advance(lx);
+                    } else if ic == ')' {
+                        paren_depth -= 1;
+                        if paren_depth == 0 {
+                            scanning_inv = false;
+                        } else {
+                            String::push(&mut inv_expr, ic);
+                            Lexer::advance(lx);
+                        }
+                    } else if ic == '\0' {
+                        scanning_inv = false;
+                    } else {
+                        String::push(&mut inv_expr, ic);
+                        Lexer::advance(lx);
+                    }
+                }
+                Lexer::advance(lx); // consume final ')'
+
+                let lex_inv: String = String::new("@invariant");
+                return Token::new(TokenKind::AtInvariant(inv_expr), line, start_col, &lex_inv);
+            }
+
+            if String::eq_cstr(&dir_name, "bounds") {
+                Lexer::skip_whitespace(lx);
+                Lexer::advance(lx); // consume '('
+
+                // Parse min integer
+                Lexer::skip_whitespace(lx);
+                let mut min_str: String = String::new("");
+                let mut neg_min: bool = false;
+                if Lexer::peek(lx) == '-' {
+                    neg_min = true;
+                    Lexer::advance(lx);
+                }
+                let mut scan_min: bool = true;
+                while scan_min {
+                    let mc: char = Lexer::peek(lx);
+                    let mut is_d: bool = false;
+                    if mc >= '0' { if mc <= '9' { is_d = true; } }
+                    if is_d {
+                        String::push(&mut min_str, mc);
+                        Lexer::advance(lx);
+                    } else {
+                        scan_min = false;
+                    }
+                }
+
+                Lexer::skip_whitespace(lx);
+                Lexer::advance(lx); // consume ','
+
+                // Parse max integer
+                Lexer::skip_whitespace(lx);
+                let mut max_str: String = String::new("");
+                let mut neg_max: bool = false;
+                if Lexer::peek(lx) == '-' {
+                    neg_max = true;
+                    Lexer::advance(lx);
+                }
+                let mut scan_max: bool = true;
+                while scan_max {
+                    let xc: char = Lexer::peek(lx);
+                    let mut is_d2: bool = false;
+                    if xc >= '0' { if xc <= '9' { is_d2 = true; } }
+                    if is_d2 {
+                        String::push(&mut max_str, xc);
+                        Lexer::advance(lx);
+                    } else {
+                        scan_max = false;
+                    }
+                }
+
+                Lexer::skip_whitespace(lx);
+                Lexer::advance(lx); // consume ')'
+
+                let min_val: I64 = str_to_i64(&min_str);
+                let max_val: I64 = str_to_i64(&max_str);
+                if neg_min { min_val = 0 - min_val; }
+                if neg_max { max_val = 0 - max_val; }
+
+                let lex_s: String = String::new("@bounds");
+                return Token::new(TokenKind::AtBounds(min_val, max_val), line, start_col, &lex_s);
+            }
+
+            // Fallback: unknown @ attribute
+            let mut at_lex: String = String::new("@");
+            String::push_str(&mut at_lex, &dir_name);
+            return Token::new(TokenKind::AtUnknown(dir_name), line, start_col, &at_lex);
+        }
 
         let mut is_alpha: bool = false;
         if ch >= 'a' { if ch <= 'z' { is_alpha = true; } }

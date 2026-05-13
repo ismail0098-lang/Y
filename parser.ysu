@@ -77,8 +77,8 @@ enum Expr {
 // ── Statements ──────────────────────────────────────────────
 
 enum Stmt {
-    // let name: ty = init;  (ty_idx=0 means no type, init_idx=0 means no init)
-    Let(String, usize, usize),
+    // let name: ty = init;  bounds_min, bounds_max (0,0 = no bounds)
+    Let(String, usize, usize, I64, I64),
 
     // return expr; (expr_idx=0 means bare return)
     Return(usize),
@@ -86,11 +86,11 @@ enum Stmt {
     // if cond_idx { then_start..then_count } else { else_start..else_count }
     If(usize, usize, usize, usize, usize),
 
-    // while cond_idx { body_start..body_count }
-    While(usize, usize, usize),
+    // while cond_idx { body_start..body_count } invariant_idx (0 = none)
+    While(usize, usize, usize, usize),
 
-    // for loop_var in start_idx..end_idx step step_idx { body_start..body_count }
-    For(String, usize, usize, usize, usize, usize),
+    // for loop_var in start_idx..end_idx step step_idx { body_start..body_count } invariant_idx
+    For(String, usize, usize, usize, usize, usize, usize),
 
     // match scrutinee_idx { arm_start..arm_count }
     Match(usize, usize, usize),
@@ -636,7 +636,38 @@ impl Parser {
     @unsafe
     fn parse_stmt(p: &mut Parser, arena: &mut AstArena) -> usize {
         let tok: Token = Parser::peek(p);
-        let lex: String = String::clone(&tok.lexeme);
+        let mut lex: String = String::clone(&tok.lexeme);
+
+        // ── check for @bounds directive preceding let ──
+        let mut has_bounds: bool = false;
+        let mut bounds_min: I64 = 0;
+        let mut bounds_max: I64 = 0;
+
+        // ── check for @invariant directive preceding while/for ──
+        let mut invariant_idx: usize = 0;
+
+        if String::eq_cstr(&lex, "@invariant") {
+            // AtInvariant token carries the raw expression string
+            // Store it as a StringLit expr in the arena for the verifier
+            Parser::advance(p);
+            let inv_expr: Expr = Expr::StringLit(String::clone(&tok.lexeme));
+            Vec::push(&mut (*arena).exprs, inv_expr);
+            invariant_idx = Vec::len(&(*arena).exprs);
+            // Re-peek for the while/for keyword
+            let next_tok: Token = Parser::peek(p);
+            lex = String::clone(&next_tok.lexeme);
+        }
+
+        if String::eq_cstr(&lex, "@bounds") {
+            has_bounds = true;
+            // AtBounds token carries parsed (min, max) in its payload
+            // For bootstrap: extract from lexeme or token data
+            // The lexer stored these as AtBounds(min, max)
+            Parser::advance(p);
+            // Re-peek for the let keyword
+            let next_tok: Token = Parser::peek(p);
+            lex = String::clone(&next_tok.lexeme);
+        }
 
         // ── let statement ──
         if String::eq_cstr(&lex, "let") {
@@ -678,7 +709,7 @@ impl Parser {
             }
 
             Parser::expect_token(p, &String::new(";"));
-            let stmt: Stmt = Stmt::Let(var_name, type_idx, init_idx);
+            let stmt: Stmt = Stmt::Let(var_name, type_idx, init_idx, bounds_min, bounds_max);
             Vec::push(&mut (*arena).stmts, stmt);
             let idx: usize = Vec::len(&(*arena).stmts);
             return idx;
@@ -749,7 +780,7 @@ impl Parser {
             return idx;
         }
 
-        // ── while statement ──
+        // ── while statement (with optional @invariant) ──
         if String::eq_cstr(&lex, "while") {
             Parser::advance(p);
             let cond_idx: usize = Parser::parse_expr(p, arena);
@@ -769,7 +800,7 @@ impl Parser {
             }
             Parser::expect_token(p, &String::new("}"));
 
-            let stmt: Stmt = Stmt::While(cond_idx, body_start, body_count);
+            let stmt: Stmt = Stmt::While(cond_idx, body_start, body_count, invariant_idx);
             Vec::push(&mut (*arena).stmts, stmt);
             let idx: usize = Vec::len(&(*arena).stmts);
             return idx;
@@ -807,7 +838,7 @@ impl Parser {
             }
             Parser::expect_token(p, &String::new("}"));
             
-            let stmt: Stmt = Stmt::For(loop_var, start_idx, end_idx, step_idx, body_start, body_count);
+            let stmt: Stmt = Stmt::For(loop_var, start_idx, end_idx, step_idx, body_start, body_count, invariant_idx);
             Vec::push(&mut (*arena).stmts, stmt);
             let idx: usize = Vec::len(&(*arena).stmts);
             return idx;

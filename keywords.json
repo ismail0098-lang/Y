@@ -109,7 +109,9 @@
     "@inline",
     "@noinline",
     "@align",
-    "@ZeroDrift"
+    "@ZeroDrift",
+    "@bounds",
+    "@invariant"
   ],
   "operators": [
     "->",

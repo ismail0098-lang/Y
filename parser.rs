@@ -1159,6 +1159,7 @@ impl Parser {
 
     /// Pratt parser: parse expression with minimum binding power.
     /// Binding powers (left, right) — left-associative: l_bp = r_bp - 1
+    /// ```text
     ///   ||          :  1,  2
     ///   &&          :  3,  4
     ///   == !=       :  5,  6
@@ -1168,6 +1169,7 @@ impl Parser {
     ///   << >>       : 13, 14
     ///   + -         : 15, 16
     ///   * / %       : 17, 18
+    /// ```
     fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, String> {
         // Parse prefix (unary operators) or primary
         let mut lhs = self.parse_unary_or_primary()?;

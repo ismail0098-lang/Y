@@ -544,6 +544,10 @@ impl TypeChecker {
                     namespace, member, ..
                 } = &**func
                 {
+                    if namespace == "barrier" && member == "sync" {
+                        self.linear_tracker.synchronize_barrier();
+                        return SemanticType::Unknown;
+                    }
                     if namespace == "File" && member == "read" {
                         for arg in args {
                             let arg_ty = self.check_expr(arg);
@@ -787,7 +791,7 @@ impl TypeChecker {
                                 // Dummy fill for parser validation context
                                 swizzle = Some(SwizzlePattern {
                                     xor_bits: 3,
-                                    base_shift: 3,
+                                    base_shift: 0,
                                     offset: 0,
                                 });
                             }

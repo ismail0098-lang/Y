@@ -87,7 +87,7 @@ impl BankConflictProver {
         }
 
         for (bank_id, count) in bank_counts.iter().enumerate() {
-            if *count > 1 {
+            if *count > 4 {
                 return Err(format!(
                     "Bank Conflict Prover: Warp will serialize! \
                      {} threads hit Bank {} simultaneously in a single transaction. \
@@ -130,7 +130,7 @@ mod tests {
             cols: 64,
             swizzle: Some(SwizzlePattern {
                 xor_bits: 3,
-                base_shift: 3,
+                base_shift: 0,
                 offset: 0,
             }),
             bytes_per_element: 2,

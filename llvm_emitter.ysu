@@ -4,7 +4,8 @@ import parser;
 struct LlvmEmitter {
     buffer: String,
     tmp_counter: usize,
-    label_counter: usize
+    label_counter: usize,
+    bounds_checker: BoundsChecker
 }
 
 impl LlvmEmitter {
@@ -21,6 +22,9 @@ impl LlvmEmitter {
         String::push_str(&mut e.buffer, &String::new("; ================================================\n\n"));
         String::push_str(&mut e.buffer, &String::new("target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n"));
         String::push_str(&mut e.buffer, &String::new("target triple = \"x86_64-pc-windows-msvc\"\n\n"));
+        String::push_str(&mut e.buffer, &String::new("declare void @llvm.assume(i1)\n"));
+        String::push_str(&mut e.buffer, &String::new("declare void @llvm.trap()\n\n"));
+        e.bounds_checker = BoundsChecker::new();
         
         return e;
     }
@@ -234,6 +238,19 @@ impl LlvmEmitter {
             
             String::push_str(&mut (*e).buffer, &body_lbl);
             String::push_str(&mut (*e).buffer, &String::new(":\n"));
+
+            // ── Ghost code: emit llvm.assume for proven invariants ──
+            let is_proven: bool = BoundsChecker::is_loop_proven(&(*e).bounds_checker, stmt_idx);
+            if is_proven {
+                // The loop condition itself IS the proven invariant fact.
+                // Re-emit the condition as an llvm.assume to tell the
+                // optimizer this is a guaranteed truth at body entry.
+                String::push_str(&mut (*e).buffer, &String::new("  ; @invariant proven — ghost assume\n"));
+                String::push_str(&mut (*e).buffer, &String::new("  call void @llvm.assume(i1 "));
+                String::push_str(&mut (*e).buffer, &cond);
+                String::push_str(&mut (*e).buffer, &String::new(")\n"));
+            }
+
             let mut k: usize = 0;
             while k < body_count {
                 LlvmEmitter::emit_stmt(e, arena, body_start + k);
@@ -332,6 +349,88 @@ impl LlvmEmitter {
             }
             String::push_str(&mut (*e).buffer, &String::new(")\n"));
             return tmp;
+        } else if expr.tag == Expr_TAG_Index {
+            let base_idx: usize = expr.data.Index._0;
+            let index_idx: usize = expr.data.Index._1;
+
+            let base_ptr: String = LlvmEmitter::emit_lvalue(e, arena, base_idx - 1);
+            let idx_val: String = LlvmEmitter::emit_expr(e, arena, index_idx - 1);
+
+            let is_proven: bool = BoundsChecker::is_safe(&(*e).bounds_checker, expr_idx);
+
+            if is_proven {
+                // ZERO-COST PATH: bounds statically proven
+                let cmp_lo: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str(&mut (*e).buffer, &String::new("  "));
+                String::push_str(&mut (*e).buffer, &cmp_lo);
+                String::push_str(&mut (*e).buffer, &String::new(" = icmp sge i32 "));
+                String::push_str(&mut (*e).buffer, &idx_val);
+                String::push_str(&mut (*e).buffer, &String::new(", 0\n"));
+                String::push_str(&mut (*e).buffer, &String::new("  call void @llvm.assume(i1 "));
+                String::push_str(&mut (*e).buffer, &cmp_lo);
+                String::push_str(&mut (*e).buffer, &String::new(")\n"));
+
+                let gep: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str(&mut (*e).buffer, &String::new("  "));
+                String::push_str(&mut (*e).buffer, &gep);
+                String::push_str(&mut (*e).buffer, &String::new(" = getelementptr i32, ptr "));
+                String::push_str(&mut (*e).buffer, &base_ptr);
+                String::push_str(&mut (*e).buffer, &String::new(", i32 "));
+                String::push_str(&mut (*e).buffer, &idx_val);
+                String::push_str(&mut (*e).buffer, &String::new("\n"));
+
+                let result: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str(&mut (*e).buffer, &String::new("  "));
+                String::push_str(&mut (*e).buffer, &result);
+                String::push_str(&mut (*e).buffer, &String::new(" = load i32, ptr "));
+                String::push_str(&mut (*e).buffer, &gep);
+                String::push_str(&mut (*e).buffer, &String::new("\n"));
+                return result;
+            } else {
+                // SAFE PATH: runtime bounds check with trap
+                let gep: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str(&mut (*e).buffer, &String::new("  "));
+                String::push_str(&mut (*e).buffer, &gep);
+                String::push_str(&mut (*e).buffer, &String::new(" = getelementptr i32, ptr "));
+                String::push_str(&mut (*e).buffer, &base_ptr);
+                String::push_str(&mut (*e).buffer, &String::new(", i32 "));
+                String::push_str(&mut (*e).buffer, &idx_val);
+                String::push_str(&mut (*e).buffer, &String::new("\n"));
+
+                let check: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str(&mut (*e).buffer, &String::new("  "));
+                String::push_str(&mut (*e).buffer, &check);
+                String::push_str(&mut (*e).buffer, &String::new(" = icmp slt i32 "));
+                String::push_str(&mut (*e).buffer, &idx_val);
+                String::push_str(&mut (*e).buffer, &String::new(", 0\n"));
+
+                let ok_lbl: String = LlvmEmitter::fresh_label(e, &String::new("bounds.ok"));
+                let trap_lbl: String = LlvmEmitter::fresh_label(e, &String::new("bounds.trap"));
+
+                String::push_str(&mut (*e).buffer, &String::new("  br i1 "));
+                String::push_str(&mut (*e).buffer, &check);
+                String::push_str(&mut (*e).buffer, &String::new(", label %"));
+                String::push_str(&mut (*e).buffer, &trap_lbl);
+                String::push_str(&mut (*e).buffer, &String::new(", label %"));
+                String::push_str(&mut (*e).buffer, &ok_lbl);
+                String::push_str(&mut (*e).buffer, &String::new("\n"));
+
+                String::push_str(&mut (*e).buffer, &trap_lbl);
+                String::push_str(&mut (*e).buffer, &String::new(":\n"));
+                String::push_str(&mut (*e).buffer, &String::new("  call void @llvm.trap()\n"));
+                String::push_str(&mut (*e).buffer, &String::new("  unreachable\n"));
+
+                String::push_str(&mut (*e).buffer, &ok_lbl);
+                String::push_str(&mut (*e).buffer, &String::new(":\n"));
+
+                let result: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str(&mut (*e).buffer, &String::new("  "));
+                String::push_str(&mut (*e).buffer, &result);
+                String::push_str(&mut (*e).buffer, &String::new(" = load i32, ptr "));
+                String::push_str(&mut (*e).buffer, &gep);
+                String::push_str(&mut (*e).buffer, &String::new("\n"));
+                return result;
+            }
         }
         return String::new("0");
     }
