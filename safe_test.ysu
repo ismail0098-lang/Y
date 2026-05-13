@@ -1,0 +1,17 @@
+fn main() {
+    @safe {
+        let uninit_var: I32 = 0;
+        let x: I32 = 10;
+        let ptr: I32 = 0;
+        
+        @invariant(x >= 0)
+        while x > 0 {
+            x = x - 1;
+        }
+
+        @invariant(i >= 0)
+        for i in 0..10 {
+            print_int(i);
+        }
+    }
+}

@@ -823,6 +823,14 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                 self.indent_level -= 1;
                 self.wln("}");
             }
+            Stmt::SafeBlock(block, _) => {
+                self.wln("/* @safe verified block */");
+                self.wln("{");
+                self.indent_level += 1;
+                self.emit_block_body(block);
+                self.indent_level -= 1;
+                self.wln("}");
+            }
         }
     }
 

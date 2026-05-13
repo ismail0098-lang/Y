@@ -176,6 +176,7 @@ pub enum Stmt {
         end: Expr,
         step: Option<Expr>,
         body: Block,
+        invariant: Option<Box<Expr>>,
         span: Span,
     },
     /// `acc = expr;`
@@ -201,6 +202,7 @@ pub enum Stmt {
     While {
         condition: Box<Expr>,
         body: Block,
+        invariant: Option<Box<Expr>>,
         span: Span,
     },
     /// `match scrutinee { pattern => body, ... }`
@@ -216,6 +218,8 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
+    /// `@safe { ... }` — strict verification block
+    SafeBlock(Block, Span),
 }
 
 impl Stmt {
@@ -232,6 +236,7 @@ impl Stmt {
             Stmt::While { span, .. } => span.clone(),
             Stmt::Match { span, .. } => span.clone(),
             Stmt::CompoundAssign { span, .. } => span.clone(),
+            Stmt::SafeBlock(_, s) => s.clone(),
         }
     }
 }

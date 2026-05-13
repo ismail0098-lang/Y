@@ -456,6 +456,40 @@ impl Lexer {
                 return Token::new(TokenKind::AtBounds(min_val, max_val), line, start_col, &lex_s);
             }
 
+            // ── @safe directive ──
+            if String::eq_cstr(&dir_name, "safe") {
+                let lex_s: String = String::new("@safe");
+                return Token::new(TokenKind::AtSafe, line, start_col, &lex_s);
+            }
+
+            // ── @unsafe directive ──
+            if String::eq_cstr(&dir_name, "unsafe") {
+                let lex_u: String = String::new("@unsafe");
+                return Token::new(TokenKind::AtUnsafe, line, start_col, &lex_u);
+            }
+
+            // ── @inline / @noinline / @align / other known directives ──
+            if String::eq_cstr(&dir_name, "inline") {
+                let lex_i: String = String::new("@inline");
+                return Token::new(TokenKind::AtInline, line, start_col, &lex_i);
+            }
+            if String::eq_cstr(&dir_name, "noinline") {
+                let lex_n: String = String::new("@noinline");
+                return Token::new(TokenKind::AtNoInline, line, start_col, &lex_n);
+            }
+            if String::eq_cstr(&dir_name, "require") {
+                let lex_r: String = String::new("@require");
+                return Token::new(TokenKind::AtRequire, line, start_col, &lex_r);
+            }
+            if String::eq_cstr(&dir_name, "atomic") {
+                let lex_a: String = String::new("@atomic");
+                return Token::new(TokenKind::AtAtomic, line, start_col, &lex_a);
+            }
+            if String::eq_cstr(&dir_name, "static_assert") {
+                let lex_sa: String = String::new("@static_assert");
+                return Token::new(TokenKind::AtStaticAssert, line, start_col, &lex_sa);
+            }
+
             // Fallback: unknown @ attribute
             let mut at_lex: String = String::new("@");
             String::push_str(&mut at_lex, &dir_name);

@@ -299,6 +299,13 @@ impl TypeChecker {
                     explicit_resolved = Some(self.resolve_type(explicit_ty));
                 }
 
+                if !self.in_unsafe && init.is_none() {
+                    self.errors.push(format!(
+                        "Line {}: [Strict Safety] Variables in safe blocks must be explicitly initialized.",
+                        span.line
+                    ));
+                }
+
                 if let Some(init_expr) = init {
                     inferred_type =
                         self.check_expr_with_expected(init_expr, explicit_resolved.as_ref());
@@ -372,8 +379,16 @@ impl TypeChecker {
                 }
                 self.insert_var(name.clone(), resolved);
             }
-            Stmt::For { loop_var, body, .. } => {
+            Stmt::For { loop_var, body, invariant, span, .. } => {
                 self.push_scope();
+
+                if !self.in_unsafe && invariant.is_none() {
+                    self.errors.push(format!(
+                        "Line {}: [Strict Safety] Loops in safe blocks require formal @invariants.",
+                        span.line
+                    ));
+                }
+
                 self.insert_var(loop_var.clone(), SemanticType::Primitive("I32".into()));
 
                 for s in &body.stmts {
@@ -446,8 +461,14 @@ impl TypeChecker {
                 }
             }
             Stmt::While {
-                condition, body, ..
+                condition, body, invariant, ..
             } => {
+                if !self.in_unsafe && invariant.is_none() {
+                    self.errors.push(format!(
+                        "Line {}: [Strict Safety] While loops in safe blocks require formal @invariants.",
+                        condition.span().line
+                    ));
+                }
                 self.check_expr(condition);
                 self.check_block(body);
             }
@@ -465,6 +486,12 @@ impl TypeChecker {
                 let rhs = self.check_expr(value);
                 self.reject_transfer_escape(&lhs, &target.span(), "in compound assignment");
                 self.reject_transfer_escape(&rhs, &value.span(), "in compound assignment");
+            }
+            Stmt::SafeBlock(block, _) => {
+                let prev_unsafe = self.in_unsafe;
+                self.in_unsafe = false;
+                self.check_block(block);
+                self.in_unsafe = prev_unsafe;
             }
         }
     }
@@ -678,7 +705,14 @@ impl TypeChecker {
                 self.reject_transfer_escape(&rhs, &right.span(), "in a binary expression");
                 SemanticType::Unknown
             }
-            Expr::UnaryOp { operand, .. } => {
+            Expr::UnaryOp { op, operand, .. } => {
+                let span = expr.span();
+                if *op == crate::ast::UnaryOp::Deref && !self.in_unsafe {
+                    self.errors.push(format!(
+                        "Line {}: [Strict Safety] Raw pointer dereferencing is forbidden in safe blocks.",
+                        span.line
+                    ));
+                }
                 let operand_ty = self.check_expr(operand);
                 self.reject_transfer_escape(&operand_ty, &operand.span(), "in a unary expression");
                 SemanticType::Unknown

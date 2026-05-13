@@ -131,6 +131,7 @@ pub enum TokenKind {
     AtAtomic,
     AtStaticAssert,
     AtZeroDrift,       // @ZeroDrift — enforce zero numerical drift
+    AtInvariant,
     AtUnknown(String), // future-proof
 
     // ── Operators ────────────────────────────────────────────
@@ -536,6 +537,7 @@ impl Lexer {
             "@atomic" => TokenKind::AtAtomic,
             "@static_assert" => TokenKind::AtStaticAssert,
             "@ZeroDrift" => TokenKind::AtZeroDrift,
+            "@invariant" => TokenKind::AtInvariant,
             other => TokenKind::AtUnknown(other.to_string()),
         };
         Token::new(kind, line, start_col, &name)

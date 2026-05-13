@@ -607,6 +607,7 @@ impl Parser {
         // Attributes applied to types/stmts -- @cache_policy and @ZeroDrift in any order
         let mut cache_policy = None;
         let mut zero_drift = None;
+        let mut invariant = None;
 
         loop {
             if self.match_token(TokenKind::AtCachePolicy) {
@@ -661,6 +662,10 @@ impl Parser {
             } else if self.match_token(TokenKind::AtZeroDrift) {
                 // @ZeroDrift -- no parentheses needed
                 zero_drift = Some(ZeroDriftAttr { span: span.clone() });
+            } else if self.match_token(TokenKind::AtInvariant) {
+                self.expect(TokenKind::LParen, "'(' after @invariant")?;
+                invariant = Some(Box::new(self.parse_expr()?));
+                self.expect(TokenKind::RParen, "')' after @invariant")?;
             } else {
                 break;
             }
@@ -747,11 +752,15 @@ impl Parser {
                 end,
                 step,
                 body,
+                invariant,
                 span,
             })
         } else if self.match_token(TokenKind::Chisel) {
             let block = self.parse_block()?;
             Ok(Stmt::Chisel(block, span))
+        } else if self.match_token(TokenKind::AtSafe) {
+            let block = self.parse_block()?;
+            Ok(Stmt::SafeBlock(block, span))
         } else if self.match_token(TokenKind::If) {
             let condition = Box::new(self.parse_expr()?);
             let then_block = self.parse_block()?;
@@ -782,6 +791,7 @@ impl Parser {
             Ok(Stmt::While {
                 condition,
                 body,
+                invariant,
                 span,
             })
         } else if self.match_token(TokenKind::Match) {

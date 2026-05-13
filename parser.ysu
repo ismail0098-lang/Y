@@ -102,7 +102,10 @@ enum Stmt {
     CompoundAssign(usize, BinaryOp, usize),
 
     // A standalone expression statement (expr_idx)
-    ExprStmt(usize)
+    ExprStmt(usize),
+
+    // @safe { body_start..body_count } — strict verification block
+    SafeBlock(usize, usize)
 }
 
 // ── Declarations ────────────────────────────────────────────
@@ -637,6 +640,36 @@ impl Parser {
     fn parse_stmt(p: &mut Parser, arena: &mut AstArena) -> usize {
         let tok: Token = Parser::peek(p);
         let mut lex: String = String::clone(&tok.lexeme);
+
+        // ── check for @safe { ... } scoped block ──
+        if String::eq_cstr(&lex, "@safe") {
+            Parser::advance(p);
+            // Check if next token is '{' (scoped block) vs 'fn' (handled at top-level)
+            let safe_next: Token = Parser::peek(p);
+            if String::eq_cstr(&safe_next.lexeme, "{") {
+                Parser::advance(p); // consume '{'
+                let sb_start: usize = Vec::len(&(*arena).stmts);
+                let mut sb_count: usize = 0;
+                let mut parsing_sb: bool = true;
+                while parsing_sb {
+                    let sb_check: Token = Parser::peek(p);
+                    if String::eq_cstr(&sb_check.lexeme, "}") {
+                        parsing_sb = false;
+                    } else {
+                        Parser::parse_stmt(p, arena);
+                        sb_count += 1;
+                    }
+                }
+                Parser::expect_token(p, &String::new("}"));
+                let stmt: Stmt = Stmt::SafeBlock(sb_start, sb_count);
+                Vec::push(&mut (*arena).stmts, stmt);
+                let idx: usize = Vec::len(&(*arena).stmts);
+                return idx;
+            }
+            // Otherwise it precedes fn — re-read lexeme for fallthrough
+            let next_tok2: Token = Parser::peek(p);
+            lex = String::clone(&next_tok2.lexeme);
+        }
 
         // ── check for @bounds directive preceding let ──
         let mut has_bounds: bool = false;

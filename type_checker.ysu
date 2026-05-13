@@ -653,4 +653,384 @@ impl BoundsChecker {
             }
         }
     }
+
+    // ════════════════════════════════════════════════════════
+    //  @safe STRICT MODE — "The Cage"
+    //
+    //  When is_strict_safe is active, the verifier switches
+    //  from permissive to hostile: every operation must be
+    //  formally justified or the compilation is rejected.
+    //
+    //  Hard Blocks enforced:
+    //    1. Mandatory Loop Invariants
+    //    2. Explicit Initialization
+    //    3. Pointer Quarantine
+    //    4. Async Obligation Leak Detection
+    // ════════════════════════════════════════════════════════
+
+    @unsafe
+    fn check_func_strict(bc: &mut BoundsChecker, arena: &AstArena, func_idx: usize) {
+        let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, func_idx);
+
+        // is_safe == 1 means @safe mode active
+        if fdecl.is_safe == 1 {
+            println("[safe] Entering strict verification for function:");
+            println(&fdecl.name);
+
+            let mut s: usize = 0;
+            while s < fdecl.body_count {
+                BoundsChecker::check_stmt_strict(bc, arena, fdecl.body_start + s);
+                s += 1;
+            }
+
+            // After scanning entire body, check for async obligation leaks
+            BoundsChecker::check_async_obligations(bc, arena, fdecl.body_start, fdecl.body_count);
+
+            println("[safe] Strict verification complete.");
+        } else {
+            // Permissive mode — delegate to standard check
+            BoundsChecker::check_func(bc, arena, func_idx);
+        }
+    }
+
+    @unsafe
+    fn check_stmt_strict(bc: &mut BoundsChecker, arena: &AstArena, stmt_idx: usize) {
+        let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, stmt_idx);
+
+        // ── Hard Block 1: Mandatory Loop Invariants ─────────
+        if stmt.tag == Stmt_TAG_While {
+            let invariant_idx: usize = stmt.data.While._3;
+            if invariant_idx == 0 {
+                print("[!] Strict Safety Error: Loops in @safe blocks require formal invariants. (while at stmt ");
+                print_int(stmt_idx);
+                println(")");
+                let err: String = String::new("missing_loop_invariant");
+                Vec::push(&mut (*bc).errors, err);
+                (*bc).error_count += 1;
+            } else {
+                // Invariant present — verify it with the standard engine
+                let cond_idx: usize = stmt.data.While._0;
+                let body_start: usize = stmt.data.While._1;
+                let body_count: usize = stmt.data.While._2;
+                BoundsChecker::verify_while_invariant(
+                    bc, arena, stmt_idx, cond_idx,
+                    body_start, body_count, invariant_idx
+                );
+            }
+
+            // Recurse into body under strict mode
+            let ws: usize = stmt.data.While._1;
+            let wc: usize = stmt.data.While._2;
+            let mut wi: usize = 0;
+            while wi < wc {
+                BoundsChecker::check_stmt_strict(bc, arena, ws + wi);
+                wi += 1;
+            }
+            return;
+        }
+
+        if stmt.tag == Stmt_TAG_For {
+            let for_inv: usize = stmt.data.For._6;
+            if for_inv == 0 {
+                print("[!] Strict Safety Error: Loops in @safe blocks require formal invariants. (for at stmt ");
+                print_int(stmt_idx);
+                println(")");
+                let err: String = String::new("missing_loop_invariant");
+                Vec::push(&mut (*bc).errors, err);
+                (*bc).error_count += 1;
+            }
+
+            // Recurse into for-body
+            let fs: usize = stmt.data.For._4;
+            let fc: usize = stmt.data.For._5;
+            let mut fi: usize = 0;
+            while fi < fc {
+                BoundsChecker::check_stmt_strict(bc, arena, fs + fi);
+                fi += 1;
+            }
+            return;
+        }
+
+        // ── Hard Block 2: Explicit Initialization ───────────
+        if stmt.tag == Stmt_TAG_Let {
+            let init_idx: usize = stmt.data.Let._2;
+            if init_idx == 0 {
+                let var_name: String = stmt.data.Let._0;
+                print("[!] Strict Safety Error: Uninitialized variables are forbidden in @safe mode. Variable: ");
+                println(&var_name);
+                let err: String = String::new("uninitialized_variable");
+                Vec::push(&mut (*bc).errors, err);
+                (*bc).error_count += 1;
+            } else {
+                // Also run standard bounds/range tracking
+                let var_name: String = stmt.data.Let._0;
+                let b_min: I64 = stmt.data.Let._3;
+                let b_max: I64 = stmt.data.Let._4;
+                if b_min != 0 {
+                    BoundsChecker::register_bounds(bc, &var_name, b_min, b_max);
+                } else if b_max != 0 {
+                    BoundsChecker::register_bounds(bc, &var_name, b_min, b_max);
+                }
+                let init_expr: Expr = Vec::get_Expr(&(*arena).exprs, init_idx - 1);
+                if init_expr.tag == Expr_TAG_IntLit {
+                    let val: I64 = init_expr.data.IntLit._0;
+                    BoundsChecker::set_sym_range(bc, &var_name, val, val);
+                }
+            }
+            return;
+        }
+
+        // ── Hard Block 3: Pointer Quarantine ────────────────
+        // Detect raw pointer dereference (*ptr) or address-of-deref patterns
+        if stmt.tag == Stmt_TAG_ExprStmt {
+            let expr_idx: usize = stmt.data.ExprStmt._0;
+            let has_ptr: bool = BoundsChecker::expr_has_raw_pointer(bc, arena, expr_idx);
+            if has_ptr {
+                print("[!] Strict Safety Error: Raw pointer manipulation is forbidden in @safe mode. ");
+                println("Use indexed access with @bounds.");
+                let err: String = String::new("raw_pointer_in_safe");
+                Vec::push(&mut (*bc).errors, err);
+                (*bc).error_count += 1;
+            }
+            return;
+        }
+
+        if stmt.tag == Stmt_TAG_Assign {
+            let t_idx: usize = stmt.data.Assign._0;
+            let v_idx: usize = stmt.data.Assign._1;
+            let has_ptr_t: bool = BoundsChecker::expr_has_raw_pointer(bc, arena, t_idx);
+            let has_ptr_v: bool = BoundsChecker::expr_has_raw_pointer(bc, arena, v_idx);
+            if has_ptr_t {
+                println("[!] Strict Safety Error: Raw pointer manipulation is forbidden in @safe mode. Use indexed access with @bounds.");
+                let err: String = String::new("raw_pointer_in_safe");
+                Vec::push(&mut (*bc).errors, err);
+                (*bc).error_count += 1;
+            }
+            if has_ptr_v {
+                println("[!] Strict Safety Error: Raw pointer manipulation is forbidden in @safe mode. Use indexed access with @bounds.");
+                let err: String = String::new("raw_pointer_in_safe");
+                Vec::push(&mut (*bc).errors, err);
+                (*bc).error_count += 1;
+            }
+            return;
+        }
+
+        // ── Recurse into if-branches under strict ───────────
+        if stmt.tag == Stmt_TAG_If {
+            let then_start: usize = stmt.data.If._1;
+            let then_count: usize = stmt.data.If._2;
+            let else_start: usize = stmt.data.If._3;
+            let else_count: usize = stmt.data.If._4;
+
+            let mut ti: usize = 0;
+            while ti < then_count {
+                BoundsChecker::check_stmt_strict(bc, arena, then_start + ti);
+                ti += 1;
+            }
+            let mut ei: usize = 0;
+            while ei < else_count {
+                BoundsChecker::check_stmt_strict(bc, arena, else_start + ei);
+                ei += 1;
+            }
+            return;
+        }
+
+        // ── Recurse into SafeBlock (inherits strict) ────────
+        if stmt.tag == Stmt_TAG_SafeBlock {
+            let sb_start: usize = stmt.data.SafeBlock._0;
+            let sb_count: usize = stmt.data.SafeBlock._1;
+            let mut si: usize = 0;
+            while si < sb_count {
+                BoundsChecker::check_stmt_strict(bc, arena, sb_start + si);
+                si += 1;
+            }
+            BoundsChecker::check_async_obligations(bc, arena, sb_start, sb_count);
+            return;
+        }
+
+        // ── CompoundAssign — also track ranges ──────────────
+        if stmt.tag == Stmt_TAG_CompoundAssign {
+            let target_idx: usize = stmt.data.CompoundAssign._0;
+            let value_idx: usize = stmt.data.CompoundAssign._2;
+            // Check for pointer ops in the value expression
+            let has_ptr: bool = BoundsChecker::expr_has_raw_pointer(bc, arena, value_idx);
+            if has_ptr {
+                println("[!] Strict Safety Error: Raw pointer manipulation is forbidden in @safe mode. Use indexed access with @bounds.");
+                let err: String = String::new("raw_pointer_in_safe");
+                Vec::push(&mut (*bc).errors, err);
+                (*bc).error_count += 1;
+            }
+            // Standard range tracking
+            let target_expr: Expr = Vec::get_Expr(&(*arena).exprs, target_idx - 1);
+            if target_expr.tag == Expr_TAG_Ident {
+                let var_name: String = target_expr.data.Ident._0;
+                let sr: SymRange = BoundsChecker::get_sym_range(bc, &var_name);
+                let has_range: bool = String::len(&sr.name) > 0;
+                if has_range {
+                    let val_expr: Expr = Vec::get_Expr(&(*arena).exprs, value_idx - 1);
+                    if val_expr.tag == Expr_TAG_IntLit {
+                        let step: I64 = val_expr.data.IntLit._0;
+                        BoundsChecker::set_sym_range(bc, &var_name, sr.lo, sr.hi + step);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Pointer Quarantine: detect Deref in expression tree ─
+
+    @unsafe
+    fn expr_has_raw_pointer(bc: &BoundsChecker, arena: &AstArena, expr_idx: usize) -> bool {
+        if expr_idx == 0 { return false; }
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx - 1);
+
+        // Direct dereference: *expr
+        if expr.tag == Expr_TAG_UnaryExpr {
+            let op: UnaryOp = expr.data.UnaryExpr._0;
+            if op == UnaryOp::Deref {
+                return true;
+            }
+            // Recurse into operand
+            let operand_idx: usize = expr.data.UnaryExpr._1;
+            return BoundsChecker::expr_has_raw_pointer(bc, arena, operand_idx);
+        }
+
+        // Binary expression: check both sides
+        if expr.tag == Expr_TAG_BinaryExpr {
+            let lhs: usize = expr.data.BinaryExpr._0;
+            let rhs: usize = expr.data.BinaryExpr._2;
+            let l: bool = BoundsChecker::expr_has_raw_pointer(bc, arena, lhs);
+            if l { return true; }
+            return BoundsChecker::expr_has_raw_pointer(bc, arena, rhs);
+        }
+
+        // Call expression: check arguments
+        if expr.tag == Expr_TAG_Call {
+            let args_start: usize = expr.data.Call._1;
+            let arg_count: usize = expr.data.Call._2;
+            let mut ai: usize = 0;
+            while ai < arg_count {
+                let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + ai);
+                let has: bool = BoundsChecker::expr_has_raw_pointer(bc, arena, arg_idx);
+                if has { return true; }
+                ai += 1;
+            }
+        }
+
+        return false;
+    }
+
+    // ── Hard Block 4: Async Obligation Leak Detection ───────
+    //
+    // Scans a block for async_copy / async transfer calls.
+    // For each one found, verifies that a barrier::sync() or
+    // wait() call exists later in the SAME block scope.
+
+    @unsafe
+    fn check_async_obligations(bc: &mut BoundsChecker, arena: &AstArena, body_start: usize, body_count: usize) {
+        let mut has_async: bool = false;
+        let mut has_barrier: bool = false;
+
+        let mut i: usize = 0;
+        while i < body_count {
+            let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, body_start + i);
+
+            if stmt.tag == Stmt_TAG_ExprStmt {
+                let expr_idx: usize = stmt.data.ExprStmt._0;
+                if expr_idx > 0 {
+                    let is_async: bool = BoundsChecker::expr_is_async_call(bc, arena, expr_idx);
+                    if is_async { has_async = true; }
+
+                    let is_sync: bool = BoundsChecker::expr_is_barrier_sync(bc, arena, expr_idx);
+                    if is_sync { has_barrier = true; }
+                }
+            }
+            i += 1;
+        }
+
+        if has_async {
+            if has_barrier == false {
+                println("[!] Strict Safety Error: Async transfer initiated without barrier::sync() or wait() in the same @safe scope.");
+                let err: String = String::new("async_obligation_leak");
+                Vec::push(&mut (*bc).errors, err);
+                (*bc).error_count += 1;
+            } else {
+                println("[safe]   ✓ Async obligation resolved by barrier::sync().");
+            }
+        }
+    }
+
+    // ── Detect async_copy / async transfer calls ────────────
+
+    @unsafe
+    fn expr_is_async_call(bc: &BoundsChecker, arena: &AstArena, expr_idx: usize) -> bool {
+        if expr_idx == 0 { return false; }
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx - 1);
+
+        if expr.tag == Expr_TAG_Call {
+            let func_idx: usize = expr.data.Call._0;
+            if func_idx > 0 {
+                let func_expr: Expr = Vec::get_Expr(&(*arena).exprs, func_idx - 1);
+                // Check for Path like "async::copy" or Ident "async_copy"
+                if func_expr.tag == Expr_TAG_Path {
+                    let ns: String = func_expr.data.Path._0;
+                    if String::eq_cstr(&ns, "async") { return true; }
+                }
+                if func_expr.tag == Expr_TAG_Ident {
+                    let name: String = func_expr.data.Ident._0;
+                    if String::eq_cstr(&name, "async_copy") { return true; }
+                    if String::eq_cstr(&name, "cp_async") { return true; }
+                }
+            }
+        }
+        return false;
+    }
+
+    // ── Detect barrier::sync() or wait() calls ──────────────
+
+    @unsafe
+    fn expr_is_barrier_sync(bc: &BoundsChecker, arena: &AstArena, expr_idx: usize) -> bool {
+        if expr_idx == 0 { return false; }
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx - 1);
+
+        if expr.tag == Expr_TAG_Call {
+            let func_idx: usize = expr.data.Call._0;
+            if func_idx > 0 {
+                let func_expr: Expr = Vec::get_Expr(&(*arena).exprs, func_idx - 1);
+                if func_expr.tag == Expr_TAG_Path {
+                    let ns: String = func_expr.data.Path._0;
+                    let member: String = func_expr.data.Path._1;
+                    if String::eq_cstr(&ns, "barrier") {
+                        if String::eq_cstr(&member, "sync") { return true; }
+                    }
+                }
+                if func_expr.tag == Expr_TAG_Ident {
+                    let name: String = func_expr.data.Ident._0;
+                    if String::eq_cstr(&name, "wait") { return true; }
+                    if String::eq_cstr(&name, "barrier_sync") { return true; }
+                }
+            }
+        }
+        return false;
+    }
+
+    // ── Entry point: verify all functions ───────────────────
+
+    @unsafe
+    fn verify_all(bc: &mut BoundsChecker, arena: &AstArena) {
+        let func_count: usize = Vec::len(&(*arena).funcs);
+        let mut f: usize = 0;
+        while f < func_count {
+            BoundsChecker::check_func_strict(bc, arena, f);
+            f += 1;
+        }
+
+        if (*bc).error_count > 0 {
+            print("[safe] Verification FAILED with ");
+            print_int((*bc).error_count);
+            println(" error(s).");
+        } else {
+            println("[safe] All strict safety checks passed. ✓");
+        }
+    }
 }

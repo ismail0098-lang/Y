@@ -946,6 +946,9 @@ impl LlvmEmitter {
                 Stmt::Chisel(b, _) => {
                     self.emit_alloca_for_block(b);
                 }
+                Stmt::SafeBlock(b, _) => {
+                    self.emit_alloca_for_block(b);
+                }
                 _ => {}
             }
         }
@@ -1435,6 +1438,10 @@ impl LlvmEmitter {
             }
             Stmt::TypeAlias { .. } => {
                 // Type aliases are resolved at compile time — no IR emission needed
+            }
+            Stmt::SafeBlock(block, _) => {
+                self.wln("  ; --- @safe verified block ---");
+                self.emit_block_body(block, ret_type);
             }
         }
     }

@@ -107,6 +107,7 @@
     "@ptx_emit",
     "@avx_emit",
     "@inline",
+    "@safe",
     "@noinline",
     "@align",
     "@ZeroDrift",
