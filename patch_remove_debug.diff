@@ -1,0 +1,13 @@
+--- llvm_emitter.rs
++++ llvm_emitter.rs
+@@ -2598,10 +2598,7 @@
+     fn infer_struct_type(&self, expr: &Expr) -> String {
+         match expr {
+             Expr::Ident(name, _) => {
+-                println!("infer_struct_type Ident: {}", name);
+                 if let Some(t) = self.locals_ast_type.get(name) {
+-                    println!("locals_ast_type: {}", t);
+                     let cleaned = t.trim_start_matches('&').trim_start_matches("mut ");
+-                    println!("cleaned: {}", cleaned);
+                     if self.ast_structs.contains_key(cleaned) {
+                         return format!("%{}", cleaned);

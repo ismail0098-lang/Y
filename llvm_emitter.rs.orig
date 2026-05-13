@@ -2442,7 +2442,6 @@ impl LlvmEmitter {
             Expr::FloatLit(_, _) => "f64".into(),
             Expr::BoolLit(_, _) => "bool".into(),
             Expr::CharLit(_, _) => "char".into(),
-            Expr::StructLit { name, .. } => name.clone(),
             _ => "Unknown".into(),
         }
     }
