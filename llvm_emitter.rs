@@ -2622,10 +2622,10 @@ impl LlvmEmitter {
                             if self.ast_structs.contains_key(cleaned) {
                                 format!("%{}", cleaned)
                             } else {
-                                "Unknown".into()
+                                "i32".into()
                             }
                         } else {
-                            "Unknown".into()
+                            "i32".into()
                         }
                     })
             }
