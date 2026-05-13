@@ -1,0 +1,9 @@
+--- llvm_emitter.rs
++++ llvm_emitter.rs
+@@ -2448,6 +2448,7 @@
+             Expr::BoolLit(_, _) => "bool".into(),
+             Expr::CharLit(_, _) => "char".into(),
++            Expr::StructLit { name, .. } => name.clone(),
+             _ => "Unknown".into(),
+         }
+     }
