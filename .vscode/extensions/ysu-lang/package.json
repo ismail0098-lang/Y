@@ -1,0 +1,35 @@
+{
+  "name": "y-lang",
+  "displayName": "Y",
+  "description": "Syntax highlighting for the Y systems language (.ysu)",
+  "version": "0.1.0",
+  "publisher": "ysu-engine",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "Y",
+        "aliases": [
+          "Y",
+          "y"
+        ],
+        "extensions": [
+          ".ysu"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "Y",
+        "scopeName": "source.Y",
+        "path": "./syntaxes/Y.tmLanguage.json"
+      }
+    ]
+  }
+}

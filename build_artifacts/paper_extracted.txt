@@ -1,0 +1,1414 @@
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+Consumer Ada SM89: Measurements, Compiler Frontiers, and
+Kernel Consequences
+Anonymous Author(s)
+Submission Id: #1738 – Confidential Draft – Do NOT Distribute!!
+Abstract
+We present an empirical characterization of consumer Ada SM89
+covering 379 mnemonics under standard optimization, 382 under
+the most permissive compilation configuration, and 25 measured
+instruction latencies spanning scalar ALU, SFU, FP64, tensor-core,
+memory, and synchronization paths. Dependent-chain microbench-
+marks, disassembly, cubin-side patching, and differential testing
+separate three commonly conflated questions: which instruction
+forms compilers emit, which merely exist at the encoding level, and
+which execute with semantically distinct behavior.
+Two compiler gaps are characterized. No tested compiler path
+(CUDA, PTX, clang, Triton, or ptxas sweeps) emits P2R.B1/B2/B3,
+although cubin-side substitution proves all three forms valid and
+executable on sm_89. Patching ULOP3 encodings to UPLOP3 yields
+invalid cubins; patching from PLOP3 yields valid cubins whose 15
+substitution sites partition into 12 that leave kernel output un-
+changed and 3 that produce functionally distinct output. The mea-
+sured TF32 WMMA path of 66.66 cycles is shown to correspond to a
+decomposed 2x HMMA.1684.F32.TF32 path; the single-instruction
+HMMA.1688.F32.TF32 form is separately confirmed by inline-PTX
+disassembly.
+Hand-tuned inline-PTX rewrites of three Instant-NGP kernels,
+compared against reference CUDA implementations in the same bi-
+nary under identical compiler flags, achieve 1.11×, 3.16×, and 1.53×
+speedups for hash-grid encoding, MLP forward, and volume render-
+ing, with exact or near-exact output preservation. In CUDA-LBM
+at 1283, the measured MUFU.RCP latency of 41.55 cycles motivates
+precomputing inv_tau to remove the per-cell reciprocal critical
+path; the resulting tier map shows Q32.32 and FP64 at zero mass
+drift, FP32 Fused at 4.77 × 10−7, and INT8 tiers at drift levels that
+preclude conservation-sensitive use.
+ACM Reference Format:
+Anonymous Author(s). 2026. Consumer Ada SM89: Measurements, Compiler
+Frontiers, and Kernel Consequences. In Proceedings of the 59th IEEE/ACM
+International Symposium on Microarchitecture (MICRO ’26). ACM, New York,
+NY, USA, 6 pages. https://doi.org/10.1145/nnnnnnn.nnnnnnn
+1
+Introduction
+PTX is intentionally one level above the hardware. That abstraction
+is useful, but it also hides the exact instruction forms, latencies,
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+MICRO ’26,
+© 2026 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 978-x-xxxx-xxxx-x/YYYY/MM
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+and selection boundaries that matter when a kernel is already close
+to the machine. Microbenchmarking has therefore been essential
+to understanding recent NVIDIA architectures, from Volta and
+Turing through Ampere and Hopper [1–4]. Ada consumer parts
+remain under-documented at the same level of detail, and existing
+reverse-engineering artifacts often stop at opcode discovery or
+library mining instead of closing the loop to application kernels.
+Prior work established the value of instruction-level and
+memory-system microbenchmarking across NVIDIA generations,
+but our scope differs in two important ways. First, we focus on
+consumer Ada SM89 rather than datacenter parts. Second, we insist
+on carrying the result set forward into bounded compiler-frontier
+claims and application rewrites, rather than stopping at a catalog
+of opcodes or isolated latency tables.
+We study the subset of Ada behavior that already supports
+bounded, evidence-backed claims, combining a measurement cor-
+pus with fresh local reruns to address three questions: how large
+and stable the current SM89 corpus is, which compiler/codegen
+frontiers remain open, and which kernel-level decisions change
+once those facts are known.
+Compiling all 343 enabled probes under -O2/-O3 yields 379 dis-
+tinct SASS mnemonics; enabling –maxrregcount flags adds three
+more for a maximum of 382; the full catalog including all observed
+variants totals 470 entries. We use these three counts consistently
+throughout.
+No compiler path we tested (CUDA C, PTX, clang, Triton, or
+ptxas sweeps) emits P2R.B1/B2/B3, though cubin-side substitu-
+tion proves all three forms valid and executable on the same device.
+For UPLOP3.LUT, attempting to substitute ULOP3 encodings pro-
+duces an invalid cubin, while substituting from PLOP3 decodes and
+runs correctly; differential output tests then partition the substi-
+tution sites into 12 that leave output unchanged and 3 that alter
+computed results.
+Hand-tuned inline-PTX rewrites of three Instant-NGP kernels
+achieve 1.11×, 3.16×, and 1.53× speedups over the CUDA base-
+line while preserving exact or near-exact output. In CUDA-LBM,
+the measured MUFU.RCP latency motivates precomputing inv_tau,
+eliminating a per-cell reciprocal critical path and shifting which
+precision tiers are practical.
+We make four contributions:
+(1) Corpus. A reproducible Ada SM89 mnemonic inventory: 379
+under standard optimized flags, 382 under the most permissive
+configuration, and 470 total documented entries.
+(2) Measurements. A representative latency and tensor character-
+ization, including a corrected TF32 WMMA/HMMA distinction
+that is stable across local Ada reruns.
+(3) Compiler gaps. Reproducibility results for P2R.B* and
+UPLOP3.LUT: what compilers still fail to emit, what cubin
+1
+117
+118
+119
+120
+121
+122
+123
+124
+125
+126
+127
+128
+129
+130
+131
+132
+133
+134
+135
+136
+137
+138
+139
+140
+141
+142
+143
+144
+145
+146
+147
+148
+149
+150
+151
+152
+153
+154
+155
+156
+157
+158
+159
+160
+161
+162
+163
+164
+165
+166
+167
+168
+169
+170
+171
+172
+173
+174
+MICRO ’26, 2026,
+Anon. Submission Id: #1738 – Confidential Draft – Do NOT Distribute‼
+175
+176
+177
+178
+179
+180
+181
+182
+183
+184
+185
+186
+187
+188
+189
+190
+191
+192
+193
+194
+195
+196
+197
+198
+199
+200
+201
+202
+203
+204
+205
+206
+207
+208
+209
+210
+211
+212
+213
+214
+215
+216
+217
+218
+219
+220
+221
+222
+223
+224
+225
+226
+227
+228
+229
+230
+231
+232
+Probe corpus
+microbenchmarks
+disassembly
+Direct emission
+vs. cubin validity
+vs. runtime semantics
+Instant-NGP
+inline PTX rewrites
+CUDA-LBM
+precision/layout choices
+Figure 1: From probes to bounded frontier claims to kernel
+consequences.
+patching proves exists, and where runtime semantics can
+already be classified.
+(4) Consequences. Application-level consequences demonstrated
+on Instant-NGP and CUDA-LBM.
+2
+Measurement Basis and Scope
+This work uses a mixed Ada evidence base. The broader SM89 cor-
+pus was gathered historically on an RTX 4070 Ti Super; validation
+reruns were then collected on a local RTX 4070 Ti over SSH. That
+sequencing was driven by available hardware, not by a planned
+cross-board comparison, so we treat the two datasets asymmetri-
+cally: the Ti Super corpus provides breadth and coverage, while the
+RTX 4070 Ti reruns anchor any measurement sensitive to board or
+runtime configuration.
+Concretely, the inventory counts come from the checked-in
+broader corpus; the full 379-mnemonic frontier was not re-
+enumerated on the RTX 4070 Ti rerun board. The TF32 tensor
+decomposition result is confirmed by both corpora, while the
+main CUDA-LBM application table and the representative LDG
+pointer-chase row are anchored to fresh RTX 4070 Ti reruns at 1283.
+The artifact still includes the larger set of custom CUDA probes,
+dependent-chain and ILP microbenchmarks, disassembly pipelines,
+processed CSV tables, cubin-side patch validation, and application
+kernels. Each instruction family is characterized at three levels:
+(1) Emission: does any compiler path produce the target SASS form
+from source or IR?
+(2) Validity: if no compiler emits it, does cubin-side substitution
+produce a form that executes correctly on the same device?
+(3) Semantics: does the patched form alter computed output under
+differential testing, or leave output unchanged?
+Scalar latency is measured using 512-deep dependent chains, a
+single warp, one warmup pass, and 20 timed repetitions read from
+the on-device clock (CS2R/S2UR); disassembly of each probe cu-
+bin is preserved alongside each result. Run-to-run variance across
+the 20 repetitions is below measurement resolution for all scalar
+latencies reported here; the cross-board agreement in Table 3 (com-
+pute metrics within 0.01–0.02 cycles across two different boards)
+bounds the total measurement noise empirically. Tensor latency
+uses 256-deep WMMA-dependent chains, since tensor API calls
+expand to multiple SASS instructions. Throughput measurements
+exclude –use_fast_math paths, which alter instruction selection
+Table 1: Scope of the checked-in Ada SM89 artifact.
+Metric
+Value
+Recursive probe files
+349
+Compile-enabled probe files
+343
+Mnemonics under -O2/-O3
+379
+Mnemonics under most permissive flags
+382
+Total catalog entries
+470
+Latency measurements
+70+
+Throughput measurements
+10+
+Tensor precisions measured
+7
+Compiler-unresolved instruction families
+P2R.B1/B2/B3,
+UPLOP3.LUT
+Table 2: Role of each analysis tool in the methodology.
+Tool
+Role
+Differential fuzzing
+Primary
+semantic
+discriminator
+for
+patched instruction sites
+compute-sanitizer
+Safety gate before promoting patched code
+into published evidence
+ncu
+Performance-regime sanity check and la-
+tency cross-validation sidecar
+nsys
+Lower-yield trace sidecar for timeline and
+launch-context inspection
+and preclude fair comparisons. ncu cross-validates latency read-
+ings and confirms the performance regime; compute-sanitizer
+verifies correctness before any patched cubin result is accepted;
+nsys provides timeline and launch-context data where needed. Dif-
+ferential output testing (not profiler output) is the primary tool
+for determining whether a substituted instruction alters computed
+results.
+This three-level characterization keeps distinct claims separate.
+For example, P2R.B1/B2/B3 are confirmed executable via cubin
+patching even though no compiler emits them from source, and
+HMMA.1688.F32.TF32 is confirmed present via inline PTX without
+attributing to it the latency measured from a WMMA decomposition
+that uses a different encoding.
+The RTX 4070 Ti reruns were used in three places. First, they re-
+confirm the TF32 WMMA decomposition as 2x HMMA.1684. Second,
+they re-confirm the direct inline-PTX HMMA.1688.F32.TF32 form
+at cubin level on the same local board. Third, they provide the
+primary CUDA-LBM application table. Across those reruns, we
+observed no tensor-form divergence between the RTX 4070 Ti and
+the checked-in RTX 4070 Ti Super corpus; what we do not claim is a
+fully normalized quantitative comparison between the two boards.
+Table 3 makes the mixed-hardware policy concrete. Core ALU,
+SFU, shared-memory, and tensor-path measurements are stable
+across the two Ada boards to within rounding. LDG chase is not.
+That 35% shift is not a footnote; it is the clearest sign that global-
+memory pointer-chase latency is substantially more board- and
+runtime-sensitive than the short dependent-chain compute metrics.
+2
+233
+234
+235
+236
+237
+238
+239
+240
+241
+242
+243
+244
+245
+246
+247
+248
+249
+250
+251
+252
+253
+254
+255
+256
+257
+258
+259
+260
+261
+262
+263
+264
+265
+266
+267
+268
+269
+270
+271
+272
+273
+274
+275
+276
+277
+278
+279
+280
+281
+282
+283
+284
+285
+286
+287
+288
+289
+290
+Consumer Ada SM89 : Measurements, Compiler Frontiers, and Kernel Consequences
+MICRO ’26, 2026,
+291
+292
+293
+294
+295
+296
+297
+298
+299
+300
+301
+302
+303
+304
+305
+306
+307
+308
+309
+310
+311
+312
+313
+314
+315
+316
+317
+318
+319
+320
+321
+322
+323
+324
+325
+326
+327
+328
+329
+330
+331
+332
+333
+334
+335
+336
+337
+338
+339
+340
+341
+342
+343
+344
+345
+346
+347
+348
+Table 3: Cross-board comparison of key latency metrics (cy-
+cles).
+Metric
+Ti Super corpus
+Ti rerun
+FFMA
+4.54
+4.53
+IADD3
+2.51
+2.52
+MUFU.RCP
+41.55
+41.54
+LDS chase
+28.03
+28.03
+TF32 WMMA path
+66.66
+66.70
+LDG chase
+92.29
+125.14
+We therefore report the RTX 4070 Ti rerun value in the represen-
+tative latency table and treat the historical Ti Super number as
+secondary corroboration rather than quietly assuming the two are
+interchangeable. The cause of the shift remains open: it could reflect
+board configuration, memory-controller behavior, boost state, or
+another uncontrolled runtime factor. What can be claimed safely is
+narrower but still useful: compute-side microbenchmarks are stable
+across the two nearby Ada boards, while this global-memory chase
+metric is not.
+3
+Related Work
+Instruction-level microbenchmarking has become the standard way
+to recover the parts of NVIDIA GPUs that vendor manuals leave
+implicit. Jia et al. established that style on Volta and then Turing,
+measuring instruction latency, throughput, memory hierarchy be-
+havior, and selected tensor-core properties [2, 3]. Abdelkhalik et
+al. extended the same basic approach to Ampere and emphasized
+instruction timing, memory access cost, and tensor-core behavior
+on a newer ISA surface [1]. Luo et al. then moved the discussion to
+Hopper, comparing Hopper against Ada and Ampere while empha-
+sizing the new features unique to Hopper [4].
+Our work differs from that line in three ways. First, we focus
+on a consumer Ada target rather than a datacenter board. Second,
+we treat compiler frontiers as first-class results: we are explicit
+about what direct source or IR still does not emit, what cubin-side
+patching proves exists, and where runtime semantics are already
+classified rather than merely guessed. Third, we require applica-
+tion consequences. The Instant-NGP and CUDA-LBM sections are
+therefore not decorative case studies; they are the evidence that
+the measured machine facts actually change how kernels should
+be written.
+4
+Instruction and Tensor Characterization
+The broad SM89 dataset is much larger than a conference paper
+can reproduce in full, so we focus on the measurements that most
+directly change kernel design. Table 4 gives representative results
+that already explain much of the downstream application behavior.
+Three interpretation points follow from these values. First, Ada
+SM89 has 64K 32-bit registers per SM and a 255-register per-thread
+architectural limit, not 256 [6, 7]. Second, consumer Ada’s weak
+FP64 rate is not a new cliff absent from Ampere; consumer Ampere
+already exposed the same 1:64 FP64:FP32 design point [6]. Third,
+IADD3 is extremely fast at 2.51 cycles, but that speed does not justify
+Table 4: Measured SM89 instruction latencies (cycles).
+Class
+Operation
+Cycles
+Scalar ALU
+IADD3
+2.51
+IMAD.WIDE
+2.59
+FFMA
+4.54
+FMUL / FADD
+4.52
+IMAD
+4.53
+LOP3.LUT
+4.53
+Reduced precision
+HFMA2 (FP16×2)
+4.54
+HFMA2.BF16_V2
+4.01
+FP64
+DADD / DMUL
+48.47
+DFMA
+54.48
+Transcendental (SFU)
+MUFU.EX2
+17.56
+MUFU.SIN
+23.50
+MUFU.RSQ / MUFU.LG2
+39.53
+MUFU.RCP
+41.55
+Memory
+LDS chase
+28.03
+LDC (const)
+70.57
+LDG chase
+125.14
+Tensor core (per WMMA)
+IMMA.8832.S4.S4
+28.05
+IMMA.16816.S8.S8
+34.06
+HMMA.16816.F16
+42.14
+TF32 path (2x HMMA.1684)
+66.66
+Synchronization
+BAR.SYNC
+35.01
+REDUX.SUM
+60.01
+MEMBAR.ALL.GPU
+205.25
+Table 5: TF32 tensor evidence and its correct interpretation.
+Evidence type
+Safe interpretation
+Measured TF32 WMMA latency
+66.66
+cycles
+for
+a
+path
+that
+decomposes
+to
+2x
+HMMA.1684.F32.TF32
+Direct inline-PTX confirmation
+HMMA.1688.F32.TF32
+exists
+and disassembles cleanly on
+local sm_89
+stating derived fixed-point throughput as a literal instruction-level
+law.
+4.1
+Tensor-core clarification
+The tensor story requires the clearest distinction. The measured
+TF32 WMMA path on Ada corresponds to a 16×16×8 operation that
+decomposes into two HMMA.1684.F32.TF32 instructions, not one
+HMMA.1688. A separate inline-PTX probe directly confirms that the
+single-instruction HMMA.1688.F32.TF32 form does exist on local
+sm_89; we simply do not yet have a standalone dependent-chain
+latency for that exact form. Table 5 states the distinction explicitly.
+This correction matters for credibility, but it also matters for
+design. It changes which throughput and overlap claims are actually
+3
+349
+350
+351
+352
+353
+354
+355
+356
+357
+358
+359
+360
+361
+362
+363
+364
+365
+366
+367
+368
+369
+370
+371
+372
+373
+374
+375
+376
+377
+378
+379
+380
+381
+382
+383
+384
+385
+386
+387
+388
+389
+390
+391
+392
+393
+394
+395
+396
+397
+398
+399
+400
+401
+402
+403
+404
+405
+406
+MICRO ’26, 2026,
+Anon. Submission Id: #1738 – Confidential Draft – Do NOT Distribute‼
+407
+408
+409
+410
+411
+412
+413
+414
+415
+416
+417
+418
+419
+420
+421
+422
+423
+424
+425
+426
+427
+428
+429
+430
+431
+432
+433
+434
+435
+436
+437
+438
+439
+440
+441
+442
+443
+444
+445
+446
+447
+448
+449
+450
+451
+452
+453
+454
+455
+456
+457
+458
+459
+460
+461
+462
+463
+464
+Table 6: UPLOP3 runtime behavior under cubin-side substitu-
+tion.
+Finding
+Result
+Structurally invalid path
+ULOP3→UPLOP3
+Structurally valid path
+PLOP3→UPLOP3
+Runtime class counts
+12 inert, 3 functionally distinct
+Primary live sites
+uniform_occ1, cutlass_occ5
+Secondary live sites
+uniform_occ2,
+cutlass_occ4,
+uniform_occ5
+justified. In the artifact, TF32 behaves much more like a decomposed
+WMMA path than like a single opaque tensor instruction. That is
+the right unit to compare against FP16, BF16, and the INT4/INT8
+IMMA paths.
+5
+Compiler and Codegen Frontiers
+We use frontier to mean an instruction form where opcode existence
+and compiler emission diverge: the encoding is reachable via cubin
+patching but no tested source or IR path selects it. Opcode discovery
+on SM89 is mostly complete; two such frontiers remain and are the
+subject of this section.
+5.1
+P2R.B1/B2/B3: selection versus existence
+No compiler path we tested emits P2R.B1/B2/B3 directly. Exten-
+sive source mutation, PTX search, frontend variation, and ptxas
+sweeps reproduce the surrounding P2R neighborhood (including
+plain P2R 0x7f and 0x0f), but the byte-qualified forms are never
+selected. Cubin-side substitution proves all three byte forms valid
+and runnable on the same machine. The open question is there-
+fore not whether these opcodes exist; it is which backend selection
+rule prevents them from being emitted. We do not claim to have
+explained that mechanism. It could reflect backend conservatism,
+a correctness hazard, cost-modeling, or historical implementation
+debt; isolating which of those is responsible is future work.
+5.2
+UPLOP3.LUT: from structural validity to
+runtime semantics
+Patching ULOP3 encodings to UPLOP3 produces a cubin that
+cuobjdump rejects as invalid. Patching from PLOP3 instead pro-
+duces a cubin that disassembles and executes correctly on sm_89. Of
+the 15 substitution sites tested, 12 leave kernel output unchanged;
+3 produce different computed results. The sites uniform_occ1 and
+cutlass_occ5 show the strongest and most consistent output
+changes; uniform_occ2, cutlass_occ4, and uniform_occ5 alter
+output only in certain operand combinations.
+The methodological lesson is that source mutation, frontend
+variation, and ptxas sweeps are best used to bound negative space;
+cubin patching resolves existence questions; and differential fuzzing
+is the most powerful semantic discriminator once a patched form
+executes safely.
+Together, these two results show that different instruction
+families reach different levels of characterization under the same
+methodology. P2R.B* cannot be emitted from source or IR, but
+inert
+functionally distinct
+0
+5
+10
+12
+3
+Patched sites
+Figure 2: Most tested local UPLOP3 substitutions are inert; only
+a small minority are functionally distinct under runtime
+differential tests.
+Table 7: Bounded compiler/codegen frontier results.
+Frontier
+Result
+P2R.B1/B2/B3
+No direct local source/IR emission; cubin-side
+substitutions are valid and runnable
+P2R interpretation
+Compiler does not select byte-qualified forms;
+why it does not is still open
+ULOP3→UPLOP3
+Structurally invalid
+PLOP3→UPLOP3
+Structurally valid; patched sites partition into
+inert and functionally distinct classes
+cubin patching proves the opcodes exist and run correctly, nar-
+rowing the question to compiler selection policy. UPLOP3 goes
+further: structural validity and runtime semantics can already be
+distinguished across substitution sites. That is more informative
+than a binary pass/fail reproducibility result.
+6
+Application Case Studies
+6.1
+Instant-NGP hot loops
+The strongest argument for the measurement corpus is that it
+changes real kernels. The Instant-NGP hot-loop suite of Muller
+et al. [5] is implemented here in inline PTX rather than raw SASS
+because it still compiles with standard toolchains while giving
+instruction-level control. Speedups are reported against reference
+CUDA implementations of the same kernels compiled in the same
+binary with identical flags (nvcc -arch=sm_89 -O2); both reference
+and hand-tuned versions pass element-wise validation against the
+same input set. The wins map directly onto the measured machine.
+Hash-grid encoding is memory bound, so its final 1.11× speedup
+comes from vectorized loads and software pipelining rather than
+brute-force ALU changes. That final win was not immediate: the
+first hand-written version was slower than the compiler at 0.69×,
+an intermediate cleanup reached only 1.03×, and only the third
+version reached 1.11×. MLP forward is compute bound, so it bene-
+fits from deep FFMA ILP and shared memory tiling, yielding 3.16×.
+Volume rendering sits in between and benefits from fast MUFU.EX2
+4
+465
+466
+467
+468
+469
+470
+471
+472
+473
+474
+475
+476
+477
+478
+479
+480
+481
+482
+483
+484
+485
+486
+487
+488
+489
+490
+491
+492
+493
+494
+495
+496
+497
+498
+499
+500
+501
+502
+503
+504
+505
+506
+507
+508
+509
+510
+511
+512
+513
+514
+515
+516
+517
+518
+519
+520
+521
+522
+Consumer Ada SM89 : Measurements, Compiler Frontiers, and Kernel Consequences
+MICRO ’26, 2026,
+523
+524
+525
+526
+527
+528
+529
+530
+531
+532
+533
+534
+535
+536
+537
+538
+539
+540
+541
+542
+543
+544
+545
+546
+547
+548
+549
+550
+551
+552
+553
+554
+555
+556
+557
+558
+559
+560
+561
+562
+563
+564
+565
+566
+567
+568
+569
+570
+571
+572
+573
+574
+575
+576
+577
+578
+579
+580
+Table 8: Instant-NGP hot-loop consequences from the mea-
+sured implementation.
+Kernel
+Max error
+Speedup
+Hash Grid Encoding (v3)
+0.00e+00
+1.11×
+MLP Forward
+1.19e−07
+3.16×
+Volume Rendering
+2.98e−07
+1.53×
+Table 9: Representative CUDA-LBM tradeoffs at 1283 from
+fresh RTX 4070 Ti reruns.
+Tier
+MLUPS
+Mass drift
+FP32 Fused
+2152
+4.77e−07
+INT8 SoA
+6124
+3.12e−01
+INT8 SoA LM
+4911
+1.47e−02
+FP64 SoA
+765
+0.00e+00
+Q32.32 SoA
+1231
+0.00e+00
+usage and a lean compositing loop, yielding 1.53×. The implementa-
+tion preserves exact output for hash-grid encoding and near-exact
+numerical agreement for the other two kernels.
+Two parts of this case study matter for the central thesis. First,
+the wins are mechanistic rather than generic. The measured SM89
+facts explain why the rewrites help: grouped loads and software
+pipelining for the memory-bound hash encoder, FFMA ILP depth
+for the MLP, and a tighter transcendental/compositing mix for
+the renderer. The hash-grid result is especially useful precisely
+because it is messier than a clean headline speedup. It shows that
+ISA knowledge does not guarantee an easy win when the compiler
+is already doing most of the obvious work on a memory-bound
+kernel. Second, the validation story is strong enough for a systems
+paper. The kernels are not merely faster; they preserve exact or
+near-exact outputs while exposing optimization levers that the
+standard CUDA pipeline does not reliably reach on its own.
+6.2
+CUDA-LBM suite
+The CUDA-LBM suite shows the same bridge on a larger design
+surface. During revision, we reran the main 1283 production tiers
+on the local RTX 4070 Ti over SSH/tmux so that the primary appli-
+cation table is anchored to one board. The performance/accuracy
+frontier depends on layout, storage precision, and whether the
+collision path still pays the MUFU.RCP-dominated 1 / tau critical
+path. The most important kernel-level optimization is precomput-
+ing inv_tau. The measured MUFU.RCP latency of 41.55 cycles, plus
+the additional iterative reciprocal cost discussed in the checked-in
+LBM notes, makes per-cell reciprocal work too expensive to ignore.
+Precomputing inv_tau removes that critical path from every time
+step and materially changes which tiers are attractive.
+Table 9 highlights three nontrivial consequences. First, raw
+throughput and physics quality diverge sharply at low precision.
+INT8 SoA is the fastest tier here, but a mass drift of 3.12e−01 makes
+it physically nonviable for conservation-sensitive use; it is best
+treated as a performance probe, not as a production physics tier.
+INT8 SoA Lloyd-Max materially reduces drift, but at 1.47e−02 it
+is still an approximate low-precision tier rather than a zero-drift
+one. Second, layout dominates vectorization: the reruns again
+show that SoA is where the large gains come from, and the local
+INT8 SoA / INT8 SoA LM / Q32.32 ordering is unambiguous. Third,
+Q32.32 matters because it bypasses consumer Ada’s weak FP64
+path while preserving zero observed drift in the shipped validation
+suite. The historical RTX 4070 Ti Super dataset preserves the
+same qualitative ordering, but because the two boards were not
+benchmarked as a synchronized head-to-head study, we do not
+interpret the absolute Ti-vs-Ti-Super deltas. That is exactly the
+kind of architecture-to-kernel bridge a SASS study should deliver.
+This is also where the bounded approach helps, but it should
+not be used to flatten the design space into five equally acceptable
+points. What the data support is narrower and more useful: a long
+reciprocal path pushes the collision kernel toward precomputed
+inv_tau; consumer Ada’s weak FP64 rate makes fixed-point viable
+again; Q32.32 and FP64 are the zero-drift reference tiers; FP32 Fused
+is the practical low-drift baseline; and the INT8 tiers buy throughput
+only by accepting physically lossy behavior.
+7
+Discussion
+Three higher-level lessons emerge from the combined evidence.
+First, knowing that an instruction exists is not the same as knowing
+whether a compiler will emit it. We distinguish these cleanly: some
+instruction families can be produced by cubin patching even though
+no compiler path selects them, and others are already characterized
+at the level of runtime semantics.
+Second, mixed-hardware evidence is acceptable only when han-
+dled asymmetrically. The cross-board sanity checks suggest that
+short dependent-chain compute measurements are comparatively
+stable across the RTX 4070 Ti and RTX 4070 Ti Super, while memory-
+path timing is more configuration-sensitive. That justifies using
+local reruns to anchor scrutiny-sensitive claims, admitting explicitly
+that the full inventory was historically enumerated on the Ti Super
+corpus, and treating the broader checked-in corpus as supporting
+coverage rather than as a pseudo-controlled comparison.
+Third, the application case studies prevent the work from col-
+lapsing into cataloging. Instant-NGP and CUDA-LBM are included
+because they make the measurements earn their place. Remove the
+measurements and the rewrites lose their explanation; remove the
+applications and the measurements lose much of their architectural
+value.
+8
+Threats to Validity and Scope
+The claims are deliberately bounded in four ways.
+First, neither P2R.B* nor UPLOP3.LUT can yet be emitted directly
+from source or IR. For P2R, the mechanism behind compiler non-
+selection also remains unexplained.
+Second, we separate broader checked-in corpus evidence from
+rerun-backed primary tables. The inventory counts come from the
+historically collected Ada corpus, while the tensor wording repair,
+the representative LDG pointer-chase row, and the main CUDA-
+LBM application table are anchored to revision-time RTX 4070 Ti
+reruns inside a remote tmux session. Those two sources agree on
+the tensor-form interpretation, but they were not collected as a
+normalized cross-board study. We therefore treat the RTX 4070
+5
+581
+582
+583
+584
+585
+586
+587
+588
+589
+590
+591
+592
+593
+594
+595
+596
+597
+598
+599
+600
+601
+602
+603
+604
+605
+606
+607
+608
+609
+610
+611
+612
+613
+614
+615
+616
+617
+618
+619
+620
+621
+622
+623
+624
+625
+626
+627
+628
+629
+630
+631
+632
+633
+634
+635
+636
+637
+638
+MICRO ’26, 2026,
+Anon. Submission Id: #1738 – Confidential Draft – Do NOT Distribute‼
+639
+640
+641
+642
+643
+644
+645
+646
+647
+648
+649
+650
+651
+652
+653
+654
+655
+656
+657
+658
+659
+660
+661
+662
+663
+664
+665
+666
+667
+668
+669
+670
+671
+672
+673
+674
+675
+676
+677
+678
+679
+680
+681
+682
+683
+684
+685
+686
+687
+688
+689
+690
+691
+692
+693
+694
+695
+696
+Table 10: Summary of measured results and their kernel-level consequences.
+Measured or bounded result
+Why it matters
+Concrete consequence
+IADD3 and FFMA are cheap on Ada; TF32 WMMA decomposes
+to 2x HMMA.1684 in the measured path
+Low-level throughput and latency claims need the right exe-
+cution unit and decomposition, not a hand-wavy tensor label
+Instant-NGP MLP forward can be rea-
+soned about as FFMA- and tiling-
+dominated, and achieves 3.16×
+MUFU.RCP remains expensive at 41.55 cycles
+Reciprocal-heavy inner loops pay a visible critical-path tax
+CUDA-LBM
+precomputes
+inv_tau,
+shifting the production frontier toward
+faster stable tiers
+P2R.B1/B2/B3 are runnable but still not directly emitted
+The remaining compiler gap is form selection, not opcode
+existence
+Backend work should target emission
+rules rather than rediscovering the op-
+code family
+PLOP3→UPLOP3 is valid but many patched sites are inert
+Structural validity and semantic liveness are different closure
+levels
+Differential testing is required before
+promoting patched substitutions into
+optimization guidance
+Ti Super numbers as secondary corroboration, not as a board-to-
+board performance comparison, and we do not claim that the full
+379-mnemonic frontier was re-enumerated on the rerun board.
+Third, we use a representative subset of a larger result set. We
+focus on the values that most directly affect kernel design rather
+than trying to reprint the full catalog.
+Fourth, the application results are first-party artifact results
+rather than a standardized cross-lab benchmark campaign. That
+is acceptable for the claims we make, but it means we emphasize
+mechanism and measured tradeoffs rather than universal superior-
+ity claims.
+9
+Conclusion
+Consumer Ada SM89 supports a stable inventory of 379 canoni-
+cal mnemonics, two bounded compiler frontiers, a corrected ten-
+sor decomposition story that separates WMMA paths from direct
+single-instruction forms, and application consequences that turn
+those measurements into actionable kernel decisions. The remain-
+ing open questions (the selection rule behind P2R.B* non-emission
+and the full semantic scope of live UPLOP3 substitutions) are scoped
+explicitly. Together, these results show that instruction-level mi-
+crobenchmarking on consumer Ada produces bounded, mechanistic
+claims rather than isolated latency tables.
+Acknowledgments
+The authors used generative-AI tools during manuscript prepara-
+tion. Claude (Anthropic) was used to assist with drafting, editing,
+and proofreading. Codex (OpenAI) was used to assist with LATEX de-
+bugging, revision support, and build troubleshooting. The authors
+reviewed, verified, and take full responsibility for all submitted
+content.
+References
+[1] Hamdy Abdelkhalik, Yehia Arafa, Nandakishore Santhi, and Abdel-Hameed A.
+Badawy. 2022. Demystifying the NVIDIA Ampere Architecture through Mi-
+crobenchmarking and Instruction-level Analysis. arXiv preprint arXiv:2208.11174.
+https://arxiv.org/abs/2208.11174
+[2] Zhe Jia, Marco Maggioni, Jeffrey Smith, and Daniele Paolo Scarpazza. 2019. Dis-
+secting the NVIDIA Turing T4 GPU via Microbenchmarking. arXiv preprint
+arXiv:1903.07486. https://arxiv.org/abs/1903.07486
+[3] Zhe Jia, Marco Maggioni, Benjamin Staiger, and Daniele Paolo Scarpazza. 2018.
+Dissecting the NVIDIA Volta GPU Architecture via Microbenchmarking. arXiv
+preprint arXiv:1804.06826. https://arxiv.org/abs/1804.06826
+[4] Weile Luo, Ruibo Fan, Zeyu Li, Dayou Du, Qiang Wang, and Xiaowen Chu.
+2024. Benchmarking and Dissecting the Nvidia Hopper GPU Architecture. arXiv
+preprint arXiv:2402.13499. https://arxiv.org/abs/2402.13499
+[5] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant
+Neural Graphics Primitives with a Multiresolution Hash Encoding. ACM Transac-
+tions on Graphics 41, 4, Article 102 (2022), 15 pages. doi:10.1145/3528223.3530127
+[6] NVIDIA Corporation. 2021.
+NVIDIA Ampere GA102 GPU Architecture.
+White paper. https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-
+architecture-whitepaper-v2.1.pdf Version 2.1.
+[7] NVIDIA Corporation. 2022.
+NVIDIA Ada GPU Architecture.
+White pa-
+per. https://images.nvidia.com/aem-dam/Solutions/Data-Center/l4/nvidia-ada-
+gpu-architecture-whitepaper-V2.02.pdf?ncid=no-ncid Version 2.02.
+6
