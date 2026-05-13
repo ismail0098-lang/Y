@@ -17,12 +17,19 @@ fn calculate_matrix() {
         
         // Loop invariant mathematically proves bounds
         @invariant(i >= 0)
+        @divergence(uniform)
         while i < size {
             // Explicit @bounds annotation ensuring zero out-of-bounds violations
             @bounds(0, 100)
             let safe_index: I32 = i;
             
-            sum = sum + safe_index;
+            @divergence(uniform)
+            if safe_index < 50 {
+                sum = sum + safe_index;
+            } else {
+                sum = sum + 1;
+            }
+            
             i = i + 1;
         }
     }

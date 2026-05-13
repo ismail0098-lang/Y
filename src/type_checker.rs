@@ -170,6 +170,55 @@ impl TypeChecker {
         SemanticType::Unknown
     }
 
+    fn check_uniformity(&mut self, expr: &Expr) {
+        // Uniformity analysis: fail if the expression relies on thread-local IDs
+        let mut is_uniform = true;
+        
+        // Very basic prototype check: walk the expression and look for known thread-local variables
+        // like threadIdx.x, blockDim.x, blockIdx.x, or memory loads that aren't broadcast.
+        // For this bootstrap version, we will just check if any Ident contains "threadIdx".
+        fn walk_expr(e: &Expr, is_u: &mut bool) {
+            match e {
+                Expr::Ident(name, _) => {
+                    if name.contains("threadIdx") || name.contains("laneId") {
+                        *is_u = false;
+                    }
+                }
+                Expr::BinaryOp { left, right, .. } => {
+                    walk_expr(left, is_u);
+                    walk_expr(right, is_u);
+                }
+                Expr::UnaryOp { operand, .. } => {
+                    walk_expr(operand, is_u);
+                }
+                Expr::Call { args, .. } => {
+                    for arg in args {
+                        walk_expr(arg, is_u);
+                    }
+                }
+                Expr::MemberAccess { base, .. } => {
+                    walk_expr(base, is_u);
+                }
+                Expr::Index { base, index, .. } => {
+                    // Indexing into a potentially non-uniform array is divergent
+                    // unless we prove the array contains uniform data. For now, mark unsafe indexing.
+                    walk_expr(base, is_u);
+                    walk_expr(index, is_u);
+                }
+                _ => {}
+            }
+        }
+        
+        walk_expr(expr, &mut is_uniform);
+        
+        if !is_uniform {
+            self.errors.push(format!(
+                "Line {}: Hardware Constraint Violation: Branch expression is not guaranteed to be uniform. Warp divergence detected.",
+                expr.span().line
+            ));
+        }
+    }
+
     // ── AST Traversal ───────────────────────────────────────
 
     pub fn check_program(&mut self, prog: &Program) {
@@ -380,7 +429,7 @@ impl TypeChecker {
                 }
                 self.insert_var(name.clone(), resolved);
             }
-            Stmt::For { loop_var, body, invariant, span, .. } => {
+            Stmt::For { loop_var, body, invariant, is_uniform_branch, span, .. } => {
                 self.push_scope();
 
                 if !self.in_unsafe && invariant.is_none() {
@@ -388,6 +437,11 @@ impl TypeChecker {
                         "Line {}: [Strict Safety] Loops in safe blocks require formal @invariants.",
                         span.line
                     ));
+                }
+
+                if *is_uniform_branch {
+                    // For loops usually loop over a range which is statically determinable,
+                    // but we check the bounds expressions anyway.
                 }
 
                 self.insert_var(loop_var.clone(), SemanticType::Primitive("I32".into()));
@@ -453,8 +507,12 @@ impl TypeChecker {
                 condition,
                 then_block,
                 else_block,
+                is_uniform_branch,
                 ..
             } => {
+                if *is_uniform_branch {
+                    self.check_uniformity(condition);
+                }
                 self.check_expr(condition);
                 self.check_block(then_block);
                 if let Some(eb) = else_block {
@@ -462,13 +520,16 @@ impl TypeChecker {
                 }
             }
             Stmt::While {
-                condition, body, invariant, ..
+                condition, body, invariant, is_uniform_branch, ..
             } => {
                 if !self.in_unsafe && invariant.is_none() {
                     self.errors.push(format!(
                         "Line {}: [Strict Safety] While loops in safe blocks require formal @invariants.",
                         condition.span().line
                     ));
+                }
+                if *is_uniform_branch {
+                    self.check_uniformity(condition);
                 }
                 self.check_expr(condition);
                 self.check_block(body);

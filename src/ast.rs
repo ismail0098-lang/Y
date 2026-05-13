@@ -178,6 +178,7 @@ pub enum Stmt {
         step: Option<Expr>,
         body: Block,
         invariant: Option<Box<Expr>>,
+        is_uniform_branch: bool,
         span: Span,
     },
     /// `acc = expr;`
@@ -197,6 +198,7 @@ pub enum Stmt {
         condition: Box<Expr>,
         then_block: Block,
         else_block: Option<Block>,
+        is_uniform_branch: bool,
         span: Span,
     },
     /// `while condition { ... }`
@@ -204,6 +206,7 @@ pub enum Stmt {
         condition: Box<Expr>,
         body: Block,
         invariant: Option<Box<Expr>>,
+        is_uniform_branch: bool,
         span: Span,
     },
     /// `match scrutinee { pattern => body, ... }`

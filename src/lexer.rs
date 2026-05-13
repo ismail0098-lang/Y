@@ -133,6 +133,7 @@ pub enum TokenKind {
     AtZeroDrift,       // @ZeroDrift — enforce zero numerical drift
     AtBounds,
     AtInvariant,
+    AtDivergenceUniform,
     AtUnknown(String), // future-proof
 
     // ── Operators ────────────────────────────────────────────
@@ -524,7 +525,7 @@ impl Lexer {
                 break;
             }
         }
-        let kind = match name.as_str() {
+        let mut kind = match name.as_str() {
             "@require" => TokenKind::AtRequire,
             "@cache_policy" => TokenKind::AtCachePolicy,
             "@ptx_emit" => TokenKind::AtPtxEmit,
@@ -540,6 +541,37 @@ impl Lexer {
             "@ZeroDrift" => TokenKind::AtZeroDrift,
             "@bounds" => TokenKind::AtBounds,
             "@invariant" => TokenKind::AtInvariant,
+            "@divergence" => {
+                // Peek for (uniform)
+                if self.peek() == Some('(') {
+                    self.advance();
+                    let mut arg = String::new();
+                    while let Some(ch) = self.peek() {
+                        if ch.is_alphabetic() {
+                            arg.push(ch);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    if self.peek() == Some(')') {
+                        self.advance();
+                        if arg == "uniform" {
+                            name.push_str("(uniform)");
+                            TokenKind::AtDivergenceUniform
+                        } else {
+                            name.push('(');
+                            name.push_str(&arg);
+                            name.push(')');
+                            TokenKind::AtUnknown(name.clone())
+                        }
+                    } else {
+                        TokenKind::AtUnknown(name.clone())
+                    }
+                } else {
+                    TokenKind::AtUnknown(name.clone())
+                }
+            }
             other => TokenKind::AtUnknown(other.to_string()),
         };
         Token::new(kind, line, start_col, &name)

@@ -609,6 +609,7 @@ impl Parser {
         let mut zero_drift = None;
         let mut bounds = None;
         let mut invariant = None;
+        let mut is_uniform_branch = false;
 
         loop {
             if self.match_token(TokenKind::AtCachePolicy) {
@@ -674,6 +675,8 @@ impl Parser {
                 self.expect(TokenKind::LParen, "'(' after @invariant")?;
                 invariant = Some(Box::new(self.parse_expr()?));
                 self.expect(TokenKind::RParen, "')' after @invariant")?;
+            } else if self.match_token(TokenKind::AtDivergenceUniform) {
+                is_uniform_branch = true;
             } else {
                 break;
             }
@@ -762,6 +765,7 @@ impl Parser {
                 step,
                 body,
                 invariant,
+                is_uniform_branch,
                 span,
             })
         } else if self.match_token(TokenKind::Chisel) {
@@ -792,6 +796,7 @@ impl Parser {
                 condition,
                 then_block,
                 else_block,
+                is_uniform_branch,
                 span,
             })
         } else if self.match_token(TokenKind::While) {
@@ -801,6 +806,7 @@ impl Parser {
                 condition,
                 body,
                 invariant,
+                is_uniform_branch,
                 span,
             })
         } else if self.match_token(TokenKind::Match) {

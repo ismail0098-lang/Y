@@ -1182,6 +1182,7 @@ impl LlvmEmitter {
                 condition,
                 then_block,
                 else_block,
+                is_uniform_branch,
                 ..
             } => {
                 let cond = self.emit_expr(condition, None, None);
@@ -1189,16 +1190,23 @@ impl LlvmEmitter {
                 let else_lbl = self.fresh_label("else");
                 let merge_lbl = self.fresh_label("merge");
 
+                let metadata = if *is_uniform_branch {
+                    ", !uniform_branch !0 ; Maps to BRANCH_UNIFORM_CYCLES scheduling baseline"
+                } else {
+                    ""
+                };
+
                 writeln!(
                     &mut self.output,
-                    "  br i1 {}, label %{}, label %{}",
+                    "  br i1 {}, label %{}, label %{}{}",
                     cond,
                     then_lbl,
                     if else_block.is_some() {
                         &else_lbl
                     } else {
                         &merge_lbl
-                    }
+                    },
+                    metadata
                 )
                 .unwrap();
 
@@ -1226,19 +1234,25 @@ impl LlvmEmitter {
                 self.block_terminated = false;
             }
             Stmt::While {
-                condition, body, ..
+                condition, body, is_uniform_branch, ..
             } => {
                 let cond_lbl = self.fresh_label("while.cond");
                 let body_lbl = self.fresh_label("while.body");
                 let end_lbl = self.fresh_label("while.end");
+
+                let metadata = if *is_uniform_branch {
+                    ", !uniform_branch !0 ; Maps to BRANCH_UNIFORM_CYCLES scheduling baseline"
+                } else {
+                    ""
+                };
 
                 writeln!(&mut self.output, "  br label %{}", cond_lbl).unwrap();
                 writeln!(&mut self.output, "{}:", cond_lbl).unwrap();
                 let cond = self.emit_expr(condition, None, None);
                 writeln!(
                     &mut self.output,
-                    "  br i1 {}, label %{}, label %{}",
-                    cond, body_lbl, end_lbl
+                    "  br i1 {}, label %{}, label %{}{}",
+                    cond, body_lbl, end_lbl, metadata
                 )
                 .unwrap();
 
@@ -1258,6 +1272,7 @@ impl LlvmEmitter {
                 end,
                 step,
                 body,
+                is_uniform_branch,
                 ..
             } => {
                 let s = self.emit_expr(start, None, None);
@@ -1265,6 +1280,12 @@ impl LlvmEmitter {
                 let cond_lbl = self.fresh_label("for.cond");
                 let body_lbl = self.fresh_label("for.body");
                 let end_lbl = self.fresh_label("for.end");
+
+                let metadata = if *is_uniform_branch {
+                    ", !uniform_branch !0 ; Maps to BRANCH_UNIFORM_CYCLES scheduling baseline"
+                } else {
+                    ""
+                };
 
                 // alloca is in entry
                 self.emit_store(&s, &format!("%{}", loop_var), "i32");
@@ -1276,8 +1297,8 @@ impl LlvmEmitter {
                 writeln!(&mut self.output, "  {} = icmp slt i32 {}, {}", cmp, cur, e).unwrap();
                 writeln!(
                     &mut self.output,
-                    "  br i1 {}, label %{}, label %{}",
-                    cmp, body_lbl, end_lbl
+                    "  br i1 {}, label %{}, label %{}{}",
+                    cmp, body_lbl, end_lbl, metadata
                 )
                 .unwrap();
 

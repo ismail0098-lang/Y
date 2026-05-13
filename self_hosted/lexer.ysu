@@ -89,6 +89,9 @@ enum TokenKind {
     // @invariant(expr) — compile-time loop invariant proof directive
     AtInvariant(String),
 
+    // @divergence(uniform) — assert branch is uniform across warp
+    AtDivergenceUniform,
+
     // ── Operators ────────────────────────────────────────────
     Arrow, DotDot, ColonColon, Colon, Assign, FatArrow,
     EqEq, NotEq, Lt, Gt, LtEq, GtEq, Plus, Minus, Star,
@@ -488,6 +491,27 @@ impl Lexer {
             if String::eq_cstr(&dir_name, "static_assert") {
                 let lex_sa: String = String::new("@static_assert");
                 return Token::new(TokenKind::AtStaticAssert, line, start_col, &lex_sa);
+            }
+
+            if String::eq_cstr(&dir_name, "divergence") {
+                Lexer::skip_whitespace(lx);
+                Lexer::advance(lx); // consume '('
+                
+                let mut kind_name: String = String::new("");
+                let mut scanning_kind: bool = true;
+                while scanning_kind {
+                    let dc: char = Lexer::peek(lx);
+                    if dc >= 'a' { if dc <= 'z' { String::push(&mut kind_name, dc); Lexer::advance(lx); } else { scanning_kind = false; } }
+                    else { scanning_kind = false; }
+                }
+
+                Lexer::skip_whitespace(lx);
+                Lexer::advance(lx); // consume ')'
+
+                if String::eq_cstr(&kind_name, "uniform") {
+                    let lex_div: String = String::new("@divergence(uniform)");
+                    return Token::new(TokenKind::AtDivergenceUniform, line, start_col, &lex_div);
+                }
             }
 
             // Fallback: unknown @ attribute
