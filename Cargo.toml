@@ -6,10 +6,10 @@ description = "Prototype Y-Lang compiler with CPU, PTX, C, and LLVM backends."
 
 [lib]
 name = "y_lang"
-path = "lib.rs"
+path = "src/lib.rs"
 
 [[bin]]
 name = "y-lang"
-path = "main.rs"
+path = "src/main.rs"
 
 [dependencies]
