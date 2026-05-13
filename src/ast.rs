@@ -165,6 +165,7 @@ pub enum Stmt {
         init: Option<Expr>,
         cache_policy: Option<CachePolicyAttr>,
         zero_drift: Option<ZeroDriftAttr>,
+        bounds: Option<BoundsAttr>,
         span: Span,
     },
     /// `type ATile = SmemLayout<...>;`
@@ -442,5 +443,12 @@ pub struct CachePolicyAttr {
 /// advisory when the drift-free path is slower than the fast default.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ZeroDriftAttr {
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundsAttr {
+    pub min: Box<Expr>,
+    pub max: Box<Expr>,
     pub span: Span,
 }

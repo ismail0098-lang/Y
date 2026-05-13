@@ -1,0 +1,34 @@
+// tests/math.ysu
+// A simple matrix calculation simulation demonstrating Y-Lang's safety cage.
+
+@unsafe
+fn matrix_init() {
+    // Unsafe block: hardware-level initialization
+    let mut mem_ptr: I32 = 0;
+    *mem_ptr = 0; // Raw pointer dereferencing
+}
+
+fn calculate_matrix() {
+    let size: I32 = 100;
+    
+    @safe {
+        let i: I32 = 0;
+        let sum: I32 = 0;
+        
+        // Loop invariant mathematically proves bounds
+        @invariant(i >= 0)
+        while i < size {
+            // Explicit @bounds annotation ensuring zero out-of-bounds violations
+            @bounds(0, 100)
+            let safe_index: I32 = i;
+            
+            sum = sum + safe_index;
+            i = i + 1;
+        }
+    }
+}
+
+fn main() {
+    matrix_init();
+    calculate_matrix();
+}

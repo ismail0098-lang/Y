@@ -290,6 +290,7 @@ impl TypeChecker {
                 ty,
                 init,
                 span,
+                bounds: _, // Ignore for now
                 ..
             } => {
                 let mut inferred_type = SemanticType::Unknown;
