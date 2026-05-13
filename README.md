@@ -1,14 +1,14 @@
-# Y-Lang: The Hardware-Sentient Systems Language
+# Y: The Hardware-Sentient Systems Language
 
-Y-Lang (or simply **Y**) is a cutting-edge systems programming language and self-hosting compiler infrastructure designed to push the boundaries of high-performance computing (HPC), AI kernel development, and secure OS engineering. Initially conceived to power the YSU-Engine, Y-Lang bridges the gap between mathematically formal verification and bare-metal, cycle-precise hardware control.
+**Y** is a  systems programming language and self-hosting compiler infrastructure designed to push the boundaries of high-performance computing (HPC), AI kernel development, and secure OS engineering. Initially conceived to power the YSU-Engine, Y bridges the gap between mathematically formal verification and bare-metal, cycle-precise hardware control.
 
-The ultimate achievement of this project is the **Y-Lang Bootstrap & Self-Hosting Loop**. The compiler is initially written in Rust (the bootstrap compiler) but is rapidly transitioning to being entirely written in native Y-Lang (`.ysu` files), establishing a truly independent, self-compiling logic ecosystem.
+The ultimate achievement of this project is the **Y Bootstrap & Self-Hosting Loop**. The compiler is initially written in Rust (the bootstrap compiler) but is rapidly transitioning to being entirely written in native Y (`.ysu` files), establishing a truly independent, self-compiling logic ecosystem.
 
 ---
 
 ##  Core Architectural Philosophies
 
-Y-Lang abandons traditional compiler design paradigms in favor of **hardware-sentience** and **formal logic**. 
+Yabandons traditional compiler design paradigms in favor of **hardware-sentience** and **formal logic**. 
 
 ### 1. Hardware-Aware "Sentient" Compilation
 Unlike traditional compilers that use static target triples (e.g., `x86_64-pc-windows-msvc`), Y-Lang features a **Sentinel Probe** that dynamically queries the host silicon. The compiler inherently understands:
@@ -18,10 +18,10 @@ Unlike traditional compilers that use static target triples (e.g., `x86_64-pc-wi
 - Tensor Core capabilities and latencies (F16, TF32)
 - Branch Divergence Penalties
 
-Using this `HardwareProfile`, Y-Lang's emitter dynamically selects the optimal instructions (e.g., dynamically choosing between `IMAD.WIDE` vs `IMAD` on NVIDIA GPUs based on known clock-cycle latencies).
+Using this `HardwareProfile`, Y's emitter dynamically selects the optimal instructions (e.g., dynamically choosing between `IMAD.WIDE` vs `IMAD` on NVIDIA GPUs based on known clock-cycle latencies).
 
 ### 2. The Formal Verification "Safety Cage"
-Y-Lang moves beyond runtime safety (Java) and ownership paradigms (Rust) by enforcing mathematically rigorous **Formal Verification** at compile-time using a "Cage" methodology.
+Y moves beyond runtime safety (Java) and ownership paradigms (Rust) by enforcing mathematically rigorous **Formal Verification** at compile-time using a "Cage" methodology.
 
 By default, the compiler enforces strict rules within `@safe` blocks, while providing developers the freedom to directly manipulate silicon in `@unsafe` or `chisel` blocks.
 
@@ -32,7 +32,7 @@ By default, the compiler enforces strict rules within `@safe` blocks, while prov
 - **`@unsafe { ... }`**: Permits direct hardware interaction, raw pointer dereferencing, and unverified data operations for maximum performance.
 
 ### 3. High-Precision Numerical Stability
-Y-Lang is designed for environments where a single floating-point rounding error is unacceptable (e.g., aerospace, high-frequency trading).
+Y is designed for environments where a single floating-point rounding error is unacceptable (e.g., aerospace, high-frequency trading).
 - **`@ZeroDrift`**: A compiler directive that guarantees zero numerical drift. If a target architecture's fast-math path causes precision loss, the compiler will emit a performance advisory and reroute to a perfectly precise, mathematically verified instruction set.
 
 ---
@@ -109,3 +109,6 @@ cargo run -- tests/math.ysu
 During execution, you will see the compiler probe your host hardware, parse the source code, run the mathematical semantic type-checkers (including the Bank Conflict Prover), and emit native binaries or LLVM/PTX blobs.
 
 ---
+This project is under devolpment.
+---
+Author: YSU
