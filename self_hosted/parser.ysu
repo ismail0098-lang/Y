@@ -83,14 +83,14 @@ enum Stmt {
     // return expr; (expr_idx=0 means bare return)
     Return(usize),
 
-    // if cond_idx { then_start..then_count } else { else_start..else_count }
-    If(usize, usize, usize, usize, usize),
+    // if cond_idx { then_start..then_count } else { else_start..else_count } is_uniform_branch
+    If(usize, usize, usize, usize, usize, usize),
 
-    // while cond_idx { body_start..body_count } invariant_idx (0 = none)
-    While(usize, usize, usize, usize),
+    // while cond_idx { body_start..body_count } invariant_idx (0 = none) is_uniform_branch
+    While(usize, usize, usize, usize, usize),
 
-    // for loop_var in start_idx..end_idx step step_idx { body_start..body_count } invariant_idx
-    For(String, usize, usize, usize, usize, usize, usize),
+    // for loop_var in start_idx..end_idx step step_idx { body_start..body_count } invariant_idx is_uniform_branch
+    For(String, usize, usize, usize, usize, usize, usize, usize),
 
     // match scrutinee_idx { arm_start..arm_count }
     Match(usize, usize, usize),
@@ -702,6 +702,15 @@ impl Parser {
             lex = String::clone(&next_tok.lexeme);
         }
 
+        // ── check for @divergence(uniform) directive preceding if/while/for ──
+        let mut is_uniform_branch: usize = 0;
+        if String::eq_cstr(&lex, "@divergence(uniform)") {
+            is_uniform_branch = 1;
+            Parser::advance(p);
+            let next_tok: Token = Parser::peek(p);
+            lex = String::clone(&next_tok.lexeme);
+        }
+
         // ── let statement ──
         if String::eq_cstr(&lex, "let") {
             Parser::advance(p);
@@ -807,7 +816,7 @@ impl Parser {
                 Parser::expect_token(p, &String::new("}"));
             }
 
-            let stmt: Stmt = Stmt::If(cond_idx, then_start, then_count, else_start, else_count);
+            let stmt: Stmt = Stmt::If(cond_idx, then_start, then_count, else_start, else_count, is_uniform_branch);
             Vec::push(&mut (*arena).stmts, stmt);
             let idx: usize = Vec::len(&(*arena).stmts);
             return idx;
@@ -833,7 +842,7 @@ impl Parser {
             }
             Parser::expect_token(p, &String::new("}"));
 
-            let stmt: Stmt = Stmt::While(cond_idx, body_start, body_count, invariant_idx);
+            let stmt: Stmt = Stmt::While(cond_idx, body_start, body_count, invariant_idx, is_uniform_branch);
             Vec::push(&mut (*arena).stmts, stmt);
             let idx: usize = Vec::len(&(*arena).stmts);
             return idx;
@@ -871,7 +880,7 @@ impl Parser {
             }
             Parser::expect_token(p, &String::new("}"));
             
-            let stmt: Stmt = Stmt::For(loop_var, start_idx, end_idx, step_idx, body_start, body_count, invariant_idx);
+            let stmt: Stmt = Stmt::For(loop_var, start_idx, end_idx, step_idx, body_start, body_count, invariant_idx, is_uniform_branch);
             Vec::push(&mut (*arena).stmts, stmt);
             let idx: usize = Vec::len(&(*arena).stmts);
             return idx;

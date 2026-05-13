@@ -183,6 +183,7 @@ impl LlvmEmitter {
             let then_count: usize = stmt.data.If._2;
             let else_start: usize = stmt.data.If._3;
             let else_count: usize = stmt.data.If._4;
+            let is_uniform: usize = stmt.data.If._5;
             
             let cond: String = LlvmEmitter::emit_expr(e, arena, cond_idx - 1);
             let then_lbl: String = LlvmEmitter::fresh_label(e, &String::new("then"));
@@ -198,6 +199,10 @@ impl LlvmEmitter {
                 String::push_str(&mut (*e).buffer, &else_lbl);
             } else {
                 String::push_str(&mut (*e).buffer, &merge_lbl);
+            }
+            
+            if is_uniform == 1 {
+                String::push_str(&mut (*e).buffer, &String::new(", !uniform_branch !0 ; Maps to BRANCH_UNIFORM_CYCLES scheduling baseline"));
             }
             String::push_str(&mut (*e).buffer, &String::new("\n"));
             
@@ -233,6 +238,7 @@ impl LlvmEmitter {
             let cond_idx: usize = stmt.data.While._0;
             let body_start: usize = stmt.data.While._1;
             let body_count: usize = stmt.data.While._2;
+            let is_uniform: usize = stmt.data.While._4;
             
             let cond_lbl: String = LlvmEmitter::fresh_label(e, &String::new("while.cond"));
             let body_lbl: String = LlvmEmitter::fresh_label(e, &String::new("while.body"));
@@ -251,6 +257,10 @@ impl LlvmEmitter {
             String::push_str(&mut (*e).buffer, &body_lbl);
             String::push_str(&mut (*e).buffer, &String::new(", label %"));
             String::push_str(&mut (*e).buffer, &end_lbl);
+            
+            if is_uniform == 1 {
+                String::push_str(&mut (*e).buffer, &String::new(", !uniform_branch !0 ; Maps to BRANCH_UNIFORM_CYCLES scheduling baseline"));
+            }
             String::push_str(&mut (*e).buffer, &String::new("\n"));
             
             String::push_str(&mut (*e).buffer, &body_lbl);

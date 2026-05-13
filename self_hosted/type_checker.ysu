@@ -204,6 +204,75 @@ impl BoundsChecker {
         return false;
     }
 
+    // ── Uniformity checking (for @divergence(uniform)) ──────
+
+    @unsafe
+    fn check_uniformity(bc: &mut BoundsChecker, arena: &AstArena, expr_idx: usize) {
+        if expr_idx == 0 { return; }
+        
+        let is_div: bool = BoundsChecker::expr_is_divergent(bc, arena, expr_idx);
+        if is_div {
+            print("[!] Hardware Constraint Violation: Branch expression is not guaranteed to be uniform. Warp divergence detected.");
+            println("");
+            let err: String = String::new("warp_divergence_detected");
+            Vec::push(&mut (*bc).errors, err);
+            (*bc).error_count += 1;
+        }
+    }
+
+    @unsafe
+    fn expr_is_divergent(bc: &BoundsChecker, arena: &AstArena, expr_idx: usize) -> bool {
+        if expr_idx == 0 { return false; }
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx - 1);
+
+        if expr.tag == Expr_TAG_Ident {
+            let name: String = expr.data.Ident._0;
+            if String::eq_cstr(&name, "threadIdx") { return true; }
+            if String::eq_cstr(&name, "laneId") { return true; }
+            return false;
+        }
+
+        if expr.tag == Expr_TAG_UnaryExpr {
+            let operand_idx: usize = expr.data.UnaryExpr._1;
+            return BoundsChecker::expr_is_divergent(bc, arena, operand_idx);
+        }
+
+        if expr.tag == Expr_TAG_BinaryExpr {
+            let lhs: usize = expr.data.BinaryExpr._0;
+            let rhs: usize = expr.data.BinaryExpr._2;
+            let l: bool = BoundsChecker::expr_is_divergent(bc, arena, lhs);
+            if l { return true; }
+            return BoundsChecker::expr_is_divergent(bc, arena, rhs);
+        }
+
+        if expr.tag == Expr_TAG_Call {
+            let args_start: usize = expr.data.Call._1;
+            let arg_count: usize = expr.data.Call._2;
+            let mut ai: usize = 0;
+            while ai < arg_count {
+                let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + ai);
+                let has: bool = BoundsChecker::expr_is_divergent(bc, arena, arg_idx);
+                if has { return true; }
+                ai += 1;
+            }
+        }
+        
+        if expr.tag == Expr_TAG_Index {
+            let base_idx: usize = expr.data.Index._0;
+            let index_idx: usize = expr.data.Index._1;
+            let b: bool = BoundsChecker::expr_is_divergent(bc, arena, base_idx);
+            if b { return true; }
+            return BoundsChecker::expr_is_divergent(bc, arena, index_idx);
+        }
+        
+        if expr.tag == Expr_TAG_MemberAccess {
+            let base_idx: usize = expr.data.MemberAccess._0;
+            return BoundsChecker::expr_is_divergent(bc, arena, base_idx);
+        }
+
+        return false;
+    }
+
     // ════════════════════════════════════════════════════════
     //  MAIN VERIFICATION PASS
     // ════════════════════════════════════════════════════════
@@ -248,6 +317,11 @@ impl BoundsChecker {
             let then_count: usize = stmt.data.If._2;
             let else_start: usize = stmt.data.If._3;
             let else_count: usize = stmt.data.If._4;
+            let is_uniform: usize = stmt.data.If._5;
+
+            if is_uniform == 1 {
+                BoundsChecker::check_uniformity(bc, arena, cond_idx);
+            }
 
             let mut i: usize = 0;
             while i < then_count {
@@ -264,6 +338,11 @@ impl BoundsChecker {
             let body_start: usize = stmt.data.While._1;
             let body_count: usize = stmt.data.While._2;
             let invariant_idx: usize = stmt.data.While._3;
+            let is_uniform: usize = stmt.data.While._4;
+
+            if is_uniform == 1 {
+                BoundsChecker::check_uniformity(bc, arena, cond_idx);
+            }
 
             // If this loop has an @invariant, verify it
             if invariant_idx > 0 {
@@ -699,7 +778,14 @@ impl BoundsChecker {
 
         // ── Hard Block 1: Mandatory Loop Invariants ─────────
         if stmt.tag == Stmt_TAG_While {
+            let cond_idx: usize = stmt.data.While._0;
             let invariant_idx: usize = stmt.data.While._3;
+            let is_uniform: usize = stmt.data.While._4;
+
+            if is_uniform == 1 {
+                BoundsChecker::check_uniformity(bc, arena, cond_idx);
+            }
+
             if invariant_idx == 0 {
                 print("[!] Strict Safety Error: Loops in @safe blocks require formal invariants. (while at stmt ");
                 print_int(stmt_idx);
@@ -731,6 +817,12 @@ impl BoundsChecker {
 
         if stmt.tag == Stmt_TAG_For {
             let for_inv: usize = stmt.data.For._6;
+            let is_uniform: usize = stmt.data.For._7;
+
+            if is_uniform == 1 {
+                // start_idx, end_idx, step_idx could be checked but for loops are generally uniform
+            }
+
             if for_inv == 0 {
                 print("[!] Strict Safety Error: Loops in @safe blocks require formal invariants. (for at stmt ");
                 print_int(stmt_idx);
@@ -821,6 +913,14 @@ impl BoundsChecker {
             let then_count: usize = stmt.data.If._2;
             let else_start: usize = stmt.data.If._3;
             let else_count: usize = stmt.data.If._4;
+            let is_uniform: usize = stmt.data.If._5;
+
+            if is_uniform == 1 {
+                // cond_idx is not directly unpacked here, we can extract it if needed, but wait:
+                // stmt.data.If._0 is cond_idx.
+                let cond_idx: usize = stmt.data.If._0;
+                BoundsChecker::check_uniformity(bc, arena, cond_idx);
+            }
 
             let mut ti: usize = 0;
             while ti < then_count {
