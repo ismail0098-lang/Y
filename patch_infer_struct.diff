@@ -1,0 +1,15 @@
+--- llvm_emitter.rs
++++ llvm_emitter.rs
+@@ -2620,11 +2620,12 @@
+             }
+             Expr::MemberAccess { base, member, .. } => {
+                 let base_ty = if let Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } = &**base {
+-                    self.infer_struct_type(operand)
++                    let t = self.infer_struct_type(operand);
++                    if t != "Unknown" { t } else { self.infer_struct_type(base) }
+                 } else {
+                     self.infer_struct_type(base)
+                 };
+                 let base_name = base_ty.trim_start_matches('%');
+
+                 if let Some(&has_data) = self.enums.get(base_name) {

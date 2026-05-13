@@ -1,0 +1,11 @@
+struct MyStruct {
+    field1: i64,
+    field2: i64,
+}
+
+fn main() -> i64 {
+    let s = MyStruct { field1: 10, field2: 20 };
+    let ptr = &s;
+    let val = (*ptr).field2;
+    return val;
+}
