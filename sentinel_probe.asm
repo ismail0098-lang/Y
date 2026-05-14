@@ -7,7 +7,7 @@
 ; 
 ; This module provides zero-overhead hardware probing. It uses CPUID and RDTSC
 ; to gather cache line sizes, AVX-512 support, and memory latency.
-; It is designed to be called directly from the Y-Lang compiler driver.
+; It is designed to be called directly from the Y compiler driver.
 ; ==============================================================================
 
 bits 64
@@ -90,3 +90,4 @@ measure_l1_latency:
 
     pop rbx
     ret
+

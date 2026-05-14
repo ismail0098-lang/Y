@@ -194,7 +194,7 @@ impl CEmitter {
         let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx);
         
         if expr.tag == Expr_TAG_IntLit {
-            // Self-hosted Y-Lang doesn't have format! or int->str yet.
+            // Self-hosted Y doesn't have format! or int->str yet.
             // In the bootstrap, we assume 0 or we'll rely on C's string lit
             String::push_str(&mut (*e).c_buffer, &String::new("0"));
         } else if expr.tag == Expr_TAG_StringLit {
@@ -257,3 +257,4 @@ impl CEmitter {
         }
     }
 }
+

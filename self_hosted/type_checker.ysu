@@ -1,5 +1,5 @@
 // ============================================================
-//  Y-Lang — Compile-Time Bounds & Invariant Verifier
+//  Y — Compile-Time Bounds & Invariant Verifier
 //  type_checker.ysu
 //
 //  Implements two zero-cost proof passes:
@@ -1134,3 +1134,4 @@ impl BoundsChecker {
         }
     }
 }
+

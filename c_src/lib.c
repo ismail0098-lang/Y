@@ -188,6 +188,7 @@ void print(const YStr* s) { yprint_str(s); }
 void println(const YStr* s) { yprintln_str(s); }
 void print_int(int64_t v) { yprint_int(v); }
 
-// String, Vec, File methods are now implemented in Y-Lang (compiler.yy) 
+// String, Vec, File methods are now implemented in Y (compiler.yy) 
 // and call the y-prefixed primitives above.
 // No need for duplicate definitions here.
+

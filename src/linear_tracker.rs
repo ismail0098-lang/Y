@@ -1,5 +1,5 @@
 // ============================================================
-//  Y-Lang  —  Linear Type Tracker
+//  Y  —  Linear Type Tracker
 //  linear_tracker.rs
 //
 //  Tracks synchronization obligations in the AST.
@@ -184,3 +184,4 @@ impl LinearTracker {
         !self.errors.is_empty()
     }
 }
+

@@ -11,7 +11,7 @@ The ultimate achievement of this project is the **Y Bootstrap & Self-Hosting Loo
 Yabandons traditional compiler design paradigms in favor of **hardware-sentience** and **formal logic**. 
 
 ### 1. Hardware-Aware "Sentient" Compilation
-Unlike traditional compilers that use static target triples (e.g., `x86_64-pc-windows-msvc`), Y-Lang features a **Sentinel Probe** that dynamically queries the host silicon. The compiler inherently understands:
+Unlike traditional compilers that use static target triples (e.g., `x86_64-pc-windows-msvc`), Y features a **Sentinel Probe** that dynamically queries the host silicon. The compiler inherently understands:
 - L1/L2 Cache Line Sizes
 - GPU Memory Latencies (SMEM vs. VRAM vs. L2)
 - Warp Shuffle execution speeds
@@ -44,15 +44,15 @@ The repository is organized to clearly separate the Rust-based bootstrap infrast
 ### Directory Layout
 *   **`src/`**: The Rust bootstrap compiler source code.
 *   **`c_src/`**: Interoperability code, raw C/C++ host bindings, and CUDA (`.cu`) wrappers.
-*   **`tests/`**: Y-Lang testing suites (`.ysu` files) and unit test modules.
-*   **`self_hosted/`**: The holy grail of the project. Contains the Y-Lang compiler completely rewritten in native Y-Lang.
+*   **`tests/`**: Y testing suites (`.ysu` files) and unit test modules.
+*   **`self_hosted/`**: The holy grail of the project. Contains the Y compiler completely rewritten in native Y.
 *   **`scripts/`**: Automation, build scripts, and Python/PowerShell helper patches.
 *   **`docs/`**: Language specifications and architecture blueprints.
 *   **`build_artifacts/`**: Emitted binaries, LLVM IR outputs, object files, and compiled executables.
 
 ### Core Compiler Pipeline (`src/`)
 
-1. **`lexer.rs` (Lexical Analysis)**: Converts raw Y-Lang source strings into an exhaustive `TokenKind` stream. Understands complex systems tokens like `cp_async`, `ldmatrix`, and advanced attributes (`@atomic`, `@cache_policy`).
+1. **`lexer.rs` (Lexical Analysis)**: Converts raw Y source strings into an exhaustive `TokenKind` stream. Understands complex systems tokens like `cp_async`, `ldmatrix`, and advanced attributes (`@atomic`, `@cache_policy`).
 2. **`parser.rs` (Recursive Descent)**: Parses the token stream into a Data-Oriented AST (`ast.rs`). Uses Arena allocation for blazingly fast memory mapping rather than standard pointer hierarchies.
 3. **`type_checker.rs` (Semantic Brain)**: 
    - Evaluates the "Safety Cage" properties.
@@ -67,10 +67,10 @@ The repository is organized to clearly separate the Rust-based bootstrap infrast
 
 ##  Directives & Advanced Syntax
 
-Y-Lang provides an expressive grammar specifically tailored for hardware layout manipulation:
+Y provides an expressive grammar specifically tailored for hardware layout manipulation:
 
 ### Hardware Requirements
-Rather than passing `-target` flags via command line, Y-Lang relies on source-code-level hardware constraints:
+Rather than passing `-target` flags via command line, Y relies on source-code-level hardware constraints:
 ```ysu
 @require(sm >= 89)          // Require Ada Lovelace or newer
 @require(tensor_cores >= 4) // Require minimal acceleration
@@ -96,13 +96,13 @@ pipe.wait(token); // Safely discharges the obligation
 
 ##  Building & Running
 
-The Y-Lang compiler is currently bootstrapped via Rust. You can compile the compiler itself, and then use it to compile Y-Lang source code (`.ysu`).
+The Y compiler is currently bootstrapped via Rust. You can compile the compiler itself, and then use it to compile Y source code (`.ysu`).
 
 ```bash
 # 1. Build the bootstrap compiler
 cargo build --release
 
-# 2. Run the compiler against a Y-Lang source file
+# 2. Run the compiler against a Y source file
 cargo run -- tests/math.ysu
 ```
 
@@ -112,3 +112,4 @@ During execution, you will see the compiler probe your host hardware, parse the 
 This project is under devolpment.
 ---
 Author: YSU
+

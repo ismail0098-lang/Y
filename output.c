@@ -1074,42 +1074,42 @@ static inline MatchPattern MatchPattern_Literal(size_t _0) {
 }
 
 #define MatchPattern_Wildcard ((MatchPattern){ .tag = MatchPattern_TAG_Wildcard })
-YVec Vec_new(int32_t elem_size);
-void Vec_push(YVec* v, const char* elem);
-void Vec_free(YVec* v);
-size_t Vec_len(const YVec* v);
-char Vec_get_char(const YVec* v, size_t i);
-size_t String_len(const YStr* s);
-YStr String_clone(const YStr* s);
-void String_push(YStr* s, char c);
-void String_push_str(YStr* s, const YStr* other);
-bool String_eq(const YStr* a, const YStr* b);
-bool String_eq_cstr(const YStr* a, const char* b);
-char String_char_at(const YStr* s, size_t i);
-void String_free(YStr* s);
+YVec Vec_new(size_t elem_size);
+void Vec_push(YVec v, const char* elem);
+void Vec_free(YVec v);
+size_t Vec_len(YVec v);
+char Vec_get_char(YVec v, size_t i);
+size_t String_len(YStr s);
+YStr String_clone(YStr s);
+void String_push(YStr s, char c);
+void String_push_str(YStr s, YStr other);
+bool String_eq(YStr a, YStr b);
+bool String_eq_cstr(YStr a, ptr b);
+char String_char_at(YStr s, size_t i);
+void String_free(YStr s);
 YStr File_read_to_string(const YStr* path);
 void File_write(const YStr* path, const YStr* content);
 Token Token_new(TokenKind kind, size_t line, size_t col, const YStr* lexeme);
-Lexer Lexer_new(const YStr* source);
-char Lexer_peek(const Lexer* lx);
-char Lexer_peek2(const Lexer* lx);
+Lexer Lexer_new(YStr source);
+char Lexer_peek(Lexer* lx);
+char Lexer_peek2(Lexer* lx);
 char Lexer_advance(Lexer* lx);
 bool Lexer_matches_next(Lexer* lx, char expected);
-TokenKind Lexer_classify_ident(const YStr* s);
+TokenKind Lexer_classify_ident(YStr s);
 void Lexer_skip_whitespace(Lexer* lx);
 Token Lexer_scan_ident_or_keyword(Lexer* lx, size_t start_col, char first_char);
 Token Lexer_scan_number(Lexer* lx, size_t start_col, char first_char);
 Token Lexer_next_token(Lexer* lx);
 YVec Lexer_tokenize(Lexer* lx);
-Token Vec_get_Token(const YVec* v, size_t i);
-Expr Vec_get_Expr(const YVec* v, size_t i);
-Stmt Vec_get_Stmt(const YVec* v, size_t i);
-FuncDecl Vec_get_FuncDecl(const YVec* v, size_t i);
-ParamDecl Vec_get_ParamDecl(const YVec* v, size_t i);
-StructDecl Vec_get_StructDecl(const YVec* v, size_t i);
-FieldDecl Vec_get_FieldDecl(const YVec* v, size_t i);
-MatchArm Vec_get_MatchArm(const YVec* v, size_t i);
-size_t Vec_get_usize(const YVec* v, size_t i);
+Token Vec_get_Token(YVec v, size_t i);
+Expr Vec_get_Expr(YVec v, size_t i);
+Stmt Vec_get_Stmt(YVec v, size_t i);
+FuncDecl Vec_get_FuncDecl(YVec v, size_t i);
+ParamDecl Vec_get_ParamDecl(YVec v, size_t i);
+StructDecl Vec_get_StructDecl(YVec v, size_t i);
+FieldDecl Vec_get_FieldDecl(YVec v, size_t i);
+MatchArm Vec_get_MatchArm(YVec v, size_t i);
+size_t Vec_get_usize(YVec v, size_t i);
 AstArena AstArena_new(void);
 Parser Parser_new(YVec tokens, size_t count);
 Token Parser_peek(const Parser* p);
@@ -1136,59 +1136,59 @@ void LlvmEmitter_emit_func(LlvmEmitter* e, const AstArena* arena, size_t func_id
 void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_idx);
 YStr LlvmEmitter_emit_lvalue(LlvmEmitter* e, const AstArena* arena, size_t expr_idx);
 YStr LlvmEmitter_emit_expr(LlvmEmitter* e, const AstArena* arena, size_t expr_idx);
-void main(void);
+int32_t main(void);
 
 /* impl Vec */
-YVec Vec_new(int32_t elem_size) {
+YVec Vec_new(size_t elem_size) {
     return yvec_new(elem_size);
 }
 
-void Vec_push(YVec* v, const char* elem) {
+void Vec_push(YVec v, const char* elem) {
     yvec_push(v, elem);
 }
 
-void Vec_free(YVec* v) {
+void Vec_free(YVec v) {
     yvec_free(v);
 }
 
-size_t Vec_len(const YVec* v) {
+size_t Vec_len(YVec v) {
     return yvec_len(v);
 }
 
-char Vec_get_char(const YVec* v, size_t i) {
+char Vec_get_char(YVec v, size_t i) {
     return yvec_get_char(v, i);
 }
 
 /* impl String */
-size_t String_len(const YStr* s) {
+size_t String_len(YStr s) {
     return ystr_len(s);
 }
 
-YStr String_clone(const YStr* s) {
+YStr String_clone(YStr s) {
     return ystr_clone(s);
 }
 
-void String_push(YStr* s, char c) {
+void String_push(YStr s, char c) {
     ystr_push(s, c);
 }
 
-void String_push_str(YStr* s, const YStr* other) {
+void String_push_str(YStr s, YStr other) {
     ystr_push_str(s, other);
 }
 
-bool String_eq(const YStr* a, const YStr* b) {
+bool String_eq(YStr a, YStr b) {
     return ystr_eq(a, b);
 }
 
-bool String_eq_cstr(const YStr* a, const char* b) {
+bool String_eq_cstr(YStr a, ptr b) {
     return ystr_eq_cstr(a, b);
 }
 
-char String_char_at(const YStr* s, size_t i) {
+char String_char_at(YStr s, size_t i) {
     return ystr_char_at(s, i);
 }
 
-void String_free(YStr* s) {
+void String_free(YStr s) {
     ystr_free(s);
 }
 
@@ -1212,14 +1212,14 @@ Token Token_new(TokenKind kind, size_t line, size_t col, const YStr* lexeme) {
 }
 
 /* impl Lexer */
-Lexer Lexer_new(const YStr* source) {
+Lexer Lexer_new(YStr source) {
     Lexer lx;
     YVec input_vec = yvec_new(1);
     size_t len = ystr_len(source);
     size_t i = 0;
     while ((i < len)) {
         char ch = ystr_char_at(source, i);
-        { __typeof__(ch) __push_tmp = ch; yvec_push((&input_vec), &__push_tmp); };
+        { __typeof__((&ch)) __push_tmp = (&ch); yvec_push(input_vec, &__push_tmp); };
         i += 1;
     }
     lx.input = input_vec;
@@ -1229,20 +1229,21 @@ Lexer Lexer_new(const YStr* source) {
     return lx;
 }
 
-char Lexer_peek(const Lexer* lx) {
-    size_t max_len = yvec_len((&(*lx).input));
+char Lexer_peek(Lexer* lx) {
+    size_t max_len = yvec_len((*lx).input);
     if (((*lx).pos >= max_len)) {
         return '\0';
     }
-    return yvec_get_char((&(*lx).input), (*lx).pos);
+    char ch = yvec_get_char((*lx).input, (*lx).pos);
+    return ch;
 }
 
-char Lexer_peek2(const Lexer* lx) {
-    size_t max_len = yvec_len((&(*lx).input));
+char Lexer_peek2(Lexer* lx) {
+    size_t max_len = yvec_len((*lx).input);
     if ((((*lx).pos + 1) >= max_len)) {
         return '\0';
     }
-    return yvec_get_char((&(*lx).input), ((*lx).pos + 1));
+    return yvec_get_char((*lx).input, ((*lx).pos + 1));
 }
 
 char Lexer_advance(Lexer* lx) {
@@ -1270,62 +1271,62 @@ bool Lexer_matches_next(Lexer* lx, char expected) {
 }
 
 /* impl Lexer */
-TokenKind Lexer_classify_ident(const YStr* s) {
-    if (ystr_eq_cstr(s, "enum")) {
+TokenKind Lexer_classify_ident(YStr s) {
+    if (String_eq(s, ystr_new("enum"))) {
         return TokenKind_Enum;
     }
-    if (ystr_eq_cstr(s, "struct")) {
+    if (String_eq(s, ystr_new("struct"))) {
         return TokenKind_Struct;
     }
-    if (ystr_eq_cstr(s, "impl")) {
+    if (String_eq(s, ystr_new("impl"))) {
         return TokenKind_Impl;
     }
-    if (ystr_eq_cstr(s, "fn")) {
+    if (String_eq(s, ystr_new("fn"))) {
         return TokenKind_Fn;
     }
-    if (ystr_eq_cstr(s, "let")) {
+    if (String_eq(s, ystr_new("let"))) {
         return TokenKind_Let;
     }
-    if (ystr_eq_cstr(s, "return")) {
+    if (String_eq(s, ystr_new("return"))) {
         return TokenKind_Return;
     }
-    if (ystr_eq_cstr(s, "if")) {
+    if (String_eq(s, ystr_new("if"))) {
         return TokenKind_If;
     }
-    if (ystr_eq_cstr(s, "else")) {
+    if (String_eq(s, ystr_new("else"))) {
         return TokenKind_Else;
     }
-    if (ystr_eq_cstr(s, "while")) {
+    if (String_eq(s, ystr_new("while"))) {
         return TokenKind_While;
     }
-    if (ystr_eq_cstr(s, "true")) {
+    if (String_eq(s, ystr_new("true"))) {
         return TokenKind_True;
     }
-    if (ystr_eq_cstr(s, "false")) {
+    if (String_eq(s, ystr_new("false"))) {
         return TokenKind_False;
     }
-    if (ystr_eq_cstr(s, "mut")) {
+    if (String_eq(s, ystr_new("mut"))) {
         return TokenKind_Mut;
     }
-    if (ystr_eq_cstr(s, "String")) {
+    if (String_eq(s, ystr_new("String"))) {
         return TokenKind_StringTy;
     }
-    if (ystr_eq_cstr(s, "Vec")) {
+    if (String_eq(s, ystr_new("Vec"))) {
         return TokenKind_VecTy;
     }
-    if (ystr_eq_cstr(s, "char")) {
+    if (String_eq(s, ystr_new("char"))) {
         return TokenKind_CharTy;
     }
-    if (ystr_eq_cstr(s, "usize")) {
+    if (String_eq(s, ystr_new("usize"))) {
         return TokenKind_Ident(ystr_clone(s));
     }
-    if (ystr_eq_cstr(s, "I32")) {
+    if (String_eq(s, ystr_new("I32"))) {
         return TokenKind_I32;
     }
-    if (ystr_eq_cstr(s, "I64")) {
+    if (String_eq(s, ystr_new("I64"))) {
         return TokenKind_I64;
     }
-    if (ystr_eq_cstr(s, "bool")) {
+    if (String_eq(s, ystr_new("bool"))) {
         return TokenKind_Bool;
     }
     return TokenKind_Ident(ystr_clone(s));
@@ -1343,6 +1344,23 @@ void Lexer_skip_whitespace(Lexer* lx) {
             Lexer_advance(lx);
         } else         if ((ch == '\t')) {
             Lexer_advance(lx);
+        } else         if ((ch == '/')) {
+            if ((Lexer_peek2(lx) == '/')) {
+                bool in_comment = true;
+                while (in_comment) {
+                    char c = Lexer_peek(lx);
+                    if ((c == '\n')) {
+                        in_comment = false;
+                    } else                     if ((c == '\0')) {
+                        in_comment = false;
+                        parsing = false;
+                    } else {
+                        Lexer_advance(lx);
+                    }
+                }
+            } else {
+                parsing = false;
+            }
         } else {
             parsing = false;
         }
@@ -1352,7 +1370,7 @@ void Lexer_skip_whitespace(Lexer* lx) {
 Token Lexer_scan_ident_or_keyword(Lexer* lx, size_t start_col, char first_char) {
     size_t line = (*lx).line;
     YStr s = ystr_new("");
-    ystr_push((&s), first_char);
+    ystr_push(s, first_char);
     bool parsing = true;
     while (parsing) {
         char ch = Lexer_peek(lx);
@@ -1376,13 +1394,13 @@ Token Lexer_scan_ident_or_keyword(Lexer* lx, size_t start_col, char first_char) 
             is_alpha = true;
         }
         if (is_alpha) {
-            ystr_push((&s), ch);
+            ystr_push(s, ch);
             Lexer_advance(lx);
         } else {
             parsing = false;
         }
     }
-    TokenKind kind = Lexer_classify_ident((&s));
+    TokenKind kind = Lexer_classify_ident(s);
     return Token_new(kind, line, start_col, (&s));
 }
 
@@ -1390,7 +1408,7 @@ Token Lexer_scan_ident_or_keyword(Lexer* lx, size_t start_col, char first_char) 
 Token Lexer_scan_number(Lexer* lx, size_t start_col, char first_char) {
     size_t line = (*lx).line;
     YStr s = ystr_new("");
-    ystr_push((&s), first_char);
+    ystr_push(s, first_char);
     bool is_float = false;
     bool parsing = true;
     while (parsing) {
@@ -1402,11 +1420,11 @@ Token Lexer_scan_number(Lexer* lx, size_t start_col, char first_char) {
             }
         }
         if (is_digit) {
-            ystr_push((&s), ch);
+            ystr_push(s, ch);
             Lexer_advance(lx);
         } else         if ((ch == '.')) {
             is_float = true;
-            ystr_push((&s), ch);
+            ystr_push(s, ch);
             Lexer_advance(lx);
         } else {
             parsing = false;
@@ -1512,78 +1530,79 @@ Token Lexer_next_token(Lexer* lx) {
 
 /* impl Lexer */
 YVec Lexer_tokenize(Lexer* lx) {
-    YVec tokens = yvec_new(32);
+    YVec tokens = yvec_new(96);
     bool parsing = true;
     while (parsing) {
         Token tok = Lexer_next_token(lx);
-        size_t len = ystr_len((&tok.lexeme));
+        size_t len = ystr_len(tok.lexeme);
         if ((len == 0)) {
             parsing = false;
         } else {
-            { __typeof__(tok) __push_tmp = tok; yvec_push((&tokens), &__push_tmp); };
+            { __typeof__((&tok)) __push_tmp = (&tok); yvec_push(tokens, &__push_tmp); };
         }
     }
     return tokens;
 }
 
 /* impl Vec */
-Token Vec_get_Token(const YVec* v, size_t i) {
-    Token d;
-    return d;
+Token Vec_get_Token(YVec v, size_t i) {
+    Token res;
+    return res;
 }
 
-Expr Vec_get_Expr(const YVec* v, size_t i) {
-    Expr d;
-    return d;
+Expr Vec_get_Expr(YVec v, size_t i) {
+    Expr res;
+    return res;
 }
 
-Stmt Vec_get_Stmt(const YVec* v, size_t i) {
-    Stmt d;
-    return d;
+Stmt Vec_get_Stmt(YVec v, size_t i) {
+    Stmt res;
+    return res;
 }
 
-FuncDecl Vec_get_FuncDecl(const YVec* v, size_t i) {
-    FuncDecl d;
-    return d;
+FuncDecl Vec_get_FuncDecl(YVec v, size_t i) {
+    FuncDecl res;
+    return res;
 }
 
-ParamDecl Vec_get_ParamDecl(const YVec* v, size_t i) {
-    ParamDecl d;
-    return d;
+ParamDecl Vec_get_ParamDecl(YVec v, size_t i) {
+    ParamDecl res;
+    return res;
 }
 
-StructDecl Vec_get_StructDecl(const YVec* v, size_t i) {
-    StructDecl d;
-    return d;
+StructDecl Vec_get_StructDecl(YVec v, size_t i) {
+    StructDecl res;
+    return res;
 }
 
-FieldDecl Vec_get_FieldDecl(const YVec* v, size_t i) {
-    FieldDecl d;
-    return d;
+FieldDecl Vec_get_FieldDecl(YVec v, size_t i) {
+    FieldDecl res;
+    return res;
 }
 
-MatchArm Vec_get_MatchArm(const YVec* v, size_t i) {
-    MatchArm d;
-    return d;
+MatchArm Vec_get_MatchArm(YVec v, size_t i) {
+    MatchArm res;
+    return res;
 }
 
-size_t Vec_get_usize(const YVec* v, size_t i) {
-    return 0;
+size_t Vec_get_usize(YVec v, size_t i) {
+    size_t res = 0;
+    return res;
 }
 
 /* impl AstArena */
 AstArena AstArena_new(void) {
     AstArena arena;
-    arena.exprs = yvec_new(64);
-    arena.stmts = yvec_new(64);
-    arena.params = yvec_new(32);
-    arena.funcs = yvec_new(32);
-    arena.structs = yvec_new(16);
-    arena.fields = yvec_new(64);
-    arena.match_arms = yvec_new(16);
+    arena.exprs = yvec_new(72);
+    arena.stmts = yvec_new(72);
+    arena.params = yvec_new(16);
+    arena.funcs = yvec_new(64);
+    arena.structs = yvec_new(24);
+    arena.fields = yvec_new(16);
+    arena.match_arms = yvec_new(88);
     arena.arg_indices = yvec_new(8);
-    arena.struct_lit_names = yvec_new(16);
-    arena.struct_lit_exprs = yvec_new(16);
+    arena.struct_lit_names = yvec_new(8);
+    arena.struct_lit_exprs = yvec_new(8);
     return arena;
 }
 
@@ -1598,7 +1617,7 @@ Parser Parser_new(YVec tokens, size_t count) {
 
 Token Parser_peek(const Parser* p) {
     if (((*p).pos < (*p).token_count)) {
-        return (*(Token*)yvec_get((&(*p).tokens), (*p).pos));
+        return (*(Token*)yvec_get((*p).tokens, (*p).pos));
     }
     Token eof;
     eof.kind = TokenKind_Eof;
@@ -1610,7 +1629,7 @@ Token Parser_peek(const Parser* p) {
 
 Token Parser_peek_at(const Parser* p, size_t offset) {
     if ((((*p).pos + offset) < (*p).token_count)) {
-        return (*(Token*)yvec_get((&(*p).tokens), ((*p).pos + offset)));
+        return (*(Token*)yvec_get((*p).tokens, ((*p).pos + offset)));
     }
     Token eof;
     eof.kind = TokenKind_Eof;
@@ -1665,7 +1684,7 @@ YStr Parser_match_ident(Parser* p) {
 
 void Parser_expect_token(Parser* p, const YStr* expected) {
     Token tok = Parser_advance(p);
-    bool matches = ystr_eq((&tok.lexeme), expected);
+    bool matches = ystr_eq(tok.lexeme, expected);
     if (matches) {
         return;
     }
@@ -1697,29 +1716,29 @@ size_t Parser_parse_primary(Parser* p, AstArena* arena) {
         if (is_digit) {
             Parser_advance(p);
             Expr expr = Expr_IntLit(0);
-            { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            size_t idx = yvec_len((&(*arena).exprs));
+            { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+            size_t idx = yvec_len((*arena).exprs);
             return idx;
         }
         if ((ch == '"')) {
             Parser_advance(p);
             Expr expr = Expr_StringLit(ystr_clone((&lex)));
-            { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            size_t idx = yvec_len((&(*arena).exprs));
+            { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+            size_t idx = yvec_len((*arena).exprs);
             return idx;
         }
-        if (ystr_eq_cstr((&lex), "true")) {
+        if (ystr_eq_cstr(lex, "true")) {
             Parser_advance(p);
             Expr expr = Expr_BoolLit(1);
-            { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            size_t idx = yvec_len((&(*arena).exprs));
+            { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+            size_t idx = yvec_len((*arena).exprs);
             return idx;
         }
-        if (ystr_eq_cstr((&lex), "false")) {
+        if (ystr_eq_cstr(lex, "false")) {
             Parser_advance(p);
             Expr expr = Expr_BoolLit(0);
-            { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            size_t idx = yvec_len((&(*arena).exprs));
+            { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+            size_t idx = yvec_len((*arena).exprs);
             return idx;
         }
         bool is_ident = false;
@@ -1739,97 +1758,97 @@ size_t Parser_parse_primary(Parser* p, AstArena* arena) {
         if (is_ident) {
             Parser_advance(p);
             Token next = Parser_peek(p);
-            if (ystr_eq_cstr((&next.lexeme), "::")) {
+            if (ystr_eq_cstr(next.lexeme, "::")) {
                 Parser_advance(p);
                 Token member_tok = Parser_advance(p);
                 YStr member_lex = ystr_clone((&member_tok.lexeme));
                 Expr expr = Expr_Path(ystr_clone((&lex)), member_lex);
-                { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-                size_t idx = yvec_len((&(*arena).exprs));
+                { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+                size_t idx = yvec_len((*arena).exprs);
                 return idx;
             }
             Token check1 = Parser_peek_at(p, 0);
-            if (ystr_eq_cstr((&check1.lexeme), "{")) {
+            if (ystr_eq_cstr(check1.lexeme, "{")) {
                 Token check2 = Parser_peek_at(p, 1);
                 Token check3 = Parser_peek_at(p, 2);
                 bool is_struct = false;
-                if (ystr_eq_cstr((&check2.lexeme), "}")) {
+                if (ystr_eq_cstr(check2.lexeme, "}")) {
                     is_struct = true;
-                } else                 if (ystr_eq_cstr((&check3.lexeme), ":")) {
+                } else                 if (ystr_eq_cstr(check3.lexeme, ":")) {
                     is_struct = true;
                 }
                 if (is_struct) {
                     Parser_advance(p);
-                    size_t field_start = yvec_len((&(*arena).struct_lit_exprs));
+                    size_t field_start = yvec_len((*arena).struct_lit_exprs);
                     size_t field_count = 0;
                     bool parsing_sfields = true;
                     while (parsing_sfields) {
                         Token end_check = Parser_peek(p);
-                        if (ystr_eq_cstr((&end_check.lexeme), "}")) {
+                        if (ystr_eq_cstr(end_check.lexeme, "}")) {
                             parsing_sfields = false;
                         } else {
                             Token sf_tok = Parser_advance(p);
                             YStr sf_name = ystr_clone((&sf_tok.lexeme));
                             Parser_expect_token(p, ({ YStr __tmp = ystr_new(":"); &__tmp; }));
                             size_t sf_expr = Parser_parse_expr(p, arena);
-                            { __typeof__(sf_name) __push_tmp = sf_name; yvec_push((&(*arena).struct_lit_names), &__push_tmp); };
-                            { __typeof__(sf_expr) __push_tmp = sf_expr; yvec_push((&(*arena).struct_lit_exprs), &__push_tmp); };
+                            { __typeof__(sf_name) __push_tmp = sf_name; yvec_push((*arena).struct_lit_names, &__push_tmp); };
+                            { __typeof__(sf_expr) __push_tmp = sf_expr; yvec_push((*arena).struct_lit_exprs, &__push_tmp); };
                             field_count += 1;
                             Token comma_check = Parser_peek(p);
-                            if (ystr_eq_cstr((&comma_check.lexeme), ",")) {
+                            if (ystr_eq_cstr(comma_check.lexeme, ",")) {
                                 Parser_advance(p);
                             }
                         }
                     }
                     Parser_expect_token(p, ({ YStr __tmp = ystr_new("}"); &__tmp; }));
                     Expr expr = Expr_StructLit(ystr_clone((&lex)), field_start, field_count);
-                    { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-                    size_t idx = yvec_len((&(*arena).exprs));
+                    { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+                    size_t idx = yvec_len((*arena).exprs);
                     return idx;
                 }
             }
             Expr expr = Expr_Ident(ystr_clone((&lex)));
-            { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            size_t idx = yvec_len((&(*arena).exprs));
+            { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+            size_t idx = yvec_len((*arena).exprs);
             return idx;
         }
     }
-    if (ystr_eq_cstr((&lex), "(")) {
+    if (ystr_eq_cstr(lex, "(")) {
         Parser_advance(p);
         size_t inner_idx = Parser_parse_expr(p, arena);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new(")"); &__tmp; }));
         return inner_idx;
     }
-    if (ystr_eq_cstr((&lex), "&")) {
+    if (ystr_eq_cstr(lex, "&")) {
         Parser_advance(p);
         size_t operand_idx = Parser_parse_primary(p, arena);
         Expr expr = Expr_UnaryExpr(UnaryOp_Ref, operand_idx);
-        { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).exprs));
+        { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+        size_t idx = yvec_len((*arena).exprs);
         return idx;
     }
-    if (ystr_eq_cstr((&lex), "*")) {
+    if (ystr_eq_cstr(lex, "*")) {
         Parser_advance(p);
         size_t operand_idx = Parser_parse_primary(p, arena);
         Expr expr = Expr_UnaryExpr(UnaryOp_Deref, operand_idx);
-        { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).exprs));
+        { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+        size_t idx = yvec_len((*arena).exprs);
         return idx;
     }
-    if (ystr_eq_cstr((&lex), "-")) {
+    if (ystr_eq_cstr(lex, "-")) {
         Parser_advance(p);
         size_t operand_idx = Parser_parse_primary(p, arena);
         Expr expr = Expr_UnaryExpr(UnaryOp_Neg, operand_idx);
-        { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).exprs));
+        { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+        size_t idx = yvec_len((*arena).exprs);
         return idx;
     }
-    if (ystr_eq_cstr((&lex), "!")) {
+    if (ystr_eq_cstr(lex, "!")) {
         Parser_advance(p);
         size_t operand_idx = Parser_parse_primary(p, arena);
         Expr expr = Expr_UnaryExpr(UnaryOp_Not, operand_idx);
-        { __typeof__(expr) __push_tmp = expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).exprs));
+        { __typeof__(expr) __push_tmp = expr; yvec_push((*arena).exprs, &__push_tmp); };
+        size_t idx = yvec_len((*arena).exprs);
         return idx;
     }
     printf("%s", (ystr_new("[!] Parse error: unexpected token '")).data);
@@ -1838,8 +1857,8 @@ size_t Parser_parse_primary(Parser* p, AstArena* arena) {
     printf("%d\n", (int)tok.line);
     printf("%s\n", (ystr_new("")).data);
     Expr dummy = Expr_IntLit(0);
-    { __typeof__(dummy) __push_tmp = dummy; yvec_push((&(*arena).exprs), &__push_tmp); };
-    size_t idx = yvec_len((&(*arena).exprs));
+    { __typeof__(dummy) __push_tmp = dummy; yvec_push((*arena).exprs, &__push_tmp); };
+    size_t idx = yvec_len((*arena).exprs);
     return idx;
 }
 
@@ -1849,21 +1868,21 @@ size_t Parser_parse_postfix(Parser* p, AstArena* arena, size_t lhs_idx) {
     while (running) {
         Token tok = Parser_peek(p);
         YStr lex = ystr_clone((&tok.lexeme));
-        if (ystr_eq_cstr((&lex), "(")) {
+        if (ystr_eq_cstr(lex, "(")) {
             Parser_advance(p);
-            size_t args_start = yvec_len((&(*arena).arg_indices));
+            size_t args_start = yvec_len((*arena).arg_indices);
             size_t arg_count = 0;
             bool parsing_args = true;
             while (parsing_args) {
                 Token check = Parser_peek(p);
-                if (ystr_eq_cstr((&check.lexeme), ")")) {
+                if (ystr_eq_cstr(check.lexeme, ")")) {
                     parsing_args = false;
                 } else {
                     size_t arg_idx = Parser_parse_expr(p, arena);
-                    { __typeof__(arg_idx) __push_tmp = arg_idx; yvec_push((&(*arena).arg_indices), &__push_tmp); };
+                    { __typeof__(arg_idx) __push_tmp = arg_idx; yvec_push((*arena).arg_indices, &__push_tmp); };
                     arg_count += 1;
                     Token comma_check = Parser_peek(p);
-                    if (ystr_eq_cstr((&comma_check.lexeme), ",")) {
+                    if (ystr_eq_cstr(comma_check.lexeme, ",")) {
                         Parser_advance(p);
                     } else {
                         parsing_args = false;
@@ -1872,22 +1891,22 @@ size_t Parser_parse_postfix(Parser* p, AstArena* arena, size_t lhs_idx) {
             }
             Parser_expect_token(p, ({ YStr __tmp = ystr_new(")"); &__tmp; }));
             Expr call_expr = Expr_Call(current, args_start, arg_count);
-            { __typeof__(call_expr) __push_tmp = call_expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            current = yvec_len((&(*arena).exprs));
-        } else         if (ystr_eq_cstr((&lex), ".")) {
+            { __typeof__(call_expr) __push_tmp = call_expr; yvec_push((*arena).exprs, &__push_tmp); };
+            current = yvec_len((*arena).exprs);
+        } else         if (ystr_eq_cstr(lex, ".")) {
             Parser_advance(p);
             Token member_tok = Parser_advance(p);
             YStr member_name = ystr_clone((&member_tok.lexeme));
             Expr acc_expr = Expr_MemberAccess(current, member_name);
-            { __typeof__(acc_expr) __push_tmp = acc_expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            current = yvec_len((&(*arena).exprs));
-        } else         if (ystr_eq_cstr((&lex), "[")) {
+            { __typeof__(acc_expr) __push_tmp = acc_expr; yvec_push((*arena).exprs, &__push_tmp); };
+            current = yvec_len((*arena).exprs);
+        } else         if (ystr_eq_cstr(lex, "[")) {
             Parser_advance(p);
             size_t index_idx = Parser_parse_expr(p, arena);
             Parser_expect_token(p, ({ YStr __tmp = ystr_new("]"); &__tmp; }));
             Expr idx_expr = Expr_Index(current, index_idx);
-            { __typeof__(idx_expr) __push_tmp = idx_expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            current = yvec_len((&(*arena).exprs));
+            { __typeof__(idx_expr) __push_tmp = idx_expr; yvec_push((*arena).exprs, &__push_tmp); };
+            current = yvec_len((*arena).exprs);
         } else {
             running = false;
         }
@@ -2016,8 +2035,8 @@ size_t Parser_parse_expr_bp(Parser* p, AstArena* arena, size_t min_bp) {
             BinaryOp op = Parser_lex_to_binop((&lex));
             size_t rhs = Parser_parse_expr_bp(p, arena, (prec + 1));
             Expr bin_expr = Expr_BinaryExpr(lhs, op, rhs);
-            { __typeof__(bin_expr) __push_tmp = bin_expr; yvec_push((&(*arena).exprs), &__push_tmp); };
-            lhs = yvec_len((&(*arena).exprs));
+            { __typeof__(bin_expr) __push_tmp = bin_expr; yvec_push((*arena).exprs, &__push_tmp); };
+            lhs = yvec_len((*arena).exprs);
             lhs = Parser_parse_postfix(p, arena, lhs);
         }
     }
@@ -2032,24 +2051,24 @@ size_t Parser_parse_expr(Parser* p, AstArena* arena) {
 size_t Parser_parse_stmt(Parser* p, AstArena* arena) {
     Token tok = Parser_peek(p);
     YStr lex = ystr_clone((&tok.lexeme));
-    if (ystr_eq_cstr((&lex), "let")) {
+    if (ystr_eq_cstr(lex, "let")) {
         Parser_advance(p);
         Token mut_check = Parser_peek(p);
-        if (ystr_eq_cstr((&mut_check.lexeme), "mut")) {
+        if (ystr_eq_cstr(mut_check.lexeme, "mut")) {
             Parser_advance(p);
         }
         Token name_tok = Parser_advance(p);
         YStr var_name = ystr_clone((&name_tok.lexeme));
         size_t type_idx = 0;
         Token colon_check = Parser_peek(p);
-        if (ystr_eq_cstr((&colon_check.lexeme), ":")) {
+        if (ystr_eq_cstr(colon_check.lexeme, ":")) {
             Parser_advance(p);
             bool skipping_type = true;
             while (skipping_type) {
                 Token t = Parser_peek(p);
-                if (ystr_eq_cstr((&t.lexeme), "=")) {
+                if (ystr_eq_cstr(t.lexeme, "=")) {
                     skipping_type = false;
-                } else                 if (ystr_eq_cstr((&t.lexeme), ";")) {
+                } else                 if (ystr_eq_cstr(t.lexeme, ";")) {
                     skipping_type = false;
                 } else {
                     Parser_advance(p);
@@ -2058,40 +2077,40 @@ size_t Parser_parse_stmt(Parser* p, AstArena* arena) {
         }
         size_t init_idx = 0;
         Token eq_check = Parser_peek(p);
-        if (ystr_eq_cstr((&eq_check.lexeme), "=")) {
+        if (ystr_eq_cstr(eq_check.lexeme, "=")) {
             Parser_advance(p);
             init_idx = Parser_parse_expr(p, arena);
         }
         Parser_expect_token(p, ({ YStr __tmp = ystr_new(";"); &__tmp; }));
         Stmt stmt = Stmt_Let(var_name, type_idx, init_idx);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
-    if (ystr_eq_cstr((&lex), "return")) {
+    if (ystr_eq_cstr(lex, "return")) {
         Parser_advance(p);
         size_t ret_idx = 0;
         Token semi_check = Parser_peek(p);
-        if (ystr_eq_cstr((&semi_check.lexeme), ";")) {
+        if (ystr_eq_cstr(semi_check.lexeme, ";")) {
         } else {
             ret_idx = Parser_parse_expr(p, arena);
         }
         Parser_expect_token(p, ({ YStr __tmp = ystr_new(";"); &__tmp; }));
         Stmt stmt = Stmt_Return(ret_idx);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
-    if (ystr_eq_cstr((&lex), "if")) {
+    if (ystr_eq_cstr(lex, "if")) {
         Parser_advance(p);
         size_t cond_idx = Parser_parse_expr(p, arena);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
-        size_t then_start = yvec_len((&(*arena).stmts));
+        size_t then_start = yvec_len((*arena).stmts);
         size_t then_count = 0;
         bool parsing_then = true;
         while (parsing_then) {
             Token check = Parser_peek(p);
-            if (ystr_eq_cstr((&check.lexeme), "}")) {
+            if (ystr_eq_cstr(check.lexeme, "}")) {
                 parsing_then = false;
             } else {
                 Parser_parse_stmt(p, arena);
@@ -2102,14 +2121,14 @@ size_t Parser_parse_stmt(Parser* p, AstArena* arena) {
         size_t else_start = 0;
         size_t else_count = 0;
         Token else_check = Parser_peek(p);
-        if (ystr_eq_cstr((&else_check.lexeme), "else")) {
+        if (ystr_eq_cstr(else_check.lexeme, "else")) {
             Parser_advance(p);
             Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
-            else_start = yvec_len((&(*arena).stmts));
+            else_start = yvec_len((*arena).stmts);
             bool parsing_else = true;
             while (parsing_else) {
                 Token check2 = Parser_peek(p);
-                if (ystr_eq_cstr((&check2.lexeme), "}")) {
+                if (ystr_eq_cstr(check2.lexeme, "}")) {
                     parsing_else = false;
                 } else {
                     Parser_parse_stmt(p, arena);
@@ -2119,20 +2138,20 @@ size_t Parser_parse_stmt(Parser* p, AstArena* arena) {
             Parser_expect_token(p, ({ YStr __tmp = ystr_new("}"); &__tmp; }));
         }
         Stmt stmt = Stmt_If(cond_idx, then_start, then_count, else_start, else_count);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
-    if (ystr_eq_cstr((&lex), "while")) {
+    if (ystr_eq_cstr(lex, "while")) {
         Parser_advance(p);
         size_t cond_idx = Parser_parse_expr(p, arena);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
-        size_t body_start = yvec_len((&(*arena).stmts));
+        size_t body_start = yvec_len((*arena).stmts);
         size_t body_count = 0;
         bool parsing_body = true;
         while (parsing_body) {
             Token check = Parser_peek(p);
-            if (ystr_eq_cstr((&check.lexeme), "}")) {
+            if (ystr_eq_cstr(check.lexeme, "}")) {
                 parsing_body = false;
             } else {
                 Parser_parse_stmt(p, arena);
@@ -2141,11 +2160,11 @@ size_t Parser_parse_stmt(Parser* p, AstArena* arena) {
         }
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("}"); &__tmp; }));
         Stmt stmt = Stmt_While(cond_idx, body_start, body_count);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
-    if (ystr_eq_cstr((&lex), "for")) {
+    if (ystr_eq_cstr(lex, "for")) {
         Parser_advance(p);
         Token var_tok = Parser_advance(p);
         YStr loop_var = ystr_clone((&var_tok.lexeme));
@@ -2155,17 +2174,17 @@ size_t Parser_parse_stmt(Parser* p, AstArena* arena) {
         size_t end_idx = Parser_parse_expr(p, arena);
         size_t step_idx = 0;
         Token step_check = Parser_peek(p);
-        if (ystr_eq_cstr((&step_check.lexeme), "step")) {
+        if (ystr_eq_cstr(step_check.lexeme, "step")) {
             Parser_advance(p);
             step_idx = Parser_parse_expr(p, arena);
         }
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
-        size_t body_start = yvec_len((&(*arena).stmts));
+        size_t body_start = yvec_len((*arena).stmts);
         size_t body_count = 0;
         bool parsing_body = true;
         while (parsing_body) {
             Token check = Parser_peek(p);
-            if (ystr_eq_cstr((&check.lexeme), "}")) {
+            if (ystr_eq_cstr(check.lexeme, "}")) {
                 parsing_body = false;
             } else {
                 Parser_parse_stmt(p, arena);
@@ -2174,30 +2193,30 @@ size_t Parser_parse_stmt(Parser* p, AstArena* arena) {
         }
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("}"); &__tmp; }));
         Stmt stmt = Stmt_For(loop_var, start_idx, end_idx, step_idx, body_start, body_count);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
-    if (ystr_eq_cstr((&lex), "match")) {
+    if (ystr_eq_cstr(lex, "match")) {
         Parser_advance(p);
         size_t scrutinee_idx = Parser_parse_expr(p, arena);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
-        size_t arm_start = yvec_len((&(*arena).match_arms));
+        size_t arm_start = yvec_len((*arena).match_arms);
         size_t arm_count = 0;
         bool parsing_arms = true;
         while (parsing_arms) {
             Token check = Parser_peek(p);
-            if (ystr_eq_cstr((&check.lexeme), "}")) {
+            if (ystr_eq_cstr(check.lexeme, "}")) {
                 parsing_arms = false;
             } else {
                 Token pat_tok = Parser_advance(p);
                 YStr pat_lex = ystr_clone((&pat_tok.lexeme));
                 MatchPattern pattern = MatchPattern_Wildcard;
-                if (ystr_eq_cstr((&pat_lex), "_")) {
+                if (ystr_eq_cstr(pat_lex, "_")) {
                     pattern = MatchPattern_Wildcard;
                 } else {
                     Token next_tok = Parser_peek(p);
-                    if (ystr_eq_cstr((&next_tok.lexeme), "::")) {
+                    if (ystr_eq_cstr(next_tok.lexeme, "::")) {
                         Parser_advance(p);
                         Token variant_tok = Parser_advance(p);
                         YStr variant_lex = ystr_clone((&variant_tok.lexeme));
@@ -2209,56 +2228,56 @@ size_t Parser_parse_stmt(Parser* p, AstArena* arena) {
                 Parser_expect_token(p, ({ YStr __tmp = ystr_new("=>"); &__tmp; }));
                 size_t body_idx = Parser_parse_expr(p, arena);
                 Token comma_check = Parser_peek(p);
-                if (ystr_eq_cstr((&comma_check.lexeme), ",")) {
+                if (ystr_eq_cstr(comma_check.lexeme, ",")) {
                     Parser_advance(p);
                 }
                 MatchArm arm;
                 arm.pattern = pattern;
                 arm.body_start = body_idx;
                 arm.body_count = 1;
-                { __typeof__(arm) __push_tmp = arm; yvec_push((&(*arena).match_arms), &__push_tmp); };
+                { __typeof__(arm) __push_tmp = arm; yvec_push((*arena).match_arms, &__push_tmp); };
                 arm_count += 1;
             }
         }
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("}"); &__tmp; }));
         Stmt stmt = Stmt_Match(scrutinee_idx, arm_start, arm_count);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
     size_t expr_idx = Parser_parse_expr(p, arena);
     Token assign_check = Parser_peek(p);
-    if (ystr_eq_cstr((&assign_check.lexeme), "=")) {
+    if (ystr_eq_cstr(assign_check.lexeme, "=")) {
         Parser_advance(p);
         size_t value_idx = Parser_parse_expr(p, arena);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new(";"); &__tmp; }));
         Stmt stmt = Stmt_Assign(expr_idx, value_idx);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
-    if (ystr_eq_cstr((&assign_check.lexeme), "+=")) {
+    if (ystr_eq_cstr(assign_check.lexeme, "+=")) {
         Parser_advance(p);
         size_t val_idx = Parser_parse_expr(p, arena);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new(";"); &__tmp; }));
         Stmt stmt = Stmt_CompoundAssign(expr_idx, BinaryOp_Add, val_idx);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
-    if (ystr_eq_cstr((&assign_check.lexeme), "-=")) {
+    if (ystr_eq_cstr(assign_check.lexeme, "-=")) {
         Parser_advance(p);
         size_t val_idx = Parser_parse_expr(p, arena);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new(";"); &__tmp; }));
         Stmt stmt = Stmt_CompoundAssign(expr_idx, BinaryOp_Sub, val_idx);
-        { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-        size_t idx = yvec_len((&(*arena).stmts));
+        { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+        size_t idx = yvec_len((*arena).stmts);
         return idx;
     }
     Parser_expect_token(p, ({ YStr __tmp = ystr_new(";"); &__tmp; }));
     Stmt stmt = Stmt_ExprStmt(expr_idx);
-    { __typeof__(stmt) __push_tmp = stmt; yvec_push((&(*arena).stmts), &__push_tmp); };
-    size_t idx = yvec_len((&(*arena).stmts));
+    { __typeof__(stmt) __push_tmp = stmt; yvec_push((*arena).stmts, &__push_tmp); };
+    size_t idx = yvec_len((*arena).stmts);
     return idx;
 }
 
@@ -2269,12 +2288,12 @@ size_t Parser_parse_func_decl(Parser* p, AstArena* arena, int32_t is_safe) {
     size_t line = name_tok.line;
     size_t col = name_tok.col;
     Parser_expect_token(p, ({ YStr __tmp = ystr_new("("); &__tmp; }));
-    size_t param_start = yvec_len((&(*arena).params));
+    size_t param_start = yvec_len((*arena).params);
     size_t param_count = 0;
     bool parsing_params = true;
     while (parsing_params) {
         Token check = Parser_peek(p);
-        if (ystr_eq_cstr((&check.lexeme), ")")) {
+        if (ystr_eq_cstr(check.lexeme, ")")) {
             parsing_params = false;
         } else {
             Token pname_tok = Parser_advance(p);
@@ -2284,35 +2303,35 @@ size_t Parser_parse_func_decl(Parser* p, AstArena* arena, int32_t is_safe) {
             bool skipping = true;
             while (skipping) {
                 Token t = Parser_peek(p);
-                if (ystr_eq_cstr((&t.lexeme), ",")) {
+                if (ystr_eq_cstr(t.lexeme, ",")) {
                     skipping = false;
-                } else                 if (ystr_eq_cstr((&t.lexeme), ")")) {
+                } else                 if (ystr_eq_cstr(t.lexeme, ")")) {
                     skipping = false;
                 } else {
                     YStr tlex = ystr_clone((&t.lexeme));
-                    ystr_push((&type_str), ' ');
+                    ystr_push(type_str, ' ');
                     Parser_advance(p);
                 }
             }
             ParamDecl param;
             param.name = pname;
             param.type_str = type_str;
-            { __typeof__(param) __push_tmp = param; yvec_push((&(*arena).params), &__push_tmp); };
+            { __typeof__(param) __push_tmp = param; yvec_push((*arena).params, &__push_tmp); };
             param_count += 1;
             Token comma_check = Parser_peek(p);
-            if (ystr_eq_cstr((&comma_check.lexeme), ",")) {
+            if (ystr_eq_cstr(comma_check.lexeme, ",")) {
                 Parser_advance(p);
             }
         }
     }
     Parser_expect_token(p, ({ YStr __tmp = ystr_new(")"); &__tmp; }));
     Token arrow_check = Parser_peek(p);
-    if (ystr_eq_cstr((&arrow_check.lexeme), "->")) {
+    if (ystr_eq_cstr(arrow_check.lexeme, "->")) {
         Parser_advance(p);
         bool skip_ret = true;
         while (skip_ret) {
             Token t = Parser_peek(p);
-            if (ystr_eq_cstr((&t.lexeme), "{")) {
+            if (ystr_eq_cstr(t.lexeme, "{")) {
                 skip_ret = false;
             } else {
                 Parser_advance(p);
@@ -2320,12 +2339,12 @@ size_t Parser_parse_func_decl(Parser* p, AstArena* arena, int32_t is_safe) {
         }
     }
     Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
-    size_t body_start = yvec_len((&(*arena).stmts));
+    size_t body_start = yvec_len((*arena).stmts);
     size_t body_count = 0;
     bool parsing_body = true;
     while (parsing_body) {
         Token check = Parser_peek(p);
-        if (ystr_eq_cstr((&check.lexeme), "}")) {
+        if (ystr_eq_cstr(check.lexeme, "}")) {
             parsing_body = false;
         } else {
             Parser_parse_stmt(p, arena);
@@ -2342,8 +2361,8 @@ size_t Parser_parse_func_decl(Parser* p, AstArena* arena, int32_t is_safe) {
     fdecl.body_count = body_count;
     fdecl.line = line;
     fdecl.col = col;
-    { __typeof__(fdecl) __push_tmp = fdecl; yvec_push((&(*arena).funcs), &__push_tmp); };
-    size_t idx = yvec_len((&(*arena).funcs));
+    { __typeof__(fdecl) __push_tmp = fdecl; yvec_push((*arena).funcs, &__push_tmp); };
+    size_t idx = yvec_len((*arena).funcs);
     return idx;
 }
 
@@ -2351,34 +2370,34 @@ size_t Parser_parse_func_decl(Parser* p, AstArena* arena, int32_t is_safe) {
 bool Parser_parse_item(Parser* p, AstArena* arena) {
     Token tok = Parser_peek(p);
     YStr lex = ystr_clone((&tok.lexeme));
-    if (ystr_eq_cstr((&lex), "fn")) {
+    if (ystr_eq_cstr(lex, "fn")) {
         Parser_advance(p);
         Parser_parse_func_decl(p, arena, 1);
         return true;
     }
-    if (ystr_eq_cstr((&lex), "@safe")) {
+    if (ystr_eq_cstr(lex, "@safe")) {
         Parser_advance(p);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("fn"); &__tmp; }));
         Parser_parse_func_decl(p, arena, 1);
         return true;
     }
-    if (ystr_eq_cstr((&lex), "@unsafe")) {
+    if (ystr_eq_cstr(lex, "@unsafe")) {
         Parser_advance(p);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("fn"); &__tmp; }));
         Parser_parse_func_decl(p, arena, 0);
         return true;
     }
-    if (ystr_eq_cstr((&lex), "struct")) {
+    if (ystr_eq_cstr(lex, "struct")) {
         Parser_advance(p);
         Token name_tok = Parser_advance(p);
         YStr s_name = ystr_clone((&name_tok.lexeme));
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
-        size_t field_start = yvec_len((&(*arena).fields));
+        size_t field_start = yvec_len((*arena).fields);
         size_t field_count = 0;
         bool parsing_fields = true;
         while (parsing_fields) {
             Token check = Parser_peek(p);
-            if (ystr_eq_cstr((&check.lexeme), "}")) {
+            if (ystr_eq_cstr(check.lexeme, "}")) {
                 parsing_fields = false;
             } else {
                 Token fname_tok = Parser_advance(p);
@@ -2388,9 +2407,9 @@ bool Parser_parse_item(Parser* p, AstArena* arena) {
                 bool skipping = true;
                 while (skipping) {
                     Token t = Parser_peek(p);
-                    if (ystr_eq_cstr((&t.lexeme), ",")) {
+                    if (ystr_eq_cstr(t.lexeme, ",")) {
                         skipping = false;
-                    } else                     if (ystr_eq_cstr((&t.lexeme), "}")) {
+                    } else                     if (ystr_eq_cstr(t.lexeme, "}")) {
                         skipping = false;
                     } else {
                         Parser_advance(p);
@@ -2399,10 +2418,10 @@ bool Parser_parse_item(Parser* p, AstArena* arena) {
                 FieldDecl field;
                 field.name = fname;
                 field.type_str = type_str;
-                { __typeof__(field) __push_tmp = field; yvec_push((&(*arena).fields), &__push_tmp); };
+                { __typeof__(field) __push_tmp = field; yvec_push((*arena).fields, &__push_tmp); };
                 field_count += 1;
                 Token comma_check = Parser_peek(p);
-                if (ystr_eq_cstr((&comma_check.lexeme), ",")) {
+                if (ystr_eq_cstr(comma_check.lexeme, ",")) {
                     Parser_advance(p);
                 }
             }
@@ -2412,44 +2431,44 @@ bool Parser_parse_item(Parser* p, AstArena* arena) {
         sdecl.name = s_name;
         sdecl.field_start = field_start;
         sdecl.field_count = field_count;
-        { __typeof__(sdecl) __push_tmp = sdecl; yvec_push((&(*arena).structs), &__push_tmp); };
+        { __typeof__(sdecl) __push_tmp = sdecl; yvec_push((*arena).structs, &__push_tmp); };
         return true;
     }
-    if (ystr_eq_cstr((&lex), "enum")) {
+    if (ystr_eq_cstr(lex, "enum")) {
         Parser_advance(p);
         Token _name = Parser_advance(p);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
         size_t depth = 1;
         while ((depth > 0)) {
             Token t = Parser_advance(p);
-            if (ystr_eq_cstr((&t.lexeme), "{")) {
+            if (ystr_eq_cstr(t.lexeme, "{")) {
                 depth += 1;
             }
-            if (ystr_eq_cstr((&t.lexeme), "}")) {
+            if (ystr_eq_cstr(t.lexeme, "}")) {
                 depth -= 1;
             }
         }
         return true;
     }
-    if (ystr_eq_cstr((&lex), "impl")) {
+    if (ystr_eq_cstr(lex, "impl")) {
         Parser_advance(p);
         Token _type_name = Parser_advance(p);
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("{"); &__tmp; }));
         bool parsing_impl = true;
         while (parsing_impl) {
             Token check = Parser_peek(p);
-            if (ystr_eq_cstr((&check.lexeme), "}")) {
+            if (ystr_eq_cstr(check.lexeme, "}")) {
                 parsing_impl = false;
             } else {
                 int32_t method_safe = 1;
-                if (ystr_eq_cstr((&check.lexeme), "@unsafe")) {
+                if (ystr_eq_cstr(check.lexeme, "@unsafe")) {
                     Parser_advance(p);
                     method_safe = 0;
-                } else                 if (ystr_eq_cstr((&check.lexeme), "@safe")) {
+                } else                 if (ystr_eq_cstr(check.lexeme, "@safe")) {
                     Parser_advance(p);
                 }
                 Token pub_check = Parser_peek(p);
-                if (ystr_eq_cstr((&pub_check.lexeme), "pub")) {
+                if (ystr_eq_cstr(pub_check.lexeme, "pub")) {
                     Parser_advance(p);
                 }
                 Parser_expect_token(p, ({ YStr __tmp = ystr_new("fn"); &__tmp; }));
@@ -2459,18 +2478,18 @@ bool Parser_parse_item(Parser* p, AstArena* arena) {
         Parser_expect_token(p, ({ YStr __tmp = ystr_new("}"); &__tmp; }));
         return true;
     }
-    if (ystr_eq_cstr((&lex), "import")) {
+    if (ystr_eq_cstr(lex, "import")) {
         Parser_advance(p);
         bool skip_import = true;
         while (skip_import) {
             Token t = Parser_advance(p);
-            if (ystr_eq_cstr((&t.lexeme), ";")) {
+            if (ystr_eq_cstr(t.lexeme, ";")) {
                 skip_import = false;
             }
         }
         return true;
     }
-    if (ystr_eq_cstr((&lex), "")) {
+    if (ystr_eq_cstr(lex, "")) {
         return false;
     }
     printf("%s", (ystr_new("[!] Skipping unknown top-level token: '")).data);
@@ -2496,16 +2515,16 @@ LlvmEmitter LlvmEmitter_new(void) {
     e.buffer = ystr_new("");
     e.tmp_counter = 0;
     e.label_counter = 0;
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("; ================================================
+    String_push_str(e.buffer, ({ YStr __tmp = ystr_new("; ================================================
 "); &__tmp; }));
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new(";  Generated by Y Self-Hosted Compiler (LLVM)
+    String_push_str(e.buffer, ({ YStr __tmp = ystr_new(";  Generated by Y Self-Hosted Compiler (LLVM)
 "); &__tmp; }));
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("; ================================================
+    String_push_str(e.buffer, ({ YStr __tmp = ystr_new("; ================================================
 
 "); &__tmp; }));
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"
+    String_push_str(e.buffer, ({ YStr __tmp = ystr_new("target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"
 "); &__tmp; }));
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("target triple = \"x86_64-pc-windows-msvc\"
+    String_push_str(e.buffer, ({ YStr __tmp = ystr_new("target triple = \"x86_64-pc-windows-msvc\"
 
 "); &__tmp; }));
     return e;
@@ -2520,25 +2539,25 @@ YStr LlvmEmitter_int_to_str(size_t val) {
     while ((temp > 0)) {
         size_t digit = (temp % 10);
         if ((digit == 0)) {
-            ystr_push((&s), '0');
+            ystr_push(s, '0');
         } else         if ((digit == 1)) {
-            ystr_push((&s), '1');
+            ystr_push(s, '1');
         } else         if ((digit == 2)) {
-            ystr_push((&s), '2');
+            ystr_push(s, '2');
         } else         if ((digit == 3)) {
-            ystr_push((&s), '3');
+            ystr_push(s, '3');
         } else         if ((digit == 4)) {
-            ystr_push((&s), '4');
+            ystr_push(s, '4');
         } else         if ((digit == 5)) {
-            ystr_push((&s), '5');
+            ystr_push(s, '5');
         } else         if ((digit == 6)) {
-            ystr_push((&s), '6');
+            ystr_push(s, '6');
         } else         if ((digit == 7)) {
-            ystr_push((&s), '7');
+            ystr_push(s, '7');
         } else         if ((digit == 8)) {
-            ystr_push((&s), '8');
+            ystr_push(s, '8');
         } else         if ((digit == 9)) {
-            ystr_push((&s), '9');
+            ystr_push(s, '9');
         }
         temp = (temp / 10);
     }
@@ -2548,50 +2567,50 @@ YStr LlvmEmitter_int_to_str(size_t val) {
 YStr LlvmEmitter_fresh_tmp(LlvmEmitter* e) {
     (*e).tmp_counter += 1;
     YStr s = ystr_new("%t");
-    String_push_str((&s), ({ YStr __tmp = LlvmEmitter_int_to_str((*e).tmp_counter); &__tmp; }));
+    String_push_str(s, ({ YStr __tmp = LlvmEmitter_int_to_str((*e).tmp_counter); &__tmp; }));
     return s;
 }
 
 YStr LlvmEmitter_fresh_label(LlvmEmitter* e, const YStr* prefix) {
     (*e).label_counter += 1;
     YStr s = ystr_clone(prefix);
-    String_push_str((&s), ({ YStr __tmp = ystr_new("."); &__tmp; }));
-    String_push_str((&s), ({ YStr __tmp = LlvmEmitter_int_to_str((*e).label_counter); &__tmp; }));
+    String_push_str(s, ({ YStr __tmp = ystr_new("."); &__tmp; }));
+    String_push_str(s, ({ YStr __tmp = LlvmEmitter_int_to_str((*e).label_counter); &__tmp; }));
     return s;
 }
 
 void LlvmEmitter_emit_func(LlvmEmitter* e, const AstArena* arena, size_t func_idx) {
     FuncDecl fdecl = (*(FuncDecl*)yvec_get((&(*arena).funcs), func_idx));
     (*e).tmp_counter = 0;
-    String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("define i32 @"); &__tmp; }));
-    String_push_str((&(*e).buffer), (&fdecl.name));
-    String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("("); &__tmp; }));
+    String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("define i32 @"); &__tmp; }));
+    String_push_str((*e).buffer, (&fdecl.name));
+    String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("("); &__tmp; }));
     size_t p = 0;
     while ((p < fdecl.param_count)) {
         ParamDecl param = (*(ParamDecl*)yvec_get((&(*arena).params), (fdecl.param_start + p)));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("i32 %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&param.name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(".arg"); &__tmp; }));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("i32 %"); &__tmp; }));
+        String_push_str((*e).buffer, (&param.name));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(".arg"); &__tmp; }));
         if (((p + 1) < fdecl.param_count)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", "); &__tmp; }));
         }
         p += 1;
     }
-    String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(") {
+    String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(") {
 entry:
 "); &__tmp; }));
     size_t ap = 0;
     while ((ap < fdecl.param_count)) {
         ParamDecl param = (*(ParamDecl*)yvec_get((&(*arena).params), (fdecl.param_start + ap)));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&param.name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = alloca i32
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  %"); &__tmp; }));
+        String_push_str((*e).buffer, (&param.name));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(" = alloca i32
 "); &__tmp; }));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  store i32 %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&param.name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(".arg, ptr %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&param.name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  store i32 %"); &__tmp; }));
+        String_push_str((*e).buffer, (&param.name));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(".arg, ptr %"); &__tmp; }));
+        String_push_str((*e).buffer, (&param.name));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
         ap += 1;
     }
@@ -2600,7 +2619,7 @@ entry:
         LlvmEmitter_emit_stmt(e, arena, (fdecl.body_start + s));
         s += 1;
     }
-    String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  ret i32 0
+    String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  ret i32 0
 }
 
 "); &__tmp; }));
@@ -2611,17 +2630,17 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
     if ((stmt.tag == Stmt_TAG_Let)) {
         YStr var_name = stmt.data.Let._0;
         size_t init_idx = stmt.data.Let._2;
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&var_name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = alloca i32
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  %"); &__tmp; }));
+        String_push_str((*e).buffer, (&var_name));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(" = alloca i32
 "); &__tmp; }));
         if ((init_idx > 0)) {
             YStr val = LlvmEmitter_emit_expr(e, arena, (init_idx - 1));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  store i32 "); &__tmp; }));
-            String_push_str((&(*e).buffer), (&val));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", ptr %"); &__tmp; }));
-            String_push_str((&(*e).buffer), (&var_name));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  store i32 "); &__tmp; }));
+            String_push_str((*e).buffer, (&val));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", ptr %"); &__tmp; }));
+            String_push_str((*e).buffer, (&var_name));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
         }
     } else     if ((stmt.tag == Stmt_TAG_Assign)) {
@@ -2629,22 +2648,22 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         size_t value_idx = stmt.data.Assign._1;
         YStr val = LlvmEmitter_emit_expr(e, arena, (value_idx - 1));
         YStr target_addr = LlvmEmitter_emit_lvalue(e, arena, (target_idx - 1));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  store i32 "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&val));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", ptr "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&target_addr));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  store i32 "); &__tmp; }));
+        String_push_str((*e).buffer, (&val));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", ptr "); &__tmp; }));
+        String_push_str((*e).buffer, (&target_addr));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
     } else     if ((stmt.tag == Stmt_TAG_Return)) {
         size_t ret_idx = stmt.data.Return._0;
         if ((ret_idx > 0)) {
             YStr val = LlvmEmitter_emit_expr(e, arena, (ret_idx - 1));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  ret i32 "); &__tmp; }));
-            String_push_str((&(*e).buffer), (&val));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  ret i32 "); &__tmp; }));
+            String_push_str((*e).buffer, (&val));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
         } else {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  ret i32 0
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  ret i32 0
 "); &__tmp; }));
         }
     } else     if ((stmt.tag == Stmt_TAG_If)) {
@@ -2657,46 +2676,46 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         YStr then_lbl = LlvmEmitter_fresh_label(e, ({ YStr __tmp = ystr_new("then"); &__tmp; }));
         YStr else_lbl = LlvmEmitter_fresh_label(e, ({ YStr __tmp = ystr_new("else"); &__tmp; }));
         YStr merge_lbl = LlvmEmitter_fresh_label(e, ({ YStr __tmp = ystr_new("merge"); &__tmp; }));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br i1 "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&cond));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&then_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  br i1 "); &__tmp; }));
+        String_push_str((*e).buffer, (&cond));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
+        String_push_str((*e).buffer, (&then_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
         if ((else_count > 0)) {
-            String_push_str((&(*e).buffer), (&else_lbl));
+            String_push_str((*e).buffer, (&else_lbl));
         } else {
-            String_push_str((&(*e).buffer), (&merge_lbl));
+            String_push_str((*e).buffer, (&merge_lbl));
         }
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&then_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
+        String_push_str((*e).buffer, (&then_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(":
 "); &__tmp; }));
         size_t i = 0;
         while ((i < then_count)) {
             LlvmEmitter_emit_stmt(e, arena, (then_start + i));
             i += 1;
         }
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&merge_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
+        String_push_str((*e).buffer, (&merge_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
         if ((else_count > 0)) {
-            String_push_str((&(*e).buffer), (&else_lbl));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
+            String_push_str((*e).buffer, (&else_lbl));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(":
 "); &__tmp; }));
             size_t j = 0;
             while ((j < else_count)) {
                 LlvmEmitter_emit_stmt(e, arena, (else_start + j));
                 j += 1;
             }
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
-            String_push_str((&(*e).buffer), (&merge_lbl));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
+            String_push_str((*e).buffer, (&merge_lbl));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
         }
-        String_push_str((&(*e).buffer), (&merge_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
+        String_push_str((*e).buffer, (&merge_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(":
 "); &__tmp; }));
     } else     if ((stmt.tag == Stmt_TAG_While)) {
         size_t cond_idx = stmt.data.While._0;
@@ -2705,36 +2724,36 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         YStr cond_lbl = LlvmEmitter_fresh_label(e, ({ YStr __tmp = ystr_new("while.cond"); &__tmp; }));
         YStr body_lbl = LlvmEmitter_fresh_label(e, ({ YStr __tmp = ystr_new("while.body"); &__tmp; }));
         YStr end_lbl = LlvmEmitter_fresh_label(e, ({ YStr __tmp = ystr_new("while.end"); &__tmp; }));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&cond_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
+        String_push_str((*e).buffer, (&cond_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&cond_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
+        String_push_str((*e).buffer, (&cond_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(":
 "); &__tmp; }));
         YStr cond = LlvmEmitter_emit_expr(e, arena, (cond_idx - 1));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br i1 "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&cond));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&body_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&end_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  br i1 "); &__tmp; }));
+        String_push_str((*e).buffer, (&cond));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
+        String_push_str((*e).buffer, (&body_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
+        String_push_str((*e).buffer, (&end_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&body_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
+        String_push_str((*e).buffer, (&body_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(":
 "); &__tmp; }));
         size_t k = 0;
         while ((k < body_count)) {
             LlvmEmitter_emit_stmt(e, arena, (body_start + k));
             k += 1;
         }
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&cond_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
+        String_push_str((*e).buffer, (&cond_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&end_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
+        String_push_str((*e).buffer, (&end_lbl));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(":
 "); &__tmp; }));
     } else     if ((stmt.tag == Stmt_TAG_ExprStmt)) {
         size_t expr_idx = stmt.data.ExprStmt._0;
@@ -2746,7 +2765,7 @@ YStr LlvmEmitter_emit_lvalue(LlvmEmitter* e, const AstArena* arena, size_t expr_
     Expr expr = (*(Expr*)yvec_get((&(*arena).exprs), expr_idx));
     if ((expr.tag == Expr_TAG_Ident)) {
         YStr res = ystr_new("%");
-        String_push_str((&res), (&expr.data.Ident._0));
+        String_push_str(res, (&expr.data.Ident._0));
         return res;
     }
     return LlvmEmitter_emit_expr(e, arena, expr_idx);
@@ -2758,11 +2777,11 @@ YStr LlvmEmitter_emit_expr(LlvmEmitter* e, const AstArena* arena, size_t expr_id
         return LlvmEmitter_int_to_str(expr.data.IntLit._0);
     } else     if ((expr.tag == Expr_TAG_Ident)) {
         YStr tmp = LlvmEmitter_fresh_tmp(e);
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&tmp));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = load i32, ptr %"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&expr.data.Ident._0));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  "); &__tmp; }));
+        String_push_str((*e).buffer, (&tmp));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(" = load i32, ptr %"); &__tmp; }));
+        String_push_str((*e).buffer, (&expr.data.Ident._0));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
         return tmp;
     } else     if ((expr.tag == Expr_TAG_BinaryExpr)) {
@@ -2770,32 +2789,32 @@ YStr LlvmEmitter_emit_expr(LlvmEmitter* e, const AstArena* arena, size_t expr_id
         YStr rhs = LlvmEmitter_emit_expr(e, arena, (expr.data.BinaryExpr._2 - 1));
         BinaryOp op = expr.data.BinaryExpr._1;
         YStr tmp = LlvmEmitter_fresh_tmp(e);
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&tmp));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = "); &__tmp; }));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  "); &__tmp; }));
+        String_push_str((*e).buffer, (&tmp));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(" = "); &__tmp; }));
         if ((op == BinaryOp_Add)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("add i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("add i32 "); &__tmp; }));
         } else         if ((op == BinaryOp_Sub)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("sub i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("sub i32 "); &__tmp; }));
         } else         if ((op == BinaryOp_Mul)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("mul i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("mul i32 "); &__tmp; }));
         } else         if ((op == BinaryOp_Div)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("sdiv i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("sdiv i32 "); &__tmp; }));
         } else         if ((op == BinaryOp_Eq)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("icmp eq i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("icmp eq i32 "); &__tmp; }));
         } else         if ((op == BinaryOp_NotEq)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("icmp ne i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("icmp ne i32 "); &__tmp; }));
         } else         if ((op == BinaryOp_Lt)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("icmp slt i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("icmp slt i32 "); &__tmp; }));
         } else         if ((op == BinaryOp_Gt)) {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("icmp sgt i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("icmp sgt i32 "); &__tmp; }));
         } else {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("add i32 "); &__tmp; }));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("add i32 "); &__tmp; }));
         }
-        String_push_str((&(*e).buffer), (&lhs));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&rhs));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
+        String_push_str((*e).buffer, (&lhs));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", "); &__tmp; }));
+        String_push_str((*e).buffer, (&rhs));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("
 "); &__tmp; }));
         return tmp;
     } else     if ((expr.tag == Expr_TAG_Call)) {
@@ -2806,49 +2825,49 @@ YStr LlvmEmitter_emit_expr(LlvmEmitter* e, const AstArena* arena, size_t expr_id
             func_name = ystr_clone((&func_expr.data.Ident._0));
         }
         YStr tmp = LlvmEmitter_fresh_tmp(e);
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  "); &__tmp; }));
-        String_push_str((&(*e).buffer), (&tmp));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = call i32 @"); &__tmp; }));
-        String_push_str((&(*e).buffer), (&func_name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("("); &__tmp; }));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("  "); &__tmp; }));
+        String_push_str((*e).buffer, (&tmp));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(" = call i32 @"); &__tmp; }));
+        String_push_str((*e).buffer, (&func_name));
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("("); &__tmp; }));
         size_t args_start = expr.data.Call._1;
         size_t arg_count = expr.data.Call._2;
         size_t i = 0;
         while ((i < arg_count)) {
             size_t arg_idx = (*(size_t*)yvec_get((&(*arena).arg_indices), (args_start + i)));
             YStr arg_val = LlvmEmitter_emit_expr(e, arena, (arg_idx - 1));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("i32 "); &__tmp; }));
-            String_push_str((&(*e).buffer), (&arg_val));
+            String_push_str((*e).buffer, ({ YStr __tmp = ystr_new("i32 "); &__tmp; }));
+            String_push_str((*e).buffer, (&arg_val));
             if (((i + 1) < arg_count)) {
-                String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", "); &__tmp; }));
+                String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(", "); &__tmp; }));
             }
             i += 1;
         }
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(")
+        String_push_str((*e).buffer, ({ YStr __tmp = ystr_new(")
 "); &__tmp; }));
         return tmp;
     }
     return ystr_new("0");
 }
 
-void main(void) {
+int32_t main(void) {
     printf("%s\n", (ystr_new("--- Y Self-Hosted Compiler ---")).data);
-    YStr source_file = ystr_new("test_program.yy");
+    YStr source_file = ystr_new("compiler.ysu");
     printf("%s", (ystr_new("[*] Reading source file: ")).data);
-    printf("%s\n", (source_file).data);
-    YStr source = File_read_to_string((&source_file));
+    printf("%s\n", (source_file)->data);
+    YStr source = File_read_to_string(source_file);
     printf("%s\n", (ystr_new("[1/3] Lexing...")).data);
-    Lexer lexer = Lexer_new((&source));
+    Lexer lexer = Lexer_new(source);
     YVec tokens = Lexer_tokenize((&lexer));
-    size_t token_count = yvec_len((&tokens));
+    size_t token_count = yvec_len(tokens);
     printf("%s", (ystr_new("      -> Extracted ")).data);
     printf("%d\n", (int)token_count);
     printf("%s\n", (ystr_new(" tokens.")).data);
     printf("%s\n", (ystr_new("[2/3] Parsing...")).data);
     AstArena arena = AstArena_new();
     Parser parser = Parser_new(tokens, token_count);
-    Parser_parse_program((&parser), (&arena));
-    size_t func_count = yvec_len((&arena.funcs));
+    Parser_parse_program(parser, (&arena));
+    size_t func_count = yvec_len(arena.funcs);
     printf("%s", (ystr_new("      -> Parsed ")).data);
     printf("%d\n", (int)func_count);
     printf("%s\n", (ystr_new(" functions.")).data);
@@ -2860,10 +2879,10 @@ void main(void) {
         i += 1;
     }
     YStr out_path = ystr_new("output.ll");
-    yfile_write((&out_path), (&emitter.buffer));
+    yfile_write(out_path, (&emitter.buffer));
     printf("%s\n", (ystr_new("      -> Written to output.ll")).data);
     printf("%s\n", (ystr_new("--- Self-Compilation Complete ---")).data);
-    return;
+    return 0;
 }
 
 

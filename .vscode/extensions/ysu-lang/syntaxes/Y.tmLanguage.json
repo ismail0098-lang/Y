@@ -270,7 +270,15 @@
         },
         {
           "name": "keyword.operator.comparison.Y",
-          "match": "==|!=|<=|>=|<|>"
+          "match": "==|!=|<=|>="
+        },
+        {
+          "name": "punctuation.section.angle.begin.Y",
+          "match": "<"
+        },
+        {
+          "name": "punctuation.section.angle.end.Y",
+          "match": ">"
         },
         {
           "name": "keyword.operator.logical.Y",

@@ -1,9 +1,9 @@
 // ============================================================
-//  Y-Lang  —  CPU Code Emitter (Host execution)
+//  Y  —  CPU Code Emitter (Host execution)
 //  cpu_emitter.rs
 //
-//  Translates Y-Lang kernel logic natively into AVX-512 and
-//  Host CPU code, allowing Y-Lang to bootstrap itself and
+//  Translates Y kernel logic natively into AVX-512 and
+//  Host CPU code, allowing Y to bootstrap itself and
 //  run mathematically-verified code on any PC unconditionally.
 // ============================================================
 
@@ -213,7 +213,7 @@ impl CpuEmitter {
 
         let param_count = kernel.params.len();
         for (i, param) in kernel.params.iter().enumerate() {
-            // Lower Y-Lang types to Rust/C pointer types
+            // Lower Y types to Rust/C pointer types
             let host_type = self.emit_type(&param.ty);
 
             write!(&mut self.host_buffer, "{}: {}", param.name, host_type).unwrap();
@@ -383,3 +383,4 @@ impl CpuEmitter {
         }
     }
 }
+

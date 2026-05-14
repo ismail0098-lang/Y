@@ -1,5 +1,5 @@
 // ============================================================
-//  Y-Lang  —  Compiler CLI Driver
+//  Y  —  Compiler CLI Driver
 //  main.rs
 //
 //  The main entry point for the compiler. Consumes a .ysu
@@ -35,7 +35,7 @@ use type_checker::TypeChecker;
 
 fn main() {
     println!("========================================");
-    println!("=== Y-Lang Compiler v0.1 (Prototype) ===");
+    println!("=== Y Compiler v0.1 (Prototype) ===");
     println!("========================================\n");
 
     // Phase 0: Sentinel Hardware Probe
@@ -60,7 +60,7 @@ fn main() {
         }
     } else {
         println!("[*] No input file provided. Running internal test harness.");
-        // A hardcoded mock Y-Lang source based on the specification document
+        // A hardcoded mock Y source based on the specification document
         r#"
         @require(avx512 >= 1)
 
@@ -353,3 +353,4 @@ fn main() {
         println!("==================================");
     }
 }
+

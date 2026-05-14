@@ -1,4 +1,4 @@
-use y_lang_compiler::lexer::*;
+use y::lexer::*;
 
 fn main() {
     let mut lexer = Lexer::new("\"unterminated");

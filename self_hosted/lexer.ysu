@@ -1,5 +1,5 @@
 // ============================================================
-//  Y-Lang  —  Lexer (Front-End Tokenizer) mapped to Y-Lang
+//  Y  —  Lexer (Front-End Tokenizer) mapped to Y
 //  lexer.ysu
 // ============================================================
 
@@ -162,7 +162,7 @@ impl Lexer {
         return lx;
     }
 
-    // Since Y-Lang doesn't have Option types perfectly mapped natively yet,
+    // Since Y doesn't have Option types perfectly mapped natively yet,
     // we return a null char '\0' to represent EOF for peek().
     @unsafe
     fn peek(lx: &Lexer) -> char {
@@ -564,7 +564,7 @@ impl Lexer {
 
 @unsafe
 fn main() {
-    println("--- Y-Lang Self-Hosted Lexer Bootstrapping ---");
+    println("--- Y Self-Hosted Lexer Bootstrapping ---");
     let source: String = String::new("fn test() ; let x = 123 }");
     
     let mut lexer: Lexer = Lexer::new(&source);
@@ -585,3 +585,4 @@ fn main() {
     
     return;
 }
+

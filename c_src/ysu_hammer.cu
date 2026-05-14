@@ -5,7 +5,7 @@
 #include <cuda_bf16.h>
 
 // =====================================================================
-//  Y-Lang Sentinel Hammer Kernels (Full Architecture Discovery)
+//  Y Sentinel Hammer Kernels (Full Architecture Discovery)
 //  Run ONCE on installation. Generates the ultimate .ysu_hw_profile
 //
 //  UNIVERSAL SM TIER MAP — every kernel must compile and run on ALL:
@@ -928,7 +928,7 @@ __global__ void hammer_dp4a_latency(unsigned long long *cycles_out, int *out_val
 // ---------------------------------------------------------
 // 19. BIT MANIPULATION FAMILY (POPC, CLZ, PRMT)
 //     Used in BVH traversal, ray-box packing, and
-//     compressed index arithmetic in Y-Lang GPU kernels.
+//     compressed index arithmetic in Y GPU kernels.
 // ---------------------------------------------------------
 
 __global__ void hammer_popc_latency(unsigned long long *cycles_out, int *out_val) {
@@ -1876,3 +1876,4 @@ int main() {
 
   return 0;
 }
+

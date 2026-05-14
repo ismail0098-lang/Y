@@ -1,5 +1,5 @@
 // ============================================================
-//  Y-Lang  —  Self-Hosted Parser (Recursive Descent)
+//  Y  —  Self-Hosted Parser (Recursive Descent)
 //  parser.ysu
 //
 //  Translates a Vec<Token> stream into a flattened AST using
@@ -1402,7 +1402,7 @@ impl Parser {
 
 @unsafe
 fn main() {
-    println("--- Y-Lang Self-Hosted Parser (DOD Arena) ---");
+    println("--- Y Self-Hosted Parser (DOD Arena) ---");
 
     // Create a small test token stream manually
     // In production, this would come from Lexer::tokenize()
@@ -1422,3 +1422,4 @@ fn main() {
     println("--- Parser module compiled successfully ---");
     return;
 }
+

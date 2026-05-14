@@ -8,7 +8,7 @@ fn fibonacci(n: I32) -> I32 {
 
 @unsafe
 fn main() {
-    println("--- Y-Lang Execution Test ---");
+    println("--- Y Execution Test ---");
     println("Calculating Fibonacci of 10...");
     
     let result: I32 = fibonacci(10);
@@ -17,7 +17,8 @@ fn main() {
     print_int(result);
     
     println("");
-    println("Y-Lang to Native LLVM compilation is fully functional!");
+    println("Y to Native LLVM compilation is fully functional!");
     
     return;
 }
+
