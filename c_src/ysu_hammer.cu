@@ -7,6 +7,20 @@
 // =====================================================================
 //  Y-Lang Sentinel Hammer Kernels (Full Architecture Discovery)
 //  Run ONCE on installation. Generates the ultimate .ysu_hw_profile
+//
+//  UNIVERSAL SM TIER MAP — every kernel must compile and run on ALL:
+//    SM60+  (Pascal)  : FMA, IMAD, SMEM, BFE/BFI, MUFU, FP16, LOP3
+//    SM61+  (Pascal+) : + DP4A (INT8 dot product)
+//    SM70+  (Volta+)  : + WMMA tensor cores, __syncwarp
+//    SM80+  (Ampere+) : + BF16, cp.async, __reduce_add_sync
+//    SM89   (Ada)     : + full Ada WMMA shapes
+//    SM90+  (Hopper+) : + TMA, wgmma
+//
+//  Kernels using SM-gated intrinsics have #if __CUDA_ARCH__ guards
+//  inside the body. main() has runtime checks via cudaDeviceProp.
+//  When a kernel can't run, we print KEY=N/A so sentinel.rs uses
+//  its unwrap_or() default — the compiler still works, it just
+//  won't optimize for features the card doesn't have.
 // =====================================================================
 
 // ---------------------------------------------------------
@@ -244,27 +258,28 @@ using namespace nvcuda;
 // ---------------------------------------------------------
 
 __global__ void hammer_hmma_latency(unsigned long long *cycles_out) {
-  // 16x16x16 F16 Tensor Core MMA
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  // SM70+ — 16x16x16 F16 Tensor Core MMA
   wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> a;
   wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> b;
-  wmma::fragment<wmma::accumulator, 16, 16, 16, float> c; // Accumulate in FP32
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> c;
 
   wmma::fill_fragment(a, __float2half(1.0f));
   wmma::fill_fragment(b, __float2half(1.0f));
   wmma::fill_fragment(c, 0.0f);
 
   unsigned long long start = clock64();
-
-// Dependent chain: output accumulator 'c' is fed back into the next mma_sync
 #pragma unroll 100
   for (int i = 0; i < 100; i++) {
     wmma::mma_sync(c, a, b, c);
   }
-
   unsigned long long end = clock64();
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     *cycles_out = (end - start);
   }
+#else
+  if (threadIdx.x == 0 && blockIdx.x == 0) *cycles_out = 0; // SM < 70: no WMMA
+#endif
 }
 
 // ---------------------------------------------------------
@@ -565,6 +580,7 @@ __global__ void hammer_mufu_lg2_latency(unsigned long long *cycles_out,
 
 __global__ void hammer_hfma2_latency(unsigned long long *cycles_out,
                                      half2 *out_val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 600
   half2 a = make_half2(1.01f, 1.01f);
   half2 b = make_half2(1.01f, 1.01f);
   half2 c = make_half2(0.01f, 0.01f);
@@ -580,25 +596,31 @@ __global__ void hammer_hfma2_latency(unsigned long long *cycles_out,
     *cycles_out = (end - start);
     *out_val = a;
   }
+#else
+  if (threadIdx.x == 0 && blockIdx.x == 0) { *cycles_out = 0; }
+#endif
 }
 
 __global__ void hammer_bf16x2_latency(unsigned long long *cycles_out,
                                       __nv_bfloat162 *out_val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  // SM80+ — BF16x2 FMA
   __nv_bfloat162 a = __floats2bfloat162_rn(1.01f, 1.01f);
   __nv_bfloat162 b = __floats2bfloat162_rn(1.01f, 1.01f);
   __nv_bfloat162 c = __floats2bfloat162_rn(0.01f, 0.01f);
   unsigned long long start = clock64();
-
 #pragma unroll 1000
   for (int i = 0; i < 1000; i++) {
     a = __hfma2(a, b, c);
   }
-
   unsigned long long end = clock64();
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     *cycles_out = (end - start);
     *out_val = a;
   }
+#else
+  if (threadIdx.x == 0 && blockIdx.x == 0) *cycles_out = 0; // SM < 80: no BF16
+#endif
 }
 
 // ---------------------------------------------------------
@@ -655,20 +677,22 @@ __global__ void hammer_dadd_latency(unsigned long long *cycles_out,
 
 __global__ void hammer_redux_sum(unsigned long long *cycles_out,
                                  int *out_val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  // SM80+ — REDUX.SUM warp-level hardware reduction
   int val = threadIdx.x;
   unsigned long long start = clock64();
-
 #pragma unroll 100
   for (int i = 0; i < 100; i++) {
-    // REDUX.SUM: warp-level reduction, maps to SASS REDUX.SUM
     val = __reduce_add_sync(0xFFFFFFFF, val);
   }
-
   unsigned long long end = clock64();
   if (threadIdx.x == 0 && blockIdx.x == 0) {
     *cycles_out = (end - start);
     *out_val = val;
   }
+#else
+  if (threadIdx.x == 0 && blockIdx.x == 0) { *cycles_out = 0; *out_val = 0; }
+#endif
 }
 
 __global__ void hammer_membar_gpu(unsigned long long *cycles_out) {
@@ -716,6 +740,443 @@ __global__ void hammer_ldc_latency(unsigned long long *cycles_out,
 // HOST ORCHESTRATION
 // ---------------------------------------------------------
 
+// ---------------------------------------------------------
+// 16. SMEM BANK CONFLICT PENALTY FAMILY
+//     Compiler uses this to decide when to pad shared memory.
+//     Bank = word_address % 32. Stride-N causes N-way conflicts.
+//     Ada Volta+: 32-way hits broadcast, no penalty.
+// ---------------------------------------------------------
+
+// No-conflict baseline: thread t reads bank t (stride-1).
+__global__ void hammer_smem_no_conflict(unsigned long long *cycles_out, int *out_val) {
+  __shared__ int smem[32];
+  smem[threadIdx.x % 32] = threadIdx.x;
+  __syncthreads();
+  int val = 0;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    val += smem[threadIdx.x % 32]; // each thread → unique bank
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = val;
+  }
+}
+
+// 2-way conflict: threads 0&16 share bank 0, 1&17 share bank 1, …
+__global__ void hammer_smem_2way_conflict(unsigned long long *cycles_out, int *out_val) {
+  __shared__ int smem[16];
+  smem[threadIdx.x % 16] = threadIdx.x % 16;
+  __syncthreads();
+  int val = 0;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    val += smem[threadIdx.x % 16]; // 2 threads per bank
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = val;
+  }
+}
+
+// 4-way conflict: threads 0,8,16,24 share bank 0, etc.
+__global__ void hammer_smem_4way_conflict(unsigned long long *cycles_out, int *out_val) {
+  __shared__ int smem[8];
+  smem[threadIdx.x % 8] = threadIdx.x % 8;
+  __syncthreads();
+  int val = 0;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    val += smem[threadIdx.x % 8]; // 4 threads per bank
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = val;
+  }
+}
+
+// Broadcast (32-way): all threads read smem[0] → same bank.
+// On Volta+ this is a broadcast with NO penalty — confirms free broadcast.
+__global__ void hammer_smem_broadcast(unsigned long long *cycles_out, int *out_val) {
+  __shared__ int smem[1];
+  smem[0] = 42;
+  __syncthreads();
+  int val = 0;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    val += smem[0]; // all 32 threads → same bank → broadcast
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = val;
+  }
+}
+
+// ---------------------------------------------------------
+// 17. TYPE CONVERSION LATENCIES (F2I, I2F, F2H, H2F)
+//     Compiler needs these to decide mixed-precision cast cost.
+//     Critical for HFMA2 / BF16 path promotion decisions.
+// ---------------------------------------------------------
+
+__global__ void hammer_f2i_latency(unsigned long long *cycles_out, int *out_val) {
+  float a = 1.5f;
+  int b = 0;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    // Dependent chain: float→int, use result to perturb float
+    b = __float2int_rn(a);
+    a = (float)b + 0.5f;
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = b;
+  }
+}
+
+__global__ void hammer_i2f_latency(unsigned long long *cycles_out, float *out_val) {
+  int a = 1;
+  float b = 0.0f;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    b = __int2float_rn(a);
+    a = (int)b + 1;
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = b;
+  }
+}
+
+__global__ void hammer_f2h_latency(unsigned long long *cycles_out, unsigned short *out_val) {
+  float a = 1.01f;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    // F2FP: float32 → float16 via inline PTX
+    unsigned short h;
+    asm volatile("cvt.rn.f16.f32 %0, %1;" : "=h"(h) : "f"(a));
+    // Feed back: half→float to maintain dependency chain
+    asm volatile("cvt.f32.f16 %0, %1;" : "=f"(a) : "h"(h));
+    a += 0.001f;
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    unsigned short h;
+    asm volatile("cvt.rn.f16.f32 %0, %1;" : "=h"(h) : "f"(a));
+    *out_val = h;
+  }
+}
+
+__global__ void hammer_h2f_latency(unsigned long long *cycles_out, float *out_val) {
+  // Start from a known half value
+  unsigned short h = 0x3C00; // 1.0 in float16
+  float a = 0.0f;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    asm volatile("cvt.f32.f16 %0, %1;" : "=f"(a) : "h"(h));
+    // Feed result back as next half
+    asm volatile("cvt.rn.f16.f32 %0, %1;" : "=h"(h) : "f"(a));
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = a;
+  }
+}
+
+// ---------------------------------------------------------
+// 18. DP4A — INT8 DOT PRODUCT (Paper: sm_89 supports DP4A)
+//     Used by Y compiler for quantized INT8 kernel paths.
+//     4×INT8 elements accumulated into INT32. 1 cycle latency.
+// ---------------------------------------------------------
+
+__global__ void hammer_dp4a_latency(unsigned long long *cycles_out, int *out_val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
+  // SM61+ — DP4A: 4×INT8 dot product → INT32
+  int a = 0x01020304;
+  int b = 0x01010101;
+  int acc = 0;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    acc = __dp4a(a, b, acc);
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = acc;
+  }
+#else
+  if (threadIdx.x == 0 && blockIdx.x == 0) { *cycles_out = 0; *out_val = 0; }
+#endif
+}
+
+// ---------------------------------------------------------
+// 19. BIT MANIPULATION FAMILY (POPC, CLZ, PRMT)
+//     Used in BVH traversal, ray-box packing, and
+//     compressed index arithmetic in Y-Lang GPU kernels.
+// ---------------------------------------------------------
+
+__global__ void hammer_popc_latency(unsigned long long *cycles_out, int *out_val) {
+  unsigned int val = 0xDEADBEEF;
+  int count = 0;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    count = __popc(val);
+    val = val ^ (unsigned int)count; // dependent chain
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = count;
+  }
+}
+
+__global__ void hammer_clz_latency(unsigned long long *cycles_out, int *out_val) {
+  unsigned int val = 0x80000000U;
+  int lz = 0;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    lz = __clz(val);
+    val = (val >> 1) | (unsigned int)(lz & 1); // dependent chain
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = lz;
+  }
+}
+
+// PRMT.b32: byte permute — rearranges 4 bytes of two 32-bit words.
+// Used in BVH BBox packing and color format conversion.
+__global__ void hammer_prmt_latency(unsigned long long *cycles_out, unsigned int *out_val) {
+  unsigned int a = 0x03020100;
+  unsigned int b = 0x07060504;
+  unsigned long long start = clock64();
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    // prmt.b32 swaps bytes: selector 0x0123 = identity
+    asm volatile("prmt.b32 %0, %0, %1, 0x3210;" : "+r"(a) : "r"(b));
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = a;
+  }
+}
+
+// ---------------------------------------------------------
+// 20. WARP VOTE PRIMITIVES (__ballot_sync, __any_sync)
+//     Y compiler uses vote latency to decide whether it is
+//     cheaper to emit a vote-based early-exit vs a branch.
+// ---------------------------------------------------------
+
+__global__ void hammer_ballot_latency(unsigned long long *cycles_out, unsigned int *out_val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  unsigned int mask = 0xFFFFFFFF;
+  unsigned int result = 0;
+  int val = (threadIdx.x < 16) ? 1 : 0; // half the warp active
+  unsigned long long start = clock64();
+#pragma unroll 500
+  for (int i = 0; i < 500; i++) {
+    result = __ballot_sync(mask, val);
+    val = (result != 0) ? 1 : 0; // dependent chain
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = result;
+  }
+#else
+  if (threadIdx.x == 0 && blockIdx.x == 0) { *cycles_out = 0; *out_val = 0; }
+#endif
+}
+
+__global__ void hammer_vote_any_latency(unsigned long long *cycles_out, int *out_val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
+  unsigned int mask = 0xFFFFFFFF;
+  int val = (threadIdx.x == 0) ? 1 : 0;
+  unsigned long long start = clock64();
+#pragma unroll 500
+  for (int i = 0; i < 500; i++) {
+    val = __any_sync(mask, val);
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = val;
+  }
+#else
+  if (threadIdx.x == 0 && blockIdx.x == 0) { *cycles_out = 0; *out_val = 0; }
+#endif
+}
+
+// ---------------------------------------------------------
+// 21. READ-ONLY CACHE (__ldg / LD.GLOBAL.NC)
+//     Latency of the texture/read-only cache path vs L1.
+//     If ldg_nc_latency < l1_latency, compiler marks
+//     read-only pointers with __restrict__ + __ldg.
+// ---------------------------------------------------------
+
+__global__ void hammer_ldg_nc_latency(const float *__restrict__ data,
+                                       unsigned long long *cycles_out,
+                                       float *out_val) {
+  float val = 0.0f;
+  int idx = 0;
+  unsigned long long start = clock64();
+#pragma unroll 500
+  for (int i = 0; i < 500; i++) {
+    // __ldg forces LD.GLOBAL.NC (read-only / texture cache path)
+    val = __ldg(&data[idx & 1023]);
+    idx = (int)(val * 1024.0f) & 1023;
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = val;
+  }
+}
+
+// ---------------------------------------------------------
+// 22. GLOBAL ATOMIC LATENCY (atomicAdd F32 and I32)
+//     Compiler uses this to decide: is it cheaper to use
+//     a warp-reduction (shfl+redux) or a direct global atomic?
+//     Crossover: if ATOM > (SHFL_LATENCY * log2(32)), use redux.
+// ---------------------------------------------------------
+
+__global__ void hammer_atomic_add_f32(float *addr, unsigned long long *cycles_out) {
+  float val = 1.0f;
+  unsigned long long start = clock64();
+#pragma unroll 50
+  for (int i = 0; i < 50; i++) {
+    // All threads in warp hit same address → worst-case serialization
+    val = atomicAdd(addr, val);
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+  }
+}
+
+__global__ void hammer_atomic_add_i32(int *addr, unsigned long long *cycles_out) {
+  int val = 1;
+  unsigned long long start = clock64();
+#pragma unroll 50
+  for (int i = 0; i < 50; i++) {
+    val = atomicAdd(addr, val);
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+  }
+}
+
+// ---------------------------------------------------------
+// 23. STRIDED GLOBAL MEMORY ACCESS PATTERNS
+//     Stride 1 = fully coalesced. Stride 32 = one cacheline
+//     per thread = fully uncoalesced. The compiler uses the
+//     crossover point to insert transpositions or padding.
+// ---------------------------------------------------------
+
+__global__ void hammer_stride_global(float *data, unsigned long long *cycles_out,
+                                      float *out_val, int stride) {
+  float val = 0.0f;
+  // Each thread accesses: base + threadIdx.x*stride
+  // This creates a strided access pattern across the warp
+  unsigned long long start = clock64();
+#pragma unroll 200
+  for (int i = 0; i < 200; i++) {
+    val += data[(threadIdx.x * stride + i * 32 * stride) & 0xFFFFF];
+  }
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = val;
+  }
+}
+
+// ---------------------------------------------------------
+// 24. CP.ASYNC GLOBAL→SHARED LATENCY (SM80+)
+//     Async copy bypasses the L1 and writes directly into SMEM.
+//     If cp_async_latency < smem_latency + vram_latency,
+//     the Y compiler will pipeline global loads with async copy.
+// ---------------------------------------------------------
+
+__global__ void hammer_cp_async_latency(float *global_src, unsigned long long *cycles_out,
+                                        float *out_val) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  // SM80+ — Async copy global→shared bypasses L1
+  __shared__ float smem[32];
+  unsigned long long start = clock64();
+  int smem_byte_offset = (int)((uintptr_t)(&smem[threadIdx.x]) & 0xFFFF);
+  asm volatile(
+    "cp.async.ca.shared.global [%0], [%1], 4;"
+    :: "r"(smem_byte_offset), "l"(&global_src[threadIdx.x])
+  );
+  asm volatile("cp.async.commit_group;");
+  asm volatile("cp.async.wait_group 0;");
+  __syncthreads();
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = smem[0];
+  }
+#else
+  if (threadIdx.x == 0 && blockIdx.x == 0) { *cycles_out = 0; *out_val = 0.0f; }
+#endif
+}
+
+// ---------------------------------------------------------
+// 25. DUAL-ISSUE ILP THROUGHPUT (FMA throughput vs latency)
+//     Measures how many independent FMAs can execute per cycle
+//     when there is NO dependency chain (max ILP).
+//     Y compiler uses: if ILP_THROUGHPUT > 1.0, emit unrolled
+//     loops with interleaved independent computations.
+// ---------------------------------------------------------
+
+__global__ void hammer_fma_throughput(unsigned long long *cycles_out, float *out_val) {
+  // 8 independent accumulators — no dependency between them
+  float a0 = 1.0f, a1 = 1.0f, a2 = 1.0f, a3 = 1.0f;
+  float a4 = 1.0f, a5 = 1.0f, a6 = 1.0f, a7 = 1.0f;
+  float b = 1.001f, c = 0.001f;
+  unsigned long long start = clock64();
+
+#pragma unroll 1000
+  for (int i = 0; i < 1000; i++) {
+    // All 8 FMAs are independent — measures peak FMA throughput
+    a0 = fmaf(a0, b, c);
+    a1 = fmaf(a1, b, c);
+    a2 = fmaf(a2, b, c);
+    a3 = fmaf(a3, b, c);
+    a4 = fmaf(a4, b, c);
+    a5 = fmaf(a5, b, c);
+    a6 = fmaf(a6, b, c);
+    a7 = fmaf(a7, b, c);
+  }
+
+  unsigned long long end = clock64();
+  if (threadIdx.x == 0 && blockIdx.x == 0) {
+    *cycles_out = (end - start);
+    *out_val = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7; // Prevent DCE
+  }
+}
+
 void setup_pointer_chase(unsigned int *host_array, size_t elements) {
   // Create a random permutation for pointer chasing to defeat spatial
   // prefetching
@@ -738,8 +1199,13 @@ int main() {
 
   printf("GPU_NAME=%s\n", prop.name);
   printf("SM_VERSION=%d.%d\n", prop.major, prop.minor);
+  printf("SM_VERSION_MAJOR=%d\n", prop.major);
+  printf("SM_VERSION_MINOR=%d\n", prop.minor);
   printf("SM_COUNT=%d\n", prop.multiProcessorCount);
   printf("MAX_SHARED_MEM_PER_BLOCK=%d\n", (int)prop.sharedMemPerBlock);
+
+  // SM tier derived from device properties
+  int sm_ver = prop.major * 10 + prop.minor; // e.g. 89 for Ada, 80 for Ampere
 
   unsigned long long *d_cycles;
   cudaMalloc(&d_cycles, sizeof(unsigned long long));
@@ -870,16 +1336,20 @@ int main() {
              cudaMemcpyDeviceToHost);
   printf("VRAM_LATENCY_CYCLES=%.2f\n", (double)vram_cycles / 1000.0);
 
-  // --- 3. TENSOR CORE LATENCY ---
-  hammer_hmma_latency<<<1, 32>>>(d_cycles);
-  cudaDeviceSynchronize();
-  unsigned long long hmma_cycles;
-  cudaMemcpy(&hmma_cycles, d_cycles, sizeof(unsigned long long),
-             cudaMemcpyDeviceToHost);
-  printf("HMMA_F16_LATENCY_CYCLES=%.2f\n", (double)hmma_cycles / 100.0);
-  // TF32 path on Ada is typically 2x the F16 path, as established in the paper
-  printf("TF32_LATENCY_CYCLES=%.2f\n",
-         ((double)hmma_cycles / 100.0) * 1.58); // Approx 66.66 based on 42.14
+  // --- 3. TENSOR CORE LATENCY (SM70+) ---
+  if (sm_ver >= 70) {
+    hammer_hmma_latency<<<1, 32>>>(d_cycles);
+    cudaDeviceSynchronize();
+    unsigned long long hmma_cycles;
+    cudaMemcpy(&hmma_cycles, d_cycles, sizeof(unsigned long long),
+               cudaMemcpyDeviceToHost);
+    printf("HMMA_F16_LATENCY_CYCLES=%.2f\n", (double)hmma_cycles / 100.0);
+    printf("TF32_LATENCY_CYCLES=%.2f\n",
+           ((double)hmma_cycles / 100.0) * 1.58);
+  } else {
+    printf("HMMA_F16_LATENCY_CYCLES=N/A\n");
+    printf("TF32_LATENCY_CYCLES=N/A\n");
+  }
 
   // --- 4. ZERO DRIFT VALIDATOR ---
   double *d_error;
@@ -1047,25 +1517,35 @@ int main() {
   printf("MUFU_LG2_LATENCY_CYCLES=%.2f\n", (double)lg2_cycles / 1000.0);
 
   // --- 11. REDUCED PRECISION ---
-  half2 *d_h2val;
-  cudaMalloc(&d_h2val, sizeof(half2));
-  hammer_hfma2_latency<<<1, 32>>>(d_cycles, d_h2val);
-  cudaDeviceSynchronize();
-  unsigned long long hfma2_cycles;
-  cudaMemcpy(&hfma2_cycles, d_cycles, sizeof(unsigned long long),
-             cudaMemcpyDeviceToHost);
-  printf("HFMA2_LATENCY_CYCLES=%.2f\n", (double)hfma2_cycles / 1000.0);
-  cudaFree(d_h2val);
+  // HFMA2 requires SM60+
+  if (sm_ver >= 60) {
+    half2 *d_h2val;
+    cudaMalloc(&d_h2val, sizeof(half2));
+    hammer_hfma2_latency<<<1, 32>>>(d_cycles, d_h2val);
+    cudaDeviceSynchronize();
+    unsigned long long hfma2_cycles;
+    cudaMemcpy(&hfma2_cycles, d_cycles, sizeof(unsigned long long),
+               cudaMemcpyDeviceToHost);
+    printf("HFMA2_LATENCY_CYCLES=%.2f\n", (double)hfma2_cycles / 1000.0);
+    cudaFree(d_h2val);
+  } else {
+    printf("HFMA2_LATENCY_CYCLES=N/A\n");
+  }
 
-  __nv_bfloat162 *d_bf2val;
-  cudaMalloc(&d_bf2val, sizeof(__nv_bfloat162));
-  hammer_bf16x2_latency<<<1, 32>>>(d_cycles, d_bf2val);
-  cudaDeviceSynchronize();
-  unsigned long long bf16_cycles;
-  cudaMemcpy(&bf16_cycles, d_cycles, sizeof(unsigned long long),
-             cudaMemcpyDeviceToHost);
-  printf("BF16X2_FMA_LATENCY_CYCLES=%.2f\n", (double)bf16_cycles / 1000.0);
-  cudaFree(d_bf2val);
+  // BF16 requires SM80+ (Ampere)
+  if (sm_ver >= 80) {
+    __nv_bfloat162 *d_bf2val;
+    cudaMalloc(&d_bf2val, sizeof(__nv_bfloat162));
+    hammer_bf16x2_latency<<<1, 32>>>(d_cycles, d_bf2val);
+    cudaDeviceSynchronize();
+    unsigned long long bf16_cycles;
+    cudaMemcpy(&bf16_cycles, d_cycles, sizeof(unsigned long long),
+               cudaMemcpyDeviceToHost);
+    printf("BF16X2_FMA_LATENCY_CYCLES=%.2f\n", (double)bf16_cycles / 1000.0);
+    cudaFree(d_bf2val);
+  } else {
+    printf("BF16X2_FMA_LATENCY_CYCLES=N/A\n");
+  }
 
   // --- 12. LOP3.LUT ---
   unsigned int *d_uval2;
@@ -1089,13 +1569,17 @@ int main() {
   printf("DADD_LATENCY_CYCLES=%.2f\n", (double)dadd_cycles / 100.0);
   cudaFree(d_dval2);
 
-  // --- 14. REDUX.SUM and MEMBAR ---
-  hammer_redux_sum<<<1, 32>>>(d_cycles, d_ival);
-  cudaDeviceSynchronize();
-  unsigned long long redux_cycles;
-  cudaMemcpy(&redux_cycles, d_cycles, sizeof(unsigned long long),
-             cudaMemcpyDeviceToHost);
-  printf("REDUX_SUM_LATENCY_CYCLES=%.2f\n", (double)redux_cycles / 100.0);
+  // --- 14. REDUX.SUM (SM80+) and MEMBAR ---
+  if (sm_ver >= 80) {
+    hammer_redux_sum<<<1, 32>>>(d_cycles, d_ival);
+    cudaDeviceSynchronize();
+    unsigned long long redux_cycles;
+    cudaMemcpy(&redux_cycles, d_cycles, sizeof(unsigned long long),
+               cudaMemcpyDeviceToHost);
+    printf("REDUX_SUM_LATENCY_CYCLES=%.2f\n", (double)redux_cycles / 100.0);
+  } else {
+    printf("REDUX_SUM_LATENCY_CYCLES=N/A\n");
+  }
 
   hammer_membar_gpu<<<1, 32>>>(d_cycles);
   cudaDeviceSynchronize();
@@ -1127,6 +1611,256 @@ int main() {
          prop.maxThreadsPerMultiProcessor / prop.warpSize);
   printf("TOTAL_GLOBAL_MEM_MB=%llu\n",
          (unsigned long long)prop.totalGlobalMem / (1024 * 1024));
+
+  // --- 16. SMEM BANK CONFLICTS ---
+  int *d_ival2;
+  cudaMalloc(&d_ival2, sizeof(int));
+
+  hammer_smem_no_conflict<<<1, 32>>>(d_cycles, d_ival2);
+  cudaDeviceSynchronize();
+  unsigned long long smem_nc_cycles;
+  cudaMemcpy(&smem_nc_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("SMEM_NOCONFLICT_CYCLES=%.2f\n", (double)smem_nc_cycles / 1000.0);
+
+  hammer_smem_2way_conflict<<<1, 32>>>(d_cycles, d_ival2);
+  cudaDeviceSynchronize();
+  unsigned long long smem_2w_cycles;
+  cudaMemcpy(&smem_2w_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("SMEM_2WAY_CONFLICT_CYCLES=%.2f\n", (double)smem_2w_cycles / 1000.0);
+
+  hammer_smem_4way_conflict<<<1, 32>>>(d_cycles, d_ival2);
+  cudaDeviceSynchronize();
+  unsigned long long smem_4w_cycles;
+  cudaMemcpy(&smem_4w_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("SMEM_4WAY_CONFLICT_CYCLES=%.2f\n", (double)smem_4w_cycles / 1000.0);
+
+  hammer_smem_broadcast<<<1, 32>>>(d_cycles, d_ival2);
+  cudaDeviceSynchronize();
+  unsigned long long smem_bc_cycles;
+  cudaMemcpy(&smem_bc_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("SMEM_BROADCAST_CYCLES=%.2f\n", (double)smem_bc_cycles / 1000.0);
+
+  // Derived: penalty = conflict_cost - no_conflict_cost
+  printf("SMEM_2WAY_CONFLICT_PENALTY=%.2f\n",
+         (double)(smem_2w_cycles - smem_nc_cycles) / 1000.0);
+  printf("SMEM_4WAY_CONFLICT_PENALTY=%.2f\n",
+         (double)(smem_4w_cycles - smem_nc_cycles) / 1000.0);
+  // If penalty > threshold, compiler should pad shared arrays by 1 int
+  printf("SMEM_PADDING_NEEDED=%d\n",
+         (smem_2w_cycles > smem_nc_cycles * 12 / 10) ? 1 : 0); // >20% overhead
+  cudaFree(d_ival2);
+
+  // --- 17. TYPE CONVERSION LATENCIES ---
+  int *d_i_conv;
+  float *d_f_conv;
+  unsigned short *d_h_conv;
+  cudaMalloc(&d_i_conv, sizeof(int));
+  cudaMalloc(&d_f_conv, sizeof(float));
+  cudaMalloc(&d_h_conv, sizeof(unsigned short));
+
+  hammer_f2i_latency<<<1, 32>>>(d_cycles, d_i_conv);
+  cudaDeviceSynchronize();
+  unsigned long long f2i_cycles;
+  cudaMemcpy(&f2i_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("F2I_LATENCY_CYCLES=%.2f\n", (double)f2i_cycles / 1000.0);
+
+  hammer_i2f_latency<<<1, 32>>>(d_cycles, d_f_conv);
+  cudaDeviceSynchronize();
+  unsigned long long i2f_cycles;
+  cudaMemcpy(&i2f_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("I2F_LATENCY_CYCLES=%.2f\n", (double)i2f_cycles / 1000.0);
+
+  hammer_f2h_latency<<<1, 32>>>(d_cycles, d_h_conv);
+  cudaDeviceSynchronize();
+  unsigned long long f2h_cycles;
+  cudaMemcpy(&f2h_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("F2H_LATENCY_CYCLES=%.2f\n", (double)f2h_cycles / 1000.0);
+
+  hammer_h2f_latency<<<1, 32>>>(d_cycles, d_f_conv);
+  cudaDeviceSynchronize();
+  unsigned long long h2f_cycles;
+  cudaMemcpy(&h2f_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("H2F_LATENCY_CYCLES=%.2f\n", (double)h2f_cycles / 1000.0);
+
+  cudaFree(d_i_conv);
+  cudaFree(d_f_conv);
+  cudaFree(d_h_conv);
+
+  // --- 18. DP4A INT8 DOT PRODUCT (SM61+) ---
+  if (sm_ver >= 61) {
+    int *d_dp4a_out;
+    cudaMalloc(&d_dp4a_out, sizeof(int));
+    hammer_dp4a_latency<<<1, 32>>>(d_cycles, d_dp4a_out);
+    cudaDeviceSynchronize();
+    unsigned long long dp4a_cycles;
+    cudaMemcpy(&dp4a_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+    printf("DP4A_LATENCY_CYCLES=%.2f\n", (double)dp4a_cycles / 1000.0);
+    cudaFree(d_dp4a_out);
+  } else {
+    printf("DP4A_LATENCY_CYCLES=N/A\n");
+  }
+
+  // --- 19. BIT MANIPULATION ---
+  int   *d_bit_i;
+  unsigned int *d_bit_u;
+  cudaMalloc(&d_bit_i, sizeof(int));
+  cudaMalloc(&d_bit_u, sizeof(unsigned int));
+
+  hammer_popc_latency<<<1, 32>>>(d_cycles, d_bit_i);
+  cudaDeviceSynchronize();
+  unsigned long long popc_cycles;
+  cudaMemcpy(&popc_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("POPC_LATENCY_CYCLES=%.2f\n", (double)popc_cycles / 1000.0);
+
+  hammer_clz_latency<<<1, 32>>>(d_cycles, d_bit_i);
+  cudaDeviceSynchronize();
+  unsigned long long clz_cycles;
+  cudaMemcpy(&clz_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("CLZ_LATENCY_CYCLES=%.2f\n", (double)clz_cycles / 1000.0);
+
+  hammer_prmt_latency<<<1, 32>>>(d_cycles, d_bit_u);
+  cudaDeviceSynchronize();
+  unsigned long long prmt_cycles;
+  cudaMemcpy(&prmt_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("PRMT_LATENCY_CYCLES=%.2f\n", (double)prmt_cycles / 1000.0);
+
+  cudaFree(d_bit_i);
+  cudaFree(d_bit_u);
+
+  // --- 20. WARP VOTE PRIMITIVES (SM70+) ---
+  if (sm_ver >= 70) {
+    unsigned int *d_vote_u;
+    int          *d_vote_i;
+    cudaMalloc(&d_vote_u, sizeof(unsigned int));
+    cudaMalloc(&d_vote_i, sizeof(int));
+
+    hammer_ballot_latency<<<1, 32>>>(d_cycles, d_vote_u);
+    cudaDeviceSynchronize();
+    unsigned long long ballot_cycles;
+    cudaMemcpy(&ballot_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+    printf("BALLOT_SYNC_LATENCY_CYCLES=%.2f\n", (double)ballot_cycles / 500.0);
+
+    hammer_vote_any_latency<<<1, 32>>>(d_cycles, d_vote_i);
+    cudaDeviceSynchronize();
+    unsigned long long vote_any_cycles;
+    cudaMemcpy(&vote_any_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+    printf("VOTE_ANY_LATENCY_CYCLES=%.2f\n", (double)vote_any_cycles / 500.0);
+
+    cudaFree(d_vote_u);
+    cudaFree(d_vote_i);
+  } else {
+    printf("BALLOT_SYNC_LATENCY_CYCLES=N/A\n");
+    printf("VOTE_ANY_LATENCY_CYCLES=N/A\n");
+  }
+
+  // --- 21. READ-ONLY CACHE (__ldg) ---
+  // Reuse d_tex_data-style array (1024 floats, values in [0,1))
+  float *h_nc_data = (float *)malloc(1024 * sizeof(float));
+  for (int i = 0; i < 1024; i++)
+    h_nc_data[i] = (float)(i % 128) / 128.0f;
+  float *d_nc_data;
+  cudaMalloc(&d_nc_data, 1024 * sizeof(float));
+  cudaMemcpy(d_nc_data, h_nc_data, 1024 * sizeof(float), cudaMemcpyHostToDevice);
+
+  float *d_nc_out;
+  cudaMalloc(&d_nc_out, sizeof(float));
+  hammer_ldg_nc_latency<<<1, 32>>>(d_nc_data, d_cycles, d_nc_out);
+  cudaDeviceSynchronize();
+  unsigned long long ldg_nc_cycles;
+  cudaMemcpy(&ldg_nc_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("LDG_NC_LATENCY_CYCLES=%.2f\n", (double)ldg_nc_cycles / 500.0);
+
+  cudaFree(d_nc_data);
+  cudaFree(d_nc_out);
+  free(h_nc_data);
+
+  // --- 22. GLOBAL ATOMICS ---
+  float *d_atom_f;
+  int   *d_atom_i;
+  cudaMalloc(&d_atom_f, sizeof(float));
+  cudaMalloc(&d_atom_i, sizeof(int));
+  float zero_f = 0.0f;
+  int   zero_i = 0;
+  cudaMemcpy(d_atom_f, &zero_f, sizeof(float), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_atom_i, &zero_i, sizeof(int),   cudaMemcpyHostToDevice);
+
+  hammer_atomic_add_f32<<<1, 32>>>(d_atom_f, d_cycles);
+  cudaDeviceSynchronize();
+  unsigned long long atom_f32_cycles;
+  cudaMemcpy(&atom_f32_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("ATOM_ADD_F32_LATENCY_CYCLES=%.2f\n", (double)atom_f32_cycles / 50.0);
+
+  hammer_atomic_add_i32<<<1, 32>>>(d_atom_i, d_cycles);
+  cudaDeviceSynchronize();
+  unsigned long long atom_i32_cycles;
+  cudaMemcpy(&atom_i32_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  printf("ATOM_ADD_I32_LATENCY_CYCLES=%.2f\n", (double)atom_i32_cycles / 50.0);
+
+  cudaFree(d_atom_f);
+  cudaFree(d_atom_i);
+
+  // --- 23. STRIDED GLOBAL MEMORY ---
+  // 4MB float array — enough to exceed L1 for all stride patterns
+  size_t stride_elements = (4 * 1024 * 1024) / sizeof(float);
+  float *h_stride = (float *)malloc(stride_elements * sizeof(float));
+  for (size_t i = 0; i < stride_elements; i++) h_stride[i] = (float)(i % 128) / 128.0f;
+  float *d_stride;
+  cudaMalloc(&d_stride, stride_elements * sizeof(float));
+  cudaMemcpy(d_stride, h_stride, stride_elements * sizeof(float), cudaMemcpyHostToDevice);
+  float *d_stride_out;
+  cudaMalloc(&d_stride_out, sizeof(float));
+
+  int strides[] = {1, 2, 4, 8, 16, 32};
+  const char *stride_labels[] = {
+    "STRIDE1_CYCLES", "STRIDE2_CYCLES", "STRIDE4_CYCLES",
+    "STRIDE8_CYCLES", "STRIDE16_CYCLES", "STRIDE32_CYCLES"
+  };
+  for (int si = 0; si < 6; si++) {
+    hammer_stride_global<<<1, 32>>>(d_stride, d_cycles, d_stride_out, strides[si]);
+    cudaDeviceSynchronize();
+    unsigned long long st_cycles;
+    cudaMemcpy(&st_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+    printf("%s=%.2f\n", stride_labels[si], (double)st_cycles / 200.0);
+  }
+  cudaFree(d_stride);
+  cudaFree(d_stride_out);
+  free(h_stride);
+
+  // --- 24. CP.ASYNC LATENCY (SM80+) ---
+  if (sm_ver >= 80) {
+    float *h_async_src = (float *)malloc(32 * sizeof(float));
+    for (int i = 0; i < 32; i++) h_async_src[i] = (float)i;
+    float *d_async_src;
+    cudaMalloc(&d_async_src, 32 * sizeof(float));
+    cudaMemcpy(d_async_src, h_async_src, 32 * sizeof(float), cudaMemcpyHostToDevice);
+    float *d_async_out;
+    cudaMalloc(&d_async_out, sizeof(float));
+
+    hammer_cp_async_latency<<<1, 32>>>(d_async_src, d_cycles, d_async_out);
+    cudaDeviceSynchronize();
+    unsigned long long cp_async_cycles;
+    cudaMemcpy(&cp_async_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+    printf("CP_ASYNC_LATENCY_CYCLES=%.2f\n", (double)cp_async_cycles / 1.0);
+
+    cudaFree(d_async_src);
+    cudaFree(d_async_out);
+    free(h_async_src);
+  } else {
+    printf("CP_ASYNC_LATENCY_CYCLES=N/A\n");
+  }
+
+  // --- 25. FMA ILP THROUGHPUT ---
+  float *d_tp_out;
+  cudaMalloc(&d_tp_out, sizeof(float));
+  hammer_fma_throughput<<<1, 32>>>(d_cycles, d_tp_out);
+  cudaDeviceSynchronize();
+  unsigned long long fma_tp_cycles;
+  cudaMemcpy(&fma_tp_cycles, d_cycles, sizeof(unsigned long long), cudaMemcpyDeviceToHost);
+  // 8 FMAs × 1000 iters = 8000 ops. Throughput = ops / cycles.
+  double fma_throughput = 8000.0 / (double)fma_tp_cycles;
+  printf("FMA_ILP_THROUGHPUT=%.4f\n", fma_throughput); // FMAs per cycle (>1 = dual-issue)
+  printf("FMA_ILP_CYCLES_PER_OP=%.2f\n", (double)fma_tp_cycles / 8000.0);
+  cudaFree(d_tp_out);
 
   // Cleanup
   cudaFree(d_cycles);

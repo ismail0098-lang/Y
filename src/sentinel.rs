@@ -98,6 +98,55 @@ pub struct HardwareProfile {
     pub drift_free_types: Vec<String>,
     // Cycle cost for switching to a drift-free path
     pub zero_drift_penalty_cycles: u64,
+
+    // §16 SMEM Bank Conflict Family
+    pub smem_noconflict_cycles: f64,
+    pub smem_2way_conflict_cycles: f64,
+    pub smem_4way_conflict_cycles: f64,
+    pub smem_broadcast_cycles: f64,
+    pub smem_2way_conflict_penalty: f64,
+    pub smem_4way_conflict_penalty: f64,
+    pub smem_padding_needed: bool,
+
+    // §17 Type Conversion Latencies
+    pub f2i_latency_cycles: f64,
+    pub i2f_latency_cycles: f64,
+    pub f2h_latency_cycles: f64,
+    pub h2f_latency_cycles: f64,
+
+    // §18 DP4A INT8 Dot Product
+    pub dp4a_latency_cycles: f64,
+
+    // §19 Bit Manipulation
+    pub popc_latency_cycles: f64,
+    pub clz_latency_cycles: f64,
+    pub prmt_latency_cycles: f64,
+
+    // §20 Warp Vote Primitives
+    pub ballot_sync_latency_cycles: f64,
+    pub vote_any_latency_cycles: f64,
+
+    // §21 Read-Only Cache (__ldg)
+    pub ldg_nc_latency_cycles: f64,
+
+    // §22 Global Atomics
+    pub atom_add_f32_latency_cycles: f64,
+    pub atom_add_i32_latency_cycles: f64,
+
+    // §23 Strided Global Access
+    pub stride1_cycles: f64,
+    pub stride2_cycles: f64,
+    pub stride4_cycles: f64,
+    pub stride8_cycles: f64,
+    pub stride16_cycles: f64,
+    pub stride32_cycles: f64,
+
+    // §24 CP.ASYNC Global→Shared
+    pub cp_async_latency_cycles: f64,
+
+    // §25 FMA ILP Throughput
+    pub fma_ilp_throughput: f64,     // FMAs per cycle (>1 = dual-issue capable)
+    pub fma_ilp_cycles_per_op: f64,
 }
 
 fn parse_profile_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
@@ -211,6 +260,35 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             drift_free_types,
             zero_drift_penalty_cycles: parse_u64_field(&contents, "ZERO_DRIFT_PENALTY")
                 .unwrap_or(0),
+            smem_noconflict_cycles: parse_f64_field(&contents, "SMEM_NOCONFLICT_CYCLES").unwrap_or(4.0),
+            smem_2way_conflict_cycles: parse_f64_field(&contents, "SMEM_2WAY_CONFLICT_CYCLES").unwrap_or(8.0),
+            smem_4way_conflict_cycles: parse_f64_field(&contents, "SMEM_4WAY_CONFLICT_CYCLES").unwrap_or(16.0),
+            smem_broadcast_cycles: parse_f64_field(&contents, "SMEM_BROADCAST_CYCLES").unwrap_or(4.0),
+            smem_2way_conflict_penalty: parse_f64_field(&contents, "SMEM_2WAY_CONFLICT_PENALTY").unwrap_or(4.0),
+            smem_4way_conflict_penalty: parse_f64_field(&contents, "SMEM_4WAY_CONFLICT_PENALTY").unwrap_or(12.0),
+            smem_padding_needed: parse_u32_field(&contents, "SMEM_PADDING_NEEDED").unwrap_or(0) != 0,
+            f2i_latency_cycles: parse_f64_field(&contents, "F2I_LATENCY_CYCLES").unwrap_or(4.5),
+            i2f_latency_cycles: parse_f64_field(&contents, "I2F_LATENCY_CYCLES").unwrap_or(4.5),
+            f2h_latency_cycles: parse_f64_field(&contents, "F2H_LATENCY_CYCLES").unwrap_or(8.0),
+            h2f_latency_cycles: parse_f64_field(&contents, "H2F_LATENCY_CYCLES").unwrap_or(8.0),
+            dp4a_latency_cycles: parse_f64_field(&contents, "DP4A_LATENCY_CYCLES").unwrap_or(2.0),
+            popc_latency_cycles: parse_f64_field(&contents, "POPC_LATENCY_CYCLES").unwrap_or(4.5),
+            clz_latency_cycles: parse_f64_field(&contents, "CLZ_LATENCY_CYCLES").unwrap_or(4.5),
+            prmt_latency_cycles: parse_f64_field(&contents, "PRMT_LATENCY_CYCLES").unwrap_or(4.5),
+            ballot_sync_latency_cycles: parse_f64_field(&contents, "BALLOT_SYNC_LATENCY_CYCLES").unwrap_or(4.5),
+            vote_any_latency_cycles: parse_f64_field(&contents, "VOTE_ANY_LATENCY_CYCLES").unwrap_or(4.5),
+            ldg_nc_latency_cycles: parse_f64_field(&contents, "LDG_NC_LATENCY_CYCLES").unwrap_or(125.0),
+            atom_add_f32_latency_cycles: parse_f64_field(&contents, "ATOM_ADD_F32_LATENCY_CYCLES").unwrap_or(400.0),
+            atom_add_i32_latency_cycles: parse_f64_field(&contents, "ATOM_ADD_I32_LATENCY_CYCLES").unwrap_or(400.0),
+            stride1_cycles: parse_f64_field(&contents, "STRIDE1_CYCLES").unwrap_or(28.0),
+            stride2_cycles: parse_f64_field(&contents, "STRIDE2_CYCLES").unwrap_or(40.0),
+            stride4_cycles: parse_f64_field(&contents, "STRIDE4_CYCLES").unwrap_or(60.0),
+            stride8_cycles: parse_f64_field(&contents, "STRIDE8_CYCLES").unwrap_or(90.0),
+            stride16_cycles: parse_f64_field(&contents, "STRIDE16_CYCLES").unwrap_or(120.0),
+            stride32_cycles: parse_f64_field(&contents, "STRIDE32_CYCLES").unwrap_or(125.0),
+            cp_async_latency_cycles: parse_f64_field(&contents, "CP_ASYNC_LATENCY_CYCLES").unwrap_or(200.0),
+            fma_ilp_throughput: parse_f64_field(&contents, "FMA_ILP_THROUGHPUT").unwrap_or(1.0),
+            fma_ilp_cycles_per_op: parse_f64_field(&contents, "FMA_ILP_CYCLES_PER_OP").unwrap_or(4.5),
         };
 
         println!("    -> Loaded AVX: {}", profile.has_avx);
@@ -491,6 +569,35 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         total_global_mem_mb,
         drift_free_types,
         zero_drift_penalty_cycles,
+        smem_noconflict_cycles: parse_f64_field(&stdout, "SMEM_NOCONFLICT_CYCLES").unwrap_or(4.0),
+        smem_2way_conflict_cycles: parse_f64_field(&stdout, "SMEM_2WAY_CONFLICT_CYCLES").unwrap_or(8.0),
+        smem_4way_conflict_cycles: parse_f64_field(&stdout, "SMEM_4WAY_CONFLICT_CYCLES").unwrap_or(16.0),
+        smem_broadcast_cycles: parse_f64_field(&stdout, "SMEM_BROADCAST_CYCLES").unwrap_or(4.0),
+        smem_2way_conflict_penalty: parse_f64_field(&stdout, "SMEM_2WAY_CONFLICT_PENALTY").unwrap_or(4.0),
+        smem_4way_conflict_penalty: parse_f64_field(&stdout, "SMEM_4WAY_CONFLICT_PENALTY").unwrap_or(12.0),
+        smem_padding_needed: parse_u32_field(&stdout, "SMEM_PADDING_NEEDED").unwrap_or(0) != 0,
+        f2i_latency_cycles: parse_f64_field(&stdout, "F2I_LATENCY_CYCLES").unwrap_or(4.5),
+        i2f_latency_cycles: parse_f64_field(&stdout, "I2F_LATENCY_CYCLES").unwrap_or(4.5),
+        f2h_latency_cycles: parse_f64_field(&stdout, "F2H_LATENCY_CYCLES").unwrap_or(8.0),
+        h2f_latency_cycles: parse_f64_field(&stdout, "H2F_LATENCY_CYCLES").unwrap_or(8.0),
+        dp4a_latency_cycles: parse_f64_field(&stdout, "DP4A_LATENCY_CYCLES").unwrap_or(2.0),
+        popc_latency_cycles: parse_f64_field(&stdout, "POPC_LATENCY_CYCLES").unwrap_or(4.5),
+        clz_latency_cycles: parse_f64_field(&stdout, "CLZ_LATENCY_CYCLES").unwrap_or(4.5),
+        prmt_latency_cycles: parse_f64_field(&stdout, "PRMT_LATENCY_CYCLES").unwrap_or(4.5),
+        ballot_sync_latency_cycles: parse_f64_field(&stdout, "BALLOT_SYNC_LATENCY_CYCLES").unwrap_or(4.5),
+        vote_any_latency_cycles: parse_f64_field(&stdout, "VOTE_ANY_LATENCY_CYCLES").unwrap_or(4.5),
+        ldg_nc_latency_cycles: parse_f64_field(&stdout, "LDG_NC_LATENCY_CYCLES").unwrap_or(125.0),
+        atom_add_f32_latency_cycles: parse_f64_field(&stdout, "ATOM_ADD_F32_LATENCY_CYCLES").unwrap_or(400.0),
+        atom_add_i32_latency_cycles: parse_f64_field(&stdout, "ATOM_ADD_I32_LATENCY_CYCLES").unwrap_or(400.0),
+        stride1_cycles: parse_f64_field(&stdout, "STRIDE1_CYCLES").unwrap_or(28.0),
+        stride2_cycles: parse_f64_field(&stdout, "STRIDE2_CYCLES").unwrap_or(40.0),
+        stride4_cycles: parse_f64_field(&stdout, "STRIDE4_CYCLES").unwrap_or(60.0),
+        stride8_cycles: parse_f64_field(&stdout, "STRIDE8_CYCLES").unwrap_or(90.0),
+        stride16_cycles: parse_f64_field(&stdout, "STRIDE16_CYCLES").unwrap_or(120.0),
+        stride32_cycles: parse_f64_field(&stdout, "STRIDE32_CYCLES").unwrap_or(125.0),
+        cp_async_latency_cycles: parse_f64_field(&stdout, "CP_ASYNC_LATENCY_CYCLES").unwrap_or(200.0),
+        fma_ilp_throughput: parse_f64_field(&stdout, "FMA_ILP_THROUGHPUT").unwrap_or(1.0),
+        fma_ilp_cycles_per_op: parse_f64_field(&stdout, "FMA_ILP_CYCLES_PER_OP").unwrap_or(4.5),
     };
 
     println!("    -> Detected AVX: {}", profile.has_avx);
@@ -573,7 +680,75 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
 
     println!("[*] Saving hardware topology to {}...", profile_path);
     let serialized = format!(
-        "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nGPU_NAME={}\nFMA_LATENCY={}\nIMAD_LATENCY={}\nTHERMAL_LATENCY_40C={}\nTHERMAL_LATENCY_60C={}\nTHERMAL_LATENCY_80C={}\nMUFU_RCP_LATENCY={}\nDFMA_LATENCY={}\nSMEM_LATENCY={}\nL1_GPU_LATENCY={}\nL2_GPU_LATENCY={}\nVRAM_LATENCY={}\nHMMA_F16_LATENCY={}\nTF32_LATENCY={}\nBAR_SYNC_LATENCY={}\nSHFL_SYNC_LATENCY={}\nSMEM_EXCHANGE_LATENCY={}\nBFE_LATENCY={}\nBFI_LATENCY={}\nAND_SHIFT_LATENCY={}\nBRANCH_UNIFORM={}\nBRANCH_DIVERGENT={}\nBRANCH_DIVERGENCE_PENALTY={}\nTEX1D_LATENCY={}\nIMAD_WIDE_LATENCY={}\nMUFU_EX2_LATENCY={}\nMUFU_SIN_LATENCY={}\nMUFU_RSQ_LATENCY={}\nMUFU_LG2_LATENCY={}\nHFMA2_LATENCY={}\nBF16X2_FMA_LATENCY={}\nLOP3_LUT_LATENCY={}\nDADD_LATENCY={}\nREDUX_SUM_LATENCY={}\nMEMBAR_GPU_LATENCY={}\nLDC_LATENCY={}\nMAX_REGS_PER_THREAD={}\nMAX_REGS_PER_SM={}\nWARP_SIZE={}\nMAX_THREADS_PER_SM={}\nMAX_WARPS_PER_SM={}\nTOTAL_GLOBAL_MEM_MB={}\nDRIFT_FREE_TYPES={}\nZERO_DRIFT_PENALTY={}\n",
+        "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nGPU_NAME={}\n\
+         FMA_LATENCY={}\nIMAD_LATENCY={}\nTHERMAL_LATENCY_40C={}\n\
+         THERMAL_LATENCY_60C={}\nTHERMAL_LATENCY_80C={}\n\
+         MUFU_RCP_LATENCY={}\nDFMA_LATENCY={}\nSMEM_LATENCY={}\n\
+         L1_GPU_LATENCY={}\nL2_GPU_LATENCY={}\nVRAM_LATENCY={}\n\
+         HMMA_F16_LATENCY={}\nTF32_LATENCY={}\nBAR_SYNC_LATENCY={}\n\
+         SHFL_SYNC_LATENCY={}\nSMEM_EXCHANGE_LATENCY={}\n\
+         BFE_LATENCY={}\nBFI_LATENCY={}\nAND_SHIFT_LATENCY={}\n\
+         BRANCH_UNIFORM={}\nBRANCH_DIVERGENT={}\nBRANCH_DIVERGENCE_PENALTY={}\n\
+         TEX1D_LATENCY={}\nIMAD_WIDE_LATENCY={}\n\
+         MUFU_EX2_LATENCY={}\nMUFU_SIN_LATENCY={}\nMUFU_RSQ_LATENCY={}\nMUFU_LG2_LATENCY={}\n\
+         HFMA2_LATENCY={}\nBF16X2_FMA_LATENCY={}\nLOP3_LUT_LATENCY={}\n\
+         DADD_LATENCY={}\nREDUX_SUM_LATENCY={}\nMEMBAR_GPU_LATENCY={}\nLDC_LATENCY={}\n\
+         MAX_REGS_PER_THREAD={}\nMAX_REGS_PER_SM={}\nWARP_SIZE={}\n\
+         MAX_THREADS_PER_SM={}\nMAX_WARPS_PER_SM={}\nTOTAL_GLOBAL_MEM_MB={}\n\
+         DRIFT_FREE_TYPES={}\nZERO_DRIFT_PENALTY={}\n\
+         SMEM_NOCONFLICT_CYCLES={}\nSMEM_2WAY_CONFLICT_CYCLES={}\n\
+         SMEM_4WAY_CONFLICT_CYCLES={}\nSMEM_BROADCAST_CYCLES={}\n\
+         SMEM_2WAY_CONFLICT_PENALTY={}\nSMEM_4WAY_CONFLICT_PENALTY={}\n\
+         SMEM_PADDING_NEEDED={}\n\
+         F2I_LATENCY_CYCLES={}\nI2F_LATENCY_CYCLES={}\n\
+         F2H_LATENCY_CYCLES={}\nH2F_LATENCY_CYCLES={}\n\
+         DP4A_LATENCY_CYCLES={}\n\
+         POPC_LATENCY_CYCLES={}\nCLZ_LATENCY_CYCLES={}\nPRMT_LATENCY_CYCLES={}\n\
+         BALLOT_SYNC_LATENCY_CYCLES={}\nVOTE_ANY_LATENCY_CYCLES={}\n\
+         LDG_NC_LATENCY_CYCLES={}\n\
+         ATOM_ADD_F32_LATENCY_CYCLES={}\nATOM_ADD_I32_LATENCY_CYCLES={}\n\
+         STRIDE1_CYCLES={}\nSTRIDE2_CYCLES={}\nSTRIDE4_CYCLES={}\n\
+         STRIDE8_CYCLES={}\nSTRIDE16_CYCLES={}\nSTRIDE32_CYCLES={}\n\
+         CP_ASYNC_LATENCY_CYCLES={}\n\
+         FMA_ILP_THROUGHPUT={}\nFMA_ILP_CYCLES_PER_OP={}\n",
+        profile.has_avx, profile.has_avx512, profile.l2_line_size, profile.l1_latency_cycles,
+        profile.gpu_name, profile.fma_latency_cycles, profile.imad_latency_cycles,
+        profile.thermal_latency_40c, profile.thermal_latency_60c, profile.thermal_latency_80c,
+        profile.mufu_rcp_latency_cycles, profile.dfma_latency_cycles, profile.smem_latency_cycles,
+        profile.l1_gpu_latency_cycles, profile.l2_gpu_latency_cycles, profile.vram_latency_cycles,
+        profile.hmma_f16_latency_cycles, profile.tf32_latency_cycles, profile.bar_sync_latency_cycles,
+        profile.shfl_sync_latency_cycles, profile.smem_exchange_latency_cycles,
+        profile.bfe_latency_cycles, profile.bfi_latency_cycles, profile.and_shift_latency_cycles,
+        profile.branch_uniform_cycles, profile.branch_divergent_cycles, profile.branch_divergence_penalty_cycles,
+        profile.tex1d_latency_cycles, profile.imad_wide_latency_cycles,
+        profile.mufu_ex2_latency_cycles, profile.mufu_sin_latency_cycles,
+        profile.mufu_rsq_latency_cycles, profile.mufu_lg2_latency_cycles,
+        profile.hfma2_latency_cycles, profile.bf16x2_fma_latency_cycles, profile.lop3_lut_latency_cycles,
+        profile.dadd_latency_cycles, profile.redux_sum_latency_cycles,
+        profile.membar_gpu_latency_cycles, profile.ldc_latency_cycles,
+        profile.max_regs_per_thread, profile.max_regs_per_sm, profile.warp_size,
+        profile.max_threads_per_sm, profile.max_warps_per_sm, profile.total_global_mem_mb,
+        profile.drift_free_types.join(","), profile.zero_drift_penalty_cycles,
+        profile.smem_noconflict_cycles, profile.smem_2way_conflict_cycles,
+        profile.smem_4way_conflict_cycles, profile.smem_broadcast_cycles,
+        profile.smem_2way_conflict_penalty, profile.smem_4way_conflict_penalty,
+        profile.smem_padding_needed as u8,
+        profile.f2i_latency_cycles, profile.i2f_latency_cycles,
+        profile.f2h_latency_cycles, profile.h2f_latency_cycles,
+        profile.dp4a_latency_cycles,
+        profile.popc_latency_cycles, profile.clz_latency_cycles, profile.prmt_latency_cycles,
+        profile.ballot_sync_latency_cycles, profile.vote_any_latency_cycles,
+        profile.ldg_nc_latency_cycles,
+        profile.atom_add_f32_latency_cycles, profile.atom_add_i32_latency_cycles,
+        profile.stride1_cycles, profile.stride2_cycles, profile.stride4_cycles,
+        profile.stride8_cycles, profile.stride16_cycles, profile.stride32_cycles,
+        profile.cp_async_latency_cycles,
+        profile.fma_ilp_throughput, profile.fma_ilp_cycles_per_op
+    );
+    fs::write(profile_path, serialized).expect("Failed to write profile");
+
+    profile
+}
         profile.has_avx,
         profile.has_avx512,
         profile.l2_line_size,
