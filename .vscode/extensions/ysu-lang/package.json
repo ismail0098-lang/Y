@@ -1,6 +1,7 @@
 {
   "name": "Y",
   "displayName": "Y",
+  "icon": "icons/logo.svg",
   "description": "Syntax highlighting for the Y systems language (.ysu)",
   "version": "0.1.0",
   "publisher": "ysu-engine",
@@ -21,6 +22,10 @@
         "extensions": [
           ".ysu"
         ],
+        "icon": {
+          "light": "./icons/logo.svg",
+          "dark": "./icons/logo.svg"
+        },
         "configuration": "./language-configuration.json"
       }
     ],
