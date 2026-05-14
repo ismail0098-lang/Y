@@ -1,4 +1,4 @@
-// hello.y -- Y-Lang test program for C backend validation
+// hello.y -- Y test program for C backend validation
 
 fn add(a: I32, b: I32) -> I32 {
     return a + b;
@@ -35,3 +35,4 @@ fn main() {
     fizzbuzz(20);
     return;
 }
+

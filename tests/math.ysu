@@ -1,5 +1,5 @@
 // tests/math.ysu
-// A simple matrix calculation simulation demonstrating Y-Lang's safety cage.
+// A simple matrix calculation simulation demonstrating Y's safety cage.
 
 @unsafe
 fn matrix_init() {
@@ -39,3 +39,4 @@ fn main() {
     matrix_init();
     calculate_matrix();
 }
+

@@ -1,5 +1,5 @@
 """
-LLVM IR Post-Processor for Y-Lang Compiler Output  (v5)
+LLVM IR Post-Processor for Y Compiler Output  (v5)
 ========================================================
 Fixes call-site type mismatches by inserting conversion instructions.
 Aliases are scoped per-function to avoid cross-function SSA conflicts.

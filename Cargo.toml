@@ -1,15 +1,16 @@
 [package]
-name = "y-lang-compiler"
+name = "Y-compiler"
 version = "0.1.0"
 edition = "2021"
-description = "Prototype Y-Lang compiler with CPU, PTX, C, and LLVM backends."
+description = "Prototype Y compiler with CPU, PTX, C, and LLVM backends."
 
 [lib]
-name = "y_lang"
+name = "y"
 path = "src/lib.rs"
 
 [[bin]]
-name = "y-lang"
+name = "Y"
 path = "src/main.rs"
 
 [dependencies]
+

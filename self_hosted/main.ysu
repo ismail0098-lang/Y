@@ -6,7 +6,7 @@ import llvm_emitter;
 
 @unsafe
 fn main() {
-    println("--- Y-Lang Self-Hosted Compiler ---");
+    println("--- Y Self-Hosted Compiler ---");
 
     // 1. Read source
     let source_path: String = String::new("test.ysu");
@@ -49,3 +49,4 @@ fn main() {
     println("Successfully compiled test.ysu -> test.c and test.ll");
     return;
 }
+

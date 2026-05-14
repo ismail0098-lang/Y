@@ -1,5 +1,5 @@
 // ============================================================
-//  Y-Lang  —  Bank Conflict Prover
+//  Y  —  Bank Conflict Prover
 //  bank_conflict.rs
 //
 //  A mathematical engine that validates whether a given
@@ -140,3 +140,4 @@ mod tests {
         assert!(result.is_ok(), "Expected 0 conflicts with proper swizzle");
     }
 }
+

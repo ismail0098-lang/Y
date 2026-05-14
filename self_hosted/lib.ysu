@@ -1,9 +1,9 @@
 // ============================================================
-//  Y-Lang Standard Library Interfaces
+//  Y Standard Library Interfaces
 //  lib.y
 //
 //  This file contains the forward declarations and standard
-//  library wrappers that map Y-Lang standard types (Vec, String, File)
+//  library wrappers that map Y standard types (Vec, String, File)
 //  to the C11 runtime backend equivalents.
 // ============================================================
 
@@ -95,3 +95,4 @@ impl File {
         yfile_write(path, content);
     }
 }
+

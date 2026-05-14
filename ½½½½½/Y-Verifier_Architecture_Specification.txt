@@ -4,7 +4,7 @@ THE Y-VERIFIER: A HYBRID HARDWARE-SENTIENT FORMAL VERIFICATION ARCHITECTURE
 
 1. EXECUTIVE SUMMARY
 --------------------------------------------------------------------------------
-The Y-Verifier is a next-generation formal verification engine built on Y-Lang, a 
+The Y-Verifier is a next-generation formal verification engine built on Y, a 
 hardware-sentient systems programming language. Traditional interactive theorem 
 provers (e.g., Coq, Lean) rely on sequential Depth-First Search (DFS) and 
 pointer-chasing Abstract Syntax Trees (ASTs), which fail to scale for massive 
@@ -19,14 +19,14 @@ Integer ALUs.
 2. CORE ARCHITECTURAL PILLARS
 --------------------------------------------------------------------------------
 
-A. Hardware-Sentient Emitters (Y-Lang)
+A. Hardware-Sentient Emitters (Y)
 The compiler dynamically probes host hardware using attributes like 
 `@require(sm >= 89)`. Instead of generating generic CUDA code, it optimizes cache 
 sizing, warp behavior, and instruction selection based on the physical limits of 
 the specific silicon (e.g., consumer Ada SM89 vs. Datacenter Hopper).
 
 B. The AstArena: 1D Storage for Logical Syntax
-To eliminate the pointer-chasing bottleneck and memory divergence, Y-Lang enforces 
+To eliminate the pointer-chasing bottleneck and memory divergence, Y enforces 
 Data-Oriented Design (DOD). 
 * All proof terms and AST nodes are stored in a contiguous 1D array of `usize` 
   indices known as the AstArena.
@@ -39,7 +39,7 @@ C. @ZeroDrift: Determinism via Q32.32 Fixed-Point Math
 Formal verification demands absolute mathematical determinism. Standard IEEE 754 
 floating-point math (FP32/FP64) is non-associative, leading to numerical drift 
 that ruins state-space exploration. 
-* To fix this, Y-Lang enforces the `@ZeroDrift` compiler constraint.
+* To fix this, Y enforces the `@ZeroDrift` compiler constraint.
 * On consumer GPUs (which have artificially weakened FP64 cores), the compiler 
   bypasses floating-point entirely. It translates math into Q32.32 fixed-point 
   arithmetic (64-bit integers split into 32-bit whole and 32-bit fractional parts).
@@ -72,7 +72,7 @@ PHASE 2: 1D TO 2D TRANSLATION (The Bridge)
 PHASE 3: GPU EXECUTION (High-Throughput Megakernel)
 * Tiling: The 2D matrices are split into tiles and loaded into the GPU's hyper-
   fast L1 Shared Memory.
-* Fragment Typing: Data is moved into registers. Y-Lang uses Phantom Typing 
+* Fragment Typing: Data is moved into registers. Y uses Phantom Typing 
   (e.g., `Fragment<Role_A>`) to guarantee the data is structurally sound before 
   firing the Tensor Cores.
 * Stream Compaction: To avoid warp divergence, the GPU uses Breadth-First Search 
@@ -102,3 +102,4 @@ SUMMARY
 By using the CPU for sparse 1D traversal and the GPU for dense 2D state-space 
 matrix math—locked into zero-drift integer arithmetic—the Y-Verifier bridges the 
 gap between formal logic safety and raw silicon performance.
+

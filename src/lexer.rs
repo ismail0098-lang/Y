@@ -1,9 +1,9 @@
 // ============================================================
-//  Y-Lang  —  Lexer (Front-End Tokenizer)
+//  Y  —  Lexer (Front-End Tokenizer)
 //  Subagent C | lexer.rs
 //
-//  Tokenizes Y-Lang source code into a flat stream of Tokens.
-//  Covers every construct defined in YLang_Specification v0.1:
+//  Tokenizes Y source code into a flat stream of Tokens.
+//  Covers every construct defined in Y_Specification v0.1:
 //    - Keywords, types, dtypes, attributes
 //    - Operators (including -> and ::)
 //    - Identifiers, integer literals, float literals, strings
@@ -1013,3 +1013,4 @@ mod tests {
         assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
 }
+

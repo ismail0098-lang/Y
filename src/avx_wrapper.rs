@@ -1,15 +1,15 @@
 // ============================================================
-//  Y-Lang  —  CPU Backend: 256-bit Register Wrapper
+//  Y  —  CPU Backend: 256-bit Register Wrapper
 //  Subagent A | avx_wrapper.rs
 //
 //  Wraps std::arch::x86_64 intrinsics into a safe, typed API
-//  that mirrors Y-Lang's type system on the CPU side.
+//  that mirrors Y's type system on the CPU side.
 //
 //  Register mapping:
-//    Y-Lang  Fragment<_, _, F32>  →  YMM (__m256  / 8×f32)
-//    Y-Lang  Fragment<_, _, F64>  →  YMM (__m256d / 4×f64)
-//    Y-Lang  Fragment<_, _, I32>  →  YMM (__m256i / 8×i32)
-//    Y-Lang  Fragment<_, _, F16>  →  YMM (__m256i / 16×f16 packed)
+//    Y  Fragment<_, _, F32>  →  YMM (__m256  / 8×f32)
+//    Y  Fragment<_, _, F64>  →  YMM (__m256d / 4×f64)
+//    Y  Fragment<_, _, I32>  →  YMM (__m256i / 8×i32)
+//    Y  Fragment<_, _, F16>  →  YMM (__m256i / 16×f16 packed)
 //
 //  Safety model:
 //    - All unsafe intrinsic calls are contained in this file.
@@ -30,7 +30,7 @@ use std::arch::x86_64::*;
 pub fn require_avx2() {
     assert!(
         is_x86_feature_detected!("avx2"),
-        "Y-Lang CPU backend requires AVX2 support. \
+        "Y CPU backend requires AVX2 support. \
          Compile with RUSTFLAGS=\"-C target-feature=+avx2\" or run on a capable CPU."
     );
 }
@@ -45,7 +45,7 @@ pub fn has_avx512f() -> bool {
 // ────────────────────────────────────────────────────────────
 
 /// A 256-bit register holding 8 single-precision floats.
-/// Corresponds to Y-Lang's `Fragment<_, _, F32>` on the CPU backend.
+/// Corresponds to Y's `Fragment<_, _, F32>` on the CPU backend.
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
 pub struct Y256f32(#[cfg(target_arch = "x86_64")] __m256);
@@ -266,7 +266,7 @@ impl Y256f32 {
 // ────────────────────────────────────────────────────────────
 
 /// A 256-bit register holding 8 signed 32-bit integers.
-/// Corresponds to Y-Lang's `Fragment<_, _, I32>` on the CPU backend.
+/// Corresponds to Y's `Fragment<_, _, I32>` on the CPU backend.
 #[derive(Copy, Clone, Debug)]
 #[repr(transparent)]
 pub struct Y256i32(#[cfg(target_arch = "x86_64")] __m256i);
@@ -410,7 +410,7 @@ impl Y256f64 {
 }
 
 // ────────────────────────────────────────────────────────────
-//  Operator overloads — lets Y-Lang IR use  a + b  syntax
+//  Operator overloads — lets Y IR use  a + b  syntax
 // ────────────────────────────────────────────────────────────
 
 use std::ops::{Add, Div, Mul, Sub};
@@ -554,3 +554,4 @@ mod tests {
         assert!(out.iter().all(|&x| x == 20));
     }
 }
+

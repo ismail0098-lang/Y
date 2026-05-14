@@ -1,5 +1,5 @@
 {
-  "name": "y-lang",
+  "name": "Y",
   "displayName": "Y",
   "description": "Syntax highlighting for the Y systems language (.ysu)",
   "version": "0.1.0",
@@ -33,3 +33,4 @@
     ]
   }
 }
+

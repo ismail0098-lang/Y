@@ -40,18 +40,18 @@ YSU Engine Project
 
 
 
-1. What Is Y-Lang?
+1. What Is Y?
 
-Y-Lang is a systems programming language designed to provide programmers with direct access to GPU hardware. It avoids abstractions and compiler heuristics, offering a typed vocabulary that maps directly to the hardware's capabilities.
-
-
-
-Most high-performance languages trade off expressiveness for beginners or portability across GPU generations. Y-Lang makes neither concession. It is precise, hardware-specific, and intended for programmers familiar with concepts such as MMA atoms who require direct hardware control.
+Y is a systems programming language designed to provide programmers with direct access to GPU hardware. It avoids abstractions and compiler heuristics, offering a typed vocabulary that maps directly to the hardware's capabilities.
 
 
 
+Most high-performance languages trade off expressiveness for beginners or portability across GPU generations. Y makes neither concession. It is precise, hardware-specific, and intended for programmers familiar with concepts such as MMA atoms who require direct hardware control.
 
-1.1 The Problem Y-Lang Solves
+
+
+
+1.1 The Problem Y Solves
 
 Modern GPU kernel languages occupy two camps:
 
@@ -67,7 +67,7 @@ Low-level (CUDA C + PTX): You have full control but no safety. A wrong register 
 
 
 
-Y-Lang occupies a third position: full low-level control with a type system that catches silent bugs at compile time. The programmer expresses silicon intent; the compiler verifies and faithfully emits it.
+Y occupies a third position: full low-level control with a type system that catches silent bugs at compile time. The programmer expresses silicon intent; the compiler verifies and faithfully emits it.
 
 
 
@@ -86,9 +86,9 @@ You are not writing a matrix multiply. You are directing a sequence of warp-coll
 
 
 
-2. Why Y-Lang May Outperform Existing Languages
+2. Why Y May Outperform Existing Languages
 
-This section compares Y-Lang against CUDA C, Triton, and Mojo across the four dimensions that determine real-world kernel performance.
+This section compares Y against CUDA C, Triton, and Mojo across the four dimensions that determine real-world kernel performance.
 
 
 
@@ -109,11 +109,11 @@ Triton: The compiler's tiling engine handles layout internally. You cannot expre
 
 
 
-Mojo: MLIR canonicalization passes can strength-reduce integer arithmetic. Your swizzle XOR may be transformed in ways that change the bit pattern. Y-Lang: Swizzle is a type parameter. The compiler recognizes the swizzled layout, maintains it through all transformations, and statically verifies conflict-freedom for all warp-collective operations on the tile.
+Mojo: MLIR canonicalization passes can strength-reduce integer arithmetic. Your swizzle XOR may be transformed in ways that change the bit pattern. Y: Swizzle is a type parameter. The compiler recognizes the swizzled layout, maintains it through all transformations, and statically verifies conflict-freedom for all warp-collective operations on the tile.
 
 
 
-// Y-Lang: swizzle is part of the memory TYPE, not a function
+// Y: swizzle is part of the memory TYPE, not a function
 
 type ATile = SmemLayout&lt;
 
@@ -146,7 +146,7 @@ The RTX 4070 has 36 MB of L2 cache running at roughly 5 TB/s — ten times the ban
 
 
 
-Triton and Mojo treat L2 as a transparent hardware detail. Y-Lang treats it as a managed memory tier with explicit lifecycle annotations:
+Triton and Mojo treat L2 as a transparent hardware detail. Y treats it as a managed memory tier with explicit lifecycle annotations:
 
 
 
@@ -185,7 +185,7 @@ In Triton, the num_stages parameter activates an automated software pipelining p
 
 
 
-In Y-Lang, pipeline synchronization is a type of obligation. The Transfer type carries a synchronization proof that must be discharged before the destination can be read:
+In Y, pipeline synchronization is a type of obligation. The Transfer type carries a synchronization proof that must be discharged before the destination can be read:
 
 
 
@@ -220,7 +220,7 @@ The m16n8k16 MMA atom is a warp-collective operation. All 32 threads participate
 
 
 
-In CUDA C, fragments are typed structs, but their roles (A vs. B vs. C) are not enforced by the type system. Passing a B fragment where an A fragment is expected compiles silently and produces incorrect numerical results. In Y-Lang, fragment roles are phantom types:
+In CUDA C, fragments are typed structs, but their roles (A vs. B vs. C) are not enforced by the type system. Passing a B fragment where an A fragment is expected compiles silently and produces incorrect numerical results. In Y, fragment roles are phantom types:
 
 
 
@@ -259,7 +259,7 @@ Triton
 
 Mojo
 
-Y-Lang
+Y
 
 Swizzle Control
 
@@ -345,9 +345,9 @@ Silicon-level expert
 
 
 
-3. The Y-Lang Type System
+3. The Y Type System
 
-Y-Lang's type system has five tiers, each corresponding to a distinct hardware concept. Types from different tiers are incompatible — there are no implicit conversions, only explicit typed operations.
+Y's type system has five tiers, each corresponding to a distinct hardware concept. Types from different tiers are incompatible — there are no implicit conversions, only explicit typed operations.
 
 
 
@@ -484,9 +484,9 @@ type Pipeline&lt;
 
 
 
-4. Y-Lang Syntax
+4. Y Syntax
 
-Y-Lang syntax is designed to be readable without being verbose. The guiding principle: hardware intent must be explicit; boilerplate must not exist.
+Y syntax is designed to be readable without being verbose. The guiding principle: hardware intent must be explicit; boilerplate must not exist.
 
 
 
@@ -643,7 +643,7 @@ let activations: L2Memory&lt;F16&gt; = load(act_ptr);
 
 4.5 PTX Escape — For When You Need It
 
-// Y-Lang has a PTX escape hatch for edge cases
+// Y has a PTX escape hatch for edge cases
 
 // Unlike CUDA C's asm volatile, the escape is TYPED
 
@@ -673,7 +673,7 @@ let activations: L2Memory&lt;F16&gt; = load(act_ptr);
 
 5. The AI-Powered Compiler
 
-Y-Lang's compiler has two distinct layers: a deterministic type-checking and code-generation layer that guarantees correctness and an AI layer that optimizes performance. These layers never overlap. The AI suggests, the type system verifies, and code is emitted only if verification passes.
+Y's compiler has two distinct layers: a deterministic type-checking and code-generation layer that guarantees correctness and an AI layer that optimizes performance. These layers never overlap. The AI suggests, the type system verifies, and code is emitted only if verification passes.
 
 
 
@@ -730,7 +730,7 @@ The hardest unsolved problem in kernel compilation: given a matrix shape, a hard
 
 
 
-Triton brute-forces this with an autotuner that can run for hours. Y-Lang instead uses a small transformer trained on (hardware config, kernel shape) › (optimal tile config, measured TFLOPS) pairs, predicting near-optimal configurations in milliseconds.
+Triton brute-forces this with an autotuner that can run for hours. Y instead uses a small transformer trained on (hardware config, kernel shape) › (optimal tile config, measured TFLOPS) pairs, predicting near-optimal configurations in milliseconds.
 
 
 
@@ -765,7 +765,7 @@ Uncoalesced access signatures — memory access patterns that will serialize acros
 
 
 
-This is particularly valuable because Y-Lang's target audience already reads SASS. The AI model augments rather than replaces that skill — catching hazards in code paths the programmer didn't manually inspect.
+This is particularly valuable because Y's target audience already reads SASS. The AI model augments rather than replaces that skill — catching hazards in code paths the programmer didn't manually inspect.
 
 
 
@@ -776,7 +776,7 @@ The current optimization loop in practice: profile kernel › read Nsight counters
 
 
 
-// AI Autotuner reads performance counters and suggests Y-Lang changes
+// AI Autotuner reads performance counters and suggests Y changes
 
 //
 
@@ -796,7 +796,7 @@ The current optimization loop in practice: profile kernel › read Nsight counters
 
 //
 
-// Suggestion is applied as a Y-Lang annotation — still type-checked
+// Suggestion is applied as a Y annotation — still type-checked
 
 
 
@@ -805,7 +805,7 @@ The current optimization loop in practice: profile kernel › read Nsight counters
 
 
 
-Y-Lang Source
+Y Source
 
      |
 
@@ -843,7 +843,7 @@ Y-Lang Source
 
 [AI]  Autotuner             -- closes profile -&gt; annotate -&gt; recompile loop
 
-                               reads perf counters, suggests Y-Lang changes
+                               reads perf counters, suggests Y changes
 
 
 
@@ -874,7 +874,7 @@ YSU Engine kernels — real SASS analyzed by hand, ground truth for the hazard det
 
 
 
-6. Why Y-Lang May Matter in the Future
+6. Why Y May Matter in the Future
 
 
 
@@ -885,7 +885,7 @@ GPU hardware is growing more heterogeneous, not less. The H100 introduced the Tr
 
 
 
-Y-Lang bets on the opposite trend: that the highest-value workloads will always be run by people who care enough to target specific hardware — the render farm running inference on 1,000 RTX 4090s, the HPC cluster where every microsecond of latency has a cost, the research lab squeezing one more percentage point of GPU utilization out of a plasma simulation.
+Y bets on the opposite trend: that the highest-value workloads will always be run by people who care enough to target specific hardware — the render farm running inference on 1,000 RTX 4090s, the HPC cluster where every microsecond of latency has a cost, the research lab squeezing one more percentage point of GPU utilization out of a plasma simulation.
 
 
 
@@ -903,7 +903,7 @@ The linear type system for Transfer obligations is similarly novel in the GPU ke
 
 6.3 The AI Compiler as a Research Direction
 
-Learned tile size prediction is an active research area. DeepMind's AlphaTensor demonstrated that learned approaches can discover matrix multiplication algorithms that outperform human-designed ones. The Y-Lang tile predictor is a narrower, more tractable version of the same idea: learn the mapping from (kernel shape, hardware spec) to (tile config) from existing benchmark data, then use it to replace hours of autotuning with milliseconds of inference.
+Learned tile size prediction is an active research area. DeepMind's AlphaTensor demonstrated that learned approaches can discover matrix multiplication algorithms that outperform human-designed ones. The Y tile predictor is a narrower, more tractable version of the same idea: learn the mapping from (kernel shape, hardware spec) to (tile config) from existing benchmark data, then use it to replace hours of autotuning with milliseconds of inference.
 
 
 
@@ -918,7 +918,7 @@ The SASS hazard detector is a form of learned static analysis — a field attracti
 
 
 
-Render farms and studios: Y-Lang kernels for ray tracing, denoising, and compositing — workloads where the same kernel runs millions of times and every percentage point of GPU utilization has a direct cost impact.
+Render farms and studios: Y kernels for ray tracing, denoising, and compositing — workloads where the same kernel runs millions of times and every percentage point of GPU utilization has a direct cost impact.
 
 
 
@@ -926,7 +926,7 @@ Scientific simulation: Plasma dynamics, fluid simulation, molecular dynamics — w
 
 
 
-AI inference at scale: Inference serving with bounded latency and a homogeneous hardware fleet. A fleet of RTX 4070s running the same model benefits from a Y-Lang kernel tuned precisely for that hardware, rather than a general CUDA kernel optimized for no hardware in particular.
+AI inference at scale: Inference serving with bounded latency and a homogeneous hardware fleet. A fleet of RTX 4070s running the same model benefits from a Y kernel tuned precisely for that hardware, rather than a general CUDA kernel optimized for no hardware in particular.
 
 
 
@@ -937,13 +937,13 @@ Compiler research: The type system is a research artifact independent of the lan
 
 6.5 Honest Limitations
 
-Y-Lang is not for everyone, and it is not trying to be. The following are genuine limitations, not false modesty:
+Y is not for everyone, and it is not trying to be. The following are genuine limitations, not false modesty:
 
 
 
 
 
-Architecture-specific: A Y-Lang kernel for the RTX 4070 does not run on an RTX 3060 or H100 without modification. This is a deliberate tradeoff, not an oversight.
+Architecture-specific: A Y kernel for the RTX 4070 does not run on an RTX 3060 or H100 without modification. This is a deliberate tradeoff, not an oversight.
 
 
 
@@ -963,7 +963,7 @@ AI component limitations: The tile predictor is advisory. For kernel shapes well
 
 7. Implementation Roadmap
 
-Y-Lang is currently in the design phase. The build order below is chosen to minimize wasted work: each phase produces something runnable before the next phase begins.
+Y is currently in the design phase. The build order below is chosen to minimize wasted work: each phase produces something runnable before the next phase begins.
 
 
 
@@ -1009,7 +1009,7 @@ Write a PTX emitter that lowers typed IR to valid PTX
 
 
 
-Target: a Y-Lang kernel that compiles to runnable PTX and produces correct numerical output
+Target: a Y kernel that compiles to runnable PTX and produces correct numerical output
 
 
 
@@ -1077,6 +1077,7 @@ Build the autotuning loop: profile › AI suggestion › annotate › recompile › veri
 Implementation Language
 
 Rust is the recommended implementation language for the compiler. Its type system natively supports linear types (via ownership), phantom types (via PhantomData), and the compile-time symbolic evaluation required for the bank conflict proof. The PTX emitter can begin as a straightforward string emitter in Phase 2 and be upgraded to an LLVM/MLIR backend in later phases.
+
 
 
 

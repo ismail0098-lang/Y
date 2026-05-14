@@ -1,8 +1,8 @@
 // ============================================================
-//  Y-Lang  —  Abstract Syntax Tree (AST)
+//  Y  —  Abstract Syntax Tree (AST)
 //  ast.rs
 //
-//  Defines the hierarchical structures for Y-Lang source
+//  Defines the hierarchical structures for Y source
 //  code, mapping directly from the hardware-sentient spec.
 //  The architecture target is deeply integrated but dynamic
 //  to support Ada Lovelace, Hopper, and CPU fallbacks.
@@ -17,13 +17,13 @@ pub struct Span {
     pub col: usize,
 }
 
-/// A parsed Y-Lang Program.
+/// A parsed Y Program.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub items: Vec<Item>,
 }
 
-/// A top-level construct in Y-Lang (currently mostly Kernels).
+/// A top-level construct in Y (currently mostly Kernels).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
     Kernel(KernelDecl),
@@ -455,3 +455,4 @@ pub struct BoundsAttr {
     pub max: Box<Expr>,
     pub span: Span,
 }
+

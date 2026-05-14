@@ -1,5 +1,5 @@
 // ============================================================
-//  Y-Lang  —  PTX Code Emitter
+//  Y  —  PTX Code Emitter
 //  ptx_emitter.rs
 //
 //  Backend code generator targeting NVIDIA PTX.
@@ -155,7 +155,7 @@ impl PtxEmitter {
             writeln!(&mut self.ptx_buffer).unwrap();
         }
 
-        // Declare virtual registers. In a full implementation, the Y-Lang compiler
+        // Declare virtual registers. In a full implementation, the Y compiler
         // would map these directly to the optimal physical set using liveness analysis.
         writeln!(&mut self.ptx_buffer, "    .reg .b32 %r<100>;").unwrap();
         writeln!(&mut self.ptx_buffer, "    .reg .f32 %f<100>;").unwrap();
@@ -516,3 +516,4 @@ impl PtxEmitter {
         }
     }
 }
+

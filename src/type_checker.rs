@@ -1,8 +1,8 @@
 // ============================================================
-//  Y-Lang  —  Semantic Type Checker
+//  Y  —  Semantic Type Checker
 //  type_checker.rs
 //
-//  The core brain of Y-Lang's safety guarantees.
+//  The core brain of Y's safety guarantees.
 //  Traverses AST, enforces Fragment roles (A vs B vs C),
 //  manages linear memory obligations, and runs the
 //  0-Bank-Conflict math prover.
@@ -948,3 +948,4 @@ mod tests {
         assert!(tc.errors.is_empty());
     }
 }
+
