@@ -1012,5 +1012,14 @@ mod tests {
         assert_eq!(tokens[4].kind, TokenKind::Semicolon);
         assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
+
+    #[test]
+    fn test_unexpected_eof() {
+        let mut lexer = Lexer::new("\"unterminated");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].kind, TokenKind::StringLit("unterminated".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
 }
 
