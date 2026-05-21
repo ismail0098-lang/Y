@@ -932,6 +932,21 @@ mod tests {
     }
 
     #[test]
+    fn test_register_enum() {
+        let mut tc = TypeChecker::new();
+        let enum_decl = EnumDecl {
+            name: "Direction".into(),
+            generic_params: vec![],
+            variants: vec![],
+            span: Span { line: 0, col: 0 },
+        };
+
+        tc.register_enum(&enum_decl);
+
+        assert!(tc.enums.contains_key("Direction"));
+    }
+
+    #[test]
     fn test_enum_item_does_not_produce_type_errors() {
         let mut tc = TypeChecker::new();
         let program = Program {
