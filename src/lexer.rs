@@ -842,6 +842,16 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_early_eof() {
+        let mut lexer = Lexer::new("let");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_tokenize_complex() {
         let mut lexer = Lexer::new("let x = 42; // comment\n y -> z;");
         let tokens = lexer.tokenize();
