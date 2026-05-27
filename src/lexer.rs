@@ -959,6 +959,13 @@ mod tests {
     }
 
     #[test]
+    fn test_unclosed_comment_error() {
+        let mut lexer = Lexer::new("/* unterminated comment");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens.last().unwrap().kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_tokenize_lines_and_columns() {
         let mut lexer = Lexer::new("let a = 1;\nlet b = 2;");
         let tokens = lexer.tokenize();
