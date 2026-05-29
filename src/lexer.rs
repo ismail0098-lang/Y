@@ -842,6 +842,20 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_method() {
+        let mut lexer = Lexer::new("let x = 10;");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 6);
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[1].kind, TokenKind::Ident("x".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Assign);
+        assert_eq!(tokens[3].kind, TokenKind::IntLit(10));
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_tokenize_complex() {
         let mut lexer = Lexer::new("let x = 42; // comment\n y -> z;");
         let tokens = lexer.tokenize();
