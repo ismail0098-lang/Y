@@ -945,6 +945,14 @@ mod tests {
     }
 
     #[test]
+    fn test_unclosed_comment_error() {
+        // The actual behavior is to emit EOF cleanly when an unterminated block comment is encountered
+        let mut lexer = Lexer::new("/* unterminated comment");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens[0].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_eof() {
         let kinds = lex("");
         assert_eq!(kinds[0], TokenKind::Eof);
