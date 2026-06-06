@@ -1,7 +1,7 @@
 pub mod ast;
 pub mod avx_wrapper;
 pub mod bank_conflict;
-pub mod c_emitter;
+// pub mod c_emitter;
 pub mod cpu_emitter;
 pub mod lexer;
 pub mod linear_tracker;
@@ -10,3 +10,4 @@ pub mod parser;
 pub mod ptx_emitter;
 pub mod sentinel;
 pub mod type_checker;
+pub mod native_emitter;

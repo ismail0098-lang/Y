@@ -1,8 +1,8 @@
 import lib;
 import lexer;
 import parser;
-import c_emitter;
 import llvm_emitter;
+import native_emitter;
 
 @unsafe
 fn main() {
@@ -25,28 +25,31 @@ fn main() {
     let mut p: Parser = Parser::new(tokens, token_count);
     Parser::parse_program(&mut p, &mut arena);
 
-    // 4. Emitter (C)
-    let mut emitter: CEmitter = CEmitter::new();
-    // 4.5 Emitter (LLVM)
+    // 4. Emitter (LLVM backend)
     let mut ll_emitter: LlvmEmitter = LlvmEmitter::new();
+    // 4.6 Emitter (Native x86-64 backend)
+    let mut nat_emitter: NativeEmitter = NativeEmitter::new();
     
-    let mut f: usize = 0;
     let func_count: usize = Vec::len(&arena.funcs);
+
+    // Emit LLVM (existing behavior)
+    let mut f: usize = 0;
     while f < func_count {
-        CEmitter::emit_func(&mut emitter, &arena, f);
         LlvmEmitter::emit_func(&mut ll_emitter, &arena, f);
         f += 1;
     }
 
-    // 5. Output C
-    let out_path: String = String::new("test.c");
-    File::write(&out_path, &emitter.c_buffer);
-    
     // 6. Output LLVM
     let ll_path: String = String::new("test.ll");
     File::write(&ll_path, &ll_emitter.buffer);
-    
-    println("Successfully compiled test.ysu -> test.c and test.ll");
+
+    // 7. Output Native ELF (NEW — direct machine code)
+    NativeEmitter::emit_program(&mut nat_emitter, &arena);
+    let elf_path: String = String::new("test_native");
+    NativeEmitter::write_binary(&nat_emitter, &elf_path);
+
+    println("Successfully compiled test.ysu:");
+    println("  -> test.ll      (LLVM IR backend)");
+    println("  -> test_native  (Native x86-64 ELF — no C!)");
     return;
 }
-

@@ -1,0 +1,30 @@
+// tests/simple_test.ysu
+// A simple test code for Y compilation via LLVM
+
+fn fibonacci(n: I32) -> I32 {
+    if n <= 0 {
+        return 0;
+    }
+    if n == 1 {
+        return 1;
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+@unsafe
+fn main() {
+    println("--- Y Language LLVM Fibonacci Test ---");
+    
+    let limit: I32 = 10;
+    let i: I32 = 1;
+    
+    while i <= limit {
+        let val: I32 = fibonacci(i);
+        print_int(val);
+        println("");
+        i += 1;
+    }
+    
+    println("Done!");
+    return;
+}

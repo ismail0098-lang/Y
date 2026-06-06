@@ -59,9 +59,8 @@ The repository is organized to clearly separate the Rust-based bootstrap infrast
    - **Linear Tracker**: Prevents resource leaks by ensuring "Transfer Obligations" (like asynchronous memory pipes) are perfectly consumed (`pipe.wait()`) exactly once.
    - **Bank Conflict Prover**: A mathematical prover that evaluates Shared Memory matrix layouts (`SmemLayout`) to guarantee **0-Bank-Conflict** loads on GPU architectures.
 4. **Backend Emitters**:
-   - **`llvm_emitter.rs`**: Directly translates the AST into highly-optimized LLVM IR.
-   - **`c_emitter.rs`**: Emits equivalent, highly-portable standard C code.
-   - **`ptx_emitter.rs`**: Emits bare-metal NVIDIA PTX assembly for ultimate GPU kernel generation.
+    - **`llvm_emitter.rs`**: Directly translates the AST into highly-optimized LLVM IR and compiles it to native binary using clang.
+    - **`ptx_emitter.rs`**: Emits bare-metal NVIDIA PTX assembly for ultimate GPU kernel generation.
 
 ---
 

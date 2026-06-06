@@ -62,6 +62,8 @@ pub struct LlvmEmitter {
     called_functions: Vec<String>,
     /// Track all function names defined in this module
     defined_functions: Vec<String>,
+    /// Whether we are currently inside a @ptx_emit function
+    in_ptx_emit: bool,
 }
 
 fn ast_type_to_string(ty: &Type) -> String {
@@ -152,6 +154,7 @@ impl LlvmEmitter {
             current_load_hint: None,
             called_functions: Vec::new(),
             defined_functions: Vec::new(),
+            in_ptx_emit: false,
         }
     }
 
@@ -806,6 +809,8 @@ impl LlvmEmitter {
         self.tmp_counter = 0;
         self.locals.clear();
         self.block_terminated = false;
+        let prev_ptx = self.in_ptx_emit;
+        self.in_ptx_emit = f.is_ptx_emit;
 
         let ret_type = match &f.ret_ty {
             Some(ty) => self.emit_type(ty),
@@ -814,6 +819,8 @@ impl LlvmEmitter {
 
         let func_name = if let Some(ref target) = self.current_impl_target {
             format!("{}_{}", target, f.name)
+        } else if f.name == "main" {
+            "ysu_main".to_string()
         } else {
             f.name.clone()
         };
@@ -876,6 +883,7 @@ impl LlvmEmitter {
 
         self.wln("}");
         self.wln("");
+        self.in_ptx_emit = prev_ptx;
     }
 
     fn emit_alloca_for_block(&mut self, block: &Block) {
@@ -1344,12 +1352,30 @@ impl LlvmEmitter {
                 self.emit_store(&result, &addr, &ty);
             }
             Stmt::Chisel(block, _) => {
-                self.wln("  ; --- CHISEL INLINE ASM ---");
-                for stmt in &block.stmts {
-                    if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
-                        self.wln(&format!("  call void asm sideeffect \"{}\", \"~{{memory}},~{{dirflag}},~{{fpsr}},~{{flags}}\"()", s));
-                    } else {
-                        self.emit_stmt(stmt, ret_type);
+                if self.in_ptx_emit {
+                    // PTX-targeted: emit chisel string literals as NVPTX inline asm
+                    self.wln("  ; --- CHISEL INLINE PTX (nvptx target) ---");
+                    for stmt in &block.stmts {
+                        if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
+                            // Emit PTX instruction as side-effecting inline asm
+                            // On nvptx backend, constraints differ from x86
+                            self.wln(&format!(
+                                "  call void asm sideeffect \"{}\", \"\"()",
+                                s.replace('\\', "\\\\").replace('"', "\\\"")
+                            ));
+                        } else {
+                            self.emit_stmt(stmt, ret_type);
+                        }
+                    }
+                    self.wln("  ; --- END CHISEL PTX ---");
+                } else {
+                    self.wln("  ; --- CHISEL INLINE ASM ---");
+                    for stmt in &block.stmts {
+                        if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
+                            self.wln(&format!("  call void asm sideeffect \"{}\", \"~{{memory}},~{{dirflag}},~{{fpsr}},~{{flags}}\"()", s));
+                        } else {
+                            self.emit_stmt(stmt, ret_type);
+                        }
                     }
                 }
             }
@@ -2311,7 +2337,13 @@ impl LlvmEmitter {
 
     fn emit_call_target(&self, func: &Expr) -> String {
         match func {
-            Expr::Ident(name, _) => name.clone(),
+            Expr::Ident(name, _) => {
+                if name == "main" {
+                    "ysu_main".to_string()
+                } else {
+                    name.clone()
+                }
+            }
             Expr::Path {
                 namespace, member, ..
             } => format!("{}_{}", namespace, member),
