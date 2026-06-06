@@ -10,7 +10,7 @@
 mod ast;
 mod avx_wrapper;
 mod bank_conflict;
-mod c_emitter;
+// mod c_emitter;
 mod cpu_emitter;
 mod lexer;
 mod linear_tracker;
@@ -19,19 +19,21 @@ mod parser;
 mod ptx_emitter;
 mod sentinel;
 mod type_checker;
+mod native_emitter;
 
 use std::env;
 use std::fs;
 use std::process::exit;
 
 use ast::Item;
-use c_emitter::CEmitter;
+// use c_emitter::CEmitter;
 use cpu_emitter::CpuEmitter;
 use lexer::Lexer;
 use llvm_emitter::LlvmEmitter;
 use parser::Parser;
 use ptx_emitter::PtxEmitter;
 use type_checker::TypeChecker;
+use native_emitter::NativeEmitter;
 
 fn main() {
     println!("========================================");
@@ -44,9 +46,9 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     // Find source file (first arg that isn't a flag)
-    let source_file = args.iter().skip(1).find(|a| !a.starts_with("--")).cloned();
+    let mut source_file = args.iter().skip(1).find(|a| !a.starts_with("--")).cloned();
 
-    let source_code = if let Some(mut file_path) = source_file {
+    let source_code = if let Some(ref mut file_path) = source_file {
         if std::path::Path::new(&file_path).extension().is_none() {
             file_path.push_str(".ysu");
         }
@@ -163,7 +165,7 @@ fn main() {
             type_checker.errors.len()
         );
         for err in type_checker.errors {
-            eprintln!("    ❌ {}", err);
+            eprintln!("    [Error] {}", err);
         }
         eprintln!("\nCompilation aborted to prevent undefined hardware behavior.");
         exit(1);
@@ -173,7 +175,7 @@ fn main() {
     if type_checker.linear_tracker.has_errors() {
         eprintln!("\n[!] Linear Type Check Failed!");
         for err in &type_checker.linear_tracker.errors {
-            eprintln!("    ❌ {}", err);
+            eprintln!("    [Error] {}", err);
         }
         exit(1);
     }
@@ -267,77 +269,105 @@ fn main() {
         }
     }
 
-    // Check for --emit-c flag
+    // Check for target flags
     let emit_c = args.iter().any(|a| a == "--emit-c" || a == "--target=c");
     let emit_llvm = args
         .iter()
         .any(|a| a == "--emit-llvm" || a == "--target=llvm");
+    let emit_native = args
+        .iter()
+        .any(|a| a == "--emit-native" || a == "--target=native");
+    let emit_ptx = args
+        .iter()
+        .any(|a| a == "--emit-ptx" || a == "--target=ptx");
+    let emit_cpu = args
+        .iter()
+        .any(|a| a == "--emit-cpu" || a == "--target=cpu");
+
+    if emit_c {
+        eprintln!("[!] The C backend has been removed. Y now uses LLVM as its primary backend.");
+        eprintln!("    To compile your code to a native binary (default behavior), omit backend flags.");
+        eprintln!("    To emit LLVM IR, use --emit-llvm.");
+        exit(1);
+    }
+
     let mut output_path = args
         .iter()
         .find(|a| a.starts_with("--output="))
         .map(|a| a.trim_start_matches("--output=").to_string())
-        .unwrap_or_else(|| "output.c".to_string());
+        .unwrap_or_else(|| {
+            if emit_native {
+                "output_bin".to_string()
+            } else if emit_llvm {
+                if let Some(ref sf) = source_file {
+                    let path = std::path::Path::new(sf);
+                    let mut p = path.to_path_buf();
+                    p.set_extension("ll");
+                    p.to_string_lossy().to_string()
+                } else {
+                    "output.ll".to_string()
+                }
+            } else {
+                if let Some(ref sf) = source_file {
+                    let path = std::path::Path::new(sf);
+                    let mut p = path.to_path_buf();
+                    p.set_extension("");
+                    p.to_string_lossy().to_string()
+                } else {
+                    "output".to_string()
+                }
+            }
+        });
 
     if output_path.starts_with('-') {
         output_path = format!("./{}", output_path);
     }
 
-    println!("\n✅ Compilation Successful!\n");
+    println!("\nCompilation Successful!\n");
 
-    if emit_llvm {
+    if emit_native {
+        println!("[4/4] Emitting Native x86-64 ELF Binary...");
+        let mut emitter = NativeEmitter::new();
+        let binary_output = emitter.emit_program(&ast);
+        match fs::write(&output_path, &binary_output) {
+            Ok(_) => {
+                println!("      -> Written to: {}", output_path);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(metadata) = fs::metadata(&output_path) {
+                        let mut perms = metadata.permissions();
+                        perms.set_mode(0o755);
+                        let _ = fs::set_permissions(&output_path, perms);
+                    }
+                }
+                println!("      Compiled to native ELF executable!");
+            }
+            Err(e) => {
+                eprintln!("[!] Failed to write ELF binary: {}", e);
+                exit(1);
+            }
+        }
+    } else if emit_llvm {
         println!("[4/4] Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
         let ll_output = emitter.emit_program(&ast, &hw_profile);
-        let ll_path = output_path.replace(".c", ".ll");
-        match fs::write(&ll_path, &ll_output) {
-            Ok(_) => println!("      -> Written to: {}", ll_path),
+        match fs::write(&output_path, &ll_output) {
+            Ok(_) => println!("      -> Written to: {}", output_path),
             Err(e) => {
                 eprintln!("[!] Failed to write LLVM IR: {}", e);
                 exit(1);
             }
         }
-        println!("      Compile: clang -O2 -o output {} -lm", ll_path);
-    } else if emit_c {
-        println!("[4/4] Emitting C11 Code...");
-        let mut emitter = CEmitter::new();
-        let c_output = emitter.emit_program(&ast);
-
-        match fs::write(&output_path, &c_output) {
-            Ok(_) => println!("      -> Written to: {}", output_path),
-            Err(e) => {
-                eprintln!("[!] Failed to write C output: {}", e);
-                exit(1);
-            }
-        }
-
-        let exe_path = output_path.replace(".c", ".exe");
-        println!("      -> Attempting gcc compilation...");
-        let gcc_result = std::process::Command::new("gcc")
-            .args(&["-std=c11", "-O2", "-o", &exe_path, &output_path, "-lm"])
-            .output();
-
-        match gcc_result {
-            Ok(output) => {
-                if output.status.success() {
-                    println!("      ✅ Compiled to native: {}", exe_path);
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("      [!] gcc failed:\n{}", stderr);
-                    println!(
-                        "      -> C source saved to {} for manual compilation.",
-                        output_path
-                    );
-                }
-            }
-            Err(_) => {
-                println!("      -> gcc not found. C source saved to {}.", output_path);
-                println!(
-                    "         Compile manually: gcc -std=c11 -O2 -o output {} -lm",
-                    output_path
-                );
-            }
-        }
-    } else if target_is_cpu {
+        println!("      Compile manually: clang -O2 -o output {} c_src/runtime.c -lm", &output_path);
+    } else if emit_ptx {
+        println!("[4/4] Emitting NVIDIA PTX Assembly...");
+        let mut emitter = PtxEmitter::new();
+        let ptx_output = emitter.emit_program(&ast, &hw_profile);
+        println!("======= GENERATED PTX BLOB =======");
+        println!("{}", ptx_output);
+        println!("==================================");
+    } else if emit_cpu {
         println!("[4/4] Emitting CPU AVX-512 Host Code...");
         let mut emitter = CpuEmitter::new();
         let cpu_output = emitter.emit_program(&ast);
@@ -345,12 +375,53 @@ fn main() {
         println!("{}", cpu_output);
         println!("=======================================");
     } else {
-        println!("[4/4] Emitting NVIDIA PTX Assembly...");
-        let mut emitter = PtxEmitter::new();
-        let ptx_output = emitter.emit_program(&ast, &hw_profile);
-        println!("======= GENERATED PTX BLOB =======");
-        println!("{}", ptx_output);
-        println!("==================================");
+        if target_is_cpu {
+            println!("[4/4] Emitting CPU AVX-512 Host Code...");
+            let mut emitter = CpuEmitter::new();
+            let cpu_output = emitter.emit_program(&ast);
+            println!("======= GENERATED RUST/AVX BLOB =======");
+            println!("{}", cpu_output);
+            println!("=======================================");
+        } else {
+            println!("[4/4] Compiling via LLVM IR Backend...");
+            let mut emitter = LlvmEmitter::new();
+            let ll_output = emitter.emit_program(&ast, &hw_profile);
+
+            let ll_path = format!("{}.tmp.ll", &output_path);
+            match fs::write(&ll_path, &ll_output) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("[!] Failed to write temporary LLVM IR: {}", e);
+                    exit(1);
+                }
+            }
+
+            println!("      -> Invoking clang compilation...");
+            let runtime_path = "c_src/runtime.c";
+            let clang_result = std::process::Command::new("clang")
+                .args(&["-O2", "-o", &output_path, &ll_path, runtime_path, "-lm"])
+                .output();
+
+            // Clean up temporary LLVM IR file
+            let _ = fs::remove_file(&ll_path);
+
+            match clang_result {
+                Ok(output) => {
+                    if output.status.success() {
+                        println!("      Compiled successfully to native binary: {}", output_path);
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        eprintln!("      [!] clang failed:\n{}", stderr);
+                        exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("      [!] clang not found or failed to execute: {}", e);
+                    println!("          Make sure clang is installed in your system.");
+                    exit(1);
+                }
+            }
+        }
     }
 }
 
