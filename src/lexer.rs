@@ -1012,5 +1012,21 @@ mod tests {
         assert_eq!(tokens[4].kind, TokenKind::Semicolon);
         assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
+
+    #[test]
+    fn test_tokenize_basic() {
+        let mut lexer = Lexer::new("let x = 1 + 2;");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 8);
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[1].kind, TokenKind::Ident("x".to_string()));
+        assert_eq!(tokens[2].kind, TokenKind::Assign);
+        assert_eq!(tokens[3].kind, TokenKind::IntLit(1));
+        assert_eq!(tokens[4].kind, TokenKind::Plus);
+        assert_eq!(tokens[5].kind, TokenKind::IntLit(2));
+        assert_eq!(tokens[6].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[7].kind, TokenKind::Eof);
+    }
 }
 
