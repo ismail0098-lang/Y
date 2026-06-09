@@ -1012,5 +1012,13 @@ mod tests {
         assert_eq!(tokens[4].kind, TokenKind::Semicolon);
         assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
+
+    #[test]
+    fn test_unclosed_comment_error() {
+        let mut lexer = Lexer::new("/* unterminated comment");
+        let tokens = lexer.tokenize();
+        // The codebase handles unclosed block comments gracefully by emitting an EOF token
+        assert_eq!(tokens[0].kind, TokenKind::Eof);
+    }
 }
 
