@@ -959,6 +959,16 @@ mod tests {
     }
 
     #[test]
+    fn test_unexpected_eof() {
+        // The local codebase handles an unterminated string by yielding a malformed
+        // StringLit token followed by an Eof token, rather than a dedicated Error token.
+        let tokens = Lexer::new("\"unterminated").tokenize();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].kind, TokenKind::StringLit("unterminated".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_tokenize_lines_and_columns() {
         let mut lexer = Lexer::new("let a = 1;\nlet b = 2;");
         let tokens = lexer.tokenize();
