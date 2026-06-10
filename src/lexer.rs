@@ -959,6 +959,12 @@ mod tests {
     }
 
     #[test]
+    fn test_unterminated_string_basic() {
+        // The codebase gracefully emits a malformed string token rather than an error token for unterminated strings.
+        assert_eq!(Lexer::new("\"unterminated").tokenize()[0].kind, TokenKind::StringLit("unterminated".to_string()));
+    }
+
+    #[test]
     fn test_tokenize_lines_and_columns() {
         let mut lexer = Lexer::new("let a = 1;\nlet b = 2;");
         let tokens = lexer.tokenize();
