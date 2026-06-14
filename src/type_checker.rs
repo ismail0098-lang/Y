@@ -932,6 +932,19 @@ mod tests {
     }
 
     #[test]
+    fn test_register_enum() {
+        let mut tc = TypeChecker::new();
+        let e = EnumDecl {
+            name: "TestEnum".to_string(),
+            generic_params: vec![],
+            variants: vec![],
+            span: Span { line: 0, col: 0 },
+        };
+        tc.register_enum(&e);
+        assert!(tc.enums.contains_key("TestEnum"));
+    }
+
+    #[test]
     fn test_enum_item_does_not_produce_type_errors() {
         let mut tc = TypeChecker::new();
         let program = Program {
