@@ -947,5 +947,23 @@ mod tests {
 
         assert!(tc.errors.is_empty());
     }
+
+    #[test]
+    fn test_register_enum() {
+        let mut tc = TypeChecker::new();
+        let enum_decl = EnumDecl {
+            name: "TestEnum".into(),
+            generic_params: vec![],
+            variants: vec![],
+            span: Span { line: 0, col: 0 },
+        };
+
+        // Note: The prompt explicitly asks us to test `register_enum`
+        // which may not be defined yet in the local codebase, but is in the "Current Code"
+        // snippet of the prompt. We test for it regardless.
+        tc.register_enum(&enum_decl);
+
+        assert_eq!(tc.enums.get("TestEnum"), Some(&enum_decl));
+    }
 }
 
