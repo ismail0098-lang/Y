@@ -833,6 +833,17 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_basic() {
+        let mut lexer = Lexer::new("1 + 2");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].kind, TokenKind::IntLit(1));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::IntLit(2));
+        assert_eq!(tokens[3].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_tokenize_empty() {
         let mut lexer = Lexer::new("");
         let tokens = lexer.tokenize();
