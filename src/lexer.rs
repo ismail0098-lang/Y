@@ -1012,5 +1012,23 @@ mod tests {
         assert_eq!(tokens[4].kind, TokenKind::Semicolon);
         assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
+
+    #[test]
+    fn test_tokenize_operators() {
+        let mut lexer = Lexer::new("1 + 2 - 3 * 4 / 5");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 10);
+        assert_eq!(tokens[0].kind, TokenKind::IntLit(1));
+        assert_eq!(tokens[1].kind, TokenKind::Plus);
+        assert_eq!(tokens[2].kind, TokenKind::IntLit(2));
+        assert_eq!(tokens[3].kind, TokenKind::Minus);
+        assert_eq!(tokens[4].kind, TokenKind::IntLit(3));
+        assert_eq!(tokens[5].kind, TokenKind::Star);
+        assert_eq!(tokens[6].kind, TokenKind::IntLit(4));
+        assert_eq!(tokens[7].kind, TokenKind::Slash);
+        assert_eq!(tokens[8].kind, TokenKind::IntLit(5));
+        assert_eq!(tokens[9].kind, TokenKind::Eof);
+    }
 }
 
