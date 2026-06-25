@@ -945,6 +945,15 @@ mod tests {
     }
 
     #[test]
+    fn test_unclosed_comment_error() {
+        // Assert that the lexer gracefully returns EOF for an unterminated block comment without panicking
+        let mut lexer = Lexer::new("/* unterminated comment");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_eof() {
         let kinds = lex("");
         assert_eq!(kinds[0], TokenKind::Eof);
