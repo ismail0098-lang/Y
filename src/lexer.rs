@@ -959,6 +959,17 @@ mod tests {
     }
 
     #[test]
+    fn test_unexpected_eof() {
+        // The codebase gracefully handles an unexpected EOF during string lexing (e.g., an unterminated string)
+        // by emitting a malformed TokenKind::StringLit token containing the text up to the EOF,
+        // rather than a dedicated error token.
+        let kinds = lex("\"unterminated");
+        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds[0], TokenKind::StringLit("unterminated".to_string()));
+        assert_eq!(kinds[1], TokenKind::Eof);
+    }
+
+    #[test]
     fn test_tokenize_lines_and_columns() {
         let mut lexer = Lexer::new("let a = 1;\nlet b = 2;");
         let tokens = lexer.tokenize();
