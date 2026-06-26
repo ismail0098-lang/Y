@@ -951,6 +951,42 @@ mod tests {
     }
 
     #[test]
+    fn test_tokenize_method() {
+        let mut lexer = Lexer::new("let a = 1;");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 6);
+
+        assert_eq!(tokens[0].kind, TokenKind::Let);
+        assert_eq!(tokens[0].lexeme, "let");
+        assert_eq!(tokens[0].line, 1);
+        assert_eq!(tokens[0].col, 1);
+
+        assert_eq!(tokens[1].kind, TokenKind::Ident("a".to_string()));
+        assert_eq!(tokens[1].lexeme, "a");
+        assert_eq!(tokens[1].line, 1);
+        assert_eq!(tokens[1].col, 5);
+
+        assert_eq!(tokens[2].kind, TokenKind::Assign);
+        assert_eq!(tokens[2].lexeme, "=");
+        assert_eq!(tokens[2].line, 1);
+        assert_eq!(tokens[2].col, 7);
+
+        assert_eq!(tokens[3].kind, TokenKind::IntLit(1));
+        assert_eq!(tokens[3].lexeme, "1");
+        assert_eq!(tokens[3].line, 1);
+        assert_eq!(tokens[3].col, 9);
+
+        assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+        assert_eq!(tokens[4].lexeme, ";");
+        assert_eq!(tokens[4].line, 1);
+        assert_eq!(tokens[4].col, 10);
+
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
+        assert_eq!(tokens[5].lexeme, "");
+    }
+
+    #[test]
     fn test_unterminated_string() {
         let kinds = lex("\"unterminated");
         assert_eq!(kinds.len(), 2);
