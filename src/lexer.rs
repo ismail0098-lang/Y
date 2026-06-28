@@ -945,6 +945,13 @@ mod tests {
     }
 
     #[test]
+    fn test_unterminated_block_comment_basic() {
+        // The codebase actually emits Eof when a block comment is unterminated
+        let kinds = lex("/* unterminated comment");
+        assert_eq!(kinds[0], TokenKind::Eof);
+    }
+
+    #[test]
     fn test_eof() {
         let kinds = lex("");
         assert_eq!(kinds[0], TokenKind::Eof);
