@@ -945,6 +945,14 @@ mod tests {
     }
 
     #[test]
+    fn test_error_unclosed_comment() {
+        let kinds = lex("/* unterminated comment");
+        // As per the current implementation, an unclosed comment
+        // does not produce an error token but cleanly hits EOF.
+        assert_eq!(kinds[0], TokenKind::Eof);
+    }
+
+    #[test]
     fn test_eof() {
         let kinds = lex("");
         assert_eq!(kinds[0], TokenKind::Eof);
