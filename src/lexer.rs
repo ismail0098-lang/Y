@@ -1012,5 +1012,14 @@ mod tests {
         assert_eq!(tokens[4].kind, TokenKind::Semicolon);
         assert_eq!(tokens[5].kind, TokenKind::Eof);
     }
+
+    #[test]
+    fn test_tokenize_stops_at_eof() {
+        let mut lexer = Lexer::new("let x = 42;   \n\t ");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 6);
+        assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
 }
 
