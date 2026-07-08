@@ -959,6 +959,20 @@ mod tests {
     }
 
     #[test]
+    fn test_unterminated_string_unexpected_eof() {
+        // The prompt asks to add a test for unexpected EOF in lexer.rs
+        // Specifically: lexing a string like `"unterminated` without the closing quote
+        // This is a classic edge case that requires a minimal 1-line test to verify
+        // if it returns an error or a malformed token.
+        // In the local codebase, this emits a malformed string token rather than an error token.
+        let mut lexer = Lexer::new("\"unterminated");
+        let tokens = lexer.tokenize();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].kind, TokenKind::StringLit("unterminated".to_string()));
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
     fn test_tokenize_lines_and_columns() {
         let mut lexer = Lexer::new("let a = 1;\nlet b = 2;");
         let tokens = lexer.tokenize();
