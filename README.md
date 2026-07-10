@@ -404,38 +404,7 @@ DRIFT_FREE_TYPES = Q32.32, FP64
 
 ---
 
-## Real-World Applications
 
-### Y ShadowPlay (`shadowplay/`)
-
-A hardware-sentient screen recorder HUD written entirely in Y. Compiled from `shadowplay/shadowplay.ysu` to a native binary. Uses the hardware profile to adapt recording parameters to the host GPU.
-
-```bash
-# Build and package into a distributable .tar.gz
-./package.sh
-
-# Portable build (stripped, no AVX requirements)
-./package.sh --portable
-
-# Install globally (KDE Plasma desktop entry included)
-sudo ./install.sh
-# → run anywhere with: y-shadowplay
-```
-
-### Y OS Kernel (`y_os/`)
-
-An experimental bare-metal OS kernel written in Y. The toolchain includes:
-
-- `kernel.ysu` — kernel source (15 KB)
-- `boot.s` — x86 bootloader
-- `build_os.sh` → compiles kernel.ysu → `kernel.ll` → `ysu_kernel.bin`
-- `make_iso.sh` → builds bootable ISO
-- `run_os.sh` → launches in QEMU
-- `ysu_vmm/` — Y Virtual Machine Monitor
-
-### Kanji Drawing Engine (`kanji/`)
-
-A handwriting recognition and stroke-matching engine. Uses the `match_stroke()` function from `algorithms/matching.ysu` — a 50/50 weighted combination of spatial alignment score and directional trajectory similarity, computed over arbitrary-length stroke paths.
 
 ### Y Language Server (`self_hosted/yls.ysu`)
 
@@ -498,42 +467,7 @@ On first run you will see the Sentinel Probe execute and report your hardware pr
     -> GPU Tensor Core Latencies (F16/TF32): 42 / 66
 ```
 
-### Run the Y OS Kernel (QEMU)
 
-```bash
-cd y_os
-./build_os.sh    # Compile kernel.ysu → ysu_kernel.bin
-./make_iso.sh    # Build bootable ISO
-./run_os.sh      # Launch in QEMU
-```
-
----
-
-## Installation
-
-### Y ShadowPlay HUD (Global Install)
-
-```bash
-# From the repo root
-sudo ./install.sh
-
-# Run from anywhere
-y-shadowplay
-```
-
-### Distributable Package
-
-```bash
-# Build a portable .tar.gz for sharing
-./package.sh --portable
-
-# The recipient extracts and runs:
-tar -xzf Y_ShadowPlay.tar.gz
-cd Y_ShadowPlay
-sudo ./install.sh
-```
-
----
 
 ## Benchmark Results
 
