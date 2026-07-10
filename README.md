@@ -1,4 +1,4 @@
-# Y — The Hardware-Sentient Systems Language
+# Y  The Hardware-Sentient Systems Language
 
 **Y** is a systems programming language and self-hosting compiler infrastructure built for high-performance computing (HPC), AI kernel development, GPU programming, and formally verified OS engineering. It powers the **YSU-Engine** and bridges the gap between mathematically rigorous compile-time verification and bare-metal, cycle-precise hardware control.
 
@@ -578,7 +578,8 @@ See [`benchmark_results.md`](./benchmark_results.md) and [`smt_comp_benchmark_co
 
 ## Status
 
-> This project is under active development. The self-hosting loop is progressing — all major compiler phases are written in native Y. The bootstrap Rust compiler (`src/`) is the stable reference implementation; `self_hosted/` is the production target.
+> This project is under active development. The self-hosting loop is progressing;  all major compiler phases are written in native Y. The bootstrap Rust compiler (`src/`) is the stable reference implementation; `self_hosted/` is the production target.
 
 **Author:** Umut Korkmaz (YSU)
-This project is under development.
+
+LLMs were used to build this project. Every architectural decision is mine.
