@@ -13,7 +13,6 @@
 - [Backend Emitters](#backend-emitters)
 - [Language Reference](#language-reference)
 - [Sentinel Hardware Probe](#sentinel-hardware-probe)
-- [Real-World Applications](#real-world-applications)
 - [Building & Running](#building--running)
 - [Installation](#installation)
 - [Benchmark Results](#benchmark-results)
