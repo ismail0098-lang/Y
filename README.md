@@ -375,14 +375,7 @@ SS programs are composed entirely from pre-proven Y safe blocks:
 - `safe_reclaim_chunk(cache: u64) -> (u64, u64)` — result never exceeds input
 - `safe_kib_to_bytes(kib: u64) -> u64` — no overflow up to 16 TiB
 
-### SS Roadmap
 
-- **Phase 1**: Define ~20–30 safe blocks for kernel scheduling domain *(in progress — CachyOS harnesses)*
-- **Phase 2**: Implement SS as restricted Y dialect (strip unsafe from grammar)
-- **Phase 3**: Model CachyOS `bore.c`, `fair.c` (EEVDF), `scx_bpfland` in SS
-- **Phase 4**: CI pipeline — every kernel patch compiled through SS; PASS = formally proven safe
-
----
 
 ## Sentinel Hardware Probe
 
