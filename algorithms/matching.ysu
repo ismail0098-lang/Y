@@ -1,0 +1,90 @@
+// algorithms/matching.ysu
+// Idiomatic, heavily optimized stroke-matching algorithm in Y-Lang.
+
+struct Point2D {
+    x: F32,
+    y: F32,
+}
+
+@unsafe
+fn match_stroke(user_path: ptr, ref_path: ptr, N: I32, tolerance_dist: F32) -> F32 {
+    if N <= 1 {
+        return 0.0;
+    }
+
+    let mut total_dist: F32 = 0.0;
+    let mut total_dir_sim: F32 = 0.0;
+    let mut valid_dir_segments: I32 = 0;
+
+    let user_path_base: I64 = user_path;
+    let ref_path_base: I64 = ref_path;
+
+    let mut i: I32 = 0;
+    while i < N {
+        // Compute spatial alignment at index i
+        let u_addr: I64 = user_path_base + (i * 8); // sizeof(Point2D) = 8 bytes
+        let r_addr: I64 = ref_path_base + (i * 8);
+        
+        let u_pt: &Point2D = u_addr;
+        let r_pt: &Point2D = r_addr;
+
+        let dx: F32 = (*u_pt).x - (*r_pt).x;
+        let dy: F32 = (*u_pt).y - (*r_pt).y;
+        total_dist += sqrtf(dx * dx + dy * dy);
+
+        // Compute segment direction matching
+        if i < N - 1 {
+            let u_next_addr: I64 = user_path_base + ((i + 1) * 8);
+            let r_next_addr: I64 = ref_path_base + ((i + 1) * 8);
+            
+            let u_next_pt: &Point2D = u_next_addr;
+            let r_next_pt: &Point2D = r_next_addr;
+
+            let ux: F32 = (*u_next_pt).x - (*u_pt).x;
+            let uy: F32 = (*u_next_pt).y - (*u_pt).y;
+            let rx: F32 = (*r_next_pt).x - (*r_pt).x;
+            let ry: F32 = (*r_next_pt).y - (*r_pt).y;
+
+            let u_len: F32 = sqrtf(ux * ux + uy * uy);
+            let r_len: F32 = sqrtf(rx * rx + ry * ry);
+
+            if u_len > 0.0001 {
+                if r_len > 0.0001 {
+                    let mut dot: F32 = (ux * rx + uy * ry) / (u_len * r_len);
+                    
+                    if dot > 1.0 {
+                        dot = 1.0;
+                    }
+                    if dot < -1.0 {
+                        dot = -1.0;
+                    }
+
+                    let dir_sim: F32 = (1.0 + dot) * 0.5;
+                    total_dir_sim += dir_sim;
+                    valid_dir_segments += 1;
+                }
+            }
+        }
+
+        i = i + 1;
+    }
+
+    // Spatial matching score calculation
+    let n_float: F32 = N; // Coerced to float
+    let avg_dist: F32 = total_dist / n_float;
+    let mut spatial_score: F32 = 1.0 - (avg_dist / tolerance_dist);
+    if spatial_score < 0.0 {
+        spatial_score = 0.0;
+    }
+
+    // Directional score
+    let mut direction_score: F32 = 1.0;
+    if valid_dir_segments > 0 {
+        let valid_segments_float: F32 = valid_dir_segments;
+        direction_score = total_dir_sim / valid_segments_float;
+    }
+
+    // Return weighted sum: 50% spatial alignment, 50% drawing trajectory match
+    let final_score: F32 = (0.5 * spatial_score) + (0.5 * direction_score);
+    return final_score;
+}

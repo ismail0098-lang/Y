@@ -1,0 +1,108 @@
+// kanji_data/loader.ysu
+// High-performance pointer-arithmetic loader for the .kjvg database format in Y.
+
+struct KjvgHeader {
+    magic_0: I8,
+    magic_1: I8,
+    magic_2: I8,
+    magic_3: I8,
+    version: I16,
+    reserved: I16,
+    char_count: I32,
+    index_offset: I32,
+}
+
+struct KjvgIndexEntry {
+    codepoint: I32,
+    stroke_count: I16,
+    reserved: I16,
+    data_offset: I64,
+}
+
+struct KjvgPoint {
+    x: I16,
+    y: I16,
+}
+
+struct KjvgStrokeHeader {
+    point_count: I16,
+    reserved: I16,
+}
+
+@unsafe
+fn kjvg_lookup(file_ptr: ptr, codepoint: I32) -> ptr {
+    let header: &KjvgHeader = file_ptr;
+    
+    // Safety check magic signature (KJVG)
+    if (*header).magic_0 != 75 { // 'K'
+        return 0;
+    }
+    if (*header).magic_1 != 74 { // 'J'
+        return 0;
+    }
+    if (*header).magic_2 != 86 { // 'V'
+        return 0;
+    }
+    if (*header).magic_3 != 71 { // 'G'
+        return 0;
+    }
+    
+    let index_offset: I32 = (*header).index_offset;
+    let char_count: I32 = (*header).char_count;
+    
+    // Cast base pointer to integer to perform pointer offset calculation
+    let file_base: I64 = file_ptr;
+    let index_table_ptr: ptr = file_base + index_offset;
+    
+    let mut low: I32 = 0;
+    let mut high: I32 = char_count - 1;
+    
+    while low <= high {
+        let mid: I32 = low + (high - low) / 2;
+        
+        // Every entry in the index table is exactly 16 bytes:
+        // codepoint(4B) + stroke_count(2B) + reserved(2B) + data_offset(8B)
+        let entry_addr: I64 = index_table_ptr + (mid * 16);
+        let entry: &KjvgIndexEntry = entry_addr;
+        
+        let entry_codepoint: I32 = (*entry).codepoint;
+        if entry_codepoint == codepoint {
+            return entry; // Found!
+        }
+        
+        if entry_codepoint < codepoint {
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+    
+    return 0; // Not found
+}
+
+@unsafe
+fn kjvg_get_stroke(file_ptr: ptr, entry: &KjvgIndexEntry, stroke_idx: I16) -> ptr {
+    let stroke_count: I16 = (*entry).stroke_count;
+    if stroke_idx >= stroke_count {
+        return 0;
+    }
+    
+    let file_base: I64 = file_ptr;
+    let data_offset: I64 = (*entry).data_offset;
+    let mut current_ptr: ptr = file_base + data_offset;
+    
+    let mut i: I16 = 0;
+    while i < stroke_idx {
+        let stroke_header: &KjvgStrokeHeader = current_ptr;
+        let pt_count: I16 = (*stroke_header).point_count;
+        
+        // Block size is: 4 bytes (header) + (pt_count * 4 bytes for Point2D U16 x,y)
+        let block_size: I64 = 4 + (pt_count * 4);
+        let current_addr: I64 = current_ptr;
+        current_ptr = current_addr + block_size;
+        
+        i = i + 1;
+    }
+    
+    return current_ptr;
+}

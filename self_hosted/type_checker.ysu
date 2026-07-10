@@ -39,6 +39,17 @@ struct InvariantRecord {
     verified: I32
 }
 
+// ── Linear type tracking obligations ────────────────────────
+
+struct Obligation {
+    name: String,
+    line: usize,
+    destination: String,
+    consumed: bool,
+    barrier_synchronized: bool,
+    scope_depth: usize
+}
+
 // ── Main checker struct ─────────────────────────────────────
 
 struct BoundsChecker {
@@ -56,13 +67,28 @@ struct BoundsChecker {
     inv_count: usize,
     // Proven invariant loop stmt indices (for LLVM assume emission)
     proven_loops: Vec,
-    proven_loop_count: usize
+    proven_loop_count: usize,
+    
+    // Linear Tracker
+    obligations: Vec,
+    ob_count: usize,
+    scope_depth: usize
 }
 
 impl Vec {
     fn get_BoundsEntry(v: &Vec, i: usize) -> BoundsEntry { let d: BoundsEntry; return d; }
     fn get_SymRange(v: &Vec, i: usize) -> SymRange { let d: SymRange; return d; }
     fn get_InvariantRecord(v: &Vec, i: usize) -> InvariantRecord { let d: InvariantRecord; return d; }
+    @unsafe
+    fn get_Obligation(v: &Vec, i: usize) -> Obligation {
+        let p: &Obligation = yvec_get(v, i);
+        return *p;
+    }
+    @unsafe
+    fn get_Obligation_mut(v: &Vec, i: usize) -> &mut Obligation {
+        let p: &mut Obligation = yvec_get(v, i);
+        return p;
+    }
 }
 
 impl BoundsChecker {
@@ -81,6 +107,9 @@ impl BoundsChecker {
         bc.inv_count = 0;
         bc.proven_loops = Vec::new(8);
         bc.proven_loop_count = 0;
+        bc.obligations = Vec::new(8);
+        bc.ob_count = 0;
+        bc.scope_depth = 0;
         return bc;
     }
 
@@ -1114,6 +1143,450 @@ impl BoundsChecker {
         return false;
     }
 
+    @unsafe
+    fn push_scope(bc: &mut BoundsChecker) {
+        (*bc).scope_depth += 1;
+    }
+
+    @unsafe
+    fn pop_scope(bc: &mut BoundsChecker) {
+        let current_depth: usize = (*bc).scope_depth;
+        let mut i: usize = 0;
+        while i < (*bc).ob_count {
+            let ob: Obligation = Vec::get_Obligation(&(*bc).obligations, i);
+            if ob.scope_depth == current_depth {
+                if ob.consumed == false {
+                    print("Line ");
+                    print_int(ob.line);
+                    print(": Linear Type Error: `");
+                    print(&ob.name);
+                    println("` is a Transfer obligation that was never consumed. You must call `pipe.wait(...)` before it goes out of scope.");
+                    
+                    let err: String = String::new("linear_leak_");
+                    String::push_str(&mut err, &ob.name);
+                    Vec::push(&mut (*bc).errors, err);
+                    (*bc).error_count += 1;
+                }
+            }
+            i += 1;
+        }
+        
+        let next_obs: Vec = Vec::new(8);
+        let mut next_count: usize = 0;
+        let mut j: usize = 0;
+        while j < (*bc).ob_count {
+            let ob: Obligation = Vec::get_Obligation(&(*bc).obligations, j);
+            if ob.scope_depth < current_depth {
+                Vec::push(&mut next_obs, ob);
+                next_count += 1;
+            }
+            j += 1;
+        }
+        Vec::free(&mut (*bc).obligations);
+        (*bc).obligations = next_obs;
+        (*bc).ob_count = next_count;
+        
+        (*bc).scope_depth -= 1;
+    }
+
+    @unsafe
+    fn register_obligation(bc: &mut BoundsChecker, name: &String, line: usize, destination: &String) {
+        let mut i: usize = 0;
+        while i < (*bc).ob_count {
+            let prev: Obligation = Vec::get_Obligation(&(*bc).obligations, i);
+            if String::eq(&prev.name, name) {
+                if prev.scope_depth == (*bc).scope_depth {
+                    if prev.consumed == false {
+                        print("Line ");
+                        print_int(line);
+                        print(": Linear Type Error: `");
+                        print(name);
+                        println("` was reassigned before its previous obligation was consumed.");
+                        
+                        let err: String = String::new("linear_reassign_");
+                        String::push_str(&mut err, name);
+                        Vec::push(&mut (*bc).errors, err);
+                        (*bc).error_count += 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        
+        let ob: Obligation;
+        ob.name = String::clone(name);
+        ob.line = line;
+        ob.destination = String::clone(destination);
+        ob.consumed = false;
+        ob.barrier_synchronized = false;
+        ob.scope_depth = (*bc).scope_depth;
+        
+        Vec::push(&mut (*bc).obligations, ob);
+        (*bc).ob_count += 1;
+    }
+
+    @unsafe
+    fn consume_obligation(bc: &mut BoundsChecker, name: &String, line: usize) -> bool {
+        let mut i: usize = (*bc).ob_count;
+        while i > 0 {
+            i -= 1;
+            let ob: &mut Obligation = Vec::get_Obligation_mut(&(*bc).obligations, i);
+            if String::eq(&(*ob).name, name) {
+                if (*ob).consumed {
+                    print("Line ");
+                    print_int(line);
+                    print(": Linear Type Error: `");
+                    print(name);
+                    println("` transfer obligation was consumed twice. It was already awaited previously.");
+                    
+                    let err: String = String::new("linear_double_consume_");
+                    String::push_str(&mut err, name);
+                    Vec::push(&mut (*bc).errors, err);
+                    (*bc).error_count += 1;
+                    return false;
+                } else {
+                    (*ob).consumed = true;
+                    (*ob).barrier_synchronized = false;
+                    return true;
+                }
+            }
+        }
+        return true;
+    }
+
+    @unsafe
+    fn synchronize_barrier(bc: &mut BoundsChecker) {
+        let mut i: usize = 0;
+        while i < (*bc).ob_count {
+            let ob: &mut Obligation = Vec::get_Obligation_mut(&(*bc).obligations, i);
+            if (*ob).consumed {
+                (*ob).barrier_synchronized = true;
+            }
+            i += 1;
+        }
+    }
+
+    @unsafe
+    fn require_destination_ready(bc: &mut BoundsChecker, destination: &String, line: usize) -> bool {
+        let mut pending_wait: bool = false;
+        let mut pending_barrier: bool = false;
+        
+        let mut i: usize = 0;
+        while i < (*bc).ob_count {
+            let ob: Obligation = Vec::get_Obligation(&(*bc).obligations, i);
+            if String::eq(&ob.destination, destination) {
+                if ob.consumed == false {
+                    pending_wait = true;
+                } else if ob.barrier_synchronized == false {
+                    pending_barrier = true;
+                }
+            }
+            i += 1;
+        }
+        
+        if pending_wait {
+            print("Line ");
+            print_int(line);
+            print(": Linear Type Error: shared destination `");
+            print(destination);
+            println("` cannot be read while Transfer obligation(s) are still pending. Call `pipe.wait(...)` and then `barrier::sync()` before reading it.");
+            
+            let err: String = String::new("destination_pending_wait_");
+            String::push_str(&mut err, destination);
+            Vec::push(&mut (*bc).errors, err);
+            (*bc).error_count += 1;
+            return false;
+        }
+        
+        if pending_barrier {
+            print("Line ");
+            print_int(line);
+            print(": Linear Type Error: shared destination `");
+            print(destination);
+            println("` cannot be read because awaited Transfer obligation(s) have not passed `barrier::sync()`. Synchronize the pipeline before reading shared memory.");
+            
+            let err: String = String::new("destination_pending_barrier_");
+            String::push_str(&mut err, destination);
+            Vec::push(&mut (*bc).errors, err);
+            (*bc).error_count += 1;
+            return false;
+        }
+        
+        return true;
+    }
+
+    @unsafe
+    fn get_root_ident(arena: &AstArena, expr_idx: usize, out: &mut String) {
+        if expr_idx == 0 { return; }
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx - 1);
+        if expr.tag == Expr_TAG_Ident {
+            *out = String::clone(&expr.data.Ident._0);
+        } else if expr.tag == Expr_TAG_Index {
+            let base_idx: usize = expr.data.Index._0;
+            BoundsChecker::get_root_ident(arena, base_idx, out);
+        } else if expr.tag == Expr_TAG_MemberAccess {
+            let base_idx: usize = expr.data.MemberAccess._0;
+            BoundsChecker::get_root_ident(arena, base_idx, out);
+        }
+    }
+
+    @unsafe
+    fn check_linear_expr(bc: &mut BoundsChecker, arena: &AstArena, expr_idx: usize, allow_transfer: bool) {
+        if expr_idx == 0 { return; }
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx - 1);
+
+        if expr.tag == Expr_TAG_Ident {
+            let name: String = expr.data.Ident._0;
+            let mut is_ob: bool = false;
+            let mut i: usize = 0;
+            while i < (*bc).ob_count {
+                let ob: Obligation = Vec::get_Obligation(&(*bc).obligations, i);
+                if String::eq(&ob.name, &name) {
+                    is_ob = true;
+                }
+                i += 1;
+            }
+            if is_ob {
+                if allow_transfer == false {
+                    print("Linear Type Error: `");
+                    print(&name);
+                    println("` is a linear Transfer obligation and may only be used as an argument to `pipe.wait(...)`.");
+                    
+                    let err: String = String::new("linear_misuse_");
+                    String::push_str(&mut err, &name);
+                    Vec::push(&mut (*bc).errors, err);
+                    (*bc).error_count += 1;
+                }
+            }
+        }
+        else if expr.tag == Expr_TAG_Call {
+            let func_idx: usize = expr.data.Call._0;
+            let args_start: usize = expr.data.Call._1;
+            let arg_count: usize = expr.data.Call._2;
+            
+            let mut is_load: bool = false;
+            let mut is_wait: bool = false;
+            let mut is_barrier_sync: bool = false;
+            
+            let func_expr: Expr = Vec::get_Expr(&(*arena).exprs, func_idx - 1);
+            if func_expr.tag == Expr_TAG_Ident {
+                let fname: String = func_expr.data.Ident._0;
+                if String::eq_cstr(&fname, "ldmatrix") { is_load = true; }
+                if String::eq_cstr(&fname, "load") { is_load = true; }
+            } else if func_expr.tag == Expr_TAG_MemberAccess {
+                let member: String = func_expr.data.MemberAccess._1;
+                if String::eq_cstr(&member, "wait") { is_wait = true; }
+            } else if func_expr.tag == Expr_TAG_Path {
+                let ns: String = func_expr.data.Path._0;
+                let mem: String = func_expr.data.Path._1;
+                if String::eq_cstr(&ns, "barrier") {
+                    if String::eq_cstr(&mem, "sync") { is_barrier_sync = true; }
+                }
+            }
+            
+            if is_load {
+                if arg_count >= 1 {
+                    let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start);
+                    let mut dest_name: String = String::new("");
+                    BoundsChecker::get_root_ident(arena, arg_idx, &mut dest_name);
+                    BoundsChecker::require_destination_ready(bc, &dest_name, 0);
+                }
+            }
+            
+            if is_wait {
+                let mut ai: usize = 0;
+                while ai < arg_count {
+                    let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + ai);
+                    let arg_expr: Expr = Vec::get_Expr(&(*arena).exprs, arg_idx - 1);
+                    if arg_expr.tag == Expr_TAG_Ident {
+                        let var_name: String = arg_expr.data.Ident._0;
+                        BoundsChecker::consume_obligation(bc, &var_name, 0);
+                    }
+                    ai += 1;
+                }
+            }
+            
+            if is_barrier_sync {
+                BoundsChecker::synchronize_barrier(bc);
+            }
+            
+            let mut k: usize = 0;
+            while k < arg_count {
+                let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + k);
+                BoundsChecker::check_linear_expr(bc, arena, arg_idx, is_wait);
+                k += 1;
+            }
+            BoundsChecker::check_linear_expr(bc, arena, func_idx, false);
+        }
+        else if expr.tag == Expr_TAG_Index {
+            let base_idx: usize = expr.data.Index._0;
+            let index_idx: usize = expr.data.Index._1;
+            BoundsChecker::check_linear_expr(bc, arena, base_idx, allow_transfer);
+            BoundsChecker::check_linear_expr(bc, arena, index_idx, allow_transfer);
+        }
+        else if expr.tag == Expr_TAG_MemberAccess {
+            let base_idx: usize = expr.data.MemberAccess._0;
+            BoundsChecker::check_linear_expr(bc, arena, base_idx, allow_transfer);
+        }
+        else if expr.tag == Expr_TAG_BinaryExpr {
+            let lhs: usize = expr.data.BinaryExpr._0;
+            let rhs: usize = expr.data.BinaryExpr._2;
+            BoundsChecker::check_linear_expr(bc, arena, lhs, allow_transfer);
+            BoundsChecker::check_linear_expr(bc, arena, rhs, allow_transfer);
+        }
+        else if expr.tag == Expr_TAG_UnaryExpr {
+            let operand_idx: usize = expr.data.UnaryExpr._1;
+            BoundsChecker::check_linear_expr(bc, arena, operand_idx, allow_transfer);
+        }
+        else if expr.tag == Expr_TAG_StructLit {
+            let fields_start: usize = expr.data.StructLit._1;
+            let fields_count: usize = expr.data.StructLit._2;
+            let mut k: usize = 0;
+            while k < fields_count {
+                let val_idx: usize = Vec::get_usize(&(*arena).struct_lit_exprs, fields_start + k);
+                BoundsChecker::check_linear_expr(bc, arena, val_idx, allow_transfer);
+                k += 1;
+            }
+        }
+    }
+
+    @unsafe
+    fn check_linear_stmt(bc: &mut BoundsChecker, arena: &AstArena, stmt_idx: usize) {
+        let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, stmt_idx);
+
+        if stmt.tag == Stmt_TAG_Let {
+            let var_name: String = stmt.data.Let._0;
+            let init_idx: usize = stmt.data.Let._2;
+            
+            let mut is_transfer: bool = false;
+            let mut dest_name: String = String::new("");
+            
+            if init_idx > 0 {
+                let init_expr: Expr = Vec::get_Expr(&(*arena).exprs, init_idx - 1);
+                if init_expr.tag == Expr_TAG_Call {
+                    let func_idx: usize = init_expr.data.Call._0;
+                    let func_expr: Expr = Vec::get_Expr(&(*arena).exprs, func_idx - 1);
+                    let mut fname: String = String::new("");
+                    if func_expr.tag == Expr_TAG_Ident {
+                        fname = String::clone(&func_expr.data.Ident._0);
+                    }
+                    if String::eq_cstr(&fname, "cp_async") {
+                        is_transfer = true;
+                        let args_start: usize = init_expr.data.Call._1;
+                        let arg_count: usize = init_expr.data.Call._2;
+                        if arg_count >= 2 {
+                            let dest_arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + 1);
+                            BoundsChecker::get_root_ident(arena, dest_arg_idx, &mut dest_name);
+                        }
+                    }
+                }
+            }
+            
+            if is_transfer {
+                BoundsChecker::register_obligation(bc, &var_name, 0, &dest_name);
+            }
+            
+            if init_idx > 0 {
+                BoundsChecker::check_linear_expr(bc, arena, init_idx, false);
+            }
+        }
+        else if stmt.tag == Stmt_TAG_Return {
+            let expr_idx: usize = stmt.data.Return._0;
+            if expr_idx > 0 {
+                BoundsChecker::check_linear_expr(bc, arena, expr_idx, false);
+            }
+        }
+        else if stmt.tag == Stmt_TAG_ExprStmt {
+            let expr_idx: usize = stmt.data.ExprStmt._0;
+            if expr_idx > 0 {
+                BoundsChecker::check_linear_expr(bc, arena, expr_idx, false);
+            }
+        }
+        else if stmt.tag == Stmt_TAG_Assign {
+            let target_idx: usize = stmt.data.Assign._0;
+            let val_idx: usize = stmt.data.Assign._1;
+            BoundsChecker::check_linear_expr(bc, arena, target_idx, false);
+            BoundsChecker::check_linear_expr(bc, arena, val_idx, false);
+        }
+        else if stmt.tag == Stmt_TAG_CompoundAssign {
+            let target_idx: usize = stmt.data.CompoundAssign._0;
+            let val_idx: usize = stmt.data.CompoundAssign._2;
+            BoundsChecker::check_linear_expr(bc, arena, target_idx, false);
+            BoundsChecker::check_linear_expr(bc, arena, val_idx, false);
+        }
+        else if stmt.tag == Stmt_TAG_If {
+            let cond_idx: usize = stmt.data.If._0;
+            let then_start: usize = stmt.data.If._1;
+            let then_count: usize = stmt.data.If._2;
+            let else_start: usize = stmt.data.If._3;
+            let else_count: usize = stmt.data.If._4;
+            
+            BoundsChecker::check_linear_expr(bc, arena, cond_idx, false);
+            
+            BoundsChecker::push_scope(bc);
+            let mut i: usize = 0;
+            while i < then_count {
+                BoundsChecker::check_linear_stmt(bc, arena, then_start + i);
+                i += 1;
+            }
+            BoundsChecker::pop_scope(bc);
+            
+            BoundsChecker::push_scope(bc);
+            let mut j: usize = 0;
+            while j < else_count {
+                BoundsChecker::check_linear_stmt(bc, arena, else_start + j);
+                j += 1;
+            }
+            BoundsChecker::pop_scope(bc);
+        }
+        else if stmt.tag == Stmt_TAG_While {
+            let cond_idx: usize = stmt.data.While._0;
+            let body_start: usize = stmt.data.While._1;
+            let body_count: usize = stmt.data.While._2;
+            
+            BoundsChecker::check_linear_expr(bc, arena, cond_idx, false);
+            
+            BoundsChecker::push_scope(bc);
+            let mut i: usize = 0;
+            while i < body_count {
+                BoundsChecker::check_linear_stmt(bc, arena, body_start + i);
+                i += 1;
+            }
+            BoundsChecker::pop_scope(bc);
+        }
+        else if stmt.tag == Stmt_TAG_For {
+            let start_idx: usize = stmt.data.For._1;
+            let end_idx: usize = stmt.data.For._2;
+            let step_idx: usize = stmt.data.For._3;
+            let body_start: usize = stmt.data.For._4;
+            let body_count: usize = stmt.data.For._5;
+            
+            BoundsChecker::check_linear_expr(bc, arena, start_idx, false);
+            BoundsChecker::check_linear_expr(bc, arena, end_idx, false);
+            BoundsChecker::check_linear_expr(bc, arena, step_idx, false);
+            
+            BoundsChecker::push_scope(bc);
+            let mut i: usize = 0;
+            while i < body_count {
+                BoundsChecker::check_linear_stmt(bc, arena, body_start + i);
+                i += 1;
+            }
+            BoundsChecker::pop_scope(bc);
+        }
+        else if stmt.tag == Stmt_TAG_SafeBlock {
+            let sb_start: usize = stmt.data.SafeBlock._0;
+            let sb_count: usize = stmt.data.SafeBlock._1;
+            
+            BoundsChecker::push_scope(bc);
+            let mut i: usize = 0;
+            while i < sb_count {
+                BoundsChecker::check_linear_stmt(bc, arena, sb_start + i);
+                i += 1;
+            }
+            BoundsChecker::pop_scope(bc);
+        }
+    }
+
     // ── Entry point: verify all functions ───────────────────
 
     @unsafe
@@ -1122,6 +1595,16 @@ impl BoundsChecker {
         let mut f: usize = 0;
         while f < func_count {
             BoundsChecker::check_func_strict(bc, arena, f);
+            
+            let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, f);
+            BoundsChecker::push_scope(bc);
+            let mut s: usize = 0;
+            while s < fdecl.body_count {
+                BoundsChecker::check_linear_stmt(bc, arena, fdecl.body_start + s);
+                s += 1;
+            }
+            BoundsChecker::pop_scope(bc);
+            
             f += 1;
         }
 

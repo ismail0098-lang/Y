@@ -9,6 +9,7 @@
 // ============================================================
 
 import lib;
+import lexer;
 
 // ── Span ────────────────────────────────────────────────────
 struct Span {
@@ -160,6 +161,7 @@ impl Vec {
     fn get_FieldDecl(v: &Vec, i: usize) -> FieldDecl { let d: FieldDecl; return d; }
     fn get_MatchArm(v: &Vec, i: usize) -> MatchArm { let d: MatchArm; return d; }
     fn get_usize(v: &Vec, i: usize) -> usize { return 0; }
+    fn get_String(v: &Vec, i: usize) -> String { let d: String; return d; }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -205,7 +207,9 @@ impl AstArena {
 struct Parser {
     tokens: Vec,
     pos: usize,
-    token_count: usize
+    token_count: usize,
+    imported_modules: Vec,
+    current_namespace: String
 }
 
 // ── Core Helpers ────────────────────────────────────────────
@@ -217,6 +221,8 @@ impl Parser {
         p.tokens = tokens;
         p.pos = 0;
         p.token_count = count;
+        p.imported_modules = Vec::new(24);
+        p.current_namespace = String::new("");
         return p;
     }
 
@@ -366,13 +372,33 @@ impl Parser {
             if is_ident {
                 Parser::advance(p);
 
-                // Check for Namespace::member path
-                let next: Token = Parser::peek(p);
+                // Check for multi-level Namespace::...::member path
+                let mut next: Token = Parser::peek(p);
                 if String::eq_cstr(&next.lexeme, "::") {
-                    Parser::advance(p);
-                    let member_tok: Token = Parser::advance(p);
-                    let member_lex: String = String::clone(&member_tok.lexeme);
-                    let expr: Expr = Expr::Path(String::clone(&lex), member_lex);
+                    let mut path_segs: Vec = Vec::new(24);
+                    Vec::push(&mut path_segs, String::clone(&lex));
+                    
+                    while String::eq_cstr(&next.lexeme, "::") {
+                        Parser::advance(p); // consume '::'
+                        let seg_tok: Token = Parser::advance(p);
+                        Vec::push(&mut path_segs, seg_tok.lexeme);
+                        next = Parser::peek(p);
+                    }
+                    
+                    let seg_len: usize = Vec::len(&path_segs);
+                    let mut ns: String = String::new("");
+                    let mut s: usize = 0;
+                    while s < seg_len - 1 {
+                        let seg: String = Vec::get_String(&path_segs, s);
+                        String::push_str(&mut ns, &seg);
+                        if s + 2 < seg_len {
+                            String::push_str(&mut ns, &String::new("::"));
+                        }
+                        s += 1;
+                    }
+                    let member: String = Vec::get_String(&path_segs, seg_len - 1);
+                    
+                    let expr: Expr = Expr::Path(ns, member);
                     Vec::push(&mut (*arena).exprs, expr);
                     let idx: usize = Vec::len(&(*arena).exprs);
                     return idx;
@@ -1121,7 +1147,12 @@ impl Parser {
     @unsafe
     fn parse_func_decl(p: &mut Parser, arena: &mut AstArena, is_safe: I32) -> usize {
         let name_tok: Token = Parser::advance(p);
-        let fn_name: String = String::clone(&name_tok.lexeme);
+        let mut fn_name: String = String::new("");
+        if String::len((*p).current_namespace) > 0 {
+            String::push_str(&mut fn_name, &(*p).current_namespace);
+            String::push_str(&mut fn_name, &String::new("::"));
+        }
+        String::push_str(&mut fn_name, &name_tok.lexeme);
         let line: usize = name_tok.line;
         let col: usize = name_tok.col;
 
@@ -1253,7 +1284,12 @@ impl Parser {
         if String::eq_cstr(&lex, "struct") {
             Parser::advance(p);
             let name_tok: Token = Parser::advance(p);
-            let s_name: String = String::clone(&name_tok.lexeme);
+            let mut s_name: String = String::new("");
+            if String::len((*p).current_namespace) > 0 {
+                String::push_str(&mut s_name, &(*p).current_namespace);
+                String::push_str(&mut s_name, &String::new("::"));
+            }
+            String::push_str(&mut s_name, &name_tok.lexeme);
             Parser::expect_token(p, &String::new("{"));
 
             let field_start: usize = Vec::len(&(*arena).fields);
@@ -1327,7 +1363,18 @@ impl Parser {
         // impl block
         if String::eq_cstr(&lex, "impl") {
             Parser::advance(p);
-            let _type_name: Token = Parser::advance(p);
+            let type_name_tok: Token = Parser::advance(p);
+            
+            // Build temporary namespace for the impl methods
+            let old_ns: String = String::clone(&(*p).current_namespace);
+            let mut new_ns: String = String::new("");
+            if String::len((*p).current_namespace) > 0 {
+                String::push_str(&mut new_ns, &(*p).current_namespace);
+                String::push_str(&mut new_ns, &String::new("::"));
+            }
+            String::push_str(&mut new_ns, &type_name_tok.lexeme);
+            (*p).current_namespace = new_ns;
+            
             Parser::expect_token(p, &String::new("{"));
 
             let mut parsing_impl: bool = true;
@@ -1354,20 +1401,16 @@ impl Parser {
                 }
             }
             Parser::expect_token(p, &String::new("}"));
+            
+            // Restore namespace
+            (*p).current_namespace = old_ns;
             return true;
         }
 
-        // import declaration — skip for bootstrap
+        // import declaration
         if String::eq_cstr(&lex, "import") {
             Parser::advance(p);
-            // Skip until ;
-            let mut skip_import: bool = true;
-            while skip_import {
-                let t: Token = Parser::advance(p);
-                if String::eq_cstr(&t.lexeme, ";") {
-                    skip_import = false;
-                }
-            }
+            Parser::parse_import(p, arena);
             return true;
         }
 
@@ -1382,6 +1425,97 @@ impl Parser {
         println("'");
         Parser::advance(p);
         return true;
+    }
+
+    @unsafe
+    fn parse_import(p: &mut Parser, arena: &mut AstArena) {
+        let mut segments: Vec = Vec::new(24);
+        let mut parsing_path: bool = true;
+        
+        while parsing_path {
+            let tok: Token = Parser::peek(p);
+            if String::eq_cstr(&tok.lexeme, ";") {
+                parsing_path = false;
+                Parser::advance(p); // consume ';'
+            } else if String::eq_cstr(&tok.lexeme, ".") {
+                Parser::advance(p); // consume '.'
+            } else {
+                let seg_tok: Token = Parser::advance(p);
+                Vec::push(&mut segments, seg_tok.lexeme);
+            }
+        }
+        
+        let seg_len: usize = Vec::len(&segments);
+        if seg_len == 0 {
+            return;
+        }
+        
+        let mut mod_name: String = String::new("");
+        let mut file_path: String = String::new("self_hosted/");
+        let first_seg: String = Vec::get_String(&segments, 0);
+        
+        let mut s: usize = 0;
+        while s < seg_len {
+            let seg: String = Vec::get_String(&segments, s);
+            String::push_str(&mut mod_name, &seg);
+            if s + 1 < seg_len {
+                String::push_str(&mut mod_name, &String::new("::"));
+            }
+            
+            String::push_str(&mut file_path, &seg);
+            if s + 1 < seg_len {
+                String::push_str(&mut file_path, &String::new("/"));
+            }
+            s += 1;
+        }
+        String::push_str(&mut file_path, &String::new(".ysu"));
+
+        
+        let mut already_imported: bool = false;
+        let mut i: usize = 0;
+        let imp_len: usize = Vec::len(&(*p).imported_modules);
+        while i < imp_len {
+            let val: String = Vec::get_String(&(*p).imported_modules, i);
+            if String::eq(&val, &mod_name) {
+                already_imported = true;
+            }
+            i += 1;
+        }
+        
+        if already_imported {
+            return;
+        }
+        
+        Vec::push(&mut (*p).imported_modules, mod_name);
+        
+        let content: String = File::read_to_string(&file_path);
+        if String::len(content) == 0 {
+            return;
+        }
+        
+        let mut lexer_obj: Lexer = Lexer::new(&content);
+        let tokens: Vec = Lexer::tokenize(&mut lexer_obj);
+        let token_count: usize = Vec::len(&tokens);
+        
+        let mut sub_parser: Parser = Parser::new(tokens, token_count);
+        sub_parser.imported_modules = (*p).imported_modules;
+        
+        let mut use_ns: bool = false;
+        if String::eq_cstr(&first_seg, "std") {
+            use_ns = true;
+        } else if seg_len > 1 {
+            use_ns = true;
+        }
+        
+        if use_ns {
+            sub_parser.current_namespace = String::clone(&mod_name);
+        } else {
+            sub_parser.current_namespace = String::new("");
+        }
+        
+        Parser::parse_program(&mut sub_parser, arena);
+        
+        (*p).imported_modules = sub_parser.imported_modules;
     }
 
     @unsafe

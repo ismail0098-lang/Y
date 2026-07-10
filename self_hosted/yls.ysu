@@ -1,0 +1,801 @@
+// ============================================================
+//  Y Language Server (yls) Daemon Wrapper
+//  self_hosted/yls.ysu
+// ============================================================
+
+import lib;
+import lexer;
+
+struct HardwareProfile {
+    gpu_name: String,
+    hmma_f16_latency_cycles: F64,
+    smem_latency_cycles: F64,
+    cp_async_latency_cycles: F64,
+    bar_sync_latency_cycles: F64,
+    fma_latency_cycles: F64,
+    mem_latency_cycles: I64,
+    thread_scheduling_cost_cycles: I64
+}
+
+struct Yls {
+    dummy: bool
+}
+
+impl Yls {
+    @unsafe
+    fn trim(s: &String) -> String {
+        let len: usize = String::len(s);
+        let mut start: usize = 0;
+        while start < len {
+            let ch: char = String::char_at(s, start);
+            if ch != ' ' {
+                if ch != '\t' {
+                    break;
+                }
+            }
+            start += 1;
+        }
+        let mut end: usize = len;
+        while end > start {
+            let ch: char = String::char_at(s, end - 1);
+            if ch != ' ' {
+                if ch != '\t' {
+                    break;
+                }
+            }
+            end -= 1;
+        }
+        let mut res: String = String::new("");
+        let mut i: usize = start;
+        while i < end {
+            String::push(&mut res, String::char_at(s, i));
+            i += 1;
+        }
+        return res;
+    }
+
+    @unsafe
+    fn get_zero() -> I64 {
+        return 0;
+    }
+
+    @unsafe
+    fn get_zero_usize() -> usize {
+        return 0;
+    }
+
+    @unsafe
+    fn parse_f64(s: &String) -> F64 {
+        let trimmed: String = Yls::trim(s);
+        let len: usize = String::len(&trimmed);
+        let mut val: F64 = 0.0;
+        let mut i: usize = 0;
+        let mut decimal_part: bool = false;
+        let mut divisor: F64 = 1.0;
+        let mut is_neg: bool = false;
+        if len > 0 {
+            let first: char = String::char_at(&trimmed, 0);
+            if first == '-' {
+                is_neg = true;
+                i += 1;
+            }
+        }
+        while i < len {
+            let ch: char = String::char_at(&trimmed, i);
+            if ch == '.' {
+                decimal_part = true;
+            } else {
+                let mut digit: F64 = 0.0;
+                if ch == '0' { digit = 0.0; }
+                else if ch == '1' { digit = 1.0; }
+                else if ch == '2' { digit = 2.0; }
+                else if ch == '3' { digit = 3.0; }
+                else if ch == '4' { digit = 4.0; }
+                else if ch == '5' { digit = 5.0; }
+                else if ch == '6' { digit = 6.0; }
+                else if ch == '7' { digit = 7.0; }
+                else if ch == '8' { digit = 8.0; }
+                else if ch == '9' { digit = 9.0; }
+                
+                if decimal_part {
+                    divisor = divisor * 10.0;
+                    val = val + (digit / divisor);
+                } else {
+                    val = val * 10.0 + digit;
+                }
+            }
+            i += 1;
+        }
+        if is_neg {
+            return 0.0 - val;
+        }
+        return val;
+    }
+
+    @unsafe
+    fn parse_i64(s: &String) -> I64 {
+        let trimmed: String = Yls::trim(s);
+        let len: usize = String::len(&trimmed);
+        let mut val: I64 = Yls::get_zero();
+        let mut i: usize = 0;
+        let mut is_neg: bool = false;
+        if len > 0 {
+            let first: char = String::char_at(&trimmed, 0);
+            if first == '-' {
+                is_neg = true;
+                i += 1;
+            }
+        }
+        while i < len {
+            let ch: char = String::char_at(&trimmed, i);
+            @bounds(0, 9)
+            let mut digit: I64 = 0;
+            if ch == '0' { digit = 0; }
+            else if ch == '1' { digit = 1; }
+            else if ch == '2' { digit = 2; }
+            else if ch == '3' { digit = 3; }
+            else if ch == '4' { digit = 4; }
+            else if ch == '5' { digit = 5; }
+            else if ch == '6' { digit = 6; }
+            else if ch == '7' { digit = 7; }
+            else if ch == '8' { digit = 8; }
+            else if ch == '9' { digit = 9; }
+            val = val * 10 + digit;
+            i += 1;
+        }
+        if is_neg {
+            return 0 - val;
+        }
+        return val;
+    }
+
+    @unsafe
+    fn load_profile() -> HardwareProfile {
+        let profile_path: String = String::new(".ysu_hw_profile");
+        let contents: String = File::read_to_string(&profile_path);
+        
+        let mut profile: HardwareProfile;
+        profile.gpu_name = String::new("Nvidia RTX 4090 (Ada Lovelace)");
+        profile.hmma_f16_latency_cycles = 42.0;
+        profile.smem_latency_cycles = 28.0;
+        profile.cp_async_latency_cycles = 200.0;
+        profile.bar_sync_latency_cycles = 35.0;
+        profile.fma_latency_cycles = 4.0;
+        profile.mem_latency_cycles = 120;
+        profile.thread_scheduling_cost_cycles = 2000;
+        
+        let len: usize = String::len(&contents);
+        if len == 0 {
+            return profile;
+        }
+        
+        let mut i: usize = 0;
+        while i < len {
+            let mut line: String = String::new("");
+            while i < len {
+                let ch: char = String::char_at(&contents, i);
+                i += 1;
+                if ch == '\n' {
+                    break;
+                }
+                if ch != '\r' {
+                    String::push(&mut line, ch);
+                }
+            }
+            
+            let line_len: usize = String::len(&line);
+            let mut eq_pos: usize = 0;
+            let mut found_eq: bool = false;
+            while eq_pos < line_len {
+                if String::char_at(&line, eq_pos) == '=' {
+                    found_eq = true;
+                    break;
+                }
+                eq_pos += 1;
+            }
+            
+            if found_eq {
+                let mut key: String = String::new("");
+                let mut k: usize = 0;
+                while k < eq_pos {
+                    String::push(&mut key, String::char_at(&line, k));
+                    k += 1;
+                }
+                
+                let mut val_str: String = String::new("");
+                let mut v: usize = eq_pos + 1;
+                while v < line_len {
+                    String::push(&mut val_str, String::char_at(&line, v));
+                    v += 1;
+                }
+                
+                let trimmed_key: String = Yls::trim(&key);
+                let trimmed_val: String = Yls::trim(&val_str);
+                
+                if String::eq_cstr(&trimmed_key, "GPU_NAME") { profile.gpu_name = String::clone(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "HMMA_F16_LATENCY") { profile.hmma_f16_latency_cycles = Yls::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "SMEM_LATENCY") { profile.smem_latency_cycles = Yls::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "CP_ASYNC_LATENCY") { profile.cp_async_latency_cycles = Yls::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "BAR_SYNC_LATENCY") { profile.bar_sync_latency_cycles = Yls::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "FMA_LATENCY") { profile.fma_latency_cycles = Yls::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "MEM_CYCLES") { profile.mem_latency_cycles = Yls::parse_i64(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "THREAD_SCHEDULING_COST") { profile.thread_scheduling_cost_cycles = Yls::parse_i64(&trimmed_val); }
+            }
+        }
+        return profile;
+    }
+
+    @unsafe
+    fn append_int(out: &mut String, val: I64) {
+        if val == 0 {
+            String::push(out, '0');
+            return;
+        }
+        let mut num: I64 = val;
+        if num < 0 {
+            String::push(out, '-');
+            num = 0 - num;
+        }
+        let mut digits: Vec = Vec::new(1);
+        while num > 0 {
+            let d: I64 = num % 10;
+            let mut ch: char = '0';
+            if d == 0 { ch = '0'; }
+            else if d == 1 { ch = '1'; }
+            else if d == 2 { ch = '2'; }
+            else if d == 3 { ch = '3'; }
+            else if d == 4 { ch = '4'; }
+            else if d == 5 { ch = '5'; }
+            else if d == 6 { ch = '6'; }
+            else if d == 7 { ch = '7'; }
+            else if d == 8 { ch = '8'; }
+            else if d == 9 { ch = '9'; }
+            Vec::push(&mut digits, &ch);
+            num = num / 10;
+        }
+        let len: usize = Vec::len(&digits);
+        let mut j: usize = len;
+        while j > 0 {
+            j -= 1;
+            let ch: char = Vec::get_char(&digits, j);
+            String::push(out, ch);
+        }
+        Vec::free(&mut digits);
+    }
+
+    @unsafe
+    fn float_to_str(val: F64, out: &mut String) {
+        let mut f: F64 = 0.0;
+        let mut i: I64 = 0;
+        let mut matched: bool = false;
+        while i < 2000 {
+            if val == f {
+                Yls::append_int(out, i);
+                String::push_str(out, &String::new(".0"));
+                matched = true;
+                break;
+            }
+            if val == f + 0.5 {
+                Yls::append_int(out, i);
+                String::push_str(out, &String::new(".5"));
+                matched = true;
+                break;
+            }
+            f = f + 1.0;
+            i += 1;
+        }
+        if matched == false {
+            let mut best_i: I64 = 0;
+            let mut best_diff: F64 = 999999.0;
+            let mut cur_f: F64 = 0.0;
+            let mut j: I64 = 0;
+            while j < 2000 {
+                let mut d: F64 = val - cur_f;
+                if d < 0.0 { d = 0.0 - d; }
+                if d < best_diff {
+                    best_diff = d;
+                    best_i = j;
+                }
+                cur_f = cur_f + 1.0;
+                j += 1;
+            }
+            Yls::append_int(out, best_i);
+            String::push_str(out, &String::new(".0"));
+        }
+    }
+
+    @unsafe
+    fn append_escaped_json(dest: &mut String, src: &String) {
+        let len: usize = String::len(src);
+        let mut i: usize = 0;
+        while i < len {
+            let ch: char = String::char_at(src, i);
+            if ch == '"' {
+                String::push(dest, '\\');
+                String::push(dest, '"');
+            } else if ch == '\\' {
+                String::push(dest, '\\');
+                String::push(dest, '\\');
+            } else if ch == '\n' {
+                String::push(dest, '\\');
+                String::push(dest, 'n');
+            } else if ch == '\r' {
+                // skip
+            } else {
+                String::push(dest, ch);
+            }
+            i += 1;
+        }
+    }
+
+    @unsafe
+    fn i32_to_char(val: I32) -> char {
+        return val;
+    }
+
+    @unsafe
+    fn read_char() -> char {
+        let c: I32 = getchar();
+        if c < 0 {
+            return '\0';
+        }
+        return Yls::i32_to_char(c);
+    }
+
+    @unsafe
+    fn read_lsp_message(out_body: &mut String) -> bool {
+        let mut header: String = String::new("");
+        let mut content_len: usize = Yls::get_zero_usize();
+        
+        let mut consecutive_newlines: usize = 0;
+        let mut loop_limit: usize = 0;
+        while loop_limit < 4096 {
+            let c: char = Yls::read_char();
+            if c == '\0' {
+                return false;
+            }
+            String::push(&mut header, c);
+            
+            let hlen: usize = String::len(&header);
+            if hlen >= 4 {
+                let c1: char = String::char_at(&header, hlen - 4);
+                let c2: char = String::char_at(&header, hlen - 3);
+                let c3: char = String::char_at(&header, hlen - 2);
+                let c4: char = String::char_at(&header, hlen - 1);
+                if c1 == '\r' {
+                    if c2 == '\n' {
+                        if c3 == '\r' {
+                            if c4 == '\n' {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            loop_limit += 1;
+        }
+        
+        let hlen: usize = String::len(&header);
+        let mut i: usize = 0;
+        while i < hlen {
+            let mut match_len: bool = true;
+            let prefix: String = String::new("Content-Length:");
+            let plen: usize = String::len(&prefix);
+            if i + plen <= hlen {
+                let mut j: usize = 0;
+                while j < plen {
+                    if String::char_at(&header, i + j) != String::char_at(&prefix, j) {
+                        match_len = false;
+                        break;
+                    }
+                    j += 1;
+                }
+            } else {
+                match_len = false;
+            }
+            
+            if match_len {
+                let mut val_idx: usize = i + plen;
+                while val_idx < hlen {
+                    let ch: char = String::char_at(&header, val_idx);
+                    if ch != ' ' {
+                        if ch != ':' {
+                            break;
+                        }
+                    }
+                    val_idx += 1;
+                }
+                while val_idx < hlen {
+                    let ch: char = String::char_at(&header, val_idx);
+                    if ch >= '0' {
+                        if ch <= '9' {
+                            @bounds(0, 9)
+                            let mut digit: usize = 0;
+                            if ch == '0' { digit = 0; }
+                            else if ch == '1' { digit = 1; }
+                            else if ch == '2' { digit = 2; }
+                            else if ch == '3' { digit = 3; }
+                            else if ch == '4' { digit = 4; }
+                            else if ch == '5' { digit = 5; }
+                            else if ch == '6' { digit = 6; }
+                            else if ch == '7' { digit = 7; }
+                            else if ch == '8' { digit = 8; }
+                            else if ch == '9' { digit = 9; }
+                            content_len = content_len * 10 + digit;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                    val_idx += 1;
+                }
+                break;
+            }
+            i += 1;
+        }
+        
+        if content_len == 0 {
+            return false;
+        }
+        
+        let mut b: usize = 0;
+        while b < content_len {
+            let c: char = Yls::read_char();
+            if c == '\0' {
+                return false;
+            }
+            String::push(out_body, c);
+            b += 1;
+        }
+        return true;
+    }
+
+    @unsafe
+    fn send_lsp_response(id_str: &String, result_body: &String) {
+        let mut response: String = String::new("{\"jsonrpc\":\"2.0\",");
+        
+        if String::len(id_str) > 0 {
+            String::push_str(&mut response, &String::new("\"id\":"));
+            String::push_str(&mut response, id_str);
+            String::push_str(&mut response, &String::new(","));
+        }
+        
+        String::push_str(&mut response, &String::new("\"result\":"));
+        String::push_str(&mut response, result_body);
+        String::push_str(&mut response, &String::new("}"));
+        
+        let res_len: usize = String::len(&response);
+        
+        print("Content-Length: ");
+        print_int(res_len);
+        print("\r\n\r\n");
+        print(&response);
+        fflush(0);
+    }
+
+    @unsafe
+    fn find_json_field(json: &String, field: &char, out_val: &mut String) -> bool {
+        let json_len: usize = String::len(json);
+        let f_str: String = String::new(field);
+        let flen: usize = String::len(&f_str);
+        
+        let mut i: usize = 0;
+        while i < json_len {
+            let mut matched: bool = true;
+            if i + flen <= json_len {
+                let mut j: usize = 0;
+                while j < flen {
+                    if String::char_at(json, i + j) != String::char_at(&f_str, j) {
+                        matched = false;
+                        break;
+                    }
+                    j += 1;
+                }
+            } else {
+                matched = false;
+            }
+            
+            if matched {
+                let mut idx: usize = i + flen;
+                while idx < json_len {
+                    let ch: char = String::char_at(json, idx);
+                    if ch == ':' {
+                        idx += 1;
+                        break;
+                    }
+                    idx += 1;
+                }
+                
+                while idx < json_len {
+                    let ch: char = String::char_at(json, idx);
+                    if ch != ' ' {
+                        break;
+                    }
+                    idx += 1;
+                }
+                
+                let first_ch: char = String::char_at(json, idx);
+                if first_ch == '"' {
+                    idx += 1;
+                    while idx < json_len {
+                        let ch: char = String::char_at(json, idx);
+                        if ch == '"' {
+                            break;
+                        }
+                        String::push(out_val, ch);
+                        idx += 1;
+                    }
+                } else {
+                    while idx < json_len {
+                        let ch: char = String::char_at(json, idx);
+                        if ch == ',' { break; }
+                        if ch == '}' { break; }
+                        if ch == ']' { break; }
+                        if ch == '\n' { break; }
+                        if ch == '\r' { break; }
+                        if ch != ' ' {
+                            String::push(out_val, ch);
+                        }
+                        idx += 1;
+                    }
+                }
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
+    @unsafe
+    fn normalize_uri(uri: &String, out_path: &mut String) {
+        let ulen: usize = String::len(uri);
+        let mut idx: usize = 0;
+        let prefix: String = String::new("file://");
+        let plen: usize = String::len(&prefix);
+        
+        let mut has_prefix: bool = true;
+        if ulen >= plen {
+            let mut j: usize = 0;
+            while j < plen {
+                if String::char_at(uri, j) != String::char_at(&prefix, j) {
+                    has_prefix = false;
+                    break;
+                }
+                j += 1;
+            }
+        } else {
+            has_prefix = false;
+        }
+        
+        if has_prefix {
+            idx = plen;
+        }
+        
+        if idx < ulen {
+            let first_ch: char = String::char_at(uri, idx);
+            if first_ch == '/' {
+                if idx + 2 < ulen {
+                    let third_ch: char = String::char_at(uri, idx + 2);
+                    if third_ch == ':' {
+                        idx += 1;
+                    }
+                }
+            }
+        }
+        
+        while idx < ulen {
+            String::push(out_path, String::char_at(uri, idx));
+            idx += 1;
+        }
+    }
+
+    @unsafe
+    fn get_Token(v: &Vec, i: usize) -> Token {
+        let p: &Token = yvec_get(v, i);
+        return *p;
+    }
+}
+
+@unsafe
+fn main() {
+    let profile: HardwareProfile = Yls::load_profile();
+    
+    let mut running: bool = true;
+    while running {
+        let mut body: String = String::new("");
+        let ok: bool = Yls::read_lsp_message(&mut body);
+        if ok == false {
+            running = false;
+            break;
+        }
+        
+        let mut id_str: String = String::new("");
+        let mut method: String = String::new("");
+        Yls::find_json_field(&body, "\"id\"", &mut id_str);
+        Yls::find_json_field(&body, "\"method\"", &mut method);
+        
+        if String::eq_cstr(&method, "initialize") {
+            let res: String = String::new("{\"capabilities\":{\"hoverProvider\":true}}");
+            Yls::send_lsp_response(&id_str, &res);
+        }
+        else if String::eq_cstr(&method, "textDocument/hover") {
+            let mut line_str: String = String::new("");
+            let mut char_str: String = String::new("");
+            let mut uri_str: String = String::new("");
+            
+            Yls::find_json_field(&body, "\"line\"", &mut line_str);
+            Yls::find_json_field(&body, "\"character\"", &mut char_str);
+            Yls::find_json_field(&body, "\"uri\"", &mut uri_str);
+            
+            let hover_line: usize = Yls::parse_i64(&line_str) + 1;
+            let hover_col: usize = Yls::parse_i64(&char_str) + 1;
+            
+            let mut file_path: String = String::new("");
+            Yls::normalize_uri(&uri_str, &mut file_path);
+            
+            let source: String = File::read_to_string(&file_path);
+            let mut lexer: Lexer = Lexer::new(&source);
+            let tokens: Vec = Lexer::tokenize(&mut lexer);
+            let token_count: usize = Vec::len(&tokens);
+            
+            let mut hovered_tok: Token;
+            let mut found_hovered: bool = false;
+            
+            let mut t: usize = 0;
+            while t < token_count {
+                let tok: Token = Yls::get_Token(&tokens, t);
+                if tok.line == hover_line {
+                    let tok_len: usize = String::len(&tok.lexeme);
+                    if hover_col >= tok.col {
+                        if hover_col <= tok.col + tok_len {
+                            hovered_tok = tok;
+                            found_hovered = true;
+                            break;
+                        }
+                    }
+                }
+                t += 1;
+            }
+            
+            if found_hovered {
+                let mut markdown: String = String::new("");
+                
+                let is_for: bool = String::eq_cstr(&hovered_tok.lexeme, "for");
+                let is_while: bool = String::eq_cstr(&hovered_tok.lexeme, "while");
+                let is_matmul: bool = String::eq_cstr(&hovered_tok.lexeme, "matmul");
+                let is_mma_sync: bool = String::eq_cstr(&hovered_tok.lexeme, "mma_sync");
+                let is_cp_async: bool = String::eq_cstr(&hovered_tok.lexeme, "cp_async");
+                let is_barrier: bool = String::eq_cstr(&hovered_tok.lexeme, "barrier");
+                let is_sync: bool = String::eq_cstr(&hovered_tok.lexeme, "sync");
+                let is_ldmatrix: bool = String::eq_cstr(&hovered_tok.lexeme, "ldmatrix");
+                let is_smem: bool = String::eq_cstr(&hovered_tok.lexeme, "smem");
+                let is_global: bool = String::eq_cstr(&hovered_tok.lexeme, "global");
+                
+                if is_for {
+                    String::push_str(&mut markdown, &String::new("### GPU Loop Performance Profile\n"));
+                    String::push_str(&mut markdown, &String::new("- **Control Flow Overhead (Uniform):** "));
+                    Yls::float_to_str(profile.branch_uniform_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Divergence Penalty:** "));
+                    Yls::float_to_str(profile.branch_divergent_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                    String::push_str(&mut markdown, &String::new("\n\n*Optimizing Tips:* Keep loops uniform across the warp. Use `@divergence(uniform)` to hint uniform execution."));
+                }
+                else if is_while {
+                    String::push_str(&mut markdown, &String::new("### GPU Loop Performance Profile\n"));
+                    String::push_str(&mut markdown, &String::new("- **Control Flow Overhead (Uniform):** "));
+                    Yls::float_to_str(profile.branch_uniform_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Divergence Penalty:** "));
+                    Yls::float_to_str(profile.branch_divergent_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                }
+                else if is_matmul {
+                    String::push_str(&mut markdown, &String::new("### Tensor Core Parallel Block Latency\n"));
+                    String::push_str(&mut markdown, &String::new("- **Instruction:** Tensor Core Matrix-Multiply Accumulate\n"));
+                    String::push_str(&mut markdown, &String::new("- **HMMA F16 Latency:** "));
+                    Yls::float_to_str(profile.hmma_f16_latency_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles / warp\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                }
+                else if is_mma_sync {
+                    String::push_str(&mut markdown, &String::new("### Tensor Core Parallel Block Latency\n"));
+                    String::push_str(&mut markdown, &String::new("- **Instruction:** mma_sync\n"));
+                    String::push_str(&mut markdown, &String::new("- **HMMA F16 Latency:** "));
+                    Yls::float_to_str(profile.hmma_f16_latency_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles / warp\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                }
+                else if is_cp_async {
+                    String::push_str(&mut markdown, &String::new("### Global-to-Shared Asynchronous Transfer\n"));
+                    String::push_str(&mut markdown, &String::new("- **Instruction:** cp_async\n"));
+                    String::push_str(&mut markdown, &String::new("- **Latency:** "));
+                    Yls::float_to_str(profile.cp_async_latency_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                    String::push_str(&mut markdown, &String::new("\n\n*Optimizing Tips:* Bypasses intermediate register files to reduce occupancy pressure. Ensure you await with `pipe.wait` and synchronize with `barrier::sync`."));
+                }
+                else if is_barrier {
+                    String::push_str(&mut markdown, &String::new("### Threadgroup Pipeline Barrier Sync\n"));
+                    String::push_str(&mut markdown, &String::new("- **Instruction:** barrier::sync()\n"));
+                    String::push_str(&mut markdown, &String::new("- **Latency:** "));
+                    Yls::float_to_str(profile.bar_sync_latency_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                }
+                else if is_sync {
+                    String::push_str(&mut markdown, &String::new("### Threadgroup Pipeline Barrier Sync\n"));
+                    String::push_str(&mut markdown, &String::new("- **Instruction:** barrier::sync()\n"));
+                    String::push_str(&mut markdown, &String::new("- **Latency:** "));
+                    Yls::float_to_str(profile.bar_sync_latency_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                }
+                else if is_ldmatrix {
+                    String::push_str(&mut markdown, &String::new("### Shared Memory Access Latency\n"));
+                    String::push_str(&mut markdown, &String::new("- **Instruction:** ldmatrix\n"));
+                    String::push_str(&mut markdown, &String::new("- **Latency:** "));
+                    Yls::float_to_str(profile.smem_latency_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                }
+                else if is_smem {
+                    String::push_str(&mut markdown, &String::new("### Shared Memory Access Latency\n"));
+                    String::push_str(&mut markdown, &String::new("- **Latency:** "));
+                    Yls::float_to_str(profile.smem_latency_cycles, &mut markdown);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                }
+                else if is_global {
+                    String::push_str(&mut markdown, &String::new("### Global VRAM Access Latency\n"));
+                    String::push_str(&mut markdown, &String::new("- **Base VRAM Latency:** "));
+                    Yls::append_int(&mut markdown, profile.mem_latency_cycles);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local Target GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                }
+                else {
+                    String::push_str(&mut markdown, &String::new("### Hovered Symbol: `"));
+                    String::push_str(&mut markdown, &hovered_tok.lexeme);
+                    String::push_str(&mut markdown, &String::new("`\n"));
+                    String::push_str(&mut markdown, &String::new("- **Local JIT Sentinel Profile GPU:** "));
+                    String::push_str(&mut markdown, &profile.gpu_name);
+                    String::push_str(&mut markdown, &String::new("\n- **Thread Scheduling context switch cost:** "));
+                    Yls::append_int(&mut markdown, profile.thread_scheduling_cost_cycles);
+                    String::push_str(&mut markdown, &String::new(" cycles\n"));
+                }
+                
+                let mut escaped_val: String = String::new("");
+                Yls::append_escaped_json(&mut escaped_val, &markdown);
+                
+                let mut res: String = String::new("{\"contents\":{\"kind\":\"markdown\",\"value\":\"");
+                String::push_str(&mut res, &escaped_val);
+                String::push_str(&mut res, &String::new("\"}}"));
+                Yls::send_lsp_response(&id_str, &res);
+            } else {
+                let res: String = String::new("null");
+                Yls::send_lsp_response(&id_str, &res);
+            }
+        }
+        else if String::eq_cstr(&method, "shutdown") {
+            let res: String = String::new("null");
+            Yls::send_lsp_response(&id_str, &res);
+            running = false;
+        }
+        else if String::eq_cstr(&method, "exit") {
+            running = false;
+        }
+    }
+}

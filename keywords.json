@@ -21,7 +21,19 @@
     "emit",
     "load",
     "store",
-    "barrier"
+    "barrier",
+    "struct",
+    "enum",
+    "fn",
+    "match",
+    "safe",
+    "chisel",
+    "import",
+    "while",
+    "impl",
+    "self",
+    "break",
+    "func"
   ],
   "memory_space_types": [
     "GlobalMemory",
@@ -112,7 +124,17 @@
     "@align",
     "@ZeroDrift",
     "@bounds",
-    "@invariant"
+    "@invariant",
+    "@unsafe",
+    "@gpu_uncached",
+    "@atomic",
+    "@static_assert",
+    "@tile",
+    "@ghost",
+    "@hdl_emit",
+    "@prefetch_stride",
+    "@clock_domain",
+    "@divergence"
   ],
   "operators": [
     "->",

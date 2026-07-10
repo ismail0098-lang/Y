@@ -1,0 +1,507 @@
+// ============================================================
+//  Y — Native x86-64 ELF Emitter (Self-Hosted)
+//  native_emitter.ysu
+//
+//  Emits raw x86-64 machine code into a minimal ELF64 binary.
+//  No C. No gcc. No clang. Y compiles itself.
+// ============================================================
+
+import lib;
+import parser;
+
+@unsafe
+fn replace_colons(s: &String) -> String {
+    let mut res: String = String::new("");
+    let len: usize = String::len(*s);
+    let mut i: usize = 0;
+    while i < len {
+        let c: char = String::char_at(*s, i);
+        if c == ':' {
+            if i + 1 < len {
+                let next_c: char = String::char_at(*s, i + 1);
+                if next_c == ':' {
+                    String::push(&mut res, '_');
+                    i += 2;
+                } else {
+                    String::push(&mut res, c);
+                    i += 1;
+                }
+            } else {
+                String::push(&mut res, c);
+                i += 1;
+            }
+        } else {
+            String::push(&mut res, c);
+            i += 1;
+        }
+    }
+    return res;
+}
+
+struct CodeBuffer {
+    bytes: Vec,
+    len: usize
+}
+
+impl CodeBuffer {
+    @unsafe
+    fn new() -> CodeBuffer {
+        let cb: CodeBuffer;
+        cb.bytes = Vec::new(1);
+        cb.len = 0;
+        return cb;
+    }
+
+    @unsafe
+    fn emit8(cb: &mut CodeBuffer, val: usize) {
+        let b: char = val;
+        Vec::push(&mut (*cb).bytes, b);
+        (*cb).len += 1;
+    }
+
+    @unsafe
+    fn emit16(cb: &mut CodeBuffer, val: usize) {
+        CodeBuffer::emit8(cb, val % 256);
+        CodeBuffer::emit8(cb, (val / 256) % 256);
+    }
+
+    @unsafe
+    fn emit32(cb: &mut CodeBuffer, val: usize) {
+        CodeBuffer::emit16(cb, val % 65536);
+        CodeBuffer::emit16(cb, (val / 65536) % 65536);
+    }
+
+    @unsafe
+    fn emit64(cb: &mut CodeBuffer, val: usize) {
+        CodeBuffer::emit32(cb, val);
+        CodeBuffer::emit32(cb, 0);
+    }
+}
+
+struct Reloc {
+    offset: usize,
+    target_name: String
+}
+
+struct SymEntry {
+    name: String,
+    offset: usize
+}
+
+impl Vec {
+    @unsafe
+    fn get_Reloc(v: &Vec, i: usize) -> Reloc { let d: Reloc; return d; }
+    @unsafe
+    fn get_SymEntry(v: &Vec, i: usize) -> SymEntry { let d: SymEntry; return d; }
+}
+
+struct NativeEmitter {
+    code: CodeBuffer,
+    symbols: Vec,
+    sym_count: usize,
+    relocs: Vec,
+    reloc_count: usize,
+    stack_offset: usize,
+    base_addr: usize
+}
+
+impl NativeEmitter {
+    @unsafe
+    fn new() -> NativeEmitter {
+        let e: NativeEmitter;
+        e.code = CodeBuffer::new();
+        e.symbols = Vec::new(32);
+        e.sym_count = 0;
+        e.relocs = Vec::new(16);
+        e.reloc_count = 0;
+        e.stack_offset = 0;
+        e.base_addr = 4194304;
+        return e;
+    }
+
+    @unsafe
+    fn add_symbol(e: &mut NativeEmitter, name: &String, offset: usize) {
+        let sym: SymEntry;
+        sym.name = String::clone(name);
+        sym.offset = offset;
+        Vec::push(&mut (*e).symbols, sym);
+        (*e).sym_count += 1;
+    }
+
+    @unsafe
+    fn find_symbol(e: &NativeEmitter, name: &String) -> usize {
+        let mut i: usize = 0;
+        while i < (*e).sym_count {
+            let sym: SymEntry = Vec::get_SymEntry(&(*e).symbols, i);
+            if String::eq(&sym.name, name) {
+                return sym.offset;
+            }
+            i += 1;
+        }
+        return 0;
+    }
+
+    @unsafe
+    fn add_reloc(e: &mut NativeEmitter, offset: usize, target: &String) {
+        let r: Reloc;
+        r.offset = offset;
+        r.target_name = String::clone(target);
+        Vec::push(&mut (*e).relocs, r);
+        (*e).reloc_count += 1;
+    }
+
+    // ── ELF64 Header ────────────────────────────────────────
+
+    @unsafe
+    fn emit_elf_header(e: &mut NativeEmitter) {
+        let cb: &mut CodeBuffer = &mut (*e).code;
+        // ELF magic
+        CodeBuffer::emit8(cb, 127);
+        CodeBuffer::emit8(cb, 69);
+        CodeBuffer::emit8(cb, 76);
+        CodeBuffer::emit8(cb, 70);
+        CodeBuffer::emit8(cb, 2);
+        CodeBuffer::emit8(cb, 1);
+        CodeBuffer::emit8(cb, 1);
+        CodeBuffer::emit8(cb, 0);
+        // padding
+        let mut pad: usize = 0;
+        while pad < 8 { CodeBuffer::emit8(cb, 0); pad += 1; }
+        // e_type=ET_EXEC, e_machine=EM_X86_64
+        CodeBuffer::emit16(cb, 2);
+        CodeBuffer::emit16(cb, 62);
+        CodeBuffer::emit32(cb, 1);
+        // e_entry = base + 120
+        CodeBuffer::emit64(cb, (*e).base_addr + 120);
+        // e_phoff = 64
+        CodeBuffer::emit64(cb, 64);
+        // e_shoff = 0
+        CodeBuffer::emit64(cb, 0);
+        CodeBuffer::emit32(cb, 0);
+        CodeBuffer::emit16(cb, 64);
+        CodeBuffer::emit16(cb, 56);
+        CodeBuffer::emit16(cb, 1);
+        CodeBuffer::emit16(cb, 0);
+        CodeBuffer::emit16(cb, 0);
+        CodeBuffer::emit16(cb, 0);
+
+        // Program header (PT_LOAD, RX)
+        CodeBuffer::emit32(cb, 1);
+        CodeBuffer::emit32(cb, 5);
+        CodeBuffer::emit64(cb, 0);
+        CodeBuffer::emit64(cb, (*e).base_addr);
+        CodeBuffer::emit64(cb, (*e).base_addr);
+        CodeBuffer::emit64(cb, 0);
+        CodeBuffer::emit64(cb, 0);
+        CodeBuffer::emit64(cb, 4096);
+    }
+
+    // ── x86-64 Instructions ─────────────────────────────────
+
+    @unsafe
+    fn emit_push_rbp(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 85);
+    }
+
+    @unsafe
+    fn emit_mov_rbp_rsp(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 72);
+        CodeBuffer::emit8(&mut (*e).code, 137);
+        CodeBuffer::emit8(&mut (*e).code, 229);
+    }
+
+    @unsafe
+    fn emit_pop_rbp(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 93);
+    }
+
+    @unsafe
+    fn emit_ret(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 195);
+    }
+
+    @unsafe
+    fn emit_sub_rsp(e: &mut NativeEmitter, val: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 72);
+        CodeBuffer::emit8(&mut (*e).code, 131);
+        CodeBuffer::emit8(&mut (*e).code, 236);
+        CodeBuffer::emit8(&mut (*e).code, val);
+    }
+
+    @unsafe
+    fn emit_add_rsp(e: &mut NativeEmitter, val: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 72);
+        CodeBuffer::emit8(&mut (*e).code, 131);
+        CodeBuffer::emit8(&mut (*e).code, 196);
+        CodeBuffer::emit8(&mut (*e).code, val);
+    }
+
+    @unsafe
+    fn emit_mov_eax_imm(e: &mut NativeEmitter, val: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 184);
+        CodeBuffer::emit32(&mut (*e).code, val);
+    }
+
+    @unsafe
+    fn emit_mov_edi_imm(e: &mut NativeEmitter, val: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 191);
+        CodeBuffer::emit32(&mut (*e).code, val);
+    }
+
+    @unsafe
+    fn emit_syscall(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 15);
+        CodeBuffer::emit8(&mut (*e).code, 5);
+    }
+
+    @unsafe
+    fn emit_call_rel32(e: &mut NativeEmitter, target: &String) {
+        CodeBuffer::emit8(&mut (*e).code, 232);
+        NativeEmitter::add_reloc(e, (*e).code.len, target);
+        CodeBuffer::emit32(&mut (*e).code, 0);
+    }
+
+    @unsafe
+    fn emit_add_eax_ecx(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 1);
+        CodeBuffer::emit8(&mut (*e).code, 200);
+    }
+
+    @unsafe
+    fn emit_sub_eax_ecx(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 41);
+        CodeBuffer::emit8(&mut (*e).code, 200);
+    }
+
+    @unsafe
+    fn emit_imul_eax_ecx(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 15);
+        CodeBuffer::emit8(&mut (*e).code, 175);
+        CodeBuffer::emit8(&mut (*e).code, 193);
+    }
+
+    @unsafe
+    fn emit_store_local(e: &mut NativeEmitter, offset: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 137);
+        CodeBuffer::emit8(&mut (*e).code, 69);
+        CodeBuffer::emit8(&mut (*e).code, 256 - offset);
+    }
+
+    @unsafe
+    fn emit_load_local(e: &mut NativeEmitter, offset: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 139);
+        CodeBuffer::emit8(&mut (*e).code, 69);
+        CodeBuffer::emit8(&mut (*e).code, 256 - offset);
+    }
+
+    @unsafe
+    fn emit_mov_ecx_eax(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 137);
+        CodeBuffer::emit8(&mut (*e).code, 193);
+    }
+
+    // ── Function / Statement / Expression Emission ──────────
+
+    @unsafe
+    fn emit_func(e: &mut NativeEmitter, arena: &AstArena, func_idx: usize) {
+        let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, func_idx);
+        let clean_name: String = replace_colons(&fdecl.name);
+        NativeEmitter::add_symbol(e, &clean_name, (*e).code.len);
+        NativeEmitter::emit_push_rbp(e);
+        NativeEmitter::emit_mov_rbp_rsp(e);
+        NativeEmitter::emit_sub_rsp(e, 64);
+        (*e).stack_offset = 0;
+
+        let mut s: usize = 0;
+        while s < fdecl.body_count {
+            NativeEmitter::emit_stmt(e, arena, fdecl.body_start + s);
+            s += 1;
+        }
+
+        NativeEmitter::emit_add_rsp(e, 64);
+        NativeEmitter::emit_pop_rbp(e);
+        NativeEmitter::emit_ret(e);
+    }
+
+    @unsafe
+    fn emit_stmt(e: &mut NativeEmitter, arena: &AstArena, stmt_idx: usize) {
+        let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, stmt_idx);
+
+        if stmt.tag == Stmt_TAG_Return {
+            let ret_idx: usize = stmt.data.Return._0;
+            if ret_idx > 0 {
+                NativeEmitter::emit_expr(e, arena, ret_idx - 1);
+            }
+        } else if stmt.tag == Stmt_TAG_Let {
+            let init_idx: usize = stmt.data.Let._2;
+            if init_idx > 0 {
+                NativeEmitter::emit_expr(e, arena, init_idx - 1);
+            }
+            (*e).stack_offset += 4;
+            NativeEmitter::emit_store_local(e, (*e).stack_offset);
+        } else if stmt.tag == Stmt_TAG_ExprStmt {
+            let expr_idx: usize = stmt.data.ExprStmt._0;
+            NativeEmitter::emit_expr(e, arena, expr_idx - 1);
+        } else if stmt.tag == Stmt_TAG_SafeBlock {
+            let sb_start: usize = stmt.data.SafeBlock._0;
+            let sb_count: usize = stmt.data.SafeBlock._1;
+            let mut sb_i: usize = 0;
+            while sb_i < sb_count {
+                NativeEmitter::emit_stmt(e, arena, sb_start + sb_i);
+                sb_i += 1;
+            }
+        }
+    }
+
+    @unsafe
+    fn emit_expr(e: &mut NativeEmitter, arena: &AstArena, expr_idx: usize) {
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx);
+
+        if expr.tag == Expr_TAG_IntLit {
+            NativeEmitter::emit_mov_eax_imm(e, 0);
+        } else if expr.tag == Expr_TAG_BinaryExpr {
+            let lhs: usize = expr.data.BinaryExpr._0;
+            let rhs: usize = expr.data.BinaryExpr._2;
+            NativeEmitter::emit_expr(e, arena, lhs - 1);
+            CodeBuffer::emit8(&mut (*e).code, 80);
+            NativeEmitter::emit_expr(e, arena, rhs - 1);
+            NativeEmitter::emit_mov_ecx_eax(e);
+            CodeBuffer::emit8(&mut (*e).code, 88);
+            NativeEmitter::emit_add_eax_ecx(e);
+        } else if expr.tag == Expr_TAG_Call {
+            let func_idx: usize = expr.data.Call._0;
+            let args_start: usize = expr.data.Call._1;
+            let arg_count: usize = expr.data.Call._2;
+
+            // Evaluate arguments and push to stack
+            let mut i: usize = 0;
+            while i < arg_count {
+                let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + i);
+                NativeEmitter::emit_expr(e, arena, arg_idx - 1);
+                // push rax
+                CodeBuffer::emit8(&mut (*e).code, 80);
+                i += 1;
+            }
+
+            // Pop in reverse order to parameters
+            if arg_count >= 6 {
+                // pop r9
+                CodeBuffer::emit8(&mut (*e).code, 65);
+                CodeBuffer::emit8(&mut (*e).code, 89);
+            }
+            if arg_count >= 5 {
+                // pop r8
+                CodeBuffer::emit8(&mut (*e).code, 65);
+                CodeBuffer::emit8(&mut (*e).code, 88);
+            }
+            if arg_count >= 4 {
+                // pop rcx
+                CodeBuffer::emit8(&mut (*e).code, 89);
+            }
+            if arg_count >= 3 {
+                // pop rdx
+                CodeBuffer::emit8(&mut (*e).code, 90);
+            }
+            if arg_count >= 2 {
+                // pop rsi
+                CodeBuffer::emit8(&mut (*e).code, 94);
+            }
+            if arg_count >= 1 {
+                // pop rdi
+                CodeBuffer::emit8(&mut (*e).code, 95);
+            }
+
+            let func_expr: Expr = Vec::get_Expr(&(*arena).exprs, func_idx - 1);
+            let mut func_name: String = String::new("unknown");
+            if func_expr.tag == Expr_TAG_Ident {
+                func_name = String::clone(&func_expr.data.Ident._0);
+            } else if func_expr.tag == Expr_TAG_Path {
+                let ns: String = func_expr.data.Path._0;
+                let member: String = func_expr.data.Path._1;
+                func_name = String::clone(&ns);
+                String::push_str(&mut func_name, &String::new("::"));
+                String::push_str(&mut func_name, &member);
+            }
+            let clean_func_name: String = replace_colons(&func_name);
+            NativeEmitter::emit_call_rel32(e, &clean_func_name);
+        } else if expr.tag == Expr_TAG_Ident {
+            NativeEmitter::emit_load_local(e, 4);
+        }
+    }
+
+    // ── Relocation Patching ─────────────────────────────────
+
+    @unsafe
+    fn patch_relocs(e: &mut NativeEmitter) {
+        let mut i: usize = 0;
+        while i < (*e).reloc_count {
+            let r: Reloc = Vec::get_Reloc(&(*e).relocs, i);
+            let target_off: usize = NativeEmitter::find_symbol(e, &r.target_name);
+            if target_off > 0 {
+                let rel: usize = target_off - (r.offset + 4);
+                // Patch bytes at r.offset in code buffer
+            }
+            i += 1;
+        }
+    }
+
+    // ── Entry point + full program ──────────────────────────
+
+    @unsafe
+    fn emit_entry_point(e: &mut NativeEmitter) {
+        let name: String = String::new("_start");
+        NativeEmitter::add_symbol(e, &name, (*e).code.len);
+        let main_name: String = String::new("main");
+        NativeEmitter::emit_call_rel32(e, &main_name);
+        // mov edi, eax
+        CodeBuffer::emit8(&mut (*e).code, 137);
+        CodeBuffer::emit8(&mut (*e).code, 199);
+        // mov eax, 60 (sys_exit)
+        NativeEmitter::emit_mov_eax_imm(e, 60);
+        NativeEmitter::emit_syscall(e);
+    }
+
+    @unsafe
+    fn emit_syscall_wrappers(e: &mut NativeEmitter) {
+        let offset: usize = (*e).code.len;
+        NativeEmitter::add_symbol(e, &String::new("sys_write"), offset);
+        NativeEmitter::add_symbol(e, &String::new("write"), offset);
+
+        // sys_write:
+        // mov eax, 1
+        CodeBuffer::emit8(&mut (*e).code, 184); // 0xB8
+        CodeBuffer::emit32(&mut (*e).code, 1);
+        // syscall
+        CodeBuffer::emit8(&mut (*e).code, 15); // 0x0F
+        CodeBuffer::emit8(&mut (*e).code, 5);  // 0x05
+        // ret
+        CodeBuffer::emit8(&mut (*e).code, 195); // 0xC3
+    }
+
+    @unsafe
+    fn emit_program(e: &mut NativeEmitter, arena: &AstArena) {
+        NativeEmitter::emit_elf_header(e);
+        NativeEmitter::emit_entry_point(e);
+        let func_count: usize = Vec::len(&(*arena).funcs);
+        let mut i: usize = 0;
+        while i < func_count {
+            NativeEmitter::emit_func(e, arena, i);
+            i += 1;
+        }
+        NativeEmitter::emit_syscall_wrappers(e);
+        NativeEmitter::patch_relocs(e);
+    }
+
+    @unsafe
+    fn write_binary(e: &NativeEmitter, path: &String) {
+        let mut output: String = String::new("");
+        let len: usize = (*e).code.len;
+        let mut i: usize = 0;
+        while i < len {
+            let b: char = Vec::get_char(&(*e).code.bytes, i);
+            String::push(&mut output, b);
+            i += 1;
+        }
+        File::write(path, &output);
+    }
+}

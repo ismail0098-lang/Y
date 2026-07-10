@@ -1,0 +1,29 @@
+// tests/train_spec.ysu
+// A complete, verified training micro-kernel showcasing all specifications of Y.
+
+kernel train_step_gpu(weights: GlobalMemory<F32>, size: I32) {
+    // Default load (uses standard L1/L2 cache operator)
+    let w_val: F32 = GlobalMemory::load(weights);
+
+    @safe {
+        // Zero Numerical Drift Accumulator for training stability
+        @ZeroDrift
+        let acc: F32 = 0.0;
+
+        @invariant(i >= 0)
+        @divergence(uniform)
+        @tile(16, 16, 8)
+        for i in 0..1024 step 1 {
+            // Explicitly bounded variable verified mathematically via loop range
+            @bounds(0, 1024)
+            let idx: I32 = i;
+            
+            // Perform accumulate step
+            acc = acc + w_val;
+        }
+    }
+}
+
+fn main() {
+    // Top-level entry simulation
+}

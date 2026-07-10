@@ -1,0 +1,44 @@
+// tests/ring_buffer.ysu
+
+struct SpscBuffer {
+    @align(64) @atomic(acq_rel) head: I64,
+    _pad1: I64, _pad2: I64, _pad3: I64, _pad4: I64, _pad5: I64, _pad6: I64, _pad7: I64,
+    @align(64) @atomic(acq_rel) tail: I64,
+    _pad8: I64, _pad9: I64, _pad10: I64, _pad11: I64, _pad12: I64, _pad13: I64, _pad14: I64,
+    buffer: [I64; 1024],
+}
+
+fn SpscBuffer_new() -> SpscBuffer {
+    return SpscBuffer {
+        head: 0,
+        _pad1: 0, _pad2: 0, _pad3: 0, _pad4: 0, _pad5: 0, _pad6: 0, _pad7: 0,
+        tail: 0,
+        _pad8: 0, _pad9: 0, _pad10: 0, _pad11: 0, _pad12: 0, _pad13: 0, _pad14: 0,
+        buffer: {}
+    };
+}
+
+fn spsc_push(s: &mut SpscBuffer, item: I64) -> I32 {
+    let current_tail: I64 = s.tail;
+    let current_head: I64 = s.head;
+    if (current_tail - current_head) >= 1024 {
+        return 0; // Buffer full
+    }
+    
+    s.buffer[current_tail & 1023] = item;
+    s.tail = current_tail + 1;
+    return 1; // Success
+}
+
+@unsafe
+fn spsc_pop(s: &mut SpscBuffer, item_ref: &mut I64) -> I32 {
+    let current_head: I64 = s.head;
+    let current_tail: I64 = s.tail;
+    if current_head == current_tail {
+        return 0; // Buffer empty
+    }
+    
+    *item_ref = s.buffer[current_head & 1023];
+    s.head = current_head + 1;
+    return 1; // Success
+}

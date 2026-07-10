@@ -51,6 +51,7 @@ pub enum TokenKind {
     While,
     Impl,
     SelfKw,
+    Break,
 
     // ── Memory space types ───────────────────────────────────
     GlobalMemory,
@@ -133,7 +134,12 @@ pub enum TokenKind {
     AtZeroDrift,       // @ZeroDrift — enforce zero numerical drift
     AtBounds,
     AtInvariant,
+    AtTile,            // @tile — Triton-like tiling attribute
     AtDivergenceUniform,
+    AtGhost,           // @ghost attribute / block
+    AtHdlEmit,         // @hdl_emit attribute
+    AtPrefetchStride,  // @prefetch_stride attribute
+    AtClockDomain,     // @clock_domain attribute / block
     AtUnknown(String), // future-proof
 
     // ── Operators ────────────────────────────────────────────
@@ -395,6 +401,7 @@ impl Lexer {
     fn classify_ident(s: &str) -> TokenKind {
         match s {
             // Keywords
+            "break" => TokenKind::Break,
             "kernel" => TokenKind::Kernel,
             "let" => TokenKind::Let,
             "type" => TokenKind::Type,
@@ -525,7 +532,7 @@ impl Lexer {
                 break;
             }
         }
-        let mut kind = match name.as_str() {
+        let kind = match name.as_str() {
             "@require" => TokenKind::AtRequire,
             "@cache_policy" => TokenKind::AtCachePolicy,
             "@ptx_emit" => TokenKind::AtPtxEmit,
@@ -541,6 +548,11 @@ impl Lexer {
             "@ZeroDrift" => TokenKind::AtZeroDrift,
             "@bounds" => TokenKind::AtBounds,
             "@invariant" => TokenKind::AtInvariant,
+            "@tile" => TokenKind::AtTile,
+            "@ghost" => TokenKind::AtGhost,
+            "@hdl_emit" => TokenKind::AtHdlEmit,
+            "@prefetch_stride" => TokenKind::AtPrefetchStride,
+            "@clock_domain" => TokenKind::AtClockDomain,
             "@divergence" => {
                 // Peek for (uniform)
                 if self.peek() == Some('(') {
@@ -1011,6 +1023,17 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::IntLit(1));
         assert_eq!(tokens[4].kind, TokenKind::Semicolon);
         assert_eq!(tokens[5].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn test_tokenize_experimental_attributes() {
+        let mut lexer = Lexer::new("@prefetch_stride @clock_domain");
+        let tokens = lexer.tokenize();
+
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].kind, TokenKind::AtPrefetchStride);
+        assert_eq!(tokens[1].kind, TokenKind::AtClockDomain);
+        assert_eq!(tokens[2].kind, TokenKind::Eof);
     }
 }
 

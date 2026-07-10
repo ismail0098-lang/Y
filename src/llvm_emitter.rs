@@ -48,6 +48,8 @@ pub struct LlvmEmitter {
     structs: BTreeMap<String, Vec<(String, String)>>,
     /// Track struct fields AST Types: StructName -> Vec<(FieldName, ASTType)>
     ast_structs: HashMap<String, Vec<(String, String)>>,
+    /// Track struct field attributes: StructName -> HashMap<FieldName, Vec<FieldAttrKind>>
+    struct_field_attrs: HashMap<String, HashMap<String, Vec<FieldAttrKind>>>,
     /// Track enums: EnumName -> has_data (true = tagged union, false = simple i32 tag)
     enums: BTreeMap<String, bool>,
     /// Track enum variant tags: EnumName_VariantName -> tag integer
@@ -64,6 +66,8 @@ pub struct LlvmEmitter {
     defined_functions: Vec<String>,
     /// Whether we are currently inside a @ptx_emit function
     in_ptx_emit: bool,
+    /// Stack of labels to jump to for break statements
+    loop_exit_stack: Vec<String>,
 }
 
 fn ast_type_to_string(ty: &Type) -> String {
@@ -133,6 +137,26 @@ impl LlvmEmitter {
         );
         functions.insert("print".into(), (vec!["&String".to_string()], "void".into()));
         functions.insert("print_int".into(), (vec!["i64".to_string()], "void".into()));
+        functions.insert("sqrtf".into(), (vec!["F32".to_string()], "float".into()));
+        functions.insert("math_sqrt".into(), (vec!["F32".to_string()], "float".into()));
+        functions.insert("math_fmin".into(), (vec!["F32".to_string(), "F32".to_string()], "float".into()));
+        functions.insert("math_fmax".into(), (vec!["F32".to_string(), "F32".to_string()], "float".into()));
+
+        // --- Standard Library namespaced methods ---
+        functions.insert("Vec_new".into(), (vec!["I32".to_string()], "ptr".into()));
+        functions.insert("Vec_push".into(), (vec!["&mut Vec".to_string(), "&char".to_string()], "void".into()));
+        functions.insert("Vec_free".into(), (vec!["&mut Vec".to_string()], "void".into()));
+        functions.insert("Vec_len".into(), (vec!["&Vec".to_string()], "i64".into()));
+        functions.insert("Vec_get_char".into(), (vec!["&Vec".to_string(), "usize".to_string()], "i8".into()));
+
+        functions.insert("String_len".into(), (vec!["&String".to_string()], "i64".into()));
+        functions.insert("String_clone".into(), (vec!["&String".to_string()], "ptr".into()));
+        functions.insert("String_push".into(), (vec!["&mut String".to_string(), "char".to_string()], "void".into()));
+        functions.insert("String_push_str".into(), (vec!["&mut String".to_string(), "&String".to_string()], "void".into()));
+        functions.insert("String_eq".into(), (vec!["&String".to_string(), "&String".to_string()], "i1".into()));
+        functions.insert("String_eq_cstr".into(), (vec!["&String".to_string(), "&char".to_string()], "i1".into()));
+        functions.insert("String_char_at".into(), (vec!["&String".to_string(), "usize".to_string()], "i8".into()));
+        functions.insert("String_free".into(), (vec!["&mut String".to_string()], "void".into()));
 
         Self {
             output: String::new(),
@@ -147,6 +171,7 @@ impl LlvmEmitter {
             functions,
             structs: BTreeMap::new(),
             ast_structs: HashMap::new(),
+            struct_field_attrs: HashMap::new(),
             enums: BTreeMap::new(),
             enum_variants: BTreeMap::new(),
             block_terminated: false,
@@ -155,6 +180,7 @@ impl LlvmEmitter {
             called_functions: Vec::new(),
             defined_functions: Vec::new(),
             in_ptx_emit: false,
+            loop_exit_stack: Vec::new(),
         }
     }
 
@@ -168,14 +194,159 @@ impl LlvmEmitter {
         format!("{}.{}", prefix, self.label_counter)
     }
 
+    fn get_expr_attrs(&self, expr: &Expr) -> Option<Vec<FieldAttrKind>> {
+        match expr {
+            Expr::MemberAccess { base, member, .. } => {
+                let base_ty = self.infer_struct_type(base);
+                let base_name = base_ty.trim_start_matches('%');
+                if let Some(field_map) = self.struct_field_attrs.get(base_name) {
+                    return field_map.get(member).cloned();
+                }
+            }
+            Expr::Index { base, .. } => {
+                return self.get_expr_attrs(base);
+            }
+            _ => {}
+        }
+        None
+    }
+
     fn emit_load(&mut self, ptr: &str, ty: &str) -> String {
+        self.emit_load_with_attrs(ptr, ty, None)
+    }
+
+    fn emit_load_with_attrs(&mut self, ptr: &str, ty: &str, attrs: Option<Vec<FieldAttrKind>>) -> String {
         let tmp = self.fresh_tmp();
-        writeln!(&mut self.output, "  {} = load {}, ptr {}", tmp, ty, ptr).unwrap();
+        let mut is_atomic = false;
+        let mut atomic_ordering = "seq_cst".to_string();
+        let mut is_volatile = false;
+        let mut align_val = None;
+
+        if let Some(attrs_list) = attrs {
+            for attr in attrs_list {
+                match attr {
+                    FieldAttrKind::Atomic(ref ord) => {
+                        is_atomic = true;
+                        if let Some(ref o) = ord {
+                            let mapped = match o.as_str() {
+                                "relaxed" => "monotonic",
+                                "release" => "monotonic", // load cannot release
+                                "acq_rel" => "acquire",   // load cannot release
+                                other => other,
+                            };
+                            atomic_ordering = mapped.to_string();
+                        }
+                    }
+                    FieldAttrKind::GpuUncached => is_volatile = true,
+                    FieldAttrKind::Align(expr) => {
+                        if let Expr::IntLit(val, _) = expr {
+                            align_val = Some(val);
+                        }
+                    }
+                }
+            }
+        }
+
+        let align_str = if let Some(a) = align_val {
+            format!(", align {}", a)
+        } else if is_atomic {
+            let default_align = match ty {
+                "i8" | "i1" => "1",
+                "i16" => "2",
+                "i32" | "float" => "4",
+                _ => "8",
+            };
+            format!(", align {}", default_align)
+        } else {
+            "".to_string()
+        };
+
+        if is_atomic {
+            writeln!(
+                &mut self.output,
+                "  {} = load atomic {}, ptr {}{} {}{}",
+                tmp, ty, ptr, if is_volatile { " volatile" } else { "" }, atomic_ordering, align_str
+            )
+            .unwrap();
+        } else {
+            let volatile_str = if is_volatile { " volatile" } else { "" };
+            let nontemporal_str = if is_volatile { ", !nontemporal !0" } else { "" };
+            writeln!(
+                &mut self.output,
+                "  {} = load{} {}, ptr {}{}{}",
+                tmp, volatile_str, ty, ptr, align_str, nontemporal_str
+            )
+            .unwrap();
+        }
         tmp
     }
 
     fn emit_store(&mut self, val: &str, ptr: &str, ty: &str) {
-        writeln!(&mut self.output, "  store {} {}, ptr {}", ty, val, ptr).unwrap();
+        self.emit_store_with_attrs(val, ptr, ty, None)
+    }
+
+    fn emit_store_with_attrs(&mut self, val: &str, ptr: &str, ty: &str, attrs: Option<Vec<FieldAttrKind>>) {
+        let mut is_atomic = false;
+        let mut atomic_ordering = "seq_cst".to_string();
+        let mut is_volatile = false;
+        let mut align_val = None;
+
+        if let Some(attrs_list) = attrs {
+            for attr in attrs_list {
+                match attr {
+                    FieldAttrKind::Atomic(ref ord) => {
+                        is_atomic = true;
+                        if let Some(ref o) = ord {
+                            let mapped = match o.as_str() {
+                                "relaxed" => "monotonic",
+                                "acquire" => "monotonic", // store cannot acquire
+                                "acq_rel" => "release",   // store cannot acquire
+                                other => other,
+                            };
+                            atomic_ordering = mapped.to_string();
+                        }
+                    }
+                    FieldAttrKind::GpuUncached => is_volatile = true,
+                    FieldAttrKind::Align(expr) => {
+                        if let Expr::IntLit(val, _) = expr {
+                            align_val = Some(val);
+                        }
+                    }
+                }
+            }
+        }
+
+        let align_str = if let Some(a) = align_val {
+            format!(", align {}", a)
+        } else if is_atomic {
+            let default_align = match ty {
+                "i8" | "i1" => "1",
+                "i16" => "2",
+                "i32" | "float" => "4",
+                _ => "8",
+            };
+            format!(", align {}", default_align)
+        } else {
+            "".to_string()
+        };
+
+        if is_atomic {
+            writeln!(
+                &mut self.output,
+                "  store atomic {} {}, ptr {}{} {}{}",
+                ty, val, ptr, if is_volatile { " volatile" } else { "" }, atomic_ordering, align_str
+            )
+            .unwrap();
+        } else {
+            let volatile_str = if is_volatile { " volatile" } else { "" };
+            let nontemporal_str = if is_volatile { ", !nontemporal !0" } else { "" };
+            writeln!(
+                &mut self.output,
+                "  store{} {} {}, ptr {}{}{}",
+                volatile_str, ty, val, ptr, align_str, nontemporal_str
+            )
+            .unwrap();
+        }
     }
 
     /// Insert an LLVM conversion instruction when src_ty != dst_ty.
@@ -447,6 +618,20 @@ impl LlvmEmitter {
         }
     }
 
+    fn emit_field_type(&self, ty: &Type) -> String {
+        match ty {
+            Type::Array { element, size, .. } => {
+                let elem_llvm_ty = self.emit_type(element);
+                if let Expr::IntLit(val, _) = &**size {
+                    format!("[{} x {}]", val, elem_llvm_ty)
+                } else {
+                    "ptr".into()
+                }
+            }
+            _ => self.emit_type(ty),
+        }
+    }
+
     // ── Entry Point ─────────────────────────────────────────
 
     pub fn emit_program(
@@ -551,17 +736,40 @@ impl LlvmEmitter {
         self.functions
             .insert("print_int".into(), (vec!["i64".to_string()], "void".into()));
 
+        // --- Standard Library namespaced methods ---
+        self.functions.insert("Vec_new".into(), (vec!["I32".to_string()], "ptr".into()));
+        self.functions.insert("Vec_push".into(), (vec!["&mut Vec".to_string(), "&char".to_string()], "void".into()));
+        self.functions.insert("Vec_free".into(), (vec!["&mut Vec".to_string()], "void".into()));
+        self.functions.insert("Vec_len".into(), (vec!["&Vec".to_string()], "i64".into()));
+        self.functions.insert("Vec_get_char".into(), (vec!["&Vec".to_string(), "usize".to_string()], "i8".into()));
+
+        self.functions.insert("String_len".into(), (vec!["&String".to_string()], "i64".into()));
+        self.functions.insert("String_clone".into(), (vec!["&String".to_string()], "ptr".into()));
+        self.functions.insert("String_push".into(), (vec!["&mut String".to_string(), "char".to_string()], "void".into()));
+        self.functions.insert("String_push_str".into(), (vec!["&mut String".to_string(), "&String".to_string()], "void".into()));
+        self.functions.insert("String_eq".into(), (vec!["&String".to_string(), "&String".to_string()], "i1".into()));
+        self.functions.insert("String_eq_cstr".into(), (vec!["&String".to_string(), "&char".to_string()], "i1".into()));
+        self.functions.insert("String_char_at".into(), (vec!["&String".to_string(), "usize".to_string()], "i8".into()));
+        self.functions.insert("String_free".into(), (vec!["&mut String".to_string()], "void".into()));
+
+        self.functions.insert("File_read_to_string".into(), (vec!["&String".to_string()], "ptr".into()));
+        self.functions.insert("File_write".into(), (vec!["&String".to_string(), "&String".to_string()], "void".into()));
+
         for item in &prog.items {
             match item {
                 Item::Struct(s) => {
                     let mut fields = Vec::new();
                     let mut ast_fields = Vec::new();
+                    let mut field_attrs = HashMap::new();
                     for f in &s.fields {
-                        fields.push((f.name.clone(), self.emit_type(&f.ty)));
+                        fields.push((f.name.clone(), self.emit_field_type(&f.ty)));
                         ast_fields.push((f.name.clone(), ast_type_to_string(&f.ty)));
+                        let attrs: Vec<FieldAttrKind> = f.attrs.iter().map(|attr| attr.kind.clone()).collect();
+                        field_attrs.insert(f.name.clone(), attrs);
                     }
                     self.structs.insert(s.name.clone(), fields);
                     self.ast_structs.insert(s.name.clone(), ast_fields);
+                    self.struct_field_attrs.insert(s.name.clone(), field_attrs);
                 }
                 Item::Func(f) => {
                     let ret_ty = f
@@ -631,7 +839,7 @@ impl LlvmEmitter {
             if let Item::Struct(s) = item {
                 let mut field_tys = Vec::new();
                 for f in &s.fields {
-                    field_tys.push(self.emit_type(&f.ty));
+                    field_tys.push(self.emit_field_type(&f.ty));
                 }
                 self.wln(&format!(
                     "%{} = type {{ {} }}",
@@ -692,6 +900,7 @@ impl LlvmEmitter {
         self.wln("@.fmt.sn = private unnamed_addr constant [4 x i8] c\"%s\\0A\\00\"");
         self.wln("@.fmt.s = private unnamed_addr constant [3 x i8] c\"%s\\00\"");
         self.wln("@.fmt.d = private unnamed_addr constant [4 x i8] c\"%ld\\00\"");
+        self.wln("@.str.bounds_err = private unnamed_addr constant [54 x i8] c\"Index out of bounds panic: index %ld, array size %ld\\0A\\00\"");
         self.wln("");
 
         // Append function bodies
@@ -957,6 +1166,12 @@ impl LlvmEmitter {
                 Stmt::SafeBlock(b, _) => {
                     self.emit_alloca_for_block(b);
                 }
+                Stmt::GhostBlock(b, _) => {
+                    self.emit_alloca_for_block(b);
+                }
+                Stmt::ClockDomainBlock { body, .. } => {
+                    self.emit_alloca_for_block(body);
+                }
                 _ => {}
             }
         }
@@ -1168,7 +1383,8 @@ impl LlvmEmitter {
                         };
                         writeln!(&mut self.output, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {}, ptr align 8 {}, i64 {}, i1 false)", target_addr, src_ptr, size_tmp).unwrap();
                     } else {
-                        self.emit_store(&coerced, &target_addr, &dst_ty);
+                        let attrs = self.get_expr_attrs(target);
+                        self.emit_store_with_attrs(&coerced, &target_addr, &dst_ty, attrs);
                     }
                 }
             }
@@ -1241,6 +1457,14 @@ impl LlvmEmitter {
                 writeln!(&mut self.output, "{}:", merge_lbl).unwrap();
                 self.block_terminated = false;
             }
+            Stmt::Break { .. } => {
+                if let Some(end_lbl) = self.loop_exit_stack.last() {
+                    writeln!(&mut self.output, "  br label %{}", end_lbl).unwrap();
+                    self.block_terminated = true;
+                } else {
+                    panic!("'break' statement outside of loop");
+                }
+            }
             Stmt::While {
                 condition, body, is_uniform_branch, ..
             } => {
@@ -1266,7 +1490,9 @@ impl LlvmEmitter {
 
                 writeln!(&mut self.output, "{}:", body_lbl).unwrap();
                 self.block_terminated = false;
+                self.loop_exit_stack.push(end_lbl.clone());
                 self.emit_block_body(body, ret_type);
+                self.loop_exit_stack.pop();
                 if !self.block_terminated {
                     writeln!(&mut self.output, "  br label %{}", cond_lbl).unwrap();
                 }
@@ -1281,6 +1507,8 @@ impl LlvmEmitter {
                 step,
                 body,
                 is_uniform_branch,
+                tile,
+                prefetch_stride,
                 ..
             } => {
                 let s = self.emit_expr(start, None, None);
@@ -1288,6 +1516,18 @@ impl LlvmEmitter {
                 let cond_lbl = self.fresh_label("for.cond");
                 let body_lbl = self.fresh_label("for.body");
                 let end_lbl = self.fresh_label("for.end");
+
+                if let Some(t) = tile {
+                    writeln!(&mut self.output, "  ; [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}", t.block_m, t.block_n, t.block_k).unwrap();
+                }
+
+                if let Some(pf) = prefetch_stride {
+                    if let Some(ref stride_expr) = pf.stride {
+                        writeln!(&mut self.output, "  ; [Y PREFETCH] @prefetch_stride({:?}) -- solver-guided cache warming", stride_expr).unwrap();
+                    } else {
+                        writeln!(&mut self.output, "  ; [Y PREFETCH] @prefetch_stride(auto) -- compiler deduces optimal prefetch distance").unwrap();
+                    }
+                }
 
                 let metadata = if *is_uniform_branch {
                     ", !uniform_branch !0 ; Maps to BRANCH_UNIFORM_CYCLES scheduling baseline"
@@ -1312,7 +1552,9 @@ impl LlvmEmitter {
 
                 writeln!(&mut self.output, "{}:", body_lbl).unwrap();
                 self.block_terminated = false;
+                self.loop_exit_stack.push(end_lbl.clone());
                 self.emit_block_body(body, ret_type);
+                self.loop_exit_stack.pop();
 
                 // Increment
                 let step_val = if let Some(st) = step {
@@ -1490,6 +1732,19 @@ impl LlvmEmitter {
                 self.wln("  ; --- @safe verified block ---");
                 self.emit_block_body(block, ret_type);
             }
+            Stmt::GhostBlock(block, _) => {
+                self.wln("  ; --- @ghost speculative block ---");
+                self.emit_block_body(block, ret_type);
+            }
+            Stmt::ClockDomainBlock { body, .. } => {
+                self.wln("  ; --- @clock_domain block ---");
+                self.emit_block_body(body, ret_type);
+            }
+            Stmt::CompileTimeAssert { .. } => {
+                // compile_time::assert! is verified at compile time and stripped
+                // from the final binary -- zero runtime cost.
+                self.wln("  ; [compile_time::assert! verified and stripped]");
+            }
         }
     }
 
@@ -1503,7 +1758,14 @@ impl LlvmEmitter {
                 let (base_val, base_ty) = if let Expr::UnaryOp { op: UnaryOp::Deref, operand: inner, .. } = &**base {
                     (self.emit_expr(inner, None, None), self.infer_struct_type(inner))
                 } else {
-                    (self.emit_lvalue(base), self.infer_struct_type(base))
+                    let raw_base_val = self.emit_lvalue(base);
+                    let base_ast_ty = self.infer_ast_type(base);
+                    if base_ast_ty.starts_with('&') {
+                        let loaded = self.emit_load(&raw_base_val, "ptr");
+                        (loaded, self.infer_struct_type(base))
+                    } else {
+                        (raw_base_val, self.infer_struct_type(base))
+                    }
                 };
                 let tmp = self.fresh_tmp();
 
@@ -1571,20 +1833,76 @@ impl LlvmEmitter {
                 .unwrap();
                 tmp
             }
-            Expr::Index { base, index, .. } => {
+            Expr::Index { base, index, span } => {
                 let base_val = self.emit_expr(base, None, None);
                 let idx_val = self.emit_expr(index, None, None);
                 let base_ty = self.infer_type(base);
+                let idx_ty = self.infer_type(index);
+                
+                let is_safe = crate::type_checker::SAFE_INDICES.with(|set| {
+                    set.borrow().contains(&(span.line, span.col))
+                });
+                let array_size = crate::type_checker::INDEX_ARRAY_SIZES.with(|map| {
+                    map.borrow().get(&(span.line, span.col)).cloned()
+                });
+                
+                if !is_safe {
+                    if let Some(size) = array_size {
+                        let cmp_ty = if idx_ty == "i32" { "i32" } else { "i64" };
+                        let ok_lbl = self.fresh_label("bounds_ok");
+                        let fail_lbl = self.fresh_label("bounds_fail");
+                        let cond = self.fresh_tmp();
+                        writeln!(
+                            &mut self.output,
+                            "  {} = icmp uge {} {}, {}",
+                            cond, cmp_ty, idx_val, size
+                        ).unwrap();
+                        writeln!(
+                            &mut self.output,
+                            "  br i1 {}, label %{}, label %{}",
+                            cond, fail_lbl, ok_lbl
+                        ).unwrap();
+                        
+                        // Fail block
+                        writeln!(&mut self.output, "{}:", fail_lbl).unwrap();
+                        let idx_i64 = if cmp_ty == "i32" {
+                            let tmp = self.fresh_tmp();
+                            writeln!(&mut self.output, "  {} = sext i32 {} to i64", tmp, idx_val).unwrap();
+                            tmp
+                        } else {
+                            idx_val.clone()
+                        };
+                        let print_tmp = self.fresh_tmp();
+                        writeln!(
+                            &mut self.output,
+                            "  {} = call i32 (ptr, ...) @printf(ptr @.str.bounds_err, i64 {}, i64 {})",
+                            print_tmp, idx_i64, size
+                        ).unwrap();
+                        writeln!(&mut self.output, "  call void @exit(i32 1)").unwrap();
+                        writeln!(&mut self.output, "  unreachable").unwrap();
+                        
+                        // Ok block
+                        writeln!(&mut self.output, "{}:", ok_lbl).unwrap();
+                        self.block_terminated = false;
+                    }
+                }
+
                 let elem_ty = if base_ty == "ptr" {
-                    "i64"
+                    "i64".to_string()
+                } else if base_ty.starts_with('[') && base_ty.ends_with(']') {
+                    if let Some(pos) = base_ty.rfind(' ') {
+                        base_ty[pos + 1..base_ty.len() - 1].to_string()
+                    } else {
+                        "i64".to_string()
+                    }
                 } else {
-                    base_ty.as_str()
+                    base_ty.clone()
                 };
                 let tmp = self.fresh_tmp();
                 writeln!(
                     &mut self.output,
-                    "  {} = getelementptr {}, ptr {}, i64 {}",
-                    tmp, elem_ty, base_val, idx_val
+                    "  {} = getelementptr {}, ptr {}, {} {}",
+                    tmp, elem_ty, base_val, idx_ty, idx_val
                 )
                 .unwrap();
                 tmp
@@ -1764,6 +2082,10 @@ impl LlvmEmitter {
                 tmp
             }
             Expr::UnaryOp { op, operand, .. } => {
+                if let UnaryOp::Ref = op {
+                    return self.emit_lvalue(operand);
+                }
+
                 let val = self.emit_expr(operand, None, None);
                 let tmp = self.fresh_tmp();
                 let ty = self.infer_type(operand);
@@ -1779,15 +2101,18 @@ impl LlvmEmitter {
                     UnaryOp::Not => {
                         writeln!(&mut self.output, "  {} = xor {} {}, 1", tmp, ty, val).unwrap();
                     }
-                    UnaryOp::Ref => {
-                        return self.emit_lvalue(operand);
-                    }
                     UnaryOp::Deref => {
                         let inner_ty = self.infer_type(operand);
                         let load_ty = if inner_ty == "ptr" {
-                            "i64"
+                            let ast_ty = self.infer_ast_type(expr);
+                            let resolved = self.ast_type_to_llvm_type(&ast_ty);
+                            if resolved != "i32" && !resolved.is_empty() {
+                                resolved
+                            } else {
+                                "i64".into()
+                            }
                         } else {
-                            inner_ty.as_str()
+                            inner_ty
                         };
                         writeln!(
                             &mut self.output,
@@ -1796,6 +2121,7 @@ impl LlvmEmitter {
                         )
                         .unwrap();
                     }
+                    UnaryOp::Ref => unreachable!(),
                 }
                 tmp
             }
@@ -1849,6 +2175,10 @@ impl LlvmEmitter {
                             "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
                             "usize" | "i64" | "I64" => "i64".to_string(),
                             "i32" | "I32" => "i32".to_string(),
+                            "I16" | "u16" | "i16" => "i16".to_string(),
+                            "F16" | "f16" => "half".to_string(),
+                            "F32" | "f32" => "float".to_string(),
+                            "F64" | "f64" => "double".to_string(),
                             "bool" => "i1".to_string(),
                             "char" | "i8" => "i8".to_string(),
                             _ => {
@@ -1991,6 +2321,10 @@ impl LlvmEmitter {
                         "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
                         "usize" | "i64" | "I64" => "i64".to_string(),
                         "i32" | "I32" => "i32".to_string(),
+                        "I16" | "u16" | "i16" => "i16".to_string(),
+                        "F16" | "f16" => "half".to_string(),
+                        "F32" | "f32" => "float".to_string(),
+                        "F64" | "f64" => "double".to_string(),
                         "bool" => "i1".to_string(),
                         "char" | "i8" => "i8".to_string(),
                         _ => {
@@ -2192,18 +2526,28 @@ impl LlvmEmitter {
             Expr::MemberAccess { .. } => {
                 let lval = self.emit_lvalue(expr);
                 let field_ty = self.infer_type(expr);
-                self.emit_load(&lval, &field_ty)
+                let attrs = self.get_expr_attrs(expr);
+                if field_ty.starts_with('[') {
+                    lval
+                } else {
+                    self.emit_load_with_attrs(&lval, &field_ty, attrs)
+                }
             }
             Expr::Index { .. } => {
                 let lval = self.emit_lvalue(expr);
                 let ty = self.infer_type(expr);
-                self.emit_load(&lval, &ty)
+                let attrs = self.get_expr_attrs(expr);
+                self.emit_load_with_attrs(&lval, &ty, attrs)
             }
             Expr::SelfLit(_) => "%self".into(),
             Expr::ZeroInit(_) => {
                 let ty = expected_ty
                     .or_else(|| self.current_load_hint.clone())
                     .unwrap_or_else(|| "i32".into());
+
+                if target.is_none() && (ty.starts_with('[') || ty.starts_with('%')) {
+                    return "zeroinitializer".into();
+                }
 
                 let target_ptr = target.unwrap_or_else(|| {
                     let tmp = self.fresh_tmp();
@@ -2232,7 +2576,11 @@ impl LlvmEmitter {
                 )
                 .unwrap();
 
-                return target_ptr;
+                if ty.starts_with('[') || ty.starts_with('%') {
+                    target_ptr
+                } else {
+                    self.emit_load(&target_ptr, &ty)
+                }
             }
             Expr::StructLit { name, fields, .. } => {
                 let ty = format!("%{}", name);
@@ -2250,8 +2598,11 @@ impl LlvmEmitter {
                             }
                         }
                     }
-                    let val = self.emit_expr(fexpr, None, None);
-                    let val_ty = self.infer_type(fexpr);
+                    let val = self.emit_expr(fexpr, None, Some(field_ty.clone()));
+                    let mut val_ty = self.infer_type(fexpr);
+                    if val == "zeroinitializer" {
+                        val_ty = field_ty.clone();
+                    }
                     let coerced = self.emit_coerce(&val, &val_ty, &field_ty);
                     let new_val = self.fresh_tmp();
                     writeln!(
@@ -2553,11 +2904,24 @@ impl LlvmEmitter {
                     }
                     "println" | "print" | "print_int" | "File_write" => "void".into(),
                     "String_new" | "File_read_to_string" => "ptr".into(),
-                    _ => self
-                        .functions
-                        .get(&func_name)
-                        .map(|(_, r)| r.clone())
-                        .unwrap_or_else(|| "i32".into()),
+                    _ => {
+                        if func_name.starts_with("Vec_get_") {
+                            let ret_type_name = &func_name[8..];
+                            match ret_type_name {
+                                "usize" | "I64" | "i64" => "i64".to_string(),
+                                "I32" | "i32" | "int" => "i32".to_string(),
+                                "bool" => "i1".to_string(),
+                                "char" => "i8".to_string(),
+                                "String" | "Vec" | "ptr" => "ptr".to_string(),
+                                _ => format!("%{}", ret_type_name),
+                            }
+                        } else {
+                            self.functions
+                                .get(&func_name)
+                                .map(|(_, r)| r.clone())
+                                .unwrap_or_else(|| "i32".into())
+                        }
+                    }
                 }
             }
             Expr::GenericCall { func, .. } => {
@@ -2567,14 +2931,36 @@ impl LlvmEmitter {
                     .map(|(_, r)| r.clone())
                     .unwrap_or_else(|| "i32".into())
             }
-            Expr::BinaryOp { op, left, .. } => match op {
+            Expr::BinaryOp { op, left, right, .. } => match op {
                 BinaryOp::Eq
                 | BinaryOp::NotEq
                 | BinaryOp::Lt
                 | BinaryOp::Gt
                 | BinaryOp::Le
                 | BinaryOp::Ge => "i1".into(),
-                _ => self.infer_type(left),
+                _ => {
+                    let l_ty = self.infer_type(left);
+                    let r_ty = self.infer_type(right);
+                    if l_ty == r_ty {
+                        l_ty
+                    } else {
+                        let l_is_float = l_ty == "float" || l_ty == "double" || l_ty == "half";
+                        let r_is_float = r_ty == "float" || r_ty == "double" || r_ty == "half";
+                        if l_is_float && r_is_float {
+                            let l_bits = if l_ty == "double" { 64 } else if l_ty == "float" { 32 } else { 16 };
+                            let r_bits = if r_ty == "double" { 64 } else if r_ty == "float" { 32 } else { 16 };
+                            if l_bits >= r_bits { l_ty } else { r_ty }
+                        } else if l_is_float {
+                            l_ty
+                        } else if r_is_float {
+                            r_ty
+                        } else {
+                            let l_bits = Self::int_bits(&l_ty);
+                            let r_bits = Self::int_bits(&r_ty);
+                            if l_bits >= r_bits { l_ty } else { r_ty }
+                        }
+                    }
+                }
             },
             Expr::MemberAccess { base, member, .. } => {
                 let base_ty = if let Expr::UnaryOp { op: UnaryOp::Deref, operand, .. } = &**base {
@@ -2633,13 +3019,39 @@ impl LlvmEmitter {
                 UnaryOp::Deref => {
                     let inner_ty = self.infer_type(operand);
                     if inner_ty == "ptr" {
-                        "i32".into()
+                        let ast_ty = self.infer_ast_type(expr);
+                        let resolved = self.ast_type_to_llvm_type(&ast_ty);
+                        if resolved != "i32" && !resolved.is_empty() {
+                            resolved
+                        } else {
+                            "i64".into()
+                        }
                     } else {
                         inner_ty
                     }
                 }
                 UnaryOp::Neg | UnaryOp::Not => self.infer_type(operand),
             },
+            Expr::Index { base, .. } => {
+                let base_ty = self.infer_type(base);
+                if base_ty == "ptr" {
+                    let ast_ty = self.infer_ast_type(expr);
+                    let resolved = self.ast_type_to_llvm_type(&ast_ty);
+                    if resolved != "i32" && !resolved.is_empty() {
+                        resolved
+                    } else {
+                        "i64".into()
+                    }
+                } else if base_ty.starts_with('[') {
+                    if let Some(pos) = base_ty.find('x') {
+                        base_ty[pos + 1..].trim().trim_end_matches(']').to_string()
+                    } else {
+                        "i64".into()
+                    }
+                } else {
+                    base_ty
+                }
+            }
             _ => "i32".into(),
         }
     }
@@ -2661,6 +3073,49 @@ impl LlvmEmitter {
                 None
             }
             _ => None,
+        }
+    }
+
+    fn ast_type_to_llvm_type(&self, ast_ty: &str) -> String {
+        if ast_ty == "Unknown" || ast_ty.is_empty() {
+            return "i32".into();
+        }
+        if ast_ty.starts_with('&') || ast_ty.starts_with('*') {
+            return "ptr".into();
+        }
+        let clean = ast_ty.trim_start_matches("mut ").trim();
+        if clean == "Vec" || clean.starts_with("Vec<") || clean == "String" || clean.starts_with("String<") || clean == "Option" || clean.starts_with("Option<") {
+            return "ptr".into();
+        }
+        match clean {
+            "I32" | "u32" | "i32" => "i32".into(),
+            "I64" | "usize" | "i64" => "i64".into(),
+            "F16" | "f16" => "half".into(),
+            "F32" | "f32" => "float".into(),
+            "F64" | "f64" => "double".into(),
+            "bool" => "i1".into(),
+            "char" | "i8" | "u8" => "i8".into(),
+            "I16" | "u16" | "i16" => "i16".into(),
+            "ptr" => "ptr".into(),
+            other => {
+                if other.is_empty() {
+                    "i32".into()
+                } else if let Some(has_data) = self.enums.get(other) {
+                    if *has_data {
+                        format!("%{}", other)
+                    } else {
+                        "i32".into()
+                    }
+                } else if self.structs.contains_key(other) {
+                    format!("%{}", other)
+                } else {
+                    if other.contains('<') {
+                        "ptr".into()
+                    } else {
+                        "i32".into()
+                    }
+                }
+            }
         }
     }
 

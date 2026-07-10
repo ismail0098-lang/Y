@@ -347,9 +347,25 @@ impl CpuEmitter {
             Expr::IntLit(val, _) => val.to_string(),
             Expr::Call { func, args, .. } => self.emit_call(func, args),
             Expr::GenericCall { func, args, .. } => self.emit_call(func, args),
-            Expr::Index { base, index, .. } => {
+            Expr::Index { base, index, span } => {
                 let base_expr = self.emit_expr(base);
                 let index_expr = self.emit_expr(index);
+                
+                let is_safe = crate::type_checker::SAFE_INDICES.with(|set| {
+                    set.borrow().contains(&(span.line, span.col))
+                });
+                let array_size = crate::type_checker::INDEX_ARRAY_SIZES.with(|map| {
+                    map.borrow().get(&(span.line, span.col)).cloned()
+                });
+                
+                if !is_safe {
+                    if let Some(size) = array_size {
+                        return format!(
+                            "{{ assert!(({} as usize) < {}, \"Index out of bounds panic: index {{}}, array size {}\", {}); {}.add({} as usize) }}",
+                            index_expr, size, size, index_expr, base_expr, index_expr
+                        );
+                    }
+                }
                 format!("{}.add({} as usize)", base_expr, index_expr)
             }
             Expr::Path {

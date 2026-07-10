@@ -1,0 +1,1127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kanji Practice Board</title>
+    <style>
+        body {
+            background-color: #f7f5f0; /* Soft paper background */
+            color: #333333;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        h1 {
+            font-size: 1.75rem;
+            margin: 0 0 10px 0;
+            font-weight: 600;
+            color: #111111;
+        }
+
+        .subtitle {
+            font-size: 0.9rem;
+            color: #666666;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            width: 100%;
+            max-width: 900px;
+            background: #ffffff;
+            border: 1px solid #dddddd;
+            border-radius: 6px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+        }
+
+        @media (min-width: 768px) {
+            .container {
+                flex-direction: row;
+            }
+        }
+
+        .sidebar {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .canvas-area {
+            position: relative;
+            background: #fafaf9;
+            border: 1px solid #cccccc;
+            border-radius: 4px;
+            width: 512px;
+            height: 512px;
+        }
+
+        #drawing-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 2;
+            cursor: crosshair;
+            touch-action: none;
+        }
+
+        /* Calligraphy grid background */
+        .grid-lines {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            pointer-events: none;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        label {
+            font-size: 0.8rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            color: #555555;
+            letter-spacing: 0.05em;
+        }
+
+        select, button {
+            padding: 8px 12px;
+            font-size: 1rem;
+            border: 1px solid #cccccc;
+            border-radius: 4px;
+            background-color: #ffffff;
+            color: #333333;
+            cursor: pointer;
+            outline: none;
+        }
+
+        select:focus, button:focus {
+            border-color: #888888;
+        }
+
+        button:hover {
+            background-color: #f5f5f5;
+        }
+
+        button.primary-btn {
+            background-color: #333333;
+            color: #ffffff;
+            border-color: #333333;
+        }
+
+        button.primary-btn:hover {
+            background-color: #111111;
+        }
+
+        .status-box {
+            padding: 12px;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            line-height: 1.4;
+        }
+
+        .status-neutral {
+            background-color: #f0f0f0;
+            border: 1px solid #dddddd;
+            color: #444444;
+        }
+
+        .status-success {
+            background-color: #e6f4ea;
+            border: 1px solid #c4e9cb;
+            color: #137333;
+        }
+
+        .status-error {
+            background-color: #fce8e6;
+            border: 1px solid #fad2cf;
+            color: #c5221f;
+        }
+
+        .progress-indicator {
+            font-family: monospace;
+            font-size: 1.1rem;
+            font-weight: bold;
+            color: #333333;
+        }
+
+        .stroke-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 6px 10px;
+            border-bottom: 1px solid #eeeeee;
+            font-size: 0.85rem;
+        }
+
+        .stroke-item.active {
+            background-color: #fff8e1;
+            font-weight: bold;
+        }
+
+        .stroke-item.done {
+            color: #137333;
+            text-decoration: line-through;
+        }
+
+        .score-display {
+            font-size: 2.25rem;
+            font-weight: bold;
+            font-family: monospace;
+            text-align: center;
+            margin: 10px 0;
+        }
+
+        .search-container {
+            display: flex;
+            gap: 6px;
+        }
+
+        .search-container input {
+            flex: 1;
+            padding: 8px 10px;
+            font-size: 0.9rem;
+            border: 1px solid #cccccc;
+            border-radius: 4px;
+            outline: none;
+        }
+
+        .search-container input:focus {
+            border-color: #888888;
+        }
+
+        .kanji-card {
+            background-color: #fafafa;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 15px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .kanji-literal {
+            font-size: 4.5rem;
+            font-weight: normal;
+            color: #000000;
+            line-height: 1;
+            margin: 5px 0;
+        }
+
+        .kanji-meta-details {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            border-top: 1px solid #eaeaea;
+            padding-top: 10px;
+        }
+
+        .meta-row {
+            display: flex;
+            flex-direction: column;
+            font-size: 0.8rem;
+        }
+
+        .meta-label {
+            font-weight: bold;
+            color: #777777;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 0.05em;
+        }
+
+        .meta-value {
+            color: #222222;
+            word-break: break-word;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Kanji Practice Board</h1>
+    <div class="subtitle">
+        Binary database lookup & stroke-direction validation. Zero heap allocation logic mapped to hardware models.
+    </div>
+
+    <div class="container">
+        <!-- Sidebar Controls & Feedback -->
+        <div class="sidebar">
+            <div class="control-group">
+                <label>Practice Mode</label>
+                <div style="display: flex; border: 1px solid #cccccc; border-radius: 4px; overflow: hidden; margin-bottom: 5px;">
+                    <button id="mode-kanji-btn" style="flex: 1; border: none; border-radius: 0; background: #333333; color: white; padding: 6px; font-size: 0.8rem; font-weight: 500;" onclick="setMode('kanji')">Single Kanji</button>
+                    <button id="mode-word-btn" style="flex: 1; border: none; border-radius: 0; background: #ffffff; color: #333333; padding: 6px; font-size: 0.8rem; font-weight: 500;" onclick="setMode('word')">Word Practice</button>
+                    <button id="mode-sentence-btn" style="flex: 1; border: none; border-radius: 0; background: #ffffff; color: #333333; padding: 6px; font-size: 0.8rem; font-weight: 500;" onclick="setMode('sentence')">Sentence Practice</button>
+                </div>
+            </div>
+
+            <div id="kanji-search-container" class="control-group">
+                <label>Find Character</label>
+                <div class="search-container">
+                    <input type="text" id="kanji-search" placeholder="Type Kanji, meaning, or reading..." onkeyup="if(event.key==='Enter') searchKanji()">
+                    <button onclick="searchKanji()">Find</button>
+                </div>
+            </div>
+
+            <div class="control-group" id="next-kanji-container">
+                <button class="primary-btn" onclick="loadRandomKanji()">Next Random Kanji</button>
+            </div>
+            
+            <div class="control-group" id="next-word-container" style="display: none;">
+                <button class="primary-btn" onclick="loadRandomWord()">Next Random Word</button>
+            </div>
+
+            <div class="control-group" id="next-sentence-container" style="display: none;">
+                <button class="primary-btn" onclick="loadRandomSentence()">Next Random Sentence</button>
+            </div>
+
+            <!-- Active Kanji Meta Card (Kanji Mode) -->
+            <div class="kanji-card" id="kanji-mode-card">
+                <div class="kanji-literal" id="kanji-char-display">日</div>
+                <div class="kanji-meta-details">
+                    <div class="meta-row">
+                        <span class="meta-label">Meaning</span>
+                        <span class="meta-value" id="kanji-meaning">day, sun, Japan</span>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-label">Onyomi (Chinese Reading)</span>
+                        <span class="meta-value" id="kanji-onyomi">ニチ, ジツ</span>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-label">Kunyomi (Japanese Reading)</span>
+                        <span class="meta-value" id="kanji-kunyomi">ひ, -び, -か</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Active Word Card (Word Mode) -->
+            <div class="kanji-card" id="word-mode-card" style="display: none;">
+                <div style="font-size: 2.5rem; font-weight: bold; color: #111; letter-spacing: 0.1em; margin-bottom: 5px;" id="word-literal-display">日本</div>
+                <div class="kanji-meta-details">
+                    <div class="meta-row">
+                        <span class="meta-label" id="word-reading-label">Word Pronunciation</span>
+                        <span class="meta-value" style="font-size: 1.1rem; font-weight: 500;" id="word-reading-display">にほん (nihon)</span>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-label" id="word-meaning-label">Word Meaning</span>
+                        <span class="meta-value" style="font-size: 0.95rem; color: #444;" id="word-meaning-display">Japan</span>
+                    </div>
+                    <div class="meta-row" style="background-color: #f1f8e9; padding: 8px; border-radius: 4px; margin-top: 8px; border: 1px solid #dcedc8;">
+                        <span class="meta-label" style="color: #33691e; font-size: 0.65rem;">Active Target Character</span>
+                        <span class="meta-value" style="font-size: 1.25rem; font-weight: bold; color: #33691e;" id="word-active-char-display">日</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="control-group">
+                <label>Progress</label>
+                <div class="progress-indicator" id="progress-text">Stroke: 0 / 0</div>
+            </div>
+
+            <div class="control-group">
+                <label>Feedback</label>
+                <div class="status-box status-neutral" id="feedback-box">
+                    Loading Kanji database...
+                </div>
+            </div>
+
+            <div class="control-group" id="score-group" style="display:none;">
+                <label>Stroke Accuracy</label>
+                <div class="score-display" id="score-text">0%</div>
+            </div>
+
+            <div class="control-group">
+                <label>Stroke Guidelines</label>
+                <div id="stroke-list" style="border: 1px solid #eeeeee; border-radius: 4px; overflow: hidden;">
+                    <!-- Stroke items dynamic filler -->
+                </div>
+            </div>
+
+            <div style="margin-top: auto; display: flex; gap: 10px;">
+                <button style="flex:1;" onclick="resetCurrentStroke()">Undo / Retry</button>
+                <button class="primary-btn" style="flex:1;" onclick="resetWholeCharacter()">Clear All</button>
+            </div>
+        </div>
+
+        <!-- Drawing Canvas Area -->
+        <div class="canvas-area">
+            <svg class="grid-lines" xmlns="http://www.w3.org/2000/svg">
+                <!-- Border grid guides -->
+                <line x1="0" y1="256" x2="512" y2="256" stroke="#dddddd" stroke-dasharray="4 4" stroke-width="1.5"/>
+                <line x1="256" y1="0" x2="256" y2="512" stroke="#dddddd" stroke-dasharray="4 4" stroke-width="1.5"/>
+                <line x1="0" y1="0" x2="512" y2="512" stroke="#eeeeee" stroke-dasharray="4 4" stroke-width="1"/>
+                <line x1="512" y1="0" x2="0" y2="512" stroke="#eeeeee" stroke-dasharray="4 4" stroke-width="1"/>
+            </svg>
+            <canvas id="drawing-canvas" width="512" height="512"></canvas>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('drawing-canvas');
+        const ctx = canvas.getContext('2d');
+        const feedbackBox = document.getElementById('feedback-box');
+        const progressText = document.getElementById('progress-text');
+        const scoreGroup = document.getElementById('score-group');
+        const scoreText = document.getElementById('score-text');
+        const strokeList = document.getElementById('stroke-list');
+
+        const N_RESAMPLE = 32; // Standard coordinates for path vector matching
+        let dbDataView = null;
+        let charCount = 0;
+        let indexOffset = 0;
+
+        let kanjiMetadata = {};
+        let availableCodepoints = [];
+
+        let activeKanjiStrokes = []; // Reference coordinate paths loaded from binary
+        let currentStrokeIdx = 0; // Current target stroke index [0, StrokeCount - 1]
+        let userDrawingPoints = [];
+        let userStrokeHistory = []; // Stores actual user drawn strokes
+        let lastFailedStroke = null; // Stores points of the last failed stroke
+        let isDrawing = false;
+
+        // Colors for stroke guidance
+        const COLOR_BACKGROUND_OUTLINE = 'rgba(200, 200, 200, 0.25)'; // Dotted outlines of other strokes
+        const COLOR_ACTIVE_OUTLINE = 'rgba(255, 152, 0, 0.4)'; // Highlight target stroke
+        const COLOR_CORRECT = '#2e7d32'; // Solid green for correctly completed strokes
+        const COLOR_USER_DRAWING = '#111111'; // Solid black for current active path
+
+        // Load the binary database file on startup
+        async function initDatabase() {
+            try {
+                // Fetch the binary database
+                const response = await fetch('./kanji_db.kjvg?v=' + Date.now());
+                if (!response.ok) {
+                    throw new Error("Unable to fetch kanji_db.kjvg. Please run downloader script first.");
+                }
+                const buffer = await response.arrayBuffer();
+                dbDataView = new DataView(buffer);
+
+                // Verify binary magic header
+                const magic = String.fromCharCode(
+                    dbDataView.getUint8(0),
+                    dbDataView.getUint8(1),
+                    dbDataView.getUint8(2),
+                    dbDataView.getUint8(3)
+                );
+                if (magic !== 'KJVG') {
+                    throw new Error("Invalid .kjvg binary signature!");
+                }
+
+                charCount = dbDataView.getUint32(8, true);
+                indexOffset = dbDataView.getUint32(12, true);
+
+                console.log(`[Database Loaded] ${charCount} characters found.`);
+
+                // Fetch metadata
+                const metaResponse = await fetch('./kanji_meta.json?v=' + Date.now());
+                if (metaResponse.ok) {
+                    kanjiMetadata = await metaResponse.json();
+                    availableCodepoints = Object.keys(kanjiMetadata);
+                } else {
+                    console.warn("Could not load kanji_meta.json metadata.");
+                }
+
+                // Load initial Kanji (default to 0x65E5 '日' if available, otherwise first loaded)
+                if (availableCodepoints.includes("0x65E5")) {
+                    loadKanjiByHex("0x65E5");
+                } else if (availableCodepoints.length > 0) {
+                    loadKanjiByHex(availableCodepoints[0]);
+                }
+            } catch (err) {
+                feedbackBox.className = "status-box status-error";
+                feedbackBox.textContent = `Database Error: ${err.message}`;
+            }
+        }
+
+        // Performs a binary search lookup inside the memory mapping
+        function lookupCodepoint(codepoint) {
+            if (!dbDataView) return null;
+            let low = 0;
+            let high = charCount - 1;
+
+            while (low <= high) {
+                const mid = Math.floor((low + high) / 2);
+                const entryAddr = indexOffset + mid * 16;
+                const entryCodepoint = dbDataView.getUint32(entryAddr, true);
+
+                if (entryCodepoint === codepoint) {
+                    const strokeCount = dbDataView.getUint16(entryAddr + 4, true);
+                    const dataOffset = Number(dbDataView.getBigUint64(entryAddr + 8, true));
+                    return { strokeCount, dataOffset };
+                } else if (entryCodepoint < codepoint) {
+                    low = mid + 1;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            return null;
+        }
+
+        // Decodes coordinate lists using relocatable offsets
+        function decodeStrokeData(entry) {
+            const strokes = [];
+            let currentOffset = entry.dataOffset;
+
+            for (let s = 0; s < entry.strokeCount; s++) {
+                const ptCount = dbDataView.getUint16(currentOffset, true);
+                const points = [];
+                const pointsBase = currentOffset + 4;
+
+                for (let p = 0; p < ptCount; p++) {
+                    const xRaw = dbDataView.getUint16(pointsBase + p * 4, true);
+                    const yRaw = dbDataView.getUint16(pointsBase + p * 4 + 2, true);
+                    // Decompress coordinates back to canvas dimensions [0, 512]
+                    const x = (xRaw / 65535.0) * 512.0;
+                    const y = (yRaw / 65535.0) * 512.0;
+                    points.push({ x, y });
+                }
+
+                strokes.push(points);
+                currentOffset += 4 + ptCount * 4;
+            }
+            return strokes;
+        }
+
+        function loadKanjiByHex(hexKey) {
+            if (!dbDataView) return;
+            const codepoint = parseInt(hexKey, 16);
+            const entry = lookupCodepoint(codepoint);
+
+            if (entry) {
+                activeKanjiStrokes = decodeStrokeData(entry);
+                
+                // Populate metadata display
+                const meta = kanjiMetadata[hexKey] || kanjiMetadata[hexKey.toUpperCase()] || {
+                    literal: String.fromCharCode(codepoint),
+                    meanings: ["No description"],
+                    onyomi: [],
+                    kunyomi: []
+                };
+
+                document.getElementById('kanji-char-display').textContent = meta.literal;
+                document.getElementById('kanji-meaning').textContent = meta.meanings.join(', ');
+                document.getElementById('kanji-onyomi').textContent = meta.onyomi.length > 0 ? meta.onyomi.join(', ') : 'None';
+                document.getElementById('kanji-kunyomi').textContent = meta.kunyomi.length > 0 ? meta.kunyomi.join(', ') : 'None';
+
+                resetWholeCharacter();
+            } else {
+                feedbackBox.className = "status-box status-error";
+                feedbackBox.textContent = `Character ${hexKey} stroke paths not found in database.`;
+            }
+        }
+
+        let activeMode = 'kanji'; // 'kanji' | 'word' | 'sentence'
+        let currentSequenceObj = null;
+        let currentSequenceCharIdx = 0;
+        let sequenceKanjiIndices = []; // Valid Kanji indices in the active word/sentence
+
+        const KANJI_WORDS = [
+            { word: "日本", reading: "にほん (nihon)", meaning: "Japan" },
+            { word: "日本語", reading: "にほんご (nihongo)", meaning: "Japanese Language" },
+            { word: "大人", reading: "おとな (otona)", meaning: "Adult" },
+            { word: "学生", reading: "がくせい (gakusei)", meaning: "Student" },
+            { word: "先生", reading: "せんせい (sensei)", meaning: "Teacher" },
+            { word: "学校", reading: "がっこう (gakkou)", meaning: "School" },
+            { word: "毎日", reading: "まいにち (mainichi)", meaning: "Every day" },
+            { word: "電車", reading: "でんしゃ (densha)", meaning: "Train" },
+            { word: "出口", reading: "でぐち (deguchi)", meaning: "Exit" },
+            { word: "入口", reading: "いりぐち (iriguchi)", meaning: "Entrance" },
+            { word: "上手", reading: "じょうず (jouzu)", meaning: "Skillful / Good at" },
+            { word: "下手", reading: "へた (heta)", meaning: "Unskillful / Poor at" },
+            { word: "火山", reading: "かざん (kazan)", meaning: "Volcano" },
+            { word: "元気", reading: "げんき (genki)", meaning: "Healthy / Energetic" },
+            { word: "写真", reading: "しゃしん (shashin)", meaning: "Photograph" },
+            { word: "旅行", reading: "りょこう (ryokou)", meaning: "Travel / Trip" },
+            { word: "漢字", reading: "かんじ (kanji)", meaning: "Kanji / Chinese Characters" },
+            { word: "世界", reading: "せかい (sekai)", meaning: "World" },
+            { word: "友達", reading: "ともだち (tomodachi)", meaning: "Friend" },
+            { word: "時間", reading: "じかん (jikan)", meaning: "Time" },
+            { word: "電話", reading: "でんわ (denwa)", meaning: "Telephone" },
+            { word: "天気", reading: "てんき (tenki)", meaning: "Weather" },
+            { word: "空気", reading: "くうき (kuuki)", meaning: "Air / Atmosphere" },
+            { word: "仕事", reading: "しごと (shigoto)", meaning: "Work / Job" },
+            { word: "音楽", reading: "おんがく (ongaku)", meaning: "Music" },
+            { word: "勉強", reading: "べんきょう (benkyou)", meaning: "Study" },
+            { word: "山登り", reading: "やまのぼり (yamanobori)", meaning: "Mountain climbing" },
+            { word: "読書", reading: "どくしょ (dokusho)", meaning: "Reading books" },
+            { word: "食堂", reading: "しょくどう (shokudou)", meaning: "Cafeteria / Dining Hall" },
+            { word: "空港", reading: "くうこう (kuukou)", meaning: "Airport" },
+            { word: "牛肉", reading: "ぎゅうにく (gyuuniku)", meaning: "Beef" },
+            { word: "自転車", reading: "じてんしゃ (jitensha)", meaning: "Bicycle" },
+            { word: "花見", reading: "はなみ (hanami)", meaning: "Cherry blossom viewing" }
+        ];
+
+        const KANJI_SENTENCES = [
+            { sentence: "日本語を勉強します。", reading: "にほんごをべんきょうします (nihongo o benkyou shimasu)", meaning: "I study Japanese." },
+            { sentence: "今日は天気が良いです。", reading: "きょうはてんきがよいです (kyou wa tenki ga yoi desu)", meaning: "The weather is good today." },
+            { sentence: "学校に行きます。", reading: "がっこうにいきます (gakkou ni ikimasu)", meaning: "I go to school." },
+            { sentence: "日本に行きたいです。", reading: "にほんにいきたいです (nihon ni ikitai desu)", meaning: "I want to go to Japan." },
+            { sentence: "私は学生です。", reading: "わたしはがくせいです (watashi wa gakusei desu)", meaning: "I am a student." },
+            { sentence: "本を読みます。", reading: "ほんをよみます (hon o yomimasu)", meaning: "I read a book." },
+            { sentence: "車を運転します。", reading: "くるまをうんてんします (kuruma o unten shimasu)", meaning: "I drive a car." },
+            { sentence: "映画を見ました。", reading: "えいがをみました (eiga o mimashita)", meaning: "I watched a movie." },
+            { sentence: "音楽を聞くのが好きです。", reading: "おんがくをきくのがすきです (ongaku o kiku no ga suki desu)", meaning: "I like listening to music." },
+            { sentence: "友達と遊びます。", reading: "ともだちとあそびます (tomodachi to asobimasu)", meaning: "I play with my friends." }
+        ];
+
+        function setMode(mode) {
+            activeMode = mode;
+            
+            // UI elements
+            const kanjiCard = document.getElementById('kanji-mode-card');
+            const wordCard = document.getElementById('word-mode-card');
+            const searchContainer = document.getElementById('kanji-search-container');
+            const nextKanji = document.getElementById('next-kanji-container');
+            const nextWord = document.getElementById('next-word-container');
+            const nextSentence = document.getElementById('next-sentence-container');
+
+            // Reset tab button highlights
+            const btnKanji = document.getElementById('mode-kanji-btn');
+            const btnWord = document.getElementById('mode-word-btn');
+            const btnSentence = document.getElementById('mode-sentence-btn');
+
+            btnKanji.style.background = '#ffffff'; btnKanji.style.color = '#333333';
+            btnWord.style.background = '#ffffff'; btnWord.style.color = '#333333';
+            btnSentence.style.background = '#ffffff'; btnSentence.style.color = '#333333';
+
+            if (mode === 'kanji') {
+                kanjiCard.style.display = 'flex';
+                wordCard.style.display = 'none';
+                searchContainer.style.display = 'block';
+                nextKanji.style.display = 'block';
+                nextWord.style.display = 'none';
+                nextSentence.style.display = 'none';
+                btnKanji.style.background = '#333333';
+                btnKanji.style.color = '#ffffff';
+
+                loadKanjiByHex("0x65E5"); // Default back to sun
+            } else if (mode === 'word') {
+                kanjiCard.style.display = 'none';
+                wordCard.style.display = 'flex';
+                searchContainer.style.display = 'none';
+                nextKanji.style.display = 'none';
+                nextWord.style.display = 'block';
+                nextSentence.style.display = 'none';
+                btnWord.style.background = '#333333';
+                btnWord.style.color = '#ffffff';
+
+                document.getElementById('word-reading-label').textContent = "Word Pronunciation";
+                document.getElementById('word-meaning-label').textContent = "Word Meaning";
+
+                loadRandomWord();
+            } else if (mode === 'sentence') {
+                kanjiCard.style.display = 'none';
+                wordCard.style.display = 'flex';
+                searchContainer.style.display = 'none';
+                nextKanji.style.display = 'none';
+                nextWord.style.display = 'none';
+                nextSentence.style.display = 'block';
+                btnSentence.style.background = '#333333';
+                btnSentence.style.color = '#ffffff';
+
+                document.getElementById('word-reading-label').textContent = "Sentence Pronunciation";
+                document.getElementById('word-meaning-label').textContent = "Sentence Meaning";
+
+                loadRandomSentence();
+            }
+        }
+
+        function loadRandomWord() {
+            if (KANJI_WORDS.length === 0) return;
+            const idx = Math.floor(Math.random() * KANJI_WORDS.length);
+            const wordObj = KANJI_WORDS[idx];
+            startSequencePractice(wordObj, 'Word');
+        }
+
+        function loadRandomSentence() {
+            if (KANJI_SENTENCES.length === 0) return;
+            const idx = Math.floor(Math.random() * KANJI_SENTENCES.length);
+            const sentenceObj = KANJI_SENTENCES[idx];
+            startSequencePractice(sentenceObj, 'Sentence');
+        }
+
+        function startSequencePractice(sequenceObj, typeStr) {
+            currentSequenceObj = sequenceObj;
+            currentSequenceCharIdx = 0;
+            sequenceKanjiIndices = [];
+
+            // Find valid Kanji codepoints present in the database metadata
+            const textStr = sequenceObj.word || sequenceObj.sentence;
+            for (let i = 0; i < textStr.length; i++) {
+                const char = textStr[i];
+                const codepoint = char.charCodeAt(0);
+                const hexKey = "0x" + codepoint.toString(16).toUpperCase();
+                
+                if (kanjiMetadata[hexKey]) {
+                    sequenceKanjiIndices.push(i);
+                }
+            }
+
+            if (sequenceKanjiIndices.length === 0) {
+                if (typeStr === 'Sentence') {
+                    loadRandomSentence();
+                } else {
+                    loadRandomWord();
+                }
+                return;
+            }
+
+            document.getElementById('word-literal-display').textContent = textStr;
+            document.getElementById('word-reading-display').textContent = sequenceObj.reading;
+            document.getElementById('word-meaning-display').textContent = sequenceObj.meaning;
+
+            loadSequenceCharacter(0, typeStr);
+        }
+
+        function loadSequenceCharacter(listIdx, typeStr) {
+            currentSequenceCharIdx = listIdx;
+            const charIdx = sequenceKanjiIndices[listIdx];
+            const textStr = currentSequenceObj.word || currentSequenceObj.sentence;
+            const char = textStr[charIdx];
+            const codepoint = char.charCodeAt(0);
+            const hexKey = "0x" + codepoint.toString(16).toUpperCase();
+
+            document.getElementById('word-active-char-display').textContent = `${char} (${listIdx + 1}/${sequenceKanjiIndices.length})`;
+            loadKanjiByHex(hexKey);
+
+            // Override feedback display
+            feedbackBox.className = "status-box status-neutral";
+            feedbackBox.textContent = `${typeStr}: "${textStr}". Draw the character "${char}" (${listIdx + 1} of ${sequenceKanjiIndices.length}).`;
+        }
+
+        function loadRandomKanji() {
+            if (availableCodepoints.length === 0) return;
+            const idx = Math.floor(Math.random() * availableCodepoints.length);
+            loadKanjiByHex(availableCodepoints[idx]);
+        }
+
+        function searchKanji() {
+            const query = document.getElementById('kanji-search').value.trim().toLowerCase();
+            if (!query) return;
+
+            // 1. Match by exact literal character
+            for (const [hex, meta] of Object.entries(kanjiMetadata)) {
+                if (meta.literal === query) {
+                    loadKanjiByHex(hex);
+                    return;
+                }
+            }
+
+            // 2. Match by meaning or reading text
+            for (const [hex, meta] of Object.entries(kanjiMetadata)) {
+                const matchesMeaning = meta.meanings.some(m => m.toLowerCase().includes(query));
+                const matchesOn = meta.onyomi.some(o => o.toLowerCase().includes(query));
+                const matchesKun = meta.kunyomi.some(k => k.toLowerCase().includes(query));
+
+                if (matchesMeaning || matchesOn || matchesKun) {
+                    loadKanjiByHex(hex);
+                    return;
+                }
+            }
+
+            feedbackBox.className = "status-box status-error";
+            feedbackBox.textContent = `No matches found for "${query}".`;
+        }
+
+        // Canvas Drawing Setup
+        canvas.addEventListener('pointerdown', (e) => {
+            if (currentStrokeIdx >= activeKanjiStrokes.length) return;
+            isDrawing = true;
+            canvas.setPointerCapture(e.pointerId);
+            userDrawingPoints = [];
+            lastFailedStroke = null; // Clear failure visual on new stroke start
+            addDrawingPoint(e);
+            renderScene();
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+            if (!isDrawing) return;
+            addDrawingPoint(e);
+            renderScene();
+        });
+
+        canvas.addEventListener('pointerup', (e) => {
+            if (!isDrawing) return;
+            isDrawing = false;
+            canvas.releasePointerCapture(e.pointerId);
+            validateUserStroke();
+        });
+
+        function addDrawingPoint(e) {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            userDrawingPoints.push({ x, y });
+        }
+
+        // Renders outlines, guidelines, user active lines, and status labels
+        function renderScene() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // 1. Draw ACCURATE reference template guidelines (Underlay)
+            // Draw completed reference strokes in thick semi-transparent green
+            ctx.lineWidth = 10;
+            ctx.strokeStyle = 'rgba(46, 125, 50, 0.22)'; // Soft template correct guide
+            for (let i = 0; i < currentStrokeIdx; i++) {
+                const strokePts = activeKanjiStrokes[i];
+                if (strokePts.length < 2) continue;
+                ctx.beginPath();
+                ctx.moveTo(strokePts[0].x, strokePts[0].y);
+                for (let p = 1; p < strokePts.length; p++) {
+                    ctx.lineTo(strokePts[p].x, strokePts[p].y);
+                }
+                ctx.stroke();
+            }
+
+            // Draw current active stroke template in semi-transparent orange
+            if (currentStrokeIdx < activeKanjiStrokes.length) {
+                const strokePts = activeKanjiStrokes[currentStrokeIdx];
+                if (strokePts.length >= 2) {
+                    ctx.lineWidth = 10;
+                    ctx.strokeStyle = 'rgba(255, 152, 0, 0.35)'; // Soft active template guide
+                    ctx.beginPath();
+                    ctx.moveTo(strokePts[0].x, strokePts[0].y);
+                    for (let p = 1; p < strokePts.length; p++) {
+                        ctx.lineTo(strokePts[p].x, strokePts[p].y);
+                    }
+                    ctx.stroke();
+                }
+            }
+
+            // Draw future strokes in very faint dotted gray
+            ctx.lineWidth = 4;
+            ctx.setLineDash([4, 6]);
+            ctx.strokeStyle = 'rgba(200, 200, 200, 0.35)';
+            for (let i = currentStrokeIdx + 1; i < activeKanjiStrokes.length; i++) {
+                const strokePts = activeKanjiStrokes[i];
+                if (strokePts.length < 2) continue;
+                ctx.beginPath();
+                ctx.moveTo(strokePts[0].x, strokePts[0].y);
+                for (let p = 1; p < strokePts.length; p++) {
+                    ctx.lineTo(strokePts[p].x, strokePts[p].y);
+                }
+                ctx.stroke();
+            }
+            ctx.setLineDash([]); // Reset dash
+
+            // Draw target starting point marker (orange dot)
+            if (currentStrokeIdx < activeKanjiStrokes.length) {
+                const strokePts = activeKanjiStrokes[currentStrokeIdx];
+                if (strokePts.length >= 2) {
+                    ctx.fillStyle = '#ff9800';
+                    ctx.beginPath();
+                    ctx.arc(strokePts[0].x, strokePts[0].y, 7, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // 2. Draw last failed user stroke in soft red (if present and user is not currently drawing)
+            if (lastFailedStroke && !isDrawing) {
+                ctx.lineWidth = 5;
+                ctx.strokeStyle = 'rgba(211, 47, 47, 0.45)'; // Soft red failed stroke overlay
+                ctx.beginPath();
+                ctx.moveTo(lastFailedStroke[0].x, lastFailedStroke[0].y);
+                for (let p = 1; p < lastFailedStroke.length; p++) {
+                    ctx.lineTo(lastFailedStroke[p].x, lastFailedStroke[p].y);
+                }
+                ctx.stroke();
+            }
+
+            // 3. Draw USER's actual drawing history on top in deep ink color
+            ctx.lineWidth = 4.5;
+            ctx.strokeStyle = '#2c3e50'; // Deep calligraphic ink color
+            for (let i = 0; i < currentStrokeIdx; i++) {
+                const userPts = userStrokeHistory[i];
+                if (!userPts || userPts.length < 2) continue;
+                ctx.beginPath();
+                ctx.moveTo(userPts[0].x, userPts[0].y);
+                for (let p = 1; p < userPts.length; p++) {
+                    ctx.lineTo(userPts[p].x, userPts[p].y);
+                }
+                ctx.stroke();
+            }
+
+            // 4. Draw current line the user is drawing
+            if (isDrawing && userDrawingPoints.length >= 2) {
+                ctx.lineWidth = 4.5;
+                ctx.strokeStyle = '#2c3e50';
+                ctx.beginPath();
+                ctx.moveTo(userDrawingPoints[0].x, userDrawingPoints[0].y);
+                for (let p = 1; p < userDrawingPoints.length; p++) {
+                    ctx.lineTo(userDrawingPoints[p].x, userDrawingPoints[p].y);
+                }
+                ctx.stroke();
+            }
+        }
+
+        // resamples coordinate array using cumulative chord-lengths
+        function resampleCoordinates(points, count) {
+            const result = [];
+            const cumulative = [0];
+            let total = 0;
+
+            for (let i = 1; i < points.length; i++) {
+                const dx = points[i].x - points[i-1].x;
+                const dy = points[i].y - points[i-1].y;
+                total += Math.sqrt(dx * dx + dy * dy);
+                cumulative.push(total);
+            }
+
+            if (total === 0) {
+                for (let i = 0; i < count; i++) {
+                    result.push({ ...points[0] });
+                }
+                return result;
+            }
+
+            const step = total / (count - 1);
+            let rawIdx = 1;
+
+            for (let k = 0; k < count; k++) {
+                const target = k * step;
+                while (rawIdx < points.length && cumulative[rawIdx] < target) {
+                    rawIdx++;
+                }
+
+                const prevDist = cumulative[rawIdx - 1];
+                const nextDist = cumulative[rawIdx];
+                const segLen = nextDist - prevDist;
+                
+                let t = 0;
+                if (segLen > 0) {
+                    t = (target - prevDist) / segLen;
+                }
+
+                const prevPt = points[rawIdx - 1];
+                const nextPt = points[rawIdx];
+
+                result.push({
+                    x: prevPt.x + (nextPt.x - prevPt.x) * t,
+                    y: prevPt.y + (nextPt.y - prevPt.y) * t
+                });
+            }
+
+            return result;
+        }
+
+        // Bounding box scale-to-fit coordinates normalization
+        function normalizeCoordinates(points, boxW, boxH) {
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+
+            for (const pt of points) {
+                if (pt.x < minX) minX = pt.x;
+                if (pt.x > maxX) maxX = pt.x;
+                if (pt.y < minY) minY = pt.y;
+                if (pt.y > maxY) maxY = pt.y;
+            }
+
+            const w = maxX - minX;
+            const h = maxY - minY;
+
+            // Preserve drawing aspect ratios
+            const scale = Math.min(boxW / (w || 1), boxH / (h || 1));
+            const offsetX = (boxW - w * scale) / 2;
+            const offsetY = (boxH - h * scale) / 2;
+
+            return points.map(pt => ({
+                x: (pt.x - minX) * scale + offsetX,
+                y: (pt.y - minY) * scale + offsetY
+            }));
+        }
+
+        // Matches two resampled stroke coordinate listings (0.0 to 1.0)
+        function computeMatchingScore(userPath, refPath, maxTolerance = 128.0) {
+            const N = userPath.length;
+            let spatialSum = 0.0;
+            let dirSimSum = 0.0;
+            let directionSegments = 0;
+
+            for (let i = 0; i < N; i++) {
+                // Spatial distance
+                const dx = userPath[i].x - refPath[i].x;
+                const dy = userPath[i].y - refPath[i].y;
+                spatialSum += Math.sqrt(dx * dx + dy * dy);
+
+                // Segment direction similarities
+                if (i < N - 1) {
+                    const ux = userPath[i+1].x - userPath[i].x;
+                    const uy = userPath[i+1].y - userPath[i].y;
+                    const rx = refPath[i+1].x - refPath[i].x;
+                    const ry = refPath[i+1].y - refPath[i].y;
+
+                    const uLen = Math.sqrt(ux * ux + uy * uy);
+                    const rLen = Math.sqrt(rx * rx + ry * ry);
+
+                    if (uLen > 0.0001 && rLen > 0.0001) {
+                        const dot = (ux * rx + uy * ry) / (uLen * rLen);
+                        const clampedDot = Math.max(-1.0, Math.min(1.0, dot));
+                        dirSimSum += (1.0 + clampedDot) * 0.5;
+                        directionSegments++;
+                    }
+                }
+            }
+
+            // Normalizations
+            const avgDist = spatialSum / N;
+            let spatialScore = 1.0 - (avgDist / maxTolerance);
+            if (spatialScore < 0) spatialScore = 0;
+
+            let directionScore = 1.0;
+            if (directionSegments > 0) {
+                directionScore = dirSimSum / directionSegments;
+            }
+
+            // 50% Position alignment + 50% Vector stroke direction alignment
+            return (0.5 * spatialScore) + (0.5 * directionScore);
+        }
+
+        // Validates user stroke completion against target stroke
+        function validateUserStroke() {
+            if (userDrawingPoints.length < 2) return;
+
+            // 1. Resample both paths to exactly matching layouts (keep in absolute 512x512 space)
+            const userResampled = resampleCoordinates(userDrawingPoints, N_RESAMPLE);
+            const refRaw = activeKanjiStrokes[currentStrokeIdx];
+            const refResampled = resampleCoordinates(refRaw, N_RESAMPLE);
+
+            // 2. Run matching math logic against absolute coordinates (75px average tolerance)
+            const score = computeMatchingScore(userResampled, refResampled, 75.0);
+            const scorePercentage = Math.round(score * 100);
+
+            scoreGroup.style.display = 'block';
+            scoreText.textContent = `${scorePercentage}%`;
+
+            // Validate against the threshold (72% accuracy required)
+            if (score >= 0.72) {
+                // Success: progress stroke index
+                const completedStroke = currentStrokeIdx + 1;
+                feedbackBox.className = "status-box status-success";
+                feedbackBox.textContent = `Correct! Stroke ${completedStroke} matched with ${scorePercentage}% accuracy.`;
+                
+                // Update side panel lists
+                const listItems = strokeList.children;
+                if (listItems[currentStrokeIdx]) {
+                    listItems[currentStrokeIdx].className = "stroke-item done";
+                }
+
+                // Store user's raw coordinates in history
+                userStrokeHistory[currentStrokeIdx] = [...userDrawingPoints];
+                lastFailedStroke = null;
+
+                currentStrokeIdx++;
+                userDrawingPoints = [];
+
+                if (currentStrokeIdx >= activeKanjiStrokes.length) {
+                    if (activeMode !== 'kanji') {
+                        const nextListIdx = currentSequenceCharIdx + 1;
+                        const typeStr = activeMode === 'sentence' ? 'Sentence' : 'Word';
+                        const textStr = currentSequenceObj.word || currentSequenceObj.sentence;
+                        if (nextListIdx < sequenceKanjiIndices.length) {
+                            feedbackBox.className = "status-box status-success";
+                            feedbackBox.textContent = `Correct! Character completed. Loading next character in 1.5s...`;
+                            progressText.textContent = `Completed!`;
+                            setTimeout(() => {
+                                loadSequenceCharacter(nextListIdx, typeStr);
+                            }, 1500);
+                        } else {
+                            feedbackBox.className = "status-box status-success";
+                            feedbackBox.innerHTML = `<strong>Congratulations!</strong> You completed drawing the entire ${typeStr.toLowerCase()} <strong>"${textStr}"</strong> successfully!`;
+                            progressText.textContent = `${typeStr} Completed!`;
+                        }
+                    } else {
+                        feedbackBox.className = "status-box status-success";
+                        feedbackBox.textContent = `Excellent! You completed drawing the character correctly. All ${activeKanjiStrokes.length} strokes match.`;
+                        progressText.textContent = `Completed!`;
+                    }
+                } else {
+                    updateProgressDisplay();
+                }
+            } else {
+                // Failure: display direction warning feedback
+                feedbackBox.className = "status-box status-error";
+                feedbackBox.textContent = `Incorrect stroke (${scorePercentage}% match). Make sure you are drawing the stroke in the correct direction (indicated by orange dot) and matching the guidelines.`;
+                
+                // Store failed stroke coordinates for visual comparison
+                lastFailedStroke = [...userDrawingPoints];
+                userDrawingPoints = [];
+            }
+
+            renderScene();
+        }
+
+        function updateProgressDisplay() {
+            progressText.textContent = `Stroke: ${currentStrokeIdx + 1} / ${activeKanjiStrokes.length}`;
+            
+            // Build the stroke validation listing
+            strokeList.innerHTML = "";
+            for (let i = 0; i < activeKanjiStrokes.length; i++) {
+                const div = document.createElement('div');
+                if (i < currentStrokeIdx) {
+                    div.className = "stroke-item done";
+                    div.innerHTML = `<span>Stroke ${i + 1}</span> <span>&#10003; Done</span>`;
+                } else if (i === currentStrokeIdx) {
+                    div.className = "stroke-item active";
+                    div.innerHTML = `<span>Stroke ${i + 1}</span> <span>Active Target</span>`;
+                } else {
+                    div.className = "stroke-item";
+                    div.innerHTML = `<span>Stroke ${i + 1}</span> <span style="color:#888;">Pending</span>`;
+                }
+                strokeList.appendChild(div);
+            }
+        }
+
+        function resetCurrentStroke() {
+            userDrawingPoints = [];
+            lastFailedStroke = null;
+            if (currentStrokeIdx > 0) {
+                currentStrokeIdx--;
+                userStrokeHistory[currentStrokeIdx] = null;
+            }
+            feedbackBox.className = "status-box status-neutral";
+            feedbackBox.textContent = `Draw the highlighted stroke starting from the orange dot.`;
+            scoreGroup.style.display = 'none';
+            updateProgressDisplay();
+            renderScene();
+        }
+
+        function resetWholeCharacter() {
+            currentStrokeIdx = 0;
+            userDrawingPoints = [];
+            userStrokeHistory = [];
+            lastFailedStroke = null;
+            feedbackBox.className = "status-box status-neutral";
+            feedbackBox.textContent = `Draw the first stroke of the character. Follow the guidelines and start at the orange dot.`;
+            scoreGroup.style.display = 'none';
+            updateProgressDisplay();
+            renderScene();
+        }
+
+        // Run bootloader
+        initDatabase();
+    </script>
+</body>
+</html>

@@ -33,6 +33,8 @@ pub struct CEmitter {
     indent_level: usize,
     /// Track current impl target for method name mangling
     current_impl_target: Option<String>,
+    /// Whether we are inside a @ptx_emit function
+    in_ptx_emit: bool,
 }
 
 impl CEmitter {
@@ -41,6 +43,7 @@ impl CEmitter {
             output: String::new(),
             indent_level: 0,
             current_impl_target: None,
+            in_ptx_emit: false,
         }
     }
 
@@ -63,7 +66,17 @@ impl CEmitter {
     pub fn emit_program(&mut self, prog: &Program) -> String {
         self.emit_prelude();
 
-        // Forward-declare all structs
+        // 1. Emit all simple enum definitions first
+        for item in &prog.items {
+            if let Item::Enum(e) = item {
+                let has_data = e.variants.iter().any(|v| v.fields.is_some());
+                if !has_data {
+                    self.emit_enum(e);
+                }
+            }
+        }
+
+        // 2. Forward-declare all structs
         for item in &prog.items {
             if let Item::Struct(s) = item {
                 writeln!(
@@ -74,21 +87,34 @@ impl CEmitter {
                 .unwrap();
             }
         }
-        if prog.items.iter().any(|i| matches!(i, Item::Struct(_))) {
-            writeln!(&mut self.output).unwrap();
-        }
 
-        // Emit struct definitions first (needed by function signatures)
-        for item in &prog.items {
-            if let Item::Struct(s) = item {
-                self.emit_struct(s);
-            }
-        }
-
-        // Emit all enum definitions (needed by function return types & params)
+        // 3. Forward-declare all data-carrying enums (which are compiled as structs)
         for item in &prog.items {
             if let Item::Enum(e) = item {
-                self.emit_enum(e);
+                let has_data = e.variants.iter().any(|v| v.fields.is_some());
+                if has_data {
+                    writeln!(
+                        &mut self.output,
+                        "typedef struct {name} {name};",
+                        name = e.name
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        writeln!(&mut self.output).unwrap();
+
+        // 4 & 5. Emit struct and data-carrying enum definitions in their original topological order
+        for item in &prog.items {
+            match item {
+                Item::Struct(s) => self.emit_struct(s),
+                Item::Enum(e) => {
+                    let has_data = e.variants.iter().any(|v| v.fields.is_some());
+                    if has_data {
+                        self.emit_enum(e);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -151,6 +177,7 @@ impl CEmitter {
                 Item::Impl(imp) => self.emit_impl(imp),
                 Item::Import(_) => {} // No-op in C
                 Item::StaticAssert(sa) => self.emit_static_assert(sa),
+                Item::Const(c) => self.emit_const(c),
             }
         }
 
@@ -180,6 +207,12 @@ typedef struct {{
     size_t cap;
 }} YStr;
 
+typedef YStr String;
+
+static uint32_t ychar_to_ascii(uint32_t c) {{
+    return c;
+}}
+
 static YStr ystr_new(const char* s) {{
     size_t len = s ? strlen(s) : 0;
     size_t cap = len + 1;
@@ -189,11 +222,23 @@ static YStr ystr_new(const char* s) {{
     return (YStr){{ data, len, cap }};
 }}
 
-static YStr ystr_clone(const YStr* s) {{
+typedef union {{
+    YStr val;
+    YStr* ptr;
+}} YStrUnion;
+
+#define YSTR_PTR(x) _Generic((x), \
+    YStr*: (x), \
+    const YStr*: (x), \
+    default: &((YStrUnion){{.val = _Generic((x), YStr: (x), const YStr: (x), default: (YStr){{0}})}}).val \
+)
+
+static YStr ystr_clone_impl(const YStr* s) {{
     return ystr_new(s->data);
 }}
+#define ystr_clone(x) ystr_clone_impl(YSTR_PTR(x))
 
-static void ystr_push(YStr* s, char c) {{
+static void ystr_push_impl(YStr* s, char c) {{
     if (s->len + 1 >= s->cap) {{
         s->cap = s->cap * 2 + 1;
         s->data = (char*)realloc(s->data, s->cap);
@@ -201,8 +246,9 @@ static void ystr_push(YStr* s, char c) {{
     s->data[s->len++] = c;
     s->data[s->len] = '\0';
 }}
+#define ystr_push(s, c) ystr_push_impl(&(s), c)
 
-static void ystr_push_str(YStr* s, const YStr* other) {{
+static void ystr_push_str_impl(YStr* s, const YStr* other) {{
     size_t olen = other->len;
     while (s->len + olen >= s->cap) {{
         s->cap = s->cap * 2 + 1;
@@ -212,30 +258,50 @@ static void ystr_push_str(YStr* s, const YStr* other) {{
     s->len += olen;
     s->data[s->len] = '\0';
 }}
+#define ystr_push_str(s, other) ystr_push_str_impl(&(s), YSTR_PTR(other))
 
-static bool ystr_eq(const YStr* a, const YStr* b) {{
+static bool ystr_eq_impl(const YStr* a, const YStr* b) {{
     if (a->len != b->len) return false;
     return memcmp(a->data, b->data, a->len) == 0;
 }}
+#define ystr_eq(a, b) ystr_eq_impl(YSTR_PTR(a), YSTR_PTR(b))
 
-static bool ystr_eq_cstr(const YStr* a, const char* b) {{
+#define YSTR_CSTR(x) _Generic(&(x), \
+    YStr*: ((const YStr*)(const void*)&(x))->data, \
+    const YStr*: ((const YStr*)(const void*)&(x))->data, \
+    YStr**: (*(const YStr**)(const void*)&(x))->data, \
+    const YStr**: (*(const YStr**)(const void*)&(x))->data, \
+    default: (x) \
+)
+
+static bool ystr_eq_cstr_impl(const YStr* a, const char* b) {{
     return strcmp(a->data, b) == 0;
 }}
-static bool ystr_eq_val(const YStr* a, const YStr* b) {{
+#define ystr_eq_cstr(a, b) ystr_eq_cstr_impl(YSTR_PTR(a), YSTR_CSTR(b))
+
+static bool ystr_eq_val_impl(const YStr* a, const YStr* b) {{
     if (a->len != b->len) return false;
     return memcmp(a->data, b->data, a->len) == 0;
 }}
+#define ystr_eq_val(a, b) ystr_eq_val_impl(YSTR_PTR(a), YSTR_PTR(b))
 
-static char ystr_char_at(const YStr* s, size_t i) {{
+static char ystr_char_at_impl(const YStr* s, size_t i) {{
     return (i < s->len) ? s->data[i] : '\0';
 }}
+#define ystr_char_at(s, i) ystr_char_at_impl(YSTR_PTR(s), i)
 
-static void ystr_free(YStr* s) {{
+static void ystr_free_impl(YStr* s) {{
     free(s->data);
     s->data = NULL;
     s->len = 0;
     s->cap = 0;
 }}
+#define ystr_free(s) ystr_free_impl(&(s))
+
+static size_t ystr_len_impl(const YStr* s) {{
+    return s->len;
+}}
+#define ystr_len(s) ystr_len_impl(YSTR_PTR(s))
 
 /* ── Y Runtime: Dynamic Vector ──────────── */
 typedef struct {{
@@ -249,7 +315,18 @@ static YVec yvec_new(size_t elem_size) {{
     return (YVec){{ NULL, 0, 0, elem_size }};
 }}
 
-static void yvec_push(YVec* v, const void* elem) {{
+typedef union {{
+    YVec val;
+    YVec* ptr;
+}} YVecUnion;
+
+#define YVEC_PTR(x) _Generic((x), \
+    YVec*: (x), \
+    const YVec*: (x), \
+    default: &((YVecUnion){{.val = _Generic((x), YVec: (x), const YVec: (x), default: (YVec){{0}})}}).val \
+)
+
+static void yvec_push_impl(YVec* v, const void* elem) {{
     if (v->len >= v->cap) {{
         v->cap = v->cap == 0 ? 8 : v->cap * 2;
         v->data = realloc(v->data, v->cap * v->elem_size);
@@ -257,34 +334,36 @@ static void yvec_push(YVec* v, const void* elem) {{
     memcpy((char*)v->data + v->len * v->elem_size, elem, v->elem_size);
     v->len++;
 }}
+#define yvec_push(v, elem) yvec_push_impl(&(v), elem)
 
-static void* yvec_get(const YVec* v, size_t i) {{
+static void* yvec_get_impl(const YVec* v, size_t i) {{
     return (char*)v->data + i * v->elem_size;
 }}
+#define yvec_get(v, i) yvec_get_impl(YVEC_PTR(v), i)
 
-static char yvec_get_char(const YVec* v, size_t i) {{
+static char yvec_get_char_impl(const YVec* v, size_t i) {{
     return *((char*)yvec_get(v, i));
 }}
+#define yvec_get_char(v, i) yvec_get_char_impl(YVEC_PTR(v), i)
 
-static size_t yvec_len(const YVec* v) {{
+static size_t yvec_len_impl(const YVec* v) {{
     return v->len;
 }}
+#define yvec_len(v) yvec_len_impl(YVEC_PTR(v))
 
-static size_t ystr_len(const YStr* s) {{
-    return s->len;
-}}
-
-static void yvec_free(YVec* v) {{
+static void yvec_free_impl(YVec* v) {{
     free(v->data);
     v->data = NULL;
     v->len = 0;
     v->cap = 0;
 }}
+#define yvec_free(v) yvec_free_impl(&(v))
 
 /* ── Y Runtime: Print ───────────────────── */
-static void yprint_str(const YStr* s) {{
+static void yprint_str_impl(const YStr* s) {{
     printf("%s", s->data);
 }}
+#define yprint_str(s) yprint_str_impl(YSTR_PTR(s))
 
 static void yprint_int(int64_t v) {{
     printf("%lld", (long long)v);
@@ -294,12 +373,13 @@ static void yprint_float(double v) {{
     printf("%f", v);
 }}
 
-static void yprintln_str(const YStr* s) {{
+static void yprintln_str_impl(const YStr* s) {{
     printf("%s\n", s->data);
 }}
+#define yprintln_str(s) yprintln_str_impl(YSTR_PTR(s))
 
 /* ── Y Runtime: File I/O ────────────────── */
-static YStr yfile_read_to_string(const YStr* path_str) {{
+static YStr yfile_read_to_string_impl(const YStr* path_str) {{
     const char* path = path_str->data;
     FILE* f = fopen(path, "rb");
     if (!f) {{
@@ -316,8 +396,9 @@ static YStr yfile_read_to_string(const YStr* path_str) {{
     YStr result = {{ buf, (size_t)len, (size_t)(len + 1) }};
     return result;
 }}
+#define yfile_read_to_string(path) yfile_read_to_string_impl(YSTR_PTR(path))
 
-static void yfile_write(const YStr* path_str, const YStr* content) {{
+static void yfile_write_impl(const YStr* path_str, const YStr* content) {{
     const char* path = path_str->data;
     FILE* f = fopen(path, "wb");
     if (!f) {{
@@ -327,6 +408,7 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
     fwrite(content->data, 1, content->len, f);
     fclose(f);
 }}
+#define yfile_write(path, content) yfile_write_impl(YSTR_PTR(path), YSTR_PTR(content))
 
 /* ── User Code ───────────────────────────────── */
 
@@ -355,6 +437,7 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                     "bool" => "bool".into(),
                     "char" => "char".into(),
                     "String" => "YStr".into(),
+                    "ptr" => "const char*".into(),
                     other => other.to_string(),
                 }
             }
@@ -363,6 +446,7 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                 "isize" => "ptrdiff_t".into(),
                 "Vec" => "YVec".into(),
                 "File" => "void*".into(),
+                "ptr" => "const char*".into(),
                 other => other.to_string(),
             },
             Type::Generic { base, args, .. } => match base.as_str() {
@@ -416,15 +500,30 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
         writeln!(&mut self.output, "struct {} {{", s.name).unwrap();
         for field in &s.fields {
             let ty_str = self.emit_type(&field.ty);
+            let mut prefix = String::new();
+            for attr in &field.attrs {
+                match &attr.kind {
+                    FieldAttrKind::Atomic(_) => {
+                        prefix.push_str("_Atomic ");
+                    }
+                    FieldAttrKind::Align(expr) => {
+                        let align_str = self.emit_expr(expr);
+                        prefix.push_str(&format!("_Alignas({}) ", align_str));
+                    }
+                    FieldAttrKind::GpuUncached => {
+                        prefix.push_str("volatile ");
+                    }
+                }
+            }
             if let Some(arr_size) = self.array_size_str(&field.ty) {
                 writeln!(
                     &mut self.output,
-                    "    {} {}[{}];",
-                    ty_str, field.name, arr_size
+                    "    {}{} {}[{}];",
+                    prefix, ty_str, field.name, arr_size
                 )
                 .unwrap();
             } else {
-                writeln!(&mut self.output, "    {} {};", ty_str, field.name).unwrap();
+                writeln!(&mut self.output, "    {}{} {};", prefix, ty_str, field.name).unwrap();
             }
         }
         writeln!(&mut self.output, "}};\n").unwrap();
@@ -471,7 +570,7 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
             }
 
             // Main tagged union struct
-            writeln!(&mut self.output, "typedef struct {{").unwrap();
+            writeln!(&mut self.output, "struct {} {{", e.name).unwrap();
             writeln!(&mut self.output, "    {}_Tag tag;", e.name).unwrap();
             writeln!(&mut self.output, "    union {{").unwrap();
             for variant in &e.variants {
@@ -485,7 +584,7 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                 }
             }
             writeln!(&mut self.output, "    }} data;").unwrap();
-            writeln!(&mut self.output, "}} {};\n", e.name).unwrap();
+            writeln!(&mut self.output, "}};\n").unwrap();
 
             // Constructors for data-carrying enums
             for variant in &e.variants {
@@ -533,6 +632,9 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
     // ── Functions ───────────────────────────────────────────
 
     fn emit_func(&mut self, f: &FuncDecl) {
+        let prev_ptx = self.in_ptx_emit;
+        self.in_ptx_emit = f.is_ptx_emit;
+
         let ret_type = match &f.ret_ty {
             Some(ty) => self.emit_type(ty),
             None => "void".into(),
@@ -548,6 +650,15 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
         // Build parameter list
         let params_str = self.emit_params(&f.params);
 
+        if f.is_ptx_emit {
+            writeln!(&mut self.output, "/* @ptx_emit */").unwrap();
+        }
+        if f.is_ghost {
+            writeln!(&mut self.output, "/* @ghost */").unwrap();
+        }
+        if f.is_hdl_emit {
+            writeln!(&mut self.output, "/* @hdl_emit */").unwrap();
+        }
         self.indent();
         writeln!(
             &mut self.output,
@@ -560,6 +671,8 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
         self.indent_level -= 1;
         self.wln("}");
         writeln!(&mut self.output).unwrap();
+
+        self.in_ptx_emit = prev_ptx;
     }
 
     fn emit_params(&self, params: &[Param]) -> String {
@@ -607,6 +720,17 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
             &mut self.output,
             "_Static_assert({}, \"{}\");\n",
             cond, sa.message
+        )
+        .unwrap();
+    }
+
+    fn emit_const(&mut self, c: &ConstDecl) {
+        let ty_str = self.emit_type(&c.ty);
+        let val_str = self.emit_expr(&c.value);
+        writeln!(
+            &mut self.output,
+            "static const {} {} = {};\n",
+            ty_str, c.name, val_str
         )
         .unwrap();
     }
@@ -816,12 +940,39 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                 }
             }
             Stmt::Chisel(block, _) => {
-                self.wln("/* chisel block — privileged hardware ops */");
-                self.wln("{");
-                self.indent_level += 1;
-                self.emit_block_body(block);
-                self.indent_level -= 1;
-                self.wln("}");
+                if self.in_ptx_emit {
+                    self.wln("/* chisel block — PTX inline assembly */");
+                    self.wln("#if defined(__NVCC__) || defined(__CUDACC__)");
+                    self.wln("{");
+                    self.indent_level += 1;
+                    for stmt in &block.stmts {
+                        if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
+                            self.indent();
+                            writeln!(&mut self.output, "asm volatile (\"{}\");", s).unwrap();
+                        } else {
+                            self.emit_stmt(stmt);
+                        }
+                    }
+                    self.indent_level -= 1;
+                    self.wln("}");
+                    self.wln("#else");
+                    self.wln("/* PTX asm elided on non-CUDA host target */");
+                    for stmt in &block.stmts {
+                        if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
+                            self.indent();
+                            writeln!(&mut self.output, "/* PTX: {} */", s).unwrap();
+                        }
+                    }
+                    self.wln("#endif");
+
+                } else {
+                    self.wln("/* chisel block — privileged hardware ops */");
+                    self.wln("{");
+                    self.indent_level += 1;
+                    self.emit_block_body(block);
+                    self.indent_level -= 1;
+                    self.wln("}");
+                }
             }
             Stmt::SafeBlock(block, _) => {
                 self.wln("/* @safe verified block */");
@@ -830,6 +981,25 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                 self.emit_block_body(block);
                 self.indent_level -= 1;
                 self.wln("}");
+            }
+            Stmt::GhostBlock(block, _) => {
+                self.wln("/* @ghost speculative block */");
+                self.wln("{");
+                self.indent_level += 1;
+                self.emit_block_body(block);
+                self.indent_level -= 1;
+                self.wln("}");
+            }
+            Stmt::ClockDomainBlock { body, .. } => {
+                self.wln("/* @clock_domain block */");
+                self.wln("{");
+                self.indent_level += 1;
+                self.emit_block_body(body);
+                self.indent_level -= 1;
+                self.wln("}");
+            }
+            Stmt::CompileTimeAssert { .. } => {
+                self.wln("/* compile_time::assert! verified and stripped */");
             }
         }
     }
@@ -865,7 +1035,11 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
             }
             Expr::StringLit(s, _) => format!(
                 "ystr_new(\"{}\")",
-                s.replace('\\', "\\\\").replace('"', "\\\"")
+                s.replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\t', "\\t")
             ),
             Expr::BoolLit(b, _) => {
                 if *b {
@@ -897,8 +1071,8 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                     UnaryOp::Ref => {
                         if o.contains('(') && !o.starts_with('(') {
                             // Taking address of a function call result (rvalue).
-                            // Use GCC statement expression to create temporary:
-                            format!("({{ YStr __tmp = {}; &__tmp; }})", o)
+                            // Use compound literal to ensure block lifetime:
+                            format!("&((YStrUnion){{.val = {}}}).val", o)
                         } else {
                             format!("(&{})", o)
                         }
@@ -915,38 +1089,14 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                         if args_str.is_empty() {
                             "printf(\"\\n\")".into()
                         } else {
-                            let arg = &args_str[0];
-                            if arg.starts_with("(&") {
-                                format!(
-                                    "printf(\"%s\\n\", ({}).data)",
-                                    arg.trim_start_matches("(&").trim_end_matches(')')
-                                )
-                            } else if arg.starts_with("ystr_new(") || arg.starts_with("ystr_clone(")
-                            {
-                                format!("printf(\"%s\\n\", ({}).data)", arg)
-                            } else {
-                                // Could be a pointer variable — use -> access
-                                format!("printf(\"%s\\n\", ({})->data)", arg)
-                            }
+                            format!("yprintln_str({})", args_str[0])
                         }
                     }
                     "print" => {
                         if args_str.is_empty() {
                             "((void)0)".into()
                         } else {
-                            let arg = &args_str[0];
-                            if arg.starts_with("(&") {
-                                format!(
-                                    "printf(\"%s\", ({}).data)",
-                                    arg.trim_start_matches("(&").trim_end_matches(')')
-                                )
-                            } else if arg.starts_with("ystr_new(") || arg.starts_with("ystr_clone(")
-                            {
-                                format!("printf(\"%s\", ({}).data)", arg)
-                            } else {
-                                // Could be a pointer variable — use -> access
-                                format!("printf(\"%s\", ({})->data)", arg)
-                            }
+                            format!("yprint_str({})", args_str[0])
                         }
                     }
                     "print_int" => format!("printf(\"%d\\n\", (int){})", args_str.join(", ")),
@@ -964,26 +1114,59 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                     "String_new" => args_str.get(0).unwrap_or(&"ystr_new(\"\")".into()).clone(),
                     "String_clone" => format!("ystr_clone({})", args_str[0]),
                     "String_len" => format!("ystr_len({})", args_str[0]),
+                    "String_eq" => format!("ystr_eq({}, {})", args_str[0], args_str[1]),
                     "String_eq_cstr" => {
-                        // If second arg is a string literal (contains quotes), use ystr_eq_cstr
-                        // Otherwise both are YStr pointers, use ystr_eq
                         if args_str[1].contains('"') {
-                            // Second arg is ystr_new("..."), extract the raw C string
                             let raw = args_str[1]
                                 .trim_start_matches("ystr_new(")
                                 .trim_end_matches(')');
                             format!("ystr_eq_cstr({}, {})", args_str[0], raw)
                         } else {
-                            format!("ystr_eq({}, {})", args_str[0], args_str[1])
+                            format!("ystr_eq_cstr({}, {})", args_str[0], args_str[1])
                         }
                     }
                     "String_char_at" => format!("ystr_char_at({}, {})", args_str[0], args_str[1]),
-                    "String_push" => format!("ystr_push({}, {})", args_str[0], args_str[1]),
+                    "String_push" => {
+                        let ptr_arg = if args_str[0].starts_with('&') || args_str[0].starts_with("(&") || args_str[0] == "self" {
+                            args_str[0].clone()
+                        } else {
+                            format!("&{}", args_str[0])
+                        };
+                        format!("ystr_push_impl({}, {})", ptr_arg, args_str[1])
+                    }
+                    "String_push_str" => {
+                        let ptr_arg = if args_str[0].starts_with('&') || args_str[0].starts_with("(&") || args_str[0] == "self" {
+                            args_str[0].clone()
+                        } else {
+                            format!("&{}", args_str[0])
+                        };
+                        format!("ystr_push_str_impl({}, YSTR_PTR({}))", ptr_arg, args_str[1])
+                    }
+                    "String_free" => {
+                        let ptr_arg = if args_str[0].starts_with('&') || args_str[0].starts_with("(&") || args_str[0] == "self" {
+                            args_str[0].clone()
+                        } else {
+                            format!("&{}", args_str[0])
+                        };
+                        format!("ystr_free_impl({})", ptr_arg)
+                    }
                     "Vec_new" => format!("yvec_new({})", args_str.get(0).unwrap_or(&"1".into())),
-                    "Vec_push" => format!(
-                        "{{ __typeof__({1}) __push_tmp = {1}; yvec_push({0}, &__push_tmp); }}",
-                        args_str[0], args_str[1]
-                    ),
+                    "Vec_push" => {
+                        let ptr_arg = if args_str[0].starts_with('&') || args_str[0].starts_with("(&") || args_str[0] == "self" {
+                            args_str[0].clone()
+                        } else {
+                            format!("&{}", args_str[0])
+                        };
+                        let val_arg = &args_str[1];
+                        if val_arg.starts_with('&') || val_arg.starts_with("(&") {
+                            format!("yvec_push_impl({}, {})", ptr_arg, val_arg)
+                        } else {
+                            format!(
+                                "{{ __typeof__({1}) __push_tmp = {1}; yvec_push_impl({0}, &__push_tmp); }}",
+                                ptr_arg, val_arg
+                            )
+                        }
+                    }
                     "Vec_get_char" => format!("yvec_get_char({}, {})", args_str[0], args_str[1]),
                     "Vec_get_Token" => {
                         format!("(*(Token*)yvec_get({}, {}))", args_str[0], args_str[1])
@@ -1005,7 +1188,26 @@ static void yfile_write(const YStr* path_str, const YStr* content) {{
                     }
                     "Vec_len" => format!("yvec_len({})", args_str[0]),
 
-                    _ => format!("{}({})", func_str, args_str.join(", ")),
+                    _ => {
+                        if func_str.starts_with("Vec_get_") {
+                            let type_name = &func_str["Vec_get_".len()..];
+                            let c_type = match type_name {
+                                "usize" => "size_t",
+                                "I8" | "i8" => "int8_t",
+                                "U8" | "u8" => "uint8_t",
+                                "I16" | "i16" => "int16_t",
+                                "U16" | "u16" => "uint16_t",
+                                "I32" | "i32" => "int32_t",
+                                "U32" | "u32" => "uint32_t",
+                                "I64" | "i64" => "int64_t",
+                                "U64" | "u64" => "uint64_t",
+                                _ => type_name,
+                            };
+                            format!("(*({}*)yvec_get({}, {}))", c_type, args_str[0], args_str[1])
+                        } else {
+                            format!("{}({})", func_str, args_str.join(", "))
+                        }
+                    }
                 }
             }
             Expr::GenericCall { func, args, .. } => {

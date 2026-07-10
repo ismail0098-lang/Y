@@ -1,6 +1,35 @@
 import lib;
 import parser;
 
+@unsafe
+fn replace_colons(s: &String) -> String {
+    let mut res: String = String::new("");
+    let len: usize = String::len(*s);
+    let mut i: usize = 0;
+    while i < len {
+        let c: char = String::char_at(*s, i);
+        if c == ':' {
+            if i + 1 < len {
+                let next_c: char = String::char_at(*s, i + 1);
+                if next_c == ':' {
+                    String::push(&mut res, '_');
+                    i += 2;
+                } else {
+                    String::push(&mut res, c);
+                    i += 1;
+                }
+            } else {
+                String::push(&mut res, c);
+                i += 1;
+            }
+        } else {
+            String::push(&mut res, c);
+            i += 1;
+        }
+    }
+    return res;
+}
+
 struct LlvmEmitter {
     buffer: String,
     tmp_counter: usize,
@@ -84,7 +113,8 @@ impl LlvmEmitter {
         }
 
         String::push_str(&mut (*e).buffer, &String::new("define i32 @"));
-        String::push_str(&mut (*e).buffer, &fdecl.name);
+        let clean_name: String = replace_colons(&fdecl.name);
+        String::push_str(&mut (*e).buffer, &clean_name);
         String::push_str(&mut (*e).buffer, &String::new("("));
         
         let mut p: usize = 0;
@@ -366,13 +396,20 @@ impl LlvmEmitter {
             let mut func_name: String = String::new("unknown");
             if func_expr.tag == Expr_TAG_Ident {
                 func_name = String::clone(&func_expr.data.Ident._0);
+            } else if func_expr.tag == Expr_TAG_Path {
+                let ns: String = func_expr.data.Path._0;
+                let member: String = func_expr.data.Path._1;
+                func_name = String::clone(&ns);
+                String::push_str(&mut func_name, &String::new("::"));
+                String::push_str(&mut func_name, &member);
             }
+            let clean_func_name: String = replace_colons(&func_name);
             
             let tmp: String = LlvmEmitter::fresh_tmp(e);
             String::push_str(&mut (*e).buffer, &String::new("  "));
             String::push_str(&mut (*e).buffer, &tmp);
             String::push_str(&mut (*e).buffer, &String::new(" = call i32 @"));
-            String::push_str(&mut (*e).buffer, &func_name);
+            String::push_str(&mut (*e).buffer, &clean_func_name);
             String::push_str(&mut (*e).buffer, &String::new("("));
             
             // Emit arguments

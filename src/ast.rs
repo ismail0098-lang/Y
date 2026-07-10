@@ -33,15 +33,28 @@ pub enum Item {
     Import(ImportDecl),
     StaticAssert(StaticAssertDecl),
     Impl(ImplBlock),
+    Const(ConstDecl),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstDecl {
+    pub name: String,
+    pub ty: Type,
+    pub value: Expr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FuncDecl {
     pub name: String,
     pub is_safe: bool,
+    pub is_ptx_emit: bool,
+    pub is_ghost: bool,
+    pub is_hdl_emit: bool,
     pub params: Vec<Param>,
     pub ret_ty: Option<Type>,
     pub body: Block,
+    pub tile: Option<TileAttr>,
     pub span: Span,
 }
 
@@ -64,7 +77,7 @@ pub struct GenericParam {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldAttrKind {
     GpuUncached,
-    Atomic,
+    Atomic(Option<String>),
     Align(Expr),
 }
 
@@ -179,6 +192,8 @@ pub enum Stmt {
         body: Block,
         invariant: Option<Box<Expr>>,
         is_uniform_branch: bool,
+        tile: Option<TileAttr>,
+        prefetch_stride: Option<PrefetchStrideAttr>,
         span: Span,
     },
     /// `acc = expr;`
@@ -209,6 +224,10 @@ pub enum Stmt {
         is_uniform_branch: bool,
         span: Span,
     },
+    /// `break;`
+    Break {
+        span: Span,
+    },
     /// `match scrutinee { pattern => body, ... }`
     Match {
         scrutinee: Box<Expr>,
@@ -224,6 +243,20 @@ pub enum Stmt {
     },
     /// `@safe { ... }` — strict verification block
     SafeBlock(Block, Span),
+    /// `@ghost { ... }` — speculative execution block
+    GhostBlock(Block, Span),
+    /// `@clock_domain(clock_expr) { ... }` — HDL clock domain scope
+    ClockDomainBlock {
+        clock: Box<Expr>,
+        body: Block,
+        span: Span,
+    },
+    /// `compile_time::assert!(condition, "message");` — zero-cost verification proof
+    CompileTimeAssert {
+        condition: Box<Expr>,
+        message: Option<String>,
+        span: Span,
+    },
 }
 
 impl Stmt {
@@ -238,9 +271,13 @@ impl Stmt {
             Stmt::Chisel(_, s) => s.clone(),
             Stmt::If { span, .. } => span.clone(),
             Stmt::While { span, .. } => span.clone(),
+            Stmt::Break { span } => span.clone(),
             Stmt::Match { span, .. } => span.clone(),
             Stmt::CompoundAssign { span, .. } => span.clone(),
             Stmt::SafeBlock(_, s) => s.clone(),
+            Stmt::GhostBlock(_, s) => s.clone(),
+            Stmt::ClockDomainBlock { span, .. } => span.clone(),
+            Stmt::CompileTimeAssert { span, .. } => span.clone(),
         }
     }
 }
@@ -453,6 +490,29 @@ pub struct ZeroDriftAttr {
 pub struct BoundsAttr {
     pub min: Box<Expr>,
     pub max: Box<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileAttr {
+    pub block_m: Box<Expr>,
+    pub block_n: Box<Expr>,
+    pub block_k: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+/// `@prefetch_stride(N)` — solver-guided cache warming for loop iterators.
+/// If stride is None, the compiler auto-deduces it from the loop's index math.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrefetchStrideAttr {
+    pub stride: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+/// `@clock_domain(clock_expr)` — defines the physical clock context for HDL synthesis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClockDomainAttr {
+    pub clock: Box<Expr>,
     pub span: Span,
 }
 

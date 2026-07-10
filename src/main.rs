@@ -35,33 +35,82 @@ use ptx_emitter::PtxEmitter;
 use type_checker::TypeChecker;
 use native_emitter::NativeEmitter;
 
+macro_rules! log_info {
+    ($($arg:tt)*) => {
+        println!("\x1b[1;36m[*]\x1b[0m {}", format_args!($($arg)*));
+    };
+}
+
+macro_rules! log_error {
+    ($($arg:tt)*) => {
+        eprintln!("\x1b[1;31m[!]\x1b[0m {}", format_args!($($arg)*));
+    };
+}
+
+macro_rules! log_warning {
+    ($($arg:tt)*) => {
+        println!("\x1b[1;33m[!]\x1b[0m {}", format_args!($($arg)*));
+    };
+}
+
+macro_rules! log_step {
+    ($step:expr, $($arg:tt)*) => {
+        println!("\x1b[1;32m[{}]\x1b[0m {}", $step, format_args!($($arg)*));
+    };
+}
+
 fn main() {
     println!("========================================");
     println!("=== Y Compiler v0.1 (Prototype) ===");
     println!("========================================\n");
 
-    // Phase 0: Sentinel Hardware Probe
-    let hw_profile = sentinel::check_or_probe_hardware();
-
     let args: Vec<String> = env::args().collect();
 
-    // Find source file (first arg that isn't a flag)
-    let mut source_file = args.iter().skip(1).find(|a| !a.starts_with("--")).cloned();
+    // Phase 0: Sentinel Hardware Probe
+    let mut hw_profile = sentinel::check_or_probe_hardware();
+    if args.iter().any(|a| a == "--portable") {
+        hw_profile.has_avx = false;
+        hw_profile.has_avx512 = false;
+        println!("[*] --portable flag detected. Disabling AVX/AVX-512 target features for maximum compatibility.");
+    }
+
+    let mut source_file = None;
+    let mut lib_paths = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "-I" && i + 1 < args.len() {
+            lib_paths.push(std::path::PathBuf::from(&args[i + 1]));
+            i += 2;
+        } else if args[i].starts_with("-I") {
+            lib_paths.push(std::path::PathBuf::from(&args[i][2..]));
+            i += 1;
+        } else if args[i].starts_with("--lib-path=") {
+            lib_paths.push(std::path::PathBuf::from(args[i].trim_start_matches("--lib-path=")));
+            i += 1;
+        } else if args[i].starts_with('-') {
+            i += 1;
+        } else {
+            if source_file.is_none() {
+                source_file = Some(args[i].clone());
+            }
+            i += 1;
+        }
+    }
 
     let source_code = if let Some(ref mut file_path) = source_file {
         if std::path::Path::new(&file_path).extension().is_none() {
             file_path.push_str(".ysu");
         }
-        println!("[*] Reading source: {}", file_path);
+        log_info!("Reading source: {}", file_path);
         match fs::read_to_string(&file_path) {
             Ok(content) => content,
             Err(e) => {
-                eprintln!("[!] Failed to read file: {}", e);
+                log_error!("Failed to read file: {}", e);
                 exit(1);
             }
         }
     } else {
-        println!("[*] No input file provided. Running internal test harness.");
+        log_info!("No input file provided. Running internal test harness.");
         // A hardcoded mock Y source based on the specification document
         r#"
         @require(avx512 >= 1)
@@ -132,7 +181,7 @@ fn main() {
     // ────────────────────────────────────────────────────────
     // Phase 1: Lexical Analysis
     // ────────────────────────────────────────────────────────
-    println!("[1/4] Running Lexer...");
+    log_step!("1/4", "Running Lexer...");
     let mut lexer = Lexer::new(&source_code);
     let tokens = lexer.tokenize();
     // lexer::print_tokens(&tokens); // Uncomment for verbose token debug
@@ -141,9 +190,9 @@ fn main() {
     // ────────────────────────────────────────────────────────
     // Phase 2: Syntax Parsing (AST)
     // ────────────────────────────────────────────────────────
-    println!("[2/4] Constructing AST...");
+    log_step!("2/4", "Constructing AST...");
     let mut parser = Parser::new(tokens);
-    let ast = match parser.parse_program() {
+    let mut ast = match parser.parse_program() {
         Ok(program) => program,
         Err(e) => {
             eprintln!("\n[!] Syntax Error:\n    {}", e);
@@ -152,20 +201,98 @@ fn main() {
     };
     println!("      -> Successfully parsed {} item(s).", ast.items.len());
 
+    // Resolve imports recursively
+    let parent_dir = if let Some(ref sf) = source_file {
+        std::path::Path::new(sf).parent().unwrap_or(std::path::Path::new("")).to_path_buf()
+    } else {
+        std::path::PathBuf::from("")
+    };
+
+    let mut imported_files = std::collections::HashSet::new();
+    if let Some(ref sf) = source_file {
+        if let Ok(canonical) = fs::canonicalize(sf) {
+            imported_files.insert(canonical);
+        }
+    }
+
+    let mut queue = ast.items;
+    let mut index = 0;
+    while index < queue.len() {
+        if let Item::Import(imp) = &queue[index] {
+            let mut relative_path = std::path::PathBuf::new();
+            for segment in &imp.path {
+                relative_path.push(segment);
+            }
+            relative_path.set_extension("ysu");
+
+            let mut target_file = parent_dir.join(&relative_path);
+            if !target_file.exists() {
+                for lib_dir in &lib_paths {
+                    let candidate = lib_dir.join(&relative_path);
+                    if candidate.exists() {
+                        target_file = candidate;
+                        break;
+                    }
+                }
+            }
+            if !target_file.exists() {
+                target_file = std::path::Path::new("self_hosted").join(&relative_path);
+            }
+
+            if target_file.exists() {
+                if let Ok(canonical) = fs::canonicalize(&target_file) {
+                    if imported_files.insert(canonical) {
+                        log_info!("Loading imported module: {}", target_file.display());
+                        match fs::read_to_string(&target_file) {
+                            Ok(content) => {
+                                let mut sub_lexer = Lexer::new(&content);
+                                let sub_tokens = sub_lexer.tokenize();
+                                let mut sub_parser = Parser::new(sub_tokens);
+                                match sub_parser.parse_program() {
+                                    Ok(mut sub_prog) => {
+                                        sub_prog.items.retain(|item| {
+                                            if let Item::Func(f) = item {
+                                                f.name != "main"
+                                            } else {
+                                                true
+                                            }
+                                        });
+                                        queue.extend(sub_prog.items);
+                                    }
+                                    Err(e) => {
+                                        log_error!("Syntax Error in imported module {}:\n    {}", target_file.display(), e);
+                                        exit(1);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log_error!("Failed to read imported file {}: {}", target_file.display(), e);
+                                exit(1);
+                            }
+                        }
+                    }
+                }
+            } else {
+                log_warning!("Imported module file not found: {}", target_file.display());
+            }
+        }
+        index += 1;
+    }
+
+    // Filter out Item::Import from the final list of items
+    ast.items = queue.into_iter().filter(|item| !matches!(item, Item::Import(_))).collect();
+
     // ────────────────────────────────────────────────────────
     // Phase 3: Semantic Type Checking & Math Verifiers
     // ────────────────────────────────────────────────────────
-    println!("[3/4] Running Semantic Type-Checker...");
+    log_step!("3/4", "Running Semantic Type-Checker...");
     let mut type_checker = TypeChecker::new();
     type_checker.check_program(&ast);
 
     if !type_checker.errors.is_empty() {
-        eprintln!(
-            "\n[!] The Type-Checker caught {} semantic errors:",
-            type_checker.errors.len()
-        );
+        log_error!("The Type-Checker caught {} semantic errors:", type_checker.errors.len());
         for err in type_checker.errors {
-            eprintln!("    [Error] {}", err);
+            eprintln!("    \x1b[1;31m[Error]\x1b[0m {}", err);
         }
         eprintln!("\nCompilation aborted to prevent undefined hardware behavior.");
         exit(1);
@@ -173,9 +300,9 @@ fn main() {
 
     // Check if any transfer obligations were left unconsumed via linear tracking
     if type_checker.linear_tracker.has_errors() {
-        eprintln!("\n[!] Linear Type Check Failed!");
+        log_error!("Linear Type Check Failed!");
         for err in &type_checker.linear_tracker.errors {
-            eprintln!("    [Error] {}", err);
+            eprintln!("    \x1b[1;31m[Error]\x1b[0m {}", err);
         }
         exit(1);
     }
@@ -204,7 +331,7 @@ fn main() {
                             };
 
                             println!(
-                                "      [Advisory] @ZeroDrift requested on type: {}",
+                                "      \x1b[1;33m[Advisory]\x1b[0m @ZeroDrift requested on type: {}",
                                 type_name
                             );
                             if profile.drift_free_types.contains(&type_name) {
@@ -214,7 +341,7 @@ fn main() {
                                     profile.zero_drift_penalty_cycles
                                 );
                             } else {
-                                println!("        -> WARNING: Target ({}) lacks native zero drift for {}.", profile.gpu_name, type_name);
+                                println!("        -> \x1b[1;33mWARNING\x1b[0m: Target ({}) lacks native zero drift for {}.", profile.gpu_name, type_name);
                                 println!(
                                     "        -> Compiler must insert software compensation path."
                                 );
@@ -285,7 +412,7 @@ fn main() {
         .any(|a| a == "--emit-cpu" || a == "--target=cpu");
 
     if emit_c {
-        eprintln!("[!] The C backend has been removed. Y now uses LLVM as its primary backend.");
+        log_error!("The C backend has been removed. Y now uses LLVM as its primary backend.");
         eprintln!("    To compile your code to a native binary (default behavior), omit backend flags.");
         eprintln!("    To emit LLVM IR, use --emit-llvm.");
         exit(1);
@@ -323,10 +450,10 @@ fn main() {
         output_path = format!("./{}", output_path);
     }
 
-    println!("\nCompilation Successful!\n");
+    println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
 
     if emit_native {
-        println!("[4/4] Emitting Native x86-64 ELF Binary...");
+        log_step!("4/4", "Emitting Native x86-64 ELF Binary...");
         let mut emitter = NativeEmitter::new();
         let binary_output = emitter.emit_program(&ast);
         match fs::write(&output_path, &binary_output) {
@@ -341,85 +468,90 @@ fn main() {
                         let _ = fs::set_permissions(&output_path, perms);
                     }
                 }
-                println!("      Compiled to native ELF executable!");
+                println!("      \x1b[1;32mCompiled to native ELF executable!\x1b[0m");
             }
             Err(e) => {
-                eprintln!("[!] Failed to write ELF binary: {}", e);
+                log_error!("Failed to write ELF binary: {}", e);
                 exit(1);
             }
         }
     } else if emit_llvm {
-        println!("[4/4] Emitting LLVM IR...");
+        log_step!("4/4", "Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
         let ll_output = emitter.emit_program(&ast, &hw_profile);
         match fs::write(&output_path, &ll_output) {
             Ok(_) => println!("      -> Written to: {}", output_path),
             Err(e) => {
-                eprintln!("[!] Failed to write LLVM IR: {}", e);
+                log_error!("Failed to write LLVM IR: {}", e);
                 exit(1);
             }
         }
         println!("      Compile manually: clang -O2 -o output {} c_src/runtime.c -lm", &output_path);
     } else if emit_ptx {
-        println!("[4/4] Emitting NVIDIA PTX Assembly...");
+        log_step!("4/4", "Emitting NVIDIA PTX Assembly...");
         let mut emitter = PtxEmitter::new();
         let ptx_output = emitter.emit_program(&ast, &hw_profile);
+        let write_path = if let Some(ref sf) = source_file {
+            let path = std::path::Path::new(sf);
+            let mut p = path.to_path_buf();
+            p.set_extension("ptx");
+            p.to_string_lossy().to_string()
+        } else {
+            "output.ptx".to_string()
+        };
+        match fs::write(&write_path, &ptx_output) {
+            Ok(_) => println!("      -> Written to: {}", write_path),
+            Err(e) => {
+                log_error!("Failed to write PTX assembly: {}", e);
+                exit(1);
+            }
+        }
         println!("======= GENERATED PTX BLOB =======");
         println!("{}", ptx_output);
         println!("==================================");
     } else if emit_cpu {
-        println!("[4/4] Emitting CPU AVX-512 Host Code...");
+        log_step!("4/4", "Emitting CPU AVX-512 Host Code...");
         let mut emitter = CpuEmitter::new();
         let cpu_output = emitter.emit_program(&ast);
         println!("======= GENERATED RUST/AVX BLOB =======");
         println!("{}", cpu_output);
         println!("=======================================");
     } else {
-        if target_is_cpu {
-            println!("[4/4] Emitting CPU AVX-512 Host Code...");
-            let mut emitter = CpuEmitter::new();
-            let cpu_output = emitter.emit_program(&ast);
-            println!("======= GENERATED RUST/AVX BLOB =======");
-            println!("{}", cpu_output);
-            println!("=======================================");
-        } else {
-            println!("[4/4] Compiling via LLVM IR Backend...");
-            let mut emitter = LlvmEmitter::new();
-            let ll_output = emitter.emit_program(&ast, &hw_profile);
+        log_step!("4/4", "Compiling via LLVM IR Backend...");
+        let mut emitter = LlvmEmitter::new();
+        let ll_output = emitter.emit_program(&ast, &hw_profile);
 
-            let ll_path = format!("{}.tmp.ll", &output_path);
-            match fs::write(&ll_path, &ll_output) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("[!] Failed to write temporary LLVM IR: {}", e);
+        let ll_path = format!("{}.tmp.ll", &output_path);
+        match fs::write(&ll_path, &ll_output) {
+            Ok(_) => {}
+            Err(e) => {
+                log_error!("Failed to write temporary LLVM IR: {}", e);
+                exit(1);
+            }
+        }
+
+        println!("      -> Invoking clang compilation...");
+        let runtime_path = "c_src/runtime.c";
+        let clang_result = std::process::Command::new("clang")
+            .args(&["-O2", "-o", &output_path, &ll_path, runtime_path, "-lm", "-lX11"])
+            .output();
+
+        match clang_result {
+            Ok(output) => {
+                if output.status.success() {
+                    let _ = fs::remove_file(&ll_path);
+                    println!("      \x1b[1;32mCompiled successfully to native binary:\x1b[0m {}", output_path);
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    log_error!("clang failed:\n{}", stderr);
                     exit(1);
                 }
             }
-
-            println!("      -> Invoking clang compilation...");
-            let runtime_path = "c_src/runtime.c";
-            let clang_result = std::process::Command::new("clang")
-                .args(&["-O2", "-o", &output_path, &ll_path, runtime_path, "-lm"])
-                .output();
-
-            // Clean up temporary LLVM IR file
-            let _ = fs::remove_file(&ll_path);
-
-            match clang_result {
-                Ok(output) => {
-                    if output.status.success() {
-                        println!("      Compiled successfully to native binary: {}", output_path);
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        eprintln!("      [!] clang failed:\n{}", stderr);
-                        exit(1);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("      [!] clang not found or failed to execute: {}", e);
-                    println!("          Make sure clang is installed in your system.");
-                    exit(1);
-                }
+            Err(e) => {
+                let _ = fs::remove_file(&ll_path);
+                log_error!("clang not found or failed to execute: {}", e);
+                println!("          Make sure clang is installed in your system.");
+                exit(1);
             }
         }
     }
