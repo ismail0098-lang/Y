@@ -343,19 +343,6 @@ barrier::sync()
 
 ---
 
-### Safe Block Library (Kernel Domain)
-
-SS programs are composed entirely from pre-proven Y safe blocks:
-
-- `safe_log2_fixed_point(v: u64, fp: u8) -> u32` — no undefined shift behavior
-- `safe_burst_penalty(burst_time: u64) -> u32` — result ≤ MAX_BURST_PENALTY
-- `safe_div_nonzero(a: u64, b: u64) -> u64` — denominator proven nonzero by type
-- `safe_vruntime_cmp(a: u64, b: u64) -> Ordering` — transitivity proven under 2⁶³ wrap
-- `safe_atomic_read(loc: &AtomicU64) -> u64` — single-word read, no tearing
-- `safe_rcu_read(ptr: &RcuProtected<T>) -> &T` — valid for RCU critical section lifetime
-- `safe_reclaim_chunk(cache: u64) -> (u64, u64)` — result never exceeds input
-- `safe_kib_to_bytes(kib: u64) -> u64` — no overflow up to 16 TiB
-
 
 
 ## Sentinel Hardware Probe
