@@ -12,5 +12,17 @@ path = "src/lib.rs"
 name = "Y"
 path = "src/main.rs"
 
+[[bin]]
+name = "ysu_gpu_probe"
+path = "src/ysu_gpu_probe.rs"
+
+[[bin]]
+name = "ypm"
+path = "src/ypm.rs"
+
+[[bin]]
+name = "ysu_vmm"
+path = "y_os/ysu_vmm/main.rs"
+
 [dependencies]
 

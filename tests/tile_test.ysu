@@ -1,0 +1,18 @@
+// tests/tile_test.ysu
+// Demonstrating Triton-like tiling (@tile) optimizations on loops and functions in Y.
+
+@tile(16, 16)
+fn tiled_matmul() {
+    let mut sum: F32 = 0.0;
+    
+    // Tiling the loop using M=16, N=16, K=8
+    @tile(16, 16, 8)
+    @invariant(i >= 0)
+    for i in 0..128 step 16 {
+        sum = sum + 1.0;
+    }
+}
+
+fn main() {
+    tiled_matmul();
+}

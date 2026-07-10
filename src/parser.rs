@@ -112,20 +112,66 @@ impl Parser {
         } else if self.match_token(TokenKind::Enum) {
             let e = self.parse_enum_decl()?;
             Ok(Item::Enum(e))
+        } else if self.check(TokenKind::AtPtxEmit)
+            || self.check(TokenKind::AtSafe)
+            || self.check(TokenKind::AtUnsafe)
+            || self.check(TokenKind::AtTile)
+            || self.check(TokenKind::AtGhost)
+            || self.check(TokenKind::AtHdlEmit)
+        {
+            let mut is_ptx = false;
+            let mut is_safe = true;
+            let mut is_ghost = false;
+            let mut is_hdl_emit = false;
+            let mut tile = None;
+            loop {
+                if self.match_token(TokenKind::AtPtxEmit) {
+                    is_ptx = true;
+                } else if self.match_token(TokenKind::AtSafe) {
+                    is_safe = true;
+                } else if self.match_token(TokenKind::AtUnsafe) {
+                    is_safe = false;
+                } else if self.match_token(TokenKind::AtGhost) {
+                    is_ghost = true;
+                } else if self.match_token(TokenKind::AtHdlEmit) {
+                    is_hdl_emit = true;
+                } else if self.match_token(TokenKind::AtTile) {
+                    let start_tok = self.peek().clone();
+                    self.expect(TokenKind::LParen, "'(' after @tile")?;
+                    let block_m = Box::new(self.parse_expr()?);
+                    self.expect(TokenKind::Comma, "',' in @tile")?;
+                    let block_n = Box::new(self.parse_expr()?);
+                    let mut block_k = None;
+                    if self.match_token(TokenKind::Comma) {
+                        block_k = Some(Box::new(self.parse_expr()?));
+                    }
+                    self.expect(TokenKind::RParen, "')' after @tile")?;
+                    tile = Some(TileAttr {
+                        block_m,
+                        block_n,
+                        block_k,
+                        span: Span {
+                            line: start_tok.line,
+                            col: start_tok.col,
+                        },
+                    });
+                } else {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Fn, "'fn' after function attributes")?;
+            let f = self.parse_func_decl(is_safe, is_ptx, is_ghost, is_hdl_emit, tile)?;
+            Ok(Item::Func(f))
         } else if self.match_token(TokenKind::Fn) {
-            let f = self.parse_func_decl(true)?;
-            Ok(Item::Func(f))
-        } else if self.match_token(TokenKind::AtSafe) {
-            self.expect(TokenKind::Fn, "'fn' after safe")?;
-            let f = self.parse_func_decl(true)?;
-            Ok(Item::Func(f))
-        } else if self.match_token(TokenKind::AtUnsafe) {
-            self.expect(TokenKind::Fn, "'fn' after unsafe")?;
-            let f = self.parse_func_decl(false)?;
+            let f = self.parse_func_decl(true, false, false, false, None)?;
             Ok(Item::Func(f))
         } else if self.match_token(TokenKind::Impl) {
             let imp = self.parse_impl_block()?;
             Ok(Item::Impl(imp))
+        } else if self.match_token(TokenKind::Const) {
+            let tok = self.peek().clone();
+            let c = self.parse_const_decl(Span { line: tok.line, col: tok.col })?;
+            Ok(Item::Const(c))
         } else {
             let tok = self.peek();
             Err(format!(
@@ -136,6 +182,28 @@ impl Parser {
     }
 
     // ── Declarations ──────────────────────────────────────────────
+
+    fn parse_const_decl(&mut self, start_span: Span) -> Result<ConstDecl, String> {
+        let name_tok = self.peek().clone();
+        let name = match &name_tok.kind {
+            TokenKind::Ident(s) => {
+                self.advance();
+                s.clone()
+            }
+            _ => return Err(format!("Line {}: Expected constant name identifier", name_tok.line)),
+        };
+        self.expect(TokenKind::Colon, "':' after constant name")?;
+        let ty = self.parse_type()?;
+        self.expect(TokenKind::Assign, "'=' after constant type")?;
+        let value = self.parse_expr()?;
+        self.expect(TokenKind::Semicolon, "';' after constant declaration")?;
+        Ok(ConstDecl {
+            name,
+            ty,
+            value,
+            span: start_span,
+        })
+    }
 
     fn parse_struct_decl(&mut self) -> Result<StructDecl, String> {
         let name_tok = self.peek().clone();
@@ -199,8 +267,23 @@ impl Parser {
                         span: attr_span,
                     });
                 } else if self.match_token(TokenKind::AtAtomic) {
+                    let mut ordering = None;
+                    if self.match_token(TokenKind::LParen) {
+                        let ord_tok = self.peek().clone();
+                        if let TokenKind::Ident(ref ord_name) = ord_tok.kind {
+                            if ord_name == "relaxed" || ord_name == "acquire" || ord_name == "release" || ord_name == "acq_rel" || ord_name == "seq_cst" {
+                                ordering = Some(ord_name.clone());
+                                self.advance();
+                            } else {
+                                return Err(format!("Line {}: Invalid atomic memory ordering '{}'. Expected relaxed, acquire, release, acq_rel, or seq_cst.", ord_tok.line, ord_name));
+                            }
+                        } else {
+                            return Err(format!("Line {}: Expected atomic memory ordering identifier after '('", ord_tok.line));
+                        }
+                        self.expect(TokenKind::RParen, "')' after atomic memory ordering")?;
+                    }
                     attrs.push(FieldAttr {
-                        kind: FieldAttrKind::Atomic,
+                        kind: FieldAttrKind::Atomic(ordering),
                         span: attr_span,
                     });
                 } else if self.match_token(TokenKind::AtAlign) {
@@ -425,13 +508,50 @@ impl Parser {
             // Optional pub keyword
             let _is_pub = self.match_token(TokenKind::Pub);
             let mut is_safe = true;
-            if self.match_token(TokenKind::AtUnsafe) {
-                is_safe = false;
-            } else if self.match_token(TokenKind::AtSafe) {
-                is_safe = true;
+            let mut is_ptx = false;
+            let mut is_ghost = false;
+            let mut is_hdl_emit = false;
+            let mut tile = None;
+            // Collect directives in any order: @unsafe/@safe, @ptx_emit, @divergence(uniform), @tile, @ghost, @hdl_emit
+            loop {
+                if self.match_token(TokenKind::AtUnsafe) {
+                    is_safe = false;
+                } else if self.match_token(TokenKind::AtSafe) {
+                    is_safe = true;
+                } else if self.match_token(TokenKind::AtPtxEmit) {
+                    is_ptx = true;
+                } else if self.match_token(TokenKind::AtGhost) {
+                    is_ghost = true;
+                } else if self.match_token(TokenKind::AtHdlEmit) {
+                    is_hdl_emit = true;
+                } else if self.match_token(TokenKind::AtDivergenceUniform) {
+                    // consumed — uniformity is tracked elsewhere
+                } else if self.match_token(TokenKind::AtTile) {
+                    let start_tok = self.peek().clone();
+                    self.expect(TokenKind::LParen, "'(' after @tile")?;
+                    let block_m = Box::new(self.parse_expr()?);
+                    self.expect(TokenKind::Comma, "',' in @tile")?;
+                    let block_n = Box::new(self.parse_expr()?);
+                    let mut block_k = None;
+                    if self.match_token(TokenKind::Comma) {
+                        block_k = Some(Box::new(self.parse_expr()?));
+                    }
+                    self.expect(TokenKind::RParen, "')' after @tile")?;
+                    tile = Some(TileAttr {
+                        block_m,
+                        block_n,
+                        block_k,
+                        span: Span {
+                            line: start_tok.line,
+                            col: start_tok.col,
+                        },
+                    });
+                } else {
+                    break;
+                }
             }
             self.expect(TokenKind::Fn, "'fn' in impl block")?;
-            let f = self.parse_func_decl(is_safe)?;
+            let f = self.parse_func_decl(is_safe, is_ptx, is_ghost, is_hdl_emit, tile)?;
             methods.push(f);
         }
         self.expect(TokenKind::RBrace, "'}' to end impl body")?;
@@ -443,7 +563,7 @@ impl Parser {
         })
     }
 
-    fn parse_func_decl(&mut self, is_safe: bool) -> Result<FuncDecl, String> {
+    fn parse_func_decl(&mut self, is_safe: bool, is_ptx_emit: bool, is_ghost: bool, is_hdl_emit: bool, tile: Option<TileAttr>) -> Result<FuncDecl, String> {
         let name_tok = self.peek().clone();
         let name = match &name_tok.kind {
             TokenKind::Ident(s) => {
@@ -493,9 +613,13 @@ impl Parser {
         Ok(FuncDecl {
             name,
             is_safe,
+            is_ptx_emit,
+            is_ghost,
+            is_hdl_emit,
             params,
             ret_ty,
             body,
+            tile,
             span,
         })
     }
@@ -610,6 +734,8 @@ impl Parser {
         let mut bounds = None;
         let mut invariant = None;
         let mut is_uniform_branch = false;
+        let mut tile = None;
+        let mut prefetch_stride = None;
 
         loop {
             if self.match_token(TokenKind::AtCachePolicy) {
@@ -666,9 +792,29 @@ impl Parser {
                 zero_drift = Some(ZeroDriftAttr { span: span.clone() });
             } else if self.match_token(TokenKind::AtBounds) {
                 self.expect(TokenKind::LParen, "'(' after @bounds")?;
-                let min = Box::new(self.parse_expr()?);
+                let min = if let TokenKind::Ident(ref name) = self.peek().kind {
+                    if name == "min" && self.pos + 1 < self.tokens.len() && self.tokens[self.pos + 1].kind == TokenKind::Assign {
+                        self.advance(); // consume "min"
+                        self.advance(); // consume "="
+                        Box::new(self.parse_expr()?)
+                    } else {
+                        Box::new(self.parse_expr()?)
+                    }
+                } else {
+                    Box::new(self.parse_expr()?)
+                };
                 self.expect(TokenKind::Comma, "',' in @bounds")?;
-                let max = Box::new(self.parse_expr()?);
+                let max = if let TokenKind::Ident(ref name) = self.peek().kind {
+                    if name == "max" && self.pos + 1 < self.tokens.len() && self.tokens[self.pos + 1].kind == TokenKind::Assign {
+                        self.advance(); // consume "max"
+                        self.advance(); // consume "="
+                        Box::new(self.parse_expr()?)
+                    } else {
+                        Box::new(self.parse_expr()?)
+                    }
+                } else {
+                    Box::new(self.parse_expr()?)
+                };
                 self.expect(TokenKind::RParen, "')' after @bounds")?;
                 bounds = Some(BoundsAttr { min, max, span: span.clone() });
             } else if self.match_token(TokenKind::AtInvariant) {
@@ -677,6 +823,42 @@ impl Parser {
                 self.expect(TokenKind::RParen, "')' after @invariant")?;
             } else if self.match_token(TokenKind::AtDivergenceUniform) {
                 is_uniform_branch = true;
+            } else if self.match_token(TokenKind::AtTile) {
+                let start_tok = self.peek().clone();
+                self.expect(TokenKind::LParen, "'(' after @tile")?;
+                let block_m = Box::new(self.parse_expr()?);
+                self.expect(TokenKind::Comma, "',' in @tile")?;
+                let block_n = Box::new(self.parse_expr()?);
+                let mut block_k = None;
+                if self.match_token(TokenKind::Comma) {
+                    block_k = Some(Box::new(self.parse_expr()?));
+                }
+                self.expect(TokenKind::RParen, "')' after @tile")?;
+                tile = Some(TileAttr {
+                    block_m,
+                    block_n,
+                    block_k,
+                    span: Span {
+                        line: start_tok.line,
+                        col: start_tok.col,
+                    },
+                });
+            } else if self.match_token(TokenKind::AtPrefetchStride) {
+                let ps_tok = self.peek().clone();
+                let mut stride_val = None;
+                if self.match_token(TokenKind::LParen) {
+                    if !self.check(TokenKind::RParen) {
+                        stride_val = Some(Box::new(self.parse_expr()?));
+                    }
+                    self.expect(TokenKind::RParen, "')' after @prefetch_stride")?;
+                }
+                prefetch_stride = Some(PrefetchStrideAttr {
+                    stride: stride_val,
+                    span: Span {
+                        line: ps_tok.line,
+                        col: ps_tok.col,
+                    },
+                });
             } else {
                 break;
             }
@@ -737,6 +919,9 @@ impl Parser {
             }
             self.expect(TokenKind::Semicolon, "';' after return statement")?;
             Ok(Stmt::Return(val, span))
+        } else if self.match_token(TokenKind::Break) {
+            self.expect(TokenKind::Semicolon, "';' after break")?;
+            Ok(Stmt::Break { span })
         } else if self.match_token(TokenKind::For) {
             let id = self.peek().clone();
             let loop_var = match &id.kind {
@@ -766,6 +951,8 @@ impl Parser {
                 body,
                 invariant,
                 is_uniform_branch,
+                tile,
+                prefetch_stride,
                 span,
             })
         } else if self.match_token(TokenKind::Chisel) {
@@ -774,6 +961,15 @@ impl Parser {
         } else if self.match_token(TokenKind::AtSafe) {
             let block = self.parse_block()?;
             Ok(Stmt::SafeBlock(block, span))
+        } else if self.match_token(TokenKind::AtGhost) {
+            let block = self.parse_block()?;
+            Ok(Stmt::GhostBlock(block, span))
+        } else if self.match_token(TokenKind::AtClockDomain) {
+            self.expect(TokenKind::LParen, "'(' after @clock_domain")?;
+            let clock = Box::new(self.parse_expr()?);
+            self.expect(TokenKind::RParen, "')' after @clock_domain")?;
+            let body = self.parse_block()?;
+            Ok(Stmt::ClockDomainBlock { clock, body, span })
         } else if self.match_token(TokenKind::If) {
             let condition = Box::new(self.parse_expr()?);
             let then_block = self.parse_block()?;
@@ -825,6 +1021,41 @@ impl Parser {
                 span,
             })
         } else {
+            // Check for compile_time::assert!(...) before general expression parsing
+            if let TokenKind::Ident(ref name) = self.peek().kind.clone() {
+                if name == "compile_time" {
+                    let saved_pos = self.pos;
+                    self.advance(); // consume 'compile_time'
+                    if self.match_token(TokenKind::ColonColon) {
+                        let next = self.peek().clone();
+                        if let TokenKind::Ident(ref fn_name) = next.kind {
+                            if fn_name == "assert" {
+                                self.advance(); // consume 'assert'
+                                self.expect(TokenKind::Bang, "'!' after compile_time::assert")?;
+                                self.expect(TokenKind::LParen, "'(' after compile_time::assert!")?;
+                                let condition = Box::new(self.parse_expr()?);
+                                let mut message = None;
+                                if self.match_token(TokenKind::Comma) {
+                                    if let TokenKind::StringLit(ref s) = self.peek().kind.clone() {
+                                        message = Some(s.clone());
+                                        self.advance();
+                                    }
+                                }
+                                self.expect(TokenKind::RParen, "')' after compile_time::assert!")?;
+                                self.expect(TokenKind::Semicolon, "';' after compile_time::assert!")?;
+                                return Ok(Stmt::CompileTimeAssert {
+                                    condition,
+                                    message,
+                                    span,
+                                });
+                            }
+                        }
+                    }
+                    // Not a compile_time::assert!, backtrack
+                    self.pos = saved_pos;
+                }
+            }
+
             // Must be Assignment, CompoundAssign, or Expr stmt
             let expr = self.parse_expr()?;
             if self.match_token(TokenKind::Assign) {
@@ -1738,6 +1969,55 @@ mod tests {
                 assert!(f.ret_ty.is_some());
             }
             _ => panic!("Expected Func"),
+        }
+    }
+
+    #[test]
+    fn test_parse_experimental_features() {
+        let src = "
+            fn test_loop() {
+                @prefetch_stride(8)
+                for i in 0..10 {
+                    let mut data = 0;
+                }
+
+                @clock_domain(100) {
+                    let mut clk_data = 1;
+                }
+
+                compile_time::assert!(1 == 1, \"always true\");
+            }
+        ";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        assert_eq!(prog.items.len(), 1);
+        if let Item::Func(f) = &prog.items[0] {
+            assert_eq!(f.body.stmts.len(), 3);
+            
+            // Check prefetch_stride on For loop
+            if let Stmt::For { prefetch_stride, .. } = &f.body.stmts[0] {
+                assert!(prefetch_stride.is_some());
+                assert!(prefetch_stride.as_ref().unwrap().stride.is_some());
+            } else {
+                panic!("Expected For loop stmt");
+            }
+
+            // Check clock_domain block
+            if let Stmt::ClockDomainBlock { .. } = &f.body.stmts[1] {
+                // block matches correctly
+            } else {
+                panic!("Expected ClockDomainBlock stmt");
+            }
+
+            // Check compile_time::assert!
+            if let Stmt::CompileTimeAssert { message, .. } = &f.body.stmts[2] {
+                assert_eq!(message.as_deref(), Some("always true"));
+            } else {
+                panic!("Expected CompileTimeAssert stmt");
+            }
+        } else {
+            panic!("Expected Func item");
         }
     }
 }

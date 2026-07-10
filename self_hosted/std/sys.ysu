@@ -1,0 +1,8 @@
+// Y Standard System Library
+// std::sys
+
+import lib;
+
+fn get_version() -> usize {
+    return 1;
+}

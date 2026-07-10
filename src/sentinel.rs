@@ -1,23 +1,238 @@
 use std::fs;
 use std::path::Path;
 
-// Using pure Rust mocks since the NASM object file is not linked via Cargo
+macro_rules! log_info {
+    ($($arg:tt)*) => {
+        println!("\x1b[1;36m[*]\x1b[0m {}", format_args!($($arg)*));
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn get_tsc() -> u64 {
+    let mut low: u32;
+    let mut high: u32;
+    std::arch::asm!(
+        "lfence",
+        "rdtsc",
+        out("eax") low,
+        out("edx") high,
+        options(nostack, nomem)
+    );
+    ((high as u64) << 32) | (low as u64)
+}
+
 fn probe_cpu_features(out_buffer: &mut [u32; 4]) {
-    // Mock AVX and AVX512, cache line size
-    out_buffer[0] = 1 << 28; // AVX
-    out_buffer[2] = 1 << 16; // AVX512
-    out_buffer[3] = 64; // L2 line size
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{__cpuid, __cpuid_count};
+        
+        // 1. Standard CPUID (EAX=1)
+        let res1 = __cpuid(1);
+        out_buffer[0] = res1.ecx;
+        out_buffer[1] = res1.edx;
+        
+        // 2. Extended CPUID (EAX=7, ECX=0)
+        let res7 = __cpuid_count(7, 0);
+        out_buffer[2] = res7.ebx;
+        
+        // 3. Cache Line Size (EAX=0x80000006)
+        let res_cache = __cpuid(0x80000006);
+        out_buffer[3] = res_cache.ecx;
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Mock fallback for non-x86_64
+        out_buffer[0] = 1 << 28; // AVX
+        out_buffer[2] = 1 << 16; // AVX512
+        out_buffer[3] = 64; // L2 line size
+    }
 }
 
-fn measure_l1_latency() -> u64 {
-    4 // 4 cycles
+fn measure_cache_latency(size_bytes: usize) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let size_elts = size_bytes / 8;
+        if size_elts < 128 { return 4; }
+        
+        // Cache line size is 64 bytes (8 elements of usize)
+        let line_stride = 8;
+        let num_lines = size_elts / line_stride;
+        if num_lines < 2 { return 4; }
+        
+        let mut array = vec![0usize; size_elts];
+        
+        // Generate a single-cycle permutation of line indices using Satolo's algorithm
+        let mut lines: Vec<usize> = (0..num_lines).collect();
+        let mut rng = 0x243F6A8885A308D3u64; // Seed with fractional part of Pi
+        for i in 0..num_lines - 1 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let range = num_lines - 1 - i;
+            let j = i + 1 + (rng as usize % range);
+            lines.swap(i, j);
+        }
+        
+        // Link the lines together in the array
+        for i in 0..num_lines {
+            let next_line = lines[i];
+            array[i * line_stride] = next_line * line_stride;
+        }
+        
+        let mut ptr = 0;
+        // Warm up and verify cycle
+        for _ in 0..num_lines {
+            ptr = array[ptr];
+        }
+        
+        let start = unsafe { get_tsc() };
+        for _ in 0..20000 {
+            ptr = array[ptr];
+            ptr = array[ptr];
+        }
+        let end = unsafe { get_tsc() };
+        
+        let cycles = end.saturating_sub(start);
+        let avg = cycles / 40000;
+        if avg == 0 { 4 } else { avg }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        if size_bytes <= 32 * 1024 { 4 }
+        else if size_bytes <= 256 * 1024 { 12 }
+        else if size_bytes <= 8 * 1024 * 1024 { 40 }
+        else { 120 }
+    }
 }
 
+#[allow(dead_code)]
+fn measure_avx2_throughput(has_avx2: bool) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !has_avx2 {
+            return 0.0;
+        }
+        let iterations = 1000000;
+        let start = unsafe { get_tsc() };
+        unsafe {
+            std::arch::asm!(
+                "2:",
+                "vpaddd ymm0, ymm0, ymm1",
+                "vpaddd ymm2, ymm2, ymm1",
+                "vpaddd ymm3, ymm3, ymm1",
+                "vpaddd ymm4, ymm4, ymm1",
+                "vpaddd ymm5, ymm5, ymm1",
+                "vpaddd ymm6, ymm6, ymm1",
+                "vpaddd ymm7, ymm7, ymm1",
+                "vpaddd ymm8, ymm8, ymm1",
+                "vpaddd ymm9, ymm9, ymm1",
+                "vpaddd ymm10, ymm10, ymm11",
+                "dec {0:e}",
+                "jnz 2b",
+                inout(reg) iterations => _,
+                out("ymm0") _, out("ymm1") _, out("ymm2") _, out("ymm3") _,
+                out("ymm4") _, out("ymm5") _, out("ymm6") _, out("ymm7") _,
+                out("ymm8") _, out("ymm9") _, out("ymm10") _, out("ymm11") _,
+                options(nostack)
+            );
+        }
+        let end = unsafe { get_tsc() };
+        let cycles = end.saturating_sub(start);
+        let total_ops = 10_000_000.0;
+        cycles as f64 / total_ops
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0.5
+    }
+}
+
+fn measure_avx512_throughput(has_avx512: bool) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if !has_avx512 {
+            return 0.0;
+        }
+        let iterations = 1000000;
+        let start = unsafe { get_tsc() };
+        unsafe {
+            std::arch::asm!(
+                "2:",
+                "vpaddd zmm0, zmm0, zmm1",
+                "vpaddd zmm2, zmm2, zmm1",
+                "vpaddd zmm3, zmm3, zmm1",
+                "vpaddd zmm4, zmm4, zmm1",
+                "vpaddd zmm5, zmm5, zmm1",
+                "vpaddd zmm6, zmm6, zmm1",
+                "vpaddd zmm7, zmm7, zmm1",
+                "vpaddd zmm8, zmm8, zmm1",
+                "vpaddd zmm9, zmm9, zmm1",
+                "vpaddd zmm10, zmm10, zmm11",
+                "dec {0:e}",
+                "jnz 2b",
+                inout(reg) iterations => _,
+                out("zmm0") _, out("zmm1") _, out("zmm2") _, out("zmm3") _,
+                out("zmm4") _, out("zmm5") _, out("zmm6") _, out("zmm7") _,
+                out("zmm8") _, out("zmm9") _, out("zmm10") _, out("zmm11") _,
+                options(nostack)
+            );
+        }
+        let end = unsafe { get_tsc() };
+        let cycles = end.saturating_sub(start);
+        let total_ops = 10_000_000.0;
+        cycles as f64 / total_ops
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0.5
+    }
+}
+
+fn measure_thread_scheduling_cost() -> u64 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    
+    let flag1 = Arc::new(AtomicU32::new(0));
+    let flag2 = Arc::new(AtomicU32::new(0));
+    
+    let f1_clone = flag1.clone();
+    let f2_clone = flag2.clone();
+    
+    let handle = std::thread::spawn(move || {
+        for i in 1..1000 {
+            while f1_clone.load(Ordering::Acquire) != i {
+                std::thread::yield_now();
+            }
+            f2_clone.store(i, Ordering::Release);
+        }
+    });
+    
+    let start = unsafe { get_tsc() };
+    for i in 1..1000 {
+        flag1.store(i, Ordering::Release);
+        while flag2.load(Ordering::Acquire) != i {
+            std::thread::yield_now();
+        }
+    }
+    let end = unsafe { get_tsc() };
+    
+    let _ = handle.join();
+    
+    let cycles = end.saturating_sub(start);
+    cycles / 999
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct HardwareProfile {
     pub has_avx: bool,
     pub has_avx512: bool,
     pub l2_line_size: u32,
     pub l1_latency_cycles: u64,
+    pub l2_latency_cycles: u64,
+    pub l3_latency_cycles: u64,
+    pub mem_latency_cycles: u64,
+    pub avx512_throughput_cycles: f64,
+    pub thread_scheduling_cost_cycles: u64,
     // GPU hardware characteristics
     pub gpu_name: String,
 
@@ -151,9 +366,10 @@ pub struct HardwareProfile {
 
 fn parse_profile_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
     for line in contents.lines() {
-        let (found_key, value) = line.split_once('=')?;
-        if found_key.trim() == key {
-            return Some(value.trim());
+        if let Some((found_key, value)) = line.split_once('=') {
+            if found_key.trim() == key {
+                return Some(value.trim());
+            }
         }
     }
     None
@@ -202,6 +418,11 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             has_avx512: parse_bool_field(&contents, "AVX512").unwrap_or(false),
             l2_line_size: parse_u32_field(&contents, "L2_LINE").unwrap_or(64),
             l1_latency_cycles: parse_u64_field(&contents, "L1_CYCLES").unwrap_or(4),
+            l2_latency_cycles: parse_u64_field(&contents, "L2_CYCLES").unwrap_or(12),
+            l3_latency_cycles: parse_u64_field(&contents, "L3_CYCLES").unwrap_or(40),
+            mem_latency_cycles: parse_u64_field(&contents, "MEM_CYCLES").unwrap_or(120),
+            avx512_throughput_cycles: parse_f64_field(&contents, "AVX512_THROUGHPUT").unwrap_or(0.5),
+            thread_scheduling_cost_cycles: parse_u64_field(&contents, "THREAD_SCHEDULING_COST").unwrap_or(2000),
             gpu_name: parse_profile_value(&contents, "GPU_NAME")
                 .unwrap_or("Unknown GPU")
                 .to_string(),
@@ -298,9 +519,11 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             profile.l2_line_size
         );
         println!(
-            "    -> Loaded Baseline L1 Latency: {} cycles",
-            profile.l1_latency_cycles
+            "    -> Loaded CPU Memory Latency Sweep (L1/L2/L3/Mem): {} / {} / {} / {} cycles",
+            profile.l1_latency_cycles, profile.l2_latency_cycles, profile.l3_latency_cycles, profile.mem_latency_cycles
         );
+        println!("    -> Loaded CPU AVX-512 Instruction Throughput: {:.2} cycles per op", profile.avx512_throughput_cycles);
+        println!("    -> Loaded CPU Thread Scheduling/Context Switch Handoff Cost: {} cycles", profile.thread_scheduling_cost_cycles);
         println!("    -> Loaded GPU Name: {}", profile.gpu_name);
         println!(
             "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
@@ -372,24 +595,49 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         return profile;
     }
 
-    println!("[*] First boot detected! Running Sentinel Hardware Probe...");
+    log_info!("First boot detected! Running Sentinel Hardware Probe...");
 
     let mut features = [0u32; 4];
-    let l1_cycles;
 
-    // Call out to the simulated microbenchmark!
     probe_cpu_features(&mut features);
-    l1_cycles = measure_l1_latency();
-
     let has_avx = (features[0] & (1 << 28)) != 0;
     let has_avx512 = (features[2] & (1 << 16)) != 0;
     let l2_line_size = features[3] & 0xFF;
 
-    println!("[*] Executing external GPU Microbenchmark Payload (ysu_gpu_probe.exe)...");
+    println!("      -> CPU Features: AVX={}, AVX-512={}, L2 Cache Line Size={}", has_avx, has_avx512, l2_line_size);
+    
+    log_info!("Running Analytical CPU Memory Bus Latency Sweep...");
+    let l1_latency_cycles = measure_cache_latency(16 * 1024);
+    let l2_latency_cycles = measure_cache_latency(256 * 1024);
+    let l3_latency_cycles = measure_cache_latency(4 * 1024 * 1024);
+    let mem_latency_cycles = measure_cache_latency(64 * 1024 * 1024);
 
-    // In production, this binary is shipped alongside the compiler and runs
-    // actual CUDA/PTX microbenchmarks on the user's silicon.
-    let probe_cmd = std::process::Command::new("./ysu_gpu_probe.exe").output();
+    log_info!("Profiling CPU Instruction Throughput...");
+    let avx512_throughput_cycles = measure_avx512_throughput(has_avx512);
+
+    log_info!("Measuring CPU Thread Scheduling/Context Switch Handoff Cost...");
+    let thread_scheduling_cost_cycles = measure_thread_scheduling_cost();
+
+    // Try to find the probe executable. First try current working directory, 
+    // then try the folder of the running compiler binary itself.
+    let mut probe_path = std::path::PathBuf::from("./ysu_gpu_probe");
+    if cfg!(target_os = "windows") {
+        probe_path.set_extension("exe");
+    }
+    
+    if !probe_path.exists() {
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let local_probe = exe_dir.join(if cfg!(target_os = "windows") { "ysu_gpu_probe.exe" } else { "ysu_gpu_probe" });
+                if local_probe.exists() {
+                    probe_path = local_probe;
+                }
+            }
+        }
+    }
+    
+    log_info!("Executing external GPU Microbenchmark Payload ({:?})...", probe_path);
+    let probe_cmd = std::process::Command::new(&probe_path).output();
 
     let mut gpu_name = "Unknown GPU".to_string();
     let mut fma_latency_cycles = 4.0;
@@ -437,9 +685,12 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let mut drift_free_types = Vec::new();
     let mut zero_drift_penalty_cycles = 0;
 
+    let mut stdout_content = String::new();
+
     match probe_cmd {
         Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout_content = String::from_utf8_lossy(&output.stdout).to_string();
+            let stdout = &stdout_content;
 
             gpu_name = parse_profile_value(&stdout, "GPU_NAME")
                 .unwrap_or("Unknown")
@@ -524,7 +775,12 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         has_avx,
         has_avx512,
         l2_line_size,
-        l1_latency_cycles: l1_cycles,
+        l1_latency_cycles,
+        l2_latency_cycles,
+        l3_latency_cycles,
+        mem_latency_cycles,
+        avx512_throughput_cycles,
+        thread_scheduling_cost_cycles,
         gpu_name,
         fma_latency_cycles,
         imad_latency_cycles,
@@ -569,44 +825,46 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         total_global_mem_mb,
         drift_free_types,
         zero_drift_penalty_cycles,
-        smem_noconflict_cycles: parse_f64_field(&stdout, "SMEM_NOCONFLICT_CYCLES").unwrap_or(4.0),
-        smem_2way_conflict_cycles: parse_f64_field(&stdout, "SMEM_2WAY_CONFLICT_CYCLES").unwrap_or(8.0),
-        smem_4way_conflict_cycles: parse_f64_field(&stdout, "SMEM_4WAY_CONFLICT_CYCLES").unwrap_or(16.0),
-        smem_broadcast_cycles: parse_f64_field(&stdout, "SMEM_BROADCAST_CYCLES").unwrap_or(4.0),
-        smem_2way_conflict_penalty: parse_f64_field(&stdout, "SMEM_2WAY_CONFLICT_PENALTY").unwrap_or(4.0),
-        smem_4way_conflict_penalty: parse_f64_field(&stdout, "SMEM_4WAY_CONFLICT_PENALTY").unwrap_or(12.0),
-        smem_padding_needed: parse_u32_field(&stdout, "SMEM_PADDING_NEEDED").unwrap_or(0) != 0,
-        f2i_latency_cycles: parse_f64_field(&stdout, "F2I_LATENCY_CYCLES").unwrap_or(4.5),
-        i2f_latency_cycles: parse_f64_field(&stdout, "I2F_LATENCY_CYCLES").unwrap_or(4.5),
-        f2h_latency_cycles: parse_f64_field(&stdout, "F2H_LATENCY_CYCLES").unwrap_or(8.0),
-        h2f_latency_cycles: parse_f64_field(&stdout, "H2F_LATENCY_CYCLES").unwrap_or(8.0),
-        dp4a_latency_cycles: parse_f64_field(&stdout, "DP4A_LATENCY_CYCLES").unwrap_or(2.0),
-        popc_latency_cycles: parse_f64_field(&stdout, "POPC_LATENCY_CYCLES").unwrap_or(4.5),
-        clz_latency_cycles: parse_f64_field(&stdout, "CLZ_LATENCY_CYCLES").unwrap_or(4.5),
-        prmt_latency_cycles: parse_f64_field(&stdout, "PRMT_LATENCY_CYCLES").unwrap_or(4.5),
-        ballot_sync_latency_cycles: parse_f64_field(&stdout, "BALLOT_SYNC_LATENCY_CYCLES").unwrap_or(4.5),
-        vote_any_latency_cycles: parse_f64_field(&stdout, "VOTE_ANY_LATENCY_CYCLES").unwrap_or(4.5),
-        ldg_nc_latency_cycles: parse_f64_field(&stdout, "LDG_NC_LATENCY_CYCLES").unwrap_or(125.0),
-        atom_add_f32_latency_cycles: parse_f64_field(&stdout, "ATOM_ADD_F32_LATENCY_CYCLES").unwrap_or(400.0),
-        atom_add_i32_latency_cycles: parse_f64_field(&stdout, "ATOM_ADD_I32_LATENCY_CYCLES").unwrap_or(400.0),
-        stride1_cycles: parse_f64_field(&stdout, "STRIDE1_CYCLES").unwrap_or(28.0),
-        stride2_cycles: parse_f64_field(&stdout, "STRIDE2_CYCLES").unwrap_or(40.0),
-        stride4_cycles: parse_f64_field(&stdout, "STRIDE4_CYCLES").unwrap_or(60.0),
-        stride8_cycles: parse_f64_field(&stdout, "STRIDE8_CYCLES").unwrap_or(90.0),
-        stride16_cycles: parse_f64_field(&stdout, "STRIDE16_CYCLES").unwrap_or(120.0),
-        stride32_cycles: parse_f64_field(&stdout, "STRIDE32_CYCLES").unwrap_or(125.0),
-        cp_async_latency_cycles: parse_f64_field(&stdout, "CP_ASYNC_LATENCY_CYCLES").unwrap_or(200.0),
-        fma_ilp_throughput: parse_f64_field(&stdout, "FMA_ILP_THROUGHPUT").unwrap_or(1.0),
-        fma_ilp_cycles_per_op: parse_f64_field(&stdout, "FMA_ILP_CYCLES_PER_OP").unwrap_or(4.5),
+        smem_noconflict_cycles: parse_f64_field(&stdout_content, "SMEM_NOCONFLICT_CYCLES").unwrap_or(4.0),
+        smem_2way_conflict_cycles: parse_f64_field(&stdout_content, "SMEM_2WAY_CONFLICT_CYCLES").unwrap_or(8.0),
+        smem_4way_conflict_cycles: parse_f64_field(&stdout_content, "SMEM_4WAY_CONFLICT_CYCLES").unwrap_or(16.0),
+        smem_broadcast_cycles: parse_f64_field(&stdout_content, "SMEM_BROADCAST_CYCLES").unwrap_or(4.0),
+        smem_2way_conflict_penalty: parse_f64_field(&stdout_content, "SMEM_2WAY_CONFLICT_PENALTY").unwrap_or(4.0),
+        smem_4way_conflict_penalty: parse_f64_field(&stdout_content, "SMEM_4WAY_CONFLICT_PENALTY").unwrap_or(12.0),
+        smem_padding_needed: parse_u32_field(&stdout_content, "SMEM_PADDING_NEEDED").unwrap_or(0) != 0,
+        f2i_latency_cycles: parse_f64_field(&stdout_content, "F2I_LATENCY_CYCLES").unwrap_or(4.5),
+        i2f_latency_cycles: parse_f64_field(&stdout_content, "I2F_LATENCY_CYCLES").unwrap_or(4.5),
+        f2h_latency_cycles: parse_f64_field(&stdout_content, "F2H_LATENCY_CYCLES").unwrap_or(8.0),
+        h2f_latency_cycles: parse_f64_field(&stdout_content, "H2F_LATENCY_CYCLES").unwrap_or(8.0),
+        dp4a_latency_cycles: parse_f64_field(&stdout_content, "DP4A_LATENCY_CYCLES").unwrap_or(2.0),
+        popc_latency_cycles: parse_f64_field(&stdout_content, "POPC_LATENCY_CYCLES").unwrap_or(4.5),
+        clz_latency_cycles: parse_f64_field(&stdout_content, "CLZ_LATENCY_CYCLES").unwrap_or(4.5),
+        prmt_latency_cycles: parse_f64_field(&stdout_content, "PRMT_LATENCY_CYCLES").unwrap_or(4.5),
+        ballot_sync_latency_cycles: parse_f64_field(&stdout_content, "BALLOT_SYNC_LATENCY_CYCLES").unwrap_or(4.5),
+        vote_any_latency_cycles: parse_f64_field(&stdout_content, "VOTE_ANY_LATENCY_CYCLES").unwrap_or(4.5),
+        ldg_nc_latency_cycles: parse_f64_field(&stdout_content, "LDG_NC_LATENCY_CYCLES").unwrap_or(125.0),
+        atom_add_f32_latency_cycles: parse_f64_field(&stdout_content, "ATOM_ADD_F32_LATENCY_CYCLES").unwrap_or(400.0),
+        atom_add_i32_latency_cycles: parse_f64_field(&stdout_content, "ATOM_ADD_I32_LATENCY_CYCLES").unwrap_or(400.0),
+        stride1_cycles: parse_f64_field(&stdout_content, "STRIDE1_CYCLES").unwrap_or(28.0),
+        stride2_cycles: parse_f64_field(&stdout_content, "STRIDE2_CYCLES").unwrap_or(40.0),
+        stride4_cycles: parse_f64_field(&stdout_content, "STRIDE4_CYCLES").unwrap_or(60.0),
+        stride8_cycles: parse_f64_field(&stdout_content, "STRIDE8_CYCLES").unwrap_or(90.0),
+        stride16_cycles: parse_f64_field(&stdout_content, "STRIDE16_CYCLES").unwrap_or(120.0),
+        stride32_cycles: parse_f64_field(&stdout_content, "STRIDE32_CYCLES").unwrap_or(125.0),
+        cp_async_latency_cycles: parse_f64_field(&stdout_content, "CP_ASYNC_LATENCY_CYCLES").unwrap_or(200.0),
+        fma_ilp_throughput: parse_f64_field(&stdout_content, "FMA_ILP_THROUGHPUT").unwrap_or(1.0),
+        fma_ilp_cycles_per_op: parse_f64_field(&stdout_content, "FMA_ILP_CYCLES_PER_OP").unwrap_or(4.5),
     };
 
     println!("    -> Detected AVX: {}", profile.has_avx);
     println!("    -> Detected AVX-512: {}", profile.has_avx512);
     println!("    -> L2 Cache Line Size: {} bytes", profile.l2_line_size);
     println!(
-        "    -> Baseline L1 Latency: {} cycles",
-        profile.l1_latency_cycles
+        "    -> CPU Memory Latency Sweep (L1/L2/L3/Mem): {} / {} / {} / {} cycles",
+        profile.l1_latency_cycles, profile.l2_latency_cycles, profile.l3_latency_cycles, profile.mem_latency_cycles
     );
+    println!("    -> CPU AVX-512 Instruction Throughput: {:.2} cycles per op", profile.avx512_throughput_cycles);
+    println!("    -> CPU Thread Scheduling/Context Switch Handoff Cost: {} cycles", profile.thread_scheduling_cost_cycles);
     println!("    -> Detected GPU: {}", profile.gpu_name);
     println!(
         "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
@@ -680,7 +938,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
 
     println!("[*] Saving hardware topology to {}...", profile_path);
     let serialized = format!(
-        "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nGPU_NAME={}\n\
+        "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nL2_CYCLES={}\nL3_CYCLES={}\nMEM_CYCLES={}\nAVX512_THROUGHPUT={}\nTHREAD_SCHEDULING_COST={}\nGPU_NAME={}\n\
          FMA_LATENCY={}\nIMAD_LATENCY={}\nTHERMAL_LATENCY_40C={}\n\
          THERMAL_LATENCY_60C={}\nTHERMAL_LATENCY_80C={}\n\
          MUFU_RCP_LATENCY={}\nDFMA_LATENCY={}\nSMEM_LATENCY={}\n\
@@ -712,6 +970,8 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
          CP_ASYNC_LATENCY_CYCLES={}\n\
          FMA_ILP_THROUGHPUT={}\nFMA_ILP_CYCLES_PER_OP={}\n",
         profile.has_avx, profile.has_avx512, profile.l2_line_size, profile.l1_latency_cycles,
+        profile.l2_latency_cycles, profile.l3_latency_cycles, profile.mem_latency_cycles,
+        profile.avx512_throughput_cycles, profile.thread_scheduling_cost_cycles,
         profile.gpu_name, profile.fma_latency_cycles, profile.imad_latency_cycles,
         profile.thermal_latency_40c, profile.thermal_latency_60c, profile.thermal_latency_80c,
         profile.mufu_rcp_latency_cycles, profile.dfma_latency_cycles, profile.smem_latency_cycles,
@@ -744,59 +1004,6 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         profile.stride8_cycles, profile.stride16_cycles, profile.stride32_cycles,
         profile.cp_async_latency_cycles,
         profile.fma_ilp_throughput, profile.fma_ilp_cycles_per_op
-    );
-    fs::write(profile_path, serialized).expect("Failed to write profile");
-
-    profile
-}
-        profile.has_avx,
-        profile.has_avx512,
-        profile.l2_line_size,
-        profile.l1_latency_cycles,
-        profile.gpu_name,
-        profile.fma_latency_cycles,
-        profile.imad_latency_cycles,
-        profile.thermal_latency_40c,
-        profile.thermal_latency_60c,
-        profile.thermal_latency_80c,
-        profile.mufu_rcp_latency_cycles,
-        profile.dfma_latency_cycles,
-        profile.smem_latency_cycles,
-        profile.l1_gpu_latency_cycles,
-        profile.l2_gpu_latency_cycles,
-        profile.vram_latency_cycles,
-        profile.hmma_f16_latency_cycles,
-        profile.tf32_latency_cycles,
-        profile.bar_sync_latency_cycles,
-        profile.shfl_sync_latency_cycles,
-        profile.smem_exchange_latency_cycles,
-        profile.bfe_latency_cycles,
-        profile.bfi_latency_cycles,
-        profile.and_shift_latency_cycles,
-        profile.branch_uniform_cycles,
-        profile.branch_divergent_cycles,
-        profile.branch_divergence_penalty_cycles,
-        profile.tex1d_latency_cycles,
-        profile.imad_wide_latency_cycles,
-        profile.mufu_ex2_latency_cycles,
-        profile.mufu_sin_latency_cycles,
-        profile.mufu_rsq_latency_cycles,
-        profile.mufu_lg2_latency_cycles,
-        profile.hfma2_latency_cycles,
-        profile.bf16x2_fma_latency_cycles,
-        profile.lop3_lut_latency_cycles,
-        profile.dadd_latency_cycles,
-        profile.redux_sum_latency_cycles,
-        profile.membar_gpu_latency_cycles,
-        profile.ldc_latency_cycles,
-        profile.max_regs_per_thread,
-        profile.max_regs_per_sm,
-        profile.warp_size,
-        profile.max_threads_per_sm,
-        profile.max_warps_per_sm,
-        profile.total_global_mem_mb,
-        profile.drift_free_types.join(","),
-        profile.zero_drift_penalty_cycles
     );
     fs::write(profile_path, serialized).expect("Failed to write profile");
 

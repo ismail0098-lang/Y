@@ -1,6 +1,7 @@
 import lib;
 import lexer;
 import parser;
+import type_checker;
 import llvm_emitter;
 import native_emitter;
 
@@ -24,6 +25,14 @@ fn main() {
     let mut arena: AstArena = AstArena::new();
     let mut p: Parser = Parser::new(tokens, token_count);
     Parser::parse_program(&mut p, &mut arena);
+
+    // 3.5. Safety / Type Checker
+    let mut bc: BoundsChecker = BoundsChecker::new();
+    BoundsChecker::verify_all(&mut bc, &arena);
+    if bc.error_count > 0 {
+        println("[!] Safety / Type Checking failed. Compilation aborted.");
+        return;
+    }
 
     // 4. Emitter (LLVM backend)
     let mut ll_emitter: LlvmEmitter = LlvmEmitter::new();

@@ -1,0 +1,29 @@
+// tests/ghost_test.ysu
+// Demonstrating Y's validation features: @ghost blocks, @clock_domain crossing,
+// and compile_time::assert!.
+
+@unsafe
+fn main() {
+    println("--- Y Language Advanced Validation Test ---");
+
+    // 1. Compile-time assertions: verified during type checking
+    compile_time::assert!(1 == 1, "always true constraint");
+
+    // 2. Clock Domain Crossing block
+    let clk_100mhz: I32 = 1;
+    @clock_domain(clk_100mhz) {
+        let domain_counter: I32 = 0;
+        domain_counter = domain_counter + 1;
+    }
+
+    // 3. Ghost speculative block for verification/invariant tracking
+    let run_count: I32 = 10;
+    @ghost {
+        let ghost_shadow: I32 = run_count;
+        ghost_shadow = ghost_shadow * 2;
+        print_int(ghost_shadow);
+        println("");
+    }
+
+    println("Verification complete!");
+}

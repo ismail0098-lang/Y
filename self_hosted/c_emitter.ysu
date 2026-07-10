@@ -184,6 +184,23 @@ impl CEmitter {
                 i += 1;
             }
             (*e).indent_level -= 1;
+            String::push_str(&mut (*e).c_buffer, &String::new("}\n"));
+        } else if stmt.tag == Stmt_TAG_SafeBlock {
+            let body_start: usize = stmt.data.SafeBlock._0;
+            let body_count: usize = stmt.data.SafeBlock._1;
+            
+            String::push_str(&mut (*e).c_buffer, &String::new("/* @safe verified block */\n"));
+            CEmitter::indent(e);
+            String::push_str(&mut (*e).c_buffer, &String::new("{\n"));
+            (*e).indent_level += 1;
+            
+            let mut i: usize = 0;
+            while i < body_count {
+                CEmitter::emit_stmt(e, arena, body_start + i);
+                i += 1;
+            }
+            
+            (*e).indent_level -= 1;
             CEmitter::indent(e);
             String::push_str(&mut (*e).c_buffer, &String::new("}\n"));
         }

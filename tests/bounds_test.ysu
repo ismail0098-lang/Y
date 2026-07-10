@@ -1,0 +1,22 @@
+// tests/bounds_test.ysu
+// Verifies interval-based array bounds checking in Y
+
+fn main() {
+    @safe {
+        let arr: [I32; 5] = {};
+
+        // 1. Safe access with constant index within bounds
+        let val1: I32 = arr[2];
+
+        // 2. Safe access with loop index proven by loop bounds [0, 4]
+        @invariant(i >= 0)
+        for i in 0..5 {
+            let val2: I32 = arr[i]; // Loop index i is in [0, 4], safe!
+        }
+
+        // 3. Safe access with variable declared with explicit bounds attribute
+        @bounds(min=0, max=4)
+        let idx: I32 = 3;
+        let val3: I32 = arr[idx]; // idx is proven to be in [0, 4], safe!
+    }
+}

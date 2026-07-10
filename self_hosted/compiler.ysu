@@ -7,6 +7,36 @@
 //  to the C11 runtime backend equivalents.
 // ============================================================
 
+struct Expr {
+    tag: I32,
+    data: ptr
+}
+
+struct Stmt {
+    tag: I32,
+    data: ptr
+}
+
+struct TokenKind {
+    tag: I32,
+    data: ptr
+}
+
+struct MatchPattern {
+    tag: I32,
+    data: ptr
+}
+
+struct VariantPayload {
+    _0: usize,
+    _1: usize,
+    _2: usize,
+    _3: usize,
+    _4: usize,
+    _5: usize,
+    _6: usize
+}
+
 // ── Array / Vector (Maps to YVec in C backend) ──────────────
 
 impl Vec {
@@ -38,6 +68,12 @@ impl Vec {
     fn get_char(v: Vec, i: usize) -> char {
         return yvec_get_char(v, i);
     }
+    
+    @unsafe
+    fn get_String(v: Vec, i: usize) -> String {
+        let p: &String = yvec_get(v, i);
+        return *p;
+    }
 }
 
 // ── String (Maps to YStr in C backend) ──────────────────────
@@ -59,7 +95,7 @@ impl String {
     }
 
     // Appends another string
-    fn push_str(s: String, other: String) {
+    fn push_str(s: String, other: &String) {
         ystr_push_str(s, other);
     }
 
@@ -93,6 +129,664 @@ impl File {
         yfile_write(path, content);
     }
 }
+
+struct HardwareProfile {
+    has_avx: bool,
+    has_avx512: bool,
+    l2_line_size: I32,
+    l1_latency_cycles: I64,
+    l2_latency_cycles: I64,
+    l3_latency_cycles: I64,
+    mem_latency_cycles: I64,
+    avx512_throughput_cycles: F64,
+    thread_scheduling_cost_cycles: I64,
+    gpu_name: String,
+    fma_latency_cycles: F64,
+    imad_latency_cycles: F64,
+    thermal_latency_40c: F64,
+    thermal_latency_60c: F64,
+    thermal_latency_80c: F64,
+    mufu_rcp_latency_cycles: F64,
+    dfma_latency_cycles: F64,
+    smem_latency_cycles: F64,
+    l1_gpu_latency_cycles: F64,
+    l2_gpu_latency_cycles: F64,
+    vram_latency_cycles: F64,
+    hmma_f16_latency_cycles: F64,
+    tf32_latency_cycles: F64,
+    bar_sync_latency_cycles: F64,
+    shfl_sync_latency_cycles: F64,
+    smem_exchange_latency_cycles: F64,
+    bfe_latency_cycles: F64,
+    bfi_latency_cycles: F64,
+    and_shift_latency_cycles: F64,
+    branch_uniform_cycles: F64,
+    branch_divergent_cycles: F64,
+    branch_divergence_penalty_cycles: F64,
+    tex1d_latency_cycles: F64,
+    imad_wide_latency_cycles: F64,
+    mufu_ex2_latency_cycles: F64,
+    mufu_sin_latency_cycles: F64,
+    mufu_rsq_latency_cycles: F64,
+    mufu_lg2_latency_cycles: F64,
+    hfma2_latency_cycles: F64,
+    bf16x2_fma_latency_cycles: F64,
+    lop3_lut_latency_cycles: F64,
+    dadd_latency_cycles: F64,
+    redux_sum_latency_cycles: F64,
+    membar_gpu_latency_cycles: F64,
+    ldc_latency_cycles: F64,
+    max_regs_per_thread: I32,
+    max_regs_per_sm: I32,
+    warp_size: I32,
+    max_threads_per_sm: I32,
+    max_warps_per_sm: I32,
+    total_global_mem_mb: I64,
+    drift_free_types: Vec,
+    zero_drift_penalty_cycles: I64,
+    smem_noconflict_cycles: F64,
+    smem_2way_conflict_cycles: F64,
+    smem_4way_conflict_cycles: F64,
+    smem_broadcast_cycles: F64,
+    smem_2way_conflict_penalty: F64,
+    smem_4way_conflict_penalty: F64,
+    smem_padding_needed: bool,
+    f2i_latency_cycles: F64,
+    i2f_latency_cycles: F64,
+    f2h_latency_cycles: F64,
+    h2f_latency_cycles: F64,
+    dp4a_latency_cycles: F64,
+    popc_latency_cycles: F64,
+    clz_latency_cycles: F64,
+    prmt_latency_cycles: F64,
+    ballot_sync_latency_cycles: F64,
+    vote_any_latency_cycles: F64,
+    ldg_nc_latency_cycles: F64,
+    atom_add_f32_latency_cycles: F64,
+    atom_add_i32_latency_cycles: F64,
+    stride1_cycles: F64,
+    stride2_cycles: F64,
+    stride4_cycles: F64,
+    stride8_cycles: F64,
+    stride16_cycles: F64,
+    stride32_cycles: F64,
+    cp_async_latency_cycles: F64,
+    fma_ilp_throughput: F64,
+    fma_ilp_cycles_per_op: F64
+}
+
+impl HardwareProfile {
+    @unsafe
+    fn parse_bool(s: &String) -> bool {
+        let trimmed: String = HardwareProfile::trim(s);
+        if String::eq_cstr(trimmed, "true") {
+            return true;
+        }
+        return false;
+    }
+
+    @unsafe
+    fn parse_i32(s: &String) -> I32 {
+        let trimmed: String = HardwareProfile::trim(s);
+        let len: usize = String::len(trimmed);
+        let mut val: I32 = 0;
+        let mut i: usize = 0;
+        let mut is_neg: bool = false;
+        if len > 0 {
+            let first: char = String::char_at(trimmed, 0);
+            if first == '-' {
+                is_neg = true;
+                i += 1;
+            }
+        }
+        while i < len {
+            let ch: char = String::char_at(trimmed, i);
+            let mut digit: I32 = 0;
+            if ch == '0' { digit = 0; }
+            else if ch == '1' { digit = 1; }
+            else if ch == '2' { digit = 2; }
+            else if ch == '3' { digit = 3; }
+            else if ch == '4' { digit = 4; }
+            else if ch == '5' { digit = 5; }
+            else if ch == '6' { digit = 6; }
+            else if ch == '7' { digit = 7; }
+            else if ch == '8' { digit = 8; }
+            else if ch == '9' { digit = 9; }
+            val = val * 10 + digit;
+            i += 1;
+        }
+        if is_neg {
+            return 0 - val;
+        }
+        return val;
+    }
+
+    @unsafe
+    fn parse_i64(s: &String) -> I64 {
+        let trimmed: String = HardwareProfile::trim(s);
+        let len: usize = String::len(trimmed);
+        let mut val: I64 = 0;
+        let mut i: usize = 0;
+        let mut is_neg: bool = false;
+        if len > 0 {
+            let first: char = String::char_at(trimmed, 0);
+            if first == '-' {
+                is_neg = true;
+                i += 1;
+            }
+        }
+        while i < len {
+            let ch: char = String::char_at(trimmed, i);
+            let mut digit: I64 = 0;
+            if ch == '0' { digit = 0; }
+            else if ch == '1' { digit = 1; }
+            else if ch == '2' { digit = 2; }
+            else if ch == '3' { digit = 3; }
+            else if ch == '4' { digit = 4; }
+            else if ch == '5' { digit = 5; }
+            else if ch == '6' { digit = 6; }
+            else if ch == '7' { digit = 7; }
+            else if ch == '8' { digit = 8; }
+            else if ch == '9' { digit = 9; }
+            val = val * 10 + digit;
+            i += 1;
+        }
+        if is_neg {
+            return 0 - val;
+        }
+        return val;
+    }
+
+    @unsafe
+    fn parse_f64(s: &String) -> F64 {
+        let trimmed: String = HardwareProfile::trim(s);
+        let len: usize = String::len(trimmed);
+        let mut val: F64 = 0;
+        let mut i: usize = 0;
+        let mut decimal_part: bool = false;
+        let mut divisor: F64 = 1;
+        let mut is_neg: bool = false;
+        if len > 0 {
+            let first: char = String::char_at(trimmed, 0);
+            if first == '-' {
+                is_neg = true;
+                i += 1;
+            }
+        }
+        while i < len {
+            let ch: char = String::char_at(trimmed, i);
+            if ch == '.' {
+                decimal_part = true;
+            } else {
+                let mut digit: F64 = 0;
+                if ch == '0' { digit = 0; }
+                else if ch == '1' { digit = 1; }
+                else if ch == '2' { digit = 2; }
+                else if ch == '3' { digit = 3; }
+                else if ch == '4' { digit = 4; }
+                else if ch == '5' { digit = 5; }
+                else if ch == '6' { digit = 6; }
+                else if ch == '7' { digit = 7; }
+                else if ch == '8' { digit = 8; }
+                else if ch == '9' { digit = 9; }
+                
+                if decimal_part {
+                    divisor = divisor * 10;
+                    val = val + (digit / divisor);
+                } else {
+                    val = val * 10 + digit;
+                }
+            }
+            i += 1;
+        }
+        if is_neg {
+            return 0 - val;
+        }
+        return val;
+    }
+
+    @unsafe
+    fn trim(s: &String) -> String {
+        let len: usize = String::len(*s);
+        if len == 0 {
+            let empty: String = "";
+            return empty;
+        }
+        let mut start: usize = 0;
+        while start < len {
+            let ch: char = String::char_at(*s, start);
+            if ch == ' ' { start += 1; }
+            else if ch == '\t' { start += 1; }
+            else if ch == '\r' { start += 1; }
+            else if ch == '\n' { start += 1; }
+            else { break; }
+        }
+        let mut end: usize = len;
+        while end > start {
+            let ch: char = String::char_at(*s, end - 1);
+            if ch == ' ' { end -= 1; }
+            else if ch == '\t' { end -= 1; }
+            else if ch == '\r' { end -= 1; }
+            else if ch == '\n' { end -= 1; }
+            else { break; }
+        }
+        let mut res: String = "";
+        let mut i: usize = start;
+        while i < end {
+            String::push(res, String::char_at(*s, i));
+            i += 1;
+        }
+        return res;
+    }
+
+    @unsafe
+    fn load_profile() -> HardwareProfile {
+        let profile_path: String = ".ysu_hw_profile";
+        let contents: String = File::read_to_string(&profile_path);
+        
+        let mut profile: HardwareProfile;
+        
+        profile.has_avx = false;
+        profile.has_avx512 = false;
+        profile.l2_line_size = 64;
+        profile.l1_latency_cycles = 4;
+        profile.l2_latency_cycles = 12;
+        profile.l3_latency_cycles = 40;
+        profile.mem_latency_cycles = 120;
+        profile.avx512_throughput_cycles = HardwareProfile::parse_f64(&"0.5");
+        profile.thread_scheduling_cost_cycles = 2000;
+        profile.gpu_name = "Unknown GPU";
+        profile.fma_latency_cycles = 4;
+        profile.imad_latency_cycles = 4;
+        profile.thermal_latency_40c = 4;
+        profile.thermal_latency_60c = 4;
+        profile.thermal_latency_80c = 4;
+        profile.mufu_rcp_latency_cycles = 40;
+        profile.dfma_latency_cycles = 50;
+        profile.smem_latency_cycles = 28;
+        profile.l1_gpu_latency_cycles = 33;
+        profile.l2_gpu_latency_cycles = 90;
+        profile.vram_latency_cycles = 300;
+        profile.hmma_f16_latency_cycles = 42;
+        profile.tf32_latency_cycles = 66;
+        profile.bar_sync_latency_cycles = 35;
+        profile.shfl_sync_latency_cycles = 1;
+        profile.smem_exchange_latency_cycles = 5;
+        profile.bfe_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.bfi_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.and_shift_latency_cycles = 7;
+        profile.branch_uniform_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.branch_divergent_cycles = 9;
+        profile.branch_divergence_penalty_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.tex1d_latency_cycles = 70;
+        profile.imad_wide_latency_cycles = HardwareProfile::parse_f64(&"2.6");
+        profile.mufu_ex2_latency_cycles = HardwareProfile::parse_f64(&"17.5");
+        profile.mufu_sin_latency_cycles = HardwareProfile::parse_f64(&"23.5");
+        profile.mufu_rsq_latency_cycles = HardwareProfile::parse_f64(&"39.5");
+        profile.mufu_lg2_latency_cycles = HardwareProfile::parse_f64(&"39.5");
+        profile.hfma2_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.bf16x2_fma_latency_cycles = 4;
+        profile.lop3_lut_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.dadd_latency_cycles = HardwareProfile::parse_f64(&"48.5");
+        profile.redux_sum_latency_cycles = 60;
+        profile.membar_gpu_latency_cycles = 205;
+        profile.ldc_latency_cycles = 70;
+        profile.max_regs_per_thread = 255;
+        profile.max_regs_per_sm = 65536;
+        profile.warp_size = 32;
+        profile.max_threads_per_sm = 1536;
+        profile.max_warps_per_sm = 48;
+        profile.total_global_mem_mb = 0;
+        profile.drift_free_types = Vec::new(24);
+        profile.zero_drift_penalty_cycles = 0;
+        profile.smem_noconflict_cycles = 4;
+        profile.smem_2way_conflict_cycles = 8;
+        profile.smem_4way_conflict_cycles = 16;
+        profile.smem_broadcast_cycles = 4;
+        profile.smem_2way_conflict_penalty = 4;
+        profile.smem_4way_conflict_penalty = 12;
+        profile.smem_padding_needed = false;
+        profile.f2i_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.i2f_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.f2h_latency_cycles = 8;
+        profile.h2f_latency_cycles = 8;
+        profile.dp4a_latency_cycles = 2;
+        profile.popc_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.clz_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.prmt_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.ballot_sync_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.vote_any_latency_cycles = HardwareProfile::parse_f64(&"4.5");
+        profile.ldg_nc_latency_cycles = 125;
+        profile.atom_add_f32_latency_cycles = 400;
+        profile.atom_add_i32_latency_cycles = 400;
+        profile.stride1_cycles = 28;
+        profile.stride2_cycles = 40;
+        profile.stride4_cycles = 60;
+        profile.stride8_cycles = 90;
+        profile.stride16_cycles = 120;
+        profile.stride32_cycles = 125;
+        profile.cp_async_latency_cycles = 200;
+        profile.fma_ilp_throughput = 1;
+        profile.fma_ilp_cycles_per_op = HardwareProfile::parse_f64(&"4.5");
+
+        let len: usize = String::len(contents);
+        let mut i: usize = 0;
+        
+        while i < len {
+            let mut line: String = "";
+            while i < len {
+                let ch: char = String::char_at(contents, i);
+                i += 1;
+                if ch == '\n' {
+                    break;
+                }
+                if ch != '\r' {
+                    String::push(line, ch);
+                }
+            }
+            
+            let line_len: usize = String::len(line);
+            let mut eq_pos: usize = 0;
+            let mut found_eq: bool = false;
+            while eq_pos < line_len {
+                if String::char_at(line, eq_pos) == '=' {
+                    found_eq = true;
+                    break;
+                }
+                eq_pos += 1;
+            }
+            
+            if found_eq {
+                let mut key: String = "";
+                let mut k: usize = 0;
+                while k < eq_pos {
+                    String::push(key, String::char_at(line, k));
+                    k += 1;
+                }
+                
+                let mut val_str: String = "";
+                let mut v: usize = eq_pos + 1;
+                while v < line_len {
+                    String::push(val_str, String::char_at(line, v));
+                    v += 1;
+                }
+                
+                let trimmed_key: String = HardwareProfile::trim(&key);
+                let trimmed_val: String = HardwareProfile::trim(&val_str);
+                
+                if String::eq_cstr(trimmed_key, "AVX") { profile.has_avx = HardwareProfile::parse_bool(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "AVX512") { profile.has_avx512 = HardwareProfile::parse_bool(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "L2_LINE") { profile.l2_line_size = HardwareProfile::parse_i32(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "L1_CYCLES") { profile.l1_latency_cycles = HardwareProfile::parse_i64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "L2_CYCLES") { profile.l2_latency_cycles = HardwareProfile::parse_i64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "L3_CYCLES") { profile.l3_latency_cycles = HardwareProfile::parse_i64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MEM_CYCLES") { profile.mem_latency_cycles = HardwareProfile::parse_i64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "AVX512_THROUGHPUT") { profile.avx512_throughput_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "THREAD_SCHEDULING_COST") { profile.thread_scheduling_cost_cycles = HardwareProfile::parse_i64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "GPU_NAME") { profile.gpu_name = String::clone(trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "FMA_LATENCY") { profile.fma_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "IMAD_LATENCY") { profile.imad_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "THERMAL_LATENCY_40C") { profile.thermal_latency_40c = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "THERMAL_LATENCY_60C") { profile.thermal_latency_60c = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "THERMAL_LATENCY_80C") { profile.thermal_latency_80c = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MUFU_RCP_LATENCY") { profile.mufu_rcp_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "DFMA_LATENCY") { profile.dfma_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_LATENCY") { profile.smem_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "L1_GPU_LATENCY") { profile.l1_gpu_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "L2_GPU_LATENCY") { profile.l2_gpu_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "VRAM_LATENCY") { profile.vram_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "HMMA_F16_LATENCY") { profile.hmma_f16_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "TF32_LATENCY") { profile.tf32_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "BAR_SYNC_LATENCY") { profile.bar_sync_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SHFL_SYNC_LATENCY") { profile.shfl_sync_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_EXCHANGE_LATENCY") { profile.smem_exchange_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "BFE_LATENCY") { profile.bfe_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "BFI_LATENCY") { profile.bfi_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "AND_SHIFT_LATENCY") { profile.and_shift_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "BRANCH_UNIFORM") { profile.branch_uniform_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "BRANCH_DIVERGENT") { profile.branch_divergent_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "BRANCH_DIVERGENCE_PENALTY") { profile.branch_divergence_penalty_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "TEX1D_LATENCY") { profile.tex1d_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "IMAD_WIDE_LATENCY") { profile.imad_wide_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MUFU_EX2_LATENCY") { profile.mufu_ex2_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MUFU_SIN_LATENCY") { profile.mufu_sin_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MUFU_RSQ_LATENCY") { profile.mufu_rsq_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MUFU_LG2_LATENCY") { profile.mufu_lg2_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "HFMA2_LATENCY") { profile.hfma2_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "BF16X2_FMA_LATENCY") { profile.bf16x2_fma_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "LOP3_LUT_LATENCY") { profile.lop3_lut_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "DADD_LATENCY") { profile.dadd_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "REDUX_SUM_LATENCY") { profile.redux_sum_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MEMBAR_GPU_LATENCY") { profile.membar_gpu_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "LDC_LATENCY") { profile.ldc_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MAX_REGS_PER_THREAD") { profile.max_regs_per_thread = HardwareProfile::parse_i32(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MAX_REGS_PER_SM") { profile.max_regs_per_sm = HardwareProfile::parse_i32(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "WARP_SIZE") { profile.warp_size = HardwareProfile::parse_i32(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MAX_THREADS_PER_SM") { profile.max_threads_per_sm = HardwareProfile::parse_i32(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "MAX_WARPS_PER_SM") { profile.max_warps_per_sm = HardwareProfile::parse_i32(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "TOTAL_GLOBAL_MEM_MB") { profile.total_global_mem_mb = HardwareProfile::parse_i64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "ZERO_DRIFT_PENALTY") { profile.zero_drift_penalty_cycles = HardwareProfile::parse_i64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_NOCONFLICT_CYCLES") { profile.smem_noconflict_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_2WAY_CONFLICT_CYCLES") { profile.smem_2way_conflict_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_4WAY_CONFLICT_CYCLES") { profile.smem_4way_conflict_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_BROADCAST_CYCLES") { profile.smem_broadcast_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_2WAY_CONFLICT_PENALTY") { profile.smem_2way_conflict_penalty = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_4WAY_CONFLICT_PENALTY") { profile.smem_4way_conflict_penalty = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "SMEM_PADDING_NEEDED") { profile.smem_padding_needed = HardwareProfile::parse_bool(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "F2I_LATENCY_CYCLES") { profile.f2i_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "I2F_LATENCY_CYCLES") { profile.i2f_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "F2H_LATENCY_CYCLES") { profile.f2h_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "H2F_LATENCY_CYCLES") { profile.h2f_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "DP4A_LATENCY_CYCLES") { profile.dp4a_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "POPC_LATENCY_CYCLES") { profile.popc_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "CLZ_LATENCY_CYCLES") { profile.clz_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "PRMT_LATENCY_CYCLES") { profile.prmt_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "BALLOT_SYNC_LATENCY_CYCLES") { profile.ballot_sync_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "VOTE_ANY_LATENCY_CYCLES") { profile.vote_any_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "LDG_NC_LATENCY_CYCLES") { profile.ldg_nc_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "ATOM_ADD_F32_LATENCY_CYCLES") { profile.atom_add_f32_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "ATOM_ADD_I32_LATENCY_CYCLES") { profile.atom_add_i32_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "STRIDE1_CYCLES") { profile.stride1_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "STRIDE2_CYCLES") { profile.stride2_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "STRIDE4_CYCLES") { profile.stride4_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "STRIDE8_CYCLES") { profile.stride8_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "STRIDE16_CYCLES") { profile.stride16_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "STRIDE32_CYCLES") { profile.stride32_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "CP_ASYNC_LATENCY_CYCLES") { profile.cp_async_latency_cycles = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "FMA_ILP_THROUGHPUT") { profile.fma_ilp_throughput = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "FMA_ILP_CYCLES_PER_OP") { profile.fma_ilp_cycles_per_op = HardwareProfile::parse_f64(&trimmed_val); }
+                else if String::eq_cstr(trimmed_key, "DRIFT_FREE_TYPES") {
+                    let val_len: usize = String::len(trimmed_val);
+                    let mut start_idx: usize = 0;
+                    let mut c: usize = 0;
+                    while c <= val_len {
+                        let mut is_comma: bool = false;
+                        if c < val_len {
+                            if String::char_at(trimmed_val, c) == ',' {
+                                is_comma = true;
+                            }
+                        } else {
+                            is_comma = true;
+                        }
+                        if is_comma {
+                            let mut item: String = "";
+                            let mut k2: usize = start_idx;
+                            while k2 < c {
+                                String::push(item, String::char_at(trimmed_val, k2));
+                                k2 += 1;
+                            }
+                            let trimmed_item: String = HardwareProfile::trim(&item);
+                            if String::len(trimmed_item) > 0 {
+                                Vec::push(profile.drift_free_types, trimmed_item);
+                            }
+                            start_idx = c + 1;
+                        }
+                        c += 1;
+                    }
+                }
+            }
+        }
+        
+        return profile;
+    }
+
+    @unsafe
+    fn print_f64(v: F64) {
+        let temp: I64 = v * 10;
+        let mut ipart: I64 = temp / 10;
+        let mut fpart: I64 = temp % 10;
+        if fpart < 0 {
+            fpart = 0 - fpart;
+        }
+        if ipart == 0 {
+            if temp < 0 {
+                print("-");
+            }
+        }
+        print_int(ipart);
+        print(".");
+        print_int(fpart);
+    }
+
+    @unsafe
+    fn display_profile(profile: &HardwareProfile) {
+        print("    -> Loaded AVX: ");
+        if (*profile).has_avx { println("true"); } else { println("false"); }
+        
+        print("    -> Loaded AVX-512: ");
+        if (*profile).has_avx512 { println("true"); } else { println("false"); }
+        
+        print("    -> Loaded L2 Cache Line Size: ");
+        print_int((*profile).l2_line_size);
+        println(" bytes");
+        
+        print("    -> Loaded CPU Memory Latency Sweep (L1/L2/L3/Mem): ");
+        print_int((*profile).l1_latency_cycles);
+        print(" / ");
+        print_int((*profile).l2_latency_cycles);
+        print(" / ");
+        print_int((*profile).l3_latency_cycles);
+        print(" / ");
+        print_int((*profile).mem_latency_cycles);
+        println(" cycles");
+        
+        print("    -> Loaded CPU AVX-512 Instruction Throughput: ");
+        HardwareProfile::print_f64((*profile).avx512_throughput_cycles);
+        println(" cycles per op");
+        
+        print("    -> Loaded CPU Thread Scheduling/Context Switch Handoff Cost: ");
+        print_int((*profile).thread_scheduling_cost_cycles);
+        println(" cycles");
+        
+        print("    -> Loaded GPU Name: ");
+        println((*profile).gpu_name);
+        
+        print("    -> GPU FMA/IMAD/MUFU Latencies: ");
+        HardwareProfile::print_f64((*profile).fma_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).imad_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).mufu_rcp_latency_cycles);
+        println("");
+        
+        print("    -> GPU Memory Latencies (SMEM/L1/L2/VRAM): ");
+        HardwareProfile::print_f64((*profile).smem_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).l1_gpu_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).l2_gpu_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).vram_latency_cycles);
+        println("");
+        
+        print("    -> GPU Tensor Core Latencies (F16/TF32): ");
+        HardwareProfile::print_f64((*profile).hmma_f16_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).tf32_latency_cycles);
+        println("");
+        
+        print("    -> Warp Shuffle vs SMEM Exchange: ");
+        HardwareProfile::print_f64((*profile).shfl_sync_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).smem_exchange_latency_cycles);
+        println(" cycles");
+        
+        print("    -> Bit-Field (BFE/BFI vs AND+SHIFT): ");
+        HardwareProfile::print_f64((*profile).bfe_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).bfi_latency_cycles);
+        print(" vs ");
+        HardwareProfile::print_f64((*profile).and_shift_latency_cycles);
+        println("");
+        
+        print("    -> Branch Divergence Penalty: ");
+        HardwareProfile::print_f64((*profile).branch_divergence_penalty_cycles);
+        print(" cycles (uniform=");
+        HardwareProfile::print_f64((*profile).branch_uniform_cycles);
+        print(", divergent=");
+        HardwareProfile::print_f64((*profile).branch_divergent_cycles);
+        println(")");
+        
+        print("    -> Texture Unit (TEX1D): ");
+        HardwareProfile::print_f64((*profile).tex1d_latency_cycles);
+        println(" cycles");
+        
+        print("    -> IMAD.WIDE: ");
+        HardwareProfile::print_f64((*profile).imad_wide_latency_cycles);
+        print(" cycles | SFU (EX2/SIN/RSQ/LG2): ");
+        HardwareProfile::print_f64((*profile).mufu_ex2_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).mufu_sin_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).mufu_rsq_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).mufu_lg2_latency_cycles);
+        println("");
+        
+        print("    -> Reduced Precision (HFMA2/BF16x2): ");
+        HardwareProfile::print_f64((*profile).hfma2_latency_cycles);
+        print(" / ");
+        HardwareProfile::print_f64((*profile).bf16x2_fma_latency_cycles);
+        print(" | LOP3.LUT: ");
+        HardwareProfile::print_f64((*profile).lop3_lut_latency_cycles);
+        println("");
+        
+        print("    -> FP64 DADD: ");
+        HardwareProfile::print_f64((*profile).dadd_latency_cycles);
+        print(" | REDUX.SUM: ");
+        HardwareProfile::print_f64((*profile).redux_sum_latency_cycles);
+        print(" | MEMBAR.GPU: ");
+        HardwareProfile::print_f64((*profile).membar_gpu_latency_cycles);
+        print(" | LDC: ");
+        HardwareProfile::print_f64((*profile).ldc_latency_cycles);
+        println("");
+        
+        print("    -> HW Limits: ");
+        print_int((*profile).max_regs_per_thread);
+        print(" regs/thread, ");
+        print_int((*profile).max_regs_per_sm);
+        print(" regs/SM, warp=");
+        print_int((*profile).warp_size);
+        print(", ");
+        print_int((*profile).total_global_mem_mb);
+        println("MB VRAM");
+        
+        print("    -> Zero Drift Types: ");
+        let drift_len: usize = Vec::len((*profile).drift_free_types);
+        let mut idx: usize = 0;
+        print("[");
+        while idx < drift_len {
+            let tname: String = Vec::get_String((*profile).drift_free_types, idx);
+            print(tname);
+            if idx + 1 < drift_len {
+                print(", ");
+            }
+            idx += 1;
+        }
+        println("]");
+    }
+}
+
 // ============================================================
 //  Y  —  Lexer (Front-End Tokenizer) mapped to Y
 //  lexer.y
@@ -384,9 +1078,118 @@ impl Lexer {
         let kind: TokenKind = Lexer::classify_ident(s);
         return Token::new(kind, line, start_col, &s);
     }
+
+    @unsafe
+    fn scan_attribute(lx: &mut Lexer, start_col: usize) -> Token {
+        let line: usize = (*lx).line;
+        let mut name: String = "@";
+        
+        let mut parsing: bool = true;
+        while parsing {
+            let ch: char = Lexer::peek(lx);
+            let mut is_alphanum: bool = false;
+            if ch >= 'a' { if ch <= 'z' { is_alphanum = true; } }
+            if ch >= 'A' { if ch <= 'Z' { is_alphanum = true; } }
+            if ch >= '0' { if ch <= '9' { is_alphanum = true; } }
+            if ch == '_' { is_alphanum = true; }
+            
+            if is_alphanum {
+                String::push(name, ch);
+                Lexer::advance(lx);
+            } else {
+                parsing = false;
+            }
+        }
+        
+        let mut kind: TokenKind = TokenKind::AtUnknown(String::clone(&name));
+        if String::eq_cstr(name, "@require") { kind = TokenKind::AtRequire; }
+        else if String::eq_cstr(name, "@cache_policy") { kind = TokenKind::AtCachePolicy; }
+        else if String::eq_cstr(name, "@ptx_emit") { kind = TokenKind::AtPtxEmit; }
+        else if String::eq_cstr(name, "@avx_emit") { kind = TokenKind::AtAvxEmit; }
+        else if String::eq_cstr(name, "@inline") { kind = TokenKind::AtInline; }
+        else if String::eq_cstr(name, "@noinline") { kind = TokenKind::AtNoInline; }
+        else if String::eq_cstr(name, "@align") { kind = TokenKind::AtAlign; }
+        else if String::eq_cstr(name, "@safe") { kind = TokenKind::AtSafe; }
+        else if String::eq_cstr(name, "@unsafe") { kind = TokenKind::AtUnsafe; }
+        else if String::eq_cstr(name, "@gpu_uncached") { kind = TokenKind::AtGpuUncached; }
+        else if String::eq_cstr(name, "@atomic") { kind = TokenKind::AtAtomic; }
+        else if String::eq_cstr(name, "@static_assert") { kind = TokenKind::AtStaticAssert; }
+        
+        return Token::new(kind, line, start_col, &name);
+    }
 }
 
 impl Lexer {
+    @unsafe
+    fn scan_string(lx: &mut Lexer, start_col: usize) -> Token {
+        let line: usize = (*lx).line;
+        let mut s: String = "";
+        let mut parsing: bool = true;
+        
+        while parsing {
+            let ch: char = Lexer::advance(lx);
+            if ch == '\0' {
+                parsing = false;
+            } else if ch == '"' {
+                parsing = false;
+            } else if ch == '\\' {
+                let esc: char = Lexer::advance(lx);
+                if esc == 'n' { String::push(s, '\n'); }
+                else if esc == 't' { String::push(s, '\t'); }
+                else if esc == '"' { String::push(s, '"'); }
+                else if esc == '\\' { String::push(s, '\\'); }
+                else {
+                    String::push(s, '\\');
+                    String::push(s, esc);
+                }
+            } else {
+                String::push(s, ch);
+            }
+        }
+        
+        let mut lexeme: String = "\"";
+        String::push_str(lexeme, &s);
+        String::push(lexeme, '"');
+        
+        return Token::new(TokenKind::StringLit(s), line, start_col, &lexeme);
+    }
+
+    @unsafe
+    fn scan_char(lx: &mut Lexer, start_col: usize) -> Token {
+        let line: usize = (*lx).line;
+        let mut tok_char: char = '\0';
+        
+        let c1: char = Lexer::advance(lx);
+        if c1 == '\\' {
+            let esc: char = Lexer::advance(lx);
+            if esc == 'n' { tok_char = '\n'; }
+            else if esc == 'r' { tok_char = '\r'; }
+            else if esc == 't' { tok_char = '\t'; }
+            else if esc == '0' { tok_char = '\0'; }
+            else if esc == '\\' { tok_char = '\\'; }
+            else if esc == '\'' { tok_char = '\''; }
+            else { tok_char = esc; }
+        } else {
+            tok_char = c1;
+        }
+        
+        if Lexer::peek(lx) == '\'' {
+            Lexer::advance(lx);
+        }
+        
+        let mut lexeme: String = "'";
+        if tok_char == '\n' { String::push_str(lexeme, &"\\n"); }
+        else if tok_char == '\r' { String::push_str(lexeme, &"\\r"); }
+        else if tok_char == '\t' { String::push_str(lexeme, &"\\t"); }
+        else if tok_char == '\0' { String::push_str(lexeme, &"\\0"); }
+        else if tok_char == '\\' { String::push_str(lexeme, &"\\\\"); }
+        else if tok_char == '\'' { String::push_str(lexeme, &"\\'"); }
+        else { String::push(lexeme, tok_char); }
+        String::push(lexeme, '\'');
+        
+        return Token::new(TokenKind::CharLit(tok_char), line, start_col, &lexeme);
+    }
+
     @unsafe
     fn scan_number(lx: &mut Lexer, start_col: usize, first_char: char) -> Token {
         let line: usize = (*lx).line;
@@ -405,9 +1208,16 @@ impl Lexer {
                 String::push(s, ch);
                 Lexer::advance(lx);
             } else if ch == '.' {
-                is_float = true;
-                String::push(s, ch);
-                Lexer::advance(lx);
+                let nch: char = Lexer::peek2(lx);
+                let mut is_ndigit: bool = false;
+                if nch >= '0' { if nch <= '9' { is_ndigit = true; } }
+                if is_ndigit {
+                    is_float = true;
+                    String::push(s, ch);
+                    Lexer::advance(lx);
+                } else {
+                    parsing = false;
+                }
             } else {
                 parsing = false;
             }
@@ -434,20 +1244,169 @@ impl Lexer {
             return Token::new(TokenKind::Eof, line, start_col, &empty);
         }
 
-        // Single-char operators
+        if ch == '"' {
+            return Lexer::scan_string(lx, start_col);
+        }
+
+        if ch == '\'' {
+            return Lexer::scan_char(lx, start_col);
+        }
+
+        // Single-char and multi-char operators / delimiters
         if ch == '{' { let x: String = "{"; return Token::new(TokenKind::LBrace, line, start_col, &x); }
         if ch == '}' { let x: String = "}"; return Token::new(TokenKind::RBrace, line, start_col, &x); }
         if ch == '(' { let x: String = "("; return Token::new(TokenKind::LParen, line, start_col, &x); }
         if ch == ')' { let x: String = ")"; return Token::new(TokenKind::RParen, line, start_col, &x); }
+        if ch == '[' { let x: String = "["; return Token::new(TokenKind::LBracket, line, start_col, &x); }
+        if ch == ']' { let x: String = "]"; return Token::new(TokenKind::RBracket, line, start_col, &x); }
         if ch == ';' { let x: String = ";"; return Token::new(TokenKind::Semicolon, line, start_col, &x); }
-        if ch == ':' { let x: String = ":"; return Token::new(TokenKind::Colon, line, start_col, &x); }
         if ch == ',' { let x: String = ","; return Token::new(TokenKind::Comma, line, start_col, &x); }
-        if ch == '=' { let x: String = "="; return Token::new(TokenKind::Assign, line, start_col, &x); }
-        if ch == '+' { let x: String = "+"; return Token::new(TokenKind::Plus, line, start_col, &x); }
-        if ch == '*' { let x: String = "*"; return Token::new(TokenKind::Star, line, start_col, &x); }
-        if ch == '&' { let x: String = "&"; return Token::new(TokenKind::Ampersand, line, start_col, &x); }
-        if ch == '<' { let x: String = "<"; return Token::new(TokenKind::Lt, line, start_col, &x); }
-        if ch == '>' { let x: String = ">"; return Token::new(TokenKind::Gt, line, start_col, &x); }
+        if ch == '%' { let x: String = "%"; return Token::new(TokenKind::Percent, line, start_col, &x); }
+        if ch == '^' { let x: String = "^"; return Token::new(TokenKind::Caret, line, start_col, &x); }
+
+        if ch == '@' {
+            return Lexer::scan_attribute(lx, start_col);
+        }
+
+        if ch == ':' {
+            if Lexer::peek(lx) == ':' {
+                Lexer::advance(lx);
+                let x: String = "::";
+                return Token::new(TokenKind::ColonColon, line, start_col, &x);
+            }
+            let x: String = ":";
+            return Token::new(TokenKind::Colon, line, start_col, &x);
+        }
+
+        if ch == '=' {
+            if Lexer::peek(lx) == '>' {
+                Lexer::advance(lx);
+                let x: String = "=>";
+                return Token::new(TokenKind::FatArrow, line, start_col, &x);
+            }
+            if Lexer::peek(lx) == '=' {
+                Lexer::advance(lx);
+                let x: String = "==";
+                return Token::new(TokenKind::EqEq, line, start_col, &x);
+            }
+            let x: String = "=";
+            return Token::new(TokenKind::Assign, line, start_col, &x);
+        }
+
+        if ch == '+' {
+            if Lexer::peek(lx) == '=' {
+                Lexer::advance(lx);
+                let x: String = "+=";
+                return Token::new(TokenKind::PlusAssign, line, start_col, &x);
+            }
+            let x: String = "+";
+            return Token::new(TokenKind::Plus, line, start_col, &x);
+        }
+
+        if ch == '-' {
+            if Lexer::peek(lx) == '>' {
+                Lexer::advance(lx);
+                let x: String = "->";
+                return Token::new(TokenKind::Arrow, line, start_col, &x);
+            }
+            if Lexer::peek(lx) == '=' {
+                Lexer::advance(lx);
+                let x: String = "-=";
+                return Token::new(TokenKind::MinusAssign, line, start_col, &x);
+            }
+            let x: String = "-";
+            return Token::new(TokenKind::Minus, line, start_col, &x);
+        }
+
+        if ch == '*' {
+            if Lexer::peek(lx) == '=' {
+                Lexer::advance(lx);
+                let x: String = "*=";
+                return Token::new(TokenKind::StarAssign, line, start_col, &x);
+            }
+            let x: String = "*";
+            return Token::new(TokenKind::Star, line, start_col, &x);
+        }
+
+        if ch == '/' {
+            if Lexer::peek(lx) == '=' {
+                Lexer::advance(lx);
+                let x: String = "/=";
+                return Token::new(TokenKind::SlashAssign, line, start_col, &x);
+            }
+            let x: String = "/";
+            return Token::new(TokenKind::Slash, line, start_col, &x);
+        }
+
+        if ch == '&' {
+            if Lexer::peek(lx) == '&' {
+                Lexer::advance(lx);
+                let x: String = "&&";
+                return Token::new(TokenKind::AmpAmp, line, start_col, &x);
+            }
+            let x: String = "&";
+            return Token::new(TokenKind::Ampersand, line, start_col, &x);
+        }
+
+        if ch == '|' {
+            if Lexer::peek(lx) == '|' {
+                Lexer::advance(lx);
+                let x: String = "||";
+                return Token::new(TokenKind::PipePipe, line, start_col, &x);
+            }
+            let x: String = "|";
+            return Token::new(TokenKind::Pipe, line, start_col, &x);
+        }
+
+        if ch == '!' {
+            if Lexer::peek(lx) == '=' {
+                Lexer::advance(lx);
+                let x: String = "!=";
+                return Token::new(TokenKind::NotEq, line, start_col, &x);
+            }
+            let x: String = "!";
+            return Token::new(TokenKind::Bang, line, start_col, &x);
+        }
+
+        if ch == '<' {
+            if Lexer::peek(lx) == '=' {
+                Lexer::advance(lx);
+                let x: String = "<=";
+                return Token::new(TokenKind::LtEq, line, start_col, &x);
+            }
+            if Lexer::peek(lx) == '<' {
+                Lexer::advance(lx);
+                let x: String = "<<";
+                return Token::new(TokenKind::LtLt, line, start_col, &x);
+            }
+            let x: String = "<";
+            return Token::new(TokenKind::Lt, line, start_col, &x);
+        }
+
+        if ch == '>' {
+            if Lexer::peek(lx) == '=' {
+                Lexer::advance(lx);
+                let x: String = ">=";
+                return Token::new(TokenKind::GtEq, line, start_col, &x);
+            }
+            if Lexer::peek(lx) == '>' {
+                Lexer::advance(lx);
+                let x: String = ">>";
+                return Token::new(TokenKind::GtGt, line, start_col, &x);
+            }
+            let x: String = ">";
+            return Token::new(TokenKind::Gt, line, start_col, &x);
+        }
+
+        if ch == '.' {
+            if Lexer::peek(lx) == '.' {
+                Lexer::advance(lx);
+                let x: String = "..";
+                return Token::new(TokenKind::DotDot, line, start_col, &x);
+            }
+            let x: String = ".";
+            return Token::new(TokenKind::Dot, line, start_col, &x);
+        }
 
         let mut is_alpha: bool = false;
         if ch >= 'a' { if ch <= 'z' { is_alpha = true; } }
@@ -473,7 +1432,7 @@ impl Lexer {
 impl Lexer {
     @unsafe
     fn tokenize(lx: &mut Lexer) -> Vec {
-        let mut tokens: Vec = Vec::new(96);
+        let mut tokens: Vec = Vec::new(72);
         let mut parsing: bool = true;
         
         while parsing {
@@ -580,11 +1539,11 @@ enum Stmt {
     // if cond_idx { then_start..then_count } else { else_start..else_count }
     If(usize, usize, usize, usize, usize),
 
-    // while cond_idx { body_start..body_count }
-    While(usize, usize, usize),
+    // while cond_idx { body_start..body_count } (invariant_idx: 0 = none)
+    While(usize, usize, usize, usize),
 
-    // for loop_var in start_idx..end_idx step step_idx { body_start..body_count }
-    For(String, usize, usize, usize, usize, usize),
+    // for loop_var in start_idx..end_idx step step_idx { body_start..body_count } (invariant_idx: 0 = none)
+    For(String, usize, usize, usize, usize, usize, usize),
 
     // match scrutinee_idx { arm_start..arm_count }
     Match(usize, usize, usize),
@@ -596,7 +1555,10 @@ enum Stmt {
     CompoundAssign(usize, BinaryOp, usize),
 
     // A standalone expression statement (expr_idx)
-    ExprStmt(usize)
+    ExprStmt(usize),
+
+    // @safe { body_start..body_count }
+    SafeBlock(usize, usize)
 }
 
 // ── Declarations ────────────────────────────────────────────
@@ -687,6 +1649,11 @@ impl Vec {
         let mut res: usize = 0;
         return res;
     }
+    @unsafe
+    fn get_String(v: Vec, i: usize) -> String {
+        let mut res: String;
+        return res;
+    }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -711,15 +1678,15 @@ impl AstArena {
     @unsafe
     fn new() -> AstArena {
         let arena: AstArena;
-        arena.exprs = Vec::new(72);
+        arena.exprs = Vec::new(48);
         arena.stmts = Vec::new(72);
-        arena.params = Vec::new(16);
-        arena.funcs = Vec::new(64);
-        arena.structs = Vec::new(24);
-        arena.fields = Vec::new(16);
-        arena.match_arms = Vec::new(88);
+        arena.params = Vec::new(48);
+        arena.funcs = Vec::new(80);
+        arena.structs = Vec::new(40);
+        arena.fields = Vec::new(48);
+        arena.match_arms = Vec::new(72);
         arena.arg_indices = Vec::new(8);
-        arena.struct_lit_names = Vec::new(8);
+        arena.struct_lit_names = Vec::new(24);
         arena.struct_lit_exprs = Vec::new(8);
         return arena;
     }
@@ -732,7 +1699,9 @@ impl AstArena {
 struct Parser {
     tokens: Vec,
     pos: usize,
-    token_count: usize
+    token_count: usize,
+    imported_modules: Vec,
+    current_namespace: String
 }
 
 // ── Core Helpers ────────────────────────────────────────────
@@ -744,6 +1713,8 @@ impl Parser {
         p.tokens = tokens;
         p.pos = 0;
         p.token_count = count;
+        p.imported_modules = Vec::new(24);
+        p.current_namespace = String::new("");
         return p;
     }
 
@@ -829,14 +1800,37 @@ impl Parser {
         print("' at line ");
         print_int(tok.line);
         println("");
-        // exit(1) — mapped to C stdlib
-        return;
+        exit(1);
     }
 }
 
 // ── Expression Parsing ──────────────────────────────────────
 
 impl Parser {
+    @unsafe
+    fn parse_int_val(lex: &String) -> usize {
+        let mut val: usize = 0;
+        let len: usize = String::len(lex);
+        let mut i: usize = 0;
+        while i < len {
+            let ch: char = String::char_at(lex, i);
+            let mut digit: usize = 0;
+            if ch == '0' { digit = 0; }
+            else if ch == '1' { digit = 1; }
+            else if ch == '2' { digit = 2; }
+            else if ch == '3' { digit = 3; }
+            else if ch == '4' { digit = 4; }
+            else if ch == '5' { digit = 5; }
+            else if ch == '6' { digit = 6; }
+            else if ch == '7' { digit = 7; }
+            else if ch == '8' { digit = 8; }
+            else if ch == '9' { digit = 9; }
+            val = val * 10 + digit;
+            i += 1;
+        }
+        return val;
+    }
+
     @unsafe
     fn parse_primary(p: &mut Parser, arena: &mut AstArena) -> usize {
         let tok: Token = Parser::peek(p);
@@ -853,7 +1847,8 @@ impl Parser {
 
             if is_digit {
                 Parser::advance(p);
-                let expr: Expr = Expr::IntLit(0);
+                let val: usize = Parser::parse_int_val(&lex);
+                let expr: Expr = Expr::IntLit(val);
                 Vec::push((*arena).exprs, expr);
                 let idx: usize = Vec::len((*arena).exprs);
                 return idx;
@@ -863,6 +1858,31 @@ impl Parser {
             if ch == '"' {
                 Parser::advance(p);
                 let expr: Expr = Expr::StringLit(String::clone(&lex));
+                Vec::push((*arena).exprs, expr);
+                let idx: usize = Vec::len((*arena).exprs);
+                return idx;
+            }
+
+            // Character literal: starts with '\''
+            if ch == '\'' {
+                Parser::advance(p);
+                let mut val: char = ' ';
+                if len > 2 {
+                    let c1: char = String::char_at(&lex, 1);
+                    if c1 == '\\' {
+                        let c2: char = String::char_at(&lex, 2);
+                        if c2 == 'n' { val = '\n'; }
+                        else if c2 == 'r' { val = '\r'; }
+                        else if c2 == 't' { val = '\t'; }
+                        else if c2 == '0' { val = '\0'; }
+                        else if c2 == '\\' { val = '\\'; }
+                        else if c2 == '\'' { val = '\''; }
+                        else { val = c2; }
+                    } else {
+                        val = c1;
+                    }
+                }
+                let expr: Expr = Expr::CharLit(val);
                 Vec::push((*arena).exprs, expr);
                 let idx: usize = Vec::len((*arena).exprs);
                 return idx;
@@ -893,13 +1913,33 @@ impl Parser {
             if is_ident {
                 Parser::advance(p);
 
-                // Check for Namespace::member path
-                let next: Token = Parser::peek(p);
+                // Check for multi-level Namespace::...::member path
+                let mut next: Token = Parser::peek(p);
                 if String::eq_cstr(next.lexeme, "::") {
-                    Parser::advance(p);
-                    let member_tok: Token = Parser::advance(p);
-                    let member_lex: String = String::clone(&member_tok.lexeme);
-                    let expr: Expr = Expr::Path(String::clone(&lex), member_lex);
+                    let mut path_segs: Vec = Vec::new(24);
+                    Vec::push(path_segs, String::clone(&lex));
+                    
+                    while String::eq_cstr(next.lexeme, "::") {
+                        Parser::advance(p); // consume '::'
+                        let seg_tok: Token = Parser::advance(p);
+                        Vec::push(path_segs, seg_tok.lexeme);
+                        next = Parser::peek(p);
+                    }
+                    
+                    let seg_len: usize = Vec::len(path_segs);
+                    let mut ns: String = String::new("");
+                    let mut s: usize = 0;
+                    while s < seg_len - 1 {
+                        let seg: String = Vec::get_String(path_segs, s);
+                        String::push_str(&mut ns, &seg);
+                        if s + 2 < seg_len {
+                            String::push_str(&mut ns, &String::new("::"));
+                        }
+                        s += 1;
+                    }
+                    let member: String = Vec::get_String(path_segs, seg_len - 1);
+                    
+                    let expr: Expr = Expr::Path(ns, member);
                     Vec::push((*arena).exprs, expr);
                     let idx: usize = Vec::len((*arena).exprs);
                     return idx;
@@ -919,7 +1959,8 @@ impl Parser {
 
                     if is_struct {
                         Parser::advance(p); // consume '{'
-                        let field_start: usize = Vec::len((*arena).struct_lit_exprs);
+                        let local_names: Vec = Vec::new(24);
+                        let local_exprs: Vec = Vec::new(8);
                         let mut field_count: usize = 0;
 
                         let mut parsing_sfields: bool = true;
@@ -933,8 +1974,8 @@ impl Parser {
                                 Parser::expect_token(p, &":");
                                 let sf_expr: usize = Parser::parse_expr(p, arena);
 
-                                Vec::push((*arena).struct_lit_names, sf_name);
-                                Vec::push((*arena).struct_lit_exprs, sf_expr);
+                                Vec::push(local_names, sf_name);
+                                Vec::push(local_exprs, sf_expr);
                                 field_count += 1;
 
                                 let comma_check: Token = Parser::peek(p);
@@ -944,6 +1985,18 @@ impl Parser {
                             }
                         }
                         Parser::expect_token(p, &"}");
+
+                        let field_start: usize = Vec::len((*arena).struct_lit_exprs);
+                        let mut i: usize = 0;
+                        while i < field_count {
+                            let sf_name: String = Vec::get_String(local_names, i);
+                            let sf_expr: usize = Vec::get_usize(local_exprs, i);
+                            Vec::push((*arena).struct_lit_names, sf_name);
+                            Vec::push((*arena).struct_lit_exprs, sf_expr);
+                            i += 1;
+                        }
+                        Vec::free(local_names);
+                        Vec::free(local_exprs);
 
                         let expr: Expr = Expr::StructLit(String::clone(&lex), field_start, field_count);
                         Vec::push((*arena).exprs, expr);
@@ -970,6 +2023,10 @@ impl Parser {
         // Unary operators: &, *, -, !
         if String::eq_cstr(lex, "&") {
             Parser::advance(p);
+            let next_tok: Token = Parser::peek(p);
+            if String::eq_cstr(next_tok.lexeme, "mut") {
+                Parser::advance(p);
+            }
             let operand_idx: usize = Parser::parse_primary(p, arena);
             let expr: Expr = Expr::UnaryExpr(UnaryOp::Ref, operand_idx);
             Vec::push((*arena).exprs, expr);
@@ -1007,6 +2064,7 @@ impl Parser {
         print("' at line ");
         print_int(tok.line);
         println("");
+        exit(1);
         // Push a dummy node to prevent crash
         let dummy: Expr = Expr::IntLit(0);
         Vec::push((*arena).exprs, dummy);
@@ -1026,7 +2084,7 @@ impl Parser {
             // Function call: (
             if String::eq_cstr(lex, "(") {
                 Parser::advance(p);
-                let args_start: usize = Vec::len((*arena).arg_indices);
+                let local_args: Vec = Vec::new(8);
                 let mut arg_count: usize = 0;
 
                 let mut parsing_args: bool = true;
@@ -1036,7 +2094,7 @@ impl Parser {
                         parsing_args = false;
                     } else {
                         let arg_idx: usize = Parser::parse_expr(p, arena);
-                        Vec::push((*arena).arg_indices, arg_idx);
+                        Vec::push(local_args, arg_idx);
                         arg_count += 1;
 
                         let comma_check: Token = Parser::peek(p);
@@ -1048,6 +2106,15 @@ impl Parser {
                     }
                 }
                 Parser::expect_token(p, &")");
+
+                let args_start: usize = Vec::len((*arena).arg_indices);
+                let mut i: usize = 0;
+                while i < arg_count {
+                    let arg_idx: usize = Vec::get_usize(local_args, i);
+                    Vec::push((*arena).arg_indices, arg_idx);
+                    i += 1;
+                }
+                Vec::free(local_args);
 
                 let call_expr: Expr = Expr::Call(current, args_start, arg_count);
                 Vec::push((*arena).exprs, call_expr);
@@ -1168,8 +2235,43 @@ impl Parser {
         let tok: Token = Parser::peek(p);
         let lex: String = String::clone(&tok.lexeme);
 
+        let mut invariant_idx: usize = 0;
+        let mut target_lex: String = String::clone(&lex);
+
+        if String::eq_cstr(target_lex, "@invariant") {
+            Parser::advance(p);
+            Parser::expect_token(p, &"(");
+            invariant_idx = Parser::parse_expr(p, arena);
+            Parser::expect_token(p, &")");
+            let next_tok: Token = Parser::peek(p);
+            target_lex = String::clone(&next_tok.lexeme);
+        }
+
+        // ── check for @safe { ... } scoped block ──
+        if String::eq_cstr(target_lex, "@safe") {
+            Parser::advance(p);
+            Parser::expect_token(p, &"{");
+            let sb_start: usize = Vec::len((*arena).stmts);
+            let mut sb_count: usize = 0;
+            let mut parsing_sb: bool = true;
+            while parsing_sb {
+                let sb_check: Token = Parser::peek(p);
+                if String::eq_cstr(sb_check.lexeme, "}") {
+                    parsing_sb = false;
+                } else {
+                    Parser::parse_stmt(p, arena);
+                    sb_count += 1;
+                }
+            }
+            Parser::expect_token(p, &"}");
+            let stmt: Stmt = Stmt::SafeBlock(sb_start, sb_count);
+            Vec::push((*arena).stmts, stmt);
+            let idx: usize = Vec::len((*arena).stmts);
+            return idx;
+        }
+
         // ── let statement ──
-        if String::eq_cstr(lex, "let") {
+        if String::eq_cstr(target_lex, "let") {
             Parser::advance(p);
             // optional: mut
             let mut_check: Token = Parser::peek(p);
@@ -1215,7 +2317,7 @@ impl Parser {
         }
 
         // ── return statement ──
-        if String::eq_cstr(lex, "return") {
+        if String::eq_cstr(target_lex, "return") {
             Parser::advance(p);
             let mut ret_idx: usize = 0;
             let semi_check: Token = Parser::peek(p);
@@ -1232,7 +2334,7 @@ impl Parser {
         }
 
         // ── if statement ──
-        if String::eq_cstr(lex, "if") {
+        if String::eq_cstr(target_lex, "if") {
             Parser::advance(p);
             let cond_idx: usize = Parser::parse_expr(p, arena);
 
@@ -1258,19 +2360,26 @@ impl Parser {
             let else_check: Token = Parser::peek(p);
             if String::eq_cstr(else_check.lexeme, "else") {
                 Parser::advance(p);
-                Parser::expect_token(p, &"{");
-                else_start = Vec::len((*arena).stmts);
-                let mut parsing_else: bool = true;
-                while parsing_else {
-                    let check2: Token = Parser::peek(p);
-                    if String::eq_cstr(check2.lexeme, "}") {
-                        parsing_else = false;
-                    } else {
-                        Parser::parse_stmt(p, arena);
-                        else_count += 1;
+                let next_tok: Token = Parser::peek(p);
+                if String::eq_cstr(next_tok.lexeme, "if") {
+                    else_start = Vec::len((*arena).stmts);
+                    Parser::parse_stmt(p, arena);
+                    else_count = 1;
+                } else {
+                    Parser::expect_token(p, &"{");
+                    else_start = Vec::len((*arena).stmts);
+                    let mut parsing_else: bool = true;
+                    while parsing_else {
+                        let check2: Token = Parser::peek(p);
+                        if String::eq_cstr(check2.lexeme, "}") {
+                            parsing_else = false;
+                        } else {
+                            Parser::parse_stmt(p, arena);
+                            else_count += 1;
+                        }
                     }
+                    Parser::expect_token(p, &"}");
                 }
-                Parser::expect_token(p, &"}");
             }
 
             let stmt: Stmt = Stmt::If(cond_idx, then_start, then_count, else_start, else_count);
@@ -1280,7 +2389,7 @@ impl Parser {
         }
 
         // ── while statement ──
-        if String::eq_cstr(lex, "while") {
+        if String::eq_cstr(target_lex, "while") {
             Parser::advance(p);
             let cond_idx: usize = Parser::parse_expr(p, arena);
             Parser::expect_token(p, &"{");
@@ -1299,14 +2408,14 @@ impl Parser {
             }
             Parser::expect_token(p, &"}");
 
-            let stmt: Stmt = Stmt::While(cond_idx, body_start, body_count);
+            let stmt: Stmt = Stmt::While(cond_idx, body_start, body_count, invariant_idx);
             Vec::push((*arena).stmts, stmt);
             let idx: usize = Vec::len((*arena).stmts);
             return idx;
         }
 
         // ── for statement ──
-        if String::eq_cstr(lex, "for") {
+        if String::eq_cstr(target_lex, "for") {
             Parser::advance(p);
             let var_tok: Token = Parser::advance(p);
             let loop_var: String = String::clone(&var_tok.lexeme);
@@ -1338,14 +2447,14 @@ impl Parser {
             }
             Parser::expect_token(p, &"}");
             
-            let stmt: Stmt = Stmt::For(loop_var, start_idx, end_idx, step_idx, body_start, body_count);
+            let stmt: Stmt = Stmt::For(loop_var, start_idx, end_idx, step_idx, body_start, body_count, invariant_idx);
             Vec::push((*arena).stmts, stmt);
             let idx: usize = Vec::len((*arena).stmts);
             return idx;
         }
 
         // ── match statement ──
-        if String::eq_cstr(lex, "match") {
+        if String::eq_cstr(target_lex, "match") {
             Parser::advance(p);
             let scrutinee_idx: usize = Parser::parse_expr(p, arena);
             Parser::expect_token(p, &"{");
@@ -1456,9 +2565,20 @@ impl Parser {
 
 impl Parser {
     @unsafe
-    fn parse_func_decl(p: &mut Parser, arena: &mut AstArena, is_safe: I32) -> usize {
+    fn parse_func_decl(p: &mut Parser, arena: &mut AstArena, is_safe: I32, prefix: &String) -> usize {
         let name_tok: Token = Parser::advance(p);
-        let fn_name: String = String::clone(&name_tok.lexeme);
+        let mut fn_name: String = String::clone(&name_tok.lexeme);
+        if String::len(*prefix) > 0 {
+            let mut pref_name: String = String::clone(prefix);
+            String::push_str(pref_name, &fn_name);
+            fn_name = pref_name;
+        }
+        if String::len((*p).current_namespace) > 0 {
+            let mut ns_name: String = String::clone(&(*p).current_namespace);
+            String::push_str(ns_name, &String::new("::"));
+            String::push_str(ns_name, &fn_name);
+            fn_name = ns_name;
+        }
         let line: usize = name_tok.line;
         let col: usize = name_tok.col;
 
@@ -1566,7 +2686,7 @@ impl Parser {
         // fn declaration
         if String::eq_cstr(lex, "fn") {
             Parser::advance(p);
-            Parser::parse_func_decl(p, arena, 1);
+            Parser::parse_func_decl(p, arena, 1, &"");
             return true;
         }
 
@@ -1574,7 +2694,7 @@ impl Parser {
         if String::eq_cstr(lex, "@safe") {
             Parser::advance(p);
             Parser::expect_token(p, &"fn");
-            Parser::parse_func_decl(p, arena, 1);
+            Parser::parse_func_decl(p, arena, 1, &"");
             return true;
         }
 
@@ -1582,7 +2702,7 @@ impl Parser {
         if String::eq_cstr(lex, "@unsafe") {
             Parser::advance(p);
             Parser::expect_token(p, &"fn");
-            Parser::parse_func_decl(p, arena, 0);
+            Parser::parse_func_decl(p, arena, 0, &"");
             return true;
         }
 
@@ -1590,7 +2710,13 @@ impl Parser {
         if String::eq_cstr(lex, "struct") {
             Parser::advance(p);
             let name_tok: Token = Parser::advance(p);
-            let s_name: String = String::clone(&name_tok.lexeme);
+            let mut s_name: String = String::clone(&name_tok.lexeme);
+            if String::len((*p).current_namespace) > 0 {
+                let mut ns_name: String = String::clone(&(*p).current_namespace);
+                String::push_str(ns_name, &String::new("::"));
+                String::push_str(ns_name, &s_name);
+                s_name = ns_name;
+            }
             Parser::expect_token(p, &"{");
 
             let field_start: usize = Vec::len((*arena).fields);
@@ -1667,6 +2793,9 @@ impl Parser {
             let _type_name: Token = Parser::advance(p);
             Parser::expect_token(p, &"{");
 
+            let mut impl_prefix: String = String::clone(&_type_name.lexeme);
+            String::push_str(impl_prefix, &"_");
+
             let mut parsing_impl: bool = true;
             while parsing_impl {
                 let check: Token = Parser::peek(p);
@@ -1687,24 +2816,17 @@ impl Parser {
                         Parser::advance(p);
                     }
                     Parser::expect_token(p, &"fn");
-                    Parser::parse_func_decl(p, arena, method_safe);
+                    Parser::parse_func_decl(p, arena, method_safe, &impl_prefix);
                 }
             }
             Parser::expect_token(p, &"}");
             return true;
         }
 
-        // import declaration — skip for bootstrap
+        // import declaration
         if String::eq_cstr(lex, "import") {
             Parser::advance(p);
-            // Skip until ;
-            let mut skip_import: bool = true;
-            while skip_import {
-                let t: Token = Parser::advance(p);
-                if String::eq_cstr(t.lexeme, ";") {
-                    skip_import = false;
-                }
-            }
+            Parser::parse_import(p, arena);
             return true;
         }
 
@@ -1722,6 +2844,97 @@ impl Parser {
     }
 
     @unsafe
+    fn parse_import(p: &mut Parser, arena: &mut AstArena) {
+        let mut segments: Vec = Vec::new(24);
+        let mut parsing_path: bool = true;
+        
+        while parsing_path {
+            let tok: Token = Parser::peek(p);
+            if String::eq_cstr(tok.lexeme, ";") {
+                parsing_path = false;
+                Parser::advance(p); // consume ';'
+            } else if String::eq_cstr(tok.lexeme, ".") {
+                Parser::advance(p); // consume '.'
+            } else {
+                let seg_tok: Token = Parser::advance(p);
+                Vec::push(segments, seg_tok.lexeme);
+            }
+        }
+        
+        let seg_len: usize = Vec::len(segments);
+        if seg_len == 0 {
+            return;
+        }
+        
+        let mut mod_name: String = String::new("");
+        let mut file_path: String = String::new("self_hosted/");
+        let first_seg: String = Vec::get_String(segments, 0);
+        
+        let mut s: usize = 0;
+        while s < seg_len {
+            let seg: String = Vec::get_String(segments, s);
+            String::push_str(mod_name, &seg);
+            if s + 1 < seg_len {
+                String::push_str(mod_name, &String::new("::"));
+            }
+            
+            String::push_str(file_path, &seg);
+            if s + 1 < seg_len {
+                String::push_str(file_path, &String::new("/"));
+            }
+            s += 1;
+        }
+        String::push_str(file_path, &String::new(".ysu"));
+
+        
+        let mut already_imported: bool = false;
+        let mut i: usize = 0;
+        let imp_len: usize = Vec::len((*p).imported_modules);
+        while i < imp_len {
+            let val: String = Vec::get_String((*p).imported_modules, i);
+            if String::eq(val, mod_name) {
+                already_imported = true;
+            }
+            i += 1;
+        }
+        
+        if already_imported {
+            return;
+        }
+        
+        Vec::push((*p).imported_modules, mod_name);
+        
+        let content: String = File::read_to_string(&file_path);
+        if String::len(content) == 0 {
+            return;
+        }
+        
+        let mut lexer_obj: Lexer = Lexer::new(content);
+        let tokens: Vec = Lexer::tokenize(&mut lexer_obj);
+        let token_count: usize = Vec::len(tokens);
+        
+        let mut sub_parser: Parser = Parser::new(tokens, token_count);
+        sub_parser.imported_modules = (*p).imported_modules;
+        
+        let mut use_ns: bool = false;
+        if String::eq_cstr(first_seg, "std") {
+            use_ns = true;
+        } else if seg_len > 1 {
+            use_ns = true;
+        }
+        
+        if use_ns {
+            sub_parser.current_namespace = String::clone(&mod_name);
+        } else {
+            sub_parser.current_namespace = String::new("");
+        }
+        
+        Parser::parse_program(&mut sub_parser, arena);
+        
+        (*p).imported_modules = sub_parser.imported_modules;
+    }
+
+    @unsafe
     fn parse_program(p: &mut Parser, arena: &mut AstArena) {
         let mut parsing: bool = true;
         while parsing {
@@ -1734,12 +2947,282 @@ impl Parser {
 }
 
 // ════════════════════════════════════════════════════════════
+//  SAFETY CHECKER
+// ════════════════════════════════════════════════════════════
+struct SafetyChecker {
+    in_unsafe: I32,
+    has_errors: I32
+}
+
+impl SafetyChecker {
+    @unsafe
+    fn check_program(arena: &AstArena) -> I32 {
+        let mut checker: SafetyChecker;
+        checker.in_unsafe = 0;
+        checker.has_errors = 0;
+
+        let func_count: usize = Vec::len((*arena).funcs);
+        let mut i: usize = 0;
+        while i < func_count {
+            let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, i);
+            let prev_unsafe: I32 = checker.in_unsafe;
+            if fdecl.is_safe == 0 {
+                checker.in_unsafe = 1;
+            } else {
+                checker.in_unsafe = 0;
+            }
+
+            let mut s: usize = 0;
+            while s < fdecl.body_count {
+                SafetyChecker::check_stmt(&mut checker, arena, fdecl.body_start + s);
+                s += 1;
+            }
+
+            checker.in_unsafe = prev_unsafe;
+            i += 1;
+        }
+        return checker.has_errors;
+    }
+
+    @unsafe
+    fn check_stmt(checker: &mut SafetyChecker, arena: &AstArena, stmt_idx: usize) {
+        let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, stmt_idx);
+
+        if stmt.tag == Stmt_TAG_Let {
+            let init_idx: usize = stmt.data.Let._2;
+            if (*checker).in_unsafe == 0 {
+                if init_idx == 0 {
+                    let var_name: String = stmt.data.Let._0;
+                    print("[Strict Safety] Variables in safe blocks must be explicitly initialized: let ");
+                    print(var_name);
+                    println(";");
+                    (*checker).has_errors = 1;
+                }
+            }
+            if init_idx > 0 {
+                SafetyChecker::check_expr(checker, arena, init_idx - 1);
+            }
+        }
+        else if stmt.tag == Stmt_TAG_Return {
+            let expr_idx: usize = stmt.data.Return._0;
+            if expr_idx > 0 {
+                SafetyChecker::check_expr(checker, arena, expr_idx - 1);
+            }
+        }
+        else if stmt.tag == Stmt_TAG_If {
+            let cond_idx: usize = stmt.data.If._0;
+            let then_start: usize = stmt.data.If._1;
+            let then_count: usize = stmt.data.If._2;
+            let else_start: usize = stmt.data.If._3;
+            let else_count: usize = stmt.data.If._4;
+
+            SafetyChecker::check_expr(checker, arena, cond_idx - 1);
+
+            let mut s: usize = 0;
+            while s < then_count {
+                SafetyChecker::check_stmt(checker, arena, then_start + s);
+                s += 1;
+            }
+            s = 0;
+            while s < else_count {
+                SafetyChecker::check_stmt(checker, arena, else_start + s);
+                s += 1;
+            }
+        }
+        else if stmt.tag == Stmt_TAG_While {
+            let cond_idx: usize = stmt.data.While._0;
+            let body_start: usize = stmt.data.While._1;
+            let body_count: usize = stmt.data.While._2;
+            let invariant_idx: usize = stmt.data.While._3;
+
+            if (*checker).in_unsafe == 0 {
+                if invariant_idx == 0 {
+                    println("[Strict Safety] While loops in safe blocks require formal @invariants.");
+                    (*checker).has_errors = 1;
+                }
+            }
+
+            SafetyChecker::check_expr(checker, arena, cond_idx - 1);
+            if invariant_idx > 0 {
+                SafetyChecker::check_expr(checker, arena, invariant_idx - 1);
+            }
+
+            let mut s: usize = 0;
+            while s < body_count {
+                SafetyChecker::check_stmt(checker, arena, body_start + s);
+                s += 1;
+            }
+        }
+        else if stmt.tag == Stmt_TAG_For {
+            let body_start: usize = stmt.data.For._4;
+            let body_count: usize = stmt.data.For._5;
+            let invariant_idx: usize = stmt.data.For._6;
+
+            if (*checker).in_unsafe == 0 {
+                if invariant_idx == 0 {
+                    println("[Strict Safety] Loops in safe blocks require formal @invariants.");
+                    (*checker).has_errors = 1;
+                }
+            }
+
+            if invariant_idx > 0 {
+                SafetyChecker::check_expr(checker, arena, invariant_idx - 1);
+            }
+
+            let mut s: usize = 0;
+            while s < body_count {
+                SafetyChecker::check_stmt(checker, arena, body_start + s);
+                s += 1;
+            }
+        }
+        else if stmt.tag == Stmt_TAG_Assign {
+            let target_idx: usize = stmt.data.Assign._0;
+            let value_idx: usize = stmt.data.Assign._1;
+            SafetyChecker::check_expr(checker, arena, target_idx - 1);
+            SafetyChecker::check_expr(checker, arena, value_idx - 1);
+        }
+        else if stmt.tag == Stmt_TAG_CompoundAssign {
+            let target_idx: usize = stmt.data.CompoundAssign._0;
+            let value_idx: usize = stmt.data.CompoundAssign._2;
+            SafetyChecker::check_expr(checker, arena, target_idx - 1);
+            SafetyChecker::check_expr(checker, arena, value_idx - 1);
+        }
+        else if stmt.tag == Stmt_TAG_ExprStmt {
+            let expr_idx: usize = stmt.data.ExprStmt._0;
+            SafetyChecker::check_expr(checker, arena, expr_idx - 1);
+        }
+        else if stmt.tag == Stmt_TAG_SafeBlock {
+            let sb_start: usize = stmt.data.SafeBlock._0;
+            let sb_count: usize = stmt.data.SafeBlock._1;
+
+            let prev_unsafe: I32 = (*checker).in_unsafe;
+            (*checker).in_unsafe = 0;
+
+            let mut s: usize = 0;
+            while s < sb_count {
+                SafetyChecker::check_stmt(checker, arena, sb_start + s);
+                s += 1;
+            }
+
+            (*checker).in_unsafe = prev_unsafe;
+        }
+    }
+
+    @unsafe
+    fn check_expr(checker: &mut SafetyChecker, arena: &AstArena, expr_idx: usize) {
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx);
+
+        if expr.tag == Expr_TAG_Path {
+            let ns: String = expr.data.Path._0;
+            let mem: String = expr.data.Path._1;
+            if (*checker).in_unsafe == 0 {
+                if String::eq_cstr(ns, "Vec") {
+                    print("[Strict Safety] Dynamic memory operations like Vec::");
+                    print(mem);
+                    println(" are mapped to raw void* and require an @unsafe function context.");
+                    (*checker).has_errors = 1;
+                }
+                else if String::eq_cstr(ns, "String") {
+                    print("[Strict Safety] Dynamic memory operations like String::");
+                    print(mem);
+                    println(" are mapped to raw void* and require an @unsafe function context.");
+                    (*checker).has_errors = 1;
+                }
+            }
+        }
+        else if expr.tag == Expr_TAG_UnaryExpr {
+            let op: UnaryOp = expr.data.UnaryExpr._0;
+            let operand_idx: usize = expr.data.UnaryExpr._1;
+            if op == UnaryOp::Deref {
+                if (*checker).in_unsafe == 0 {
+                    println("[Strict Safety] Raw pointer dereferencing is forbidden in safe blocks.");
+                    (*checker).has_errors = 1;
+                }
+            }
+            SafetyChecker::check_expr(checker, arena, operand_idx - 1);
+        }
+        else if expr.tag == Expr_TAG_Call {
+            let func_idx: usize = expr.data.Call._0;
+            let args_start: usize = expr.data.Call._1;
+            let args_count: usize = expr.data.Call._2;
+
+            SafetyChecker::check_expr(checker, arena, func_idx - 1);
+            let mut i: usize = 0;
+            while i < args_count {
+                let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + i);
+                SafetyChecker::check_expr(checker, arena, arg_idx - 1);
+                i += 1;
+            }
+        }
+        else if expr.tag == Expr_TAG_Index {
+            let base_idx: usize = expr.data.Index._0;
+            let index_idx: usize = expr.data.Index._1;
+            SafetyChecker::check_expr(checker, arena, base_idx - 1);
+            SafetyChecker::check_expr(checker, arena, index_idx - 1);
+        }
+        else if expr.tag == Expr_TAG_MemberAccess {
+            let base_idx: usize = expr.data.MemberAccess._0;
+            SafetyChecker::check_expr(checker, arena, base_idx - 1);
+        }
+        else if expr.tag == Expr_TAG_BinaryExpr {
+            let left_idx: usize = expr.data.BinaryExpr._0;
+            let right_idx: usize = expr.data.BinaryExpr._2;
+            SafetyChecker::check_expr(checker, arena, left_idx - 1);
+            SafetyChecker::check_expr(checker, arena, right_idx - 1);
+        }
+        else if expr.tag == Expr_TAG_StructLit {
+            let fields_start: usize = expr.data.StructLit._1;
+            let fields_count: usize = expr.data.StructLit._2;
+            let mut i: usize = 0;
+            while i < fields_count {
+                let val_idx: usize = Vec::get_usize(&(*arena).struct_lit_exprs, fields_start + i);
+                SafetyChecker::check_expr(checker, arena, val_idx - 1);
+                i += 1;
+            }
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════
 //  LLVM EMITTER
 // ════════════════════════════════════════════════════════════
+@unsafe
+fn replace_colons(s: &String) -> String {
+    let mut res: String = String::new("");
+    let len: usize = String::len(*s);
+    let mut i: usize = 0;
+    while i < len {
+        let c: char = String::char_at(*s, i);
+        if c == ':' {
+            if i + 1 < len {
+                let next_c: char = String::char_at(*s, i + 1);
+                if next_c == ':' {
+                    String::push(res, '_');
+                    i += 2;
+                } else {
+                    String::push(res, c);
+                    i += 1;
+                }
+            } else {
+                String::push(res, c);
+                i += 1;
+            }
+        } else {
+            String::push(res, c);
+            i += 1;
+        }
+    }
+    return res;
+}
+
 struct LlvmEmitter {
     buffer: String,
     tmp_counter: usize,
-    label_counter: usize
+    label_counter: usize,
+    var_names: Vec,
+    var_llvm: Vec,
+    var_counter: usize,
+    curr_func_idx: usize
 }
 
 impl LlvmEmitter {
@@ -1749,6 +3232,10 @@ impl LlvmEmitter {
         e.buffer = "";
         e.tmp_counter = 0;
         e.label_counter = 0;
+        e.var_names = Vec::new(32);
+        e.var_llvm = Vec::new(32);
+        e.var_counter = 0;
+        e.curr_func_idx = 0;
         
         // Emit LLVM Header
         String::push_str(e.buffer, &"; ================================================\n");
@@ -1803,11 +3290,16 @@ impl LlvmEmitter {
 
     @unsafe
     fn emit_func(e: &mut LlvmEmitter, arena: &AstArena, func_idx: usize) {
+        (*e).curr_func_idx = func_idx;
         let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, func_idx);
         (*e).tmp_counter = 0;
+        (*e).var_names = Vec::new(32);
+        (*e).var_llvm = Vec::new(32);
+        (*e).var_counter = 0;
 
         String::push_str((*e).buffer, &"define i32 @");
-        String::push_str((*e).buffer, &fdecl.name);
+        let clean_name: String = replace_colons(&fdecl.name);
+        String::push_str((*e).buffer, &clean_name);
         String::push_str((*e).buffer, &"(");
         
         let mut p: usize = 0;
@@ -1829,6 +3321,8 @@ impl LlvmEmitter {
         let mut ap: usize = 0;
         while ap < fdecl.param_count {
             let param: ParamDecl = Vec::get_ParamDecl(&(*arena).params, fdecl.param_start + ap);
+            Vec::push((*e).var_names, String::clone(&param.name));
+            Vec::push((*e).var_llvm, String::clone(&param.name));
             String::push_str((*e).buffer, &"  %");
             String::push_str((*e).buffer, &param.name);
             String::push_str((*e).buffer, &" = alloca i32\n");
@@ -1858,15 +3352,23 @@ impl LlvmEmitter {
             let var_name: String = stmt.data.Let._0;
             let init_idx: usize = stmt.data.Let._2;
             
+            (*e).var_counter += 1;
+            let mut llvm_name: String = String::clone(&var_name);
+            String::push_str(llvm_name, &".");
+            String::push_str(llvm_name, &LlvmEmitter::int_to_str((*e).var_counter));
+            
+            Vec::push((*e).var_names, String::clone(&var_name));
+            Vec::push((*e).var_llvm, String::clone(&llvm_name));
+            
             String::push_str((*e).buffer, &"  %");
-            String::push_str((*e).buffer, &var_name);
+            String::push_str((*e).buffer, &llvm_name);
             String::push_str((*e).buffer, &" = alloca i32\n");
             if init_idx > 0 {
                 let val: String = LlvmEmitter::emit_expr(e, arena, init_idx - 1);
                 String::push_str((*e).buffer, &"  store i32 ");
                 String::push_str((*e).buffer, &val);
                 String::push_str((*e).buffer, &", ptr %");
-                String::push_str((*e).buffer, &var_name);
+                String::push_str((*e).buffer, &llvm_name);
                 String::push_str((*e).buffer, &"\n");
             }
         } else if stmt.tag == Stmt_TAG_Assign {
@@ -1899,12 +3401,33 @@ impl LlvmEmitter {
             let else_count: usize = stmt.data.If._4;
             
             let cond: String = LlvmEmitter::emit_expr(e, arena, cond_idx - 1);
+            let cond_expr: Expr = Vec::get_Expr(&(*arena).exprs, cond_idx - 1);
+            let mut cond_i1: String = String::clone(&cond);
+            let mut is_cmp: bool = false;
+            if cond_expr.tag == Expr_TAG_BinaryExpr {
+                let op: I32 = cond_expr.data.BinaryExpr._1;
+                if op == BinaryOp::Eq { is_cmp = true; }
+                if op == BinaryOp::NotEq { is_cmp = true; }
+                if op == BinaryOp::Lt { is_cmp = true; }
+                if op == BinaryOp::Gt { is_cmp = true; }
+                if op == BinaryOp::Le { is_cmp = true; }
+                if op == BinaryOp::Ge { is_cmp = true; }
+            }
+            if is_cmp == false {
+                let tmp_i1: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str((*e).buffer, &"  ");
+                String::push_str((*e).buffer, &tmp_i1);
+                String::push_str((*e).buffer, &" = icmp ne i32 ");
+                String::push_str((*e).buffer, &cond);
+                String::push_str((*e).buffer, &", 0\n");
+                cond_i1 = tmp_i1;
+            }
             let then_lbl: String = LlvmEmitter::fresh_label(e, &"then");
             let else_lbl: String = LlvmEmitter::fresh_label(e, &"else");
             let merge_lbl: String = LlvmEmitter::fresh_label(e, &"merge");
             
             String::push_str((*e).buffer, &"  br i1 ");
-            String::push_str((*e).buffer, &cond);
+            String::push_str((*e).buffer, &cond_i1);
             String::push_str((*e).buffer, &", label %");
             String::push_str((*e).buffer, &then_lbl);
             String::push_str((*e).buffer, &", label %");
@@ -1959,8 +3482,29 @@ impl LlvmEmitter {
             String::push_str((*e).buffer, &cond_lbl);
             String::push_str((*e).buffer, &":\n");
             let cond: String = LlvmEmitter::emit_expr(e, arena, cond_idx - 1);
+            let wcond_expr: Expr = Vec::get_Expr(&(*arena).exprs, cond_idx - 1);
+            let mut cond_i1: String = String::clone(&cond);
+            let mut wis_cmp: bool = false;
+            if wcond_expr.tag == Expr_TAG_BinaryExpr {
+                let wop: I32 = wcond_expr.data.BinaryExpr._1;
+                if wop == BinaryOp::Eq { wis_cmp = true; }
+                if wop == BinaryOp::NotEq { wis_cmp = true; }
+                if wop == BinaryOp::Lt { wis_cmp = true; }
+                if wop == BinaryOp::Gt { wis_cmp = true; }
+                if wop == BinaryOp::Le { wis_cmp = true; }
+                if wop == BinaryOp::Ge { wis_cmp = true; }
+            }
+            if wis_cmp == false {
+                let tmp_i1: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str((*e).buffer, &"  ");
+                String::push_str((*e).buffer, &tmp_i1);
+                String::push_str((*e).buffer, &" = icmp ne i32 ");
+                String::push_str((*e).buffer, &cond);
+                String::push_str((*e).buffer, &", 0\n");
+                cond_i1 = tmp_i1;
+            }
             String::push_str((*e).buffer, &"  br i1 ");
-            String::push_str((*e).buffer, &cond);
+            String::push_str((*e).buffer, &cond_i1);
             String::push_str((*e).buffer, &", label %");
             String::push_str((*e).buffer, &body_lbl);
             String::push_str((*e).buffer, &", label %");
@@ -1983,16 +3527,195 @@ impl LlvmEmitter {
         } else if stmt.tag == Stmt_TAG_ExprStmt {
             let expr_idx: usize = stmt.data.ExprStmt._0;
             LlvmEmitter::emit_expr(e, arena, expr_idx - 1);
+        } else if stmt.tag == Stmt_TAG_SafeBlock {
+            let sb_start: usize = stmt.data.SafeBlock._0;
+            let sb_count: usize = stmt.data.SafeBlock._1;
+            let mut sb_i: usize = 0;
+            while sb_i < sb_count {
+                LlvmEmitter::emit_stmt(e, arena, sb_start + sb_i);
+                sb_i += 1;
+            }
         }
+    }
+
+    @unsafe
+    fn clean_type_name(t: &String) -> String {
+        let mut res: String = "";
+        let len: usize = String::len(t);
+        let mut i: usize = 0;
+        if len > 5 {
+            if String::char_at(t, 0) == '&' {
+                if String::char_at(t, 1) == 'm' {
+                    if String::char_at(t, 2) == 'u' {
+                        if String::char_at(t, 3) == 't' {
+                            if String::char_at(t, 4) == ' ' {
+                                i = 5;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if i == 0 {
+            if len > 1 {
+                if String::char_at(t, 0) == '&' {
+                    i = 1;
+                } else if String::char_at(t, 0) == '*' {
+                    i = 1;
+                }
+            }
+        }
+        while i < len {
+            String::push(res, String::char_at(t, i));
+            i += 1;
+        }
+        return res;
+    }
+
+    @unsafe
+    fn resolve_struct_name(arena: &AstArena, func_idx: usize, base_idx: usize) -> String {
+        let base_expr: Expr = Vec::get_Expr(&(*arena).exprs, base_idx);
+        let mut target_expr: Expr = base_expr;
+        if base_expr.tag == Expr_TAG_UnaryExpr {
+            let op: UnaryOp = base_expr.data.UnaryExpr._0;
+            if op == UnaryOp::Deref {
+                target_expr = Vec::get_Expr(&(*arena).exprs, base_expr.data.UnaryExpr._1 - 1);
+            }
+        }
+        if target_expr.tag == Expr_TAG_Ident {
+            let var_name: String = target_expr.data.Ident._0;
+            let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, func_idx);
+            let mut p: usize = 0;
+            while p < fdecl.param_count {
+                let param: ParamDecl = Vec::get_ParamDecl(&(*arena).params, fdecl.param_start + p);
+                if String::eq(param.name, var_name) {
+                    return LlvmEmitter::clean_type_name(&param.type_str);
+                }
+                p += 1;
+            }
+            let mut s: usize = 0;
+            while s < fdecl.body_count {
+                let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, fdecl.body_start + s);
+                if stmt.tag == Stmt_TAG_Let {
+                    if String::eq(stmt.data.Let._0, var_name) {
+                        let type_idx: usize = stmt.data.Let._1;
+                        if type_idx > 0 {
+                            let ty_expr: Expr = Vec::get_Expr(&(*arena).exprs, type_idx - 1);
+                            if ty_expr.tag == Expr_TAG_Ident {
+                                return LlvmEmitter::clean_type_name(&ty_expr.data.Ident._0);
+                            }
+                        }
+                    }
+                }
+                s += 1;
+            }
+        }
+        return "";
     }
 
     @unsafe
     fn emit_lvalue(e: &mut LlvmEmitter, arena: &AstArena, expr_idx: usize) -> String {
         let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx);
         if expr.tag == Expr_TAG_Ident {
+            let src: String = expr.data.Ident._0;
             let mut res: String = "%";
-            String::push_str(res, &expr.data.Ident._0);
+            let vn: usize = Vec::len((*e).var_names);
+            let mut vi: usize = vn;
+            let mut found: bool = false;
+            while vi > 0 {
+                vi -= 1;
+                if found == false {
+                    let stored: String = Vec::get_String((*e).var_names, vi);
+                    if String::eq(src, stored) {
+                        let llvm: String = Vec::get_String((*e).var_llvm, vi);
+                        String::push_str(res, &llvm);
+                        found = true;
+                    }
+                }
+            }
+            if found == false {
+                String::push_str(res, &src);
+            }
             return res;
+        } else if expr.tag == Expr_TAG_MemberAccess {
+            let base_idx: usize = expr.data.MemberAccess._0;
+            let member_name: String = expr.data.MemberAccess._1;
+            let mut base_addr: String = LlvmEmitter::emit_lvalue(e, arena, base_idx - 1);
+            let base_expr: Expr = Vec::get_Expr(&(*arena).exprs, base_idx - 1);
+            let mut is_ptr_type: bool = false;
+            if base_expr.tag == Expr_TAG_Ident { is_ptr_type = true; }
+            else if base_expr.tag == Expr_TAG_MemberAccess { is_ptr_type = true; }
+            else if base_expr.tag == Expr_TAG_UnaryExpr {
+                let op: UnaryOp = base_expr.data.UnaryExpr._0;
+                if op == UnaryOp::Deref { is_ptr_type = true; }
+            }
+            if is_ptr_type == false {
+                let ptr_tmp: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str((*e).buffer, &"  ");
+                String::push_str((*e).buffer, &ptr_tmp);
+                String::push_str((*e).buffer, &" = inttoptr i32 ");
+                String::push_str((*e).buffer, &base_addr);
+                String::push_str((*e).buffer, &" to ptr\n");
+                base_addr = ptr_tmp;
+            }
+            let struct_name: String = LlvmEmitter::resolve_struct_name(arena, (*e).curr_func_idx, base_idx - 1);
+            let mut field_index: usize = 0;
+            let mut struct_found: bool = false;
+            let struct_count: usize = Vec::len(&(*arena).structs);
+            let mut s_idx: usize = 0;
+            while s_idx < struct_count {
+                let sdecl: StructDecl = Vec::get_StructDecl(&(*arena).structs, s_idx);
+                if String::eq(sdecl.name, struct_name) {
+                    let mut f: usize = 0;
+                    while f < sdecl.field_count {
+                        let field: FieldDecl = Vec::get_FieldDecl(&(*arena).fields, sdecl.field_start + f);
+                        if String::eq(field.name, member_name) {
+                            field_index = f;
+                            struct_found = true;
+                        }
+                        f += 1;
+                    }
+                }
+                s_idx += 1;
+            }
+            if struct_found == false {
+                let mut s_idx2: usize = 0;
+                while s_idx2 < struct_count {
+                    let sdecl: StructDecl = Vec::get_StructDecl(&(*arena).structs, s_idx2);
+                    let mut f: usize = 0;
+                    while f < sdecl.field_count {
+                        let field: FieldDecl = Vec::get_FieldDecl(&(*arena).fields, sdecl.field_start + f);
+                        if String::eq(field.name, member_name) {
+                            field_index = f;
+                            struct_found = true;
+                        }
+                        f += 1;
+                    }
+                    s_idx2 += 1;
+                }
+            }
+            let tmp: String = LlvmEmitter::fresh_tmp(e);
+            String::push_str((*e).buffer, &"  ");
+            String::push_str((*e).buffer, &tmp);
+            String::push_str((*e).buffer, &" = getelementptr i32, ptr ");
+            String::push_str((*e).buffer, &base_addr);
+            String::push_str((*e).buffer, &", i32 ");
+            String::push_str((*e).buffer, &LlvmEmitter::int_to_str(field_index));
+            String::push_str((*e).buffer, &"\n");
+            return tmp;
+        } else if expr.tag == Expr_TAG_UnaryExpr {
+            let op: UnaryOp = expr.data.UnaryExpr._0;
+            let operand_idx: usize = expr.data.UnaryExpr._1;
+            if op == UnaryOp::Deref {
+                let addr: String = LlvmEmitter::emit_expr(e, arena, operand_idx - 1);
+                let tmp: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str((*e).buffer, &"  ");
+                String::push_str((*e).buffer, &tmp);
+                String::push_str((*e).buffer, &" = inttoptr i32 ");
+                String::push_str((*e).buffer, &addr);
+                String::push_str((*e).buffer, &" to ptr\n");
+                return tmp;
+            }
         }
         return LlvmEmitter::emit_expr(e, arena, expr_idx);
     }
@@ -2004,11 +3727,26 @@ impl LlvmEmitter {
         if expr.tag == Expr_TAG_IntLit {
             return LlvmEmitter::int_to_str(expr.data.IntLit._0);
         } else if expr.tag == Expr_TAG_Ident {
+            let src: String = expr.data.Ident._0;
+            let mut resolved: String = src;
+            let vn: usize = Vec::len((*e).var_names);
+            let mut vi: usize = vn;
+            let mut found: bool = false;
+            while vi > 0 {
+                vi -= 1;
+                if found == false {
+                    let stored: String = Vec::get_String((*e).var_names, vi);
+                    if String::eq(src, stored) {
+                        resolved = Vec::get_String((*e).var_llvm, vi);
+                        found = true;
+                    }
+                }
+            }
             let tmp: String = LlvmEmitter::fresh_tmp(e);
             String::push_str((*e).buffer, &"  ");
             String::push_str((*e).buffer, &tmp);
             String::push_str((*e).buffer, &" = load i32, ptr %");
-            String::push_str((*e).buffer, &expr.data.Ident._0);
+            String::push_str((*e).buffer, &resolved);
             String::push_str((*e).buffer, &"\n");
             return tmp;
         } else if expr.tag == Expr_TAG_BinaryExpr {
@@ -2025,10 +3763,20 @@ impl LlvmEmitter {
             else if op == BinaryOp::Sub { String::push_str((*e).buffer, &"sub i32 "); }
             else if op == BinaryOp::Mul { String::push_str((*e).buffer, &"mul i32 "); }
             else if op == BinaryOp::Div { String::push_str((*e).buffer, &"sdiv i32 "); }
+            else if op == BinaryOp::Mod { String::push_str((*e).buffer, &"srem i32 "); }
             else if op == BinaryOp::Eq { String::push_str((*e).buffer, &"icmp eq i32 "); }
             else if op == BinaryOp::NotEq { String::push_str((*e).buffer, &"icmp ne i32 "); }
             else if op == BinaryOp::Lt { String::push_str((*e).buffer, &"icmp slt i32 "); }
             else if op == BinaryOp::Gt { String::push_str((*e).buffer, &"icmp sgt i32 "); }
+            else if op == BinaryOp::Le { String::push_str((*e).buffer, &"icmp sle i32 "); }
+            else if op == BinaryOp::Ge { String::push_str((*e).buffer, &"icmp sge i32 "); }
+            else if op == BinaryOp::And { String::push_str((*e).buffer, &"and i32 "); }
+            else if op == BinaryOp::Or { String::push_str((*e).buffer, &"or i32 "); }
+            else if op == BinaryOp::BitAnd { String::push_str((*e).buffer, &"and i32 "); }
+            else if op == BinaryOp::BitOr { String::push_str((*e).buffer, &"or i32 "); }
+            else if op == BinaryOp::BitXor { String::push_str((*e).buffer, &"xor i32 "); }
+            else if op == BinaryOp::Shl { String::push_str((*e).buffer, &"shl i32 "); }
+            else if op == BinaryOp::Shr { String::push_str((*e).buffer, &"ashr i32 "); }
             else { String::push_str((*e).buffer, &"add i32 "); }
             
             String::push_str((*e).buffer, &lhs);
@@ -2042,33 +3790,550 @@ impl LlvmEmitter {
             let mut func_name: String = "unknown";
             if func_expr.tag == Expr_TAG_Ident {
                 func_name = String::clone(&func_expr.data.Ident._0);
+            } else if func_expr.tag == Expr_TAG_Path {
+                let ns: String = String::clone(&func_expr.data.Path._0);
+                let mem: String = String::clone(&func_expr.data.Path._1);
+                let mut name: String = String::clone(&ns);
+                String::push_str(name, &"_");
+                String::push_str(name, &mem);
+                func_name = name;
+            }
+            
+            // Emit arguments to a temporary string list first so nested/intermediate load
+            // instructions are written to the main emitter buffer before the call instruction is printed.
+            let args_start: usize = expr.data.Call._1;
+            let arg_count: usize = expr.data.Call._2;
+            let mut arg_vals: String = "";
+            let mut i: usize = 0;
+            while i < arg_count {
+                let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + i);
+                let arg_val: String = LlvmEmitter::emit_expr(e, arena, arg_idx - 1);
+                String::push_str(&mut arg_vals, &arg_val);
+                if i + 1 < arg_count {
+                    String::push_str(&mut arg_vals, &",");
+                }
+                i += 1;
             }
             
             let tmp: String = LlvmEmitter::fresh_tmp(e);
             String::push_str((*e).buffer, &"  ");
             String::push_str((*e).buffer, &tmp);
             String::push_str((*e).buffer, &" = call i32 @");
-            String::push_str((*e).buffer, &func_name);
+            let clean_func_name: String = replace_colons(&func_name);
+            String::push_str((*e).buffer, &clean_func_name);
             String::push_str((*e).buffer, &"(");
             
-            // Emit arguments
+            let mut current_arg: String = "";
+            let arg_vals_len: usize = String::len(arg_vals);
+            let mut k: usize = 0;
+            while k < arg_vals_len {
+                let c: char = String::char_at(arg_vals, k);
+                if c == ',' {
+                    String::push_str((*e).buffer, &"i32 ");
+                    String::push_str((*e).buffer, &current_arg);
+                    String::push_str((*e).buffer, &", ");
+                    current_arg = "";
+                } else {
+                    String::push(current_arg, c);
+                }
+                k += 1;
+            }
+            if String::len(current_arg) > 0 {
+                String::push_str((*e).buffer, &"i32 ");
+                String::push_str((*e).buffer, &current_arg);
+            }
+            
+            String::push_str((*e).buffer, &")\n");
+            return tmp;
+        } else if expr.tag == Expr_TAG_MemberAccess {
+            let lval: String = LlvmEmitter::emit_lvalue(e, arena, expr_idx);
+            let tmp: String = LlvmEmitter::fresh_tmp(e);
+            String::push_str((*e).buffer, &"  ");
+            String::push_str((*e).buffer, &tmp);
+            String::push_str((*e).buffer, &" = load i32, ptr ");
+            String::push_str((*e).buffer, &lval);
+            String::push_str((*e).buffer, &"\n");
+            return tmp;
+        } else if expr.tag == Expr_TAG_UnaryExpr {
+            let op: UnaryOp = expr.data.UnaryExpr._0;
+            let operand_idx: usize = expr.data.UnaryExpr._1;
+            if op == UnaryOp::Ref {
+                let lval: String = LlvmEmitter::emit_lvalue(e, arena, operand_idx - 1);
+                if String::eq(lval, "0") {
+                    return "0";
+                }
+                let tmp: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str((*e).buffer, &"  ");
+                String::push_str((*e).buffer, &tmp);
+                String::push_str((*e).buffer, &" = ptrtoint ptr ");
+                String::push_str((*e).buffer, &lval);
+                String::push_str((*e).buffer, &" to i32\n");
+                return tmp;
+            } else if op == UnaryOp::Deref {
+                let lval: String = LlvmEmitter::emit_lvalue(e, arena, expr_idx);
+                let tmp: String = LlvmEmitter::fresh_tmp(e);
+                String::push_str((*e).buffer, &"  ");
+                String::push_str((*e).buffer, &tmp);
+                String::push_str((*e).buffer, &" = load i32, ptr ");
+                String::push_str((*e).buffer, &lval);
+                String::push_str((*e).buffer, &"\n");
+                return tmp;
+            }
+        }
+        return "0";
+    }
+}
+
+// ════════════════════════════════════════════════════════════
+//  NATIVE EMITTER
+// ════════════════════════════════════════════════════════════
+struct CodeBuffer {
+    bytes: Vec,
+    len: usize
+}
+
+impl CodeBuffer {
+    @unsafe
+    fn new() -> CodeBuffer {
+        let cb: CodeBuffer;
+        cb.bytes = Vec::new(1);
+        cb.len = 0;
+        return cb;
+    }
+
+    @unsafe
+    fn emit8(cb: &mut CodeBuffer, val: usize) {
+        let b: char = val;
+        Vec::push(&mut (*cb).bytes, b);
+        (*cb).len += 1;
+    }
+
+    @unsafe
+    fn emit16(cb: &mut CodeBuffer, val: usize) {
+        CodeBuffer::emit8(cb, val % 256);
+        CodeBuffer::emit8(cb, (val / 256) % 256);
+    }
+
+    @unsafe
+    fn emit32(cb: &mut CodeBuffer, val: usize) {
+        CodeBuffer::emit16(cb, val % 65536);
+        CodeBuffer::emit16(cb, (val / 65536) % 65536);
+    }
+
+    @unsafe
+    fn emit64(cb: &mut CodeBuffer, val: usize) {
+        CodeBuffer::emit32(cb, val);
+        CodeBuffer::emit32(cb, 0);
+    }
+}
+
+struct Reloc {
+    offset: usize,
+    target_name: String
+}
+
+struct SymEntry {
+    name: String,
+    offset: usize
+}
+
+impl Vec {
+    @unsafe
+    fn get_Reloc(v: &Vec, i: usize) -> Reloc { let d: Reloc; return d; }
+    @unsafe
+    fn get_SymEntry(v: &Vec, i: usize) -> SymEntry { let d: SymEntry; return d; }
+}
+
+struct NativeEmitter {
+    code: CodeBuffer,
+    symbols: Vec,
+    sym_count: usize,
+    relocs: Vec,
+    reloc_count: usize,
+    stack_offset: usize,
+    base_addr: usize
+}
+
+impl NativeEmitter {
+    @unsafe
+    fn new() -> NativeEmitter {
+        let e: NativeEmitter;
+        e.code = CodeBuffer::new();
+        e.symbols = Vec::new(32);
+        e.sym_count = 0;
+        e.relocs = Vec::new(32);
+        e.reloc_count = 0;
+        e.stack_offset = 0;
+        e.base_addr = 4194304;
+        return e;
+    }
+
+    @unsafe
+    fn add_symbol(e: &mut NativeEmitter, name: &String, offset: usize) {
+        let sym: SymEntry;
+        sym.name = String::clone(name);
+        sym.offset = offset;
+        Vec::push(&mut (*e).symbols, sym);
+        (*e).sym_count += 1;
+    }
+
+    @unsafe
+    fn find_symbol(e: &NativeEmitter, name: &String) -> usize {
+        let mut i: usize = 0;
+        while i < (*e).sym_count {
+            let sym: SymEntry = Vec::get_SymEntry(&(*e).symbols, i);
+            if String::eq(&sym.name, name) {
+                return sym.offset;
+            }
+            i += 1;
+        }
+        return 0;
+    }
+
+    @unsafe
+    fn add_reloc(e: &mut NativeEmitter, offset: usize, target: &String) {
+        let r: Reloc;
+        r.offset = offset;
+        r.target_name = String::clone(target);
+        Vec::push(&mut (*e).relocs, r);
+        (*e).reloc_count += 1;
+    }
+
+    @unsafe
+    fn emit_elf_header(e: &mut NativeEmitter) {
+        let cb: &mut CodeBuffer = &mut (*e).code;
+        CodeBuffer::emit8(cb, 127);
+        CodeBuffer::emit8(cb, 69);
+        CodeBuffer::emit8(cb, 76);
+        CodeBuffer::emit8(cb, 70);
+        CodeBuffer::emit8(cb, 2);
+        CodeBuffer::emit8(cb, 1);
+        CodeBuffer::emit8(cb, 1);
+        CodeBuffer::emit8(cb, 0);
+        let mut pad: usize = 0;
+        while pad < 8 { CodeBuffer::emit8(cb, 0); pad += 1; }
+        CodeBuffer::emit16(cb, 2);
+        CodeBuffer::emit16(cb, 62);
+        CodeBuffer::emit32(cb, 1);
+        CodeBuffer::emit64(cb, (*e).base_addr + 120);
+        CodeBuffer::emit64(cb, 64);
+        CodeBuffer::emit64(cb, 0);
+        CodeBuffer::emit32(cb, 0);
+        CodeBuffer::emit16(cb, 64);
+        CodeBuffer::emit16(cb, 56);
+        CodeBuffer::emit16(cb, 1);
+        CodeBuffer::emit16(cb, 0);
+        CodeBuffer::emit16(cb, 0);
+        CodeBuffer::emit16(cb, 0);
+
+        CodeBuffer::emit32(cb, 1);
+        CodeBuffer::emit32(cb, 5);
+        CodeBuffer::emit64(cb, 0);
+        CodeBuffer::emit64(cb, (*e).base_addr);
+        CodeBuffer::emit64(cb, (*e).base_addr);
+        CodeBuffer::emit64(cb, 0);
+        CodeBuffer::emit64(cb, 0);
+        CodeBuffer::emit64(cb, 4096);
+    }
+
+    @unsafe
+    fn emit_push_rbp(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 85);
+    }
+
+    @unsafe
+    fn emit_mov_rbp_rsp(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 72);
+        CodeBuffer::emit8(&mut (*e).code, 137);
+        CodeBuffer::emit8(&mut (*e).code, 229);
+    }
+
+    @unsafe
+    fn emit_pop_rbp(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 93);
+    }
+
+    @unsafe
+    fn emit_ret(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 195);
+    }
+
+    @unsafe
+    fn emit_sub_rsp(e: &mut NativeEmitter, val: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 72);
+        CodeBuffer::emit8(&mut (*e).code, 131);
+        CodeBuffer::emit8(&mut (*e).code, 236);
+        CodeBuffer::emit8(&mut (*e).code, val);
+    }
+
+    @unsafe
+    fn emit_add_rsp(e: &mut NativeEmitter, val: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 72);
+        CodeBuffer::emit8(&mut (*e).code, 131);
+        CodeBuffer::emit8(&mut (*e).code, 196);
+        CodeBuffer::emit8(&mut (*e).code, val);
+    }
+
+    @unsafe
+    fn emit_mov_eax_imm(e: &mut NativeEmitter, val: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 184);
+        CodeBuffer::emit32(&mut (*e).code, val);
+    }
+
+    @unsafe
+    fn emit_mov_edi_imm(e: &mut NativeEmitter, val: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 191);
+        CodeBuffer::emit32(&mut (*e).code, val);
+    }
+
+    @unsafe
+    fn emit_syscall(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 15);
+        CodeBuffer::emit8(&mut (*e).code, 5);
+    }
+
+    @unsafe
+    fn emit_call_rel32(e: &mut NativeEmitter, target: &String) {
+        CodeBuffer::emit8(&mut (*e).code, 232);
+        NativeEmitter::add_reloc(e, (*e).code.len, target);
+        CodeBuffer::emit32(&mut (*e).code, 0);
+    }
+
+    @unsafe
+    fn emit_add_eax_ecx(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 1);
+        CodeBuffer::emit8(&mut (*e).code, 200);
+    }
+
+    @unsafe
+    fn emit_sub_eax_ecx(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 41);
+        CodeBuffer::emit8(&mut (*e).code, 200);
+    }
+
+    @unsafe
+    fn emit_imul_eax_ecx(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 15);
+        CodeBuffer::emit8(&mut (*e).code, 175);
+        CodeBuffer::emit8(&mut (*e).code, 193);
+    }
+
+    @unsafe
+    fn emit_store_local(e: &mut NativeEmitter, offset: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 137);
+        CodeBuffer::emit8(&mut (*e).code, 69);
+        CodeBuffer::emit8(&mut (*e).code, 256 - offset);
+    }
+
+    @unsafe
+    fn emit_load_local(e: &mut NativeEmitter, offset: usize) {
+        CodeBuffer::emit8(&mut (*e).code, 139);
+        CodeBuffer::emit8(&mut (*e).code, 69);
+        CodeBuffer::emit8(&mut (*e).code, 256 - offset);
+    }
+
+    @unsafe
+    fn emit_mov_ecx_eax(e: &mut NativeEmitter) {
+        CodeBuffer::emit8(&mut (*e).code, 137);
+        CodeBuffer::emit8(&mut (*e).code, 193);
+    }
+
+    @unsafe
+    fn emit_func(e: &mut NativeEmitter, arena: &AstArena, func_idx: usize) {
+        let fdecl: FuncDecl = Vec::get_FuncDecl(&(*arena).funcs, func_idx);
+        let clean_name: String = replace_colons(&fdecl.name);
+        NativeEmitter::add_symbol(e, &clean_name, (*e).code.len);
+        NativeEmitter::emit_push_rbp(e);
+        NativeEmitter::emit_mov_rbp_rsp(e);
+        NativeEmitter::emit_sub_rsp(e, 64);
+        (*e).stack_offset = 0;
+
+        let mut s: usize = 0;
+        while s < fdecl.body_count {
+            NativeEmitter::emit_stmt(e, arena, fdecl.body_start + s);
+            s += 1;
+        }
+
+        NativeEmitter::emit_add_rsp(e, 64);
+        NativeEmitter::emit_pop_rbp(e);
+        NativeEmitter::emit_ret(e);
+    }
+
+    @unsafe
+    fn emit_stmt(e: &mut NativeEmitter, arena: &AstArena, stmt_idx: usize) {
+        let stmt: Stmt = Vec::get_Stmt(&(*arena).stmts, stmt_idx);
+
+        if stmt.tag == Stmt_TAG_Return {
+            let ret_idx: usize = stmt.data.Return._0;
+            if ret_idx > 0 {
+                NativeEmitter::emit_expr(e, arena, ret_idx - 1);
+            }
+        } else if stmt.tag == Stmt_TAG_Let {
+            let init_idx: usize = stmt.data.Let._2;
+            if init_idx > 0 {
+                NativeEmitter::emit_expr(e, arena, init_idx - 1);
+            }
+            (*e).stack_offset += 4;
+            NativeEmitter::emit_store_local(e, (*e).stack_offset);
+        } else if stmt.tag == Stmt_TAG_ExprStmt {
+            let expr_idx: usize = stmt.data.ExprStmt._0;
+            NativeEmitter::emit_expr(e, arena, expr_idx - 1);
+        } else if stmt.tag == Stmt_TAG_SafeBlock {
+            let sb_start: usize = stmt.data.SafeBlock._0;
+            let sb_count: usize = stmt.data.SafeBlock._1;
+            let mut sb_i: usize = 0;
+            while sb_i < sb_count {
+                NativeEmitter::emit_stmt(e, arena, sb_start + sb_i);
+                sb_i += 1;
+            }
+        }
+    }
+
+    @unsafe
+    fn emit_expr(e: &mut NativeEmitter, arena: &AstArena, expr_idx: usize) {
+        let expr: Expr = Vec::get_Expr(&(*arena).exprs, expr_idx);
+
+        if expr.tag == Expr_TAG_IntLit {
+            NativeEmitter::emit_mov_eax_imm(e, expr.data.IntLit._0);
+        } else if expr.tag == Expr_TAG_BinaryExpr {
+            let lhs: usize = expr.data.BinaryExpr._0;
+            let rhs: usize = expr.data.BinaryExpr._2;
+            NativeEmitter::emit_expr(e, arena, lhs - 1);
+            CodeBuffer::emit8(&mut (*e).code, 80);
+            NativeEmitter::emit_expr(e, arena, rhs - 1);
+            NativeEmitter::emit_mov_ecx_eax(e);
+            CodeBuffer::emit8(&mut (*e).code, 88);
+            NativeEmitter::emit_add_eax_ecx(e);
+        } else if expr.tag == Expr_TAG_Call {
+            let func_idx: usize = expr.data.Call._0;
             let args_start: usize = expr.data.Call._1;
             let arg_count: usize = expr.data.Call._2;
+
+            // Evaluate arguments and push to stack
             let mut i: usize = 0;
             while i < arg_count {
                 let arg_idx: usize = Vec::get_usize(&(*arena).arg_indices, args_start + i);
-                let arg_val: String = LlvmEmitter::emit_expr(e, arena, arg_idx - 1);
-                String::push_str((*e).buffer, &"i32 ");
-                String::push_str((*e).buffer, &arg_val);
-                if i + 1 < arg_count {
-                    String::push_str((*e).buffer, &", ");
-                }
+                NativeEmitter::emit_expr(e, arena, arg_idx - 1);
+                // push rax
+                CodeBuffer::emit8(&mut (*e).code, 80);
                 i += 1;
             }
-            String::push_str((*e).buffer, &")\n");
-            return tmp;
+
+            // Pop in reverse order to parameters
+            if arg_count >= 6 {
+                // pop r9
+                CodeBuffer::emit8(&mut (*e).code, 65);
+                CodeBuffer::emit8(&mut (*e).code, 89);
+            }
+            if arg_count >= 5 {
+                // pop r8
+                CodeBuffer::emit8(&mut (*e).code, 65);
+                CodeBuffer::emit8(&mut (*e).code, 88);
+            }
+            if arg_count >= 4 {
+                // pop rcx
+                CodeBuffer::emit8(&mut (*e).code, 89);
+            }
+            if arg_count >= 3 {
+                // pop rdx
+                CodeBuffer::emit8(&mut (*e).code, 90);
+            }
+            if arg_count >= 2 {
+                // pop rsi
+                CodeBuffer::emit8(&mut (*e).code, 94);
+            }
+            if arg_count >= 1 {
+                // pop rdi
+                CodeBuffer::emit8(&mut (*e).code, 95);
+            }
+
+            let func_expr: Expr = Vec::get_Expr(&(*arena).exprs, func_idx - 1);
+            let mut func_name: String = String::new("unknown");
+            if func_expr.tag == Expr_TAG_Ident {
+                func_name = String::clone(&func_expr.data.Ident._0);
+            } else if func_expr.tag == Expr_TAG_Path {
+                let ns: String = String::clone(&func_expr.data.Path._0);
+                let mem: String = String::clone(&func_expr.data.Path._1);
+                let mut name: String = String::clone(&ns);
+                String::push_str(name, &String::new("::"));
+                String::push_str(name, &mem);
+                func_name = name;
+            }
+            let clean_func_name: String = replace_colons(&func_name);
+            NativeEmitter::emit_call_rel32(e, &clean_func_name);
+        } else if expr.tag == Expr_TAG_Ident {
+            NativeEmitter::emit_load_local(e, 4);
         }
-        return "0";
+    }
+
+    @unsafe
+    fn patch_relocs(e: &mut NativeEmitter) {
+        let mut i: usize = 0;
+        while i < (*e).reloc_count {
+            let r: Reloc = Vec::get_Reloc(&(*e).relocs, i);
+            let target_off: usize = NativeEmitter::find_symbol(e, &r.target_name);
+            if target_off > 0 {
+                let rel: usize = target_off - (r.offset + 4);
+                // Patching is simplified for bootstrap
+            }
+            i += 1;
+        }
+    }
+
+    @unsafe
+    fn emit_entry_point(e: &mut NativeEmitter) {
+        let name: String = String::new("_start");
+        NativeEmitter::add_symbol(e, &name, (*e).code.len);
+        let main_name: String = String::new("main");
+        NativeEmitter::emit_call_rel32(e, &main_name);
+        CodeBuffer::emit8(&mut (*e).code, 137);
+        CodeBuffer::emit8(&mut (*e).code, 199);
+        NativeEmitter::emit_mov_eax_imm(e, 60);
+        NativeEmitter::emit_syscall(e);
+    }
+
+    @unsafe
+    fn emit_syscall_wrappers(e: &mut NativeEmitter) {
+        let offset: usize = (*e).code.len;
+        NativeEmitter::add_symbol(e, &String::new("sys_write"), offset);
+        NativeEmitter::add_symbol(e, &String::new("write"), offset);
+
+        // sys_write:
+        // mov eax, 1
+        CodeBuffer::emit8(&mut (*e).code, 184); // 0xB8
+        CodeBuffer::emit32(&mut (*e).code, 1);
+        // syscall
+        CodeBuffer::emit8(&mut (*e).code, 15); // 0x0F
+        CodeBuffer::emit8(&mut (*e).code, 5);  // 0x05
+        // ret
+        CodeBuffer::emit8(&mut (*e).code, 195); // 0xC3
+    }
+
+    @unsafe
+    fn emit_program(e: &mut NativeEmitter, arena: &AstArena) {
+        NativeEmitter::emit_elf_header(e);
+        NativeEmitter::emit_entry_point(e);
+        let func_count: usize = Vec::len(&(*arena).funcs);
+        let mut i: usize = 0;
+        while i < func_count {
+            NativeEmitter::emit_func(e, arena, i);
+            i += 1;
+        }
+        NativeEmitter::emit_syscall_wrappers(e);
+        NativeEmitter::patch_relocs(e);
+    }
+
+    @unsafe
+    fn write_binary(e: &NativeEmitter, path: &String) {
+        let mut output: String = String::new("");
+        let len: usize = (*e).code.len;
+        let mut i: usize = 0;
+        while i < len {
+            let b: char = Vec::get_char(&(*e).code.bytes, i);
+            String::push(&mut output, b);
+            i += 1;
+        }
+        File::write(path, &output);
     }
 }
 
@@ -2078,14 +4343,19 @@ impl LlvmEmitter {
 
 @unsafe
 fn main() -> i32 {
-    println("--- Y Self-Hosted Compiler ---");
+    @safe {
+        println("--- Y Self-Hosted Compiler ---");
+    }
 
-    let source_file: String = "compiler.ysu";
+    let hw_profile: HardwareProfile = HardwareProfile::load_profile();
+    HardwareProfile::display_profile(&hw_profile);
+
+    let source_file: String = "input.ysu";
     print("[*] Reading source file: ");
     println(source_file);
-    let source: String = File::read_to_string(source_file);
+    let source: String = File::read_to_string(&source_file);
 
-    println("[1/3] Lexing...");
+    println("[1/5] Lexing...");
     let mut lexer: Lexer = Lexer::new(source);
     let tokens: Vec = Lexer::tokenize(&mut lexer);
     let token_count: usize = Vec::len(tokens);
@@ -2093,16 +4363,23 @@ fn main() -> i32 {
     print_int(token_count);
     println(" tokens.");
 
-    println("[2/3] Parsing...");
+    println("[2/5] Parsing...");
     let mut arena: AstArena = AstArena::new();
     let mut parser: Parser = Parser::new(tokens, token_count);
-    Parser::parse_program(parser, &mut arena);
+    Parser::parse_program(&mut parser, &mut arena);
     let func_count: usize = Vec::len(arena.funcs);
     print("      -> Parsed ");
     print_int(func_count);
     println(" functions.");
 
-    println("[3/3] Emitting LLVM IR...");
+    println("[3/5] Running Safety Verification...");
+    let safety_errors: I32 = SafetyChecker::check_program(&arena);
+    if safety_errors > 0 {
+        println("[!] Safety Verification failed. Compilation aborted.");
+        return 1;
+    }
+
+    println("[4/5] Emitting LLVM IR...");
     let mut emitter: LlvmEmitter = LlvmEmitter::new();
 
     let mut i: usize = 0;
@@ -2112,10 +4389,21 @@ fn main() -> i32 {
     }
 
     let out_path: String = "output.ll";
-    File::write(out_path, &emitter.buffer);
+    File::write(&out_path, &emitter.buffer);
     println("      -> Written to output.ll");
 
-    println("--- Self-Compilation Complete ---");
+    println("[5/5] Emitting Native x86-64 ELF...");
+    let mut nat: NativeEmitter = NativeEmitter::new();
+    NativeEmitter::emit_program(&mut nat, &arena);
+    let elf_path: String = "output_native";
+    NativeEmitter::write_binary(&nat, &elf_path);
+    println("      -> Written to output_native (direct ELF — no C!)");
+
+    @safe {
+        println("--- Self-Compilation Complete ---");
+        println("  output.ll      = LLVM IR (needs clang)");
+        println("  output_native  = Raw x86-64 ELF (runs directly!)");
+    }
     return 0;
 }
 

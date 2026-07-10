@@ -1,0 +1,168 @@
+// Y Standard Memory Library
+// std::mem
+
+import lib;
+
+// Basic malloc wrapper
+@unsafe
+fn alloc(size: usize) -> ptr {
+    return malloc(size);
+}
+
+// ── Stack Allocator ──
+struct StackAllocator {
+    buffer: ptr,
+    capacity: usize,
+    offset: usize
+}
+
+impl StackAllocator {
+    fn init(buffer: ptr, capacity: usize) -> StackAllocator {
+        let mut sa: StackAllocator = StackAllocator {
+            buffer: buffer,
+            capacity: capacity,
+            offset: 0
+        };
+        return sa;
+    }
+
+    @unsafe
+    fn alloc(sa: &mut StackAllocator, size: usize) -> ptr {
+        let aligned_size: usize = ((size + 7) / 8) * 8;
+        if (*sa).offset + aligned_size > (*sa).capacity {
+            let null_ptr: ptr = 0;
+            return null_ptr;
+        }
+        let addr: usize = (*sa).buffer;
+        let new_addr: usize = addr + (*sa).offset;
+        (*sa).offset = (*sa).offset + aligned_size;
+        let p: ptr = new_addr;
+        return p;
+    }
+
+    fn free_to(sa: &mut StackAllocator, new_offset: usize) {
+        if new_offset <= (*sa).offset {
+            (*sa).offset = new_offset;
+        }
+    }
+
+    fn reset(sa: &mut StackAllocator) {
+        (*sa).offset = 0;
+    }
+}
+
+// ── Arena Allocator ──
+struct ArenaAllocator {
+    buffer: ptr,
+    capacity: usize,
+    offset: usize
+}
+
+impl ArenaAllocator {
+    fn init(buffer: ptr, capacity: usize) -> ArenaAllocator {
+        let mut arena: ArenaAllocator = ArenaAllocator {
+            buffer: buffer,
+            capacity: capacity,
+            offset: 0
+        };
+        return arena;
+    }
+
+    @unsafe
+    fn alloc(arena: &mut ArenaAllocator, size: usize) -> ptr {
+        let aligned_size: usize = ((size + 7) / 8) * 8;
+        if (*arena).offset + aligned_size > (*arena).capacity {
+            let null_ptr: ptr = 0;
+            return null_ptr;
+        }
+        let addr: usize = (*arena).buffer;
+        let new_addr: usize = addr + (*arena).offset;
+        (*arena).offset = (*arena).offset + aligned_size;
+        let p: ptr = new_addr;
+        return p;
+    }
+
+    fn reset(arena: &mut ArenaAllocator) {
+        (*arena).offset = 0;
+    }
+}
+
+// ── Hardware Pool Allocator ──
+struct HardwarePoolAllocator {
+    buffer: ptr,
+    capacity: usize,
+    block_size: usize,
+    aligned_block_size: usize,
+    alignment: usize,
+    free_list: ptr
+}
+
+impl HardwarePoolAllocator {
+    @unsafe
+    fn init(buffer: ptr, capacity: usize, block_size: usize, alignment: usize) -> HardwarePoolAllocator {
+        let aligned_block: usize = ((block_size + alignment - 1) / alignment) * alignment;
+        
+        let start_addr: usize = buffer;
+        let aligned_start: usize = ((start_addr + alignment - 1) / alignment) * alignment;
+        let padding: usize = aligned_start - start_addr;
+        let mut remaining: usize = 0;
+        if capacity > padding {
+            remaining = capacity - padding;
+        }
+        
+        let block_count: usize = remaining / aligned_block;
+        
+        let mut pool: HardwarePoolAllocator = HardwarePoolAllocator {
+            buffer: aligned_start,
+            capacity: capacity,
+            block_size: block_size,
+            aligned_block_size: aligned_block,
+            alignment: alignment,
+            free_list: aligned_start
+        };
+        
+        let mut i: usize = 0;
+        while i + 1 < block_count {
+            let curr_addr: usize = aligned_start + i * aligned_block;
+            let next_addr: usize = aligned_start + (i + 1) * aligned_block;
+            let curr_ptr: ptr = curr_addr;
+            *curr_ptr = next_addr;
+            i += 1;
+        }
+        
+        if block_count > 0 {
+            let last_addr: usize = aligned_start + (block_count - 1) * aligned_block;
+            let last_ptr: ptr = last_addr;
+            *last_ptr = 0;
+        }
+        
+        return pool;
+    }
+
+    @unsafe
+    fn alloc(pool: &mut HardwarePoolAllocator) -> ptr {
+        let free_ptr: ptr = (*pool).free_list;
+        let free_addr: usize = free_ptr;
+        if free_addr == 0 {
+            let null_ptr: ptr = 0;
+            return null_ptr;
+        }
+        
+        let next_addr: usize = *free_ptr;
+        let next_ptr: ptr = next_addr;
+        (*pool).free_list = next_ptr;
+        
+        return free_ptr;
+    }
+
+    @unsafe
+    fn free(pool: &mut HardwarePoolAllocator, block: ptr) {
+        if block == 0 {
+            return;
+        }
+        let next_addr: usize = (*pool).free_list;
+        let block_ptr: ptr = block;
+        *block_ptr = next_addr;
+        (*pool).free_list = block;
+    }
+}
