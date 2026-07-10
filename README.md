@@ -344,24 +344,6 @@ barrier::sync()
 
 ---
 
-## The SS Safe Subset
-
-**SS (Safe Subset)** is a formally verified restricted dialect of Y, described in `SS_LANGUAGE_DESIGN.txt`. It is Y with `@unsafe` removed from the grammar.
-
-> **Core principle**: *"If an SS program compiles, it is formally proven correct."*
-
-There is no separate verification step — compilation **is** verification.
-
-### How SS Differs from Other Verification Tools
-
-| Tool | Approach | Limitation |
-|---|---|---|
-| CBMC | Bounded model checking of C | External, manual harnesses, unsound concurrency |
-| Z3 | SMT solving | External, requires expert query formulation |
-| Coq | Interactive theorem proving | Human writes every proof step |
-| Dafny | Verification annotations | Human writes proof hints |
-| **SS** | Proof by construction | Expressiveness limited to safe block library (by design) |
-
 ### Safe Block Library (Kernel Domain)
 
 SS programs are composed entirely from pre-proven Y safe blocks:
