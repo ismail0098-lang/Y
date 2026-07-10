@@ -12,7 +12,6 @@
 - [Compiler Pipeline](#compiler-pipeline)
 - [Backend Emitters](#backend-emitters)
 - [Language Reference](#language-reference)
-- [The SS Safe Subset](#the-ss-safe-subset)
 - [Sentinel Hardware Probe](#sentinel-hardware-probe)
 - [Real-World Applications](#real-world-applications)
 - [Building & Running](#building--running)
