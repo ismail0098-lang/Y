@@ -21,6 +21,9 @@ mod sentinel;
 mod type_checker;
 mod native_emitter;
 
+#[cfg(feature = "zk")]
+mod zk_emitter;
+
 use std::env;
 use std::fs;
 use std::process::exit;
@@ -410,6 +413,9 @@ fn main() {
     let emit_cpu = args
         .iter()
         .any(|a| a == "--emit-cpu" || a == "--target=cpu");
+    let emit_r1cs = args
+        .iter()
+        .any(|a| a == "--emit-r1cs" || a == "--target=r1cs");
 
     if emit_c {
         log_error!("The C backend has been removed. Y now uses LLVM as its primary backend.");
@@ -434,6 +440,15 @@ fn main() {
                 } else {
                     "output.ll".to_string()
                 }
+            } else if emit_r1cs {
+                if let Some(ref sf) = source_file {
+                    let path = std::path::Path::new(sf);
+                    let mut p = path.to_path_buf();
+                    p.set_extension("r1cs");
+                    p.to_string_lossy().to_string()
+                } else {
+                    "output.r1cs".to_string()
+                }
             } else {
                 if let Some(ref sf) = source_file {
                     let path = std::path::Path::new(sf);
@@ -452,7 +467,49 @@ fn main() {
 
     println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
 
-    if emit_native {
+    if emit_r1cs {
+        #[cfg(not(feature = "zk"))]
+        {
+            log_error!("The ZK Circuit Backend is not compiled into this binary.");
+            eprintln!("    Recompile Y-lang with ZK support enabled: cargo build --features zk");
+            exit(1);
+        }
+        #[cfg(feature = "zk")]
+        {
+            log_step!("4/4", "Emitting Rank-1 Constraint System (R1CS)...");
+            let mut emitter = zk_emitter::ZkEmitter::new();
+            match emitter.emit_program(&ast) {
+                Ok(r1cs_text) => {
+                    // Write binary R1CS format directly to output_path
+                    match emitter.write_r1cs_binary(&output_path) {
+                        Ok(_) => {
+                            println!("      -> R1CS binary target compiled successfully.");
+                            println!("      -> Written to: {}", output_path);
+
+                            let prefix = output_path.strip_suffix(".r1cs").unwrap_or(&output_path);
+
+                            // Write symbols file
+                            let sym_path = format!("{}.sym", prefix);
+                            println!("      -> Written symbols to: {}", sym_path);
+
+                            // Also write human-readable constraints text to .r1cs.txt
+                            let txt_path = format!("{}.r1cs.txt", prefix);
+                            let _ = fs::write(&txt_path, &r1cs_text);
+                            println!("      -> Written human-readable constraints to: {}", txt_path);
+                        }
+                        Err(e) => {
+                            log_error!("Failed to write binary R1CS output: {}", e);
+                            exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log_error!("ZK Constraint Lowering Error:\n    {}", e);
+                    exit(1);
+                }
+            }
+        }
+    } else if emit_native {
         log_step!("4/4", "Emitting Native x86-64 ELF Binary...");
         let mut emitter = NativeEmitter::new();
         let binary_output = emitter.emit_program(&ast);

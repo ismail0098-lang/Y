@@ -12,7 +12,9 @@
 - [Compiler Pipeline](#compiler-pipeline)
 - [Backend Emitters](#backend-emitters)
 - [Language Reference](#language-reference)
+- [The SS Safe Subset](#the-ss-safe-subset)
 - [Sentinel Hardware Probe](#sentinel-hardware-probe)
+- [Real-World Applications](#real-world-applications)
 - [Building & Running](#building--running)
 - [Installation](#installation)
 - [Benchmark Results](#benchmark-results)
@@ -342,7 +344,45 @@ barrier::sync()
 
 ---
 
+## The SS Safe Subset
 
+**SS (Safe Subset)** is a formally verified restricted dialect of Y, described in `SS_LANGUAGE_DESIGN.txt`. It is Y with `@unsafe` removed from the grammar.
+
+> **Core principle**: *"If an SS program compiles, it is formally proven correct."*
+
+There is no separate verification step — compilation **is** verification.
+
+### How SS Differs from Other Verification Tools
+
+| Tool | Approach | Limitation |
+|---|---|---|
+| CBMC | Bounded model checking of C | External, manual harnesses, unsound concurrency |
+| Z3 | SMT solving | External, requires expert query formulation |
+| Coq | Interactive theorem proving | Human writes every proof step |
+| Dafny | Verification annotations | Human writes proof hints |
+| **SS** | Proof by construction | Expressiveness limited to safe block library (by design) |
+
+### Safe Block Library (Kernel Domain)
+
+SS programs are composed entirely from pre-proven Y safe blocks:
+
+- `safe_log2_fixed_point(v: u64, fp: u8) -> u32` — no undefined shift behavior
+- `safe_burst_penalty(burst_time: u64) -> u32` — result ≤ MAX_BURST_PENALTY
+- `safe_div_nonzero(a: u64, b: u64) -> u64` — denominator proven nonzero by type
+- `safe_vruntime_cmp(a: u64, b: u64) -> Ordering` — transitivity proven under 2⁶³ wrap
+- `safe_atomic_read(loc: &AtomicU64) -> u64` — single-word read, no tearing
+- `safe_rcu_read(ptr: &RcuProtected<T>) -> &T` — valid for RCU critical section lifetime
+- `safe_reclaim_chunk(cache: u64) -> (u64, u64)` — result never exceeds input
+- `safe_kib_to_bytes(kib: u64) -> u64` — no overflow up to 16 TiB
+
+### SS Roadmap
+
+- **Phase 1**: Define ~20–30 safe blocks for kernel scheduling domain *(in progress — CachyOS harnesses)*
+- **Phase 2**: Implement SS as restricted Y dialect (strip unsafe from grammar)
+- **Phase 3**: Model CachyOS `bore.c`, `fair.c` (EEVDF), `scx_bpfland` in SS
+- **Phase 4**: CI pipeline — every kernel patch compiled through SS; PASS = formally proven safe
+
+---
 
 ## Sentinel Hardware Probe
 
@@ -389,7 +429,38 @@ DRIFT_FREE_TYPES = Q32.32, FP64
 
 ---
 
+## Real-World Applications
 
+### Y ShadowPlay (`shadowplay/`)
+
+A hardware-sentient screen recorder HUD written entirely in Y. Compiled from `shadowplay/shadowplay.ysu` to a native binary. Uses the hardware profile to adapt recording parameters to the host GPU.
+
+```bash
+# Build and package into a distributable .tar.gz
+./package.sh
+
+# Portable build (stripped, no AVX requirements)
+./package.sh --portable
+
+# Install globally (KDE Plasma desktop entry included)
+sudo ./install.sh
+# → run anywhere with: y-shadowplay
+```
+
+### Y OS Kernel (`y_os/`)
+
+An experimental bare-metal OS kernel written in Y. The toolchain includes:
+
+- `kernel.ysu` — kernel source (15 KB)
+- `boot.s` — x86 bootloader
+- `build_os.sh` → compiles kernel.ysu → `kernel.ll` → `ysu_kernel.bin`
+- `make_iso.sh` → builds bootable ISO
+- `run_os.sh` → launches in QEMU
+- `ysu_vmm/` — Y Virtual Machine Monitor
+
+### Kanji Drawing Engine (`kanji/`)
+
+A handwriting recognition and stroke-matching engine. Uses the `match_stroke()` function from `algorithms/matching.ysu` — a 50/50 weighted combination of spatial alignment score and directional trajectory similarity, computed over arbitrary-length stroke paths.
 
 ### Y Language Server (`self_hosted/yls.ysu`)
 
@@ -452,17 +523,41 @@ On first run you will see the Sentinel Probe execute and report your hardware pr
     -> GPU Tensor Core Latencies (F16/TF32): 42 / 66
 ```
 
+### Run the Y OS Kernel (QEMU)
 
+```bash
+cd y_os
+./build_os.sh    # Compile kernel.ysu → ysu_kernel.bin
+./make_iso.sh    # Build bootable ISO
+./run_os.sh      # Launch in QEMU
+```
 
-## Benchmark Results
+---
 
-Benchmarks were run on an **NVIDIA RTX 4070 Ti SUPER (16 GB)** with CUDA 13.2 and Z3 4.17.0.
+## Installation
 
-| Benchmark | Clauses | Variables | GPU Overhead | Result |
-|---|---|---|---|---|
-| `bench_qfbv_mult64.smt2` | 139,465 | 40,645 | +0.14s (36%) | SAT — 0.52s |
-| `bench_gpu_arx_medium.smt2` | 624,235 | 181,616 | +0.33s (0.18%) | TIMEOUT (180s) |
-| `bench_qfbv_mult32.smt2` | 33,667 | — | GPU bypassed | SAT — 0.04s |
+### Y ShadowPlay HUD (Global Install)
+
+```bash
+# From the repo root
+sudo ./install.sh
+
+# Run from anywhere
+y-shadowplay
+```
+
+### Distributable Package
+
+```bash
+# Build a portable .tar.gz for sharing
+./package.sh --portable
+
+# The recipient extracts and runs:
+tar -xzf Y_ShadowPlay.tar.gz
+cd Y_ShadowPlay
+sudo ./install.sh
+```
+
 ---
 
 ## Benchmark Results
@@ -471,7 +566,7 @@ All benchmarks measured live on this machine: **NVIDIA RTX 4070 Ti SUPER (16 GB,
 
 ---
 
-### Benchmark 2 — GPU Kernel: Y Native PTX vs PyTorch
+### Benchmark 1 — GPU Kernel: Y Native PTX vs PyTorch
 
 **Source:** `tests/train_spec.ysu` compiled to PTX by Y, vs PyTorch Eager and `torch.compile` (Triton)  
 **Task:** 1024-step F32 accumulation kernel · 1000 launches averaged · `tests/benchmark.py`
@@ -499,7 +594,7 @@ $LOOP_START_0:
 
 ---
 
-### Benchmark 3 — CPU Lock-Free Queue: Y vs C++
+### Benchmark 2 — CPU Lock-Free Queue: Y vs C++
 
 **Source:** `tests/ring_buffer.ysu` compiled to native object · vs `tests/benchmark.cpp`  
 **Task:** 20 million push/pop ops · SPSC ring buffer capacity = 1024
@@ -523,9 +618,30 @@ struct SpscBuffer {
 ```
 
 ---
-> **Key insight**: GPU overhead becomes negligible (<0.2%) for problems running longer than 1 minute. The Tensor Core BCP matrix build achieves ~3.7M clauses/second using a flat array + binary search layout (replacing a previous 1.77 GB 2D lookup table).
 
-See [`benchmark_results.md`](./benchmark_results.md) and [`smt_comp_benchmark_comparison.md`](./smt_comp_benchmark_comparison.md) for full data.
+### Benchmark 3 — ZK R1CS Compiler: Y vs. Circom
+
+**Task:** Compile large-scale Rank-1 Constraint Systems (R1CS) under unrolled loops of non-linear constraints and conditionals. 
+**Environment:** Measured live on the same host (NVIDIA RTX 4070 Ti SUPER, Intel AVX-512 CPU).
+
+#### **A. 1,000,000 Constraints (Polynomial Loop - `heavy_circuit.ysu`)**
+- **Y-lang Compiler**: **`2.20 seconds`** (`2,195.72 ms`)
+- **Circom Compiler**: `292.05 seconds` (`292,045.16 ms` / ~4.87 minutes)
+- **Speedup**: **133.01x faster compilation**
+
+#### **B. 100,000 Constraints (Iterative Dot Product - `dot_product.ysu`)**
+- **Y-lang Compiler**: **`3.63 seconds`** (`3,634.07 ms`)
+- **Circom Compiler**: `17.08 seconds` (`17,077.58 ms`)
+- **Speedup**: **4.70x faster compilation**
+
+#### **C. Baseline Equivalence & Optimization (`test_circuit.ysu`)**
+- **Y-lang Compiler**: **5 constraints, 8 wires** (Fully optimized linear combination folding)
+- **Circom Compiler**: **5 constraints, 10 wires** (Using `IsEqual` comparator sub-template)
+
+#### **Why is Y-lang so much faster?**
+1. **In-Place Accumulator Updates**: Scope reassignments inside loops (e.g., `temp = temp * y`) mutate linear combinations in-place, eliminating $O(N)$ vector copying.
+2. **Simplified State Propagation**: Linear addition checks bypass the $O(N)$ simplifier when inputs are already flat and disjoint, reducing constraint addition to $O(1)$.
+3. **Rust-Native Deduplication**: Constraint hashing uses a high-performance order-independent associative map, reducing sorting and hashing complexity.
 
 ---
 

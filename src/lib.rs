@@ -11,3 +11,6 @@ pub mod ptx_emitter;
 pub mod sentinel;
 pub mod type_checker;
 pub mod native_emitter;
+
+#[cfg(feature = "zk")]
+pub mod zk_emitter;

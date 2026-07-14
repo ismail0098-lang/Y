@@ -26,3 +26,7 @@ path = "y_os/ysu_vmm/main.rs"
 
 [dependencies]
 
+[features]
+default = []
+zk = []
+
