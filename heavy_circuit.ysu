@@ -1,0 +1,8 @@
+@unsafe
+fn main(x: I32, y: I32) -> I32 {
+    let mut temp = x;
+    for i in 0..1000000 {
+        temp = temp * y;
+    }
+    return temp;
+}
