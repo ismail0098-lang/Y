@@ -2,7 +2,7 @@ import struct
 import sys
 
 def main():
-    r1cs_file = "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/test_circuit.r1cs"
+    r1cs_file = sys.argv[1] if len(sys.argv) > 1 else "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/test_circuit.r1cs"
     print(f"[*] Reading {r1cs_file}...")
     with open(r1cs_file, "rb") as f:
         data = f.read()
