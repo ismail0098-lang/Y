@@ -12,7 +12,6 @@
 - [Compiler Pipeline](#compiler-pipeline)
 - [Backend Emitters](#backend-emitters)
 - [Language Reference](#language-reference)
-- [The SS Safe Subset](#the-ss-safe-subset)
 - [Sentinel Hardware Probe](#sentinel-hardware-probe)
 - [Building & Running](#building--running)
 - [Benchmark Results](#benchmark-results)
@@ -340,47 +339,7 @@ Pipeline::init() -> Pipeline
 barrier::sync()
 ```
 
----
 
-## The SS Safe Subset
-
-**SS (Safe Subset)** is a formally verified restricted dialect of Y, described in `SS_LANGUAGE_DESIGN.txt`. It is Y with `@unsafe` removed from the grammar.
-
-> **Core principle**: *"If an SS program compiles, it is formally proven correct."*
-
-There is no separate verification step — compilation **is** verification.
-
-### How SS Differs from Other Verification Tools
-
-| Tool | Approach | Limitation |
-|---|---|---|
-| CBMC | Bounded model checking of C | External, manual harnesses, unsound concurrency |
-| Z3 | SMT solving | External, requires expert query formulation |
-| Coq | Interactive theorem proving | Human writes every proof step |
-| Dafny | Verification annotations | Human writes proof hints |
-| **SS** | Proof by construction | Expressiveness limited to safe block library (by design) |
-
-### Safe Block Library (Kernel Domain)
-
-SS programs are composed entirely from pre-proven Y safe blocks:
-
-- `safe_log2_fixed_point(v: u64, fp: u8) -> u32` — no undefined shift behavior
-- `safe_burst_penalty(burst_time: u64) -> u32` — result ≤ MAX_BURST_PENALTY
-- `safe_div_nonzero(a: u64, b: u64) -> u64` — denominator proven nonzero by type
-- `safe_vruntime_cmp(a: u64, b: u64) -> Ordering` — transitivity proven under 2⁶³ wrap
-- `safe_atomic_read(loc: &AtomicU64) -> u64` — single-word read, no tearing
-- `safe_rcu_read(ptr: &RcuProtected<T>) -> &T` — valid for RCU critical section lifetime
-- `safe_reclaim_chunk(cache: u64) -> (u64, u64)` — result never exceeds input
-- `safe_kib_to_bytes(kib: u64) -> u64` — no overflow up to 16 TiB
-
-### SS Roadmap
-
-- **Phase 1**: Define ~20–30 safe blocks for kernel scheduling domain *(in progress — CachyOS harnesses)*
-- **Phase 2**: Implement SS as restricted Y dialect (strip unsafe from grammar)
-- **Phase 3**: Model CachyOS `bore.c`, `fair.c` (EEVDF), `scx_bpfland` in SS
-- **Phase 4**: CI pipeline — every kernel patch compiled through SS; PASS = formally proven safe
-
----
 
 ## Sentinel Hardware Probe
 
