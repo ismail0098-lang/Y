@@ -1,50 +1,94 @@
 const { execSync } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 
 console.log('========================================================');
-console.log('      Y-lang vs. Circom Compilation Speed Test          ');
-console.log('========================================================');
+console.log('    ZK Compiler Benchmark: 1,000,000 Constraints        ');
+console.log('      (Polynomial Loop - Y vs Circom vs Noir vs Leo)    ');
+console.log('========================================================\n');
 
-// 1. Benchmark Y-lang Compilation
-console.log('[*] Compiling Y-lang heavy circuit (1,000,000 constraint multiplications)...');
-const yStart = process.hrtime.bigint();
-try {
-    execSync('./target/release/Y heavy_circuit.ysu --target=r1cs', { stdio: 'ignore' });
-} catch (e) {
-    console.error('[!] Failed to compile Y circuit:', e.message);
-    process.exit(1);
+function cleanDir(dirPath) {
+    if (fs.existsSync(dirPath)) {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+    }
 }
-const yEnd = process.hrtime.bigint();
-const yDurationMs = Number(yEnd - yStart) / 1_000_000;
-console.log(`[+] Y-lang compilation completed in: ${yDurationMs.toFixed(2)} ms`);
 
-// Check if circom is installed
+function runWithStats(name, cmd, cwd = null) {
+    console.log(`[*] Running ${name}...`);
+    try {
+        const cwdArg = cwd ? `, cwd='${cwd}'` : '';
+        const pythonCmd = `python -c "import subprocess, resource, time; start = time.time(); p = subprocess.Popen('${cmd}', shell=True${cwdArg}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); p.wait(); print(f'{time.time() - start:.3f},{resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1024:.2f}')"`;
+        const result = execSync(pythonCmd).toString().trim();
+        const [duration, memory] = result.split(',');
+        console.log(`    -> Time: ${duration}s`);
+        console.log(`    -> Peak Memory: ${parseFloat(memory).toFixed(2)} MB`);
+        return { duration: parseFloat(duration), memory: parseFloat(memory) };
+    } catch (e) {
+        console.log(`    -> Failed to run ${name}: ${e.message}`);
+        return null;
+    }
+}
+
+const stats = {};
+
+// 1. Y-lang
+// Ensure Y output file is clean
+if (fs.existsSync('heavy_circuit.r1cs')) fs.unlinkSync('heavy_circuit.r1cs');
+stats['Y-lang'] = runWithStats('Y-lang Compiler', './target/release/Y heavy_circuit.ysu --target=r1cs');
+
+// 2. Circom
 let hasCircom = false;
 try {
     execSync('circom --version', { stdio: 'ignore' });
     hasCircom = true;
-} catch (e) {
-    console.log('\n[!] circom compiler is not installed on this system. Skipping Circom speed test.');
-}
+} catch (e) {}
 
 if (hasCircom) {
-    console.log('\n[*] Compiling Circom heavy circuit (1,000,000 constraints)...');
-    const circomStart = process.hrtime.bigint();
-    try {
-        execSync('circom heavy_circuit.circom --r1cs --wasm --sym', { stdio: 'ignore' });
-    } catch (e) {
-        console.error('[!] Failed to compile Circom circuit:', e.message);
-    }
-    const circomEnd = process.hrtime.bigint();
-    const circomDurationMs = Number(circomEnd - circomStart) / 1_000_000;
-    console.log(`[+] Circom compilation completed in: ${circomDurationMs.toFixed(2)} ms`);
-    
-    const speedup = circomDurationMs / yDurationMs;
-    console.log(`\n[=] Speedup: Y-lang is ${speedup.toFixed(2)}x faster than Circom!`);
+    if (fs.existsSync('heavy_circuit.r1cs')) fs.unlinkSync('heavy_circuit.r1cs');
+    stats['Circom'] = runWithStats('Circom Compiler', 'circom heavy_circuit.circom --r1cs --wasm --sym');
 }
 
-// Check size of the generated binary files
-if (fs.existsSync('heavy_circuit.r1cs')) {
-    const stats = fs.statSync('heavy_circuit.r1cs');
-    console.log(`\n[+] Generated R1CS binary size: ${stats.size} bytes`);
+// 3. Noir
+const nargoPath = '/home/yumin/.nargo/bin/nargo';
+let hasNoir = false;
+try {
+    execSync(`${nargoPath} --version`, { stdio: 'ignore' });
+    hasNoir = true;
+} catch (e) {}
+
+if (hasNoir) {
+    cleanDir(path.join(__dirname, 'noir/heavy_circuit/target'));
+    stats['Noir'] = runWithStats('Noir Compiler (Nargo)', `${nargoPath} compile --force`, 'noir/heavy_circuit');
 }
+
+// 4. Leo
+let hasLeo = false;
+try {
+    execSync('leo --version', { stdio: 'ignore' });
+    hasLeo = true;
+} catch (e) {}
+
+if (hasLeo) {
+    cleanDir(path.join(__dirname, 'leo/heavy_circuit/build'));
+    stats['Leo'] = runWithStats('Leo Compiler', 'leo build', 'leo/heavy_circuit');
+}
+
+console.log('\n========================================================');
+console.log('                  Summary Table                         ');
+console.log('========================================================');
+console.log(String('Compiler').padEnd(12) + ' | ' + String('Time (s)').padEnd(10) + ' | ' + String('Memory (MB)').padEnd(12) + ' | ' + String('Speedup vs Circom'));
+console.log('-'.repeat(60));
+
+const circomTime = stats['Circom'] ? stats['Circom'].duration : null;
+
+for (const [compiler, data] of Object.entries(stats)) {
+    if (!data) continue;
+    const speedup = circomTime ? (circomTime / data.duration).toFixed(2) + 'x' : 'N/A';
+    console.log(
+        compiler.padEnd(12) + ' | ' +
+        data.duration.toFixed(3).padEnd(10) + ' | ' +
+        data.memory.toFixed(2).padEnd(12) + ' | ' +
+        speedup
+    );
+}
+console.log('========================================================');

@@ -619,25 +619,29 @@ struct SpscBuffer {
 
 ---
 
-### Benchmark 3 — ZK R1CS Compiler: Y vs. Circom
+### Benchmark 3 — ZK R1CS Compiler: Y vs. Circom vs. Noir vs. Leo
 
-**Task:** Benchmarking compilation and constraint-generation time (source → `.r1cs`) under unrolled loops of non-linear constraints and conditionals. 
+**Task:** Benchmarking compilation and constraint-generation time (source → backend target) under unrolled loops of non-linear constraints and conditionals. 
 **Environment:** Measured live on the same host (NVIDIA RTX 4070 Ti SUPER, Intel AVX-512 CPU).
 
-#### **A. 1,000,000 Constraints (Polynomial Loop - `heavy_circuit.ysu`)**
-- **Y-lang Compiler**: **`1.55 seconds`** | Peak Memory: **`1.07 GB`** (RSS)
-- **Circom Compiler**: `242.47 seconds` | Peak Memory: `2.39 GB` (RSS)
-- **Speedup**: **156.4x faster compilation** with **2.2x lower memory footprint**
+#### **A. 1,000,000 Constraints (Polynomial Loop - `heavy_circuit`)**
+- **Y-lang Compiler**: **`1.67 seconds`** | Peak Memory: **`1.07 GB`** (RSS)
+- **Noir Compiler (Nargo)**: `11.36 seconds` | Peak Memory: `1.25 GB` (RSS)
+- **Leo Compiler**: `41.52 seconds` | Peak Memory: `10.81 GB` (RSS)
+- **Circom Compiler**: `259.25 seconds` | Peak Memory: `2.39 GB` (RSS)
+- **Speedup**: **6.8x faster** than Noir, **24.9x faster** than Leo, and **155.4x faster** than Circom (with over **10x lower memory footprint** than Leo!).
 
-#### **B. 100,000 Constraints (Iterative Dot Product - `dot_product.ysu`)**
-- **Y-lang Compiler**: **`3.66 seconds`** | Peak Memory: **`154.70 MB`** (RSS)
-- **Circom Compiler**: `13.81 seconds` | Peak Memory: `1.06 GB` (RSS)
-- **Speedup**: **3.77x faster compilation** with **6.8x lower memory footprint**
+#### **B. 100,000 Constraints (Iterative Dot Product - `dot_product`)**
+- **Noir Compiler (Nargo)**: `2.31 seconds` | Peak Memory: `393.74 MB` (RSS)
+- **Y-lang Compiler**: **`3.66 seconds`** | Peak Memory: **`154.24 MB`** (RSS)
+- **Leo Compiler**: `13.83 seconds` | Peak Memory: `3.08 GB` (RSS)
+- **Circom Compiler**: `14.51 seconds` | Peak Memory: `1.05 GB` (RSS)
+- **Memory Optimization**: While Noir is slightly faster on this flatter constraint graph, Y-lang uses **2.5x less memory** than Noir, **7x less memory** than Circom, and **20x less memory** than Leo.
 
-#### **C. Baseline Equivalence & Optimization (`test_circuit.ysu`)**
+#### **C. Baseline Equivalence & Optimization (`test_circuit`)**
 - **Y-lang Compiler**: **5 constraints, 8 wires** (Natively optimized linear combinations & multiplexer)
 - **Circom Compiler**: **7 constraints, 10 wires** (Using `IsEqual` comparator sub-template)
-*Note: Since both compilers emit structurally correct R1CS binaries over the same BN254 prime field, downstream witness/proof generation (e.g. using `snarkjs` / Groth16) will execute identically, but Y-lang produces a more compact constraint system.*
+*Note: Noir and Leo target different proving key configurations (ACIR/Aleo Instructions), but Y-lang and Circom produce equivalent BN254 R1CS binaries for identical downstream Groth16 witness execution.*
 
 #### **Why is Y-lang so much faster and more memory-efficient?**
 1. **In-Place Accumulator Updates**: Scope reassignments inside loops (e.g., `temp = temp * y`) mutate linear combinations in-place, eliminating $O(N)$ vector copying.

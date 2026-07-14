@@ -1,0 +1,5 @@
+[package]
+name = "heavy_circuit"
+type = "bin"
+authors = ["Umut Korkmaz"]
+compiler_version = ">=0.1.0"
