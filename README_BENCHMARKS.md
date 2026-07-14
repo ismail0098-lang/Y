@@ -49,8 +49,9 @@ This directory contains the benchmark suite used to validate the performance, st
   }
   component main {public [x, y]} = TestCircuit();
   ```
-* **Constraints**: **5 constraints** (both compilers).
-* **Wires**: **8 wires** (Y-lang, optimized) vs. **10 wires** (Circom).
+* **Constraints & Wires**:
+  * **Y-lang**: **5 constraints, 8 wires** (Natively optimized linear combinations & multiplexer)
+  * **Circom**: **7 constraints, 10 wires** (Using `IsEqual` comparator sub-template)
 
 ---
 
@@ -87,9 +88,9 @@ This directory contains the benchmark suite used to validate the performance, st
   component main {public [x, y]} = HeavyCircuit();
   ```
 * **Constraints**: **1,000,000 constraints**.
-* **Compilation Speed**:
-  * **Y-lang**: **`2.20 seconds`** (133.01x speedup)
-  * **Circom**: **`292.05 seconds`**
+* **Compilation Resources (Constraint Generation)**:
+  * **Y-lang**: **`1.55 seconds`** | Peak Memory: **`1.07 GB`** (RSS) (156.4x speedup)
+  * **Circom**: **`242.47 seconds`** | Peak Memory: **`2.39 GB`** (RSS)
 
 ---
 
@@ -136,9 +137,9 @@ This directory contains the benchmark suite used to validate the performance, st
   component main {public [x, y]} = DotProduct();
   ```
 * **Constraints**: **100,000 constraints**.
-* **Compilation Speed**:
-  * **Y-lang**: **`3.63 seconds`** (4.70x speedup)
-  * **Circom**: **`17.08 seconds`**
+* **Compilation Resources (Constraint Generation)**:
+  * **Y-lang**: **`3.66 seconds`** | Peak Memory: **`154.70 MB`** (RSS) (3.77x speedup)
+  * **Circom**: **`13.81 seconds`** | Peak Memory: **`1.06 GB`** (RSS)
 
 ---
 
