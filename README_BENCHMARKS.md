@@ -170,6 +170,29 @@ This directory contains the benchmark suite used to validate the performance, st
 
 ---
 
+### 5. 31 Million Constraints Extreme Loop (`heavy_31m`)
+* **Objective**: Evaluate compiler memory usage and compilation speed when unrolling large-scale programs that typically cause out-of-memory (OOM) failures or significant swap delays.
+* **Concepts Tested**: Linear combination allocations, garbage collection overhead, AST nodes pruning, and R1CS generation scaling.
+* **Y-lang Source (`heavy_31m.ysu`)**:
+  ```rust
+  @unsafe
+  fn main(x: I32, y: I32) -> I32 {
+      let mut temp = x;
+      for i in 0..31000000 {
+          temp = temp * y;
+      }
+      return temp;
+  }
+  ```
+* **Constraints**: **31,000,000 constraints**.
+* **Compilation Resources (Constraint Generation)**:
+  * **Y-lang**: **`105.28 seconds`** | Peak Memory: **`30.65 GB`** (RSS) — *Generates a valid 3.7 GB `.r1cs` binary file under 2 minutes.*
+  * **Circom**: **OOM** (Estimated **~74 GB of RAM** and over **2.2 hours**).
+  * **Leo**: **OOM** (Estimated **~335 GB of RAM**).
+  * **Noir**: **OOM / Swap Latency** (Estimated **~39 GB of RAM**).
+
+---
+
 ## Executing the Benchmarks
 
 ### 1. Compile Y-lang Circuits
