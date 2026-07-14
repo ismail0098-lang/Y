@@ -39,7 +39,7 @@ Unlike compilers that use static target triples (e.g., `x86_64-pc-windows-msvc`)
 
 The emitter uses this profile to make cycle-aware decisions — e.g., dynamically choosing `IMAD.WIDE` (2.59 cycles) over `IMAD` (4.53 cycles) on an RTX 4070 Ti SUPER.
 
-### 2. Formal Verification — The Safety Cage
+### 2. Formal Verification  The Safety Cage
 
 Y moves beyond runtime safety (Java GC) and ownership (Rust borrow checker) to enforce **mathematically rigorous correctness at compile-time**. The compiler distinguishes three safety levels:
 
@@ -519,3 +519,5 @@ struct SpscBuffer {
 **Author:** Umut Korkmaz (YSU) (ismail0098@gmail.com)
 
 LLMs were used to build this project. Every architectural decision is mine.
+
+нещо
