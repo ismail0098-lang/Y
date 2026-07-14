@@ -427,32 +427,6 @@ On first run you will see the Sentinel Probe execute and report your hardware pr
 
 ---
 
-## Installation
-
-### Y ShadowPlay HUD (Global Install)
-
-```bash
-# From the repo root
-sudo ./install.sh
-
-# Run from anywhere
-y-shadowplay
-```
-
-### Distributable Package
-
-```bash
-# Build a portable .tar.gz for sharing
-./package.sh --portable
-
-# The recipient extracts and runs:
-tar -xzf Y_ShadowPlay.tar.gz
-cd Y_ShadowPlay
-sudo ./install.sh
-```
-
----
-
 ## Benchmark Results
 
 All benchmarks measured live on this machine: **NVIDIA RTX 4070 Ti SUPER (16 GB, CUDA 13.0)** · AVX-512 CPU · L2 cache line 64 B.
