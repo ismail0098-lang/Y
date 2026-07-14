@@ -14,9 +14,7 @@
 - [Language Reference](#language-reference)
 - [The SS Safe Subset](#the-ss-safe-subset)
 - [Sentinel Hardware Probe](#sentinel-hardware-probe)
-- [Real-World Applications](#real-world-applications)
 - [Building & Running](#building--running)
-- [Installation](#installation)
 - [Benchmark Results](#benchmark-results)
 
 ---
@@ -429,53 +427,6 @@ DRIFT_FREE_TYPES = Q32.32, FP64
 
 ---
 
-## Real-World Applications
-
-### Y ShadowPlay (`shadowplay/`)
-
-A hardware-sentient screen recorder HUD written entirely in Y. Compiled from `shadowplay/shadowplay.ysu` to a native binary. Uses the hardware profile to adapt recording parameters to the host GPU.
-
-```bash
-# Build and package into a distributable .tar.gz
-./package.sh
-
-# Portable build (stripped, no AVX requirements)
-./package.sh --portable
-
-# Install globally (KDE Plasma desktop entry included)
-sudo ./install.sh
-# → run anywhere with: y-shadowplay
-```
-
-### Y OS Kernel (`y_os/`)
-
-An experimental bare-metal OS kernel written in Y. The toolchain includes:
-
-- `kernel.ysu` — kernel source (15 KB)
-- `boot.s` — x86 bootloader
-- `build_os.sh` → compiles kernel.ysu → `kernel.ll` → `ysu_kernel.bin`
-- `make_iso.sh` → builds bootable ISO
-- `run_os.sh` → launches in QEMU
-- `ysu_vmm/` — Y Virtual Machine Monitor
-
-### Kanji Drawing Engine (`kanji/`)
-
-A handwriting recognition and stroke-matching engine. Uses the `match_stroke()` function from `algorithms/matching.ysu` — a 50/50 weighted combination of spatial alignment score and directional trajectory similarity, computed over arbitrary-length stroke paths.
-
-### Y Language Server (`self_hosted/yls.ysu`)
-
-A full LSP-compatible language server written in native Y, providing IDE support (completions, diagnostics, hover) for `.ysu` files.
-
-### Y Package Manager (`src/ypm.rs`)
-
-`ypm` — a package manager for Y libraries and modules, built as a separate binary from the same Cargo workspace.
-
-### Tensor Core BCP Solver / Z3 GPU Integration (`z3/`, `z3_benchmarks/`)
-
-A GPU-accelerated Boolean Constraint Propagation (BCP) pre-solver backed by NVIDIA Tensor Core WMMA operations. Used to accelerate Z3 SAT solving for formal verification. See `benchmark_results.md` for detailed performance data.
-
----
-
 ## Building & Running
 
 ### Prerequisites
@@ -483,7 +434,6 @@ A GPU-accelerated Boolean Constraint Propagation (BCP) pre-solver backed by NVID
 - Rust toolchain (`cargo`)
 - `clang` (for LLVM IR → binary compilation)
 - `nvcc` (optional, for GPU probe compilation)
-- `qemu-system-x86_64` (optional, for Y OS kernel testing)
 
 ### Build
 
@@ -520,42 +470,6 @@ On first run you will see the Sentinel Probe execute and report your hardware pr
     -> Loaded CPU Memory Latency Sweep (L1/L2/L3/Mem): 4 / 12 / 40 / 120 cycles
     -> Loaded GPU Name: NVIDIA GeForce RTX 4070 Ti SUPER
     -> GPU Memory Latencies (SMEM/L1/L2/VRAM): 28 / 33 / 90 / 300
-    -> GPU Tensor Core Latencies (F16/TF32): 42 / 66
-```
-
-### Run the Y OS Kernel (QEMU)
-
-```bash
-cd y_os
-./build_os.sh    # Compile kernel.ysu → ysu_kernel.bin
-./make_iso.sh    # Build bootable ISO
-./run_os.sh      # Launch in QEMU
-```
-
----
-
-## Installation
-
-### Y ShadowPlay HUD (Global Install)
-
-```bash
-# From the repo root
-sudo ./install.sh
-
-# Run from anywhere
-y-shadowplay
-```
-
-### Distributable Package
-
-```bash
-# Build a portable .tar.gz for sharing
-./package.sh --portable
-
-# The recipient extracts and runs:
-tar -xzf Y_ShadowPlay.tar.gz
-cd Y_ShadowPlay
-sudo ./install.sh
 ```
 
 ---
