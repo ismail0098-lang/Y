@@ -484,7 +484,7 @@ struct SpscBuffer {
 **Environment:** Measured live on the same host (NVIDIA RTX 4070 Ti SUPER, Intel AVX-512 CPU).
 
 #### **A. 1,000,000 Constraints (Polynomial Loop - `heavy_circuit`)**
-- **Y-lang Compiler**: **`1.67 seconds`** | Peak Memory: **`1.07 GB`** (RSS)
+- **Y Compiler**: **`1.67 seconds`** | Peak Memory: **`1.07 GB`** (RSS)
 - **Noir Compiler (Nargo)**: `11.36 seconds` | Peak Memory: `1.25 GB` (RSS)
 - **Leo Compiler**: `41.52 seconds` | Peak Memory: `10.81 GB` (RSS)
 - **Circom Compiler**: `259.25 seconds` | Peak Memory: `2.39 GB` (RSS)
@@ -503,14 +503,14 @@ struct SpscBuffer {
 *Note: Noir and Leo target different proving key configurations (ACIR/Aleo Instructions), but Y-lang and Circom produce equivalent BN254 R1CS binaries for identical downstream Groth16 witness execution.*
 
 #### **D. Extreme Scaling: 31,000,000 Constraints (Polynomial Loop - `heavy_31m.ysu`)**
-- **Y-lang Compiler**: **`105.28 seconds`** (~1.75 minutes) | Peak Memory: **`30.65 GB`** (RSS)
+- **Y Compiler**: **`105.28 seconds`** (~1.75 minutes) | Peak Memory: **`30.65 GB`** (RSS)
 - **Noir / Leo / Circom**: **OOM (Out Of Memory) or Impractical**
   * *Leo* would require **~335 GB of RAM** to compile.
   * *Circom* would require **~74 GB of RAM** and over **2.2 hours** of CPU execution.
   * *Noir* would require **~39 GB of RAM** (pushing the physical limits of typical development machines).
-- **Result**: Y-lang cleanly compiles a massive 3.7 GB `.r1cs` file containing **31 million constraints** in under 2 minutes, natively fitting within standard development hardware limits.
+- **Result**: Y cleanly compiles a massive 3.7 GB `.r1cs` file containing **31 million constraints** in under 2 minutes, natively fitting within standard development hardware limits.
 
-#### **Why is Y-lang so much faster and more memory-efficient?**
+#### **Why is Y so much faster and more memory-efficient?**
 1. **In-Place Accumulator Updates**: Scope reassignments inside loops (e.g., `temp = temp * y`) mutate linear combinations in-place, eliminating $O(N)$ vector copying.
 2. **Simplified State Propagation**: Linear addition checks bypass the $O(N)$ simplifier when inputs are already flat and disjoint, reducing constraint addition to $O(1)$.
 3. **Rust-Native Deduplication**: Constraint hashing uses a high-performance order-independent associative map, reducing sorting and hashing complexity.
