@@ -130,20 +130,6 @@ Y_lang/
 │   ├── matching.ysu        # Stroke matching algorithm (spatial + directional)
 │   └── matching.c          # Reference C implementation
 │
-├── shadowplay/             # Y ShadowPlay HUD — screen recorder app written in Y
-│   ├── shadowplay.ysu      # Source (5 KB)
-│   └── shadowplay          # Compiled native binary
-│
-├── y_os/                   # Experimental Y-native OS kernel
-│   ├── kernel.ysu          # Kernel source (15 KB)
-│   ├── boot.s              # x86 bootloader assembly
-│   ├── kernel.ll           # Emitted LLVM IR
-│   ├── ysu_kernel.bin      # Compiled kernel binary
-│   └── ysu_vmm/            # Y Virtual Machine Monitor
-│
-├── kanji/                  # Kanji drawing engine (handwriting recognition)
-│   ├── frontend/           # Drawing UI frontend
-│   └── kanji_data/         # Stroke reference data
 │
 ├── c_src/                  # C/C++ host bindings and CUDA wrappers
 ├── docs/                   # Language specifications and architecture docs
