@@ -1,4 +1,4 @@
-Y — A Systems Language and Compiler for GPU/CPU Hardware-Aware Code Generation
+Y -----  A Systems Language and Compiler for GPU/CPU Hardware-Aware Code Generation
 
 Y is a compiler and systems language for writing hardware-aware code across CPU (x86/AVX-512) and GPU (NVIDIA PTX) targets. It also includes a zero-knowledge circuit compiler (R1CS constraint generation) as one of its backends.
 
@@ -8,7 +8,7 @@ The project is under active, single-developer, ongoing development.
 What this project does
 
 
-Probes the actual hardware it's running on — cache latencies, AVX-512 throughput, GPU warp/tensor-core timings — and uses those measurements to make codegen decisions (e.g. choosing IMAD.WIDE over IMAD based on measured cycle cost).
+Probes the actual hardware it's running on:  cache latencies, AVX-512 throughput, GPU warp/tensor-core timings,  and uses those measurements to make codegen decisions (e.g. choosing IMAD.WIDE over IMAD based on measured cycle cost).
 Enforces compile-time safety guarantees on marked code blocks: initialized-variable checks, loop invariants, bounds declarations, and a numerical-drift check for fixed-point accumulation.
 Compiles to five backends: LLVM IR (→ native binary via clang), NVIDIA PTX, portable C, direct x86-64, and a standalone ELF emitter.
 Includes an R1CS constraint generator for zero-knowledge circuits, benchmarked against Circom, Noir, and Leo.
@@ -19,7 +19,7 @@ Is partially self-hosting: most compiler phases (lexer, parser, type checker, LL
 Status
 
 
-Bootstrap compiler (src/, Rust): stable, this is what actually runs today.
+Bootstrap compiler (src/, Rust): stable; this is what actually runs today.
 Self-hosted compiler (self_hosted/, written in Y): in progress, not yet the default build path.
 Author-built with LLM assistance for implementation; architecture and design decisions are the author's own.
 There is currently a backlog of automated pull requests from a connected AI coding agent (Jules) that have not yet been reviewed or merged, due to a personal medical situation. They do not reflect the current state of main.
