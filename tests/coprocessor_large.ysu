@@ -1,0 +1,20 @@
+// Y Dual-Accelerator Co-Processing: Large Multi-Tile GEMM
+// Simulates a larger workload with 1 RT Core tree search producing routing values,
+// followed by 4 Tensor Core MMA tile computations reusing loaded matrix fragments.
+
+@unsafe
+fn main() {
+    // 1. RT Core: Hardware BVH-accelerated K-Nearest Neighbor (128D query vector, k=8 neighbors)
+    let nns_res: I32 = rt_nearest_neighbor(128, 8);
+
+    // 2. Load fragments once
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
+
+    // 3. Tensor Core: 4 tile computations reusing fragments
+    let acc0: Fragment<MMA_m16n8k16, D, F32> = mma_sync(frag_A, frag_B, frag_C);
+    let acc1: Fragment<MMA_m16n8k16, D, F32> = mma_sync(frag_A, frag_B, frag_C);
+    let acc2: Fragment<MMA_m16n8k16, D, F32> = mma_sync(frag_A, frag_B, frag_C);
+    let acc3: Fragment<MMA_m16n8k16, D, F32> = mma_sync(frag_A, frag_B, frag_C);
+}

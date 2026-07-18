@@ -1,0 +1,21 @@
+// Y Dual-Accelerator Co-Processing Test
+// Tests RT Core + Tensor Core concurrent pipeline scheduling
+
+@unsafe
+fn main() {
+    // Phase 1: RT Core — sparse attention routing via BVH
+    let mask: I32 = sparse_route(512);
+
+    // Phase 2: Tensor Core ops
+    let x: F32 = 1.0;
+    let y: F32 = 2.0;
+    let z: F32 = x + y;
+
+    // Phase 3: RT Core — nearest neighbor search
+    let nn: I32 = rt_nearest_neighbor(128, 8);
+
+    // Phase 4: BVH traversal for graph pruning
+    let pruned: I32 = bvh_traverse(64, 64);
+
+    print_int(z);
+}

@@ -20,6 +20,10 @@ mod ptx_emitter;
 mod sentinel;
 mod type_checker;
 mod native_emitter;
+mod ir_grapher;
+mod rt_core_emitter;
+mod quantization_pass;
+mod coprocessor_scheduler;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
@@ -416,8 +420,81 @@ fn main() {
     let emit_r1cs = args
         .iter()
         .any(|a| a == "--emit-r1cs" || a == "--target=r1cs");
+    let emit_coprocessor = args
+        .iter()
+        .any(|a| a == "--emit-coprocessor" || a == "--target=coprocessor");
 
-    if emit_c {
+    if emit_coprocessor {
+        log_step!("4/4", "Running Dual-Accelerator Co-Processing Pipeline...");
+        println!("      -> Phase A: IR Dependency Graphing...");
+        let mut grapher = ir_grapher::DependencyGrapher::new();
+        let ir_graph = grapher.analyze_program(&ast).clone();
+
+        let rt_count = ir_graph.rt_core_nodes().len();
+        let tensor_count = ir_graph.tensor_core_nodes().len();
+        let cross_edges = ir_graph.cross_pipeline_edges().len();
+
+        println!("         RT Core nodes:     {}", rt_count);
+        println!("         Tensor Core nodes: {}", tensor_count);
+        println!("         Cross-pipe edges:  {}", cross_edges);
+        println!("         Critical path:     {:.0} cycles", ir_graph.critical_path_cycles());
+
+        println!("      -> Phase B: Co-Processor Scheduling...");
+        let mut scheduler = coprocessor_scheduler::CoprocessorScheduler::new();
+        scheduler.schedule(&ir_graph, &hw_profile);
+
+        let sched = &scheduler.schedule;
+        println!("         SMEM budget:       {} bytes", sched.total_smem_bytes);
+        println!("         Sync barriers:     {}", sched.sync_barriers.len());
+        println!("         Est. parallel cy:  {:.0}", sched.estimated_total_cycles);
+        println!("         Overlap savings:   {:.0} cycles", sched.overlap_savings_cycles);
+
+        for (i, barrier) in sched.sync_barriers.iter().enumerate() {
+            if barrier.needs_quantization {
+                println!(
+                    "         Barrier {}: {:?} → {:?} quantization ({} bytes)",
+                    i, barrier.src_precision, barrier.dst_precision, barrier.smem_bytes
+                );
+            }
+        }
+
+        println!("      -> Phase C: Fused PTX Emission...");
+        let fused_ptx = scheduler.emit_fused_ptx(&ir_graph, &hw_profile);
+
+        let write_path = if let Some(ref sf) = source_file {
+            let path = std::path::Path::new(sf);
+            let mut p = path.to_path_buf();
+            p.set_extension("coprocessor.ptx");
+            p.to_string_lossy().to_string()
+        } else {
+            "output.coprocessor.ptx".to_string()
+        };
+
+        // Wrap in a PTX module
+        let mut full_ptx = String::new();
+        full_ptx.push_str(".version 8.0\n");
+        full_ptx.push_str(".target sm_89\n");
+        full_ptx.push_str(".address_size 64\n\n");
+        full_ptx.push_str("// =======================================================\n");
+        full_ptx.push_str("// Y Compiler - Dual-Accelerator Co-Processing Backend\n");
+        full_ptx.push_str(&format!("// Hardware: {}\n", hw_profile.gpu_name));
+        full_ptx.push_str(&format!("// RT Nodes: {} | Tensor Nodes: {} | Barriers: {}\n",
+            rt_count, tensor_count, sched.sync_barriers.len()));
+        full_ptx.push_str("// =======================================================\n\n");
+        full_ptx.push_str(&fused_ptx);
+
+        match fs::write(&write_path, &full_ptx) {
+            Ok(_) => {
+                println!("      -> Written to: {}", write_path);
+                println!("      \x1b[1;32mDual-accelerator PTX generated successfully!\x1b[0m");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                log_error!("Failed to write co-processor PTX: {}", e);
+                exit(1);
+            }
+        }
+    } else if emit_c {
         log_error!("The C backend has been removed. Y now uses LLVM as its primary backend.");
         eprintln!("    To compile your code to a native binary (default behavior), omit backend flags.");
         eprintln!("    To emit LLVM IR, use --emit-llvm.");

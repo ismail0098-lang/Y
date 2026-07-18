@@ -1,0 +1,19 @@
+// Y Dual-Accelerator Co-Processing: Database Index as a Geometric Map (FRNN Search)
+// Treats database index clusters as fixed-radius bounding spheres in a BVH.
+// Fires short query rays to search for Nearest Neighbors, then uses Tensor Core for projection.
+
+@unsafe
+fn main() {
+    // 1. RT Core: Hardware BVH-accelerated Fixed-Radius Nearest Neighbor Search
+    // We map 256-dimensional cluster embeddings down to 3D/4D leaf spheres and search k=16 neighbors.
+    let nns_res: I32 = rt_nearest_neighbor(256, 16);
+
+    // 2. Tensor Core: Process nearest neighbor representations or compute distances/projections.
+    // The compiler automatically swizzles and quantizes FP32 search outputs to FP16 matrix fragments.
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
+    
+    acc = mma_sync(frag_A, frag_B, frag_C);
+}
