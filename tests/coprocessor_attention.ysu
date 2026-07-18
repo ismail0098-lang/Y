@@ -1,0 +1,19 @@
+// Y Dual-Accelerator Co-Processing Sparse Attention / Router
+// Uses RT Core Nearest Neighbor Search to route sparse attention tokens
+// followed by Tensor Core MMA to project token representation vectors.
+
+@unsafe
+fn main() {
+    // 1. RT Core: Hardware BVH-accelerated K-Nearest Neighbor (128D query vector, k=8 neighbors)
+    let nns_res: I32 = rt_nearest_neighbor(128, 8);
+
+    // 2. Tensor Core: MMA calculation (consumes routing output)
+    // The compiler automatically swizzles routing results in Shared Memory
+    // and converts them to FP16 to feed the matrix core.
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
+    
+    acc = mma_sync(frag_A, frag_B, frag_C);
+}

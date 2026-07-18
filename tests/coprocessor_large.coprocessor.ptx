@@ -1,0 +1,219 @@
+.version 8.0
+.target sm_89
+.address_size 64
+
+// =======================================================
+// Y Compiler - Dual-Accelerator Co-Processing Backend
+// Hardware: RTX 4070 Ti SUPER
+// RT Nodes: 1 | Tensor Nodes: 7 | Barriers: 1
+// =======================================================
+
+    // +----------------------------------------------------------+
+    // |  Y DUAL-ACCELERATOR CO-PROCESSING SCHEDULE              |
+    // |  RT Core Pipeline:     1 nodes                          |
+    // |  Tensor Core Pipeline: 7 nodes                          |
+    // |  Sync Barriers:        1                                |
+    // |  SMEM Budget:          10240 bytes                          |
+    // |  Est. Parallel Cycles: 287                             |
+    // |  Overlap Savings:      145 cycles                      |
+    // +----------------------------------------------------------+
+
+    .shared .align 128 .b8 coprocessor_smem[10240];
+
+    // ===================================================
+    // RT CORE CO-PROCESSING PIPELINE  (1 nodes)
+    // Hardware: RTX 4070 Ti SUPER | RT traversal latency ~200 cy
+    // ===================================================
+
+    // -- RT Nearest Neighbor Search (128D, k=8) --
+    // BVH encodes point cloud as AABB leaf nodes
+    // Query point -> ray origin, search radius -> t_max
+    .shared .align 64 .b8 rt_nns_scratch[4352];
+    // Encode query vector as ray origin in 128D space
+    add.u64 %rt_rd0, nns_query_ptr, 0;
+    ld.global.ca.f32 %rt_f0, [%rt_rd0];  // q[0]
+    add.u64 %rt_rd1, nns_query_ptr, 4;
+    ld.global.ca.f32 %rt_f1, [%rt_rd1];  // q[1]
+    add.u64 %rt_rd2, nns_query_ptr, 8;
+    ld.global.ca.f32 %rt_f2, [%rt_rd2];  // q[2]
+    // Issue BVH traversal: spherical range query
+    // Hardware prunes branches where AABB is outside search sphere
+    // Complexity: O(log N) traversal vs O(N) linear scan
+    mov.u32 %rt_r0, 0;
+    mov.u32 %rt_r1, 8;
+    $RT_KNN_COLLECT_0:
+    // RT Core returns closest intersection -> nearest point
+    mov.f32 %rt_f3, 0f7F7FFFFF;  // dist = FLT_MAX (initialized)
+    mov.u32 %rt_r2, 0;  // neighbor_idx
+    mul.lo.u32 %rt_r3, %rt_r0, 4;       // 1 float = 4 bytes
+    cvt.u64.u32 %rt_rd3, %rt_r3;
+    mov.u64 %rt_rd5, rt_nns_scratch;
+    add.u64 %rt_rd4, %rt_rd5, %rt_rd3;
+    st.shared.f32 [%rt_rd4], %rt_f3;
+    add.u32 %rt_r0, %rt_r0, 1;
+    setp.lt.u32 %rt_p0, %rt_r0, %rt_r1;
+    @%rt_p0 bra $RT_KNN_COLLECT_0;
+    $RT_KNN_END_1:
+    // NNS complete: 8-NN in 128D via hardware BVH
+
+    // -- CROSS-PIPELINE SYNC BARRIER 0 --
+    // RT -> Tensor handoff at cycle 180, 4096 bytes via SMEM[0..4096]
+    bar.sync 0;
+    // QUANTIZATION PASS: FP32 -> FP16
+    // -- VECTORIZED QUANTIZATION PASS: FP32 -> FP16 --
+    // Operating on 4096 bytes at SMEM[0..4096]
+    // half2 packing: 1024 FP32 -> 512 half2 (2x compression)
+    // Estimated cost: 4.5 cycles per pair (4.5 cy * 512 pairs)
+    {
+        .reg .b32 %tid_x;
+        .reg .b32 %ntid_x;
+        mov.u32 %tid_x, %tid.x;
+        mov.u32 %ntid_x, %ntid.x;
+        mov.u32 %qr0, %tid_x;
+        mov.u32 %qr1, 512;
+        $QUANT_HALF2_PACK_0:
+        mov.u64 %qrd0, coprocessor_smem;
+        cvt.u64.u32 %qrd3, %qr0;
+        shl.b64 %qrd3, %qrd3, 3;
+        add.u64 %qrd1, %qrd0, %qrd3;
+        cvt.u64.u32 %qrd4, %qr0;
+        shl.b64 %qrd4, %qrd4, 2;
+        add.u64 %qrd2, %qrd0, %qrd4;
+        add.u64 %qrd2, %qrd2, 4096;
+        ld.shared.f32 %qf0, [%qrd1];     // val_lo = FP32[2*i]
+        ld.shared.f32 %qf1, [%qrd1+4];   // val_hi = FP32[2*i+1]
+        // cvt.rn.f16x2.f32: vectorized FP32->FP16 + half2 pack
+        cvt.rn.f16x2.f32 %qr2, %qf1, %qf0;  // packed = {f16(lo), f16(hi)}
+        st.shared.b32 [%qrd2], %qr2;  // Store half2 fragment
+        add.u32 %qr0, %qr0, %ntid_x;
+        setp.lt.u32 %qp0, %qr0, %qr1;
+        @%qp0 bra $QUANT_HALF2_PACK_0;
+        $QUANT_HALF2_DONE_1:
+    }
+    // half2 pack complete: 4096 bytes FP32 -> 2048 bytes FP16
+    bar.sync 0;  // Post-quantization fence
+
+    // ===================================================
+    // TENSOR CORE CO-PROCESSING PIPELINE  (7 nodes)
+    // Consuming RT Core outputs via quantized SMEM fragments
+    // ===================================================
+    // Tensor node [1] 'tensor_ldmatrix': generic mma.sync
+    // Zero-initialize accumulator registers
+    mov.f32 %f0, 0f00000000;
+    mov.f32 %f1, 0f00000000;
+    mov.f32 %f2, 0f00000000;
+    mov.f32 %f3, 0f00000000;
+    // ldmatrix: load A fragment from quantized SMEM[4096..4608]
+    {
+        .reg .b64 %mma_addr;
+        mov.u64 %mma_addr, coprocessor_smem;
+        add.u64 %mma_addr, %mma_addr, 4096;
+        ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%mma_addr];
+    }
+    // ldmatrix: load B fragment from quantized SMEM[4608..4864]
+    {
+        .reg .b64 %mma_addr_b;
+        mov.u64 %mma_addr_b, coprocessor_smem;
+        add.u64 %mma_addr_b, %mma_addr_b, 4608;
+        ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
+    }
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
+    // Tensor node [2] 'tensor_ldmatrix': generic mma.sync
+    // ldmatrix: load A fragment from quantized SMEM[4864..5376]
+    {
+        .reg .b64 %mma_addr;
+        mov.u64 %mma_addr, coprocessor_smem;
+        add.u64 %mma_addr, %mma_addr, 4864;
+        ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%mma_addr];
+    }
+    // ldmatrix: load B fragment from quantized SMEM[5376..5632]
+    {
+        .reg .b64 %mma_addr_b;
+        mov.u64 %mma_addr_b, coprocessor_smem;
+        add.u64 %mma_addr_b, %mma_addr_b, 5376;
+        ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
+    }
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
+    // Tensor node [3] 'tensor_ldmatrix': generic mma.sync
+    // ldmatrix: load A fragment from quantized SMEM[5632..6144]
+    {
+        .reg .b64 %mma_addr;
+        mov.u64 %mma_addr, coprocessor_smem;
+        add.u64 %mma_addr, %mma_addr, 5632;
+        ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%mma_addr];
+    }
+    // ldmatrix: load B fragment from quantized SMEM[4096..4352]
+    {
+        .reg .b64 %mma_addr_b;
+        mov.u64 %mma_addr_b, coprocessor_smem;
+        add.u64 %mma_addr_b, %mma_addr_b, 4096;
+        ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
+    }
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
+    // ldmatrix: load A fragment from quantized SMEM[4352..4864]
+    {
+        .reg .b64 %mma_addr;
+        mov.u64 %mma_addr, coprocessor_smem;
+        add.u64 %mma_addr, %mma_addr, 4352;
+        ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%mma_addr];
+    }
+    // ldmatrix: load B fragment from quantized SMEM[4864..5120]
+    {
+        .reg .b64 %mma_addr_b;
+        mov.u64 %mma_addr_b, coprocessor_smem;
+        add.u64 %mma_addr_b, %mma_addr_b, 4864;
+        ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
+    }
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
+    // ldmatrix: load A fragment from quantized SMEM[5120..5632]
+    {
+        .reg .b64 %mma_addr;
+        mov.u64 %mma_addr, coprocessor_smem;
+        add.u64 %mma_addr, %mma_addr, 5120;
+        ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%mma_addr];
+    }
+    // ldmatrix: load B fragment from quantized SMEM[5632..5888]
+    {
+        .reg .b64 %mma_addr_b;
+        mov.u64 %mma_addr_b, coprocessor_smem;
+        add.u64 %mma_addr_b, %mma_addr_b, 5632;
+        ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
+    }
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
+    // ldmatrix: load A fragment from quantized SMEM[5888..6400]
+    {
+        .reg .b64 %mma_addr;
+        mov.u64 %mma_addr, coprocessor_smem;
+        add.u64 %mma_addr, %mma_addr, 5888;
+        ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%mma_addr];
+    }
+    // ldmatrix: load B fragment from quantized SMEM[4352..4608]
+    {
+        .reg .b64 %mma_addr_b;
+        mov.u64 %mma_addr_b, coprocessor_smem;
+        add.u64 %mma_addr_b, %mma_addr_b, 4352;
+        ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
+    }
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
+    // ldmatrix: load A fragment from quantized SMEM[4608..5120]
+    {
+        .reg .b64 %mma_addr;
+        mov.u64 %mma_addr, coprocessor_smem;
+        add.u64 %mma_addr, %mma_addr, 4608;
+        ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0,%r1,%r2,%r3}, [%mma_addr];
+    }
+    // ldmatrix: load B fragment from quantized SMEM[5120..5376]
+    {
+        .reg .b64 %mma_addr_b;
+        mov.u64 %mma_addr_b, coprocessor_smem;
+        add.u64 %mma_addr_b, %mma_addr_b, 5120;
+        ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
+    }
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};

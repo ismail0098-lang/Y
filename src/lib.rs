@@ -11,6 +11,10 @@ pub mod ptx_emitter;
 pub mod sentinel;
 pub mod type_checker;
 pub mod native_emitter;
+pub mod ir_grapher;
+pub mod rt_core_emitter;
+pub mod quantization_pass;
+pub mod coprocessor_scheduler;
 
 #[cfg(feature = "zk")]
 pub mod zk_emitter;
