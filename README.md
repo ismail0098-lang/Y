@@ -20,7 +20,6 @@ Status
 Bootstrap compiler (src/, Rust): stable; this is what actually runs today.
 Self-hosted compiler (self_hosted/, written in Y): in progress, not yet the default build path.
 Author-built with LLM assistance for implementation; architecture and design decisions are the author's own.
-There is currently a backlog of automated pull requests from a connected AI coding agent (Jules) that have not yet been reviewed or merged, due to a personal medical situation. They do not reflect the current state of main.
 
 
 Project Layout
