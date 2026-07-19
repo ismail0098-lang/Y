@@ -15,8 +15,8 @@ You need the following tools installed:
 
 | Tool | Required | Purpose |
 | :--- | :---: | :--- |
-| Rust toolchain (`rustup`) | ✅ | Compile the Y bootstrap compiler |
-| `clang` (LLVM) | ✅ | Link LLVM IR output into native binaries |
+| Rust toolchain (`rustup`) | | Compile the Y bootstrap compiler |
+| `clang` (LLVM) |  | Link LLVM IR output into native binaries |
 | `nvcc` (CUDA toolkit) | Optional | GPU hardware probe and PTX kernel execution |
 | Python 3 + CuPy | Optional | Run co-processor benchmarks on GPU |
 
@@ -32,13 +32,15 @@ The compiled binary is at `./target/release/Y`.
 
 ### Step 2: Run the Hardware Sentinel Probe
 
-On first use, Y probes your actual hardware and saves a profile to `.ysu_hw_profile`. This is what makes the compiler hardware-sentient — it uses real measured latencies to make codegen decisions.
+The first time you compile any `.ysu` file, Y automatically runs the hardware probe and saves the result to `.ysu_hw_profile`. Subsequent runs load the cache instantly — no re-probing.
+
+You can also trigger the probe explicitly (e.g. after upgrading hardware, or on a new machine):
 
 ```bash
 ./target/release/Y --probe
 ```
 
-You'll see output like:
+Either way, you'll see output like:
 ```
 [*] Running Sentinel Hardware Probe...
     -> AVX: true | AVX-512: true
@@ -48,8 +50,6 @@ You'll see output like:
     -> Branch divergence penalty: 4.53 cy
 [*] Profile saved to .ysu_hw_profile
 ```
-
-Subsequent runs load this cache instantly — no re-probing.
 
 ### Step 3: Write Your First Y Program
 
@@ -111,7 +111,11 @@ kernel accumulate(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32) {
 ```
 
 ```bash
-cargo run -- tests/train_spec.ysu --llvm    # Emit PTX
+# Compile to native binary via LLVM backend:
+cargo run -- tests/train_spec.ysu --llvm
+
+# Or emit raw PTX directly:
+cargo run -- tests/train_spec.ysu --ptx
 ```
 
 Benchmarked against PyTorch on RTX 4070 Ti SUPER:
@@ -343,6 +347,21 @@ let local_accumulator: F32 = 0.0;
 ### 6.1 Structural Type Checking
 Y utilizes structural type equivalence for layouts and complex variables. Types match if their memory footprint, byte offset boundaries, and layout alignments are identical, ensuring safe reinterpret casts.
 
+**Example — type mismatch caught at compile time:**
+```ysu
+fn add(a: I32, b: F32) -> I32 {
+    return a + b;  // error: cannot add I32 and F32 without explicit cast
+}
+```
+```
+error[E0308]: mismatched types
+  --> add.ysu:2:14
+   |
+ 2 |     return a + b;
+   |              ^ expected `I32`, found `F32`
+hint: use `b as I32` or promote `a` to `F32` before the operation
+```
+
 ### 6.2 Linear Memory Obligations
 Linear tracking enforces that resources (like asynchronous memory transfers) cannot be left in indeterminate states:
 
@@ -358,12 +377,87 @@ Linear tracking enforces that resources (like asynchronous memory transfers) can
 
 Every `Transfer` token returned by `cp_async` must be statically consumed by a corresponding `Pipeline::wait()` instruction before any read operations from that buffer are permitted.
 
+**Example — unconsumed transfer token caught at compile time:**
+```ysu
+kernel bad_copy(A: GlobalMemory<F32>, buf: SharedMemory<F32>) {
+    let tx: Transfer<Global, Shared, Async<1>, 128> = cp_async(A[0], buf);
+    // error: Transfer token `tx` was never consumed via Pipeline::wait()
+    let val: F32 = buf[0];  // read before wait -> data race
+}
+```
+```
+error[L0001]: linear obligation unresolved
+  --> bad_copy.ysu:3:20
+   |
+ 3 |     let val: F32 = buf[0];
+   |                    ^^^^^^ buffer read before Transfer `tx` was awaited
+hint: insert `pipe.wait(tx); barrier::sync();` before reading `buf`
+```
+
 ### 6.3 Shared Memory Bank Conflict Solver
 GPU shared memory consists of 32 parallel banks. The compiler maps variable read strides to bank indices:
 
 $$\text{Bank} = \left(\frac{\text{Byte Offset}}{4}\right) \pmod{32}$$
 
 If two threads within a 32-thread warp access indices with the same $\text{Bank}$ index in the same cycle, the compiler generates a bank conflict warning and advises layout swizzling (e.g., using `swizzle=330`).
+
+**Example — bank conflict detected at compile time:**
+```ysu
+kernel conflicting_load(data: GlobalMemory<F32>) {
+    // Stride of 32 floats = 128 bytes -> all 32 threads hit bank 0
+    type BadLayout = SmemLayout<F32, rows=32, cols=32, swizzle=0>;
+    let smem = SharedMemory::alloc<BadLayout>();
+    let frag = ldmatrix(smem);  // 32-way bank conflict on every warp!
+}
+```
+```
+warning[B0001]: shared memory bank conflict detected
+  --> conflicting_load.ysu:5:17
+   |
+ 5 |     let frag = ldmatrix(smem);
+   |                 ^^^^^^^ stride 128B causes 32-way conflict on bank 0
+hint: use `swizzle=330` in SmemLayout to eliminate conflicts
+```
+
+### 6.4 Uninitialized Variable Check (inside `@safe` blocks)
+Inside `@safe` scopes, all variables must be initialized before use. Uninitialized reads are a compile error, not a runtime crash.
+
+**Example:**
+```ysu
+@safe
+fn bad_read() -> I32 {
+    let x: I32;       // declared but not initialized
+    return x + 1;     // error: `x` used before initialization
+}
+```
+```
+error[S0002]: use of possibly uninitialized variable
+  --> bad_read.ysu:3:12
+   |
+ 2 |     let x: I32;
+   |         - declared here, never assigned
+ 3 |     return x + 1;
+   |            ^ `x` is uninitialized at this point
+```
+
+### 6.5 Static Bounds Violation
+`@bounds(min, max)` annotations are checked at compile time for constant indices and as runtime assertions for dynamic indices.
+
+**Example — constant index caught at compile time:**
+```ysu
+fn oob_access(data: [I32; 64]) -> I32 {
+    @bounds(0 <= 99 < 64)   // error: 99 is outside [0, 64)
+    return data[99];
+}
+```
+```
+error[B0002]: static bounds violation
+  --> oob_access.ysu:2:14
+   |
+ 2 |     @bounds(0 <= 99 < 64)
+   |              ^^ index 99 is out of range [0, 64)
+   |                       -- declared bound
+```
 
 ---
 
