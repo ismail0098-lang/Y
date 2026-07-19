@@ -5,6 +5,188 @@ Y is a hardware-sentient, low-level systems programming language designed for hi
 
 ---
 
+## Getting Started
+
+This section gets you from zero to a running Y program in a few steps. If you want the full language spec, skip ahead to Section 1.
+
+### Prerequisites
+
+You need the following tools installed:
+
+| Tool | Required | Purpose |
+| :--- | :---: | :--- |
+| Rust toolchain (`rustup`) | ✅ | Compile the Y bootstrap compiler |
+| `clang` (LLVM) | ✅ | Link LLVM IR output into native binaries |
+| `nvcc` (CUDA toolkit) | Optional | GPU hardware probe and PTX kernel execution |
+| Python 3 + CuPy | Optional | Run co-processor benchmarks on GPU |
+
+### Step 1: Build the Compiler
+
+```bash
+git clone https://github.com/ismail0098-lang/Y.git
+cd Y
+cargo build --release
+```
+
+The compiled binary is at `./target/release/Y`.
+
+### Step 2: Run the Hardware Sentinel Probe
+
+On first use, Y probes your actual hardware and saves a profile to `.ysu_hw_profile`. This is what makes the compiler hardware-sentient — it uses real measured latencies to make codegen decisions.
+
+```bash
+./target/release/Y --probe
+```
+
+You'll see output like:
+```
+[*] Running Sentinel Hardware Probe...
+    -> AVX: true | AVX-512: true
+    -> L1/L2/L3/Mem latency: 4 / 12 / 42 / 335 cycles
+    -> GPU Name: RTX 4070 Ti SUPER
+    -> GPU FMA latency: 4.54 cy | SMEM: 28.03 cy | Tensor F16: 42.14 cy
+    -> Branch divergence penalty: 4.53 cy
+[*] Profile saved to .ysu_hw_profile
+```
+
+Subsequent runs load this cache instantly — no re-probing.
+
+### Step 3: Write Your First Y Program
+
+Create a file `hello.ysu`:
+
+```ysu
+fn main() -> I32 {
+    return 42;
+}
+```
+
+Compile and run it:
+
+```bash
+cargo run -- hello.ysu          # LLVM backend (default) -> native binary
+./hello                         # Run it
+```
+
+### Step 4: Write a Safe Block with Loop Invariant
+
+Y's `@safe` blocks enforce compile-time correctness guarantees. Variables must be initialized, and loops need `@invariant` annotations:
+
+```ysu
+fn countdown(n: I32) -> I32 {
+    @safe {
+        let x: I32 = n;
+
+        @invariant(x >= 0)
+        while x > 0 {
+            x = x - 1;
+        }
+
+        return x;
+    }
+}
+
+fn main() -> I32 {
+    return countdown(10);
+}
+```
+
+```bash
+cargo run -- countdown.ysu
+```
+
+### Step 5: Write a GPU Kernel (PTX backend)
+
+Y compiles directly to NVIDIA PTX for GPU execution. Here is a simple F32 accumulation kernel:
+
+```ysu
+// train_spec.ysu — GPU kernel: accumulate 1024 F32 values
+kernel accumulate(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32) {
+    let acc: F32 = 0.0;
+    for i in 0..N {
+        acc += data[i];
+    }
+    result[0] = acc;
+}
+```
+
+```bash
+cargo run -- tests/train_spec.ysu --llvm    # Emit PTX
+```
+
+Benchmarked against PyTorch on RTX 4070 Ti SUPER:
+
+| Implementation | Avg latency |
+| :--- | :---: |
+| PyTorch Eager | 2,579 µs |
+| PyTorch + Triton | 13.40 µs |
+| **Y-emitted PTX** | **1.98 µs** |
+
+### Step 6: Use the Dual-Accelerator Co-Processor Pipeline
+
+Y can automatically fuse **RT Core** (BVH traversal / nearest neighbor search) with **Tensor Core** (matrix multiply-accumulate) workloads in a single kernel — inserting sync barriers, FP32→FP16 quantization, and bank-conflict-free shared memory layouts at compile time.
+
+```ysu
+// coprocessor_attention.ysu
+// RT Core routes token queries; Tensor Core projects the results.
+// The compiler handles: bar.sync, quantization, swizzled ldmatrix.
+
+@unsafe
+fn main() {
+    // RT Core: hardware BVH nearest-neighbor search (128D query, k=8)
+    let nns_res: I32 = rt_nearest_neighbor(128, 8);
+
+    // Tensor Core: MMA projection on RT Core output
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
+    acc = mma_sync(frag_A, frag_B, frag_C);
+}
+```
+
+```bash
+cargo run -- tests/coprocessor_attention.ysu --emit-coprocessor
+```
+
+The compiler prints its scheduling report and writes `coprocessor_attention.coprocessor.ptx` and `.wrapped.ptx`. You can then benchmark it:
+
+```bash
+./venv/bin/python tests/benchmark_coprocessor_physical.py
+```
+
+Result on RTX 4070 Ti SUPER (10,000 iterations):
+- Naive CUDA C++ (manual OptiX + WMMA): **4.22 µs**
+- Y Co-Processor (auto-scheduled): **2.38 µs** → **1.77x speedup**
+
+See **Section 11** for the full co-processor pipeline reference and more examples.
+
+### Quick Reference: Compiler Flags
+
+| Flag | Effect |
+| :--- | :--- |
+| *(none)* | Compile with LLVM backend → native binary via clang |
+| `--llvm` | Explicit LLVM IR emission |
+| `--c` | Emit portable C |
+| `--ptx` | Emit raw NVIDIA PTX |
+| `--emit-coprocessor` | Fused RT Core + Tensor Core co-processor PTX |
+| `--probe` | Run hardware Sentinel probe and save `.ysu_hw_profile` |
+
+### Where to Go Next
+
+| Topic | Section |
+| :--- | :--- |
+| Language design philosophy | §1 |
+| Compiler pipeline internals | §2 |
+| Full grammar (EBNF) | §3 |
+| Type system & memory spaces | §5 |
+| Safety directives (`@safe`, `@bounds`, `@ZeroDrift`) | §6 |
+| All attributes & decorators reference | §9 |
+| Complete code examples (21 examples) | §10 |
+| RT Core + Tensor Core co-processor pipeline | §11 |
+
+---
+
 ## 1. Introduction & Design Philosophy
 
 Traditional programming languages abstract away the underlying microarchitecture, resulting in suboptimal memory access patterns, cache thrashing, branch divergence, and thread serialization. Y flips this paradigm: **the compiler is co-designed with the hardware profile**.
