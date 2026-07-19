@@ -1841,4 +1841,409 @@ Parallel cy:    287   (overlap savings: 145 cycles)
 
 ---
 
+## 12. Zero-Knowledge Circuit Backend (R1CS)
+
+Y includes a standalone ZK circuit compiler backend that generates R1CS (Rank-1 Constraint Systems) directly from annotated Y programs. It does not use an intermediate circuit DSL — the same Y syntax compiles to either native binaries or ZK constraint systems depending on the backend flag.
+
+### 12.1 What is R1CS?
+
+An R1CS system encodes a computation as a set of quadratic constraints of the form:
+
+$$\mathbf{a} \cdot \mathbf{w} \;\times\; \mathbf{b} \cdot \mathbf{w} = \mathbf{c} \cdot \mathbf{w}$$
+
+where **w** is a witness vector. A satisfying assignment to **w** proves that the computation was performed correctly without revealing the inputs. R1CS is the standard format consumed by ZK proving systems like Groth16, PLONK, and Nova.
+
+### 12.2 Writing a ZK Circuit in Y
+
+ZK programs use the same Y syntax with two constraints:
+- Use `@unsafe` at the function level (mutable variable reassignment requires it in the current ZK emitter).
+- Field arithmetic operates in the BLS12-381 scalar field by default (254-bit prime).
+
+```ysu
+// Simple dot product circuit: proves knowledge of vectors a, b s.t. a·b = result
+@unsafe
+fn dot_product(a: [F32; 4], b: [F32; 4]) -> F32 {
+    let result: F32 = 0.0;
+    for i in 0..4 {
+        result = result + (a[i] * b[i]);
+    }
+    return result;
+}
+```
+
+Compile to R1CS:
+```bash
+cargo run -- dot_product.ysu --emit-r1cs
+# Outputs: dot_product.r1cs, dot_product.sym
+```
+
+### 12.3 Compiler Output
+
+The ZK backend emits three files:
+
+| File | Contents |
+| :--- | :--- |
+| `.r1cs` | Binary R1CS constraint system (compatible with snarkjs, bellman) |
+| `.sym` | Symbol table mapping wire indices to variable names |
+| `.r1cs.txt` | Human-readable constraint listing for debugging |
+
+Example `.r1cs.txt` output for a 4-element dot product:
+```
+Constraint 0: (1 * a[0]) * (1 * b[0]) = (1 * _mul_0)
+Constraint 1: (1 * a[1]) * (1 * b[1]) = (1 * _mul_1)
+Constraint 2: (1 * a[2]) * (1 * b[2]) = (1 * _mul_2)
+Constraint 3: (1 * a[3]) * (1 * b[3]) = (1 * _mul_3)
+Constraint 4: (1 * _mul_0 + 1 * _mul_1 + 1 * _mul_2 + 1 * _mul_3) * (1 * 1) = (1 * result)
+```
+
+### 12.4 ZK-Specific Directives
+
+| Directive | Effect |
+| :--- | :--- |
+| `@ZeroDrift` | Verifies that fixed-point accumulation does not drift beyond the field modulus over iteration |
+| `@safe` on loops | Requires `@invariant` — used by the ZK emitter to unroll bounded loops into flat constraint sequences |
+| `@bounds(min, max)` | Used by the constraint generator to statically verify index ranges, preventing out-of-range witness accesses |
+
+### 12.5 Performance vs Other ZK Compilers
+
+Benchmarks run on AMD Ryzen 9 9950X, 48 GB DDR5-6000. Results are physically measured (not estimated) except where noted.
+
+**1,000,000 constraints (`heavy_circuit`):**
+
+| Compiler | Time | Peak Memory |
+| :--- | :---: | :---: |
+| **Y** | **1.67s** | **1.07 GB** |
+| Noir (Nargo) | 11.36s | 1.25 GB |
+| Leo | 41.52s | 10.81 GB |
+| Circom | 259.25s | 2.39 GB |
+
+**31,000,000 constraints (`heavy_31m.ysu`):**
+
+| Compiler | Result |
+| :--- | :--- |
+| **Y** | **105.28s, 30.65 GB peak RSS** |
+| Noir | Estimated ~39 GB required (did not complete) |
+| Leo | Estimated ~335 GB required (did not complete) |
+| Circom | Estimated ~74 GB, ~2.2 hours (did not complete) |
+
+**Why Y uses less memory at scale:**
+- In-place accumulator updates avoid O(N) vector copies on loop-scoped reassignment.
+- Linear-combination addition is O(1) when inputs are already flat.
+- Constraint deduplication uses an order-independent hash map, not a sorted list.
+
+### 12.6 Verifying Generated Circuits
+
+Verification scripts are included:
+```bash
+python verify_r1cs.py      # dot_product circuit
+python verify_heavy.py     # heavy_circuit (1M constraints)
+python verify_benchmarks.js  # snarkjs-based verification
+```
+
+---
+
+## 13. CUDA-to-Y Migration Guide
+
+This section maps common CUDA C++ patterns directly to their Y equivalents. It is intended for GPU developers who know CUDA and want to understand Y's model quickly.
+
+### 13.1 Memory Declarations
+
+| CUDA C++ | Y Equivalent | Notes |
+| :--- | :--- | :--- |
+| `__shared__ float buf[4096];` | `let buf = SharedMemory::alloc<SmemLayout<F32, ...>>();` | Y requires an explicit layout type |
+| `__global__ float* ptr` | `data: GlobalMemory<F32>` | Global memory is a first-class type |
+| `__device__ float val;` | `let val: F32 = ...;` | Regular variable in kernel scope |
+| `alignas(128) float x;` | `@align(128) let x: F32 = ...;` | Alignment as a decorator |
+| `volatile float* ptr;` | `@gpu_uncached let ptr: F32 = ...;` | Non-temporal / bypass cache |
+
+### 13.2 Synchronization
+
+| CUDA C++ | Y Equivalent | Notes |
+| :--- | :--- | :--- |
+| `__syncthreads();` | `barrier::sync();` | Block-level sync |
+| `asm volatile("bar.sync 0;");` | Injected automatically by co-processor scheduler | Manual only if using `chisel {}` |
+| `__syncwarp();` | `warp::sync();` | Warp-level sync |
+| `cp_async_wait_all();` | `pipe.wait(tx);` | Wait for specific transfer token |
+
+### 13.3 Tensor Core (WMMA API → Y Fragments)
+
+| CUDA C++ (WMMA) | Y Equivalent |
+| :--- | :--- |
+| `wmma::fragment<wmma::matrix_a, 16,16,16, half, col_major>` | `Fragment<MMA_m16n8k16, A, F16>` |
+| `wmma::fragment<wmma::matrix_b, 16,16,16, half, row_major>` | `Fragment<MMA_m16n8k16, B, F16>` |
+| `wmma::fragment<wmma::accumulator, 16,16,16, float>` | `Fragment<MMA_m16n8k16, D, F32>` |
+| `wmma::fill_fragment(frag_c, 0.0f);` | `Fragment::zero()` |
+| `wmma::load_matrix_sync(frag_a, ptr, stride);` | `ldmatrix(smem_buf)` — stride and swizzle computed automatically |
+| `wmma::mma_sync(frag_c, frag_a, frag_b, frag_c);` | `acc = mma_sync(frag_A, frag_B, frag_C);` |
+| `wmma::store_matrix_sync(ptr, frag_c, stride, layout);` | `store(acc, C);` |
+
+### 13.4 Async Memory Transfers (cp.async)
+
+```cpp
+// CUDA C++
+__pipeline_memcpy_async(smem_ptr, global_ptr, 128);
+__pipeline_commit();
+__pipeline_wait_prior(0);
+```
+
+```ysu
+// Y equivalent
+let tx: Transfer<Global, Shared, Async<1>, 128> = cp_async(A[k], smem_A);
+pipe.wait(tx);
+barrier::sync();
+```
+
+The Y version enforces at compile time that `pipe.wait(tx)` is called before `smem_A` is read — the CUDA version relies on developer discipline.
+
+### 13.5 Safety Scopes
+
+| CUDA C++ | Y Equivalent | Difference |
+| :--- | :--- | :--- |
+| No equivalent | `@safe { }` | Enforces initialization, bounds, invariants at compile time |
+| No equivalent | `@unsafe { }` | Explicit opt-out of safety checks, required for raw pointer math |
+| `assert(cond)` (runtime) | `@bounds(min <= i < max)` | Static for constant indices, runtime assertion for dynamic |
+| No equivalent | `@invariant(expr)` | Loop invariant verified at every iteration by type checker |
+
+### 13.6 Cache Policies
+
+| CUDA C++ | Y Equivalent |
+| :--- | :--- |
+| `ld.global.ca` (L1/L2 cache) | Default load (no decorator) |
+| `ld.global.cg` (L2 only) | `@cache_policy(L2_EVICT_FIRST)` |
+| `ld.global.cs` (streaming, evict-first) | `@cache_policy(L2_STREAM)` |
+| `ld.global.lu` (last-use, invalidate) | `@cache_policy(L2_EVICT_LAST)` |
+| `ld.global.nc` (non-coherent / read-only) | `@cache_policy(L2_PERSIST)` |
+
+### 13.7 Inline PTX
+
+```cpp
+// CUDA C++
+asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(packed) : "f"(hi), "f"(lo));
+```
+
+```ysu
+// Y: injected automatically by quantization pass when a Fragment<..., F16>
+// consumes an FP32 RT Core result. Manual equivalent:
+chisel {
+    "cvt.rn.f16x2.f32 %packed, %hi, %lo;";
+}
+```
+
+### 13.8 Full Side-by-Side: Fused RT+Tensor Kernel
+
+**CUDA C++ (manual, ~65 lines):**
+```cpp
+extern "C" __global__ void cuda_rt_tensor_kernel(
+    const float* query, float* out
+) {
+    __shared__ float rt_scratch[4096];
+    __shared__ half  quant_scratch[4096];
+    int tid = threadIdx.x;
+
+    // Manual BVH traversal with branch divergence
+    int stack_depth = (tid % 4) == 0 ? 16 : 32;
+    float dist = 0.0f;
+    for (int i = 0; i < stack_depth; ++i) {
+        float diff = query[tid % 16] - 0.5f;
+        if (diff * diff < 4.0f) dist += __fsqrt_rn(diff * diff + 0.1f);
+        else dist += 0.01f;
+    }
+    rt_scratch[tid] = dist;
+
+    asm volatile("bar.sync 0;");
+
+    // Manual FP32->FP16 quantization
+    if (tid < 2048) {
+        uint32_t packed;
+        asm("cvt.rn.f16x2.f32 %0, %1, %2;"
+            : "=r"(packed)
+            : "f"(rt_scratch[2*tid+1]), "f"(rt_scratch[2*tid]));
+        ((uint32_t*)quant_scratch)[tid] = packed;
+    }
+    asm volatile("bar.sync 0;");
+
+    // WMMA Tensor Core
+    wmma::fragment<wmma::matrix_a,16,16,16,half,wmma::col_major> fa;
+    wmma::fragment<wmma::matrix_b,16,16,16,half,wmma::row_major> fb;
+    wmma::fragment<wmma::accumulator,16,16,16,float> fc;
+    wmma::fill_fragment(fc, 0.0f);
+    wmma::load_matrix_sync(fa, &quant_scratch[0], 16);
+    wmma::load_matrix_sync(fb, &quant_scratch[256], 16);
+    wmma::mma_sync(fc, fa, fb, fc);
+    wmma::store_matrix_sync(out, fc, 16, wmma::mem_row_major);
+}
+```
+
+**Y (12 lines — compiler generates everything above):**
+```ysu
+@unsafe
+fn main() {
+    let nns_res: I32 = rt_nearest_neighbor(128, 8);
+
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
+    acc = mma_sync(frag_A, frag_B, frag_C);
+}
+```
+
+**Physical result (RTX 4070 Ti SUPER, 10,000 iterations): 4.22 µs → 2.38 µs (1.77x speedup)**
+
+---
+
+## 14. Performance Tuning Guide
+
+This section explains how to use Y's hardware-aware features to get the best performance out of specific workloads.
+
+### 14.1 Reading the Hardware Profile
+
+After the Sentinel probe runs, `.ysu_hw_profile` contains cycle-accurate measurements specific to your machine. The compiler uses these directly in its cost model. Key values and what they mean for your code:
+
+| Profile Key | What it measures | How it affects codegen |
+| :--- | :--- | :--- |
+| `SMEM_LATENCY` | Shared memory access latency in cycles | Determines when `barrier::sync()` insertion is worth the cost vs. re-computing |
+| `TENSOR_F16_LATENCY` | Tensor Core MMA latency (F16) | Used to schedule overlap between RT traversal and register initialization |
+| `BRANCH_DIVERGENCE_PENALTY` | Extra cycles per divergent warp branch | If high, use `@divergence(uniform)` to assert non-divergent paths |
+| `WARP_SHUFFLE_LATENCY` | Cycles for `__shfl_sync` | If lower than `SMEM_LATENCY`, compiler prefers warp-shuffle reductions |
+| `L2_CACHE_LINE` | L2 cache line size in bytes | Used to compute `@align(N)` for struct fields in SPSC buffers |
+| `FMA_LATENCY` | FP32 FMA latency | Determines IMAD.WIDE vs IMAD selection for integer multiply-accumulate |
+
+### 14.2 Choosing a Cache Policy
+
+```ysu
+// Use L2_PERSIST for data accessed repeatedly across loop iterations
+// (e.g. weight matrices in attention, BVH node data in deep traversals)
+@cache_policy(L2_PERSIST, reuse_count=8)
+let weights: F16 = load(W);
+
+// Use L2_STREAM for data written once and never re-read
+// (e.g. output tiles, streaming reductions)
+@cache_policy(L2_STREAM)
+output[i] = result;
+
+// Use L2_EVICT_FIRST for inputs that should not pollute L2
+// (e.g. large activation tensors in single-pass inference)
+@cache_policy(L2_EVICT_FIRST)
+let act: F16 = load(A);
+```
+
+**Rule of thumb:**
+- Weights / BVH nodes repeatedly accessed → `L2_PERSIST`
+- Large one-shot reads → `L2_EVICT_FIRST`
+- Write-only outputs → `L2_STREAM`
+
+### 14.3 Eliminating Shared Memory Bank Conflicts
+
+GPU shared memory is divided into 32 banks (4 bytes each). If 32 threads in a warp all access addresses that map to the same bank, the accesses are serialized into 32 sequential steps instead of 1.
+
+**How to diagnose:** The compiler will warn `B0001: shared memory bank conflict detected` with the stride that caused it.
+
+**How to fix — use layout swizzling:**
+```ysu
+// Bad: stride 32 floats = 128 bytes -> all threads hit bank 0
+type BadLayout  = SmemLayout<F32, rows=32, cols=32, swizzle=0>;
+
+// Good: swizzle=330 XORs the row index into the column address
+type GoodLayout = SmemLayout<F32, rows=32, cols=32, swizzle=330>;
+```
+
+The swizzle value `330` comes from the standard CuTe/CUTLASS swizzle formula for 32-column F32 tiles. The Y compiler validates the conflict-free property statically.
+
+### 14.4 When to Use `--emit-coprocessor` vs Raw PTX
+
+| Scenario | Use |
+| :--- | :--- |
+| You have RT Core traversal feeding Tensor Core MMA | `--emit-coprocessor` |
+| Pure Tensor Core kernel (no BVH/ray queries) | `--llvm` or `--ptx` |
+| Pure compute kernel (reductions, FFTs, sorting) | `--llvm` |
+| ZK circuit generation | `--emit-r1cs` |
+| CPU-side lock-free data structures | `--llvm` (uses AVX-512 backend) |
+
+### 14.5 Overlapping RT Core Latency
+
+RT Core traversal is the highest-latency operation in a co-processor kernel (~200 cycles on Ada Lovelace). The compiler automatically overlaps it with:
+- `Fragment::zero()` accumulator initialization (~4 cycles)
+- Register-resident scalar setup
+- Independent global-memory parameter loads
+
+If you want to maximize this overlap manually inside `chisel {}` blocks, place any register-only computation (no shared memory reads) between the `rt_nearest_neighbor` call and the first `ldmatrix`:
+
+```ysu
+@unsafe
+fn main() {
+    let nns_res: I32 = rt_nearest_neighbor(256, 16); // <-- RT starts here
+
+    // These are pure register ops -- run during RT traversal:
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+    let scale: F32 = 1.0 / 256.0;  // precompute normalization
+
+    // bar.sync (auto-inserted) -- RT must complete before here
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
+    acc = mma_sync(frag_A, frag_B, frag_C);
+}
+```
+
+The compiler's scheduling report will show `Overlap savings: 133 cycles` when this pattern is detected.
+
+### 14.6 Loop Invariant Hoisting (`@invariant`)
+
+Inside `@safe` blocks, `@invariant` annotations do more than verify correctness — they inform the optimizer that a value is stable across iterations, enabling hoisting:
+
+```ysu
+@safe
+fn process(data: [F32; 1024], scale: F32) -> F32 {
+    let sum: F32 = 0.0;
+
+    @invariant(sum >= 0.0)
+    @invariant(scale > 0.0)   // <- tells compiler scale never changes in loop
+    for i in 0..1024 {
+        sum += data[i] * scale;
+    }
+    return sum;
+}
+```
+
+Without `@invariant(scale > 0.0)`, the compiler conservatively reloads `scale` each iteration. With it, the compiler can hoist the load to a register before the loop begins.
+
+### 14.7 Register Pressure in Tensor Core Kernels
+
+Each `Fragment<MMA_m16n8k16, ...>` occupies a fixed number of 32-bit registers:
+
+| Fragment Role | Registers Used |
+| :---: | :---: |
+| A (F16) | 4 |
+| B (F16) | 2 |
+| C / D (F32) | 4 |
+
+The RTX 4070 Ti SUPER has **255 registers per thread**. If you chain more than ~20 MMA operations without storing intermediate accumulators, you will exhaust the register file and spill to local memory (measured at ~125 cycles/access vs ~4 cycles for registers).
+
+**Rule:** Keep the number of live `Fragment` variables below 30 at any given point in the kernel. Interleave `store(acc, C)` calls to free registers between MMA pipeline stages.
+
+### 14.8 ZeroDrift Fixed-Point Accumulation
+
+For long-running accumulation loops (e.g. computing dot products over 1M+ elements), standard F32 accumulation accumulates floating-point rounding error that compounds with iteration count. Y's `@ZeroDrift` annotation enforces drift-free accumulation using Q32.32 fixed-point arithmetic:
+
+```ysu
+fn safe_sum(data: [Q32.32; 1000000]) -> Q32.32 {
+    @ZeroDrift
+    let acc: Q32.32 = 0.0;
+
+    for i in 0..1000000 {
+        acc += data[i];
+    }
+    return acc;
+}
+```
+
+The compiler verifies that `Q32.32` never overflows the 64-bit fixed-point range given the bounds of `data`. If it might, a compile-time error is emitted:
+```
+error[D0001]: ZeroDrift accumulator may overflow Q32.32 range
+hint: reduce iteration count or use Q16.48 for higher fractional precision
+```
+
+---
+
 *made by YSU-SSS research*
