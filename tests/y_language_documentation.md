@@ -1969,7 +1969,7 @@ This section maps common CUDA C++ patterns directly to their Y equivalents. It i
 | `__shared__ float buf[4096];` | `let buf = SharedMemory::alloc<SmemLayout<F32, ...>>();` | Y requires an explicit layout type |
 | `__global__ float* ptr` | `data: GlobalMemory<F32>` | Global memory is a first-class type |
 | `__device__ float val;` | `let val: F32 = ...;` | Regular variable in kernel scope |
-| `alignas(128) float x;` | `@align(128) let x: F32 = ...;` | Alignment as a decorator |
+| `alignas(128) float x;` | `@align(128) let x: F32 = ...;` | `alignas` sets allocation alignment; `@align(N)` in Y sets LLVM `align N` on load/store instructions (access alignment hint), not allocation alignment. Effect is equivalent for most GPU memory patterns. |
 | `volatile float* ptr;` | `@gpu_uncached let ptr: F32 = ...;` | Non-temporal / bypass cache |
 
 ### 13.2 Synchronization
