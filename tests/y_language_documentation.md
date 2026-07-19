@@ -2262,4 +2262,347 @@ hint: reduce iteration count or use Q16.48 for higher fractional precision
 
 ---
 
+## 15. Fragment & MMA Type Reference
+
+This section documents all valid `Fragment<Shape, Role, Precision>` combinations, their register footprints, and the PTX MMA instructions they map to.
+
+### 15.1 Fragment Type Syntax
+
+```ysu
+let frag: Fragment<Shape, Role, Precision> = ...;
+```
+
+| Parameter | Options | Notes |
+| :--- | :--- | :--- |
+| `Shape` | `MMA_m16n8k16`, `MMA_m16n8k8`, `MMA_m16n16k16` | Tile dimensions: M×N output, K reduction depth |
+| `Role` | `A`, `B`, `C`, `D` | Matrix role in the MMA operation |
+| `Precision` | `F16`, `BF16`, `TF32`, `F32` | Numeric type stored in the fragment |
+
+### 15.2 Valid Fragment Combinations
+
+| Shape | Role A | Role B | Role C / D | PTX Instruction |
+| :--- | :---: | :---: | :---: | :--- |
+| `MMA_m16n8k16` | `F16` | `F16` | `F32` | `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` |
+| `MMA_m16n8k16` | `F16` | `F16` | `F16` | `mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16` |
+| `MMA_m16n8k8` | `TF32` | `TF32` | `F32` | `mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32` |
+| `MMA_m16n8k16` | `BF16` | `BF16` | `F32` | `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32` |
+| `MMA_m16n16k16` | `F16` | `F16` | `F32` | `mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32` (Ampere+) |
+
+> **Hardware compatibility:** `MMA_m16n8k16` with F16 is supported on all Volta+ GPUs (SM 7.0+). `BF16` requires Ampere+ (SM 8.0+). `TF32` requires Ampere+ (SM 8.0+). `MMA_m16n16k16` requires Ampere+ (SM 8.0+).
+
+### 15.3 Register Usage Per Fragment
+
+Each `Fragment` occupies a fixed number of 32-bit registers per thread in a warp:
+
+| Shape | Role | Precision | Registers per Thread |
+| :--- | :---: | :---: | :---: |
+| `MMA_m16n8k16` | A | F16 | 4 |
+| `MMA_m16n8k16` | B | F16 | 2 |
+| `MMA_m16n8k16` | C / D | F32 | 4 |
+| `MMA_m16n8k16` | C / D | F16 | 2 |
+| `MMA_m16n8k8` | A | TF32 | 4 |
+| `MMA_m16n8k8` | B | TF32 | 4 |
+| `MMA_m16n8k8` | C / D | F32 | 4 |
+| `MMA_m16n16k16` | A | F16 | 8 |
+| `MMA_m16n16k16` | B | F16 | 8 |
+| `MMA_m16n16k16` | C / D | F32 | 8 |
+
+### 15.4 `ldmatrix` Variants
+
+The `ldmatrix(src)` intrinsic selects the correct PTX `ldmatrix` variant based on the fragment role:
+
+| Fragment Role | PTX Emitted |
+| :---: | :--- |
+| A (4 registers) | `ldmatrix.sync.aligned.m8n8.x4.shared.b16 {r0,r1,r2,r3}, [ptr];` |
+| B (2 registers) | `ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {r0,r1}, [ptr];` |
+| C / D (F32, 4 regs) | Loaded via standard `ld.shared.f32` sequence — no `ldmatrix` |
+
+### 15.5 Accumulator Initialization & Store
+
+```ysu
+// Initialize to zero (emits mov.f32 %rN, 0f00000000 for each register)
+let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+
+// Store result back to global memory
+store(acc, C);
+// Emits: wmma-equivalent store or direct st.global.f32 per accumulator register
+```
+
+### 15.6 Full MMA Example (F16 → F32 accumulation)
+
+```ysu
+kernel matmul_mma(
+    A: GlobalMemory<F16>,
+    B: GlobalMemory<F16>,
+    C: GlobalMemory<F32>
+) {
+    type TileA = SmemLayout<F16, rows=16, cols=16, swizzle=330>;
+    type TileB = SmemLayout<F16, rows=16, cols=8,  swizzle=330>;
+
+    let smem_A = SharedMemory::alloc<TileA>();
+    let smem_B = SharedMemory::alloc<TileB>();
+
+    let pipe: Pipeline<stages=2, layout=TileA> = Pipeline::init();
+
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+
+    for k in 0..1024 step 16 {
+        let tx_A = cp_async(A[k], smem_A);
+        let tx_B = cp_async(B[k], smem_B);
+        pipe.wait(tx_A);
+        pipe.wait(tx_B);
+        barrier::sync();
+
+        let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(smem_A);
+        let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(smem_B);
+        let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(smem_A);
+
+        acc = mma_sync(frag_A, frag_B, frag_C);
+    }
+
+    store(acc, C);
+}
+```
+
+---
+
+## 16. `chisel {}` Block Reference
+
+`chisel {}` blocks allow direct inline PTX assembly injection anywhere in a Y program. They are the escape hatch for operations the compiler does not yet emit natively.
+
+### 16.1 Syntax
+
+```ysu
+chisel {
+    "ptx_instruction operands;";
+    "another_instruction;";
+}
+```
+
+Each line is a string literal containing a single PTX statement, terminated with a semicolon inside the string. The block is emitted verbatim into the current PTX function body at the point of the `chisel` call.
+
+### 16.2 Variable Scoping Inside `chisel`
+
+Y variables declared before the `chisel` block are accessible using their PTX register names. The naming convention follows the Y compiler's register allocator:
+
+| Y Declaration | PTX Register Name |
+| :--- | :--- |
+| `let x: F32 = ...;` | `%x` (F32 scalar) |
+| `let v: I32 = ...;` | `%v` (I32 scalar) |
+| `let ptr: ptr = ...;` | `%ptr` (u64 address register) |
+| Struct fields | Not directly accessible — load to a local variable first |
+
+```ysu
+let val: F32 = 1.0;
+let result: F32 = 0.0;
+
+chisel {
+    // %val and %result refer to the Y variables above
+    "mul.f32 %result, %val, %val;";   // result = val * val
+}
+```
+
+### 16.3 Safety Implications
+
+- `chisel {}` blocks **bypass all `@safe` guarantees**. Uninitialized reads, out-of-bounds pointer arithmetic, and data races are possible.
+- `chisel {}` is implicitly `@unsafe` — it can be used inside `@safe` blocks but the compiler does not verify the inline PTX.
+- Bank conflicts and register pressure from `chisel` instructions are **not tracked** by the compiler's static analyzers.
+
+### 16.4 Common Use Cases
+
+**Vectorized FP32 → FP16 packing** (auto-emitted by `--emit-coprocessor`, but available manually):
+```ysu
+let hi: F32 = src[2 * i + 1];
+let lo: F32 = src[2 * i];
+let packed: I32 = 0;
+
+chisel {
+    "cvt.rn.f16x2.f32 %packed, %hi, %lo;";
+}
+```
+
+**Warp shuffle reduction:**
+```ysu
+let val: F32 = thread_value;
+
+chisel {
+    "shfl.sync.down.b32 %val, %val, 16, 31, 0xffffffff;";
+    "shfl.sync.down.b32 %val, %val, 8,  31, 0xffffffff;";
+    "shfl.sync.down.b32 %val, %val, 4,  31, 0xffffffff;";
+    "shfl.sync.down.b32 %val, %val, 2,  31, 0xffffffff;";
+    "shfl.sync.down.b32 %val, %val, 1,  31, 0xffffffff;";
+}
+// val in lane 0 now holds the warp-wide sum
+```
+
+**Explicit bar.sync (rarely needed — co-processor scheduler inserts automatically):**
+```ysu
+chisel {
+    "bar.sync 0;";
+}
+```
+
+**GPU clock read for microbenchmarking:**
+```ysu
+let clock: I64 = 0;
+chisel {
+    "mov.u64 %clock, %globaltimer;";
+}
+```
+
+### 16.5 Restrictions
+
+- PTX must be valid for the target `sm_XX` architecture. Invalid PTX will cause `CUDA_ERROR_INVALID_PTX` at JIT load time.
+- Do not declare new `.reg` or `.shared` variables inside `chisel` — all registers must come from Y declarations. New PTX declarations will conflict with the compiler's symbol table.
+- `chisel {}` cannot span multiple Y scopes (no jumping into or out of `if`/`for`/`while` blocks).
+
+---
+
+## 17. Frequently Asked Questions
+
+**Do I need CUDA drivers and a GPU to use Y?**
+Not for all backends. The LLVM (`--llvm`), C (`--c`), x86-64 (`--cpu`), and ZK (`--emit-r1cs`) backends work entirely on CPU with no GPU required. The PTX (`--ptx`) and co-processor (`--emit-coprocessor`) backends require an NVIDIA GPU and CUDA toolkit installed. The hardware Sentinel probe also requires CUDA for the GPU portion, but will skip it gracefully and probe CPU-only if no GPU is detected.
+
+---
+
+**Why does the ZK backend require `@unsafe`?**
+The current ZK emitter implements SSA-style constraint generation. Mutable variable reassignment (e.g. `result = result + x` inside a loop) requires the type checker to track multiple versions of the same wire. This is currently gated behind `@unsafe` while the SSA-aware ZK emitter is being finalized. In a future release, `@safe` ZK circuits will be possible for pure functional programs.
+
+---
+
+**What is the difference between `@safe` and `@unsafe`?**
+
+| | `@safe` | `@unsafe` |
+| :--- | :--- | :--- |
+| Raw pointer access | ❌ Forbidden | ✅ Allowed |
+| Uninitialized variable reads | ❌ Compile error | ✅ Allowed |
+| `@invariant` required on loops | ✅ Yes | ❌ No |
+| `@bounds` enforced statically | ✅ Yes | ❌ Not enforced |
+| `chisel {}` PTX injection | ✅ Allowed (but bypasses checks) | ✅ Allowed |
+
+---
+
+**Can I use Y on macOS or Windows?**
+Currently Linux only. The native ELF emitter (`native_emitter.rs`) targets Linux ELF64. The LLVM backend can in principle target other platforms via `clang`, but this has not been tested. macOS/Windows support is not on the current roadmap.
+
+---
+
+**Is Y production-ready?**
+Y is a research-grade single-developer compiler under active development. The bootstrap compiler (`src/`, Rust) is stable for its documented feature set. The self-hosted compiler (`self_hosted/`, written in Y) is in progress and not the default build path. Do not use Y for production systems without thorough testing. Benchmarks are real and measured, but the toolchain has not been audited for security or hardened for adversarial inputs.
+
+---
+
+**Why is `Fragment::zero()` overlapped with RT Core traversal?**
+`Fragment::zero()` expands to a sequence of `mov.f32 %rN, 0f00000000` register moves — pure register operations with no memory accesses. The co-processor scheduler identifies these as independent of the RT Core traversal data path and schedules them to execute during the RT Core's traversal latency (~200 cycles), hiding that cost at zero additional clock budget.
+
+---
+
+**Can I mix `@safe` and `@unsafe` in the same file?**
+Yes. `@safe` and `@unsafe` are block-level annotations and can be nested. An `@unsafe` block inside an `@safe` function opts out of the safety checks for that specific block only. `@safe` inside an `@unsafe` function re-enables checks for that inner scope.
+
+---
+
+**What happens if my co-processor SMEM budget exceeds 48 KB?**
+The compiler emits a compile-time error before any PTX is generated:
+```
+error: coprocessor_smem budget (N bytes) exceeds SM limit (49152 bytes)
+hint: reduce k or dims, or split into multiple barrier stages
+```
+The limit is read from the hardware profile and varies by SM generation (48 KB on Turing/Ampere/Ada Lovelace by default, configurable up to 96 KB on Ampere+ with runtime `cudaFuncSetAttribute`).
+
+---
+
+## 18. Known Limitations
+
+| Area | Limitation |
+| :--- | :--- |
+| **Self-hosted compiler** | `self_hosted/` (written in Y) is in progress. The Rust bootstrap compiler (`src/`) is the only stable build path today. |
+| **ZK backend mutability** | Mutable variable reassignment in ZK circuits requires `@unsafe`. Immutable/functional-style circuits work in `@safe`. |
+| **`chisel {}` analysis** | The compiler does not track register pressure, bank conflicts, or data races introduced by inline PTX in `chisel` blocks. |
+| **Windows / macOS** | Not supported. Native emitter targets Linux ELF64 only. |
+| **BF16 / TF32 fragments** | Supported in PTX emission, but the co-processor scheduler does not yet model BF16/TF32 quantization passes — only F16. Manual `chisel` PTX required for BF16 quantization. |
+| **Jules PR backlog** | A backlog of automated pull requests from a connected AI agent has not been reviewed or merged due to a personal medical situation. They do not reflect the current state of `main`. |
+| **`rt_nearest_neighbor` dims** | High-dimensional embeddings (>512D) require careful SMEM budget management. The compiler enforces this statically, but very large `k` values at high dimensions may require splitting into multiple kernel launches. |
+| **ZK field** | Fixed to BLS12-381 scalar field (254-bit prime). Support for other fields (BN254, Pasta) is planned but not implemented. |
+
+---
+
+## 19. `ypm` — Y Package Manager
+
+`ypm` is Y's built-in package manager for managing Y library dependencies and distributing reusable `.ysu` modules.
+
+### 19.1 Basic Commands
+
+```bash
+# Initialize a new Y package in the current directory
+./target/release/Y ypm init
+
+# Add a dependency
+./target/release/Y ypm add <package-name>
+
+# Install all dependencies listed in Y.toml
+./target/release/Y ypm install
+
+# Build the current package
+./target/release/Y ypm build
+
+# Run the package entry point
+./target/release/Y ypm run
+```
+
+### 19.2 Package Manifest (`Y.toml`)
+
+Each Y package is described by a `Y.toml` manifest:
+
+```toml
+[package]
+name    = "my_kernel"
+version = "0.1.0"
+author  = "YSU"
+entry   = "src/main.ysu"
+
+[dependencies]
+# Local path dependency
+y_dsp = { path = "../y_dsp" }
+
+# Future: registry-based dependency (planned)
+# y_linalg = "0.2.1"
+```
+
+### 19.3 Package Structure
+
+A standard `ypm` package layout:
+
+```
+my_kernel/
+  Y.toml          Package manifest
+  src/
+    main.ysu      Entry point (fn main)
+    kernels.ysu   GPU kernel definitions
+    lib.ysu       Shared utilities
+  tests/
+    test_kernels.ysu
+  algorithms/     Reference implementations (C or Y)
+```
+
+### 19.4 Importing Modules
+
+```ysu
+// Import from a local module file
+import kernels::matmul_mma;
+import lib::ring_buffer;
+
+fn main() -> I32 {
+    // Use imported symbols
+    ring_buffer::try_enqueue(&mut rb, 42);
+    return 0;
+}
+```
+
+### 19.5 Current Status
+
+`ypm` is implemented in `src/ypm.rs` and handles local path-based dependencies. Registry-based package distribution (a central package index) is planned but not yet implemented. The current use case is organizing multi-file Y projects and sharing `.ysu` utility modules between kernels in the same workspace.
+
+---
+
 *made by YSU-SSS research*
