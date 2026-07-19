@@ -2511,11 +2511,11 @@ The current ZK emitter implements SSA-style constraint generation. Mutable varia
 
 | | `@safe` | `@unsafe` |
 | :--- | :--- | :--- |
-| Raw pointer access | ❌ Forbidden | ✅ Allowed |
-| Uninitialized variable reads | ❌ Compile error | ✅ Allowed |
-| `@invariant` required on loops | ✅ Yes | ❌ No |
-| `@bounds` enforced statically | ✅ Yes | ❌ Not enforced |
-| `chisel {}` PTX injection | ✅ Allowed (but bypasses checks) | ✅ Allowed |
+| Raw pointer access | No Forbidden | Yes Allowed |
+| Uninitialized variable reads | No Compile error | Yes Allowed |
+| `@invariant` required on loops | Yes Yes | No No |
+| `@bounds` enforced statically | Yes Yes | No Not enforced |
+| `chisel {}` PTX injection | Yes Allowed (but bypasses checks) | Yes Allowed |
 
 ---
 
@@ -2650,14 +2650,14 @@ Y supports the following primitive numeric types. GPU types are only valid in ke
 
 | Type | Bits | Signed | Range | Valid Context |
 | :---: | :---: | :---: | :--- | :---: |
-| `I8` | 8 | ✅ | −128 to 127 | CPU + GPU |
-| `I16` | 16 | ✅ | −32,768 to 32,767 | CPU + GPU |
-| `I32` | 32 | ✅ | −2,147,483,648 to 2,147,483,647 | CPU + GPU |
-| `I64` | 64 | ✅ | −9.2×10¹⁸ to 9.2×10¹⁸ | CPU + GPU |
-| `U8` | 8 | ❌ | 0 to 255 | CPU + GPU |
-| `U16` | 16 | ❌ | 0 to 65,535 | CPU + GPU |
-| `U32` | 32 | ❌ | 0 to 4,294,967,295 | CPU + GPU |
-| `U64` | 64 | ❌ | 0 to 1.8×10¹⁹ | CPU + GPU |
+| `I8` | 8 | Yes | −128 to 127 | CPU + GPU |
+| `I16` | 16 | Yes | −32,768 to 32,767 | CPU + GPU |
+| `I32` | 32 | Yes | −2,147,483,648 to 2,147,483,647 | CPU + GPU |
+| `I64` | 64 | Yes | −9.2×10¹⁸ to 9.2×10¹⁸ | CPU + GPU |
+| `U8` | 8 | No | 0 to 255 | CPU + GPU |
+| `U16` | 16 | No | 0 to 65,535 | CPU + GPU |
+| `U32` | 32 | No | 0 to 4,294,967,295 | CPU + GPU |
+| `U64` | 64 | No | 0 to 1.8×10¹⁹ | CPU + GPU |
 
 ### 20.2 Floating-Point Types
 
@@ -2743,12 +2743,12 @@ For a 32-column F32 tile (128 bytes/row = exactly 32 banks), `swizzle=330` (bina
 
 | Tile width | Element | Swizzle | Conflict-free? |
 | :---: | :---: | :---: | :---: |
-| 8 cols | F32 | `0` | ✅ (< 1 bank row) |
-| 16 cols | F32 | `8` | ✅ |
-| 32 cols | F32 | `330` | ✅ |
-| 16 cols | F16 | `0` | ✅ |
-| 32 cols | F16 | `8` | ✅ |
-| 64 cols | F16 | `330` | ✅ |
+| 8 cols | F32 | `0` |  (< 1 bank row) |
+| 16 cols | F32 | `8` |  |
+| 32 cols | F32 | `330` |  |
+| 16 cols | F16 | `0` |  |
+| 32 cols | F16 | `8` |  |
+| 64 cols | F16 | `330` |  |
 
 **Methods:**
 
