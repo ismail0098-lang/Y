@@ -1847,11 +1847,27 @@ Y includes a standalone ZK circuit compiler backend that generates R1CS (Rank-1 
 
 ### 12.1 What is R1CS?
 
-An R1CS system encodes a computation as a set of quadratic constraints of the form:
+An R1CS system encodes a computation as a set of constraints. Each constraint has the form:
 
-$$\mathbf{a} \cdot \mathbf{w} \;\times\; \mathbf{b} \cdot \mathbf{w} = \mathbf{c} \cdot \mathbf{w}$$
+```
+(A · w) × (B · w) = (C · w)
+```
 
-where **w** is a witness vector. A satisfying assignment to **w** proves that the computation was performed correctly without revealing the inputs. R1CS is the standard format consumed by ZK proving systems like Groth16, PLONK, and Nova.
+where `w` is a **witness vector** (the private inputs and intermediate values), and `A`, `B`, `C` are sparse coefficient vectors. A satisfying assignment to `w` proves the computation was performed correctly without revealing the inputs. R1CS is the standard format consumed by ZK proving systems like Groth16, PLONK, and Nova.
+
+For example, multiplying two values `x * y = z` becomes a single constraint:
+
+```
+(1·x) × (1·y) = (1·z)
+```
+
+A dot product `a[0]*b[0] + a[1]*b[1] = result` requires an intermediate wire per multiplication:
+
+```
+(1·a[0]) × (1·b[0]) = (1·_mul_0)
+(1·a[1]) × (1·b[1]) = (1·_mul_1)
+(1·_mul_0 + 1·_mul_1) × (1·1) = (1·result)
+```
 
 ### 12.2 Writing a ZK Circuit in Y
 
