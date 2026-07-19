@@ -5,6 +5,43 @@ Y is a hardware-sentient, low-level systems programming language designed for hi
 
 ---
 
+## Table of Contents
+
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Step 1: Build the Compiler](#step-1-build-the-compiler)
+  - [Step 2: Run the Hardware Sentinel Probe](#step-2-run-the-hardware-sentinel-probe)
+  - [Step 3: Write Your First Y Program](#step-3-write-your-first-y-program)
+  - [Step 4: Write a Safe Block with Loop Invariant](#step-4-write-a-safe-block-with-loop-invariant)
+  - [Step 5: Write a GPU Kernel (PTX backend)](#step-5-write-a-gpu-kernel-ptx-backend)
+  - [Step 6: Use the Dual-Accelerator Co-Processor Pipeline](#step-6-use-the-dual-accelerator-co-processor-pipeline)
+  - [Quick Reference: Compiler Flags](#quick-reference-compiler-flags)
+- [§1 — Introduction & Design Philosophy](#1-introduction--design-philosophy)
+- [§2 — Compiler Pipeline Architecture](#2-compiler-pipeline-architecture)
+- [§3 — Formal EBNF Grammar Specification](#3-formal-ebnf-grammar-specification)
+- [§4 — Generics and Monomorphization](#4-generics-and-monomorphization)
+- [§5 — Type System & Memory Spaces](#5-type-system--memory-spaces)
+- [§6 — Compile-Time Verification & Analysis](#6-compile-time-verification--analysis)
+- [§7 — Emitter Lowering & Code Generation](#7-emitter-lowering--code-generation)
+- [§8 — Standard Library Reference](#8-standard-library-reference)
+- [§9 — Exhaustive Reference: Language Attributes (Decorators)](#9-exhaustive-reference-language-attributes-decorators)
+- [§10 — Complete Code Examples](#10-complete-code-examples)
+- [§11 — Hardware-Sentient Dual-Accelerator Co-Processing Pipeline](#11-hardware-sentient-dual-accelerator-co-processing-pipeline)
+- [§12 — Zero-Knowledge Circuit Backend (R1CS)](#12-zero-knowledge-circuit-backend-r1cs)
+- [§13 — CUDA-to-Y Migration Guide](#13-cuda-to-y-migration-guide)
+- [§14 — Performance Tuning Guide](#14-performance-tuning-guide)
+- [§15 — Fragment & MMA Type Reference](#15-fragment--mma-type-reference)
+- [§16 — `chisel {}` Block Reference](#16-chisel--block-reference)
+- [§17 — Frequently Asked Questions](#17-frequently-asked-questions)
+- [§18 — Known Limitations](#18-known-limitations)
+- [§19 — `ypm` Package Manager](#19-ypm--y-package-manager)
+- [§20 — Numeric Types Reference](#20-numeric-types-reference)
+- [§21 — `SmemLayout` & `Pipeline` API Reference](#21-smemlayout--pipeline-api-reference)
+- [§22 — Operator Precedence](#22-operator-precedence)
+- [§23 — Error Code Reference](#23-error-code-reference)
+
+---
+
 ## Getting Started
 
 This section gets you from zero to a running Y program in a few steps. If you want the full language spec, skip ahead to Section 1.
@@ -2602,6 +2639,286 @@ fn main() -> I32 {
 ### 19.5 Current Status
 
 `ypm` is implemented in `src/ypm.rs` and handles local path-based dependencies. Registry-based package distribution (a central package index) is planned but not yet implemented. The current use case is organizing multi-file Y projects and sharing `.ysu` utility modules between kernels in the same workspace.
+
+---
+
+## 20. Numeric Types Reference
+
+Y supports the following primitive numeric types. GPU types are only valid in kernel/PTX contexts; CPU types are valid everywhere.
+
+### 20.1 Integer Types
+
+| Type | Bits | Signed | Range | Valid Context |
+| :---: | :---: | :---: | :--- | :---: |
+| `I8` | 8 | ✅ | −128 to 127 | CPU + GPU |
+| `I16` | 16 | ✅ | −32,768 to 32,767 | CPU + GPU |
+| `I32` | 32 | ✅ | −2,147,483,648 to 2,147,483,647 | CPU + GPU |
+| `I64` | 64 | ✅ | −9.2×10¹⁸ to 9.2×10¹⁸ | CPU + GPU |
+| `U8` | 8 | ❌ | 0 to 255 | CPU + GPU |
+| `U16` | 16 | ❌ | 0 to 65,535 | CPU + GPU |
+| `U32` | 32 | ❌ | 0 to 4,294,967,295 | CPU + GPU |
+| `U64` | 64 | ❌ | 0 to 1.8×10¹⁹ | CPU + GPU |
+
+### 20.2 Floating-Point Types
+
+| Type | Bits | Exponent | Mantissa | Hardware | Notes |
+| :---: | :---: | :---: | :---: | :--- | :--- |
+| `F16` | 16 | 5 | 10 | Volta+ (SM 7.0+) | Half precision. Tensor Core input type. |
+| `BF16` | 16 | 8 | 7 | Ampere+ (SM 8.0+) | Brain float. Same range as F32, less precision. |
+| `TF32` | 19 | 8 | 10 | Ampere+ (SM 8.0+) | TensorFloat-32. Tensor Core accumulator intermediate. |
+| `F32` | 32 | 8 | 23 | All | Single precision. Default GPU accumulator type. |
+| `F64` | 64 | 11 | 52 | All | Double precision. High latency on consumer GPUs. |
+
+### 20.3 Fixed-Point Types
+
+| Type | Total Bits | Integer Bits | Fractional Bits | Valid Context |
+| :---: | :---: | :---: | :---: | :---: |
+| `Q32.32` | 64 | 32 | 32 | CPU only |
+| `Q16.48` | 64 | 16 | 48 | CPU only |
+
+Fixed-point types are used with `@ZeroDrift` for verified drift-free accumulation. They are not supported in GPU kernels.
+
+### 20.4 Type Casting
+
+Explicit casts use the `as` keyword:
+
+```ysu
+let x: I32 = 42;
+let y: F32 = x as F32;    // I32 -> F32 widening
+let z: I16 = x as I16;    // I32 -> I16 narrowing (may truncate)
+let h: F16 = y as F16;    // F32 -> F16 (precision loss, no error)
+```
+
+Implicit coercion **does not happen** in Y. Mixing types in expressions is a compile error:
+
+```
+error[E0308]: mismatched types — use explicit `as` cast
+```
+
+### 20.5 GPU Type Usage Rules
+
+| Context | Allowed Types |
+| :--- | :--- |
+| Fragment A / B (Tensor Core input) | `F16`, `BF16`, `TF32` |
+| Fragment C / D (Tensor Core accumulator) | `F32`, `F16` |
+| RT Core outputs (`rt_nearest_neighbor`) | `I32` (neighbor indices) + implicit `F32` distances in SMEM |
+| `@ZeroDrift` accumulator | `Q32.32`, `Q16.48` |
+| General kernel variables | `F32`, `I32`, `U32`, `F64`, `I64`, `U64` |
+| `@atomic` fields | `I32`, `U32`, `U64`, `bool` |
+
+---
+
+## 21. `SmemLayout` & `Pipeline` API Reference
+
+### 21.1 `SmemLayout<T, rows, cols, swizzle>`
+
+`SmemLayout` defines the physical layout of a tile in GPU shared memory, including optional bank-conflict-eliminating swizzle.
+
+**Syntax:**
+```ysu
+type MyTile = SmemLayout<ElementType, rows=R, cols=C, swizzle=S>;
+let buf = SharedMemory::alloc<MyTile>();
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+| :--- | :---: | :--- |
+| `ElementType` | Type | Scalar element type stored per cell (`F16`, `F32`, etc.) |
+| `rows` | const I32 | Number of rows in the tile |
+| `cols` | const I32 | Number of columns in the tile |
+| `swizzle` | const I32 | XOR swizzle mask applied to column index to eliminate bank conflicts. `0` = no swizzle. |
+
+**How swizzle works:**
+
+GPU shared memory has 32 banks of 4 bytes each. A read stride equal to the bank count causes all 32 threads in a warp to hit the same bank (32-way serialization). The swizzle parameter XORs row bits into the column address:
+
+```
+physical_col = logical_col XOR ((row >> shift) & swizzle_mask)
+```
+
+For a 32-column F32 tile (128 bytes/row = exactly 32 banks), `swizzle=330` (binary `101001010`) eliminates conflicts. The Y compiler validates the conflict-free property statically.
+
+**Common swizzle values:**
+
+| Tile width | Element | Swizzle | Conflict-free? |
+| :---: | :---: | :---: | :---: |
+| 8 cols | F32 | `0` | ✅ (< 1 bank row) |
+| 16 cols | F32 | `8` | ✅ |
+| 32 cols | F32 | `330` | ✅ |
+| 16 cols | F16 | `0` | ✅ |
+| 32 cols | F16 | `8` | ✅ |
+| 64 cols | F16 | `330` | ✅ |
+
+**Methods:**
+
+```ysu
+// Allocate in shared memory (static allocation, size known at compile time)
+let smem_A = SharedMemory::alloc<TileA>();
+
+// Index directly
+smem_A[row * cols + col] = val;
+```
+
+---
+
+### 21.2 `Pipeline<stages, layout>`
+
+`Pipeline` manages multi-stage asynchronous memory transfer pipelines, overlapping global→shared memory loads with compute.
+
+**Syntax:**
+```ysu
+let pipe: Pipeline<stages=N, layout=MyLayout> = Pipeline::init();
+```
+
+**Parameters:**
+
+| Parameter | Type | Description |
+| :--- | :---: | :--- |
+| `stages` | const I32 | Number of pipeline stages (typically 2 for double-buffering, 3+ for deeper overlap) |
+| `layout` | SmemLayout | The shared memory layout type used by all transfers in this pipeline |
+
+**Methods:**
+
+| Method | Description |
+| :--- | :--- |
+| `Pipeline::init()` | Initializes the pipeline and allocates internal stage tracking state |
+| `pipe.wait(tx)` | Waits for a specific `Transfer` token to complete. Statically consumes the linear obligation. |
+
+**Transfer type:**
+```ysu
+let tx: Transfer<Src, Dst, Async<stage_idx>, bytes> = cp_async(src_ptr, dst_buf);
+```
+
+| Field | Options | Description |
+| :--- | :--- | :--- |
+| `Src` | `Global` | Source memory space |
+| `Dst` | `Shared` | Destination memory space |
+| `Async<N>` | Stage index 0..stages-1 | Which pipeline stage this transfer belongs to |
+| `bytes` | const I32 | Number of bytes to copy (must be 4, 8, or 16 for hardware cp.async) |
+
+**Full double-buffered pipeline example:**
+```ysu
+type TileA = SmemLayout<F16, rows=16, cols=16, swizzle=330>;
+
+kernel double_buffered(A: GlobalMemory<F16>, out: GlobalMemory<F32>, N: I32) {
+    let smem_A0 = SharedMemory::alloc<TileA>();  // Stage 0 buffer
+    let smem_A1 = SharedMemory::alloc<TileA>();  // Stage 1 buffer
+
+    let pipe: Pipeline<stages=2, layout=TileA> = Pipeline::init();
+
+    // Prefetch first block into stage 0
+    let tx0 = cp_async(A[0], smem_A0);
+    pipe.wait(tx0);
+    barrier::sync();
+
+    for k in 1..N {
+        // Prefetch next block while processing current
+        let tx_next = if k % 2 == 1 {
+            cp_async(A[k * 256], smem_A1)
+        } else {
+            cp_async(A[k * 256], smem_A0)
+        };
+
+        // Process current block
+        let current_buf = if k % 2 == 1 { smem_A0 } else { smem_A1 };
+        // ... compute on current_buf ...
+
+        pipe.wait(tx_next);
+        barrier::sync();
+    }
+}
+```
+
+**`pipe.wait(tx)` vs `barrier::sync()`:**
+
+| | `pipe.wait(tx)` | `barrier::sync()` |
+| :--- | :--- | :--- |
+| Scope | Waits for one specific transfer | Synchronizes all threads in the block |
+| PTX emitted | `cp.async.wait_group N` | `bar.sync 0` |
+| Required before | Reading the destination buffer of `tx` | Any shared memory access after a write |
+| Linear obligation | Consumes the `Transfer` token (required by type checker) | No token involved |
+
+---
+
+## 22. Operator Precedence
+
+Operators are listed from **highest** (evaluated first) to **lowest** (evaluated last). Operators at the same level associate left-to-right unless noted.
+
+| Precedence | Operator(s) | Description | Associativity |
+| :---: | :--- | :--- | :---: |
+| 1 (highest) | `()` `[]` `::` `.` | Grouping, indexing, path, field access | Left |
+| 2 | `-` `!` `~` `*` `&` | Unary negation, logical NOT, bitwise NOT, deref, address-of | Right |
+| 3 | `as` | Type cast | Left |
+| 4 | `*` `/` `%` | Multiply, divide, modulo | Left |
+| 5 | `+` `-` | Add, subtract | Left |
+| 6 | `<<` `>>` | Bitwise left/right shift | Left |
+| 7 | `&` | Bitwise AND | Left |
+| 8 | `^` | Bitwise XOR | Left |
+| 9 | `\|` | Bitwise OR | Left |
+| 10 | `==` `!=` `<` `>` `<=` `>=` | Comparison | Left |
+| 11 | `&&` | Logical AND | Left |
+| 12 | `\|\|` | Logical OR | Left |
+| 13 (lowest) | `=` `+=` `-=` `*=` `/=` | Assignment, compound assignment | Right |
+
+**Examples:**
+
+```ysu
+// Precedence 4 before 5: multiplication binds tighter than addition
+let a: I32 = 2 + 3 * 4;      // = 2 + 12 = 14  (not 20)
+
+// Precedence 6 before 7: shift binds tighter than bitwise AND
+let b: I32 = 1 & 3 << 2;     // = 1 & 12 = 0   (not 4)
+
+// Use parentheses to override:
+let c: I32 = (2 + 3) * 4;    // = 20
+
+// as (precedence 3) binds tighter than arithmetic:
+let d: F32 = 1 + x as F32;   // = 1 + (x as F32), not (1 + x) as F32
+```
+
+> **Note:** The `*` symbol appears at precedence levels 2 (unary dereference) and 4 (binary multiply). The parser distinguishes them by context — unary `*` requires a prefix position.
+
+---
+
+## 23. Error Code Reference
+
+All compiler error codes, their meanings, and the section where they are demonstrated.
+
+### Compile-Time Errors
+
+| Code | Category | Meaning | See |
+| :--- | :--- | :--- | :---: |
+| `E0308` | Type mismatch | Expression operands have incompatible types; explicit `as` cast required | §6.1 |
+| `L0001` | Linear obligation | A `Transfer` token was not consumed by `pipe.wait()` before its buffer was read (data race) | §6.2 |
+| `B0001` | Bank conflict | A `SmemLayout` or `ldmatrix` access stride causes a warp-wide shared memory bank conflict | §6.3 |
+| `S0002` | Safety violation | A variable was declared but never assigned before being read inside a `@safe` block | §6.4 |
+| `B0002` | Bounds violation | A `@bounds(min, max)` annotation was violated by a constant index at compile time | §6.5 |
+| `D0001` | Drift overflow | A `@ZeroDrift` accumulator may overflow the fixed-point range given the loop bounds | §14.8 |
+| `R0001` | Require unsatisfied | A `@require(feature >= N)` hardware requirement is not met by the current `.ysu_hw_profile` | §9 |
+
+### Co-Processor Errors
+
+| Code | Meaning | See |
+| :--- | :--- | :---: |
+| `SMEM_OVERFLOW` | `coprocessor_smem` budget exceeds SM limit (48 KB default) | §11.6, §17 |
+| `CUDA_ERROR_INVALID_PTX` | Invalid PTX JIT compilation — usually from incorrect `.shared` declarations or non-ASCII characters | §11.2 |
+
+### Runtime / JIT Errors
+
+| Error | Cause | Fix |
+| :--- | :--- | :--- |
+| `CUDA_ERROR_INVALID_PTX` | Generated PTX violates SM architecture constraints | Check `chisel {}` PTX for target SM compatibility; rebuild with correct `--emit-coprocessor` |  
+| `CUDA_ERROR_ILLEGAL_ADDRESS` | Shared memory access out of allocated range | Verify `SmemLayout` dimensions and `coprocessor_smem` offsets |  
+| `CUDA_ERROR_LAUNCH_FAILED` | Kernel launch with wrong grid/block dimensions | Check thread count assumptions in co-processor benchmarks |  
+
+### Warnings
+
+| Code | Meaning | Action |
+| :--- | :--- | :--- |
+| `B0001` | Bank conflict detected (warning, not error) | Add `swizzle=330` to `SmemLayout` or restructure access pattern |
+| `W0001` | `chisel {}` block detected inside `@safe` scope | Review inline PTX manually — safety guarantees do not apply |
+| `W0002` | Fragment register count exceeds 30 live variables | Interleave `store()` calls to reduce register pressure |
 
 ---
 
