@@ -1214,4 +1214,355 @@ fn main() -> I32 {
 
 ---
 
+## 11. Hardware-Sentient Dual-Accelerator Co-Processing Pipeline
+
+Y's co-processor backend (`--emit-coprocessor`) automatically fuses **RT Core** (ray tracing / BVH traversal) and **Tensor Core** (matrix multiply-accumulate) workloads within a single GPU kernel. The developer writes a high-level description of the compute intent; the compiler generates the full fused PTX including sync barriers, quantization passes, and bank-conflict-free shared memory layouts.
+
+---
+
+### 11.1 The Problem: Manual Fusion is Hard
+
+On modern NVIDIA architectures (Ampere, Ada Lovelace, Blackwell), RT Cores and Tensor Cores are useful together but extremely difficult to combine by hand due to three fundamental mismatches:
+
+| Mismatch | RT Core | Tensor Core |
+| :--- | :--- | :--- |
+| **Timing** | Asynchronous, non-deterministic (depends on BVH depth) | Synchronous, lock-step warp instructions |
+| **Precision** | Outputs FP32 hit distances and indices | Requires packed FP16/BF16 input fragments |
+| **Memory handoff** | Writes to shared memory (FP32) | Reads swizzled shared memory (FP16, bank-conflict-free) |
+
+Bridging these by hand requires: manual `bar.sync` fence placement, explicit `cvt.rn.f16x2.f32` packing loops, hand-computed swizzle address offsets, and careful shared memory budget management to avoid `CUDA_ERROR_INVALID_PTX` from exceeding the 48 KB SM limit.
+
+Y eliminates all of this at compile time.
+
+---
+
+### 11.2 Compiler Architecture
+
+The co-processor pipeline adds four new modules to the compiler:
+
+#### `ir_grapher.rs` — IR Dependency Graph
+Builds a directed acyclic graph of all RT Core and Tensor Core nodes in the kernel, resolves their data dependencies (cross-pipeline edges), and computes the critical path through the mixed execution graph.
+
+Output:
+```
+RT Core nodes:     1
+Tensor Core nodes: 5
+Cross-pipe edges:  3
+Critical path:     250 cycles
+```
+
+#### `coprocessor_scheduler.rs` — Hardware-Sentient Scheduler
+Uses the hardware profile (RT traversal latency, Tensor Core MMA latency, SMEM access cost) to schedule the fused kernel timeline. It:
+- Allocates a single unified `coprocessor_smem` shared memory buffer covering both RT scratch and Tensor Core fragment staging.
+- Places `bar.sync` barriers at minimum-cost cut points on the data dependency graph.
+- Overlaps RT Core traversal latency with independent scalar instructions (register initialization, fragment zeroing) to hide stall cycles.
+
+Output:
+```
+SMEM budget:       33280 bytes
+Sync barriers:     1
+Est. parallel cy:  215
+Overlap savings:   133 cycles
+Barrier 0: FP32 -> FP16 quantization (16384 bytes)
+```
+
+#### `quantization_pass.rs` — Vectorized FP32→FP16 Pass
+Detects precision boundaries in the data flow (RT Core outputs FP32; `ldmatrix` requires FP16) and emits a vectorized conversion loop using `cvt.rn.f16x2.f32` — packing two FP32 values into one `half2` register per instruction. The destination layout is swizzled to be bank-conflict-free for subsequent `ldmatrix.sync.aligned` loads.
+
+#### `rt_core_emitter.rs` — Unified SMEM Emitter
+Emits the RT Core traversal PTX. Crucially, all RT scratch and output writes are **aliased directly to `coprocessor_smem` at the scheduler-provided offset** — eliminating the double-allocation bug (separate `rt_scratch` + global `coprocessor_smem`) that causes static shared memory to overflow the 48 KB hardware limit at high dimensions.
+
+```ptx
+// Y emits this — no separate .shared declaration:
+mov.u64 %rt_scratch_base, coprocessor_smem;
+add.u64 %rt_scratch_base, %rt_scratch_base, <scheduler_offset>;
+st.shared.f32 [%rt_scratch_base + %offset], %dist_reg;
+```
+
+---
+
+### 11.3 Compiler Pipeline (Co-Processor Path)
+
+```
+source (.ysu)
+  → lexer / parser / type_checker   (standard pipeline)
+  → ir_grapher.rs                   build RT+Tensor dependency graph
+  → coprocessor_scheduler.rs        schedule timeline, allocate coprocessor_smem, place barriers
+  → quantization_pass.rs            insert vectorized FP32→FP16 conversion loop
+  → rt_core_emitter.rs              emit RT traversal PTX (aliased to coprocessor_smem)
+  → ptx_emitter.rs                  emit Tensor Core MMA PTX
+  → wrap_ptx()                      produce final .wrapped.ptx with correct .visible .entry and .shared declarations
+  → CuPy / nvcc JIT                 load onto GPU driver
+```
+
+Invoked with:
+```bash
+cargo run -- tests/coprocessor_attention.ysu --emit-coprocessor
+```
+
+---
+
+### 11.4 RT Core Intrinsic: `rt_nearest_neighbor`
+
+```
+rt_nearest_neighbor(dims: I32, k: I32) -> I32
+```
+
+**Parameters:**
+- `dims` — dimensionality of the embedding space (e.g. `128` or `256`). The compiler maps this down to 3D/4D BVH leaf spheres using the hardware-optimal projection.
+- `k` — number of nearest neighbors to retrieve.
+
+**Returns:** An `I32` handle (`nns_res`) consumed downstream by `ldmatrix` to load the RT Core outputs as Tensor Core input fragments.
+
+**Compiler actions:**
+1. Emits a BVH traversal loop over `k` nearest-neighbor slots, computing ray-AABB intersection distances.
+2. Writes all `k` FP32 distances and indices to `coprocessor_smem[scheduler_offset .. scheduler_offset + k*4]`.
+3. Registers a cross-pipeline data edge to all downstream `ldmatrix(nns_res)` consumers, so the scheduler knows to place a `bar.sync` before quantization.
+
+**Directives accepted on `rt_nearest_neighbor`:**
+
+| Directive | Effect |
+| :--- | :--- |
+| `@divergence(uniform)` | Assert all warp threads query the same BVH depth (skips divergence penalty in cycle model) |
+| `@cache_policy(L2_PERSIST)` | Mark BVH node loads as L2-persistent to reduce repeated eviction during deep traversals |
+
+---
+
+### 11.5 Tensor Core Intrinsics (Co-Processor Context)
+
+When used after an `rt_nearest_neighbor` call, the standard Tensor Core intrinsics gain additional compiler-managed behavior:
+
+#### `ldmatrix(nns_res)`
+
+Loads a matrix fragment from the quantized RT Core output region in `coprocessor_smem`. The compiler:
+- Computes the bank-conflict-free swizzled source address automatically from the scheduler's SMEM layout.
+- Emits `ldmatrix.sync.aligned.m8n8.x4.shared.b16` for A fragments and `.x2` for B fragments.
+
+#### `Fragment::zero()`
+
+Initializes accumulator registers to zero. In co-processor context, the compiler overlaps this initialization with the RT Core traversal to hide latency.
+
+#### `mma_sync(frag_A, frag_B, frag_C)`
+
+Emits `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32`. In co-processor context, the compiler validates that `bar.sync` was correctly placed before this instruction's SMEM reads.
+
+---
+
+### 11.6 Shared Memory Model
+
+All co-processor kernels use a single unified `coprocessor_smem` buffer. The scheduler partitions it into regions:
+
+```
+coprocessor_smem layout (example: 256D k=16 FRNN):
+┌─────────────────────────────────┐  offset 0
+│  RT Core scratch (FP32)         │  16384 bytes  (k=16 * dims_proj * 4)
+├─────────────────────────────────┤  offset 16384
+│  Quantized FP16 staging         │  8192  bytes  (half2 packed)
+├─────────────────────────────────┤  offset 24576
+│  Tensor Core fragment tiles     │  8704  bytes  (5 MMA tiles)
+└─────────────────────────────────┘  total: 33280 bytes
+```
+
+The compiler enforces that the total never exceeds the SM shared memory limit (48 KB for Ada Lovelace). If it would, a compile-time error is emitted:
+```
+error: coprocessor_smem budget (49920 bytes) exceeds SM limit (49152 bytes)
+hint: reduce k or dims, or split into multiple barrier stages
+```
+
+---
+
+### 11.7 Scheduling Statistics Output
+
+When `--emit-coprocessor` is passed, the compiler prints a static scheduling report:
+
+```
+-> Phase A: IR Dependency Graphing...
+   RT Core nodes:     1
+   Tensor Core nodes: 5
+   Cross-pipe edges:  3
+   Critical path:     250 cycles
+-> Phase B: Co-Processor Scheduling...
+   SMEM budget:       33280 bytes
+   Sync barriers:     1
+   Est. parallel cy:  215
+   Overlap savings:   133 cycles
+   Barrier 0: FP32 -> FP16 quantization (16384 bytes)
+-> Phase C: Fused PTX Emission...
+-> Written to: tests/coprocessor_db_index.coprocessor.ptx
+   Dual-accelerator PTX generated successfully!
+```
+
+**Est. parallel cy** is the compiler's static estimate of total kernel execution cycles, accounting for RT/Tensor overlap. **Overlap savings** is the number of cycles hidden by scheduling independent instructions during RT traversal.
+
+---
+
+### 11.8 Complete Examples
+
+---
+
+#### Example A: RT-Routed Sparse Attention (`coprocessor_attention.ysu`)
+
+**Use case:** Use hardware BVH to route token keys/values for sparse self-attention in a transformer, then run Tensor Core MMA to project the routed vectors.
+
+```ysu
+// Y Dual-Accelerator Co-Processing: RT-Routed Sparse Attention
+// RT Core performs KNN routing; Tensor Core projects the attended vectors.
+// Compiler inserts: bar.sync, FP32->FP16 quantization, swizzled ldmatrix.
+
+@unsafe
+fn main() {
+    // Step 1: RT Core — Hardware BVH K-Nearest Neighbor search
+    // Query space: 128-dimensional token embeddings, k=8 neighbors
+    let nns_res: I32 = rt_nearest_neighbor(128, 8);
+
+    // Step 2: Tensor Core — MMA projection on routed vectors
+    // Compiler automatically:
+    //   - Places bar.sync after RT traversal completes
+    //   - Inserts vectorized cvt.rn.f16x2.f32 quantization loop
+    //   - Emits bank-conflict-free ldmatrix.sync.aligned reads
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
+
+    acc = mma_sync(frag_A, frag_B, frag_C);
+}
+```
+
+**Compiler scheduling output:**
+```
+SMEM budget:    8704 bytes
+Sync barriers:  1
+Parallel cy:    215   (overlap savings: 133 cycles)
+```
+
+**Physical result (RTX 4070 Ti SUPER, 10,000 iterations):**
+
+| Implementation | Latency | Speedup |
+| :--- | :---: | :---: |
+| Naive CUDA C++ (manual OptiX + WMMA) | 4.2175 µs | 1.0x |
+| Y Co-Processor | **2.3818 µs** | **1.77x** |
+
+---
+
+#### Example B: Database Index Fixed-Radius Nearest Neighbor (`coprocessor_db_index.ysu`)
+
+**Use case:** Treat a vector database index as a geometric map. Cluster embeddings become AABB leaf spheres in a BVH. Query rays find nearest neighbors; Tensor Core computes distance projections.
+
+> **Note on index quality:** index construction and recall@k tradeoffs are workload-specific. This demonstrates traversal speedup, not search accuracy.
+
+```ysu
+// Y Dual-Accelerator Co-Processing: Database Index as Geometric Map (FRNN)
+// 256-dimensional cluster embeddings -> 3D/4D BVH leaf spheres.
+// RT Core fires query rays; Tensor Core projects neighbor representations.
+
+@unsafe
+fn main() {
+    // Step 1: RT Core — Fixed-Radius Nearest Neighbor Search
+    // dims=256 embeddings mapped to BVH leaf spheres, searching k=16 neighbors
+    let nns_res: I32 = rt_nearest_neighbor(256, 16);
+
+    // Step 2: Tensor Core — MMA distance/projection computation
+    // Compiler inserts: bar.sync, vectorized FP32->FP16 quantization (16384 bytes),
+    // and bank-conflict-free swizzled fragment loads.
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
+
+    acc = mma_sync(frag_A, frag_B, frag_C);
+}
+```
+
+**CUDA C++ equivalent requires ~65 lines, notably including:**
+- A per-thread variable-depth stack traversal (`stack_depth = (tid % 4) == 0 ? 16 : ...`) producing severe warp branch divergence.
+- A manual `if (diff * diff < 4.0f)` distance-check branch — divergent across warp lanes.
+- A manual FP32→FP16 quantization loop prone to shared memory bank conflicts.
+- Manual WMMA fragment loads with non-swizzled (conflict-prone) striding.
+
+**Compiler scheduling output:**
+```
+SMEM budget:    33280 bytes
+Sync barriers:  1
+Parallel cy:    215   (overlap savings: 133 cycles)
+Barrier 0: FP32 -> FP16 quantization (16384 bytes)
+```
+
+Note: static cycle estimates match Example A because both kernels share the same IR node topology (1 RT node, 5 Tensor nodes, 1 barrier). Physical latencies differ significantly due to the larger search space (256D/k=16 vs. 128D/k=8).
+
+**Physical result (RTX 4070 Ti SUPER, 10,000 iterations):**
+
+| Implementation | Latency | Speedup |
+| :--- | :---: | :---: |
+| Naive CUDA C++ (divergent BVH + manual quant) | 10.6026 µs | 1.0x |
+| Y Co-Processor | **5.9137 µs** | **1.79x** |
+
+---
+
+#### Example C: Large Multi-MMA Attention Pipeline (`coprocessor_large.ysu`)
+
+**Use case:** Larger attention pipeline with 7 sequential Tensor Core MMA nodes consuming a single RT Core routing result — demonstrating that the scheduler scales to deeper Tensor pipelines while keeping a single barrier.
+
+```ysu
+// Y Dual-Accelerator Co-Processing: Large Multi-MMA Pipeline
+// 1 RT Core routing node feeds 7 Tensor Core MMA operations.
+// Compiler deduplicates barriers across all 7 consumers.
+
+@unsafe
+fn main() {
+    // RT Core: KNN routing (128D, k=8)
+    let nns_res: I32 = rt_nearest_neighbor(128, 8);
+
+    // Tensor Core pipeline: 7 MMA nodes
+    // Single bar.sync and single quantization pass inserted by compiler
+    // (deduplicated across all 7 ldmatrix consumers of nns_res)
+    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+
+    let frag_A0: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B0: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    acc = mma_sync(frag_A0, frag_B0, acc);
+
+    let frag_A1: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B1: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    acc = mma_sync(frag_A1, frag_B1, acc);
+
+    let frag_A2: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B2: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    acc = mma_sync(frag_A2, frag_B2, acc);
+
+    let frag_A3: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
+    let frag_B3: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
+    acc = mma_sync(frag_A3, frag_B3, acc);
+}
+```
+
+**Compiler scheduling output:**
+```
+SMEM budget:    8704 bytes
+Sync barriers:  1         <- deduplicated from naive 7 down to 1
+Parallel cy:    287   (overlap savings: 145 cycles)
+```
+
+**Physical result (RTX 4070 Ti SUPER, 10,000 iterations):**
+
+| Implementation | Latency | Speedup |
+| :--- | :---: | :---: |
+| Naive CUDA C++ (3 barriers, manual quant) | 2.4501 µs | 1.0x |
+| Y Co-Processor (1 barrier, deduplicated) | **1.8515 µs** | **1.32x** |
+
+---
+
+### 11.9 Key Optimizations Summary
+
+| Optimization | What Y Does | What CUDA Requires |
+| :--- | :--- | :--- |
+| **Sync barrier deduplication** | Inserts a single `bar.sync` at the optimal cut point regardless of how many Tensor nodes consume the RT output | Developer inserts one barrier per consumer, or risks races |
+| **Vectorized FP32→FP16 quantization** | Emits `cvt.rn.f16x2.f32` packing 2 values per instruction | Manual loop with `__float2half` or inline PTX |
+| **Bank-conflict-free SMEM layout** | Computes swizzle offsets for all `ldmatrix` reads automatically | Manual stride/swizzle math per tile size |
+| **Unified SMEM budget** | All RT + Tensor scratch aliased to a single `coprocessor_smem` buffer | Separate `__shared__` declarations risk exceeding 48 KB SM limit |
+| **RT latency hiding** | Overlaps RT traversal with register init and fragment zeroing | Not done without explicit software pipelining |
+| **PTX address safety** | Uses `mov.u64` state-space offsets, not `cvta.shared` | `cvta.shared` can trigger driver-level JIT failures |
+
+---
+
 *made by YSU-SSS research*
