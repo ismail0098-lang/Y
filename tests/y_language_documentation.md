@@ -2558,7 +2558,6 @@ The limit is read from the hardware profile and varies by SM generation (48 KB o
 | **`chisel {}` analysis** | The compiler does not track register pressure, bank conflicts, or data races introduced by inline PTX in `chisel` blocks. |
 | **Windows / macOS** | Not supported. Native emitter targets Linux ELF64 only. |
 | **BF16 / TF32 fragments** | Supported in PTX emission, but the co-processor scheduler does not yet model BF16/TF32 quantization passes — only F16. Manual `chisel` PTX required for BF16 quantization. |
-| **Jules PR backlog** | A backlog of automated pull requests from a connected AI agent has not been reviewed or merged due to a personal medical situation. They do not reflect the current state of `main`. |
 | **`rt_nearest_neighbor` dims** | High-dimensional embeddings (>512D) require careful SMEM budget management. The compiler enforces this statically, but very large `k` values at high dimensions may require splitting into multiple kernel launches. |
 | **ZK field** | Fixed to BLS12-381 scalar field (254-bit prime). Support for other fields (BN254, Pasta) is planned but not implemented. |
 
