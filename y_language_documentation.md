@@ -3294,14 +3294,14 @@ Y's Static Under-Constrained Signal Analyzer operates directly within the semant
 
 ```mermaid
 flowchart TD
-    A["@hint Block Output / Witness Input"] -->|Tag as TaintedUnconstrained| B["Taint Tracking Engine (constraint_env)"]
-    B -->|Arithmetic Propagation| C{"Expr Evaluation (Tainted-If-Either)"}
-    C -->|Merge Origin Spans| B
+    A["@hint Block Output / Witness Input"] -->|"Tag as TaintedUnconstrained"| B["Taint Tracking Engine (constraint_env)"]
+    B -->|"Arithmetic Propagation"| C{"Expr Evaluation (Tainted-If-Either)"}
+    C -->|"Merge Origin Spans"| B
     B -->|"Equality Assertion (c == a)"| D["Verification Transition to Verified"]
-    B -->|@zk_allow_unconstrained| E["DeferredObligation (Tracked to Top-Level)"]
-    C -->|Scope Exit / Top-Level Return| F{"Is Signal Tainted or Deferred?"}
-    F -->|Yes| G["Compiler Diagnostic error[Z0042]"]
-    F -->|Verified / Constrained| H["Pass Type Checker"]
+    B -->|"@zk_allow_unconstrained"| E["DeferredObligation (Tracked to Top-Level)"]
+    C -->|"Scope Exit / Top-Level Return"| F{"Is Signal Tainted or Deferred?"}
+    F -->|"Yes"| G["Compiler Diagnostic error Z0042"]
+    F -->|"Verified / Constrained"| H["Pass Type Checker"]
 ```
 
 ### 27.2 Constraint State Lattice & Provenance Tracking
