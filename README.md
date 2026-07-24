@@ -14,6 +14,17 @@ Includes an R1CS constraint generator for zero-knowledge circuits, benchmarked a
 Runs a Hardware-Sentient Dual-Accelerator Scheduler: automatically fuses RT Core traversal and Tensor Core MMA pipelines, inserting sync barriers, vectorized FP32→FP16 quantization, and bank-conflict-free swizzled SMEM layouts — from a high-level description of the workload.
 Is partially self-hosting: most compiler phases (lexer, parser, type checker, LLVM emitter) have been rewritten in Y itself, alongside the original Rust implementation.
 
+Documentation & Manuals
+
+The complete specification and reference manuals for the Y programming language are available in the repository:
+
+- 📖 [Y Language Definitive Specification & Reference Manual](y_language_documentation.md)
+  - Compiler Architecture: LLVM IR, PTX, C, x86-64, ELF native emission.
+  - Zero-Knowledge Circuit Backend (R1CS): SSA linear-combination folding, static soundness analyzer (`error[Z0042]`), 1M-iteration witness satisfiability suite, and benchmark comparison vs Circom/Noir/Leo.
+  - Hardware-Sentient Dual-Accelerator Scheduler: Fusing RT Core ray tracing & Tensor Core matrix multiplication.
+  - Language Reference: Grammar, type system, hardware probes, attributes, memory spaces, and CUDA migration guide.
+- ⚡ [Benchmarks & Empirical Evaluation](README_BENCHMARKS.md)
+
 
 Status
 
