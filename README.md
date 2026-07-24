@@ -18,12 +18,12 @@ Documentation & Manuals
 
 The complete specification and reference manuals for the Y programming language are available in the repository:
 
-- 📖 [Y Language Definitive Specification & Reference Manual](y_language_documentation.md)
+  -  [Y Language Definitive Specification & Reference Manual](y_language_documentation.md)
   - Compiler Architecture: LLVM IR, PTX, C, x86-64, ELF native emission.
   - Zero-Knowledge Circuit Backend (R1CS): SSA linear-combination folding, static soundness analyzer (`error[Z0042]`), 1M-iteration witness satisfiability suite, and benchmark comparison vs Circom/Noir/Leo.
   - Hardware-Sentient Dual-Accelerator Scheduler: Fusing RT Core ray tracing & Tensor Core matrix multiplication.
   - Language Reference: Grammar, type system, hardware probes, attributes, memory spaces, and CUDA migration guide.
-- ⚡ [Benchmarks & Empirical Evaluation](README_BENCHMARKS.md)
+  -  [Benchmarks & Empirical Evaluation](README_BENCHMARKS.md)
 
 
 Status
