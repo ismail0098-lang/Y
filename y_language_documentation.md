@@ -1900,7 +1900,7 @@ Y supports configurable prime fields defined via the `@zk_target` module directi
    $$p_{\text{bn254}} = 21888242871839275222246405745257275088548364400416034343698204186575808495617$$
    Default field for Ethereum ZK-SNARKs (Groth16, PLONK, snarkjs).
 2. **BLS12-381**:
-   $$p_{\text{bls12\_381}} = 52435875175126190479447740508185965837690552500527637822603658699938581184513$$
+   $$p_{\text{bls12-381}} = 52435875175126190479447740508185965837690552500527637822603658699938581184513$$
    Standard field for Zcash, Filecoin, and Eth2 BLS signatures.
 
 ---
@@ -3167,7 +3167,7 @@ When a variable is annotated with `@bounds(min=..., max=...)`, the compiler gene
 
 1. Decompose the variable $x$ into $N$ bits:
    $$x = \sum_{i=0}^{N-1} b_i \cdot 2^i \quad \text{where } b_i \cdot (b_i - 1) = 0$$
-   where $N = \text{bit\_len}(\text{max})$.
+   where $N = \text{bit-len}(\text{max})$.
 2. Also decompose the difference $(\text{max} - x)$ into $N$ bits to enforce $x \leq \text{max}$.
 
 ---
@@ -3242,7 +3242,7 @@ Unconstrained `@hint` execution blocks (such as non-deterministic division $c = 
 ### 25.4 Zero-Copy Memory & Grid Topology
 
 - **Offset Formula**:
-  $$\text{Offset}(b, s) = \left( b \times N_{\text{total\_signals}} + s \right) \times 32 \text{ bytes}$$
+  $$\text{Offset}(b, s) = \left( b \times N_{\text{total signals}} + s \right) \times 32 \text{ bytes}$$
 - **Thread Topology**:
   - Grid Dimension: `GridDim((total_instances + 255) / 256, 1, 1)`
   - Block Dimension: `BlockDim(256, 1, 1)`
@@ -3297,7 +3297,7 @@ flowchart TD
     A["@hint Block Output / Witness Input"] -->|Tag as TaintedUnconstrained| B["Taint Tracking Engine (constraint_env)"]
     B -->|Arithmetic Propagation| C{"Expr Evaluation (Tainted-If-Either)"}
     C -->|Merge Origin Spans| B
-    B -->|Equality Assertion (c == a)| D["Verification Transition -> Verified"]
+    B -->|"Equality Assertion (c == a)"| D["Verification Transition to Verified"]
     B -->|@zk_allow_unconstrained| E["DeferredObligation (Tracked to Top-Level)"]
     C -->|Scope Exit / Top-Level Return| F{"Is Signal Tainted or Deferred?"}
     F -->|Yes| G["Compiler Diagnostic error[Z0042]"]
