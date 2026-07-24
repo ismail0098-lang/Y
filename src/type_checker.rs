@@ -53,6 +53,38 @@ pub enum SemanticType {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnconstrainedReason {
+    HintOutput(String),
+    UnconstrainedInput(String),
+    Merged(Vec<UnconstrainedReason>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstraintState {
+    Constrained,
+    TaintedUnconstrained {
+        origins: Vec<Span>,
+        reasons: Vec<UnconstrainedReason>,
+    },
+    DeferredObligation {
+        origins: Vec<Span>,
+        reasons: Vec<UnconstrainedReason>,
+        override_span: Span,
+    },
+    Verified {
+        origins: Vec<Span>,
+        verified_span: Span,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SignalConstraintInfo {
+    pub name: String,
+    pub state: ConstraintState,
+    pub declared_span: Span,
+}
+
 pub struct TypeChecker {
     // Basic type environment: variable name -> SemanticType
     env: Vec<HashMap<String, SemanticType>>,
@@ -67,6 +99,11 @@ pub struct TypeChecker {
     current_return_type: Option<SemanticType>,
     functions: HashMap<String, Vec<SemanticType>>,
     structs: HashMap<String, HashMap<String, SemanticType>>,
+
+    // Static Under-Constrained Analyzer (@zk_safe) fields
+    pub constraint_env: Vec<HashMap<String, SignalConstraintInfo>>,
+    pub zk_safe_stack: Vec<bool>,
+    pub zk_allow_unconstrained_stack: Vec<bool>,
 }
 
 impl TypeChecker {
@@ -82,6 +119,9 @@ impl TypeChecker {
             current_return_type: None,
             functions: HashMap::new(),
             structs: HashMap::new(),
+            constraint_env: vec![HashMap::new()],
+            zk_safe_stack: vec![false],
+            zk_allow_unconstrained_stack: vec![false],
         }
     }
 
@@ -90,13 +130,245 @@ impl TypeChecker {
         self.intervals.push(HashMap::new());
         self.explicit_bounds.push(HashSet::new());
         self.linear_tracker.push_scope();
+        self.constraint_env.push(HashMap::new());
     }
 
     pub fn pop_scope(&mut self) {
+        self.check_scope_unconstrained_signals();
+        self.constraint_env.pop();
         self.linear_tracker.pop_scope();
         self.explicit_bounds.pop();
         self.intervals.pop();
         self.env.pop();
+    }
+
+    pub fn is_zk_safe_active(&self) -> bool {
+        self.zk_safe_stack.iter().rev().copied().any(|b| b)
+    }
+
+    pub fn is_zk_allow_unconstrained_active(&self) -> bool {
+        self.zk_allow_unconstrained_stack.iter().rev().copied().any(|b| b)
+    }
+
+    pub fn set_signal_constraint(&mut self, name: String, state: ConstraintState, span: Span) {
+        if let Some(scope) = self.constraint_env.last_mut() {
+            if let Some(existing) = scope.get_mut(&name) {
+                existing.state = state;
+            } else {
+                scope.insert(
+                    name.clone(),
+                    SignalConstraintInfo {
+                        name,
+                        state,
+                        declared_span: span,
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn lookup_signal_constraint(&self, name: &str) -> Option<&SignalConstraintInfo> {
+        for scope in self.constraint_env.iter().rev() {
+            if let Some(info) = scope.get(name) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
+    pub fn update_signal_constraint_state(&mut self, name: &str, new_state: ConstraintState) {
+        for scope in self.constraint_env.iter_mut().rev() {
+            if let Some(info) = scope.get_mut(name) {
+                info.state = new_state;
+                return;
+            }
+        }
+    }
+
+    pub fn eval_expr_constraint_state(&self, expr: &Expr) -> ConstraintState {
+        match expr {
+            Expr::Ident(name, _) => {
+                if let Some(info) = self.lookup_signal_constraint(name) {
+                    info.state.clone()
+                } else {
+                    ConstraintState::Constrained
+                }
+            }
+            Expr::IntLit(..) | Expr::FloatLit(..) | Expr::StringLit(..) | Expr::CharLit(..) => {
+                ConstraintState::Constrained
+            }
+            Expr::BinaryOp { left, op, right, .. } => {
+                if matches!(op, BinaryOp::Eq) {
+                    return ConstraintState::Constrained;
+                }
+                let s_left = self.eval_expr_constraint_state(left);
+                let s_right = self.eval_expr_constraint_state(right);
+
+                match (s_left, s_right) {
+                    (
+                        ConstraintState::TaintedUnconstrained { origins: o1, reasons: r1 },
+                        ConstraintState::TaintedUnconstrained { origins: o2, reasons: r2 },
+                    ) => {
+                        let mut merged_origins = o1;
+                        for span in o2 {
+                            if !merged_origins.contains(&span) {
+                                merged_origins.push(span);
+                            }
+                        }
+                        let mut merged_reasons = r1;
+                        for r in r2 {
+                            if !merged_reasons.contains(&r) {
+                                merged_reasons.push(r);
+                            }
+                        }
+                        ConstraintState::TaintedUnconstrained {
+                            origins: merged_origins,
+                            reasons: merged_reasons,
+                        }
+                    }
+                    (ConstraintState::TaintedUnconstrained { origins, reasons }, _)
+                    | (_, ConstraintState::TaintedUnconstrained { origins, reasons }) => {
+                        ConstraintState::TaintedUnconstrained { origins, reasons }
+                    }
+                    (
+                        ConstraintState::DeferredObligation { origins: o1, reasons: r1, override_span },
+                        ConstraintState::DeferredObligation { origins: o2, reasons: r2, .. },
+                    ) => {
+                        let mut merged_origins = o1;
+                        for span in o2 {
+                            if !merged_origins.contains(&span) {
+                                merged_origins.push(span);
+                            }
+                        }
+                        let mut merged_reasons = r1;
+                        for r in r2 {
+                            if !merged_reasons.contains(&r) {
+                                merged_reasons.push(r);
+                            }
+                        }
+                        ConstraintState::DeferredObligation {
+                            origins: merged_origins,
+                            reasons: merged_reasons,
+                            override_span,
+                        }
+                    }
+                    (ConstraintState::DeferredObligation { origins, reasons, override_span }, _)
+                    | (_, ConstraintState::DeferredObligation { origins, reasons, override_span }) => {
+                        ConstraintState::DeferredObligation { origins, reasons, override_span }
+                    }
+                    (ConstraintState::Verified { origins, verified_span }, _)
+                    | (_, ConstraintState::Verified { origins, verified_span }) => {
+                        ConstraintState::Verified { origins, verified_span }
+                    }
+                    _ => ConstraintState::Constrained,
+                }
+            }
+            Expr::UnaryOp { operand, .. } => {
+                self.eval_expr_constraint_state(operand)
+            }
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    let st = self.eval_expr_constraint_state(arg);
+                    if matches!(st, ConstraintState::TaintedUnconstrained { .. } | ConstraintState::DeferredObligation { .. }) {
+                        return st;
+                    }
+                }
+                ConstraintState::Constrained
+            }
+            Expr::Index { base, index, .. } => {
+                let sb = self.eval_expr_constraint_state(base);
+                if matches!(sb, ConstraintState::TaintedUnconstrained { .. } | ConstraintState::DeferredObligation { .. }) {
+                    return sb;
+                }
+                let si = self.eval_expr_constraint_state(index);
+                if matches!(si, ConstraintState::TaintedUnconstrained { .. } | ConstraintState::DeferredObligation { .. }) {
+                    return si;
+                }
+                ConstraintState::Constrained
+            }
+            _ => ConstraintState::Constrained,
+        }
+    }
+
+    pub fn check_verification_transition(&mut self, left: &Expr, right: &Expr, eq_span: &Span) {
+        let left_state = self.eval_expr_constraint_state(left);
+        let right_state = self.eval_expr_constraint_state(right);
+
+        if let Expr::Ident(name_l, _) = left {
+            if let ConstraintState::TaintedUnconstrained { ref origins, .. }
+                | ConstraintState::DeferredObligation { ref origins, .. } = left_state
+            {
+                if matches!(right_state, ConstraintState::Constrained | ConstraintState::Verified { .. }) {
+                    self.update_signal_constraint_state(
+                        name_l,
+                        ConstraintState::Verified {
+                            origins: origins.clone(),
+                            verified_span: eq_span.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        if let Expr::Ident(name_r, _) = right {
+            if let ConstraintState::TaintedUnconstrained { ref origins, .. }
+                | ConstraintState::DeferredObligation { ref origins, .. } = right_state
+            {
+                if matches!(left_state, ConstraintState::Constrained | ConstraintState::Verified { .. }) {
+                    self.update_signal_constraint_state(
+                        name_r,
+                        ConstraintState::Verified {
+                            origins: origins.clone(),
+                            verified_span: eq_span.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_scope_unconstrained_signals(&mut self) {
+        let is_allow = self.is_zk_allow_unconstrained_active();
+        let is_safe = self.is_zk_safe_active();
+        let is_top_level = self.constraint_env.len() <= 2;
+
+        if let Some(current_scope) = self.constraint_env.last_mut() {
+            for (var_name, info) in current_scope.iter_mut() {
+                if is_allow {
+                    if let ConstraintState::TaintedUnconstrained { origins, reasons } = &info.state {
+                        info.state = ConstraintState::DeferredObligation {
+                            origins: origins.clone(),
+                            reasons: reasons.clone(),
+                            override_span: info.declared_span.clone(),
+                        };
+                        continue;
+                    }
+                }
+
+                if is_safe {
+                    match &info.state {
+                        ConstraintState::TaintedUnconstrained { origins, .. } => {
+                            let escape_span = &info.declared_span;
+                            let origin_span = origins.first().unwrap_or(escape_span);
+                            let err_msg = format!(
+                                "error[Z0042]: under-constrained signal `{}` detected in @zk_safe context\n  --> line {}, col {}: signal escapes scope unconstrained\n  |\nnote: signal originated from @hint block here\n  --> line {}, col {}: unconstrained witness defined here\n  |\nhelp: add a constraint assertion (e.g., assert({} == expected)) to verify the witness.",
+                                var_name, escape_span.line, escape_span.col, origin_span.line, origin_span.col, var_name
+                            );
+                            self.errors.push(err_msg);
+                        }
+                        ConstraintState::DeferredObligation { origins, override_span, .. } if is_top_level => {
+                            let escape_span = &info.declared_span;
+                            let origin_span = origins.first().unwrap_or(escape_span);
+                            let err_msg = format!(
+                                "error[Z0042]: deferred unconstrained signal `{}` allowed via @zk_allow_unconstrained escaped top-level program boundary unverified\n  --> line {}, col {}: signal reaches circuit output unconstrained\n  |\nnote: deferred override applied here\n  --> line {}, col {}: @zk_allow_unconstrained override\n  |\nnote: signal originated from @hint block here\n  --> line {}, col {}: unconstrained witness defined here\n  |\nhelp: add a constraint assertion to verify the deferred witness.",
+                                var_name, escape_span.line, escape_span.col, override_span.line, override_span.col, origin_span.line, origin_span.col
+                            );
+                            self.errors.push(err_msg);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     fn insert_interval(&mut self, name: String, interval: Interval) {
@@ -251,7 +523,7 @@ impl TypeChecker {
                     self.collect_assigned_vars_in_block(eb, vars);
                 }
             }
-            Stmt::Chisel(block, _) | Stmt::SafeBlock(block, _) | Stmt::GhostBlock(block, _) => {
+            Stmt::Chisel(block, _) | Stmt::SafeBlock(block, _) | Stmt::GhostBlock(block, _) | Stmt::HintBlock { body: block, .. } => {
                 self.collect_assigned_vars_in_block(block, vars);
             }
             Stmt::ClockDomainBlock { body, .. } => {
@@ -432,50 +704,72 @@ impl TypeChecker {
         });
         // Collect function signatures first
         for item in &prog.items {
-            match item {
-                Item::Func(f) => {
+            self.collect_signatures_item(item);
+        }
+
+        for item in &prog.items {
+            self.check_item(item);
+        }
+    }
+
+    fn collect_signatures_item(&mut self, item: &Item) {
+        match item {
+            Item::Func(f) => {
+                let mut params = Vec::new();
+                for p in &f.params {
+                    params.push(self.resolve_type(&p.ty));
+                }
+                self.functions.insert(f.name.clone(), params);
+            }
+            Item::Impl(imp) => {
+                for f in &imp.methods {
                     let mut params = Vec::new();
                     for p in &f.params {
                         params.push(self.resolve_type(&p.ty));
                     }
-                    self.functions.insert(f.name.clone(), params);
+                    self.functions
+                        .insert(format!("{}_{}", imp.target_type, f.name), params);
                 }
-                Item::Impl(imp) => {
-                    for f in &imp.methods {
-                        let mut params = Vec::new();
-                        for p in &f.params {
-                            params.push(self.resolve_type(&p.ty));
-                        }
-                        self.functions
-                            .insert(format!("{}_{}", imp.target_type, f.name), params);
-                    }
-                }
-                Item::Const(c) => {
-                    let resolved = self.resolve_type(&c.ty);
-                    self.insert_var(c.name.clone(), resolved);
-                }
-                Item::Struct(s) => {
-                    let mut fields = HashMap::new();
-                    for f in &s.fields {
-                        fields.insert(f.name.clone(), self.resolve_type(&f.ty));
-                    }
-                    self.structs.insert(s.name.clone(), fields);
-                }
-                _ => {}
             }
+            Item::Const(c) => {
+                let resolved = self.resolve_type(&c.ty);
+                self.insert_var(c.name.clone(), resolved);
+            }
+            Item::Struct(s) => {
+                let mut fields = HashMap::new();
+                for f in &s.fields {
+                    fields.insert(f.name.clone(), self.resolve_type(&f.ty));
+                }
+                self.structs.insert(s.name.clone(), fields);
+            }
+            Item::Module(m) => {
+                for inner_item in &m.items {
+                    self.collect_signatures_item(inner_item);
+                }
+            }
+            _ => {}
         }
+    }
 
-        for item in &prog.items {
-            match item {
-                Item::Kernel(k) => self.check_kernel(k),
-                Item::Func(f) => self.check_func(f),
-                Item::Impl(imp) => {
-                    for f in &imp.methods {
-                        self.check_func(f);
-                    }
+    fn check_item(&mut self, item: &Item) {
+        match item {
+            Item::Kernel(k) => self.check_kernel(k),
+            Item::Func(f) => self.check_func(f),
+            Item::Impl(imp) => {
+                for f in &imp.methods {
+                    self.check_func(f);
                 }
-                _ => {}
             }
+            Item::Module(m) => {
+                self.zk_safe_stack.push(m.is_zk_safe);
+                self.zk_allow_unconstrained_stack.push(m.is_zk_allow_unconstrained);
+                for inner_item in &m.items {
+                    self.check_item(inner_item);
+                }
+                self.zk_allow_unconstrained_stack.pop();
+                self.zk_safe_stack.pop();
+            }
+            _ => {}
         }
     }
 
@@ -492,6 +786,7 @@ impl TypeChecker {
                 ));
             }
             self.insert_var(param.name.clone(), sty);
+            self.set_signal_constraint(param.name.clone(), ConstraintState::Constrained, param.span.clone());
         }
 
         self.check_block(&kernel.body);
@@ -502,6 +797,8 @@ impl TypeChecker {
     }
 
     fn check_func(&mut self, f: &FuncDecl) {
+        self.zk_safe_stack.push(f.is_safe || f.is_zk_safe);
+        self.zk_allow_unconstrained_stack.push(f.is_zk_allow_unconstrained);
         self.push_scope();
 
         let prev_unsafe = self.in_unsafe;
@@ -518,6 +815,7 @@ impl TypeChecker {
                 ));
             }
             self.insert_var(param.name.clone(), sty);
+            self.set_signal_constraint(param.name.clone(), ConstraintState::Constrained, param.span.clone());
         }
 
         let prev_ret_ty = self.current_return_type.clone();
@@ -539,6 +837,8 @@ impl TypeChecker {
 
         self.in_unsafe = prev_unsafe;
         self.pop_scope();
+        self.zk_allow_unconstrained_stack.pop();
+        self.zk_safe_stack.pop();
     }
 
     fn check_block(&mut self, block: &Block) {
@@ -619,6 +919,13 @@ impl TypeChecker {
                 }
 
                 self.insert_var(name.clone(), inferred_type.clone());
+
+                let init_state = if let Some(init_expr) = init {
+                    self.eval_expr_constraint_state(init_expr)
+                } else {
+                    ConstraintState::Constrained
+                };
+                self.set_signal_constraint(name.clone(), init_state, span.clone());
 
                 // If it's a transfer obligation (`cp_async`), track it linearly.
                 if inferred_type == SemanticType::TransferObligation {
@@ -779,6 +1086,8 @@ impl TypeChecker {
                     ));
                 }
                 if let Expr::Ident(name, _) = target {
+                    let val_state = self.eval_expr_constraint_state(value);
+                    self.update_signal_constraint_state(name, val_state);
                     if self.is_explicitly_bounded(name) {
                         if let Some(target_interval) = self.lookup_interval(name).cloned() {
                             if let Some(val_interval) = self.eval_interval(value) {
@@ -843,8 +1152,15 @@ impl TypeChecker {
                 }
             }
             Stmt::While {
-                condition, body, invariant, is_uniform_branch, ..
+                condition, body, invariant, max_iterations, is_uniform_branch, ..
             } => {
+                if max_iterations.is_none() {
+                    // Static error Z0010 check for dynamic un-annotated while loops in ZK mode
+                    self.errors.push(format!(
+                        "Line {}: error[Z0010]: dynamic 'while' loop prohibited in ZK circuit mode\n  hint: annotate loop with '@max_iterations(N)' where N is a compile-time constant integer",
+                        condition.span().line
+                    ));
+                }
                 if !self.in_unsafe && invariant.is_none() {
                     self.errors.push(format!(
                         "Line {}: [Strict Safety] While loops in safe blocks require formal @invariants.",
@@ -901,6 +1217,19 @@ impl TypeChecker {
                 self.in_unsafe = false;
                 self.check_block(block);
                 self.in_unsafe = prev_unsafe;
+            }
+            Stmt::HintBlock { outputs, body, span } => {
+                self.check_block(body);
+                for out_var in outputs {
+                    self.set_signal_constraint(
+                        out_var.clone(),
+                        ConstraintState::TaintedUnconstrained {
+                            origins: vec![span.clone()],
+                            reasons: vec![UnconstrainedReason::HintOutput(out_var.clone())],
+                        },
+                        span.clone(),
+                    );
+                }
             }
             Stmt::ClockDomainBlock { body, span, .. } => {
                 // Type-check the body within the clock domain scope
@@ -1217,11 +1546,16 @@ impl TypeChecker {
                 
                 SemanticType::Unknown
             }
-            Expr::BinaryOp { left, right, .. } => {
+            Expr::BinaryOp { left, op, right, span } => {
                 let lhs = self.check_expr(left);
                 let rhs = self.check_expr(right);
                 self.reject_transfer_escape(&lhs, &left.span(), "in a binary expression");
                 self.reject_transfer_escape(&rhs, &right.span(), "in a binary expression");
+
+                if *op == BinaryOp::Eq {
+                    self.check_verification_transition(left, right, span);
+                }
+
                 SemanticType::Unknown
             }
             Expr::UnaryOp { op, operand, .. } => {
@@ -1515,7 +1849,7 @@ impl TypeChecker {
                         ));
                     }
                 }
-                Stmt::SafeBlock(block, _) | Stmt::Chisel(block, _) | Stmt::GhostBlock(block, _) => {
+                Stmt::SafeBlock(block, _) | Stmt::Chisel(block, _) | Stmt::GhostBlock(block, _) | Stmt::HintBlock { body: block, .. } => {
                     self.trace_body_statements(&block.stmts, versions, declarations, body_assertions);
                 }
                 Stmt::ClockDomainBlock { body, .. } => {

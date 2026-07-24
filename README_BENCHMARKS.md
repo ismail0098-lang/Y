@@ -88,11 +88,11 @@ This directory contains the benchmark suite used to validate the performance, st
   component main {public [x, y]} = HeavyCircuit();
   ```
 * **Constraints**: **1,000,000 constraints**.
-* **Compilation Resources (Constraint Generation)**:
-  * **Y-lang**: **`1.67 seconds`** | Peak Memory: **`1.07 GB`** (RSS) (155.4x speedup)
-  * **Noir**: **`11.36 seconds`** | Peak Memory: **`1.25 GB`** (RSS) (22.8x speedup)
+* **Compilation Resources (Constraint Generation, Release Binary)**:
+  * **Y-lang**: **`1.706 seconds`** | Peak Memory: **`1.04 GB`** (RSS) (148.8x speedup)
+  * **Noir**: **`13.069 seconds`** | Peak Memory: **`1.25 GB`** (RSS) (19.4x speedup)
   * **Leo**: **`41.52 seconds`** | Peak Memory: **`10.81 GB`** (RSS) (6.2x speedup)
-  * **Circom**: **`259.25 seconds`** | Peak Memory: **`2.39 GB`** (RSS)
+  * **Circom**: **`253.936 seconds`** | Peak Memory: **`2.39 GB`** (RSS)
 
 ---
 
@@ -139,11 +139,11 @@ This directory contains the benchmark suite used to validate the performance, st
   component main {public [x, y]} = DotProduct();
   ```
 * **Constraints**: **100,000 constraints**.
-* **Compilation Resources (Constraint Generation)**:
-  * **Noir**: **`2.31 seconds`** | Peak Memory: **`393.74 MB`** (RSS) (6.3x speedup)
-  * **Y-lang**: **`3.66 seconds`** | Peak Memory: **`154.24 MB`** (RSS) (4.0x speedup)
+* **Compilation Resources (Constraint Generation, Release Binary)**:
+  * **Y-lang**: **`0.285 seconds`** | Peak Memory: **`152.8 MB`** (RSS) (53.6x speedup vs Circom)
+  * **Noir**: **`2.261 seconds`** | Peak Memory: **`393.74 MB`** (RSS) (6.3x speedup)
   * **Leo**: **`13.83 seconds`** | Peak Memory: **`3.08 GB`** (RSS) (1.05x speedup)
-  * **Circom**: **`14.51 seconds`** | Peak Memory: **`1.05 GB`** (RSS)
+  * **Circom**: **`15.28 seconds`** | Peak Memory: **`1.05 GB`** (RSS)
 
 ---
 

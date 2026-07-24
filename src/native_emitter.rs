@@ -208,6 +208,11 @@ impl NativeEmitter {
                     self.emit_stmt(stmt);
                 }
             }
+            Stmt::HintBlock { body, .. } => {
+                for stmt in &body.stmts {
+                    self.emit_stmt(stmt);
+                }
+            }
             Stmt::ClockDomainBlock { body, .. } => {
                 for stmt in &body.stmts {
                     self.emit_stmt(stmt);

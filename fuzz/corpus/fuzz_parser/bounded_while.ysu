@@ -1,0 +1,12 @@
+@unsafe
+fn main(x: Field) -> Field {
+    let mut acc: Field = x;
+    let mut i: Field = 0;
+
+    @max_iterations(100000)
+    while i < 100000 {
+        acc = acc + 1;
+        i = i + 1;
+    }
+    return acc;
+}

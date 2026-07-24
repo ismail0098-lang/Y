@@ -52,6 +52,7 @@ pub enum TokenKind {
     Impl,
     SelfKw,
     Break,
+    Module,
 
     // ── Memory space types ───────────────────────────────────
     GlobalMemory,
@@ -86,7 +87,6 @@ pub enum TokenKind {
     I16,
     I32,
     I64,
-    U3,
     U8,
     U16,
     U32,
@@ -140,6 +140,11 @@ pub enum TokenKind {
     AtHdlEmit,         // @hdl_emit attribute
     AtPrefetchStride,  // @prefetch_stride attribute
     AtClockDomain,     // @clock_domain attribute / block
+    AtZkTarget,
+    AtZkSafe,
+    AtZkAllowUnconstrained,
+    AtMaxIterations,   // @max_iterations(N) attribute
+    AtHint,            // @hint attribute / block
     AtUnknown(String), // future-proof
 
     // ── Operators ────────────────────────────────────────────
@@ -433,6 +438,7 @@ impl Lexer {
             "while" => TokenKind::While,
             "impl" => TokenKind::Impl,
             "self" => TokenKind::SelfKw,
+            "module" => TokenKind::Module,
 
             // Memory space types
             "GlobalMemory" => TokenKind::GlobalMemory,
@@ -464,12 +470,10 @@ impl Lexer {
             "I16" => TokenKind::I16,
             "I32" => TokenKind::I32,
             "I64" => TokenKind::I64,
-            "U3" => TokenKind::U3,
             "U8" => TokenKind::U8,
             "U16" => TokenKind::U16,
             "U32" => TokenKind::U32,
             "U64" => TokenKind::U64,
-            "u3" => TokenKind::U3,
             "u8" => TokenKind::U8,
             "u16" => TokenKind::U16,
             "u32" => TokenKind::U32,
@@ -553,6 +557,11 @@ impl Lexer {
             "@hdl_emit" => TokenKind::AtHdlEmit,
             "@prefetch_stride" => TokenKind::AtPrefetchStride,
             "@clock_domain" => TokenKind::AtClockDomain,
+            "@zk_target" => TokenKind::AtZkTarget,
+            "@zk_safe" => TokenKind::AtZkSafe,
+            "@zk_allow_unconstrained" => TokenKind::AtZkAllowUnconstrained,
+            "@max_iterations" => TokenKind::AtMaxIterations,
+            "@hint" => TokenKind::AtHint,
             "@divergence" => {
                 // Peek for (uniform)
                 if self.peek() == Some('(') {

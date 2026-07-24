@@ -1169,6 +1169,9 @@ impl LlvmEmitter {
                 Stmt::GhostBlock(b, _) => {
                     self.emit_alloca_for_block(b);
                 }
+                Stmt::HintBlock { body, .. } => {
+                    self.emit_alloca_for_block(body);
+                }
                 Stmt::ClockDomainBlock { body, .. } => {
                     self.emit_alloca_for_block(body);
                 }
@@ -1735,6 +1738,10 @@ impl LlvmEmitter {
             Stmt::GhostBlock(block, _) => {
                 self.wln("  ; --- @ghost speculative block ---");
                 self.emit_block_body(block, ret_type);
+            }
+            Stmt::HintBlock { body, .. } => {
+                self.wln("  ; --- @hint unconstrained block ---");
+                self.emit_block_body(body, ret_type);
             }
             Stmt::ClockDomainBlock { body, .. } => {
                 self.wln("  ; --- @clock_domain block ---");

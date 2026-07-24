@@ -8,6 +8,9 @@ import lexer;
 
 struct HardwareProfile {
     gpu_name: String,
+    gpu_vendor: String,
+    sm_version: String,
+    compute_capability: String,
     hmma_f16_latency_cycles: F64,
     smem_latency_cycles: F64,
     cp_async_latency_cycles: F64,
@@ -156,6 +159,9 @@ impl Yls {
         
         let mut profile: HardwareProfile;
         profile.gpu_name = String::new("Nvidia RTX 4090 (Ada Lovelace)");
+        profile.gpu_vendor = String::new("Nvidia");
+        profile.sm_version = String::new("0.0");
+        profile.compute_capability = String::new("0.0");
         profile.hmma_f16_latency_cycles = 42.0;
         profile.smem_latency_cycles = 28.0;
         profile.cp_async_latency_cycles = 200.0;
@@ -213,6 +219,9 @@ impl Yls {
                 let trimmed_val: String = Yls::trim(&val_str);
                 
                 if String::eq_cstr(&trimmed_key, "GPU_NAME") { profile.gpu_name = String::clone(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "GPU_VENDOR") { profile.gpu_vendor = String::clone(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "SM_VERSION") { profile.sm_version = String::clone(&trimmed_val); }
+                else if String::eq_cstr(&trimmed_key, "COMPUTE_CAPABILITY") { profile.compute_capability = String::clone(&trimmed_val); }
                 else if String::eq_cstr(&trimmed_key, "HMMA_F16_LATENCY") { profile.hmma_f16_latency_cycles = Yls::parse_f64(&trimmed_val); }
                 else if String::eq_cstr(&trimmed_key, "SMEM_LATENCY") { profile.smem_latency_cycles = Yls::parse_f64(&trimmed_val); }
                 else if String::eq_cstr(&trimmed_key, "CP_ASYNC_LATENCY") { profile.cp_async_latency_cycles = Yls::parse_f64(&trimmed_val); }

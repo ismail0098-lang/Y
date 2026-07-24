@@ -326,6 +326,7 @@ impl DependencyGrapher {
             }
             Stmt::SafeBlock(block, _) => self.analyze_block(block),
             Stmt::GhostBlock(block, _) => self.analyze_block(block),
+            Stmt::HintBlock { body: block, .. } => self.analyze_block(block),
             Stmt::Chisel(block, _) => self.analyze_block(block),
             Stmt::Expr(expr) => {
                 let (pipeline, label) = self.classify_expr(expr);

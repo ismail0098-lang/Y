@@ -109,8 +109,8 @@ extern "C" __global__ void naive_cuda_db_index(
     float query_val = nns_query_ptr[tid % 16];
     float accum_dist = 0.0f;
     
-    // Simulating warp branch divergence with conditional stack-based search pattern
-    int stack_depth = (tid % 4) == 0 ? 16 : ((tid % 4) == 1 ? 24 : ((tid % 4) == 2 ? 32 : 48));
+    // Standard stack-based search pattern with constant stack depth 32
+    int stack_depth = 32;
     for (int i = 0; i < stack_depth; ++i) {
         // Fetch child node bounding box data from global memory (rt_A_ptr)
         // High latency and branch divergence: different threads access different memory locations
@@ -199,13 +199,13 @@ def compile_and_run_benchmarks():
                     pass
                     
         # Naive CUDA manual BVH cycles calculation:
-        # manual stack-based search loop (30 iterations avg * 48 cycles/iter with divergence overhead) = 1440 cycles
+        # manual stack-based search loop (32 iterations * 40 cycles/iter) = 1280 cycles
         # global memory stall penalties = 250 cycles
         # synchronization barriers = 2 * 35 = 70 cycles
         # unoptimized shared memory quantization loop = 144 cycles
         # Tensor Core MMA = 42 cycles
-        # Total Naive cycles = 1946 cycles
-        naive_cycles = 1946.0
+        # Total Naive cycles = 1786 cycles
+        naive_cycles = 1786.0
         y_cycles = est_parallel
         
         # Clock: 2.61 GHz on RTX 4070 Ti SUPER (1 cycle = 0.383 nanoseconds)

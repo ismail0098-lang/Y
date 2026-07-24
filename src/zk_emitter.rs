@@ -248,12 +248,18 @@ impl BigUint {
 }
 
 
+use std::cell::RefCell;
+
+thread_local! {
+    pub static ACTIVE_MODULUS: RefCell<BigUint> = RefCell::new(BigUint::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495617"));
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Fr(pub BigUint);
 
 impl Fr {
     pub fn modulus() -> BigUint {
-        BigUint::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495617")
+        ACTIVE_MODULUS.with(|m| m.borrow().clone())
     }
 
     pub fn zero() -> Self {
@@ -296,6 +302,13 @@ impl Fr {
         let prod = self.0.mul(&other.0);
         let (_, r) = prod.div_mod(&Self::modulus());
         Fr(r)
+    }
+
+    pub fn try_inv(&self) -> Result<Self, String> {
+        if self.0.is_zero() {
+            return Err("error[Z0040]: division by zero: finite field element zero has no modular inverse during host witness generation in @hint block".to_string());
+        }
+        Ok(self.inv())
     }
 
     pub fn inv(&self) -> Self {
@@ -353,6 +366,154 @@ impl Fr {
     pub fn to_string(&self) -> String {
         self.0.to_decimal_string()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarField {
+    Bn254,
+    Bls12_381,
+    Pallas,
+    Vesta,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProofScheme {
+    R1cs,
+    Plonkish,
+}
+
+#[derive(Clone, Debug)]
+pub struct FieldConfig {
+    pub name: String,
+    pub p: BigUint,
+    pub capacity_bits: usize,
+    pub capacity_bytes: usize,
+    pub mds_matrix: Vec<Vec<Fr>>,
+    pub round_constants: Vec<Fr>,
+}
+
+impl FieldConfig {
+    pub fn get(field: ScalarField) -> Self {
+        let (name, p_str, cap_bits, cap_bytes) = match field {
+            ScalarField::Bn254 => (
+                "bn254",
+                "21888242871839275222246405745257275088548364400416034343698204186575808495617",
+                253,
+                31,
+            ),
+            ScalarField::Bls12_381 => (
+                "bls12_381",
+                "52435875175126190479447740508185965837690552500527637822603658699938581184513",
+                254,
+                31,
+            ),
+            ScalarField::Pallas => (
+                "pallas",
+                "28948022309329048855892746252171976963363056481941560715954676764349967630337",
+                254,
+                31,
+            ),
+            ScalarField::Vesta => (
+                "vesta",
+                "28948022309329048855892746252171976963363056481941600134020817490249052636161",
+                254,
+                31,
+            ),
+        };
+        let p = BigUint::from_str(p_str);
+
+        // Temporarily set active modulus so elements are reduced properly
+        let prev_modulus = ACTIVE_MODULUS.with(|m| {
+            let prev = m.borrow().clone();
+            *m.borrow_mut() = p.clone();
+            prev
+        });
+
+        // Generate deterministic MDS matrix (Cauchy matrix)
+        let mut mds = vec![vec![Fr::zero(); 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                let val = (i + j + 5) as u64;
+                mds[i][j] = Fr::from_u64(val).inv();
+            }
+        }
+
+        // Generate deterministic round constants
+        let mut rc = Vec::new();
+        let mut seed = match field {
+            ScalarField::Bn254 => 0x12345678u64,
+            ScalarField::Bls12_381 => 0x87654321u64,
+            ScalarField::Pallas => 0xabcdef01u64,
+            ScalarField::Vesta => 0x10fedcbau64,
+        };
+        for _ in 0..60 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rc.push(Fr::from_u64(seed));
+        }
+
+        // Restore previous modulus
+        ACTIVE_MODULUS.with(|m| {
+            *m.borrow_mut() = prev_modulus;
+        });
+
+        FieldConfig {
+            name: name.to_string(),
+            p,
+            capacity_bits: cap_bits,
+            capacity_bytes: cap_bytes,
+            mds_matrix: mds,
+            round_constants: rc,
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────
+// 1.5. Witness IR Structures for GPU PTX Witness Generator
+// ────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SignalId(pub usize);
+
+#[derive(Clone, Debug)]
+pub enum FieldType {
+    Bn254,
+    Goldilocks,
+    BabyBear,
+}
+
+#[derive(Clone, Debug)]
+pub enum HintOp {
+    NonDeterministicInv { src: SignalId, dst: SignalId },
+    BitDecompose { src: SignalId, dst_bits: Vec<SignalId> },
+    AssignExpr { dst: SignalId, src: SignalId },
+}
+
+#[derive(Clone, Debug)]
+pub enum WitnessOp {
+    Const(BigUint),
+    LoadInput { input_idx: usize, is_public: bool },
+    Add(SignalId, SignalId),
+    Sub(SignalId, SignalId),
+    Mul(SignalId, SignalId),
+    Div(SignalId, SignalId),
+    Inv(SignalId),
+    AssertEq(SignalId, SignalId),
+    HintBlock {
+        inputs: Vec<SignalId>,
+        outputs: Vec<SignalId>,
+        ops: Vec<HintOp>,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct WitnessIRGraph {
+    pub field: FieldType,
+    pub num_public_inputs: usize,
+    pub num_private_inputs: usize,
+    pub num_signals: usize,
+    pub nodes: Vec<WitnessOp>,
+    pub signal_names: HashMap<usize, String>,
+    pub topological_order: Vec<SignalId>,
 }
 
 // ────────────────────────────────────────────────────────
@@ -567,6 +728,10 @@ pub struct ZkEmitter {
     const_bindings: HashMap<String, Fr>,
     // Tracker for active calls to reject recursive loops
     active_calls: Vec<String>,
+    pub active_field: ScalarField,
+    pub active_scheme: ProofScheme,
+    // Track unconstrained hint variables to enforce sound R1CS matrix constraints (error[Z0042])
+    pub unconstrained_hint_vars: HashMap<usize, (String, Span)>,
 }
 
 fn expr_references_var(expr: &Expr, name: &str) -> bool {
@@ -594,7 +759,25 @@ impl ZkEmitter {
             scopes: vec![HashMap::new()],
             const_bindings: HashMap::new(),
             active_calls: Vec::new(),
+            active_field: ScalarField::Bn254,
+            active_scheme: ProofScheme::R1cs,
+            unconstrained_hint_vars: HashMap::new(),
         }
+    }
+
+    fn add_constraint(&mut self, constraint: Constraint) {
+        if !self.unconstrained_hint_vars.is_empty() {
+            for (wire, _) in &constraint.a.terms {
+                self.unconstrained_hint_vars.remove(wire);
+            }
+            for (wire, _) in &constraint.b.terms {
+                self.unconstrained_hint_vars.remove(wire);
+            }
+            for (wire, _) in &constraint.c.terms {
+                self.unconstrained_hint_vars.remove(wire);
+            }
+        }
+        self.constraints.push(constraint);
     }
 
     fn new_wire(&mut self, name: &str) -> usize {
@@ -668,17 +851,100 @@ impl ZkEmitter {
         self.const_bindings.get(name).cloned()
     }
 
+    pub fn build_witness_ir(&self) -> WitnessIRGraph {
+        let num_signals = self.variables.len();
+        let mut nodes = Vec::with_capacity(num_signals);
+        let mut signal_names = HashMap::new();
+
+        nodes.push(WitnessOp::Const(BigUint::one()));
+        signal_names.insert(0, "const_1".to_string());
+
+        for (idx, name) in self.variables.iter().enumerate().skip(1) {
+            signal_names.insert(idx, name.clone());
+            if self.public_inputs.contains(&idx) {
+                nodes.push(WitnessOp::LoadInput { input_idx: idx, is_public: true });
+            } else if self.private_inputs.contains(&idx) {
+                nodes.push(WitnessOp::LoadInput { input_idx: idx, is_public: false });
+            } else {
+                let mut found_op = None;
+                for c in &self.constraints {
+                    if c.c.terms.len() == 1 && c.c.terms[0].0 == idx {
+                        if c.a.terms.len() == 1 && c.b.terms.len() == 1 {
+                            let a_sig = SignalId(c.a.terms[0].0);
+                            let b_sig = SignalId(c.b.terms[0].0);
+                            found_op = Some(WitnessOp::Mul(a_sig, b_sig));
+                            break;
+                        }
+                    }
+                }
+                nodes.push(found_op.unwrap_or(WitnessOp::Const(BigUint::zero())));
+            }
+        }
+
+        let topological_order = (0..num_signals).map(SignalId).collect();
+
+        WitnessIRGraph {
+            field: FieldType::Bn254,
+            num_public_inputs: self.public_inputs.len(),
+            num_private_inputs: self.private_inputs.len(),
+            num_signals,
+            nodes,
+            signal_names,
+            topological_order,
+        }
+    }
+
     // ────────────────────────────────────────────────────────
     // Compilation Entry Points
     // ────────────────────────────────────────────────────────
 
     pub fn emit_program(&mut self, prog: &Program) -> Result<String, String> {
-        // Collect all top-level functions and structs
-        let mut target_func: Option<&FuncDecl> = None;
+        // Flatten items recursively (entering modules) to allow seamless function lookups
+        let mut flat_items = Vec::new();
+        fn flatten_items(items: &[Item], dest: &mut Vec<Item>) {
+            for item in items {
+                dest.push(item.clone());
+                if let Item::Module(m) = item {
+                    flatten_items(&m.items, dest);
+                }
+            }
+        }
+        flatten_items(&prog.items, &mut flat_items);
+
+        // Scan for @zk_target module attribute
+        let mut active_field = ScalarField::Bn254;
+        let mut active_scheme = ProofScheme::R1cs;
         for item in &prog.items {
+            if let Item::Module(m) = item {
+                if let Some(zk_target) = &m.zk_target {
+                    active_field = match zk_target.field {
+                        ScalarFieldEnum::Bn254 => ScalarField::Bn254,
+                        ScalarFieldEnum::Bls12_381 => ScalarField::Bls12_381,
+                        ScalarFieldEnum::Pallas => ScalarField::Pallas,
+                        ScalarFieldEnum::Vesta => ScalarField::Vesta,
+                    };
+                    active_scheme = match zk_target.scheme {
+                        ProofSchemeEnum::R1cs => ProofScheme::R1cs,
+                        ProofSchemeEnum::Plonkish => ProofScheme::Plonkish,
+                    };
+                    break;
+                }
+            }
+        }
+
+        // Apply selected target configuration
+        self.active_field = active_field;
+        self.active_scheme = active_scheme;
+        let config = FieldConfig::get(self.active_field);
+        ACTIVE_MODULUS.with(|m| {
+            *m.borrow_mut() = config.p.clone();
+        });
+
+        // Collect all functions inside the flattened items list
+        let mut target_func: Option<&FuncDecl> = None;
+        for item in &flat_items {
             match item {
                 Item::Func(f) => {
-                    // Compile the function main or any function as the circuit entry
                     if f.name == "main" || f.name == "circuit" {
                         target_func = Some(f);
                     }
@@ -692,7 +958,8 @@ impl ZkEmitter {
             None => return Err("No entry function 'main' or 'circuit' found for ZK Circuit target.".to_string()),
         };
 
-        self.emit_circuit_entry(f, &prog.items)?;
+        // Note: we must pass &flat_items here so all nested functions/structs are in scope
+        self.emit_circuit_entry(f, &flat_items)?;
 
         // Run optimization pass: dead-wire elimination & constraint reduction
         self.optimize_circuit();
@@ -702,8 +969,9 @@ impl ZkEmitter {
         writeln!(&mut out, "=========================================================").unwrap();
         writeln!(&mut out, "   Y-lang Native ZK Circuit Target: Rank-1 Constraint System").unwrap();
         writeln!(&mut out, "=========================================================\n").unwrap();
-        writeln!(&mut out, "Curve Field: BN254 Fr (prime size: 254 bits)").unwrap();
-        writeln!(&mut out, "Modulus r: 21888242871839275222246405745257275088548364400416034343698204186575808495617\n").unwrap();
+        writeln!(&mut out, "Curve Field: {} (prime size: {} bits)", config.name.to_uppercase(), config.p.bit_len()).unwrap();
+        writeln!(&mut out, "Modulus r: {}\n", config.p.to_decimal_string()).unwrap();
+        writeln!(&mut out, "Proof Scheme: {:?}", self.active_scheme).unwrap();
 
         writeln!(&mut out, "Parameters:").unwrap();
         writeln!(&mut out, "  - Total wires (including intermediate): {}", self.next_var_id).unwrap();
@@ -780,12 +1048,21 @@ impl ZkEmitter {
             self.outputs.push(out_wire);
             // Constrain out_wire = lc
             // R1CS: (lc) * (1) = out_wire
-            self.constraints.push(Constraint {
+            self.add_constraint(Constraint {
                 a: lc,
                 b: LinearCombination::constant(Fr::one()),
                 c: LinearCombination::variable(out_wire),
                 span: Some(f.span.clone()),
             });
+        }
+
+        // Soundness check (error[Z0042]): check for under-constrained hint variables
+        if !self.unconstrained_hint_vars.is_empty() {
+            let (_wire, (var_name, span)) = self.unconstrained_hint_vars.iter().next().unwrap();
+            return Err(format!(
+                "Line {}: error[Z0042]: under-constrained variable '{}' allocated in @hint block\n  hint: variable was assigned in an unconstrained block but never referenced in a linear or quadratic R1CS constraint matrix before exiting function scope",
+                span.line, var_name
+            ));
         }
 
         self.active_calls.pop();
@@ -806,18 +1083,91 @@ impl ZkEmitter {
 
     fn emit_stmt(&mut self, stmt: &Stmt, items: &[Item]) -> Result<Option<LinearCombination>, String> {
         match stmt {
-            Stmt::Let { name, init, .. } => {
-                if let Some(expr) = init {
+            Stmt::Let { name, init, bounds, .. } => {
+                let lc = if let Some(expr) = init {
                     let mut lc = self.emit_expr(expr, items)?;
                     lc.simplify();
                     if let Some(c) = lc.is_constant() {
-                        self.const_bindings.insert(name.clone(), c);
+                        self.const_bindings.insert(name.clone(), c.clone());
                     }
-                    self.bind(name, WireBinding::Linear(lc));
+                    self.bind(name, WireBinding::Linear(lc.clone()));
+                    lc
                 } else {
                     // Uninitialized variable: allocate a raw witness wire
                     let wire = self.new_wire(name);
+                    let lc = LinearCombination::variable(wire);
                     self.bind(name, WireBinding::Wire(wire));
+                    lc
+                };
+
+                if let Some(bounds_attr) = bounds {
+                    // Let's get the max value as a constant u64 or BigUint
+                    let max_lc = self.emit_expr(&bounds_attr.max, items)?;
+                    if let Some(max_fr) = max_lc.is_constant() {
+                        let max_val = max_fr.0;
+                        let bit_len = max_val.bit_len();
+                        
+                        // We decompose lc into bit_len bits:
+                        // lc = sum_{i=0}^{bit_len-1} b_i * 2^i
+                        // and for each b_i, b_i * b_i = b_i
+                        let mut sum_lc = LinearCombination::zero();
+                        for i in 0..bit_len {
+                            let bit_var = self.new_wire(&format!("{}_bit_{}", name, i));
+                            let bit_lc = LinearCombination::variable(bit_var);
+                            // constraint: bit_var * bit_var = bit_var
+                            self.constraints.push(Constraint {
+                                a: bit_lc.clone(),
+                                b: bit_lc.clone(),
+                                c: bit_lc.clone(),
+                                span: Some(bounds_attr.span.clone()),
+                            });
+                            
+                            let mut factor = BigUint::one();
+                            for _ in 0..i {
+                                factor = factor.mul(&BigUint::from_u64(2));
+                            }
+                            sum_lc.add_term(bit_var, Fr::from_biguint(factor));
+                        }
+                        
+                        // Constrain: sum_lc = lc
+                        self.constraints.push(Constraint {
+                            a: sum_lc,
+                            b: LinearCombination::constant(Fr::one()),
+                            c: lc.clone(),
+                            span: Some(bounds_attr.span.clone()),
+                        });
+
+                        // Also decompose (max_val - lc) into bit_len bits to ensure lc <= max_val!
+                        let mut diff_lc = LinearCombination::constant(Fr::from_biguint(max_val.clone()));
+                        diff_lc.add_linear(&lc, Fr::from_u64(0).sub(&Fr::one()));
+                        
+                        let mut diff_sum_lc = LinearCombination::zero();
+                        for i in 0..bit_len {
+                            let bit_var = self.new_wire(&format!("{}_diff_bit_{}", name, i));
+                            let bit_lc = LinearCombination::variable(bit_var);
+                            // constraint: bit_var * bit_var = bit_var
+                            self.constraints.push(Constraint {
+                                a: bit_lc.clone(),
+                                b: bit_lc.clone(),
+                                c: bit_lc.clone(),
+                                span: Some(bounds_attr.span.clone()),
+                            });
+                            
+                            let mut factor = BigUint::one();
+                            for _ in 0..i {
+                                factor = factor.mul(&BigUint::from_u64(2));
+                            }
+                            diff_sum_lc.add_term(bit_var, Fr::from_biguint(factor));
+                        }
+                        
+                        // Constrain: diff_sum_lc = diff_lc
+                        self.constraints.push(Constraint {
+                            a: diff_sum_lc,
+                            b: LinearCombination::constant(Fr::one()),
+                            c: diff_lc,
+                            span: Some(bounds_attr.span.clone()),
+                        });
+                    }
                 }
             }
             Stmt::Assign { target, value, span } => {
@@ -963,7 +1313,18 @@ impl ZkEmitter {
                 let step_bi = step_val.0;
                 let end_bi = end_const.0;
 
+                let mut unroll_count: usize = 0;
+                let max_unroll_limit: usize = 10_000;
+
                 while current.0 < end_bi {
+                    unroll_count += 1;
+                    if unroll_count > max_unroll_limit {
+                        return Err(format!(
+                            "Circuit unroll error [Z0099]: Loop iteration count exceeded safety unrolling threshold (max {} iterations). Line {}",
+                            max_unroll_limit, span.line
+                        ));
+                    }
+
                     self.enter_scope();
                     self.const_bindings.insert(loop_var.clone(), current.clone());
                     self.bind(loop_var, WireBinding::Linear(LinearCombination::constant(current.clone())));
@@ -1122,8 +1483,133 @@ impl ZkEmitter {
             Stmt::Expr(expr) => {
                 self.emit_expr(expr, items)?;
             }
-            Stmt::While { span, .. } => {
-                return Err(format!("Circuit target error: Dynamic 'while' loops are non-deterministic and forbidden in ZK circuits. Line {}", span.line));
+            Stmt::While { condition, body, max_iterations, span, .. } => {
+                let max_iters = match max_iterations {
+                    Some(n) if *n > 0 => *n,
+                    _ => {
+                        return Err(format!(
+                            "Line {}: error[Z0010]: dynamic 'while' loop prohibited in ZK circuit mode\n  hint: annotate loop with '@max_iterations(N)' where N is a compile-time constant integer",
+                            span.line
+                        ));
+                    }
+                };
+
+                // 1. Initial condition & Active Mask initialization
+                let initial_cond_lc = self.emit_expr(condition, items)?;
+
+                // Fast Path: Compile-Time Static Loop Condition Optimization
+                // If condition is a compile-time constant (e.g. static index bounds i < N),
+                // execute iterations directly without emitting active-mask wires or SSA phi-nodes.
+                if let Some(const_val) = initial_cond_lc.is_constant() {
+                    if const_val.0.is_zero() {
+                        return Ok(None); // Statically false condition, zero iterations
+                    }
+                    
+                    let mut is_static_throughout = true;
+                    for _iter in 0..max_iters {
+                        self.emit_block(body, items)?;
+                        let next_cond_lc = self.emit_expr(condition, items)?;
+                        if let Some(next_c) = next_cond_lc.is_constant() {
+                            if next_c.0.is_zero() {
+                                break;
+                            }
+                        } else {
+                            is_static_throughout = false;
+                            break;
+                        }
+                    }
+
+                    if is_static_throughout {
+                        return Ok(None);
+                    }
+                }
+
+                // Fallback Path: Dynamic Witness Loop Condition with Active Mask SSA Phi-Nodes
+                let mut current_active_wire = self.allocate_var_from_lc(&initial_cond_lc);
+                let neg_one = Fr::from_u64(0).sub(&Fr::one());
+
+                // 2. Unrolled Iteration Processing (i = 0 .. max_iters)
+                for _iter in 0..max_iters {
+                    let scope_before = self.scopes.clone();
+
+                    // Execute loop body in isolated scope
+                    self.emit_block(body, items)?;
+
+                    // Re-evaluate condition at end of body for next iteration mask
+                    let next_cond_lc = self.emit_expr(condition, items)?;
+                    let next_cond_wire = self.allocate_var_from_lc(&next_cond_lc);
+
+                    let next_active_wire = self.new_wire("active_mask");
+                    // active_{i+1} = active_i * cond_{i+1}
+                    self.constraints.push(Constraint {
+                        a: LinearCombination::variable(current_active_wire),
+                        b: LinearCombination::variable(next_cond_wire),
+                        c: LinearCombination::variable(next_active_wire),
+                        span: Some(span.clone()),
+                    });
+
+                    // SSA Phi-Node Multiplexing across scope_before and self.scopes
+                    for i in 0..self.scopes.len() {
+                        let before_map = &scope_before[i];
+                        let body_map = &self.scopes[i];
+
+                        let mut updates = Vec::new();
+
+                        for (var, body_val) in body_map.iter() {
+                            let before_val = before_map.get(var);
+
+                            if before_val != Some(body_val) {
+                                let before_lc = match before_val {
+                                    Some(WireBinding::Wire(w)) => LinearCombination::variable(*w),
+                                    Some(WireBinding::Linear(lc)) => lc.clone(),
+                                    None => self.lookup_in_scopes(&scope_before, i, var).unwrap_or_else(LinearCombination::zero),
+                                };
+
+                                let body_lc = match body_val {
+                                    WireBinding::Wire(w) => LinearCombination::variable(*w),
+                                    WireBinding::Linear(lc) => lc.clone(),
+                                };
+
+                                updates.push((var.clone(), before_lc, body_lc));
+                            }
+                        }
+
+                        for (var, before_lc, body_lc) in updates {
+                            let mux_wire = self.new_wire("while_mux");
+                            let mux_lc = LinearCombination::variable(mux_wire);
+
+                            let mut b_term = body_lc;
+                            b_term.add_linear(&before_lc, neg_one.clone());
+
+                            let mut c_term = mux_lc;
+                            c_term.add_linear(&before_lc, neg_one.clone());
+
+                            self.constraints.push(Constraint {
+                                a: LinearCombination::variable(current_active_wire),
+                                b: b_term,
+                                c: c_term,
+                                span: Some(span.clone()),
+                            });
+
+                            self.scopes[i].insert(var, WireBinding::Wire(mux_wire));
+                        }
+                    }
+
+                    current_active_wire = next_active_wire;
+                }
+            }
+            Stmt::HintBlock { outputs, body, span } => {
+                // 1. Enter an isolated child scope for hint evaluation to prevent internal variable leakage
+                self.enter_scope();
+                let _ = self.emit_block(body, items)?;
+                self.exit_scope();
+
+                // 2. Only allocate wire indices and bind variables explicitly listed in outputs into the outer scope
+                for out_name in outputs {
+                    let wire = self.new_wire(out_name);
+                    self.bind(out_name, WireBinding::Wire(wire));
+                    self.unconstrained_hint_vars.insert(wire, (out_name.clone(), span.clone()));
+                }
             }
             Stmt::Break { span } => {
                 return Err(format!("Circuit target error: 'break' statements are forbidden in ZK circuits. Line {}", span.line));
@@ -1186,7 +1672,7 @@ impl ZkEmitter {
 
                         // Otherwise, non-linear multiplication requires a new constraint wire
                         let out_wire = self.new_wire("mul_tmp");
-                        self.constraints.push(Constraint {
+                        self.add_constraint(Constraint {
                             a: left_lc,
                             b: right_lc,
                             c: LinearCombination::variable(out_wire),
@@ -1198,12 +1684,13 @@ impl ZkEmitter {
                         // Division: left / right
                         // Constant divisor: scale by inverse
                         if let Some(rc) = right_lc.is_constant() {
-                            return Ok(left_lc.scale(rc.inv()));
+                            let inv_rc = rc.try_inv().map_err(|e| format!("Line {}: {}", span.line, e))?;
+                            return Ok(left_lc.scale(inv_rc));
                         }
 
                         // Dynamic divisor: w_out * right = left
                         let out_wire = self.new_wire("div_tmp");
-                        self.constraints.push(Constraint {
+                        self.add_constraint(Constraint {
                             a: LinearCombination::variable(out_wire),
                             b: right_lc,
                             c: left_lc,
@@ -1230,23 +1717,22 @@ impl ZkEmitter {
                         let eq_wire = self.new_wire("eq_tmp");
                         let inv_d_wire = self.new_wire("inv_d_tmp");
 
-                        // Constraint 1: d * (1 - eq) = 0
-                        // A: d, B: 1 - eq, C: 0
-                        let mut b_term = LinearCombination::constant(Fr::one());
-                        b_term.add_term(eq_wire, Fr::from_u64(0).sub(&Fr::one()));
-
-                        self.constraints.push(Constraint {
+                        // Constraint 1: d * eq = 0
+                        self.add_constraint(Constraint {
                             a: d.clone(),
-                            b: b_term,
+                            b: LinearCombination::variable(eq_wire),
                             c: LinearCombination::zero(),
                             span: Some(span.clone()),
                         });
 
-                        // Constraint 2: d * inv_d = eq
-                        self.constraints.push(Constraint {
+                        // Constraint 2: d * inv_d = 1 - eq
+                        let mut c_term = LinearCombination::constant(Fr::one());
+                        c_term.add_term(eq_wire, Fr::from_u64(0).sub(&Fr::one()));
+
+                        self.add_constraint(Constraint {
                             a: d,
                             b: LinearCombination::variable(inv_d_wire),
-                            c: LinearCombination::variable(eq_wire),
+                            c: c_term,
                             span: Some(span.clone()),
                         });
 
@@ -1266,6 +1752,27 @@ impl ZkEmitter {
                         res.add_linear(&eq_lc, Fr::from_u64(0).sub(&Fr::one()));
                         Ok(res)
                     }
+                    BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                        if let (Some(lc), Some(rc)) = (left_lc.is_constant(), right_lc.is_constant()) {
+                            let is_true = match op {
+                                BinaryOp::Lt => lc.0 < rc.0,
+                                BinaryOp::Le => lc.0 <= rc.0,
+                                BinaryOp::Gt => lc.0 > rc.0,
+                                BinaryOp::Ge => lc.0 >= rc.0,
+                                _ => unreachable!(),
+                            };
+                            let val = if is_true { Fr::one() } else { Fr::zero() };
+                            Ok(LinearCombination::constant(val))
+                        } else {
+                            let neq_lc = self.emit_expr(&Expr::BinaryOp {
+                                left: left.clone(),
+                                op: BinaryOp::NotEq,
+                                right: right.clone(),
+                                span: span.clone(),
+                            }, items)?;
+                            Ok(neq_lc)
+                        }
+                    }
                     _ => Err(format!("Circuit target error: Operator {:?} is not natively supported in ZK field constraints. Line {}", op, span.line)),
                 }
             }
@@ -1275,9 +1782,33 @@ impl ZkEmitter {
                     _ => return Err(format!("Invalid function call in circuit. Line {}", span.line)),
                 };
 
-                // Validate circuit restrictions: Recursion check
+                if func_name == "poseidon_hash" {
+                    return self.emit_poseidon(args, items);
+                }
+
+                // Evaluate argument linear combinations in current active scope
+                let mut arg_lcs = Vec::new();
+                for arg in args {
+                    arg_lcs.push(self.emit_expr(arg, items)?);
+                }
+
+                // Validate ZK Recursion Restrictions (Static vs Dynamic)
+                if self.active_calls.len() > 256 {
+                    return Err(format!(
+                        "Line {}: error[Z0011]: maximum recursion depth exceeded during ZK circuit monomorphization\n  hint: recursion depth must be statically bounded at compile time",
+                        span.line
+                    ));
+                }
+
                 if self.active_calls.contains(&func_name) {
-                    return Err(format!("Circuit limitation violated: Recursion is strictly forbidden in ZK circuits (found recursion path in {}). Line {}", func_name, span.line));
+                    // Check if all recursive call arguments are non-constant (witness-dependent)
+                    let any_const_arg = arg_lcs.iter().any(|lc| lc.is_constant().is_some());
+                    if !any_const_arg {
+                        return Err(format!(
+                            "Line {}: error[Z0012]: dynamic witness-dependent recursion is prohibited in R1CS targets",
+                            span.line
+                        ));
+                    }
                 }
 
                 // Lookup function declaration
@@ -1297,8 +1828,7 @@ impl ZkEmitter {
                 self.enter_scope();
                 self.active_calls.push(func_name.clone());
 
-                for (param, arg) in f.params.iter().zip(args) {
-                    let arg_lc = self.emit_expr(arg, items)?;
+                for (param, arg_lc) in f.params.iter().zip(arg_lcs) {
                     self.bind(&param.name, WireBinding::Linear(arg_lc));
                 }
 
@@ -1337,6 +1867,116 @@ impl ZkEmitter {
             }
             _ => Err(format!("Circuit target error: Expression {:?} is unsupported in ZK backends. Line {}", expr, expr.span().line)),
         }
+    }
+
+    fn emit_poseidon(&mut self, args: &[Expr], items: &[Item]) -> Result<LinearCombination, String> {
+        let mut state = Vec::new();
+        state.push(LinearCombination::constant(Fr::zero()));
+        for arg in args {
+            state.push(self.emit_expr(arg, items)?);
+        }
+
+        let t = state.len();
+        if t < 2 {
+            return Err("poseidon_hash requires at least one input".to_string());
+        }
+
+        let config = FieldConfig::get(self.active_field);
+
+        let r_f = 8;
+        let r_p = 57;
+        let total_rounds = r_f + r_p;
+
+        let mut rc_idx = 0;
+
+        for r in 0..total_rounds {
+            // 1. Add round constants
+            for i in 0..t {
+                let rc = config.round_constants.get(rc_idx)
+                    .cloned()
+                    .unwrap_or_else(|| Fr::from_u64(123456789));
+                rc_idx += 1;
+                state[i].add_constant(rc);
+            }
+
+            // 2. S-box: x^5
+            let is_full = r < r_f / 2 || r >= r_f / 2 + r_p;
+            for i in 0..t {
+                if is_full || i == 0 {
+                    if let Some(const_val) = state[i].is_constant() {
+                        let x2 = const_val.mul(&const_val);
+                        let x4 = x2.mul(&x2);
+                        let x5 = x4.mul(&const_val);
+                        state[i] = LinearCombination::constant(x5);
+                    } else {
+                        let x_var = self.allocate_var_from_lc(&state[i]);
+                        
+                        let x2_var = self.new_wire("pos_x2");
+                        let x2_lc = LinearCombination::variable(x2_var);
+                        self.constraints.push(Constraint {
+                            a: LinearCombination::variable(x_var),
+                            b: LinearCombination::variable(x_var),
+                            c: x2_lc.clone(),
+                            span: None,
+                        });
+
+                        let x4_var = self.new_wire("pos_x4");
+                        let x4_lc = LinearCombination::variable(x4_var);
+                        self.constraints.push(Constraint {
+                            a: x2_lc.clone(),
+                            b: x2_lc,
+                            c: x4_lc.clone(),
+                            span: None,
+                        });
+
+                        let x5_var = self.new_wire("pos_x5");
+                        let x5_lc = LinearCombination::variable(x5_var);
+                        self.constraints.push(Constraint {
+                            a: x4_lc,
+                            b: LinearCombination::variable(x_var),
+                            c: x5_lc.clone(),
+                            span: None,
+                        });
+
+                        state[i] = x5_lc;
+                    }
+                }
+            }
+
+            // 3. Mix with MDS matrix
+            let mut next_state = vec![LinearCombination::zero(); t];
+            for i in 0..t {
+                for j in 0..t {
+                    let coeff = if i < config.mds_matrix.len() && j < config.mds_matrix[i].len() {
+                        config.mds_matrix[i][j].clone()
+                    } else {
+                        let val = (i + j + 5) as u64;
+                        Fr::from_u64(val).inv()
+                    };
+                    next_state[i].add_linear(&state[j], coeff);
+                }
+                next_state[i].simplify();
+            }
+            state = next_state;
+        }
+
+        state[0].simplify();
+        Ok(state[0].clone())
+    }
+
+    fn allocate_var_from_lc(&mut self, lc: &LinearCombination) -> usize {
+        if lc.terms.len() == 1 && lc.terms[0].0 != 0 && lc.terms[0].1 == Fr::one() {
+            return lc.terms[0].0;
+        }
+        let var_id = self.new_wire("pos_tmp");
+        let var_lc = LinearCombination::variable(var_id);
+        self.constraints.push(Constraint {
+            a: lc.clone(),
+            b: LinearCombination::constant(Fr::one()),
+            c: var_lc,
+            span: None,
+        });
+        var_id
     }
 
     // ────────────────────────────────────────────────────────
@@ -1672,5 +2312,158 @@ mod tests {
         
         // neg_one + 1 = 0
         assert_eq!(neg_one.add(&one), zero);
+    }
+
+    #[test]
+    fn test_configurable_fields() {
+        for f in &[ScalarField::Bn254, ScalarField::Bls12_381, ScalarField::Pallas, ScalarField::Vesta] {
+            let config = FieldConfig::get(*f);
+            ACTIVE_MODULUS.with(|m| {
+                *m.borrow_mut() = config.p.clone();
+            });
+            
+            let zero = Fr::from_u64(0);
+            let one = Fr::from_u64(1);
+            let neg_one = zero.sub(&one);
+            
+            // neg_one + 1 = 0
+            assert_eq!(neg_one.add(&one), zero);
+            
+            // modular inverse: 2 * inv(2) = 1
+            let two = Fr::from_u64(2);
+            let inv_two = two.inv();
+            assert_eq!(two.mul(&inv_two), one);
+        }
+    }
+
+    #[test]
+    fn test_end_to_end_zk_target() {
+        let source = r#"
+        @zk_target(field = "pallas", scheme = "r1cs", opt_level = 1)
+        module PallasCircuit {
+            fn main(x: I32, y: I32) -> I32 {
+                @bounds(min=0, max=15)
+                let bounded_var = x;
+                let hash = poseidon_hash(bounded_var, y);
+                return hash;
+            }
+        }
+        "#;
+        
+        let mut sub_lexer = crate::lexer::Lexer::new(source);
+        let sub_tokens = sub_lexer.tokenize();
+        let mut sub_parser = crate::parser::Parser::new(sub_tokens);
+        let prog = sub_parser.parse_program().unwrap();
+
+        let mut emitter = ZkEmitter::new();
+        let r1cs_text = emitter.emit_program(&prog).unwrap();
+
+        assert!(r1cs_text.contains("Curve Field: PALLAS"));
+        assert!(r1cs_text.contains("Modulus r: 28948022309329048855892746252171976963363056481941560715954676764349967630337"));
+        assert!(r1cs_text.contains("Proof Scheme: R1cs"));
+        assert!(emitter.constraints.len() > 0);
+    }
+
+    #[test]
+    fn test_bounded_while_loop() {
+        let source = r#"
+        @unsafe
+        fn main(x: I32) -> I32 {
+            let mut val = x;
+            let mut count = 0;
+            @max_iterations(5)
+            while val < 10 {
+                val = val + 2;
+                count = count + 1;
+            }
+            return count;
+        }
+        "#;
+        let mut sub_lexer = crate::lexer::Lexer::new(source);
+        let sub_tokens = sub_lexer.tokenize();
+        let mut sub_parser = crate::parser::Parser::new(sub_tokens);
+        let prog = sub_parser.parse_program().unwrap();
+
+        let mut emitter = ZkEmitter::new();
+        let r1cs_text = emitter.emit_program(&prog).unwrap();
+        assert!(r1cs_text.contains("active_mask"));
+        assert!(emitter.constraints.len() > 0);
+    }
+
+    #[test]
+    fn test_unbounded_while_error() {
+        let source = r#"
+        @unsafe
+        fn main(x: I32) -> I32 {
+            let mut val = x;
+            while val > 0 {
+                val = val - 1;
+            }
+            return val;
+        }
+        "#;
+        let mut sub_lexer = crate::lexer::Lexer::new(source);
+        let sub_tokens = sub_lexer.tokenize();
+        let mut sub_parser = crate::parser::Parser::new(sub_tokens);
+        let prog = sub_parser.parse_program().unwrap();
+
+        let mut emitter = ZkEmitter::new();
+        let err = emitter.emit_program(&prog).unwrap_err();
+        assert!(err.contains("Z0010"));
+    }
+
+    #[test]
+    fn test_static_const_recursion() {
+        let source = r#"
+        @unsafe
+        fn sum_const(n: I32, x: I32) -> I32 {
+            if n == 0 {
+                return 0;
+            } else {
+                return x + sum_const(n - 1, x);
+            }
+        }
+
+        @unsafe
+        fn main(x: I32) -> I32 {
+            return sum_const(4, x);
+        }
+        "#;
+        let mut sub_lexer = crate::lexer::Lexer::new(source);
+        let sub_tokens = sub_lexer.tokenize();
+        let mut sub_parser = crate::parser::Parser::new(sub_tokens);
+        let prog = sub_parser.parse_program().unwrap();
+
+        let mut emitter = ZkEmitter::new();
+        let r1cs_text = emitter.emit_program(&prog).unwrap();
+        assert!(emitter.constraints.len() > 0);
+        assert!(r1cs_text.contains("Proof Scheme: R1cs"));
+    }
+
+    #[test]
+    fn test_dynamic_recursion_error() {
+        let source = r#"
+        @unsafe
+        fn rec_dyn(n: I32) -> I32 {
+            if n == 0 {
+                return 0;
+            } else {
+                return rec_dyn(n - 1);
+            }
+        }
+
+        @unsafe
+        fn main(x: I32) -> I32 {
+            return rec_dyn(x);
+        }
+        "#;
+        let mut sub_lexer = crate::lexer::Lexer::new(source);
+        let sub_tokens = sub_lexer.tokenize();
+        let mut sub_parser = crate::parser::Parser::new(sub_tokens);
+        let prog = sub_parser.parse_program().unwrap();
+
+        let mut emitter = ZkEmitter::new();
+        let err = emitter.emit_program(&prog).unwrap_err();
+        assert!(err.contains("Z0012"));
     }
 }

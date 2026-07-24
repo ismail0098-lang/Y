@@ -1,0 +1,7 @@
+@unsafe
+fn main(
+    a0: I32, a1: I32, a2: I32, a3: I32,
+    b0: I32, b1: I32, b2: I32, b3: I32
+) -> I32 {
+    return a0 * b0 + a1 * b1 + a2 * b2 + a3 * b3;
+}

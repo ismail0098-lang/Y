@@ -20,9 +20,7 @@ path = "src/ysu_gpu_probe.rs"
 name = "ypm"
 path = "src/ypm.rs"
 
-[[bin]]
-name = "ysu_vmm"
-path = "y_os/ysu_vmm/main.rs"
+
 
 [dependencies]
 

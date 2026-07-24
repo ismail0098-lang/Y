@@ -45,7 +45,7 @@ try {
 
 if (hasCircom) {
     if (fs.existsSync('heavy_circuit.r1cs')) fs.unlinkSync('heavy_circuit.r1cs');
-    stats['Circom'] = runWithStats('Circom Compiler', 'circom heavy_circuit.circom --r1cs --wasm --sym');
+    stats['Circom'] = runWithStats('Circom Compiler', 'circom heavy_circuit.circom --r1cs --c --sym --O2');
 }
 
 // 3. Noir
@@ -58,7 +58,7 @@ try {
 
 if (hasNoir) {
     cleanDir(path.join(__dirname, 'noir/heavy_circuit/target'));
-    stats['Noir'] = runWithStats('Noir Compiler (Nargo)', `${nargoPath} compile --force`, 'noir/heavy_circuit');
+    stats['Noir'] = runWithStats('Noir Compiler (Nargo)', `${nargoPath} compile --force --inliner-aggressiveness 100`, 'noir/heavy_circuit');
 }
 
 // 4. Leo
