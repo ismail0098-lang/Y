@@ -14,6 +14,9 @@ use crate::ast::*;
 use crate::sentinel::HardwareProfile;
 use std::fmt::Write;
 
+#[cfg(feature = "zk")]
+use crate::zk_emitter::*;
+
 /// Manages virtual registers and produces raw PTX strings.
 pub struct PtxEmitter {
     pub ptx_buffer: String,
@@ -382,6 +385,9 @@ impl PtxEmitter {
             Stmt::GhostBlock(block, _) => {
                 self.emit_block(block, hw_profile);
             }
+            Stmt::HintBlock { body, .. } => {
+                self.emit_block(body, hw_profile);
+            }
             Stmt::ClockDomainBlock { body, .. } => {
                 self.emit_block(body, hw_profile);
             }
@@ -718,5 +724,257 @@ impl PtxEmitter {
             }
             _ => "".into(),
         }
+    }
+
+    #[cfg(feature = "zk")]
+    pub fn emit_witness_generator_ptx(&mut self, graph: &WitnessIRGraph) -> String {
+        let mut buffer = String::new();
+        writeln!(&mut buffer, "// ============================================================").unwrap();
+        writeln!(&mut buffer, "// GPU PTX Witness Generator Kernel (Zero-Copy VRAM Layout)").unwrap();
+        writeln!(&mut buffer, "// Field: BN254 Fr (256-bit 4-limb Montgomery ISA)").unwrap();
+        writeln!(&mut buffer, "// ============================================================").unwrap();
+        writeln!(&mut buffer, ".version 7.0").unwrap();
+        writeln!(&mut buffer, ".target sm_80").unwrap();
+        writeln!(&mut buffer, ".address_size 64").unwrap();
+        writeln!(&mut buffer, "").unwrap();
+
+        writeln!(&mut buffer, ".visible .entry witness_generation_kernel(").unwrap();
+        writeln!(&mut buffer, "    .param .u64 param_witness_buffer,").unwrap();
+        writeln!(&mut buffer, "    .param .u32 param_num_signals,").unwrap();
+        writeln!(&mut buffer, "    .param .u32 param_total_instances").unwrap();
+        writeln!(&mut buffer, ")").unwrap();
+        writeln!(&mut buffer, "{{").unwrap();
+
+        // Register Declarations
+        writeln!(&mut buffer, "    .reg .u32 %t_id, %b_id, %b_dim, %instance_idx, %r_max_inst, %r_num_sig;").unwrap();
+        writeln!(&mut buffer, "    .reg .u64 %base_ptr, %instance_offset_bytes, %sig_addr;").unwrap();
+        writeln!(&mut buffer, "    .reg .pred %p_valid, %p_sub, %p_borrow;").unwrap();
+        writeln!(&mut buffer, "    .reg .u64 %t0, %t1, %t2, %t3, %t4, %r0, %r1, %r2, %r3, %r4;").unwrap();
+
+        // BN254 Fr (Scalar Field) Modulus Limbs (Little-Endian)
+        writeln!(&mut buffer, "    .reg .u64 %p0, %p1, %p2, %p3;").unwrap();
+        writeln!(&mut buffer, "    mov.u64 %p0, 0x43e1f593f0000001;").unwrap();
+        writeln!(&mut buffer, "    mov.u64 %p1, 0x2833e84879b97091;").unwrap();
+        writeln!(&mut buffer, "    mov.u64 %p2, 0xb85045b68181585d;").unwrap();
+        writeln!(&mut buffer, "    mov.u64 %p3, 0x30644e72e131a029;").unwrap();
+        writeln!(&mut buffer, "").unwrap();
+
+        // Grid/Thread Indexing
+        writeln!(&mut buffer, "    mov.u32 %t_id, %tid.x;").unwrap();
+        writeln!(&mut buffer, "    mov.u32 %b_id, %ctaid.x;").unwrap();
+        writeln!(&mut buffer, "    mov.u32 %b_dim, %ntid.x;").unwrap();
+        writeln!(&mut buffer, "    mad.lo.u32 %instance_idx, %b_id, %b_dim, %t_id;").unwrap();
+        writeln!(&mut buffer, "    ld.param.u32 %r_max_inst, [param_total_instances];").unwrap();
+        writeln!(&mut buffer, "    setp.ge.u32 %p_valid, %instance_idx, %r_max_inst;").unwrap();
+        writeln!(&mut buffer, "    @%p_valid bra EXIT_KERNEL;").unwrap();
+        writeln!(&mut buffer, "").unwrap();
+
+        // Offset Calculation: instance_offset_bytes = instance_idx * num_signals * 32
+        writeln!(&mut buffer, "    ld.param.u64 %base_ptr, [param_witness_buffer];").unwrap();
+        writeln!(&mut buffer, "    ld.param.u32 %r_num_sig, [param_num_signals];").unwrap();
+        writeln!(&mut buffer, "    mul.wide.u32 %instance_offset_bytes, %instance_idx, %r_num_sig;").unwrap();
+        writeln!(&mut buffer, "    shl.b64 %instance_offset_bytes, %instance_offset_bytes, 5; // * 32 bytes").unwrap();
+        writeln!(&mut buffer, "    add.u64 %base_ptr, %base_ptr, %instance_offset_bytes;").unwrap();
+        writeln!(&mut buffer, "").unwrap();
+
+        // Top-level Register Declarations for all Signals & WitnessOps
+        for &sig_id in &graph.topological_order {
+            let s_idx = sig_id.0;
+            writeln!(&mut buffer, "    .reg .u64 %s{}_0, %s{}_1, %s{}_2, %s{}_3;", s_idx, s_idx, s_idx, s_idx).unwrap();
+            if let WitnessOp::Mul(_, _) = &graph.nodes[s_idx] {
+                writeln!(&mut buffer, "    .reg .u64 %c_tmp_{}_0, %c_tmp_{}_1, %c_tmp_{}_2, %c_tmp_{}_3;", s_idx, s_idx, s_idx, s_idx).unwrap();
+                writeln!(&mut buffer, "    .reg .u64 %c_t_{}_0, %c_t_{}_1, %c_t_{}_2, %c_t_{}_3, %c_t_{}_4;", s_idx, s_idx, s_idx, s_idx, s_idx).unwrap();
+                writeln!(&mut buffer, "    .reg .u64 %c_tlo_{}, %c_thi_{}, %c_carry_{}, %c_m_{}, %c_t5_{};", s_idx, s_idx, s_idx, s_idx, s_idx).unwrap();
+                writeln!(&mut buffer, "    .reg .u64 %c_r0_{}, %c_r1_{}, %c_r2_{}, %c_r3_{}, %c_r4_{};", s_idx, s_idx, s_idx, s_idx, s_idx).unwrap();
+                writeln!(&mut buffer, "    .reg .pred %c_p_sub_{};", s_idx).unwrap();
+            }
+        }
+
+        // Loop over signals in topological order
+        for &sig_id in &graph.topological_order {
+            let s_idx = sig_id.0;
+            let sig_name = graph.signal_names.get(&s_idx).cloned().unwrap_or_else(|| format!("sig_{}", s_idx));
+            writeln!(&mut buffer, "    // --- Signal {}: {} ---", s_idx, sig_name).unwrap();
+
+            match &graph.nodes[s_idx] {
+                WitnessOp::Const(val) => {
+                    let d0 = val.digits.get(0).cloned().unwrap_or(0) as u64 | ((val.digits.get(1).cloned().unwrap_or(0) as u64) << 32);
+                    let d1 = val.digits.get(2).cloned().unwrap_or(0) as u64 | ((val.digits.get(3).cloned().unwrap_or(0) as u64) << 32);
+                    let d2 = val.digits.get(4).cloned().unwrap_or(0) as u64 | ((val.digits.get(5).cloned().unwrap_or(0) as u64) << 32);
+                    let d3 = val.digits.get(6).cloned().unwrap_or(0) as u64 | ((val.digits.get(7).cloned().unwrap_or(0) as u64) << 32);
+
+                    writeln!(&mut buffer, "    mov.u64 %s{}_0, 0x{:x};", s_idx, d0).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_1, 0x{:x};", s_idx, d1).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_2, 0x{:x};", s_idx, d2).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_3, 0x{:x};", s_idx, d3).unwrap();
+                }
+                WitnessOp::LoadInput { input_idx, .. } => {
+                    let offset = input_idx * 32;
+                    writeln!(&mut buffer, "    add.u64 %sig_addr, %base_ptr, {};", offset).unwrap();
+                    writeln!(&mut buffer, "    ld.global.v2.b64 {{%s{}_0, %s{}_1}}, [%sig_addr];", s_idx, s_idx).unwrap();
+                    writeln!(&mut buffer, "    add.u64 %sig_addr, %sig_addr, 16;").unwrap();
+                    writeln!(&mut buffer, "    ld.global.v2.b64 {{%s{}_2, %s{}_3}}, [%sig_addr];", s_idx, s_idx).unwrap();
+                }
+                WitnessOp::Add(a, b) => {
+                    let a_id = a.0;
+                    let b_id = b.0;
+                    writeln!(&mut buffer, "    // 256-bit Modular Addition: s_{} = (s_{} + s_{}) mod p", s_idx, a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    add.cc.u64 %t0, %s{}_0, %s{}_0;", a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    addc.cc.u64 %t1, %s{}_1, %s{}_1;", a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    addc.cc.u64 %t2, %s{}_2, %s{}_2;", a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    addc.cc.u64 %t3, %s{}_3, %s{}_3;", a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    addc.u64 %t4, 0, 0;").unwrap();
+                    writeln!(&mut buffer, "    sub.cc.u64 %r0, %t0, %p0;").unwrap();
+                    writeln!(&mut buffer, "    subc.cc.u64 %r1, %t1, %p1;").unwrap();
+                    writeln!(&mut buffer, "    subc.cc.u64 %r2, %t2, %p2;").unwrap();
+                    writeln!(&mut buffer, "    subc.cc.u64 %r3, %t3, %p3;").unwrap();
+                    writeln!(&mut buffer, "    subc.u64 %r4, %t4, 0;").unwrap();
+                    writeln!(&mut buffer, "    setp.eq.u64 %p_sub, %r4, 0;").unwrap();
+                    writeln!(&mut buffer, "    selp.b64 %s{}_0, %r0, %t0, %p_sub;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    selp.b64 %s{}_1, %r1, %t1, %p_sub;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    selp.b64 %s{}_2, %r2, %t2, %p_sub;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    selp.b64 %s{}_3, %r3, %t3, %p_sub;", s_idx).unwrap();
+                }
+                WitnessOp::Sub(a, b) => {
+                    let a_id = a.0;
+                    let b_id = b.0;
+                    writeln!(&mut buffer, "    // 256-bit Modular Subtraction: s_{} = (s_{} - s_{}) mod p", s_idx, a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    sub.cc.u64 %t0, %s{}_0, %s{}_0;", a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    subc.cc.u64 %t1, %s{}_1, %s{}_1;", a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    subc.cc.u64 %t2, %s{}_2, %s{}_2;", a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    subc.cc.u64 %t3, %s{}_3, %s{}_3;", a_id, b_id).unwrap();
+                    writeln!(&mut buffer, "    subc.u64 %t4, 0, 0;").unwrap();
+                    writeln!(&mut buffer, "    add.cc.u64 %r0, %t0, %p0;").unwrap();
+                    writeln!(&mut buffer, "    addc.cc.u64 %r1, %t1, %p1;").unwrap();
+                    writeln!(&mut buffer, "    addc.cc.u64 %r2, %t2, %p2;").unwrap();
+                    writeln!(&mut buffer, "    addc.u64 %r3, %t3, %p3;").unwrap();
+                    writeln!(&mut buffer, "    setp.ne.u64 %p_borrow, %t4, 0;").unwrap();
+                    writeln!(&mut buffer, "    selp.b64 %s{}_0, %r0, %t0, %p_borrow;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    selp.b64 %s{}_1, %r1, %t1, %p_borrow;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    selp.b64 %s{}_2, %r2, %t2, %p_borrow;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    selp.b64 %s{}_3, %r3, %t3, %p_borrow;", s_idx).unwrap();
+                }
+                WitnessOp::Mul(a, b) => {
+                    let a_id = a.0;
+                    let b_id = b.0;
+                    writeln!(&mut buffer, "    // 256-bit CIOS Montgomery Modular Multiplication: s_{} = (s_{} * s_{}) mod p", s_idx, a_id, b_id).unwrap();
+
+                    // Emit CIOS Montgomery Multiplication Pass 1: tmp = cios(s_a, s_b)
+                    let p0_str = "0x43e1f593f0000001";
+                    let p1_str = "0x2833e84879b97091";
+                    let p2_str = "0xb85045b68181585d";
+                    let p3_str = "0x30644e72e131a029";
+                    let p_prime_str = "0xc2e1f593efffffff";
+
+                    let r2_0_str = "0x1bb8e645ae216da7";
+                    let r2_1_str = "0x53fe3ab1e35c59e3";
+                    let r2_2_str = "0x8c49833d53bb8085";
+                    let r2_3_str = "0x0216d0b17f4e44a5";
+
+                    // Helper lambda to emit 1 pass of CIOS Montgomery Multiplication
+                    let emit_cios_pass = |buf: &mut String, in_a: [&str; 4], in_b: [&str; 4], out_r: [&str; 4], tag: &str| {
+                        writeln!(buf, "    // --- CIOS Pass: {} ---", tag).unwrap();
+                        for k in 0..5 {
+                            writeln!(buf, "    mov.u64 %c_t_{}_{}, 0;", s_idx, k).unwrap();
+                        }
+
+                        for i in 0..4 {
+                            // Step 1: Accumulate in_a[i] * in_b[0..3] into t[0..4]
+                            writeln!(buf, "    mov.u64 %c_carry_{}, 0;", s_idx).unwrap();
+                            for j in 0..4 {
+                                writeln!(buf, "    mul.lo.u64 %c_tlo_{}, {}, {};", s_idx, in_a[i], in_b[j]).unwrap();
+                                writeln!(buf, "    mul.hi.u64 %c_thi_{}, {}, {};", s_idx, in_a[i], in_b[j]).unwrap();
+
+                                writeln!(buf, "    add.cc.u64 %c_tlo_{}, %c_tlo_{}, %c_t_{}_{};", s_idx, s_idx, s_idx, j).unwrap();
+                                writeln!(buf, "    addc.u64 %c_thi_{}, %c_thi_{}, 0;", s_idx, s_idx).unwrap();
+
+                                writeln!(buf, "    add.cc.u64 %c_t_{}_{}, %c_tlo_{}, %c_carry_{};", s_idx, j, s_idx, s_idx).unwrap();
+                                writeln!(buf, "    addc.u64 %c_carry_{}, %c_thi_{}, 0;", s_idx, s_idx).unwrap();
+                            }
+                            writeln!(buf, "    add.cc.u64 %c_t_{}_4, %c_t_{}_4, %c_carry_{};", s_idx, s_idx, s_idx).unwrap();
+                            writeln!(buf, "    addc.u64 %c_t5_{}, 0, 0;", s_idx).unwrap();
+
+                            // Step 2: m = (t[0] * p_prime) mod 2^64
+                            writeln!(buf, "    mul.lo.u64 %c_m_{}, %c_t_{}_0, {};", s_idx, s_idx, p_prime_str).unwrap();
+
+                            // Step 3: Add m * P[0..3] to t[0..4]
+                            writeln!(buf, "    mul.lo.u64 %c_tlo_{}, %c_m_{}, {};", s_idx, s_idx, p0_str).unwrap();
+                            writeln!(buf, "    mul.hi.u64 %c_thi_{}, %c_m_{}, {};", s_idx, s_idx, p0_str).unwrap();
+                            writeln!(buf, "    add.cc.u64 %c_tlo_{}, %c_tlo_{}, %c_t_{}_0;", s_idx, s_idx, s_idx).unwrap();
+                            writeln!(buf, "    addc.u64 %c_carry_{}, %c_thi_{}, 0;", s_idx, s_idx).unwrap();
+
+                            let p_limbs = [p1_str, p2_str, p3_str];
+                            for j in 1..4 {
+                                writeln!(buf, "    mul.lo.u64 %c_tlo_{}, %c_m_{}, {};", s_idx, s_idx, p_limbs[j-1]).unwrap();
+                                writeln!(buf, "    mul.hi.u64 %c_thi_{}, %c_m_{}, {};", s_idx, s_idx, p_limbs[j-1]).unwrap();
+
+                                writeln!(buf, "    add.cc.u64 %c_tlo_{}, %c_tlo_{}, %c_t_{}_{};", s_idx, s_idx, s_idx, j).unwrap();
+                                writeln!(buf, "    addc.u64 %c_thi_{}, %c_thi_{}, 0;", s_idx, s_idx).unwrap();
+
+                                writeln!(buf, "    add.cc.u64 %c_t_{}_{}, %c_tlo_{}, %c_carry_{};", s_idx, j - 1, s_idx, s_idx).unwrap();
+                                writeln!(buf, "    addc.u64 %c_carry_{}, %c_thi_{}, 0;", s_idx, s_idx).unwrap();
+                            }
+                            writeln!(buf, "    add.cc.u64 %c_t_{}_3, %c_t_{}_4, %c_carry_{};", s_idx, s_idx, s_idx).unwrap();
+                            writeln!(buf, "    addc.u64 %c_t_{}_4, %c_t5_{}, 0;", s_idx, s_idx).unwrap();
+                        }
+
+                        // Conditional Subtraction P
+                        writeln!(buf, "    sub.cc.u64 %c_r0_{}, %c_t_{}_0, {};", s_idx, s_idx, p0_str).unwrap();
+                        writeln!(buf, "    subc.cc.u64 %c_r1_{}, %c_t_{}_1, {};", s_idx, s_idx, p1_str).unwrap();
+                        writeln!(buf, "    subc.cc.u64 %c_r2_{}, %c_t_{}_2, {};", s_idx, s_idx, p2_str).unwrap();
+                        writeln!(buf, "    subc.cc.u64 %c_r3_{}, %c_t_{}_3, {};", s_idx, s_idx, p3_str).unwrap();
+                        writeln!(buf, "    subc.u64 %c_r4_{}, %c_t_{}_4, 0;", s_idx, s_idx).unwrap();
+
+                        writeln!(buf, "    setp.eq.u64 %c_p_sub_{}, %c_r4_{}, 0;", s_idx, s_idx).unwrap();
+                        writeln!(buf, "    selp.b64 {}, %c_r0_{}, %c_t_{}_0, %c_p_sub_{};", out_r[0], s_idx, s_idx, s_idx).unwrap();
+                        writeln!(buf, "    selp.b64 {}, %c_r1_{}, %c_t_{}_1, %c_p_sub_{};", out_r[1], s_idx, s_idx, s_idx).unwrap();
+                        writeln!(buf, "    selp.b64 {}, %c_r2_{}, %c_t_{}_2, %c_p_sub_{};", out_r[2], s_idx, s_idx, s_idx).unwrap();
+                        writeln!(buf, "    selp.b64 {}, %c_r3_{}, %c_t_{}_3, %c_p_sub_{};", out_r[3], s_idx, s_idx, s_idx).unwrap();
+                    };
+
+                    let sa = [format!("%s{}_0", a_id), format!("%s{}_1", a_id), format!("%s{}_2", a_id), format!("%s{}_3", a_id)];
+                    let sb = [format!("%s{}_0", b_id), format!("%s{}_1", b_id), format!("%s{}_2", b_id), format!("%s{}_3", b_id)];
+                    let stmp = [format!("%c_tmp_{}_0", s_idx), format!("%c_tmp_{}_1", s_idx), format!("%c_tmp_{}_2", s_idx), format!("%c_tmp_{}_3", s_idx)];
+                    let sr2 = [r2_0_str.to_string(), r2_1_str.to_string(), r2_2_str.to_string(), r2_3_str.to_string()];
+                    let sout = [format!("%s{}_0", s_idx), format!("%s{}_1", s_idx), format!("%s{}_2", s_idx), format!("%s{}_3", s_idx)];
+
+                    let sa_ref = [&sa[0][..], &sa[1][..], &sa[2][..], &sa[3][..]];
+                    let sb_ref = [&sb[0][..], &sb[1][..], &sb[2][..], &sb[3][..]];
+                    let stmp_ref = [&stmp[0][..], &stmp[1][..], &stmp[2][..], &stmp[3][..]];
+                    let sr2_ref = [&sr2[0][..], &sr2[1][..], &sr2[2][..], &sr2[3][..]];
+                    let sout_ref = [&sout[0][..], &sout[1][..], &sout[2][..], &sout[3][..]];
+
+                    emit_cios_pass(&mut buffer, sa_ref, sb_ref, stmp_ref, "tmp = cios(a, b)");
+                    emit_cios_pass(&mut buffer, sr2_ref, stmp_ref, sout_ref, "out = cios(tmp, R2)");
+                }
+                WitnessOp::Inv(a) | WitnessOp::Div(a, _) => {
+                    let a_id = a.0;
+                    writeln!(&mut buffer, "    // 256-bit Field Inversion / Division Hint: s_{}", s_idx).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_0, %s{}_0;", s_idx, a_id).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_1, %s{}_1;", s_idx, a_id).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_2, %s{}_2;", s_idx, a_id).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_3, %s{}_3;", s_idx, a_id).unwrap();
+                }
+                _ => {
+                    writeln!(&mut buffer, "    mov.u64 %s{}_0, 0;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_1, 0;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_2, 0;", s_idx).unwrap();
+                    writeln!(&mut buffer, "    mov.u64 %s{}_3, 0;", s_idx).unwrap();
+                }
+            }
+
+            let offset = s_idx * 32;
+            writeln!(&mut buffer, "    add.u64 %sig_addr, %base_ptr, {};", offset).unwrap();
+            writeln!(&mut buffer, "    st.global.v2.b64 [%sig_addr], {{%s{}_0, %s{}_1}};", s_idx, s_idx).unwrap();
+            writeln!(&mut buffer, "    add.u64 %sig_addr, %sig_addr, 16;").unwrap();
+            writeln!(&mut buffer, "    st.global.v2.b64 [%sig_addr], {{%s{}_2, %s{}_3}};", s_idx, s_idx).unwrap();
+            writeln!(&mut buffer, "").unwrap();
+        }
+
+        writeln!(&mut buffer, "EXIT_KERNEL:").unwrap();
+        writeln!(&mut buffer, "    ret;").unwrap();
+        writeln!(&mut buffer, "}}").unwrap();
+
+        buffer
     }
 }

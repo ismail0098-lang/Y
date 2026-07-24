@@ -75,6 +75,27 @@ impl Parser {
     }
 
     fn parse_item(&mut self) -> Result<Item, String> {
+        // Handle module level attributes (@zk_target, @zk_safe, @zk_allow_unconstrained)
+        let mut zk_target = None;
+        let mut is_zk_safe = false;
+        let mut is_zk_allow_unconstrained = false;
+
+        while self.check(TokenKind::AtZkTarget) || self.check(TokenKind::AtZkSafe) || self.check(TokenKind::AtZkAllowUnconstrained) {
+            if self.check(TokenKind::AtZkTarget) {
+                zk_target = Some(self.parse_zk_target_attr()?);
+            } else if self.match_token(TokenKind::AtZkSafe) {
+                is_zk_safe = true;
+            } else if self.match_token(TokenKind::AtZkAllowUnconstrained) {
+                is_zk_allow_unconstrained = true;
+            }
+        }
+
+        // Handle module declarations
+        if self.check(TokenKind::Module) {
+            let m = self.parse_module(is_zk_safe, is_zk_allow_unconstrained, zk_target)?;
+            return Ok(Item::Module(m));
+        }
+
         // Handle import declarations
         if self.match_token(TokenKind::Import) {
             let imp = self.parse_import()?;
@@ -114,6 +135,8 @@ impl Parser {
             Ok(Item::Enum(e))
         } else if self.check(TokenKind::AtPtxEmit)
             || self.check(TokenKind::AtSafe)
+            || self.check(TokenKind::AtZkSafe)
+            || self.check(TokenKind::AtZkAllowUnconstrained)
             || self.check(TokenKind::AtUnsafe)
             || self.check(TokenKind::AtTile)
             || self.check(TokenKind::AtGhost)
@@ -121,6 +144,8 @@ impl Parser {
         {
             let mut is_ptx = false;
             let mut is_safe = true;
+            let mut is_zk_safe = false;
+            let mut is_zk_allow_unconstrained = false;
             let mut is_ghost = false;
             let mut is_hdl_emit = false;
             let mut tile = None;
@@ -129,6 +154,11 @@ impl Parser {
                     is_ptx = true;
                 } else if self.match_token(TokenKind::AtSafe) {
                     is_safe = true;
+                    is_zk_safe = true;
+                } else if self.match_token(TokenKind::AtZkSafe) {
+                    is_zk_safe = true;
+                } else if self.match_token(TokenKind::AtZkAllowUnconstrained) {
+                    is_zk_allow_unconstrained = true;
                 } else if self.match_token(TokenKind::AtUnsafe) {
                     is_safe = false;
                 } else if self.match_token(TokenKind::AtGhost) {
@@ -160,10 +190,10 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::Fn, "'fn' after function attributes")?;
-            let f = self.parse_func_decl(is_safe, is_ptx, is_ghost, is_hdl_emit, tile)?;
+            let f = self.parse_func_decl(is_safe, is_zk_safe, is_zk_allow_unconstrained, is_ptx, is_ghost, is_hdl_emit, tile)?;
             Ok(Item::Func(f))
         } else if self.match_token(TokenKind::Fn) {
-            let f = self.parse_func_decl(true, false, false, false, None)?;
+            let f = self.parse_func_decl(true, false, false, false, false, false, None)?;
             Ok(Item::Func(f))
         } else if self.match_token(TokenKind::Impl) {
             let imp = self.parse_impl_block()?;
@@ -508,16 +538,23 @@ impl Parser {
             // Optional pub keyword
             let _is_pub = self.match_token(TokenKind::Pub);
             let mut is_safe = true;
+            let mut is_zk_safe = false;
+            let mut is_zk_allow_unconstrained = false;
             let mut is_ptx = false;
             let mut is_ghost = false;
             let mut is_hdl_emit = false;
             let mut tile = None;
-            // Collect directives in any order: @unsafe/@safe, @ptx_emit, @divergence(uniform), @tile, @ghost, @hdl_emit
+            // Collect directives in any order: @unsafe/@safe, @zk_safe, @zk_allow_unconstrained, @ptx_emit, @divergence(uniform), @tile, @ghost, @hdl_emit
             loop {
                 if self.match_token(TokenKind::AtUnsafe) {
                     is_safe = false;
                 } else if self.match_token(TokenKind::AtSafe) {
                     is_safe = true;
+                    is_zk_safe = true;
+                } else if self.match_token(TokenKind::AtZkSafe) {
+                    is_zk_safe = true;
+                } else if self.match_token(TokenKind::AtZkAllowUnconstrained) {
+                    is_zk_allow_unconstrained = true;
                 } else if self.match_token(TokenKind::AtPtxEmit) {
                     is_ptx = true;
                 } else if self.match_token(TokenKind::AtGhost) {
@@ -551,7 +588,7 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::Fn, "'fn' in impl block")?;
-            let f = self.parse_func_decl(is_safe, is_ptx, is_ghost, is_hdl_emit, tile)?;
+            let f = self.parse_func_decl(is_safe, is_zk_safe, is_zk_allow_unconstrained, is_ptx, is_ghost, is_hdl_emit, tile)?;
             methods.push(f);
         }
         self.expect(TokenKind::RBrace, "'}' to end impl body")?;
@@ -563,7 +600,7 @@ impl Parser {
         })
     }
 
-    fn parse_func_decl(&mut self, is_safe: bool, is_ptx_emit: bool, is_ghost: bool, is_hdl_emit: bool, tile: Option<TileAttr>) -> Result<FuncDecl, String> {
+    fn parse_func_decl(&mut self, is_safe: bool, is_zk_safe: bool, is_zk_allow_unconstrained: bool, is_ptx_emit: bool, is_ghost: bool, is_hdl_emit: bool, tile: Option<TileAttr>) -> Result<FuncDecl, String> {
         let name_tok = self.peek().clone();
         let name = match &name_tok.kind {
             TokenKind::Ident(s) => {
@@ -613,6 +650,8 @@ impl Parser {
         Ok(FuncDecl {
             name,
             is_safe,
+            is_zk_safe,
+            is_zk_allow_unconstrained,
             is_ptx_emit,
             is_ghost,
             is_hdl_emit,
@@ -736,6 +775,7 @@ impl Parser {
         let mut is_uniform_branch = false;
         let mut tile = None;
         let mut prefetch_stride = None;
+        let mut max_iterations = None;
 
         loop {
             if self.match_token(TokenKind::AtCachePolicy) {
@@ -859,6 +899,18 @@ impl Parser {
                         col: ps_tok.col,
                     },
                 });
+            } else if self.match_token(TokenKind::AtMaxIterations) {
+                self.expect(TokenKind::LParen, "'(' after @max_iterations")?;
+                let n_expr = self.parse_expr()?;
+                self.expect(TokenKind::RParen, "')' after @max_iterations")?;
+                match n_expr {
+                    Expr::IntLit(val, _) if val > 0 => {
+                        max_iterations = Some(val as usize);
+                    }
+                    _ => {
+                        return Err(format!("Line {}: @max_iterations requires a positive constant integer N > 0", span.line));
+                    }
+                }
             } else {
                 break;
             }
@@ -964,6 +1016,41 @@ impl Parser {
         } else if self.match_token(TokenKind::AtGhost) {
             let block = self.parse_block()?;
             Ok(Stmt::GhostBlock(block, span))
+        } else if self.match_token(TokenKind::AtHint) {
+            let mut outputs = Vec::new();
+            if self.match_token(TokenKind::LParen) {
+                if let TokenKind::Ident(ref id_name) = self.peek().kind {
+                    if id_name == "outputs" {
+                        self.advance();
+                        let _ = self.match_token(TokenKind::Assign);
+                    }
+                }
+                if self.match_token(TokenKind::LBracket) {
+                    while !self.check(TokenKind::RBracket) && !self.check(TokenKind::Eof) {
+                        if let TokenKind::Ident(ref name) = self.peek().kind.clone() {
+                            outputs.push(name.clone());
+                            self.advance();
+                        }
+                        if !self.match_token(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(TokenKind::RBracket, "']' after outputs list in @hint")?;
+                } else {
+                    while !self.check(TokenKind::RParen) && !self.check(TokenKind::Eof) {
+                        if let TokenKind::Ident(ref name) = self.peek().kind.clone() {
+                            outputs.push(name.clone());
+                            self.advance();
+                        }
+                        if !self.match_token(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(TokenKind::RParen, "')' after @hint attribute parameters")?;
+            }
+            let body = self.parse_block()?;
+            Ok(Stmt::HintBlock { outputs, body, span })
         } else if self.match_token(TokenKind::AtClockDomain) {
             self.expect(TokenKind::LParen, "'(' after @clock_domain")?;
             let clock = Box::new(self.parse_expr()?);
@@ -1002,6 +1089,7 @@ impl Parser {
                 condition,
                 body,
                 invariant,
+                max_iterations,
                 is_uniform_branch,
                 span,
             })
@@ -1890,6 +1978,120 @@ impl Parser {
             condition,
             message,
             span,
+        })
+    }
+
+    fn parse_zk_target_attr(&mut self) -> Result<ZkTargetAttr, String> {
+        let zk_tok = self.expect(TokenKind::AtZkTarget, "'@zk_target'")?;
+        let start_span = Span { line: zk_tok.line, col: zk_tok.col };
+        self.expect(TokenKind::LParen, "'(' after @zk_target")?;
+        
+        let mut field = None;
+        let mut scheme = None;
+        let mut opt_level = None;
+        
+        while !self.check(TokenKind::RParen) && !self.check(TokenKind::Eof) {
+            let key_tok = self.peek().clone();
+            let key = match &key_tok.kind {
+                TokenKind::Ident(s) => {
+                    self.advance();
+                    s.clone()
+                }
+                _ => return Err(format!("Line {}: Expected key in @zk_target parameter list", key_tok.line)),
+            };
+            
+            self.expect(TokenKind::Assign, "'=' after key")?;
+            
+            let val_tok = self.peek().clone();
+            match key.as_str() {
+                "field" => {
+                    match &val_tok.kind {
+                        TokenKind::StringLit(s) => {
+                            self.advance();
+                            let f = match s.as_str() {
+                                "bn254" => ScalarFieldEnum::Bn254,
+                                "bls12_381" => ScalarFieldEnum::Bls12_381,
+                                "pallas" => ScalarFieldEnum::Pallas,
+                                "vesta" => ScalarFieldEnum::Vesta,
+                                _ => return Err(format!("Line {}: Unsupported field identifier '{}'", val_tok.line, s)),
+                            };
+                            field = Some(f);
+                        }
+                        _ => return Err(format!("Line {}: Expected string literal for 'field'", val_tok.line)),
+                    }
+                }
+                "scheme" => {
+                    match &val_tok.kind {
+                        TokenKind::StringLit(s) => {
+                            self.advance();
+                            let sch = match s.as_str() {
+                                "r1cs" => ProofSchemeEnum::R1cs,
+                                "plonkish" => ProofSchemeEnum::Plonkish,
+                                _ => return Err(format!("Line {}: Unsupported proof scheme '{}'", val_tok.line, s)),
+                            };
+                            scheme = Some(sch);
+                        }
+                        _ => return Err(format!("Line {}: Expected string literal for 'scheme'", val_tok.line)),
+                    }
+                }
+                "opt_level" => {
+                    match &val_tok.kind {
+                        TokenKind::IntLit(n) => {
+                            self.advance();
+                            opt_level = Some(*n as u32);
+                        }
+                        _ => return Err(format!("Line {}: Expected integer literal for 'opt_level'", val_tok.line)),
+                    }
+                }
+                _ => return Err(format!("Line {}: Unknown parameter '{}' in @zk_target", key_tok.line, key)),
+            }
+            
+            if !self.match_token(TokenKind::Comma) {
+                break;
+            }
+        }
+        
+        self.expect(TokenKind::RParen, "')' to close @zk_target parameters")?;
+        
+        let field = field.ok_or_else(|| format!("Line {}: Missing 'field' parameter in @zk_target", zk_tok.line))?;
+        let scheme = scheme.ok_or_else(|| format!("Line {}: Missing 'scheme' parameter in @zk_target", zk_tok.line))?;
+        let opt_level = opt_level.unwrap_or(0);
+        
+        Ok(ZkTargetAttr {
+            field,
+            scheme,
+            opt_level,
+            span: start_span,
+        })
+    }
+
+    fn parse_module(&mut self, is_zk_safe: bool, is_zk_allow_unconstrained: bool, zk_target: Option<ZkTargetAttr>) -> Result<ModuleDecl, String> {
+        let module_tok = self.expect(TokenKind::Module, "'module' keyword")?;
+        let start_span = Span { line: module_tok.line, col: module_tok.col };
+        
+        let name_tok = self.peek().clone();
+        let name = match &name_tok.kind {
+            TokenKind::Ident(s) => {
+                self.advance();
+                s.clone()
+            }
+            _ => return Err(format!("Line {}: Expected module name identifier", name_tok.line)),
+        };
+        
+        self.expect(TokenKind::LBrace, "'{' after module name")?;
+        let mut items = Vec::new();
+        while !self.check(TokenKind::RBrace) && !self.check(TokenKind::Eof) {
+            items.push(self.parse_item()?);
+        }
+        self.expect(TokenKind::RBrace, "'}' to end module body")?;
+        
+        Ok(ModuleDecl {
+            name,
+            is_zk_safe,
+            is_zk_allow_unconstrained,
+            zk_target,
+            items,
+            span: start_span,
         })
     }
 }

@@ -32,6 +32,10 @@ cat << 'EOF' > Y_ShadowPlay/install.sh
 #!/bin/bash
 set -e
 
+# Change directory to script location
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
+
 # Check if run as root/sudo
 if [ "$EUID" -ne 0 ]; then
   echo "[!] Please run this script with sudo:"

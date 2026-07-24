@@ -1,0 +1,61 @@
+[package]
+name = "y-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.3", features = ["derive"] }
+y = { path = "..", package = "Y-compiler", features = ["zk"] }
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_type_checker"
+path = "fuzz_targets/fuzz_type_checker.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ast"
+path = "fuzz_targets/fuzz_ast.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_zk_emitter"
+path = "fuzz_targets/fuzz_zk_emitter.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_differential"
+path = "fuzz_targets/fuzz_differential.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_llvm_emitter"
+path = "fuzz_targets/fuzz_llvm_emitter.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ptx_emitter"
+path = "fuzz_targets/fuzz_ptx_emitter.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_zk_soundness"
+path = "fuzz_targets/fuzz_zk_soundness.rs"
+test = false
+doc = false

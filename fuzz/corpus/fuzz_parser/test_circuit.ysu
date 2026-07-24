@@ -1,0 +1,24 @@
+@unsafe
+fn main(x: I32, y: I32) -> I32 {
+    // 1. Non-linear multiplication constraint: A * B = C
+    let product = x * y;
+
+    // 2. Compile-time static loop unrolling
+    // Addition and scaling by loop index constant are zero-cost (free in R1CS)
+    let mut loop_sum = 0;
+    for i in 0..5 {
+        loop_sum = loop_sum + x * i;
+    }
+
+    // 3. Multiplexed conditional assignment (generates multiplexer selectors)
+    let mut cond_val = 0;
+    if x == y {
+        cond_val = 100;
+    } else {
+        cond_val = 200;
+    }
+
+    // Return the final constraint outcome
+    let result = product + loop_sum + cond_val;
+    return result;
+}

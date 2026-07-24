@@ -1,3 +1,7 @@
-use lexer::*;
+use y::lexer::*;
 
-fn main() {}
+fn main() {
+    let mut lexer = Lexer::new("\"unterminated");
+    let tokens = lexer.tokenize();
+    println!("{:?}", tokens);
+}

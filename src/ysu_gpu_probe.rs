@@ -5,7 +5,9 @@ use std::process::Command;
 
 struct GpuLatencies {
     gpu_name: String,
+    gpu_vendor: String,
     sm_version: String,
+    compute_capability: String,
     total_mem_mb: u64,
     fma_latency: f64,
     imad_latency: f64,
@@ -653,21 +655,25 @@ extern "C" __global__ void vram_latency_kernel(unsigned long long **array_ptr, u
 
 // ── Fallback Computations & CLI Output ────────────────────────
 
-fn query_gpu_profile() -> GpuLatencies {
-    let mut name = "Unknown GPU".to_string();
-    let mut mem_mb = 0u64;
-    let mut sm = "8.9".to_string(); 
-    
-    if let Some((parsed_name, parsed_mem, parsed_sm)) = get_gpu_info() {
-        name = parsed_name;
-        mem_mb = parsed_mem;
-        sm = parsed_sm;
-    }
-    
+// ── Prober Trait & Architectures ──────────────────────────────
+
+trait HardwareProber {
+    fn is_available(&self) -> bool;
+    fn probe(&self) -> Option<GpuLatencies>;
+}
+
+struct CudaProber;
+struct HipProber;
+struct OneApiProber;
+struct FallbackProber;
+
+fn build_cuda_profile(name: String, sm: String, mem_mb: u64) -> GpuLatencies {
     if sm.starts_with("9.0") {
         GpuLatencies {
             gpu_name: name,
-            sm_version: sm,
+            gpu_vendor: "NVIDIA".to_string(),
+            sm_version: sm.clone(),
+            compute_capability: sm,
             total_mem_mb: mem_mb,
             fma_latency: 4.0,
             imad_latency: 2.0,
@@ -702,7 +708,9 @@ fn query_gpu_profile() -> GpuLatencies {
     } else if sm.starts_with("8.6") || sm.starts_with("8.7") {
         GpuLatencies {
             gpu_name: name,
-            sm_version: sm,
+            gpu_vendor: "NVIDIA".to_string(),
+            sm_version: sm.clone(),
+            compute_capability: sm,
             total_mem_mb: mem_mb,
             fma_latency: 4.0,
             imad_latency: 4.0,
@@ -737,7 +745,9 @@ fn query_gpu_profile() -> GpuLatencies {
     } else if sm.starts_with("7.5") || sm.starts_with("7.0") {
         GpuLatencies {
             gpu_name: name,
-            sm_version: sm,
+            gpu_vendor: "NVIDIA".to_string(),
+            sm_version: sm.clone(),
+            compute_capability: sm,
             total_mem_mb: mem_mb,
             fma_latency: 4.0,
             imad_latency: 4.0,
@@ -772,7 +782,9 @@ fn query_gpu_profile() -> GpuLatencies {
     } else {
         GpuLatencies {
             gpu_name: if name == "Unknown GPU" { "NVIDIA RTX 40-Series".to_string() } else { name },
-            sm_version: sm,
+            gpu_vendor: "NVIDIA".to_string(),
+            sm_version: sm.clone(),
+            compute_capability: sm,
             total_mem_mb: if mem_mb == 0 { 12288 } else { mem_mb },
             fma_latency: 4.54,
             imad_latency: 2.51,
@@ -807,6 +819,290 @@ fn query_gpu_profile() -> GpuLatencies {
     }
 }
 
+fn build_amd_profile(name: String, arch: String, mem_mb: u64) -> GpuLatencies {
+    GpuLatencies {
+        gpu_name: name,
+        gpu_vendor: "AMD".to_string(),
+        sm_version: arch.clone(),
+        compute_capability: arch,
+        total_mem_mb: mem_mb,
+        fma_latency: 4.0,
+        imad_latency: 4.0,
+        smem_latency: 32.0,
+        l1_latency: 35.0,
+        l2_latency: 110.0,
+        vram_latency: 220.0,
+        hmma_f16_latency: 44.0,
+        tf32_latency: 70.0,
+        bar_sync_latency: 38.0,
+        shfl_sync_latency: 1.5,
+        smem_exchange_latency: 6.0,
+        branch_uniform: 4.0,
+        branch_divergent: 8.0,
+        imad_wide_latency: 4.0,
+        hfma2_latency: 4.0,
+        bf16x2_fma_latency: 4.0,
+        lop3_lut_latency: 4.0,
+        dadd_latency: 48.0,
+        max_regs_per_thread: 256,
+        max_regs_per_sm: 65536,
+        warp_size: 64,
+        max_threads_per_sm: 2048,
+        max_warps_per_sm: 32,
+        smem_noconflict: 4.0,
+        smem_2way_conflict: 8.0,
+        smem_4way_conflict: 16.0,
+        smem_broadcast: 4.0,
+        cp_async_latency: 220.0,
+        fma_ilp_throughput: 1.0,
+    }
+}
+
+fn build_intel_profile(name: String, arch: String, mem_mb: u64) -> GpuLatencies {
+    GpuLatencies {
+        gpu_name: name,
+        gpu_vendor: "Intel".to_string(),
+        sm_version: arch.clone(),
+        compute_capability: arch,
+        total_mem_mb: mem_mb,
+        fma_latency: 4.0,
+        imad_latency: 4.0,
+        smem_latency: 32.0,
+        l1_latency: 38.0,
+        l2_latency: 120.0,
+        vram_latency: 240.0,
+        hmma_f16_latency: 48.0,
+        tf32_latency: 80.0,
+        bar_sync_latency: 40.0,
+        shfl_sync_latency: 1.5,
+        smem_exchange_latency: 6.5,
+        branch_uniform: 4.0,
+        branch_divergent: 8.0,
+        imad_wide_latency: 4.0,
+        hfma2_latency: 4.0,
+        bf16x2_fma_latency: 4.0,
+        lop3_lut_latency: 4.0,
+        dadd_latency: 48.0,
+        max_regs_per_thread: 128,
+        max_regs_per_sm: 32768,
+        warp_size: 32,
+        max_threads_per_sm: 1024,
+        max_warps_per_sm: 32,
+        smem_noconflict: 4.0,
+        smem_2way_conflict: 8.0,
+        smem_4way_conflict: 16.0,
+        smem_broadcast: 4.0,
+        cp_async_latency: 250.0,
+        fma_ilp_throughput: 1.0,
+    }
+}
+
+fn get_generic_fallback_profile() -> GpuLatencies {
+    GpuLatencies {
+        gpu_name: "Generic GPU Emitter Target".to_string(),
+        gpu_vendor: "Generic".to_string(),
+        sm_version: "0.0".to_string(),
+        compute_capability: "0.0".to_string(),
+        total_mem_mb: 8192,
+        fma_latency: 4.0,
+        imad_latency: 4.0,
+        smem_latency: 32.0,
+        l1_latency: 35.0,
+        l2_latency: 110.0,
+        vram_latency: 220.0,
+        hmma_f16_latency: 44.0,
+        tf32_latency: 70.0,
+        bar_sync_latency: 38.0,
+        shfl_sync_latency: 1.2,
+        smem_exchange_latency: 6.0,
+        branch_uniform: 4.0,
+        branch_divergent: 8.0,
+        imad_wide_latency: 4.0,
+        hfma2_latency: 4.0,
+        bf16x2_fma_latency: 4.0,
+        lop3_lut_latency: 4.0,
+        dadd_latency: 48.0,
+        max_regs_per_thread: 255,
+        max_regs_per_sm: 65536,
+        warp_size: 32,
+        max_threads_per_sm: 1024,
+        max_warps_per_sm: 32,
+        smem_noconflict: 4.0,
+        smem_2way_conflict: 8.0,
+        smem_4way_conflict: 16.0,
+        smem_broadcast: 4.0,
+        cp_async_latency: 220.0,
+        fma_ilp_throughput: 1.0,
+    }
+}
+
+fn detect_alternative_gpus() -> Option<(String, String, String)> {
+    #[cfg(unix)]
+    {
+        if let Ok(output) = Command::new("lspci").output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let line_lower = line.to_lowercase();
+                    if line_lower.contains("vga compatible controller") || line_lower.contains("3d controller") {
+                        if line_lower.contains("nvidia") {
+                            return Some(("NVIDIA GPU".to_string(), "NVIDIA".to_string(), "8.9".to_string()));
+                        } else if line_lower.contains("amd") || line_lower.contains("radeon") {
+                            return Some(("AMD Radeon GPU".to_string(), "AMD".to_string(), "gfx1100".to_string()));
+                        } else if line_lower.contains("intel") {
+                            return Some(("Intel Graphics".to_string(), "Intel".to_string(), "gen12".to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("card") {
+                        let vendor_path = path.join("device/vendor");
+                        if let Ok(vendor_hex) = std::fs::read_to_string(vendor_path) {
+                            let vendor_hex = vendor_hex.trim();
+                            if vendor_hex == "0x10de" {
+                                return Some(("NVIDIA GPU".to_string(), "NVIDIA".to_string(), "8.9".to_string()));
+                            } else if vendor_hex == "0x1002" {
+                                return Some(("AMD Radeon GPU".to_string(), "AMD".to_string(), "gfx1100".to_string()));
+                            } else if vendor_hex == "0x8086" {
+                                return Some(("Intel Graphics".to_string(), "Intel".to_string(), "gen12".to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    #[cfg(windows)]
+    {
+        if let Ok(output) = Command::new("wmic").args(&["path", "win32_VideoController", "get", "name"]).output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let line_lower = line.to_lowercase();
+                    if line_lower.contains("nvidia") {
+                        return Some(("NVIDIA GPU".to_string(), "NVIDIA".to_string(), "8.9".to_string()));
+                    } else if line_lower.contains("amd") || line_lower.contains("radeon") {
+                        return Some(("AMD Radeon GPU".to_string(), "AMD".to_string(), "gfx1100".to_string()));
+                    } else if line_lower.contains("intel") {
+                        return Some(("Intel Graphics".to_string(), "Intel".to_string(), "gen12".to_string()));
+                    }
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+impl HardwareProber for CudaProber {
+    fn is_available(&self) -> bool {
+        unsafe { CudaDriver::load().is_some() }
+    }
+    
+    fn probe(&self) -> Option<GpuLatencies> {
+        let (name, mem_mb, sm) = get_gpu_info()?;
+        Some(build_cuda_profile(name, sm, mem_mb))
+    }
+}
+
+impl HardwareProber for HipProber {
+    fn is_available(&self) -> bool {
+        if Command::new("rocm-smi").arg("-h").output().is_ok() {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            if std::path::Path::new("/opt/rocm").exists() || std::path::Path::new("/sys/module/amdgpu").exists() {
+                return true;
+            }
+        }
+        false
+    }
+    
+    fn probe(&self) -> Option<GpuLatencies> {
+        let mut name = "AMD Radeon GPU".to_string();
+        let mem_mb = 8192;
+        let arch = "gfx1100".to_string();
+        
+        if let Ok(output) = Command::new("rocm-smi").args(&["--showproductname"]).output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if line.contains("Card Series:") || line.contains("Product Name:") {
+                        if let Some(idx) = line.find(':') {
+                            name = line[idx+1..].trim().to_string();
+                        }
+                    }
+                }
+            }
+        }
+        Some(build_amd_profile(name, arch, mem_mb))
+    }
+}
+
+impl HardwareProber for OneApiProber {
+    fn is_available(&self) -> bool {
+        if Command::new("sycl-ls").output().is_ok() {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            if std::path::Path::new("/opt/intel/oneapi").exists() {
+                return true;
+            }
+        }
+        false
+    }
+    
+    fn probe(&self) -> Option<GpuLatencies> {
+        let mut name = "Intel Xe GPU".to_string();
+        let arch = "gen12".to_string();
+        let mem_mb = 8192;
+        
+        if let Ok(output) = Command::new("sycl-ls").output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if line.contains("[gpu]") {
+                        name = line.trim().to_string();
+                        break;
+                    }
+                }
+            }
+        }
+        Some(build_intel_profile(name, arch, mem_mb))
+    }
+}
+
+impl HardwareProber for FallbackProber {
+    fn is_available(&self) -> bool {
+        true
+    }
+    
+    fn probe(&self) -> Option<GpuLatencies> {
+        if let Some((name, vendor, arch)) = detect_alternative_gpus() {
+            if vendor == "NVIDIA" {
+                Some(build_cuda_profile(name, arch, 8192))
+            } else if vendor == "AMD" {
+                Some(build_amd_profile(name, arch, 8192))
+            } else if vendor == "Intel" {
+                Some(build_intel_profile(name, arch, 8192))
+            } else {
+                Some(build_amd_profile(name, arch, 8192))
+            }
+        } else {
+            None
+        }
+    }
+}
+
 fn get_gpu_info() -> Option<(String, u64, String)> {
     let output = Command::new("nvidia-smi")
         .args(&[
@@ -835,15 +1131,39 @@ fn get_gpu_info() -> Option<(String, u64, String)> {
 }
 
 fn main() {
-    let mut profile = query_gpu_profile();
-    
-    println!("[*] Initializing live GPU micro-kernels JIT profiling...");
-    let live_opt = unsafe { run_live_benchmarks() };
-    
+    let probers: Vec<Box<dyn HardwareProber>> = vec![
+        Box::new(CudaProber),
+        Box::new(HipProber),
+        Box::new(OneApiProber),
+        Box::new(FallbackProber),
+    ];
+
+    let mut detected_profile = None;
+    for prober in probers {
+        if prober.is_available() {
+            if let Some(prof) = prober.probe() {
+                detected_profile = Some(prof);
+                break;
+            }
+        }
+    }
+
+    let mut profile = detected_profile.unwrap_or_else(|| {
+        get_generic_fallback_profile()
+    });
+
     let mut temp_start = 40;
     let mut temp_end = 40;
     let mut live_benchmarked = false;
-    
+
+    let mut live_opt = None;
+    if profile.gpu_vendor == "NVIDIA" {
+        println!("[*] Initializing live GPU micro-kernels JIT profiling...");
+        live_opt = unsafe { run_live_benchmarks() };
+    } else {
+        println!("[*] Skipping live CUDA microbenchmarks on non-NVIDIA GPU.");
+    }
+
     if let Some(ref live) = live_opt {
         live_benchmarked = true;
         profile.fma_latency = live.fma_latency;
@@ -859,7 +1179,7 @@ fn main() {
     } else {
         println!("[!] Dynamic live GPU JIT benchmarks skipped or unsupported. Falling back to static model.");
     }
-    
+
     let temp_diff = (temp_end as f64) - (temp_start as f64);
     let drift_coefficient = if live_benchmarked && temp_diff > 0.0 {
         let live = live_opt.as_ref().unwrap();
@@ -867,15 +1187,17 @@ fn main() {
     } else {
         0.0051
     };
-    
+
     let thermal_40c = profile.fma_latency + (40.0 - temp_start as f64) * drift_coefficient;
     let thermal_60c = profile.fma_latency + (60.0 - temp_start as f64) * drift_coefficient;
     let thermal_80c = profile.fma_latency + (80.0 - temp_start as f64) * drift_coefficient;
-    
+
     println!("GPU_NAME={}", profile.gpu_name);
+    println!("GPU_VENDOR={}", profile.gpu_vendor);
     println!("SM_VERSION={}", profile.sm_version);
+    println!("COMPUTE_CAPABILITY={}", profile.compute_capability);
     println!("L1_CYCLES_GPU={:.2}", profile.l1_latency);
-    
+
     println!("FMA_LATENCY_CYCLES={:.2}", profile.fma_latency);
     println!("IMAD_LATENCY_CYCLES={:.2}", profile.imad_latency);
     println!("THERMAL_LATENCY_40C={:.4}", thermal_40c);
@@ -883,7 +1205,7 @@ fn main() {
     println!("THERMAL_LATENCY_80C={:.4}", thermal_80c);
     println!("MUFU_RCP_LATENCY_CYCLES=41.55");
     println!("DFMA_LATENCY_CYCLES={:.2}", profile.dadd_latency + 6.0);
-    
+
     println!("SMEM_LATENCY_CYCLES={:.2}", profile.smem_latency);
     println!("L1_LATENCY_CYCLES={:.2}", profile.l1_latency);
     println!("L2_LATENCY_CYCLES={:.2}", profile.l2_latency);
@@ -891,7 +1213,7 @@ fn main() {
 
     println!("HMMA_F16_LATENCY_CYCLES={:.2}", profile.hmma_f16_latency);
     println!("TF32_LATENCY_CYCLES={:.2}", profile.tf32_latency);
-    
+
     println!("BAR_SYNC_LATENCY_CYCLES={:.2}", profile.bar_sync_latency);
 
     println!("SHFL_SYNC_LATENCY_CYCLES={:.2}", profile.shfl_sync_latency);
@@ -932,7 +1254,7 @@ fn main() {
     println!("MAX_THREADS_PER_SM={}", profile.max_threads_per_sm);
     println!("MAX_WARPS_PER_SM={}", profile.max_warps_per_sm);
     println!("TOTAL_GLOBAL_MEM_MB={}", profile.total_mem_mb);
-    
+
     println!("DRIFT_FREE_TYPES=Q32.32,F64");
     println!("ZERO_DRIFT_PENALTY=48");
 

@@ -34,6 +34,7 @@ pub enum Item {
     StaticAssert(StaticAssertDecl),
     Impl(ImplBlock),
     Const(ConstDecl),
+    Module(ModuleDecl),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -48,6 +49,8 @@ pub struct ConstDecl {
 pub struct FuncDecl {
     pub name: String,
     pub is_safe: bool,
+    pub is_zk_safe: bool,
+    pub is_zk_allow_unconstrained: bool,
     pub is_ptx_emit: bool,
     pub is_ghost: bool,
     pub is_hdl_emit: bool,
@@ -221,6 +224,7 @@ pub enum Stmt {
         condition: Box<Expr>,
         body: Block,
         invariant: Option<Box<Expr>>,
+        max_iterations: Option<usize>,
         is_uniform_branch: bool,
         span: Span,
     },
@@ -257,6 +261,12 @@ pub enum Stmt {
         message: Option<String>,
         span: Span,
     },
+    /// `@hint { ... }` — unconstrained witness computation block
+    HintBlock {
+        outputs: Vec<String>,
+        body: Block,
+        span: Span,
+    },
 }
 
 impl Stmt {
@@ -278,6 +288,7 @@ impl Stmt {
             Stmt::GhostBlock(_, s) => s.clone(),
             Stmt::ClockDomainBlock { span, .. } => span.clone(),
             Stmt::CompileTimeAssert { span, .. } => span.clone(),
+            Stmt::HintBlock { span, .. } => span.clone(),
         }
     }
 }
@@ -513,6 +524,38 @@ pub struct PrefetchStrideAttr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClockDomainAttr {
     pub clock: Box<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Copy, Eq)]
+pub enum ScalarFieldEnum {
+    Bn254,
+    Bls12_381,
+    Pallas,
+    Vesta,
+}
+
+#[derive(Debug, Clone, PartialEq, Copy, Eq)]
+pub enum ProofSchemeEnum {
+    R1cs,
+    Plonkish,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZkTargetAttr {
+    pub field: ScalarFieldEnum,
+    pub scheme: ProofSchemeEnum,
+    pub opt_level: u32,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleDecl {
+    pub name: String,
+    pub is_zk_safe: bool,
+    pub is_zk_allow_unconstrained: bool,
+    pub zk_target: Option<ZkTargetAttr>,
+    pub items: Vec<Item>,
     pub span: Span,
 }
 

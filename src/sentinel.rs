@@ -235,6 +235,9 @@ pub struct HardwareProfile {
     pub thread_scheduling_cost_cycles: u64,
     // GPU hardware characteristics
     pub gpu_name: String,
+    pub gpu_vendor: String,
+    pub sm_version: String,
+    pub compute_capability: String,
 
     // Compute Latencies
     pub fma_latency_cycles: f64,
@@ -426,6 +429,15 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             gpu_name: parse_profile_value(&contents, "GPU_NAME")
                 .unwrap_or("Unknown GPU")
                 .to_string(),
+            gpu_vendor: parse_profile_value(&contents, "GPU_VENDOR")
+                .unwrap_or("Unknown")
+                .to_string(),
+            sm_version: parse_profile_value(&contents, "SM_VERSION")
+                .unwrap_or("0.0")
+                .to_string(),
+            compute_capability: parse_profile_value(&contents, "COMPUTE_CAPABILITY")
+                .unwrap_or("0.0")
+                .to_string(),
             fma_latency_cycles: parse_f64_field(&contents, "FMA_LATENCY").unwrap_or(4.0),
             imad_latency_cycles: parse_f64_field(&contents, "IMAD_LATENCY").unwrap_or(4.0),
             thermal_latency_40c: parse_f64_field(&contents, "THERMAL_LATENCY_40C").unwrap_or(4.0),
@@ -525,6 +537,8 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         println!("    -> Loaded CPU AVX-512 Instruction Throughput: {:.2} cycles per op", profile.avx512_throughput_cycles);
         println!("    -> Loaded CPU Thread Scheduling/Context Switch Handoff Cost: {} cycles", profile.thread_scheduling_cost_cycles);
         println!("    -> Loaded GPU Name: {}", profile.gpu_name);
+        println!("    -> Loaded GPU Vendor: {}", profile.gpu_vendor);
+        println!("    -> Loaded SM Version / Compute Capability: {} / {}", profile.sm_version, profile.compute_capability);
         println!(
             "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
             profile.fma_latency_cycles,
@@ -640,6 +654,9 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let probe_cmd = std::process::Command::new(&probe_path).output();
 
     let mut gpu_name = "Unknown GPU".to_string();
+    let mut gpu_vendor = "Unknown".to_string();
+    let mut sm_version = "0.0".to_string();
+    let mut compute_capability = "0.0".to_string();
     let mut fma_latency_cycles = 4.0;
     let mut imad_latency_cycles = 4.0;
     let mut thermal_latency_40c = 4.0;
@@ -694,6 +711,15 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
 
             gpu_name = parse_profile_value(&stdout, "GPU_NAME")
                 .unwrap_or("Unknown")
+                .to_string();
+            gpu_vendor = parse_profile_value(&stdout, "GPU_VENDOR")
+                .unwrap_or("Unknown")
+                .to_string();
+            sm_version = parse_profile_value(&stdout, "SM_VERSION")
+                .unwrap_or("0.0")
+                .to_string();
+            compute_capability = parse_profile_value(&stdout, "COMPUTE_CAPABILITY")
+                .unwrap_or("0.0")
                 .to_string();
             zero_drift_penalty_cycles = parse_u64_field(&stdout, "ZERO_DRIFT_PENALTY").unwrap_or(0);
 
@@ -782,6 +808,9 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         avx512_throughput_cycles,
         thread_scheduling_cost_cycles,
         gpu_name,
+        gpu_vendor,
+        sm_version,
+        compute_capability,
         fma_latency_cycles,
         imad_latency_cycles,
         thermal_latency_40c,
@@ -939,6 +968,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     println!("[*] Saving hardware topology to {}...", profile_path);
     let serialized = format!(
         "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nL2_CYCLES={}\nL3_CYCLES={}\nMEM_CYCLES={}\nAVX512_THROUGHPUT={}\nTHREAD_SCHEDULING_COST={}\nGPU_NAME={}\n\
+         GPU_VENDOR={}\nSM_VERSION={}\nCOMPUTE_CAPABILITY={}\n\
          FMA_LATENCY={}\nIMAD_LATENCY={}\nTHERMAL_LATENCY_40C={}\n\
          THERMAL_LATENCY_60C={}\nTHERMAL_LATENCY_80C={}\n\
          MUFU_RCP_LATENCY={}\nDFMA_LATENCY={}\nSMEM_LATENCY={}\n\
@@ -972,7 +1002,8 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         profile.has_avx, profile.has_avx512, profile.l2_line_size, profile.l1_latency_cycles,
         profile.l2_latency_cycles, profile.l3_latency_cycles, profile.mem_latency_cycles,
         profile.avx512_throughput_cycles, profile.thread_scheduling_cost_cycles,
-        profile.gpu_name, profile.fma_latency_cycles, profile.imad_latency_cycles,
+        profile.gpu_name, profile.gpu_vendor, profile.sm_version, profile.compute_capability,
+        profile.fma_latency_cycles, profile.imad_latency_cycles,
         profile.thermal_latency_40c, profile.thermal_latency_60c, profile.thermal_latency_80c,
         profile.mufu_rcp_latency_cycles, profile.dfma_latency_cycles, profile.smem_latency_cycles,
         profile.l1_gpu_latency_cycles, profile.l2_gpu_latency_cycles, profile.vram_latency_cycles,

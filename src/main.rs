@@ -420,9 +420,55 @@ fn main() {
     let emit_r1cs = args
         .iter()
         .any(|a| a == "--emit-r1cs" || a == "--target=r1cs");
+    let emit_zk_ptx = args
+        .iter()
+        .any(|a| a == "--emit-zk-ptx" || a == "--target=zk-ptx");
     let emit_coprocessor = args
         .iter()
         .any(|a| a == "--emit-coprocessor" || a == "--target=coprocessor");
+
+    if emit_zk_ptx {
+        #[cfg(not(feature = "zk"))]
+        {
+            log_error!("The ZK Circuit Backend is not compiled into this binary.");
+            eprintln!("    Recompile Y-lang with ZK support enabled: cargo build --features zk");
+            exit(1);
+        }
+        #[cfg(feature = "zk")]
+        {
+            log_step!("4/4", "Emitting GPU PTX Witness Generator Kernel...");
+            let mut emitter = zk_emitter::ZkEmitter::new();
+            if let Err(e) = emitter.emit_program(&ast) {
+                log_error!("ZK Constraint Lowering Error:\n    {}", e);
+                exit(1);
+            }
+            let graph = emitter.build_witness_ir();
+            let mut ptx_emitter = ptx_emitter::PtxEmitter::new();
+            let ptx_code = ptx_emitter.emit_witness_generator_ptx(&graph);
+
+            let write_path = if let Some(ref sf) = source_file {
+                let path = std::path::Path::new(sf);
+                let mut p = path.to_path_buf();
+                p.set_extension("witness.ptx");
+                p.to_string_lossy().to_string()
+            } else {
+                "output.witness.ptx".to_string()
+            };
+
+            match fs::write(&write_path, &ptx_code) {
+                Ok(_) => {
+                    println!("      -> GPU PTX Witness Generator Kernel compiled successfully.");
+                    println!("      -> Signals compiled: {}", graph.num_signals);
+                    println!("      -> Written to: {}", write_path);
+                    exit(0);
+                }
+                Err(e) => {
+                    log_error!("Failed to write witness PTX output: {}", e);
+                    exit(1);
+                }
+            }
+        }
+    }
 
     if emit_coprocessor {
         log_step!("4/4", "Running Dual-Accelerator Co-Processing Pipeline...");

@@ -44,7 +44,7 @@ try {
 
 if (hasCircom) {
     if (fs.existsSync('dot_product.r1cs')) fs.unlinkSync('dot_product.r1cs');
-    stats['Circom'] = runWithStats('Circom Compiler', 'circom dot_product.circom --r1cs --wasm --sym');
+    stats['Circom'] = runWithStats('Circom Compiler', 'circom dot_product.circom --r1cs --c --sym --O2');
 }
 
 // 3. Noir
@@ -57,7 +57,7 @@ try {
 
 if (hasNoir) {
     cleanDir(path.join(__dirname, 'noir/dot_product/target'));
-    stats['Noir'] = runWithStats('Noir Compiler (Nargo)', `${nargoPath} compile --force`, 'noir/dot_product');
+    stats['Noir'] = runWithStats('Noir Compiler (Nargo)', `${nargoPath} compile --force --inliner-aggressiveness 100`, 'noir/dot_product');
 }
 
 // 4. Leo

@@ -990,6 +990,14 @@ static void yfile_write_impl(const YStr* path_str, const YStr* content) {{
                 self.indent_level -= 1;
                 self.wln("}");
             }
+            Stmt::HintBlock { body, .. } => {
+                self.wln("/* @hint unconstrained block */");
+                self.wln("{");
+                self.indent_level += 1;
+                self.emit_block_body(body);
+                self.indent_level -= 1;
+                self.wln("}");
+            }
             Stmt::ClockDomainBlock { body, .. } => {
                 self.wln("/* @clock_domain block */");
                 self.wln("{");
