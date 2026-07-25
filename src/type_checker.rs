@@ -13,7 +13,7 @@
 use crate::ast::*;
 use crate::bank_conflict::{BankConflictProver, SmemLayout as ProverLayout, SwizzlePattern};
 use crate::linear_tracker::LinearTracker;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::process::{Command, Stdio};
 use std::io::Write;
 
@@ -85,13 +85,31 @@ pub struct SignalConstraintInfo {
     pub declared_span: Span,
 }
 
+/// Per-variable entry in a unified scope frame, combining type, interval,
+/// explicit-bound flag, and constraint info into a single cache-friendly record.
+pub struct SymbolEntry {
+    pub ty: SemanticType,
+    pub interval: Option<Interval>,
+    pub is_explicitly_bounded: bool,
+    pub constraint_info: Option<SignalConstraintInfo>,
+}
+
+/// A single scope frame that replaces the former four parallel scope stacks.
+pub struct ScopeFrame {
+    pub symbols: HashMap<String, SymbolEntry>,
+}
+
+impl ScopeFrame {
+    fn new() -> Self {
+        Self {
+            symbols: HashMap::new(),
+        }
+    }
+}
+
 pub struct TypeChecker {
-    // Basic type environment: variable name -> SemanticType
-    env: Vec<HashMap<String, SemanticType>>,
-    // Interval environment: variable name -> Interval bounds
-    intervals: Vec<HashMap<String, Interval>>,
-    // Explicitly bounded variables to enforce strict bounds on assignment
-    explicit_bounds: Vec<HashSet<String>>,
+    // Unified scope stack: each frame holds all per-variable data
+    scopes: Vec<ScopeFrame>,
     pub linear_tracker: LinearTracker,
     pub errors: Vec<String>,
     pub in_unsafe: bool,
@@ -101,17 +119,21 @@ pub struct TypeChecker {
     structs: HashMap<String, HashMap<String, SemanticType>>,
 
     // Static Under-Constrained Analyzer (@zk_safe) fields
-    pub constraint_env: Vec<HashMap<String, SignalConstraintInfo>>,
     pub zk_safe_stack: Vec<bool>,
     pub zk_allow_unconstrained_stack: Vec<bool>,
 }
 
+fn reset_thread_locals() {
+    SAFE_INDICES.with(|s| s.borrow_mut().clear());
+    INDEX_ARRAY_SIZES.with(|s| s.borrow_mut().clear());
+    INDEX_SWIZZLES.with(|s| s.borrow_mut().clear());
+}
+
 impl TypeChecker {
     pub fn new() -> Self {
+        reset_thread_locals();
         Self {
-            env: vec![HashMap::new()],
-            intervals: vec![HashMap::new()],
-            explicit_bounds: vec![HashSet::new()],
+            scopes: vec![ScopeFrame::new()],
             linear_tracker: LinearTracker::new(),
             errors: Vec::new(),
             in_unsafe: false,
@@ -119,27 +141,20 @@ impl TypeChecker {
             current_return_type: None,
             functions: HashMap::new(),
             structs: HashMap::new(),
-            constraint_env: vec![HashMap::new()],
             zk_safe_stack: vec![false],
             zk_allow_unconstrained_stack: vec![false],
         }
     }
 
     pub fn push_scope(&mut self) {
-        self.env.push(HashMap::new());
-        self.intervals.push(HashMap::new());
-        self.explicit_bounds.push(HashSet::new());
+        self.scopes.push(ScopeFrame::new());
         self.linear_tracker.push_scope();
-        self.constraint_env.push(HashMap::new());
     }
 
     pub fn pop_scope(&mut self) {
         self.check_scope_unconstrained_signals();
-        self.constraint_env.pop();
         self.linear_tracker.pop_scope();
-        self.explicit_bounds.pop();
-        self.intervals.pop();
-        self.env.pop();
+        self.scopes.pop();
     }
 
     pub fn is_zk_safe_active(&self) -> bool {
@@ -151,16 +166,25 @@ impl TypeChecker {
     }
 
     pub fn set_signal_constraint(&mut self, name: String, state: ConstraintState, span: Span) {
-        if let Some(scope) = self.constraint_env.last_mut() {
-            if let Some(existing) = scope.get_mut(&name) {
-                existing.state = state;
+        if let Some(frame) = self.scopes.last_mut() {
+            if let Some(entry) = frame.symbols.get_mut(&name) {
+                entry.constraint_info = Some(SignalConstraintInfo {
+                    name,
+                    state,
+                    declared_span: span,
+                });
             } else {
-                scope.insert(
+                frame.symbols.insert(
                     name.clone(),
-                    SignalConstraintInfo {
-                        name,
-                        state,
-                        declared_span: span,
+                    SymbolEntry {
+                        ty: SemanticType::Unknown,
+                        interval: None,
+                        is_explicitly_bounded: false,
+                        constraint_info: Some(SignalConstraintInfo {
+                            name,
+                            state,
+                            declared_span: span,
+                        }),
                     },
                 );
             }
@@ -168,19 +192,23 @@ impl TypeChecker {
     }
 
     pub fn lookup_signal_constraint(&self, name: &str) -> Option<&SignalConstraintInfo> {
-        for scope in self.constraint_env.iter().rev() {
-            if let Some(info) = scope.get(name) {
-                return Some(info);
+        for frame in self.scopes.iter().rev() {
+            if let Some(entry) = frame.symbols.get(name) {
+                if let Some(ref info) = entry.constraint_info {
+                    return Some(info);
+                }
             }
         }
         None
     }
 
     pub fn update_signal_constraint_state(&mut self, name: &str, new_state: ConstraintState) {
-        for scope in self.constraint_env.iter_mut().rev() {
-            if let Some(info) = scope.get_mut(name) {
-                info.state = new_state;
-                return;
+        for frame in self.scopes.iter_mut().rev() {
+            if let Some(entry) = frame.symbols.get_mut(name) {
+                if let Some(ref mut info) = entry.constraint_info {
+                    info.state = new_state;
+                    return;
+                }
             }
         }
     }
@@ -329,10 +357,15 @@ impl TypeChecker {
     fn check_scope_unconstrained_signals(&mut self) {
         let is_allow = self.is_zk_allow_unconstrained_active();
         let is_safe = self.is_zk_safe_active();
-        let is_top_level = self.constraint_env.len() <= 2;
+        let is_top_level = self.scopes.len() <= 2;
 
-        if let Some(current_scope) = self.constraint_env.last_mut() {
-            for (var_name, info) in current_scope.iter_mut() {
+        if let Some(current_frame) = self.scopes.last_mut() {
+            for (var_name, entry) in current_frame.symbols.iter_mut() {
+                let info = match entry.constraint_info.as_mut() {
+                    Some(info) => info,
+                    None => continue,
+                };
+
                 if is_allow {
                     if let ConstraintState::TaintedUnconstrained { origins, reasons } = &info.state {
                         info.state = ConstraintState::DeferredObligation {
@@ -372,14 +405,23 @@ impl TypeChecker {
     }
 
     fn insert_interval(&mut self, name: String, interval: Interval) {
-        if let Some(scope) = self.intervals.last_mut() {
-            scope.insert(name, interval);
+        if let Some(frame) = self.scopes.last_mut() {
+            if let Some(entry) = frame.symbols.get_mut(&name) {
+                entry.interval = Some(interval);
+            } else {
+                frame.symbols.insert(name, SymbolEntry {
+                    ty: SemanticType::Unknown,
+                    interval: Some(interval),
+                    is_explicitly_bounded: false,
+                    constraint_info: None,
+                });
+            }
         }
     }
 
     fn find_var_scope_index(&self, name: &str) -> Option<usize> {
-        for (idx, scope) in self.env.iter().enumerate().rev() {
-            if scope.contains_key(name) {
+        for (idx, frame) in self.scopes.iter().enumerate().rev() {
+            if frame.symbols.contains_key(name) {
                 return Some(idx);
             }
         }
@@ -388,36 +430,47 @@ impl TypeChecker {
 
     fn is_explicitly_bounded(&self, name: &str) -> bool {
         if let Some(idx) = self.find_var_scope_index(name) {
-            if let Some(scope) = self.explicit_bounds.get(idx) {
-                return scope.contains(name);
+            if let Some(frame) = self.scopes.get(idx) {
+                if let Some(entry) = frame.symbols.get(name) {
+                    return entry.is_explicitly_bounded;
+                }
             }
         }
         false
     }
 
     fn mark_explicitly_bounded(&mut self, name: String) {
-        if let Some(scope) = self.explicit_bounds.last_mut() {
-            scope.insert(name);
+        if let Some(frame) = self.scopes.last_mut() {
+            if let Some(entry) = frame.symbols.get_mut(&name) {
+                entry.is_explicitly_bounded = true;
+            }
         }
     }
 
     fn update_interval(&mut self, name: &str, interval: Option<Interval>) {
         let target_idx = self.find_var_scope_index(name).unwrap_or_else(|| {
-            self.intervals.len().saturating_sub(1)
+            self.scopes.len().saturating_sub(1)
         });
-        if let Some(scope) = self.intervals.get_mut(target_idx) {
-            if let Some(inv) = interval {
-                scope.insert(name.to_string(), inv);
-            } else {
-                scope.remove(name);
+        if let Some(frame) = self.scopes.get_mut(target_idx) {
+            if let Some(entry) = frame.symbols.get_mut(name) {
+                entry.interval = interval;
+            } else if let Some(inv) = interval {
+                frame.symbols.insert(name.to_string(), SymbolEntry {
+                    ty: SemanticType::Unknown,
+                    interval: Some(inv),
+                    is_explicitly_bounded: false,
+                    constraint_info: None,
+                });
             }
         }
     }
 
     fn lookup_interval(&self, name: &str) -> Option<&Interval> {
         if let Some(idx) = self.find_var_scope_index(name) {
-            if let Some(scope) = self.intervals.get(idx) {
-                return scope.get(name);
+            if let Some(frame) = self.scopes.get(idx) {
+                if let Some(entry) = frame.symbols.get(name) {
+                    return entry.interval.as_ref();
+                }
             }
         }
         None
@@ -451,6 +504,22 @@ impl TypeChecker {
                             max: *candidates.iter().max().unwrap(),
                         })
                     }
+                    BinaryOp::Div => {
+                        if rhs.min <= 0 && rhs.max >= 0 {
+                            None
+                        } else {
+                            let candidates = [
+                                lhs.min.saturating_div(rhs.min),
+                                lhs.min.saturating_div(rhs.max),
+                                lhs.max.saturating_div(rhs.min),
+                                lhs.max.saturating_div(rhs.max),
+                            ];
+                            Some(Interval {
+                                min: *candidates.iter().min().unwrap(),
+                                max: *candidates.iter().max().unwrap(),
+                            })
+                        }
+                    }
                     _ => None,
                 }
             }
@@ -459,15 +528,26 @@ impl TypeChecker {
     }
 
     fn insert_var(&mut self, name: String, ty: SemanticType) {
-        if let Some(scope) = self.env.last_mut() {
-            scope.insert(name, ty);
+        if let Some(frame) = self.scopes.last_mut() {
+            if let Some(entry) = frame.symbols.get_mut(&name) {
+                entry.ty = ty;
+            } else {
+                frame.symbols.insert(name, SymbolEntry {
+                    ty,
+                    interval: None,
+                    is_explicitly_bounded: false,
+                    constraint_info: None,
+                });
+            }
         }
     }
 
     fn lookup_var(&self, name: &str) -> Option<&SemanticType> {
-        for scope in self.env.iter().rev() {
-            if let Some(ty) = scope.get(name) {
-                return Some(ty);
+        for frame in self.scopes.iter().rev() {
+            if let Some(entry) = frame.symbols.get(name) {
+                if entry.ty != SemanticType::Unknown {
+                    return Some(&entry.ty);
+                }
             }
         }
         None
@@ -1862,9 +1942,9 @@ impl TypeChecker {
 
     fn verify_while_loop_invariant(&mut self, condition: &Expr, body: &Block, invariant: &Expr, span: &Span) {
         let mut vars = std::collections::HashSet::new();
-        for scope in &self.env {
-            for (name, ty) in scope {
-                if let SemanticType::Primitive(prim_name) = ty {
+        for frame in &self.scopes {
+            for (name, entry) in &frame.symbols {
+                if let SemanticType::Primitive(prim_name) = &entry.ty {
                     if prim_name == "I32" || prim_name == "u32" || prim_name == "usize" || prim_name == "i64" {
                         vars.insert(name.clone());
                     }
@@ -1961,9 +2041,9 @@ impl TypeChecker {
         span: &Span,
     ) {
         let mut vars = std::collections::HashSet::new();
-        for scope in &self.env {
-            for (name, ty) in scope {
-                if let SemanticType::Primitive(prim_name) = ty {
+        for frame in &self.scopes {
+            for (name, entry) in &frame.symbols {
+                if let SemanticType::Primitive(prim_name) = &entry.ty {
                     if prim_name == "I32" || prim_name == "u32" || prim_name == "usize" || prim_name == "i64" {
                         vars.insert(name.clone());
                     }
@@ -2076,7 +2156,8 @@ impl TypeChecker {
 }
 
 fn run_z3(query: &str) -> Result<String, String> {
-    let mut child = Command::new("z3")
+    let z3_path = std::env::var("Y_Z3_PATH").unwrap_or_else(|_| "z3".to_string());
+    let mut child = Command::new(&z3_path)
         .args(&["-smt2", "-in"])
         .env("Z3_GPU_THRESHOLD", "2147483647")
         .stdin(Stdio::piped())
@@ -2093,7 +2174,7 @@ fn run_z3(query: &str) -> Result<String, String> {
                 .spawn()
         })
         .or_else(|_| {
-            Command::new("/mnt/storage/YSU-engine-main/YSU-engine-main/src/Y_lang/z3/build/z3")
+            Command::new("z3/build/z3")
                 .args(&["-smt2", "-in"])
                 .env("Z3_GPU_THRESHOLD", "2147483647")
                 .stdin(Stdio::piped())
@@ -2101,7 +2182,10 @@ fn run_z3(query: &str) -> Result<String, String> {
                 .stderr(Stdio::piped())
                 .spawn()
         })
-        .map_err(|e| format!("Failed to spawn Z3 process: {}", e))?;
+        .map_err(|e| format!(
+            "Failed to spawn Z3 process: {}\n  Searched: '{}', './z3/build/z3', 'z3/build/z3'\n  hint: set Y_Z3_PATH to the absolute path of your z3 binary",
+            e, z3_path
+        ))?;
 
     {
         let stdin = child.stdin.as_mut().ok_or("Failed to open stdin")?;
@@ -2406,6 +2490,31 @@ mod tests {
         tc.check_program(&program);
 
         assert!(tc.errors.is_empty());
+    }
+
+    #[test]
+    fn test_eval_interval_div() {
+        let tc = TypeChecker::new();
+
+        // 1. Division by interval containing zero -> None
+        let expr_zero = Expr::BinaryOp {
+            left: Box::new(Expr::IntLit(10, Span { line: 0, col: 0 })),
+            op: BinaryOp::Div,
+            right: Box::new(Expr::IntLit(0, Span { line: 0, col: 0 })),
+            span: Span { line: 0, col: 0 },
+        };
+        assert!(tc.eval_interval(&expr_zero).is_none());
+
+        // 2. Division by positive divisor interval
+        let expr_pos = Expr::BinaryOp {
+            left: Box::new(Expr::IntLit(20, Span { line: 0, col: 0 })),
+            op: BinaryOp::Div,
+            right: Box::new(Expr::IntLit(4, Span { line: 0, col: 0 })),
+            span: Span { line: 0, col: 0 },
+        };
+        let res = tc.eval_interval(&expr_pos).unwrap();
+        assert_eq!(res.min, 5);
+        assert_eq!(res.max, 5);
     }
 }
 

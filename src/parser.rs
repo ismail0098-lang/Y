@@ -29,20 +29,28 @@ impl Parser {
         }
     }
 
-    fn advance(&mut self) -> Token {
-        let tok = self.peek().clone();
+    /// Advances the cursor without cloning the token (zero-copy).
+    fn advance(&mut self) {
         if self.pos < self.tokens.len() - 1 {
             self.pos += 1;
         }
+    }
+
+    /// Advances the cursor and returns a clone of the consumed token.
+    /// Use only when the caller needs the token value (e.g. for span info).
+    fn advance_and_take(&mut self) -> Token {
+        let tok = self.peek().clone();
+        self.advance();
         tok
     }
 
     fn check(&self, kind: TokenKind) -> bool {
-        self.peek().kind == kind
+        let peek_kind = &self.peek().kind;
+        std::mem::discriminant(peek_kind) == std::mem::discriminant(&kind) || *peek_kind == kind
     }
 
     fn match_token(&mut self, kind: TokenKind) -> bool {
-        if self.check(kind.clone()) {
+        if self.check(kind) {
             self.advance();
             true
         } else {
@@ -51,9 +59,9 @@ impl Parser {
     }
 
     fn expect(&mut self, kind: TokenKind, msg: &str) -> Result<Token, String> {
-        let tok = self.peek().clone();
+        let tok = self.peek();
         if std::mem::discriminant(&tok.kind) == std::mem::discriminant(&kind) || tok.kind == kind {
-            Ok(self.advance())
+            Ok(self.advance_and_take())
         } else {
             Err(format!(
                 "Line {}: Expected {} but found {:?}",

@@ -30,16 +30,16 @@ impl PartialOrd for BigUint {
 
 impl Ord for BigUint {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let mut lhs = self.clone();
-        lhs.trim();
-        let mut rhs = other.clone();
-        rhs.trim();
-        if lhs.digits.len() != rhs.digits.len() {
-            return lhs.digits.len().cmp(&rhs.digits.len());
+        let lhs_len = self.effective_len();
+        let rhs_len = other.effective_len();
+        if lhs_len != rhs_len {
+            return lhs_len.cmp(&rhs_len);
         }
-        for i in (0..lhs.digits.len()).rev() {
-            if lhs.digits[i] != rhs.digits[i] {
-                return lhs.digits[i].cmp(&rhs.digits[i]);
+        for i in (0..lhs_len).rev() {
+            let d1 = self.digits.get(i).copied().unwrap_or(0);
+            let d2 = other.digits.get(i).copied().unwrap_or(0);
+            if d1 != d2 {
+                return d1.cmp(&d2);
             }
         }
         std::cmp::Ordering::Equal
@@ -78,6 +78,14 @@ impl BigUint {
         }
     }
 
+    pub fn effective_len(&self) -> usize {
+        let mut len = self.digits.len();
+        while len > 1 && self.digits[len - 1] == 0 {
+            len -= 1;
+        }
+        len
+    }
+
     pub fn add(&self, other: &Self) -> Self {
         let mut digits = Vec::new();
         let mut carry = 0u64;
@@ -98,6 +106,18 @@ impl BigUint {
     }
 
     pub fn sub(&self, other: &Self) -> Self {
+        if self < other {
+            let mod_val = ACTIVE_MODULUS.with(|m| m.borrow().clone());
+            if !mod_val.is_zero() {
+                let mut padded = self.clone();
+                while padded < *other {
+                    padded = padded.add(&mod_val);
+                }
+                let diff = padded.sub(other);
+                let (_, rem) = diff.div_mod(&mod_val);
+                return rem;
+            }
+        }
         let mut digits = Vec::new();
         let mut borrow = 0i64;
         let len = std::cmp::max(self.digits.len(), other.digits.len());
@@ -262,6 +282,11 @@ impl Fr {
         ACTIVE_MODULUS.with(|m| m.borrow().clone())
     }
 
+    #[inline(always)]
+    pub fn with_modulus<R, F: FnOnce(&BigUint) -> R>(f: F) -> R {
+        ACTIVE_MODULUS.with(|m| f(&m.borrow()))
+    }
+
     pub fn zero() -> Self {
         Fr(BigUint::zero())
     }
@@ -271,37 +296,47 @@ impl Fr {
     }
 
     pub fn from_u64(val: u64) -> Self {
-        let bi = BigUint::from_u64(val);
-        let (_, r) = bi.div_mod(&Self::modulus());
-        Fr(r)
+        Self::with_modulus(|m| {
+            let bi = BigUint::from_u64(val);
+            let (_, r) = bi.div_mod(m);
+            Fr(r)
+        })
     }
 
     pub fn from_biguint(bi: BigUint) -> Self {
-        let (_, r) = bi.div_mod(&Self::modulus());
-        Fr(r)
+        Self::with_modulus(|m| {
+            let (_, r) = bi.div_mod(m);
+            Fr(r)
+        })
     }
 
     pub fn add(&self, other: &Self) -> Self {
-        let sum = self.0.add(&other.0);
-        if sum >= Self::modulus() {
-            Fr(sum.sub(&Self::modulus()))
-        } else {
-            Fr(sum)
-        }
+        Self::with_modulus(|modulus| {
+            let sum = self.0.add(&other.0);
+            if &sum >= modulus {
+                Fr(sum.sub(modulus))
+            } else {
+                Fr(sum)
+            }
+        })
     }
 
     pub fn sub(&self, other: &Self) -> Self {
-        if self.0 >= other.0 {
-            Fr(self.0.sub(&other.0))
-        } else {
-            Fr(self.0.add(&Self::modulus()).sub(&other.0))
-        }
+        Self::with_modulus(|modulus| {
+            if self.0 >= other.0 {
+                Fr(self.0.sub(&other.0))
+            } else {
+                Fr(self.0.add(modulus).sub(&other.0))
+            }
+        })
     }
 
     pub fn mul(&self, other: &Self) -> Self {
-        let prod = self.0.mul(&other.0);
-        let (_, r) = prod.div_mod(&Self::modulus());
-        Fr(r)
+        Self::with_modulus(|modulus| {
+            let prod = self.0.mul(&other.0);
+            let (_, r) = prod.div_mod(modulus);
+            Fr(r)
+        })
     }
 
     pub fn try_inv(&self) -> Result<Self, String> {
@@ -315,52 +350,53 @@ impl Fr {
         if self.0.is_zero() {
             panic!("Zero has no modular inverse");
         }
-        let p = Self::modulus();
-        let mut t = BigUint::zero();
-        let mut newt = BigUint::one();
-        let mut r = p.clone();
-        let mut newr = self.0.clone();
-        
-        let mut t_neg = false;
-        let mut newt_neg = false;
+        Self::with_modulus(|p| {
+            let mut t = BigUint::zero();
+            let mut newt = BigUint::one();
+            let mut r = p.clone();
+            let mut newr = self.0.clone();
 
-        while !newr.is_zero() {
-            let (quotient, remainder) = r.div_mod(&newr);
-            r = newr;
-            newr = remainder;
+            let mut t_neg = false;
+            let mut newt_neg = false;
 
-            let prod = quotient.mul(&newt);
-            let next_t;
-            let next_t_neg;
+            while !newr.is_zero() {
+                let (quotient, remainder) = r.div_mod(&newr);
+                r = newr;
+                newr = remainder;
 
-            if t_neg == newt_neg {
-                if t >= prod {
-                    next_t = t.sub(&prod);
-                    next_t_neg = t_neg;
+                let prod = quotient.mul(&newt);
+                let next_t;
+                let next_t_neg;
+
+                if t_neg == newt_neg {
+                    if t >= prod {
+                        next_t = t.sub(&prod);
+                        next_t_neg = t_neg;
+                    } else {
+                        next_t = prod.sub(&t);
+                        next_t_neg = !t_neg;
+                    }
                 } else {
-                    next_t = prod.sub(&t);
-                    next_t_neg = !t_neg;
+                    next_t = t.add(&prod);
+                    next_t_neg = t_neg;
                 }
-            } else {
-                next_t = t.add(&prod);
-                next_t_neg = t_neg;
+
+                t = newt;
+                t_neg = newt_neg;
+                newt = next_t;
+                newt_neg = next_t_neg;
             }
 
-            t = newt;
-            t_neg = newt_neg;
-            newt = next_t;
-            newt_neg = next_t_neg;
-        }
+            if r > BigUint::one() {
+                panic!("Modular inverse does not exist (GCD != 1 — modulus may not be prime)");
+            }
 
-        if r > BigUint::one() {
-            panic!("Modular inverse does not exist");
-        }
-
-        if t_neg {
-            Fr(p.sub(&t))
-        } else {
-            Fr(t)
-        }
+            if t_neg {
+                Fr(p.sub(&t))
+            } else {
+                Fr(t)
+            }
+        })
     }
 
     pub fn to_string(&self) -> String {
@@ -559,13 +595,10 @@ impl LinearCombination {
     }
 
     pub fn add_linear(&mut self, other: &Self, scale: Fr) {
-        if scale.0.is_zero() {
+        if scale.0.is_zero() || other.terms.is_empty() {
             return;
         }
-        let can_keep_simplified = self.is_simplified 
-            && other.is_simplified 
-            && (self.terms.is_empty() || other.terms.is_empty() || self.terms.last().unwrap().0 < other.terms[0].0);
-        
+        let can_keep_simplified = self.terms.is_empty() && other.is_simplified;
         for (wire, coeff) in &other.terms {
             self.terms.push((*wire, coeff.mul(&scale)));
         }
@@ -2465,5 +2498,36 @@ mod tests {
         let mut emitter = ZkEmitter::new();
         let err = emitter.emit_program(&prog).unwrap_err();
         assert!(err.contains("Z0012"));
+    }
+
+    #[test]
+    fn test_biguint_sub_underflow_modular_reduction() {
+        let a = BigUint::from_u64(5);
+        let b = BigUint::from_u64(10);
+        let res = a.sub(&b);
+        let p = ACTIVE_MODULUS.with(|m| m.borrow().clone());
+        let expected = p.sub(&BigUint::from_u64(5));
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn test_add_linear_term_deduplication() {
+        let mut lc1 = LinearCombination::zero();
+        lc1.add_term(1, Fr::from_u64(3));
+        lc1.add_term(2, Fr::from_u64(2));
+        lc1.simplify();
+
+        let mut lc2 = LinearCombination::zero();
+        lc2.add_term(1, Fr::from_u64(5));
+        lc2.add_term(3, Fr::from_u64(1));
+        lc2.simplify();
+
+        lc1.add_linear(&lc2, Fr::one());
+        assert!(!lc1.is_simplified);
+        lc1.simplify();
+        assert_eq!(lc1.terms.len(), 3);
+        assert_eq!(lc1.terms[0], (1, Fr::from_u64(8)));
+        assert_eq!(lc1.terms[1], (2, Fr::from_u64(2)));
+        assert_eq!(lc1.terms[2], (3, Fr::from_u64(1)));
     }
 }

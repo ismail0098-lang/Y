@@ -17,6 +17,21 @@ use std::fmt::Write;
 #[cfg(feature = "zk")]
 use crate::zk_emitter::*;
 
+/// Maps an SM compute capability to the minimum required PTX ISA version.
+fn ptx_version_for_sm(sm: &str) -> &'static str {
+    match sm {
+        s if s >= "sm_100" => ".version 8.7",
+        "sm_90" | "sm_90a" => ".version 8.0",
+        "sm_89" => ".version 7.8",
+        "sm_86" | "sm_87" => ".version 7.5",
+        "sm_80" => ".version 7.0",
+        "sm_75" => ".version 6.5",
+        "sm_72" => ".version 6.2",
+        "sm_70" => ".version 6.3",
+        _ => ".version 7.0", // Safe default for unknown targets
+    }
+}
+
 /// Manages virtual registers and produces raw PTX strings.
 pub struct PtxEmitter {
     pub ptx_buffer: String,
@@ -28,15 +43,29 @@ pub struct PtxEmitter {
     reg_pred_count: u32,
     label_count: u32,
     variables: std::collections::HashMap<String, String>,
+    /// The resolved SM target (e.g. "sm_80") for PTX header emission.
+    sm_target: String,
 }
 
 impl PtxEmitter {
     pub fn new() -> Self {
+        Self::new_with_profile(&HardwareProfile::default())
+    }
+
+    pub fn new_with_profile(hw_profile: &HardwareProfile) -> Self {
         let mut buffer = String::new();
-        // Emit PTX header
-        writeln!(&mut buffer, ".version 7.0").unwrap();
-        // Assume sm_80 or sm_89 depending on feature set needed (sm_80 for cp.async).
-        writeln!(&mut buffer, ".target sm_80").unwrap();
+        let target = if !hw_profile.sm_version.is_empty() {
+            if hw_profile.sm_version.starts_with("sm_") {
+                hw_profile.sm_version.clone()
+            } else {
+                format!("sm_{}", hw_profile.sm_version)
+            }
+        } else {
+            "sm_80".to_string()
+        };
+        let ptx_version = ptx_version_for_sm(&target);
+        writeln!(&mut buffer, "{}", ptx_version).unwrap();
+        writeln!(&mut buffer, ".target {}", target).unwrap();
         writeln!(&mut buffer, ".address_size 64").unwrap();
         writeln!(&mut buffer, "").unwrap();
 
@@ -48,6 +77,7 @@ impl PtxEmitter {
             reg_pred_count: 0,
             label_count: 0,
             variables: std::collections::HashMap::new(),
+            sm_target: target,
         }
     }
 
@@ -733,8 +763,8 @@ impl PtxEmitter {
         writeln!(&mut buffer, "// GPU PTX Witness Generator Kernel (Zero-Copy VRAM Layout)").unwrap();
         writeln!(&mut buffer, "// Field: BN254 Fr (256-bit 4-limb Montgomery ISA)").unwrap();
         writeln!(&mut buffer, "// ============================================================").unwrap();
-        writeln!(&mut buffer, ".version 7.0").unwrap();
-        writeln!(&mut buffer, ".target sm_80").unwrap();
+        writeln!(&mut buffer, "{}", ptx_version_for_sm(&self.sm_target)).unwrap();
+        writeln!(&mut buffer, ".target {}", self.sm_target).unwrap();
         writeln!(&mut buffer, ".address_size 64").unwrap();
         writeln!(&mut buffer, "").unwrap();
 
