@@ -242,9 +242,6 @@ fn main() {
                     }
                 }
             }
-            if !target_file.exists() {
-                target_file = std::path::Path::new("self_hosted").join(&relative_path);
-            }
 
             if target_file.exists() {
                 if let Ok(canonical) = fs::canonicalize(&target_file) {
