@@ -187,7 +187,15 @@ def main():
         torch.cuda.synchronize()
         cudnn_us = (start_evt.elapsed_time(end_evt) / iterations) * 1000.0
 
-        # 3. Y Tensor Core Warmup & Timing (Adaptive CTA Block Tiling + Graph Execution)
+        # Architecture-Aware Macro-Tile Routing via GPU hardware probe
+        try:
+            dev = cp.cuda.Device(0)
+            major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, dev.id)
+            minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, dev.id)
+            sm_ver = major * 10 + minor
+        except Exception:
+            sm_ver = 86
+
         smem_size = 0
         if M <= 256:
             grid_m = (M + 15) // 16
@@ -199,34 +207,21 @@ def main():
             grid_n = (N + 63) // 64
             threads_per_block = 128
             target_gemm_kernel = y_gemm_small_kernel
-        elif M >= 4096:
-            # Check if GPU device supports >= 96KB dynamic SMEM optin (e.g. GA102 / Ada / Hopper)
-            try:
-                device_id = cp.cuda.Device(0).id
-                max_optin = cp.cuda.runtime.deviceGetAttribute(
-                    cp.cuda.runtime.cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id
-                )
-            except Exception:
-                max_optin = 49152
-
-            if max_optin >= 98304:
+        else:
+            if sm_ver >= 89:
+                # Ada / Hopper (sm_89, sm_90): Target 256x128x32 tile, 4-stage buffer (96KB SMEM)
                 grid_m = (M + 255) // 256
                 grid_n = (N + 127) // 128
                 threads_per_block = 256
                 target_gemm_kernel = y_gemm_256x128_kernel
                 smem_size = 98304
             else:
+                # Ampere (sm_80, sm_86): Target 128x128x32 tile, 3-stage buffer (48KB SMEM, 2 blocks/SM occupancy)
                 grid_m = (M + 127) // 128
                 grid_n = (N + 127) // 128
                 threads_per_block = 256
                 target_gemm_kernel = y_gemm_large_kernel
                 smem_size = 0
-        else:
-            grid_m = (M + 127) // 128
-            grid_n = (N + 127) // 128
-            threads_per_block = 256
-            target_gemm_kernel = y_gemm_large_kernel
-            smem_size = 0
 
         cp.cuda.Device(0).synchronize()
         if smem_size > 0:
