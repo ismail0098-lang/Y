@@ -32,7 +32,7 @@ def wrap_ptx(ptx_file, name="y_coprocessor_db_index", param_count=2):
         minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, device_id)
         target_sm = f"sm_{major}{minor}"
     except Exception:
-        target_sm = "sm_86"
+        target_sm = "sm_90"
 
     version_str = ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
     
