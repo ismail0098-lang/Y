@@ -30,20 +30,21 @@ The complete specification and reference manuals for the Y programming language 
 
 GPU Performance Benchmarks (NVIDIA RTX 4070 Ti SUPER)
 
-1. Standalone Unfused FP16 GEMM ($4096 \times 4096 \times 4096$):
-   - Y Compiler (High-Throughput $256 \times 128$ CTA Tile + Double-Buffered `ldmatrix`): **2087.06 us (65.85 TFLOPS)**
-   - NVIDIA cuBLAS: **2699.24 us (50.93 TFLOPS)**
-   - Result: **1.29x FASTER than cuBLAS** with 100% numerical parity against `torch.matmul`.
+### Theoretical Hardware Limits vs. Empirical TFLOPS
+- **Hardware GPU**: NVIDIA GeForce RTX 4070 Ti SUPER (Ada Lovelace, SM 8.9)
+- **CUDA Cores / Tensor Cores**: 66 SMs | 8,448 CUDA Cores | 264 4th-Gen Tensor Cores
+- **Theoretical Peak FP16 Tensor Core Performance (Dense)**: **88.13 TFLOPS** (at 2.61 GHz Boost Clock)
 
-2. Fused AI Network Layers ($4096 \times 4096 \times 4096$ GEMM + Bias + Activation):
-   - Y Compiler: **5453.91 us**
-   - NVIDIA cuBLAS / PyTorch: **6696.12 us** (**1.23x Speedup**)
-   - OpenAI Triton: **10190.23 us** (**1.87x Speedup**)
+| Benchmark Workload ($M \times N \times K$) | cuBLAS Latency ($\mu s$) | Y Compiler Latency ($\mu s$) | Y TFLOPS | cuBLAS TFLOPS | % of Hardware Theoretical Peak | Speedup vs cuBLAS |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Micro GEMM ($256 \times 256 \times 256$)** | $12.19 \ \mu s$ | **$9.49 \ \mu s$** | **3.54 TFLOPS** | $2.76 \ \text{TFLOPS}$ | 4.0% (Latency-Bound) | **1.28x** |
+| **Medium GEMM ($2048 \times 2048 \times 2048$)** | $634.78 \ \mu s$ | **$807.97 \ \mu s$** | **21.26 TFLOPS** | $27.06 \ \text{TFLOPS}$ | 24.1% | 0.79x |
+| **Standalone Unfused GEMM ($4096^3$)** | $2699.24 \ \mu s$ | **$2087.06 \ \mu s$** | **65.85 TFLOPS** | $50.93 \ \text{TFLOPS}$ | **74.7% of HW Peak** | **1.29x** |
+| **Fused AI Network Layers ($4096^3$)** | $6696.12 \ \mu s$ | **$5453.91 \ \mu s$** | **25.19 TFLOPS** | $20.52 \ \text{TFLOPS}$ | Fused Pipeline | **1.23x** |
+| **Fused AI Network Layers ($8192^3$)** | $55198.61 \ \mu s$ | **$46859.20 \ \mu s$** | **23.46 TFLOPS** | $19.92 \ \text{TFLOPS}$ | Fused Pipeline | **1.18x** |
+| **Dual-Accelerator Co-Processor** | $3.00 \ \mu s$ (OptiX) | **$1.81 \ \mu s$** | Co-Proc | Co-Proc | Hardware Overlap | **1.66x (39.8% Saved)** |
 
-3. Dual-Accelerator Co-Processing Engine (Ada Lovelace SM 8.9):
-   - Y Co-Processor (Fused RT Core Traversal + Tensor Core MMA): **1.81 us**
-   - Sequential OptiX + cuBLAS: **3.00 us**
-   - Result: **1.66x FASTER (39.8% Latency Saved)**
+*Key Efficiency Win:* On standalone unfused $4096^3$ GEMM, Y Compiler reaches **74.7% of the GPU's absolute hardware physical peak TFLOPS** (65.85 TFLOPS out of 88.13 TFLOPS peak), delivering **+14.92 TFLOPS higher throughput than cuBLAS** (50.93 TFLOPS / 57.8% peak) via high-throughput $256 \times 128 \times 32$ CTA block tiling, double-buffered `ldmatrix` prefetching, and 4-stage `cp.async.cg` L1 cache bypass.
 
 
 
