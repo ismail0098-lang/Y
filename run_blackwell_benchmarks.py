@@ -286,8 +286,11 @@ def run_benchmarks():
         C_y_single = cp.zeros((M, N), dtype=cp.float16)
         kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
         cp.cuda.Device(0).synchronize()
-        C_y_torch = torch.from_dlpack(C_y_single)
-        is_close = torch.allclose(C_y_torch, C_ref, atol=5e-1, rtol=1e-1)
+        y_out = torch.from_dlpack(C_y_single)
+        cublas_out = C_ref
+        max_diff = torch.max(torch.abs(y_out - cublas_out)).item()
+        rtol, atol = 1e-2, 1e-2
+        is_close = torch.allclose(y_out, cublas_out, rtol=rtol, atol=atol)
         parity = "PASSED" if is_close else "WARN"
 
         tflops = (2.0 * M * N * K) / (y_us * 1e-6) / 1e12
@@ -356,19 +359,24 @@ def run_benchmarks():
             y_end.synchronize()
             y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
         elif M <= 32:
-            if cap_major == 9 and y_hopper_wgmma_fused is not None:
-                grid_m = (M + 127) // 128
+            try:
+                y_small_m_vec = y_mod.get_function("y_hopper_small_m_vectorized_gemv_kernel")
+            except Exception:
+                y_small_m_vec = None
+
+            if cap_major == 9 and y_small_m_vec is not None:
+                grid_m = (M + 15) // 16
                 grid_n = (N + 127) // 128
                 threads = 128
                 for _ in range(10):
-                    y_hopper_wgmma_fused((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, 0, C_y, M, N, K))
+                    y_small_m_vec((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
                 cp.cuda.Device(0).synchronize()
 
                 y_start = cp.cuda.Event()
                 y_end = cp.cuda.Event()
                 y_start.record()
                 for _ in range(50):
-                    y_hopper_wgmma_fused((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, 0, C_y, M, N, K))
+                    y_small_m_vec((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
                 y_end.record()
                 y_end.synchronize()
                 y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0

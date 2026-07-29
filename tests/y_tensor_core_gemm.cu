@@ -5355,3 +5355,89 @@ extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_wgmma_fused_bias_r
         }
     }
 }
+
+// Hopper sm_90a Dedicated Small-M Vectorized GEMV / Tile Router (M <= 32, 16x128x64 Tile, 128 Threads, Zero Atomic Operations)
+extern "C" __global__ __launch_bounds__(128, 4) void y_hopper_small_m_vectorized_gemv_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 16;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 64;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+    int tid = threadIdx.x;
+
+    __shared__ alignas(128) half smem_A[16][64 + 8];
+    __shared__ alignas(128) half smem_B[64][128 + 8];
+
+    float acc[8] = {0.0f};
+
+    int r_a = tid / 8;
+    int c_a = (tid % 8) * 8;
+    int r_b = tid / 8;
+    int c_b = (tid % 8) * 16;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        if (cta_m + r_a < M && k + c_a + 7 < K) {
+            *reinterpret_cast<uint4*>(&smem_A[r_a][c_a]) = *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + (k + c_a)]);
+        } else {
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                half val = __float2half(0.0f);
+                if (cta_m + r_a < M && k + c_a + e < K) val = A[(cta_m + r_a) * K + (k + c_a + e)];
+                smem_A[r_a][c_a + e] = val;
+            }
+        }
+
+        #pragma unroll
+        for (int step = 0; step < 4; ++step) {
+            int cur_r = r_b + step * 16;
+            if (k + cur_r < K && cta_n + c_b + 15 < N) {
+                *reinterpret_cast<uint4*>(&smem_B[cur_r][c_b])     = *reinterpret_cast<const uint4*>(&B[(k + cur_r) * N + (cta_n + c_b)]);
+                *reinterpret_cast<uint4*>(&smem_B[cur_r][c_b + 8]) = *reinterpret_cast<const uint4*>(&B[(k + cur_r) * N + (cta_n + c_b + 8)]);
+            } else {
+                #pragma unroll
+                for (int e = 0; e < 16; ++e) {
+                    half val = __float2half(0.0f);
+                    if (k + cur_r < K && cta_n + c_b + e < N) val = B[(k + cur_r) * N + (cta_n + c_b + e)];
+                    smem_B[cur_r][c_b + e] = val;
+                }
+            }
+        }
+        __syncthreads();
+
+        int warp_id = tid / 32;
+        int lane_id = tid % 32;
+        int row = lane_id / 4;
+        int col = (lane_id % 4) * 8 + warp_id * 32;
+
+        if (cta_m + row < M && cta_n + col + 7 < N) {
+            #pragma unroll
+            for (int k_idx = 0; k_idx < BLOCK_K; ++k_idx) {
+                float a_val = __half2float(smem_A[row][k_idx]);
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    float b_val = __half2float(smem_B[k_idx][col + e]);
+                    acc[e] += a_val * b_val;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
+    int row = lane_id / 4;
+    int col = (lane_id % 4) * 8 + warp_id * 32;
+
+    if (cta_m + row < M && cta_n + col + 7 < N) {
+        #pragma unroll
+        for (int e = 0; e < 8; ++e) {
+            C[(cta_m + row) * N + (cta_n + col + e)] = __float2half(acc[e]);
+        }
+    }
+}

@@ -82,7 +82,7 @@ impl CtaTileConfig {
         if m <= 32 {
             Self {
                 cta_m: 16,
-                cta_n: 32,
+                cta_n: 128,
                 cta_k: 64,
                 warps_m: 1,
                 warps_n: 4,
