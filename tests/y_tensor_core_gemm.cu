@@ -96,7 +96,8 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
     int cta_n = ((tile_idx / group_size_m) % grid_n) * BLOCK_N;
 
     // Padded Dynamic Shared Memory Allocation (32+8=40 stride for A, 128+8=136 stride for B to eliminate bank conflicts)
-    __shared__ alignas(128) half smem_A[2][128][40];
+    __shared__ alignas(128) half smem_storage[20480 / 2];
+    half (*smem_A)[128][40] = (half (*)[128][40])smem_storage;
     __shared__ alignas(128) half smem_B[2][32][136];
 
     int tid = threadIdx.x;
@@ -189,28 +190,42 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
         read_stage = 1 - read_stage;
     }
 
-    // Epilogue Store with Float-to-Half Conversion via Shared Buffer
-    __shared__ alignas(16) float smem_C_buf[8][16][16];
+    // Fast Vectorized Epilogue Store via Memory Reuse
+    half (*smem_C)[32][64] = (half (*)[32][64])smem_storage;
     #pragma unroll
-    for (int i = 0; i < 2; ++i) {
-        #pragma unroll
-        for (int j = 0; j < 4; ++j) {
-            int out_m = cta_m + warp_m * 32 + i * 16;
-            int out_n = cta_n + warp_n * 64 + j * 16;
-            wmma::store_matrix_sync(&smem_C_buf[warp_id][0][0], frag_C[i][j], 16, wmma::mem_row_major);
-            __syncthreads();
-            int lane = tid % 32;
-            if (lane < 16) {
-                for (int c_idx = 0; c_idx < 16; ++c_idx) {
-                    int r_gmem = out_m + lane;
-                    int c_gmem = out_n + c_idx;
-                    if (r_gmem < M && c_gmem < N) {
-                        C[r_gmem * N + c_gmem] = __float2half(smem_C_buf[warp_id][lane][c_idx]);
+    for (int pass = 0; pass < 2; ++pass) {
+        int active_warp = warp_id - pass * 4;
+        if (active_warp >= 0 && active_warp < 4) {
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_h;
+                    #pragma unroll
+                    for (int e = 0; e < frag_h.num_elements; ++e) {
+                        frag_h.x[e] = __float2half(frag_C[i][j].x[e]);
                     }
+                    wmma::store_matrix_sync(&smem_C[active_warp][i * 16][j * 16], frag_h, 64, wmma::mem_row_major);
                 }
             }
-            __syncthreads();
         }
+        __syncthreads();
+        if (active_warp >= 0 && active_warp < 4) {
+            int warp_out_m = cta_m + warp_m * 32;
+            int warp_out_n = cta_n + warp_n * 64;
+            int lane = tid % 32;
+            int store_r = lane / 8;
+            int store_c = (lane % 8) * 8;
+            #pragma unroll
+            for (int r_off = 0; r_off < 32; r_off += 4) {
+                int gm_r = warp_out_m + store_r + r_off;
+                int gm_c = warp_out_n + store_c;
+                if (gm_r < M && (gm_c + 7) < N) {
+                    *reinterpret_cast<uint4*>(&C[gm_r * N + gm_c]) = *reinterpret_cast<const uint4*>(&smem_C[active_warp][store_r + r_off][store_c]);
+                }
+            }
+        }
+        __syncthreads();
     }
 }
 
