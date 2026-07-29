@@ -127,7 +127,8 @@ def main():
     suite1_results = []
 
     # Compile Y Tensor Core kernel via CuPy JIT
-    y_gemm_mod = cp.RawModule(code=Y_TENSOR_CORE_GEMM_CUDA, options=("-std=c++17", "--use_fast_math"))
+    y_gemm_mod = cp.RawModule(code=Y_TENSOR_CORE_GEMM_CUDA, options=("-std=c++17", "--use_fast_math", "-I/usr/local/cuda/include"))
+    y_gemm_256x128_kernel = y_gemm_mod.get_function("y_tensor_core_gemm_256x128_kernel")
     y_gemm_large_kernel = y_gemm_mod.get_function("y_tensor_core_gemm_kernel")
     y_gemm_small_kernel = y_gemm_mod.get_function("y_fused_gemm_small_64x64_kernel")
     y_gemm_micro_kernel = y_gemm_mod.get_function("y_fused_gemm_barrier_free_16x32_kernel")
@@ -187,21 +188,32 @@ def main():
             target_gemm_kernel = y_gemm_micro_kernel
         elif M <= 512:
             grid_m = (M + 63) // 64
-        grid_m = (M + 127) // 128
-        grid_n = (N + 127) // 128
-        threads_per_block = 256
-        target_gemm_kernel = y_gemm_large_kernel
+            grid_n = (N + 63) // 64
+            threads_per_block = 128
+            target_gemm_kernel = y_gemm_small_kernel
+        elif M >= 4096:
+            grid_m = (M + 255) // 256
+            grid_n = (N + 127) // 128
+            threads_per_block = 256
+            target_gemm_kernel = y_gemm_256x128_kernel
+            smem_size = 98304
+        else:
+            grid_m = (M + 127) // 128
+            grid_n = (N + 127) // 128
+            threads_per_block = 256
+            target_gemm_kernel = y_gemm_large_kernel
+            smem_size = 65536
 
         cp.cuda.Device(0).synchronize()
         for _ in range(50):
-            target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K))
+            target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K), shared_mem=smem_size)
         cp.cuda.Device(0).synchronize()
 
         y_start = cp.cuda.Event()
         y_end = cp.cuda.Event()
         y_start.record()
         for _ in range(iterations):
-            target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K))
+            target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K), shared_mem=smem_size)
         y_end.record()
         y_end.synchronize()
         y_tensor_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iterations) * 1000.0
