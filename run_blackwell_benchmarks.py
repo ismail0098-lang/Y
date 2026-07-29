@@ -126,18 +126,14 @@ def run_benchmarks():
         if os.path.exists(d):
             include_options.append(f"-I{d}")
 
-    base_compile_options = ["-std=c++17", "--use_fast_math", "--device-as-default-execution-space", "-w"] + include_options
+    compile_options = ["-std=c++17", "--use_fast_math", "-w"] + include_options
     if cap_major >= 10:
         print("[*] Blackwell GPU detected (SM 10.0+)! Enabling Blackwell architecture targets.")
     elif cap_major == 9:
         print(f"[*] Hopper GPU detected (sm_90a)! Enabling TMA & WGMMA architecture targets ({arch_target}).")
 
-    try:
-        y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(base_compile_options + [f"-arch={arch_target}"]))
-        y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
-    except Exception:
-        y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(base_compile_options))
-        y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
+    y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
+    y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
     y_gemm_64x64 = y_mod.get_function("y_tensor_core_gemm_64x64_kernel")
     y_gemv_vec = y_mod.get_function("y_gemv_fp16_vector_kernel")
     y_gemm_32x64 = y_mod.get_function("y_gemm_32x64_kernel")
