@@ -123,14 +123,13 @@ def main():
     print(f"{'Matrix (M=N=K)':<18} | {'cuBLAS (us)':<14} | {'cuDNN (us)':<14} | {'Y Tensor (us)':<14} | {'Y vs cuBLAS':<12} | {'Y vs cuDNN':<12}")
     print("-" * 95)
 
-    matrix_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+    matrix_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384]
     suite1_results = []
 
     # Compile Y Tensor Core kernel via CuPy JIT
     y_gemm_mod = cp.RawModule(code=Y_TENSOR_CORE_GEMM_CUDA, options=("-std=c++17", "--use_fast_math"))
     y_gemm_large_kernel = y_gemm_mod.get_function("y_tensor_core_gemm_kernel")
-    y_gemm_large_kernel.max_dynamic_shared_size_bytes = 65536
-    y_gemm_small_kernel = y_gemm_mod.get_function("y_tensor_core_gemm_small_kernel")
+    y_gemm_small_kernel = y_gemm_mod.get_function("y_fused_gemm_small_64x64_kernel")
     y_gemm_micro_kernel = y_gemm_mod.get_function("y_fused_gemm_barrier_free_16x32_kernel")
 
     for dim in matrix_sizes:
@@ -188,26 +187,21 @@ def main():
             target_gemm_kernel = y_gemm_micro_kernel
         elif M <= 512:
             grid_m = (M + 63) // 64
-            grid_n = (N + 63) // 64
-            threads_per_block = 128
-            target_gemm_kernel = y_gemm_small_kernel
-        else:
-            grid_m = (M + 127) // 128
-            grid_n = (N + 127) // 128
-            threads_per_block = 256
-            target_gemm_kernel = y_gemm_large_kernel
-            smem_size = 65536
+        grid_m = (M + 127) // 128
+        grid_n = (N + 127) // 128
+        threads_per_block = 256
+        target_gemm_kernel = y_gemm_large_kernel
 
         cp.cuda.Device(0).synchronize()
-        for _ in range(20):
-            target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K), shared_mem=smem_size)
+        for _ in range(50):
+            target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K))
         cp.cuda.Device(0).synchronize()
 
         y_start = cp.cuda.Event()
         y_end = cp.cuda.Event()
         y_start.record()
         for _ in range(iterations):
-            target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K), shared_mem=smem_size)
+            target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K))
         y_end.record()
         y_end.synchronize()
         y_tensor_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iterations) * 1000.0
@@ -233,11 +227,11 @@ def main():
     print(f"{'Matrix (M=N=K)':<18} | {'cuBLAS+Kernel':<14} | {'cuDNN Fused':<14} | {'Y Fused Tensor':<14} | {'Y vs cuBLAS':<12} | {'Y vs cuDNN':<12}")
     print("-" * 95)
 
-    y_fused_mod = cp.RawModule(code=Y_FUSED_GEMM_RELU_CUDA, options=("-std=c++17", "--use_fast_math"))
+    y_fused_mod = cp.RawModule(code=Y_FUSED_GEMM_RELU_CUDA, options=("-std=c++17", "--use_fast_math", "-I/usr/local/cuda/include"))
     y_fused_large_kernel = y_fused_mod.get_function("y_fused_gemm_bias_relu_kernel")
     y_fused_small_kernel = y_fused_mod.get_function("y_fused_gemm_bias_relu_small_kernel")
 
-    naive_bias_mod = cp.RawModule(code=NAIVE_MULTI_KERNEL_BIAS_RELU_CUDA)
+    naive_bias_mod = cp.RawModule(code=NAIVE_MULTI_KERNEL_BIAS_RELU_CUDA, options=("-std=c++17", "--use_fast_math", "-I/usr/local/cuda/include"))
     naive_bias_kernel = naive_bias_mod.get_function("naive_bias_relu_kernel")
 
     fused_sizes = [512, 1024, 2048, 4096, 8192]

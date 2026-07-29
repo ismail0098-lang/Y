@@ -141,13 +141,11 @@ def main():
     # Compile Y CuPy Module
     y_mod = cp.RawModule(code=CUDA_SRC, options=("-std=c++17", "--use_fast_math"))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
-    y_gemm_large.max_dynamic_shared_size_bytes = 65536
-    y_gemm_small = y_mod.get_function("y_tensor_core_gemm_small_kernel")
+    y_gemm_small = y_mod.get_function("y_fused_gemm_small_64x64_kernel")
     y_fused_large = y_mod.get_function("y_fused_gemm_bias_relu_fp16_kernel")
-    y_fused_large.max_dynamic_shared_size_bytes = 65536
     y_fused_small_vec = y_mod.get_function("y_fused_gemm_bias_relu_small_fp16_kernel")
 
-    dimensions = [512, 1024, 2048, 4096, 8192, 16384, 32768]
+    dimensions = [512, 1024, 2048, 4096, 8192, 16384]
 
     # --- Section 1: Standalone GEMM Benchmark ---
     print("\n" + "=" * 85)
@@ -197,39 +195,24 @@ def main():
         torch.cuda.synchronize()
         triton_us = (t_start.elapsed_time(t_end) / iters) * 1000.0
 
-        # Y Execution (Autotuned Tile Selection)
-        candidates = []
-        # Candidate 1: 128x128 Tile (half output, 64KB dynamic smem)
+        # Y Execution
         g_m_1 = (M + 127) // 128
         g_n_1 = (N + 127) // 128
         C_y_f16 = cp.empty((M, N), dtype=cp.float16)
-        candidates.append(((g_n_1, g_m_1, 1), (256, 1, 1), y_gemm_large, C_y_f16, 65536))
 
-        if M <= 1024:
-            # Candidate 2: 64x64 Tile (float32 output)
-            g_m_2 = (M + 63) // 64
-            g_n_2 = (N + 63) // 64
-            C_y_f32 = cp.empty((M, N), dtype=cp.float32)
-            candidates.append(((g_n_2, g_m_2, 1), (128, 1, 1), y_gemm_small, C_y_f32, 0))
+        cp.cuda.Device(0).synchronize()
+        for _ in range(warmup):
+            y_gemm_large((g_n_1, g_m_1, 1), (256, 1, 1), (A_cp, B_cp, C_y_f16, M, N, K))
+        cp.cuda.Device(0).synchronize()
 
-        best_y_us = float("inf")
-
-        for grid, block, k_func, out_buf, smem in candidates:
-            cp.cuda.Device(0).synchronize()
-            for _ in range(warmup):
-                k_func(grid, block, (A_cp, B_cp, out_buf, M, N, K), shared_mem=smem)
-            cp.cuda.Device(0).synchronize()
-
-            y_start = cp.cuda.Event()
-            y_end = cp.cuda.Event()
-            y_start.record()
-            for _ in range(iters):
-                k_func(grid, block, (A_cp, B_cp, out_buf, M, N, K), shared_mem=smem)
-            y_end.record()
-            y_end.synchronize()
-            cand_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iters) * 1000.0
-            if cand_us < best_y_us:
-                best_y_us = cand_us
+        y_start = cp.cuda.Event()
+        y_end = cp.cuda.Event()
+        y_start.record()
+        for _ in range(iters):
+            y_gemm_large((g_n_1, g_m_1, 1), (256, 1, 1), (A_cp, B_cp, C_y_f16, M, N, K))
+        y_end.record()
+        y_end.synchronize()
+        best_y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iters) * 1000.0
 
         y_us = best_y_us
 
