@@ -279,7 +279,10 @@ def run_benchmarks():
         y_end.synchronize()
         y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
 
-        C_y_torch = torch.from_dlpack(C_y)
+        C_y_single = cp.zeros((M, N), dtype=cp.float16)
+        kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y_single, M, N, K))
+        cp.cuda.Device(0).synchronize()
+        C_y_torch = torch.from_dlpack(C_y_single)
         is_close = torch.allclose(C_y_torch, C_ref, atol=5e-1, rtol=1e-1)
         parity = "PASSED" if is_close else "WARN"
 
