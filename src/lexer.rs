@@ -1,9 +1,9 @@
 // ============================================================
 //  Y  —  Lexer (Front-End Tokenizer)
-//  Subagent C | lexer.rs
+//  lexer.rs
 //
 //  Tokenizes Y source code into a flat stream of Tokens.
-//  Covers every construct defined in Y_Specification v0.1:
+//  Covers every construct defined in Y_Specification v1.0:
 //    - Keywords, types, dtypes, attributes
 //    - Operators (including -> and ::)
 //    - Identifiers, integer literals, float literals, strings

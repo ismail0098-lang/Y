@@ -1,12 +1,13 @@
 [package]
 name = "Y-compiler"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "Prototype Y compiler with CPU, PTX, C, and LLVM backends."
+description = "Y compiler with LLVM IR, PTX, CPU, ZK (R1CS), and Co-Processor backends."
 
 [lib]
 name = "y"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "Y"

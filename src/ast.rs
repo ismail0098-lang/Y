@@ -438,6 +438,12 @@ pub enum Type {
         inner: Box<Type>,
         span: Span,
     },
+    /// Block-Level Tensor Tile type `BlockTile<T, Size>`
+    BlockTile {
+        element: Box<Type>,
+        size: Box<Expr>,
+        span: Span,
+    },
 }
 
 // ── Operators ─────────────────────────────────────────────────────

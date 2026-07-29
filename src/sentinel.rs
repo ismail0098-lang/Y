@@ -238,6 +238,7 @@ pub struct HardwareProfile {
     pub gpu_vendor: String,
     pub sm_version: String,
     pub compute_capability: String,
+    pub sm_count: u32,
 
     // Compute Latencies
     pub fma_latency_cycles: f64,
@@ -433,11 +434,12 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
                 .unwrap_or("Unknown")
                 .to_string(),
             sm_version: parse_profile_value(&contents, "SM_VERSION")
-                .unwrap_or("0.0")
+                .unwrap_or("sm_80")
                 .to_string(),
             compute_capability: parse_profile_value(&contents, "COMPUTE_CAPABILITY")
-                .unwrap_or("0.0")
+                .unwrap_or("8.0")
                 .to_string(),
+            sm_count: parse_u32_field(&contents, "SM_COUNT").unwrap_or(108),
             fma_latency_cycles: parse_f64_field(&contents, "FMA_LATENCY").unwrap_or(4.0),
             imad_latency_cycles: parse_f64_field(&contents, "IMAD_LATENCY").unwrap_or(4.0),
             thermal_latency_40c: parse_f64_field(&contents, "THERMAL_LATENCY_40C").unwrap_or(4.0),
@@ -811,6 +813,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         gpu_vendor,
         sm_version,
         compute_capability,
+        sm_count: 108,
         fma_latency_cycles,
         imad_latency_cycles,
         thermal_latency_40c,

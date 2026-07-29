@@ -133,6 +133,15 @@ impl CpuEmitter {
                     format!("&{}", inner_str)
                 }
             }
+            Type::BlockTile { element, size, .. } => {
+                let elem_str = self.emit_type(element);
+                let size_str = match size.as_ref() {
+                    Expr::IntLit(v, _) => v.to_string(),
+                    Expr::Ident(s, _) => s.clone(),
+                    _ => "128".into(),
+                };
+                format!("[{}; {}]", elem_str, size_str)
+            }
         }
     }
 

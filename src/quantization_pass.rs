@@ -661,4 +661,186 @@ impl QuantizationPass {
         )
         .unwrap();
     }
+
+    /// Emits single-pass epilogue fusion directly on accumulator registers (%f0..%f3).
+    /// Performs inline bias addition + activation (ReLU / GELU / SiLU) before store.
+    pub fn emit_epilogue_fusion(
+        &mut self,
+        accumulators: &[&str],
+        bias_ptr_reg: Option<&str>,
+        activation: ActivationKind,
+    ) -> String {
+        let mut out = String::new();
+
+        writeln!(
+            &mut out,
+            "    // -- IN-REGISTER EPILOGUE FUSION (Bias + {:?}) --",
+            activation
+        )
+        .unwrap();
+
+        for (i, acc) in accumulators.iter().enumerate() {
+            // 1. Bias Addition
+            if let Some(bias_ptr) = bias_ptr_reg {
+                let bias_reg = self.alloc_f32();
+                writeln!(
+                    &mut out,
+                    "    ld.global.f32 {}, [{}+{}];  // load bias for lane element {}",
+                    bias_reg,
+                    bias_ptr,
+                    i * 4,
+                    i
+                )
+                .unwrap();
+                writeln!(
+                    &mut out,
+                    "    add.f32 {}, {}, {};  // inline bias add",
+                    acc, acc, bias_reg
+                )
+                .unwrap();
+            }
+
+            // 2. Activation Function
+            match activation {
+                ActivationKind::None => {}
+                ActivationKind::ReLU => {
+                    writeln!(
+                        &mut out,
+                        "    max.f32 {}, {}, 0f00000000;  // inline ReLU",
+                        acc, acc
+                    )
+                    .unwrap();
+                }
+                ActivationKind::SiLU => {
+                    let neg_x = self.alloc_f32();
+                    let scaled_neg_x = self.alloc_f32();
+                    let exp_val = self.alloc_f32();
+                    let denom = self.alloc_f32();
+                    let sig = self.alloc_f32();
+
+                    writeln!(&mut out, "    neg.f32 {}, {};", neg_x, acc).unwrap();
+                    writeln!(
+                        &mut out,
+                        "    mul.f32 {}, {}, 0f3fb8aa3b;  // -x * log2(e)",
+                        scaled_neg_x, neg_x
+                    )
+                    .unwrap();
+                    writeln!(
+                        &mut out,
+                        "    ex2.approx.f32 {}, {};",
+                        exp_val, scaled_neg_x
+                    )
+                    .unwrap();
+                    writeln!(
+                        &mut out,
+                        "    add.f32 {}, {}, 0f3f800000;  // 1.0 + exp(-x)",
+                        denom, exp_val
+                    )
+                    .unwrap();
+                    writeln!(&mut out, "    rcp.approx.f32 {}, {};", sig, denom).unwrap();
+                    writeln!(
+                        &mut out,
+                        "    mul.f32 {}, {}, {};  // SiLU = x * sigmoid(x)",
+                        acc, acc, sig
+                    )
+                    .unwrap();
+                }
+                ActivationKind::GELU => {
+                    let x_sq = self.alloc_f32();
+                    let poly = self.alloc_f32();
+                    let g_in = self.alloc_f32();
+                    let t_val = self.alloc_f32();
+                    let t_one = self.alloc_f32();
+                    let half_x = self.alloc_f32();
+
+                    writeln!(&mut out, "    mul.f32 {}, {}, {};", x_sq, acc, acc).unwrap();
+                    writeln!(
+                        &mut out,
+                        "    fma.rn.f32 {}, {}, 0f3d372713, 0f3f79b5c3;  // 0.044715*x^2 + 0.79788456",
+                        poly, x_sq
+                    )
+                    .unwrap();
+                    writeln!(&mut out, "    mul.f32 {}, {}, {};", g_in, acc, poly).unwrap();
+                    writeln!(&mut out, "    tanh.approx.f32 {}, {};", t_val, g_in).unwrap();
+                    writeln!(
+                        &mut out,
+                        "    add.f32 {}, {}, 0f3f800000;  // 1 + tanh(...)",
+                        t_one, t_val
+                    )
+                    .unwrap();
+                    writeln!(
+                        &mut out,
+                        "    mul.f32 {}, {}, 0f3f000000;  // 0.5 * x",
+                        half_x, acc
+                    )
+                    .unwrap();
+                    writeln!(
+                        &mut out,
+                        "    mul.f32 {}, {}, {};  // GELU",
+                        acc, half_x, t_one
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        out
+    }
 }
+
+/// Activation functions supported for inline epilogue fusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationKind {
+    None,
+    ReLU,
+    GELU,
+    SiLU,
+}
+
+/// Pass 3: Fuses activation functions (SiLU, GELU, ReLU) and scale factors directly
+/// into accumulation register writeback loops, avoiding DRAM round-trips.
+pub struct EpilogueFusionPass {
+    pub fused_epilogues: usize,
+}
+
+impl EpilogueFusionPass {
+    pub fn new() -> Self {
+        EpilogueFusionPass {
+            fused_epilogues: 0,
+        }
+    }
+
+    pub fn run_fusion(&mut self, activation: ActivationKind) -> usize {
+        if activation != ActivationKind::None {
+            self.fused_epilogues += 1;
+        }
+        self.fused_epilogues
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// Tests
+// ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_epilogue_fusion_relu_gelu_silu() {
+        let mut pass = QuantizationPass::new();
+        let accs = vec!["%f0", "%f1", "%f2", "%f3"];
+
+        let relu_code = pass.emit_epilogue_fusion(&accs, Some("%rd_bias"), ActivationKind::ReLU);
+        assert!(relu_code.contains("inline ReLU"));
+        assert!(relu_code.contains("max.f32 %f0, %f0, 0f00000000;"));
+
+        let silu_code = pass.emit_epilogue_fusion(&accs, None, ActivationKind::SiLU);
+        assert!(silu_code.contains("SiLU = x * sigmoid(x)"));
+
+        let gelu_code = pass.emit_epilogue_fusion(&accs, None, ActivationKind::GELU);
+        assert!(gelu_code.contains("tanh.approx.f32"));
+    }
+}
+
+

@@ -1,0 +1,4653 @@
+// tests/y_tensor_core_gemm.cu
+#include <mma.h>
+#include <cuda_fp16.h>
+
+typedef unsigned int uint32_t;
+
+using namespace nvcuda;
+
+// Helper functions for PTX cp.async (.cg L1 cache bypass), ldmatrix, and mma.sync
+__device__ __forceinline__ void cp_async_cg_16(void* smem_ptr, const void* gmem_ptr, bool valid) {
+    uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    if (valid) {
+        asm volatile(
+            "cp.async.cg.shared.global [%0], [%1], 16;\n"
+            :: "r"(smem_ptr32), "l"(gmem_ptr)
+        );
+    } else {
+        asm volatile(
+            "cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+            :: "r"(smem_ptr32), "l"(gmem_ptr), "r"(0)
+        );
+    }
+}
+
+__device__ __forceinline__ void cp_async_commit() {
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+
+template<int N>
+__device__ __forceinline__ void cp_async_wait_group() {
+    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
+}
+
+__device__ __forceinline__ void ldmatrix_x4(uint32_t reg[4], uint32_t smem_ptr32) {
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(reg[0]), "=r"(reg[1]), "=r"(reg[2]), "=r"(reg[3])
+        : "r"(smem_ptr32)
+    );
+}
+
+__device__ __forceinline__ void ldmatrix_x2_trans(uint32_t reg[2], uint32_t smem_ptr32) {
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];\n"
+        : "=r"(reg[0]), "=r"(reg[1])
+        : "r"(smem_ptr32)
+    );
+}
+
+__device__ __forceinline__ void mma_m16n8k16(
+    float c[4],
+    const uint32_t a[4],
+    const uint32_t b[2]
+) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
+        : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "r"(b[0]), "r"(b[1]),
+          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3])
+    );
+}
+
+// Standalone Y Tensor Core MMA GEMM simulation kernel (128x128x32 CTA Tile + 128B XOR SMEM Swizzle + 4-Stage cp.async + mma.sync)
+// 64 KB Dynamic Shared Memory Allocation (32KB smem_A + 32KB smem_B)
+extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    // 2D L2 Cache Swizzling (GROUP_SIZE_M = 8)
+    const int GROUP_SIZE_M = 8;
+    int grid_m = (M + BLOCK_M - 1) / BLOCK_M;
+    int grid_n = (N + BLOCK_N - 1) / BLOCK_N;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_in_group = GROUP_SIZE_M * grid_n;
+    int group_id = tile_idx / num_tiles_in_group;
+    int first_tile_m = group_id * GROUP_SIZE_M;
+    int group_size_m = min(grid_m - first_tile_m, GROUP_SIZE_M);
+    int cta_m = (first_tile_m + (tile_idx % group_size_m)) * BLOCK_M;
+    int cta_n = ((tile_idx / group_size_m) % grid_n) * BLOCK_N;
+
+    // 4-Stage Dynamic Shared Memory Allocation (Total = 32KB + 32KB = 64KB = 65536 bytes)
+    extern __shared__ char smem_raw[];
+    half (*smem_A)[128][32] = (half (*)[128][32])smem_raw;
+    half (*smem_B)[32][128] = (half (*)[32][128])(smem_raw + 4 * 128 * 32 * sizeof(half));
+
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
+
+    int warp_m = warp_id % 4; // 0..3 (4 warps in M)
+    int warp_n = warp_id / 4; // 0..1 (2 warps in N)
+
+    // Accumulators for warp C tile (32x64): 2 sub-tiles in M, 8 sub-tiles in N
+    float frag_C[2][8][4];
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            #pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                frag_C[i][j][c] = 0.0f;
+            }
+        }
+    }
+
+    // Helper for loading 16-byte global memory vectors to shared memory via cp.async
+    auto load_gmem_to_smem_stage = [&](int stage, int k_curr) {
+        // Load Tile A (128x32 halfs -> 512 chunks of 16B)
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int chunk_idx = tid + i * 256;
+            int r = chunk_idx / 4;
+            int c = (chunk_idx % 4) * 8;
+            int gmem_r = cta_m + r;
+            int gmem_c = k_curr + c;
+            bool valid = (gmem_r < M) && (gmem_c + 7 < K);
+            const void* g_ptr = valid ? (const void*)&A[gmem_r * K + gmem_c] : nullptr;
+            bool is_aligned = (((unsigned long long)g_ptr) & 15) == 0;
+            int byte_c = c * 2;
+            int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+            void* s_ptr = (void*)((char*)&smem_A[stage][r][0] + swizzled_byte_c);
+            if (valid && is_aligned) {
+                cp_async_cg_16(s_ptr, g_ptr, true);
+            } else {
+                cp_async_cg_16(s_ptr, nullptr, false);
+                if (gmem_r < M) {
+                    #pragma unroll
+                    for (int e = 0; e < 8; ++e) {
+                        if (gmem_c + e < K) smem_A[stage][r][c + e] = A[gmem_r * K + gmem_c + e];
+                    }
+                }
+            }
+        }
+
+        // Load Tile B (32x128 halfs -> 512 chunks of 16B)
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int chunk_idx = tid + i * 256;
+            int r = chunk_idx / 16;
+            int c = (chunk_idx % 16) * 8;
+            int gmem_r = k_curr + r;
+            int gmem_c = cta_n + c;
+            bool valid = (gmem_r < K) && (gmem_c + 7 < N);
+            const void* g_ptr = valid ? (const void*)&B[gmem_r * N + gmem_c] : nullptr;
+            bool is_aligned = (((unsigned long long)g_ptr) & 15) == 0;
+            int byte_c = c * 2;
+            int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+            void* s_ptr = (void*)((char*)&smem_B[stage][r][0] + swizzled_byte_c);
+            if (valid && is_aligned) {
+                cp_async_cg_16(s_ptr, g_ptr, true);
+            } else {
+                cp_async_cg_16(s_ptr, nullptr, false);
+                if (gmem_r < K) {
+                    #pragma unroll
+                    for (int e = 0; e < 8; ++e) {
+                        if (gmem_c + e < N) smem_B[stage][r][c + e] = B[gmem_r * N + gmem_c + e];
+                    }
+                }
+            }
+        }
+    };
+
+    // Preamble Async Prefetch (Fill stages 0, 1, 2)
+    load_gmem_to_smem_stage(0, 0);
+    cp_async_commit();
+
+    load_gmem_to_smem_stage(1, BLOCK_K);
+    cp_async_commit();
+
+    load_gmem_to_smem_stage(2, 2 * BLOCK_K);
+    cp_async_commit();
+
+    int write_stage = 3;
+    int read_stage = 0;
+
+    // Main K Loop with 4-Stage Circular Pipeline
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + 3 * BLOCK_K;
+        if (next_k < K) {
+            load_gmem_to_smem_stage(write_stage, next_k);
+        } else {
+            // Out of bounds: fill stage with zero-padded async copies
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int chunk_idx = tid + i * 256;
+                int r = chunk_idx / 4;
+                int c = (chunk_idx % 4) * 8;
+                int byte_c = c * 2;
+                int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+                void* s_ptr = (void*)((char*)&smem_A[write_stage][r][0] + swizzled_byte_c);
+                cp_async_cg_16(s_ptr, nullptr, false);
+            }
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int chunk_idx = tid + i * 256;
+                int r = chunk_idx / 16;
+                int c = (chunk_idx % 16) * 8;
+                int byte_c = c * 2;
+                int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+                void* s_ptr = (void*)((char*)&smem_B[write_stage][r][0] + swizzled_byte_c);
+                cp_async_cg_16(s_ptr, nullptr, false);
+            }
+        }
+        cp_async_commit();
+
+        // Guard stage read_stage consumption
+        cp_async_wait_group<2>();
+        __syncthreads();
+
+        // Compute on read_stage using double-buffered ldmatrix prefetching to hide SMEM read latency
+        uint32_t reg_A[2][4];
+        uint32_t reg_B[8][2];
+        uint32_t reg_A_next[2][4];
+        uint32_t reg_B_next[8][2];
+
+        // Prefetch ldmatrix for k_step = 0
+        #pragma unroll
+        for (int i_mma = 0; i_mma < 2; ++i_mma) {
+            int r = warp_m * 32 + i_mma * 16 + (lane_id % 16);
+            int c = 0 + (lane_id / 16) * 8;
+            int byte_c = c * 2;
+            int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+            void* s_ptr = (void*)((char*)&smem_A[read_stage][r][0] + swizzled_byte_c);
+            uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(s_ptr));
+            ldmatrix_x4(reg_A[i_mma], smem_ptr32);
+        }
+        #pragma unroll
+        for (int j_mma = 0; j_mma < 8; ++j_mma) {
+            int r = 0 + (lane_id % 16);
+            int c = warp_n * 64 + j_mma * 8;
+            int byte_c = c * 2;
+            int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+            void* s_ptr = (void*)((char*)&smem_B[read_stage][r][0] + swizzled_byte_c);
+            uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(s_ptr));
+            ldmatrix_x2_trans(reg_B[j_mma], smem_ptr32);
+        }
+
+        // Prefetch ldmatrix for k_step = 16 while initializing computation
+        #pragma unroll
+        for (int i_mma = 0; i_mma < 2; ++i_mma) {
+            int r = warp_m * 32 + i_mma * 16 + (lane_id % 16);
+            int c = 16 + (lane_id / 16) * 8;
+            int byte_c = c * 2;
+            int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+            void* s_ptr = (void*)((char*)&smem_A[read_stage][r][0] + swizzled_byte_c);
+            uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(s_ptr));
+            ldmatrix_x4(reg_A_next[i_mma], smem_ptr32);
+        }
+        #pragma unroll
+        for (int j_mma = 0; j_mma < 8; ++j_mma) {
+            int r = 16 + (lane_id % 16);
+            int c = warp_n * 64 + j_mma * 8;
+            int byte_c = c * 2;
+            int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+            void* s_ptr = (void*)((char*)&smem_B[read_stage][r][0] + swizzled_byte_c);
+            uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(s_ptr));
+            ldmatrix_x2_trans(reg_B_next[j_mma], smem_ptr32);
+        }
+
+        // Execute step 0 MMA
+        #pragma unroll
+        for (int j_mma = 0; j_mma < 8; ++j_mma) {
+            mma_m16n8k16(frag_C[0][j_mma], reg_A[0], reg_B[j_mma]);
+            mma_m16n8k16(frag_C[1][j_mma], reg_A[1], reg_B[j_mma]);
+        }
+
+        // Execute step 1 MMA using prefetched reg_A_next and reg_B_next
+        #pragma unroll
+        for (int j_mma = 0; j_mma < 8; ++j_mma) {
+            mma_m16n8k16(frag_C[0][j_mma], reg_A_next[0], reg_B_next[j_mma]);
+            mma_m16n8k16(frag_C[1][j_mma], reg_A_next[1], reg_B_next[j_mma]);
+        }
+
+        __syncthreads();
+        write_stage = (write_stage + 1) % 4;
+        read_stage = (read_stage + 1) % 4;
+    }
+
+    // Drain remaining committed groups
+    cp_async_wait_group<0>();
+    __syncthreads();
+
+    // Epilogue: Vectorized Store Accumulators to C
+    int group = lane_id / 4;        // 0..7
+    int lane_in_group = lane_id % 4; // 0..3
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            int out_m0 = cta_m + warp_m * 32 + i * 16 + group;
+            int out_m1 = cta_m + warp_m * 32 + i * 16 + group + 8;
+            int out_n = cta_n + warp_n * 64 + j * 8 + lane_in_group * 2;
+
+            if (out_m0 < M && out_n + 1 < N) {
+                unsigned long long addr = (unsigned long long)(&C[out_m0 * N + out_n]);
+                if ((addr & 3) == 0) {
+                    half2 val = __floats2half2_rn(frag_C[i][j][0], frag_C[i][j][1]);
+                    *reinterpret_cast<half2*>(addr) = val;
+                } else {
+                    C[out_m0 * N + out_n] = __float2half(frag_C[i][j][0]);
+                    C[out_m0 * N + out_n + 1] = __float2half(frag_C[i][j][1]);
+                }
+            } else if (out_m0 < M && out_n < N) {
+                C[out_m0 * N + out_n] = __float2half(frag_C[i][j][0]);
+            }
+
+            if (out_m1 < M && out_n + 1 < N) {
+                unsigned long long addr = (unsigned long long)(&C[out_m1 * N + out_n]);
+                if ((addr & 3) == 0) {
+                    half2 val = __floats2half2_rn(frag_C[i][j][2], frag_C[i][j][3]);
+                    *reinterpret_cast<half2*>(addr) = val;
+                } else {
+                    C[out_m1 * N + out_n] = __float2half(frag_C[i][j][2]);
+                    C[out_m1 * N + out_n + 1] = __float2half(frag_C[i][j][3]);
+                }
+            } else if (out_m1 < M && out_n < N) {
+                C[out_m1 * N + out_n] = __float2half(frag_C[i][j][2]);
+            }
+        }
+    }
+}
+
+
+// Single-Warp Barrier-Free Micro GEMM (16x32 CTA Tile, 32 Threads, Zero __syncthreads(), FP16 Output) for M,N <= 512
+extern "C" __global__ __launch_bounds__(32, 4) void y_fused_gemm_barrier_free_16x32_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 16;
+    const int BLOCK_N = 32;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A_0[16][32 + 8];
+    __shared__ alignas(128) half smem_B_0[32][32 + 8];
+    __shared__ alignas(128) half smem_A_1[16][32 + 8];
+    __shared__ alignas(128) half smem_B_1[32][32 + 8];
+
+    int tid = threadIdx.x; // 0..31 (Single Warp)
+
+    const int SWIZZLE = 8;
+    int grid_n = gridDim.x;
+    int grid_m = gridDim.y;
+    int tile_idx = blockIdx.y * grid_n + blockIdx.x;
+    int num_tiles_per_swizzle = grid_n * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+    if (cta_m >= M || cta_n >= N) {
+        cta_m = blockIdx.y * BLOCK_M;
+        cta_n = blockIdx.x * BLOCK_N;
+    }
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2];
+
+    wmma::fill_fragment(frag_C[0], 0.0f);
+    wmma::fill_fragment(frag_C[1], 0.0f);
+
+    // 32 threads load 16x32 halfs (512 halfs = 32 uint4s) -> 1 uint4 per thread
+    int load_a_row = tid / 2;        // 0..15
+    int load_a_col = (tid % 2) * 16;  // 0, 16
+
+    // 32 threads load 32x32 halfs (1024 halfs = 64 uint4s) -> 2 uint4s per thread
+    int load_b_row = tid;            // 0..31
+
+    // Prologue Stage 0
+    if (cta_m + load_a_row < M && load_a_col < K) {
+        uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+        const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + load_a_col];
+        *dst_a = *src_a;
+    } else {
+        *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+    }
+
+    if (load_b_row < K && cta_n < N) {
+        uint4* dst_b = (uint4*)&smem_B_0[load_b_row][0];
+        const uint4* src_b = (const uint4*)&B[load_b_row * N + cta_n];
+        *dst_b = *src_b;
+        *(dst_b + 1) = *(src_b + 1);
+    } else {
+        *(uint4*)&smem_B_0[load_b_row][0] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_B_0[load_b_row][16] = make_uint4(0, 0, 0, 0);
+    }
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        if (next_k < K) {
+            if (stage == 0) {
+                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                    uint4* dst_a = (uint4*)&smem_A_1[load_a_row][load_a_col];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                    *dst_a = *src_a;
+                } else {
+                    *(uint4*)&smem_A_1[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n < N) {
+                    uint4* dst_b = (uint4*)&smem_B_1[load_b_row][0];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + cta_n];
+                    *dst_b = *src_b;
+                    *(dst_b + 1) = *(src_b + 1);
+                } else {
+                    *(uint4*)&smem_B_1[load_b_row][0] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_1[load_b_row][16] = make_uint4(0, 0, 0, 0);
+                }
+            } else {
+                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                    uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                    *dst_a = *src_a;
+                } else {
+                    *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n < N) {
+                    uint4* dst_b = (uint4*)&smem_B_0[load_b_row][0];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + cta_n];
+                    *dst_b = *src_b;
+                    *(dst_b + 1) = *(src_b + 1);
+                } else {
+                    *(uint4*)&smem_B_0[load_b_row][0] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_0[load_b_row][16] = make_uint4(0, 0, 0, 0);
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                wmma::load_matrix_sync(frag_A, &smem_A_0[0][k_step], 40);
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 40);
+                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                wmma::load_matrix_sync(frag_A, &smem_A_1[0][k_step], 40);
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 40);
+                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+                }
+            }
+        }
+
+        stage = 1 - stage;
+    }
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[2];
+    #pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            frag_C_half[j].x[k] = __float2half(frag_C[j].x[k]);
+        }
+        int out_m = cta_m;
+        int out_n = cta_n + j * 16;
+        if (out_m < M && out_n < N) {
+            wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C_half[j], N, wmma::mem_row_major);
+        }
+    }
+}
+
+// Direct-Register Micro GEMM (32x32 CTA Tile, 64 Threads, Direct Global -> WMMA Registers, FP16 Output)
+// Direct-Register Micro GEMM (32x32 CTA Tile, 64 Threads, Direct Global -> WMMA Registers, FP16 Output)
+extern "C" __global__ __launch_bounds__(64, 4) void y_fused_gemm_direct_reg_fp16_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 32;
+    const int BLOCK_N = 32;
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+    int warp_m_idx = warpId; // 0 or 1 -> offset 0, 16
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C[2];
+
+    wmma::fill_fragment(frag_C[0], __float2half(0.0f));
+    wmma::fill_fragment(frag_C[1], __float2half(0.0f));
+
+    int a_row = cta_m + warp_m_idx * 16;
+    int b_col0 = cta_n;
+    int b_col1 = cta_n + 16;
+
+    #pragma unroll 4
+    for (int k = 0; k < K; k += 16) {
+        if (a_row < M && k < K) {
+            wmma::load_matrix_sync(frag_A, &A[a_row * K + k], K);
+        }
+        if (k < K && b_col0 < N) {
+            wmma::load_matrix_sync(frag_B[0], &B[k * N + b_col0], N);
+        }
+        if (k < K && b_col1 < N) {
+            wmma::load_matrix_sync(frag_B[1], &B[k * N + b_col1], N);
+        }
+
+        wmma::mma_sync(frag_C[0], frag_A, frag_B[0], frag_C[0]);
+        wmma::mma_sync(frag_C[1], frag_A, frag_B[1], frag_C[1]);
+    }
+
+    int out_m = a_row;
+    if (out_m < M && b_col0 < N) {
+        wmma::store_matrix_sync(&C[out_m * N + b_col0], frag_C[0], N, wmma::mem_row_major);
+    }
+    if (out_m < M && b_col1 < N) {
+        wmma::store_matrix_sync(&C[out_m * N + b_col1], frag_C[1], N, wmma::mem_row_major);
+    }
+}
+
+// Ultra-Fast Micro GEMM (32x32 Tile, 64 Threads, 2 Warps, 256 CTA Blocks for 512x512)
+extern "C" __global__ __launch_bounds__(64, 4) void y_fused_gemm_tiny_32x32_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 32;
+    const int BLOCK_N = 32;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A_0[32][32 + 8];
+    __shared__ alignas(128) half smem_B_0[32][32 + 8];
+    __shared__ alignas(128) half smem_A_1[32][32 + 8];
+    __shared__ alignas(128) half smem_B_1[32][32 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2; // 0 or 1 -> M offset 0, 16
+
+    const int SWIZZLE = 8;
+    int grid_n = gridDim.x;
+    int grid_m = gridDim.y;
+    int tile_idx = blockIdx.y * grid_n + blockIdx.x;
+    int num_tiles_per_swizzle = grid_n * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+    if (cta_m >= M || cta_n >= N) {
+        cta_m = blockIdx.y * BLOCK_M;
+        cta_n = blockIdx.x * BLOCK_N;
+    }
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2];
+
+    wmma::fill_fragment(frag_C[0], 0.0f);
+    wmma::fill_fragment(frag_C[1], 0.0f);
+
+    // 64 threads load 32x32 halfs (1024 halfs = 64 uint4s) -> 1 uint4 per thread
+    int load_a_row = tid / 2;        // 0..31
+    int load_a_col = (tid % 2) * 16;  // 0, 16
+
+    int load_b_row = tid / 2;        // 0..31
+    int load_b_col = (tid % 2) * 16;  // 0, 16
+
+    // Prologue Stage 0
+    if (cta_m + load_a_row < M && load_a_col < K) {
+        uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+        const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + load_a_col];
+        *dst_a = *src_a;
+    } else {
+        *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+    }
+
+    if (load_b_row < K && cta_n + load_b_col < N) {
+        uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+        const uint4* src_b = (const uint4*)&B[load_b_row * N + (cta_n + load_b_col)];
+        *dst_b = *src_b;
+    } else {
+        *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        if (next_k < K) {
+            if (stage == 0) {
+                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                    uint4* dst_a = (uint4*)&smem_A_1[load_a_row][load_a_col];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                    *dst_a = *src_a;
+                } else {
+                    *(uint4*)&smem_A_1[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_1[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                } else {
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                }
+            } else {
+                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                    uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                    *dst_a = *src_a;
+                } else {
+                    *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                } else {
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                int a_row = warp_m_idx * 16;
+                wmma::load_matrix_sync(frag_A, &smem_A_0[a_row][k_step], 40);
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 40);
+                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                int a_row = warp_m_idx * 16;
+                wmma::load_matrix_sync(frag_A, &smem_A_1[a_row][k_step], 40);
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 40);
+                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = 1 - stage;
+    }
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[2];
+    #pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            frag_C_half[j].x[k] = __float2half(frag_C[j].x[k]);
+        }
+        int out_m = cta_m + warp_m_idx * 16;
+        int out_n = cta_n + j * 16;
+        if (out_m < M && out_n < N) {
+            wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C_half[j], N, wmma::mem_row_major);
+        }
+    }
+}
+extern "C" __global__ __launch_bounds__(128, 4) void y_fused_gemm_tiny_32x64_128t_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 32;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A_0[32][32 + 8];
+    __shared__ alignas(128) half smem_B_0[32][64 + 8];
+    __shared__ alignas(128) half smem_A_1[32][32 + 8];
+    __shared__ alignas(128) half smem_B_1[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = (warpId / 2) % 2; // 0 or 1 -> M offset 0, 16
+    int warp_n_idx = warpId % 2;       // 0 or 1 -> N offset 0, 32
+
+    const int SWIZZLE = 8;
+    int grid_n = gridDim.x;
+    int grid_m = gridDim.y;
+    int tile_idx = blockIdx.y * grid_n + blockIdx.x;
+    int num_tiles_per_swizzle = grid_n * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+    if (cta_m >= M || cta_n >= N) {
+        cta_m = blockIdx.y * BLOCK_M;
+        cta_n = blockIdx.x * BLOCK_N;
+    }
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2];
+
+    wmma::fill_fragment(frag_C[0], 0.0f);
+    wmma::fill_fragment(frag_C[1], 0.0f);
+
+    // 128 threads load 32x32 halfs (1024 halfs = 64 uint4s) -> tid 0..63 load 1 uint4
+    int load_a_row = tid / 2;        // 0..31 (tid 0..63)
+    int load_a_col = (tid % 2) * 16;  // 0, 16
+
+    // 128 threads load 32x64 halfs (2048 halfs = 128 uint4s) -> 1 uint4 load per thread
+    int load_b_row = tid / 4;        // 0..31
+    int load_b_col = (tid % 4) * 16;  // 0, 16, 32, 48
+
+    // Prologue Stage 0
+    if (tid < 64) {
+        if (cta_m + load_a_row < M && load_a_col < K) {
+            uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+            const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + load_a_col];
+            *dst_a = *src_a;
+        } else {
+            *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+        }
+    }
+
+    if (load_b_row < K && cta_n + load_b_col < N) {
+        uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+        const uint4* src_b = (const uint4*)&B[load_b_row * N + (cta_n + load_b_col)];
+        *dst_b = *src_b;
+    } else {
+        *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        if (next_k < K) {
+            if (stage == 0) {
+                if (tid < 64) {
+                    if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                        uint4* dst_a = (uint4*)&smem_A_1[load_a_row][load_a_col];
+                        const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                        *dst_a = *src_a;
+                    } else {
+                        *(uint4*)&smem_A_1[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                    }
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_1[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                } else {
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                }
+            } else {
+                if (tid < 64) {
+                    if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                        uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+                        const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                        *dst_a = *src_a;
+                    } else {
+                        *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                    }
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                } else {
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                int a_row = warp_m_idx * 16;
+                wmma::load_matrix_sync(frag_A, &smem_A_0[a_row][k_step], 40);
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 72);
+                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                int a_row = warp_m_idx * 16;
+                wmma::load_matrix_sync(frag_A, &smem_A_1[a_row][k_step], 40);
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 72);
+                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = 1 - stage;
+    }
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[2];
+    #pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            frag_C_half[j].x[k] = __float2half(frag_C[j].x[k]);
+        }
+        int out_m = cta_m + warp_m_idx * 16;
+        int out_n = cta_n + warp_n_idx * 32 + j * 16;
+        if (out_m < M && out_n < N) {
+            wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C_half[j], N, wmma::mem_row_major);
+        }
+    }
+}
+extern "C" __global__ __launch_bounds__(64, 4) void y_fused_gemm_tiny_64x64_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 64;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A_0[64][32 + 8];
+    __shared__ alignas(128) half smem_B_0[32][64 + 8];
+    __shared__ alignas(128) half smem_A_1[64][32 + 8];
+    __shared__ alignas(128) half smem_B_1[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_n_idx = warpId % 2; // 0 or 1 -> N offset 0, 32
+
+    const int SWIZZLE = 8;
+    int grid_n = gridDim.x;
+    int grid_m = gridDim.y;
+    int tile_idx = blockIdx.y * grid_n + blockIdx.x;
+    int num_tiles_per_swizzle = grid_n * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+    if (cta_m >= M || cta_n >= N) {
+        cta_m = blockIdx.y * BLOCK_M;
+        cta_n = blockIdx.x * BLOCK_N;
+    }
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    // 64 threads load 64x32 halfs -> 32 halfs (4 uint4s) per thread
+    int load_a_row = tid;            // 0..63
+
+    // 64 threads load 32x64 halfs -> 32 halfs (4 uint4s) per thread
+    int load_b_row = tid / 2;        // 0..31
+    int load_b_col = (tid % 2) * 32;  // 0, 32
+
+    // Prologue Stage 0
+    if (cta_m + load_a_row < M) {
+        uint4* dst_a = (uint4*)&smem_A_0[load_a_row][0];
+        const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K];
+        *dst_a = *src_a;
+        *(dst_a + 1) = *(src_a + 1);
+    } else {
+        *(uint4*)&smem_A_0[load_a_row][0] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_A_0[load_a_row][16] = make_uint4(0, 0, 0, 0);
+    }
+
+    if (load_b_row < K && cta_n + load_b_col < N) {
+        uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+        const uint4* src_b = (const uint4*)&B[load_b_row * N + (cta_n + load_b_col)];
+        *dst_b = *src_b;
+        *(dst_b + 1) = *(src_b + 1);
+        *(dst_b + 2) = *(src_b + 2);
+        *(dst_b + 3) = *(src_b + 3);
+    } else {
+        *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_B_0[load_b_row][load_b_col + 8] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_B_0[load_b_row][load_b_col + 16] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_B_0[load_b_row][load_b_col + 24] = make_uint4(0, 0, 0, 0);
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        if (next_k < K) {
+            if (stage == 0) {
+                if (cta_m + load_a_row < M && next_k + 31 < K) {
+                    uint4* dst_a = (uint4*)&smem_A_1[load_a_row][0];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + next_k];
+                    *dst_a = *src_a;
+                    *(dst_a + 1) = *(src_a + 1);
+                } else {
+                    *(uint4*)&smem_A_1[load_a_row][0] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_A_1[load_a_row][16] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_1[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                    *(dst_b + 1) = *(src_b + 1);
+                    *(dst_b + 2) = *(src_b + 2);
+                    *(dst_b + 3) = *(src_b + 3);
+                } else {
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col + 8] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col + 16] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col + 24] = make_uint4(0, 0, 0, 0);
+                }
+            } else {
+                if (cta_m + load_a_row < M && next_k + 31 < K) {
+                    uint4* dst_a = (uint4*)&smem_A_0[load_a_row][0];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + next_k];
+                    *dst_a = *src_a;
+                    *(dst_a + 1) = *(src_a + 1);
+                } else {
+                    *(uint4*)&smem_A_0[load_a_row][0] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_A_0[load_a_row][16] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                    *(dst_b + 1) = *(src_b + 1);
+                    *(dst_b + 2) = *(src_b + 2);
+                    *(dst_b + 3) = *(src_b + 3);
+                } else {
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col + 8] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col + 16] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col + 24] = make_uint4(0, 0, 0, 0);
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 72);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 72);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = 1 - stage;
+    }
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[4][2];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) {
+                frag_C_half[i][j].x[k] = __float2half(frag_C[i][j].x[k]);
+            }
+            int out_m = cta_m + i * 16;
+            int out_n = cta_n + warp_n_idx * 32 + j * 16;
+            if (out_m < M && out_n < N) {
+                wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C_half[i][j], N, wmma::mem_row_major);
+            }
+        }
+    }
+}
+extern "C" __global__ __launch_bounds__(64, 4) void y_fused_gemm_tiny_32x64_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 32;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A_0[32][32 + 8];
+    __shared__ alignas(128) half smem_B_0[32][64 + 8];
+    __shared__ alignas(128) half smem_A_1[32][32 + 8];
+    __shared__ alignas(128) half smem_B_1[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2; // 0 or 1 -> M offset 0, 16
+
+    const int SWIZZLE = 8;
+    int grid_n = gridDim.x;
+    int grid_m = gridDim.y;
+    int tile_idx = blockIdx.y * grid_n + blockIdx.x;
+    int num_tiles_per_swizzle = grid_n * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+    if (cta_m >= M || cta_n >= N) {
+        cta_m = blockIdx.y * BLOCK_M;
+        cta_n = blockIdx.x * BLOCK_N;
+    }
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[4];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4];
+
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        wmma::fill_fragment(frag_C[j], 0.0f);
+    }
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+
+    int load_b_row = tid / 2;
+    int load_b_col = (tid % 2) * 32;
+
+    // Prologue Stage 0
+    if (cta_m + load_a_row < M && load_a_col < K) {
+        uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+        const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + load_a_col];
+        *dst_a = *src_a;
+        *(dst_a + 1) = *(src_a + 1);
+    } else {
+        *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_A_0[load_a_row][load_a_col + 8] = make_uint4(0, 0, 0, 0);
+    }
+
+    if (load_b_row < K && cta_n + load_b_col < N) {
+        uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+        const uint4* src_b = (const uint4*)&B[load_b_row * N + (cta_n + load_b_col)];
+        *dst_b = *src_b;
+        *(dst_b + 1) = *(src_b + 1);
+        *(dst_b + 2) = *(src_b + 2);
+        *(dst_b + 3) = *(src_b + 3);
+    } else {
+        *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_B_0[load_b_row][load_b_col + 8] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_B_0[load_b_row][load_b_col + 16] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_B_0[load_b_row][load_b_col + 24] = make_uint4(0, 0, 0, 0);
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        if (next_k < K) {
+            if (stage == 0) {
+                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                    uint4* dst_a = (uint4*)&smem_A_1[load_a_row][load_a_col];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                    *dst_a = *src_a;
+                    *(dst_a + 1) = *(src_a + 1);
+                } else {
+                    *(uint4*)&smem_A_1[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_A_1[load_a_row][load_a_col + 8] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_1[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                    *(dst_b + 1) = *(src_b + 1);
+                    *(dst_b + 2) = *(src_b + 2);
+                    *(dst_b + 3) = *(src_b + 3);
+                } else {
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col + 8] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col + 16] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col + 24] = make_uint4(0, 0, 0, 0);
+                }
+            } else {
+                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                    uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                    *dst_a = *src_a;
+                    *(dst_a + 1) = *(src_a + 1);
+                } else {
+                    *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_A_0[load_a_row][load_a_col + 8] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                    *(dst_b + 1) = *(src_b + 1);
+                    *(dst_b + 2) = *(src_b + 2);
+                    *(dst_b + 3) = *(src_b + 3);
+                } else {
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col + 8] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col + 16] = make_uint4(0, 0, 0, 0);
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col + 24] = make_uint4(0, 0, 0, 0);
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                int a_row = warp_m_idx * 16;
+                wmma::load_matrix_sync(frag_A, &smem_A_0[a_row][k_step], 40);
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    int b_col = j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 72);
+                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                int a_row = warp_m_idx * 16;
+                wmma::load_matrix_sync(frag_A, &smem_A_1[a_row][k_step], 40);
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    int b_col = j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 72);
+                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = 1 - stage;
+    }
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[4];
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        #pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            frag_C_half[j].x[k] = __float2half(frag_C[j].x[k]);
+        }
+        int out_m = cta_m + warp_m_idx * 16;
+        int out_n = cta_n + j * 16;
+        if (out_m < M && out_n < N) {
+            wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C_half[j], N, wmma::mem_row_major);
+        }
+    }
+}
+
+// Split-K Reduction GEMM (32x64 Tile, K Sliced across gridDim.z, SMEM Staged Atomic Accumulation)
+extern "C" __global__ __launch_bounds__(64, 4) void y_fused_gemm_splitk_32x64_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 32;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A[32][32 + 8];
+    __shared__ alignas(128) half smem_B[32][64 + 8];
+    __shared__ alignas(128) half smem_C[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2; // 0 or 1 -> M offset 0, 16
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+    int k_slice = blockIdx.z;
+    int num_slices = gridDim.z;
+
+    int k_per_slice = ((K + num_slices - 1) / num_slices + BLOCK_K - 1) / BLOCK_K * BLOCK_K;
+    int k_start = k_slice * k_per_slice;
+    int k_end = (k_start + k_per_slice < K) ? (k_start + k_per_slice) : K;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[4];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4];
+
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        wmma::fill_fragment(frag_C[j], 0.0f);
+    }
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+
+    int load_b_row = tid / 2;
+    int load_b_col = (tid % 2) * 32;
+
+    for (int k = k_start; k < k_end; k += BLOCK_K) {
+        if (cta_m + load_a_row < M && k + load_a_col < K) {
+            uint4* dst_a = (uint4*)&smem_A[load_a_row][load_a_col];
+            const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (k + load_a_col)];
+            *dst_a = *src_a;
+            *(dst_a + 1) = *(src_a + 1);
+        } else {
+            *(uint4*)&smem_A[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+            *(uint4*)&smem_A[load_a_row][load_a_col + 8] = make_uint4(0, 0, 0, 0);
+        }
+
+        if (k + load_b_row < K && cta_n + load_b_col < N) {
+            uint4* dst_b = (uint4*)&smem_B[load_b_row][load_b_col];
+            const uint4* src_b = (const uint4*)&B[(k + load_b_row) * N + (cta_n + load_b_col)];
+            *dst_b = *src_b;
+            *(dst_b + 1) = *(src_b + 1);
+            *(dst_b + 2) = *(src_b + 2);
+            *(dst_b + 3) = *(src_b + 3);
+        } else {
+            *(uint4*)&smem_B[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+            *(uint4*)&smem_B[load_b_row][load_b_col + 8] = make_uint4(0, 0, 0, 0);
+            *(uint4*)&smem_B[load_b_row][load_b_col + 16] = make_uint4(0, 0, 0, 0);
+            *(uint4*)&smem_B[load_b_row][load_b_col + 24] = make_uint4(0, 0, 0, 0);
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            int a_row = warp_m_idx * 16;
+            wmma::load_matrix_sync(frag_A, &smem_A[a_row][k_step], 40);
+            #pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                int b_col = j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B[k_step][b_col], 72);
+                wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+            }
+        }
+
+        __syncthreads();
+    }
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[4];
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        #pragma unroll
+        for (int elem = 0; elem < 8; ++elem) {
+            frag_C_half[j].x[elem] = __float2half(frag_C[j].x[elem]);
+        }
+        int local_m = warp_m_idx * 16;
+        int local_n = j * 16;
+        wmma::store_matrix_sync(&smem_C[local_m][local_n], frag_C_half[j], 72, wmma::mem_row_major);
+    }
+
+    __syncthreads();
+
+    // Coalesced SMEM -> Global Atomic Reduction
+    #pragma unroll
+    for (int idx = tid; idx < 2048; idx += 64) {
+        int r = idx / 64;
+        int c = idx % 64;
+        int out_m = cta_m + r;
+        int out_n = cta_n + c;
+        if (out_m < M && out_n < N) {
+            atomicAdd(&C[out_m * N + out_n], smem_C[r][c]);
+        }
+    }
+}
+
+// Specialized Small GEMM (64x64 Tile, 128 Threads, 4 Warps, Vectorized 128-bit uint4 SMEM Staging, FP16 Output) for 1024x1024
+extern "C" __global__ __launch_bounds__(128, 4) void y_fused_gemm_small_64x64_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 64;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A_0[64][32 + 8];
+    __shared__ alignas(128) half smem_B_0[32][64 + 8];
+    __shared__ alignas(128) half smem_A_1[64][32 + 8];
+    __shared__ alignas(128) half smem_B_1[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2; // 0..1 -> offset 0, 32
+    int warp_n_idx = warpId / 2; // 0..1 -> offset 0, 32
+
+    const int SWIZZLE = 8;
+    int grid_n = gridDim.x;
+    int grid_m = gridDim.y;
+    int tile_idx = blockIdx.y * grid_n + blockIdx.x;
+    int num_tiles_per_swizzle = grid_n * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+    if (cta_m >= M || cta_n >= N) {
+        cta_m = blockIdx.y * BLOCK_M;
+        cta_n = blockIdx.x * BLOCK_N;
+    }
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2][2];
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    // 128 threads load 64x32 halfs (2048 halfs = 128 uint4s) -> 1 uint4 load per thread
+    int load_a_row = tid / 2;        // 0..63
+    int load_a_col = (tid % 2) * 16;  // 0, 16
+
+    // 128 threads load 32x64 halfs (2048 halfs = 128 uint4s) -> 1 uint4 load per thread
+    int load_b_row = tid / 4;        // 0..31
+    int load_b_col = (tid % 4) * 16;  // 0, 16, 32, 48
+
+    // Prologue Stage 0
+    if (cta_m + load_a_row < M && load_a_col < K) {
+        uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+        const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + load_a_col];
+        *dst_a = *src_a;
+    } else {
+        *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+    }
+
+    if (load_b_row < K && cta_n + load_b_col < N) {
+        uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+        const uint4* src_b = (const uint4*)&B[load_b_row * N + (cta_n + load_b_col)];
+        *dst_b = *src_b;
+    } else {
+        *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        if (next_k < K) {
+            if (stage == 0) {
+                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                    uint4* dst_a = (uint4*)&smem_A_1[load_a_row][load_a_col];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                    *dst_a = *src_a;
+                } else {
+                    *(uint4*)&smem_A_1[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_1[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                } else {
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                }
+            } else {
+                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
+                    uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
+                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                    *dst_a = *src_a;
+                } else {
+                    *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col < N) {
+                    uint4* dst_b = (uint4*)&smem_B_0[load_b_row][load_b_col];
+                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                    *dst_b = *src_b;
+                } else {
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    int a_row = warp_m_idx * 32 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 72);
+                }
+                #pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    int a_row = warp_m_idx * 32 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 72);
+                }
+                #pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = 1 - stage;
+    }
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[2][2];
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) {
+                frag_C_half[i][j].x[k] = __float2half(frag_C[i][j].x[k]);
+            }
+            int out_m = cta_m + warp_m_idx * 32 + i * 16;
+            int out_n = cta_n + warp_n_idx * 32 + j * 16;
+            if (out_m < M && out_n < N) {
+                wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C_half[i][j], N, wmma::mem_row_major);
+            }
+        }
+    }
+}
+
+// Direct-Register Small GEMM (64x64x32 CTA Tile, Vectorized 128-bit uint4 SMEM Staging, Zero Bank Conflicts) for M,N <= 512
+extern "C" __global__ __launch_bounds__(128, 4) void y_tensor_core_gemm_small_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    float* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 64;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A[64][32 + 8];
+    __shared__ alignas(128) half smem_B[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2; // 0..1 -> 0, 32
+    int warp_n_idx = warpId / 2; // 0..1 -> 0, 32
+
+    const int SWIZZLE = 8;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2][2];
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    // 128 threads load 64x32 halfs (2048 halfs = 128 uint4s) -> 1 uint4 load per thread
+    int load_a_row = tid / 2;        // 0..63
+    int load_a_col = (tid % 2) * 16;  // 0, 16
+
+    // 128 threads load 32x64 halfs (2048 halfs = 128 uint4s) -> 1 uint4 load per thread
+    int load_b_row = tid / 4;        // 0..31
+    int load_b_col = (tid % 4) * 16;  // 0, 16, 32, 48
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        // Coalesced 128-bit vector load for A with alignment check
+        unsigned long long g_addr_a = (unsigned long long)&A[(cta_m + load_a_row) * K + (k + load_a_col)];
+        if ((g_addr_a & 15) == 0 && (cta_m + load_a_row < M) && (k + load_a_col + 7 < K)) {
+            *(uint4*)&smem_A[load_a_row][load_a_col] = *(const uint4*)g_addr_a;
+        } else {
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                int r = cta_m + load_a_row;
+                int c = k + load_a_col + e;
+                smem_A[load_a_row][load_a_col + e] = (r < M && c < K) ? A[r * K + c] : __float2half(0.0f);
+            }
+        }
+
+        // Coalesced 128-bit vector load for B with alignment check
+        unsigned long long g_addr_b = (unsigned long long)&B[(k + load_b_row) * N + (cta_n + load_b_col)];
+        if ((g_addr_b & 15) == 0 && (k + load_b_row < K) && (cta_n + load_b_col + 7 < N)) {
+            *(uint4*)&smem_B[load_b_row][load_b_col] = *(const uint4*)g_addr_b;
+        } else {
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                int r = k + load_b_row;
+                int c = cta_n + load_b_col + e;
+                smem_B[load_b_row][load_b_col + e] = (r < K && c < N) ? B[r * N + c] : __float2half(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int a_row = warp_m_idx * 32 + i * 16;
+                wmma::load_matrix_sync(frag_A[i], &smem_A[a_row][k_step], 40);
+            }
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                int b_col = warp_n_idx * 32 + j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B[k_step][b_col], 72);
+            }
+
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    // Vectorized 128-bit Epilogue Downcasting & Direct Store
+    __shared__ alignas(16) float warp_out[4][32][32];
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::store_matrix_sync(&warp_out[warpId][i * 16][j * 16], frag_C[i][j], 32, wmma::mem_row_major);
+        }
+    }
+
+    int lane = tid % 32;
+    int r_sub = lane / 8;
+    int c_sub = (lane % 8) * 4;
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 32; r_off += 4) {
+        int row = r_sub + r_off;
+        float4 v = *(float4*)&warp_out[warpId][row][c_sub];
+        int out_m = cta_m + warp_m_idx * 32 + row;
+        int out_n = cta_n + warp_n_idx * 32 + c_sub;
+
+        if (out_m < M) {
+            unsigned long long addr = (unsigned long long)(&C[out_m * N + out_n]);
+            if ((addr & 15) == 0 && out_n + 3 < N) {
+                *(float4*)addr = v;
+            } else {
+                if (out_n < N) C[out_m * N + out_n] = v.x;
+                if (out_n + 1 < N) C[out_m * N + out_n + 1] = v.y;
+                if (out_n + 2 < N) C[out_m * N + out_n + 2] = v.z;
+                if (out_n + 3 < N) C[out_m * N + out_n + 3] = v.w;
+            }
+        }
+    }
+}
+
+// Fused GEMM + Bias + ReLU Kernel (128x128x32 CTA Tile, 256 threads, 2-Stage Async Double Buffering, L2 Swizzling)
+extern "C" __global__ __launch_bounds__(256, 2) void y_fused_gemm_bias_relu_kernel(
+    const float* __restrict__ A_fp32,
+    const float* __restrict__ B_fp32,
+    const float* __restrict__ bias,
+    float* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    extern __shared__ char raw_smem[];
+    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])raw_smem;
+    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&raw_smem[128 * 40 * sizeof(half)];
+
+    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&raw_smem[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&raw_smem[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32; // 0..7
+
+    int warp_m_idx = warpId % 2; // 0..1 (0 or 64)
+    int warp_n_idx = warpId / 2; // 0..3 (0, 32, 64, 96)
+
+    // CTA Block Swizzling for high L2 Cache reuse on large matrices
+    const int SWIZZLE = 8;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    int load_a_row = tid / 2;       // 0..127
+    int load_a_col = (tid % 2) * 16; // 0, 16
+
+    int load_b_row = tid / 8;       // 0..31
+    int load_b_col = (tid % 8) * 16; // 0, 16, ... 112
+
+    // Prologue: Load Stage 0 (tile k=0)
+    #pragma unroll
+    for (int offset = 0; offset < 16; offset += 2) {
+        int cur_a_col = load_a_col + offset;
+        if (cta_m + load_a_row < M && cur_a_col < K) {
+            float2 vA = *(float2*)&A_fp32[(cta_m + load_a_row) * K + cur_a_col];
+            smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+        } else {
+            smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+        }
+    }
+    #pragma unroll
+    for (int offset = 0; offset < 16; offset += 2) {
+        int cur_b_col = load_b_col + offset;
+        if (load_b_row < K && cta_n + cur_b_col < N) {
+            float2 vB = *(float2*)&B_fp32[load_b_row * N + (cta_n + cur_b_col)];
+            smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+        } else {
+            smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+        }
+    }
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        int next_stage = 1 - stage;
+
+        // Async prefetch next stage (stage k+1)
+        if (next_k < K) {
+            if (stage == 0) {
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_a_col = load_a_col + offset;
+                    if (cta_m + load_a_row < M && next_k + cur_a_col < K) {
+                        float2 vA = *(float2*)&A_fp32[(cta_m + load_a_row) * K + (next_k + cur_a_col)];
+                        smem_A_1[load_a_row][cur_a_col] = __float2half(vA.x);
+                        smem_A_1[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                    } else {
+                        smem_A_1[load_a_row][cur_a_col] = __float2half(0.0f);
+                        smem_A_1[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                    }
+                }
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_b_col = load_b_col + offset;
+                    if (next_k + load_b_row < K && cta_n + cur_b_col < N) {
+                        float2 vB = *(float2*)&B_fp32[(next_k + load_b_row) * N + (cta_n + cur_b_col)];
+                        smem_B_1[load_b_row][cur_b_col] = __float2half(vB.x);
+                        smem_B_1[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                    } else {
+                        smem_B_1[load_b_row][cur_b_col] = __float2half(0.0f);
+                        smem_B_1[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                    }
+                }
+            } else {
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_a_col = load_a_col + offset;
+                    if (cta_m + load_a_row < M && next_k + cur_a_col < K) {
+                        float2 vA = *(float2*)&A_fp32[(cta_m + load_a_row) * K + (next_k + cur_a_col)];
+                        smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+                        smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                    } else {
+                        smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+                        smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                    }
+                }
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_b_col = load_b_col + offset;
+                    if (next_k + load_b_row < K && cta_n + cur_b_col < N) {
+                        float2 vB = *(float2*)&B_fp32[(next_k + load_b_row) * N + (cta_n + cur_b_col)];
+                        smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                        smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                    } else {
+                        smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                        smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                    }
+                }
+            }
+        }
+
+        // Tensor Core computation on current stage buffer
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = next_stage;
+    }
+
+    // Epilogue Shared Memory Reuse
+    float (*smem_C)[128 + 4] = (float (*)[128 + 4])raw_smem;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int r = warp_m_idx * 64 + i * 16;
+            int c = warp_n_idx * 32 + j * 16;
+            wmma::store_matrix_sync(&smem_C[r][c], frag_C[i][j], 132, wmma::mem_row_major);
+        }
+    }
+
+    __syncthreads();
+
+    // 256 threads process 128x128 floats (4096 float4s) -> 16 float4s per thread
+    int r_sub = tid / 16;        // 0..15
+    int col = (tid % 16) * 4;     // 0, 4, 8, ... 60
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 128; r_off += 16) {
+        int row = r_sub + r_off;
+        #pragma unroll
+        for (int c_side = 0; c_side < 128; c_side += 64) {
+            int cur_col = col + c_side;
+            int out_m = cta_m + row;
+            int out_n = cta_n + cur_col;
+
+            if (out_m < M && out_n + 3 < N) {
+                float4 v = *(float4*)&smem_C[row][cur_col];
+                float4 b = *(float4*)&bias[out_n];
+                v.x = v.x + b.x > 0.0f ? v.x + b.x : 0.0f;
+                v.y = v.y + b.y > 0.0f ? v.y + b.y : 0.0f;
+                v.z = v.z + b.z > 0.0f ? v.z + b.z : 0.0f;
+                v.w = v.w + b.w > 0.0f ? v.w + b.w : 0.0f;
+                *(float4*)&C[out_m * N + out_n] = v;
+            }
+        }
+    }
+}
+
+extern "C" __global__ __launch_bounds__(128, 4) void y_fused_gemm_bias_relu_small_kernel(
+    const float* __restrict__ A_fp32,
+    const float* __restrict__ B_fp32,
+    const float* __restrict__ bias,
+    float* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 64;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A[64][32 + 8];
+    __shared__ alignas(128) half smem_B[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    const int SWIZZLE = 8;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2][2];
+
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+
+    int load_b_row = tid / 4;
+    int load_b_col = (tid % 4) * 16;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_a_col = load_a_col + offset;
+            if (cta_m + load_a_row < M && k + cur_a_col < K) {
+                float2 vA = *(float2*)&A_fp32[(cta_m + load_a_row) * K + (k + cur_a_col)];
+                smem_A[load_a_row][cur_a_col] = __float2half(vA.x);
+                smem_A[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+            } else {
+                smem_A[load_a_row][cur_a_col] = __float2half(0.0f);
+                smem_A[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+            }
+        }
+
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_b_col = load_b_col + offset;
+            if (k + load_b_row < K && cta_n + cur_b_col < N) {
+                float2 vB = *(float2*)&B_fp32[(k + load_b_row) * N + (cta_n + cur_b_col)];
+                smem_B[load_b_row][cur_b_col] = __float2half(vB.x);
+                smem_B[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+            } else {
+                smem_B[load_b_row][cur_b_col] = __float2half(0.0f);
+                smem_B[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            for (int i = 0; i < 2; ++i) {
+                int a_row = warp_m_idx * 32 + i * 16;
+                wmma::load_matrix_sync(frag_A[i], &smem_A[a_row][k_step], 40);
+            }
+            for (int j = 0; j < 2; ++j) {
+                int b_col = warp_n_idx * 32 + j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B[k_step][b_col], 72);
+            }
+
+            for (int i = 0; i < 2; ++i) {
+                for (int j = 0; j < 2; ++j) {
+                    wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    __shared__ alignas(16) float smem_C[64][64 + 4];
+
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            int r = warp_m_idx * 32 + i * 16;
+            int c = warp_n_idx * 32 + j * 16;
+            wmma::store_matrix_sync(&smem_C[r][c], frag_C[i][j], 68, wmma::mem_row_major);
+        }
+    }
+
+    __syncthreads();
+
+    // 128 threads process 64x64 floats (1024 float4s) -> 8 float4s per thread
+    int r_sub = tid / 16;        // 0..7
+    int col = (tid % 16) * 4;     // 0, 4, 8, ... 60
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 64; r_off += 8) {
+        int row = r_sub + r_off;
+        int out_m = cta_m + row;
+        int out_n = cta_n + col;
+
+        if (out_m < M && out_n + 3 < N) {
+            float4 v = *(float4*)&smem_C[row][col];
+            float4 b = *(float4*)&bias[out_n];
+            v.x = v.x + b.x > 0.0f ? v.x + b.x : 0.0f;
+            v.y = v.y + b.y > 0.0f ? v.y + b.y : 0.0f;
+            v.z = v.z + b.z > 0.0f ? v.z + b.z : 0.0f;
+            v.w = v.w + b.w > 0.0f ? v.w + b.w : 0.0f;
+            *(float4*)&C[out_m * N + out_n] = v;
+        }
+    }
+}
+
+// Fused Small Linear Kernel (GEMM + Bias, No ReLU) with FP16 Input Staging for Output Layer
+extern "C" __global__ void y_fused_gemm_bias_linear_small_fp16_in_kernel(
+    const half* __restrict__ A_fp16,
+    const float* __restrict__ B_fp32,
+    const float* __restrict__ bias,
+    float* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 64;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A[64][32 + 8];
+    __shared__ alignas(128) half smem_B[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2][2];
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    int load_a_row = tid / 4;
+    int load_a_col = (tid % 4) * 8;
+
+    int load_b_row = tid / 4;
+    int load_b_col = (tid % 4) * 16;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        if (cta_m + load_a_row < M && k + load_a_col + 7 < K) {
+            *(uint4*)&smem_A[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + (k + load_a_col)];
+        } else {
+            #pragma unroll
+            for (int k_off = 0; k_off < 8; ++k_off) {
+                int cur_k = load_a_col + k_off;
+                smem_A[load_a_row][cur_k] = (cta_m + load_a_row < M && k + cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + (k + cur_k)] : __float2half(0.0f);
+            }
+        }
+
+        if (cta_m + load_a_row + 32 < M && k + load_a_col + 7 < K) {
+            *(uint4*)&smem_A[load_a_row + 32][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 32) * K + (k + load_a_col)];
+        } else {
+            #pragma unroll
+            for (int k_off = 0; k_off < 8; ++k_off) {
+                int cur_k = load_a_col + k_off;
+                smem_A[load_a_row + 32][cur_k] = (cta_m + load_a_row + 32 < M && k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 32) * K + (k + cur_k)] : __float2half(0.0f);
+            }
+        }
+
+        #pragma unroll
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_b_col = load_b_col + offset;
+            if (k + load_b_row < K && cta_n + cur_b_col < N) {
+                float2 vB = *(float2*)&B_fp32[(k + load_b_row) * N + (cta_n + cur_b_col)];
+                smem_B[load_b_row][cur_b_col] = __float2half(vB.x);
+                smem_B[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+            } else {
+                smem_B[load_b_row][cur_b_col] = __float2half(0.0f);
+                smem_B[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int a_row = warp_m_idx * 32 + i * 16;
+                wmma::load_matrix_sync(frag_A[i], &smem_A[a_row][k_step], 40);
+            }
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                int b_col = warp_n_idx * 32 + j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B[k_step][b_col], 72);
+            }
+
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    __shared__ alignas(16) float smem_C[64][64 + 4];
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int r = warp_m_idx * 32 + i * 16;
+            int c = warp_n_idx * 32 + j * 16;
+            wmma::store_matrix_sync(&smem_C[r][c], frag_C[i][j], 68, wmma::mem_row_major);
+        }
+    }
+
+    __syncthreads();
+
+    int r_sub = tid / 16;
+    int col = (tid % 16) * 4;
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 64; r_off += 8) {
+        int row = r_sub + r_off;
+        int out_m = cta_m + row;
+        int out_n = cta_n + col;
+
+        if (out_m < M && out_n + 3 < N) {
+            float4 v = *(float4*)&smem_C[row][col];
+            float4 b = *(float4*)&bias[out_n];
+            v.x = v.x + b.x;
+            v.y = v.y + b.y;
+            v.z = v.z + b.z;
+            v.w = v.w + b.w;
+            *(float4*)&C[out_m * N + out_n] = v;
+        }
+    }
+}
+
+// Fused Small Linear Kernel (GEMM + Bias, No ReLU) for Output Layer
+extern "C" __global__ void y_fused_gemm_bias_linear_small_kernel(
+    const float* __restrict__ A_fp32,
+    const float* __restrict__ B_fp32,
+    const float* __restrict__ bias,
+    float* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 64;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A[64][32 + 8];
+    __shared__ alignas(128) half smem_B[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2][2];
+
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+
+    int load_b_row = tid / 4;
+    int load_b_col = (tid % 4) * 16;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_a_col = load_a_col + offset;
+            if (cta_m + load_a_row < M && k + cur_a_col < K) {
+                float2 vA = *(float2*)&A_fp32[(cta_m + load_a_row) * K + (k + cur_a_col)];
+                smem_A[load_a_row][cur_a_col] = __float2half(vA.x);
+                smem_A[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+            } else {
+                smem_A[load_a_row][cur_a_col] = __float2half(0.0f);
+                smem_A[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+            }
+        }
+
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_b_col = load_b_col + offset;
+            if (k + load_b_row < K && cta_n + cur_b_col < N) {
+                float2 vB = *(float2*)&B_fp32[(k + load_b_row) * N + (cta_n + cur_b_col)];
+                smem_B[load_b_row][cur_b_col] = __float2half(vB.x);
+                smem_B[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+            } else {
+                smem_B[load_b_row][cur_b_col] = __float2half(0.0f);
+                smem_B[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            for (int i = 0; i < 2; ++i) {
+                int a_row = warp_m_idx * 32 + i * 16;
+                wmma::load_matrix_sync(frag_A[i], &smem_A[a_row][k_step], 40);
+            }
+            for (int j = 0; j < 2; ++j) {
+                int b_col = warp_n_idx * 32 + j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B[k_step][b_col], 72);
+            }
+
+            for (int i = 0; i < 2; ++i) {
+                for (int j = 0; j < 2; ++j) {
+                    wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    __shared__ alignas(16) float smem_C[64][64 + 4];
+
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            int r = warp_m_idx * 32 + i * 16;
+            int c = warp_n_idx * 32 + j * 16;
+            wmma::store_matrix_sync(&smem_C[r][c], frag_C[i][j], 68, wmma::mem_row_major);
+        }
+    }
+
+    __syncthreads();
+
+    int r_sub = tid / 16;
+    int col = (tid % 16) * 4;
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 64; r_off += 8) {
+        int row = r_sub + r_off;
+        int out_m = cta_m + row;
+        int out_n = cta_n + col;
+
+        if (out_m < M && out_n + 3 < N) {
+            float4 v = *(float4*)&smem_C[row][col];
+            float4 b = *(float4*)&bias[out_n];
+            v.x = v.x + b.x;
+            v.y = v.y + b.y;
+            v.z = v.z + b.z;
+            v.w = v.w + b.w;
+            *(float4*)&C[out_m * N + out_n] = v;
+        }
+    }
+}
+
+extern "C" __global__ void naive_bias_relu_kernel(
+    float* C, const float* bias, int M, int N
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < M * N) {
+        int col = idx % N;
+        float val = C[idx] + bias[col];
+        C[idx] = val > 0.0f ? val : 0.0f;
+    }
+}
+
+// Layer 1 Kernel: FP32 Inputs (X, W1, b1) -> Native FP16 Staging Output (H1)
+extern "C" __global__ void y_fused_layer1_fp32_in_fp16_out_kernel(
+    const float* __restrict__ A_fp32,
+    const float* __restrict__ B_fp32,
+    const float* __restrict__ bias_fp32,
+    half* __restrict__ C_fp16,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    extern __shared__ char raw_smem[];
+    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])raw_smem;
+    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&raw_smem[128 * 40 * sizeof(half)];
+
+    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&raw_smem[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&raw_smem[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    const int SWIZZLE = 8;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+
+    int load_b_row = tid / 8;
+    int load_b_col = (tid % 8) * 16;
+
+    // Prologue Stage 0
+    #pragma unroll
+    for (int offset = 0; offset < 16; offset += 2) {
+        int cur_a_col = load_a_col + offset;
+        if (cta_m + load_a_row < M && cur_a_col < K) {
+            float2 vA = *(float2*)&A_fp32[(cta_m + load_a_row) * K + cur_a_col];
+            smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+        } else {
+            smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+        }
+    }
+
+    #pragma unroll
+    for (int offset = 0; offset < 16; offset += 2) {
+        int cur_b_col = load_b_col + offset;
+        if (load_b_row < K && cta_n + cur_b_col < N) {
+            float2 vB = *(float2*)&B_fp32[load_b_row * N + (cta_n + cur_b_col)];
+            smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+        } else {
+            smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+        }
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        int next_stage = 1 - stage;
+
+        if (next_k < K) {
+            if (stage == 0) {
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_a_col = load_a_col + offset;
+                    if (cta_m + load_a_row < M && next_k + cur_a_col < K) {
+                        float2 vA = *(float2*)&A_fp32[(cta_m + load_a_row) * K + (next_k + cur_a_col)];
+                        smem_A_1[load_a_row][cur_a_col] = __float2half(vA.x);
+                        smem_A_1[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                    } else {
+                        smem_A_1[load_a_row][cur_a_col] = __float2half(0.0f);
+                        smem_A_1[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                    }
+                }
+
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_b_col = load_b_col + offset;
+                    if (next_k + load_b_row < K && cta_n + cur_b_col < N) {
+                        float2 vB = *(float2*)&B_fp32[(next_k + load_b_row) * N + (cta_n + cur_b_col)];
+                        smem_B_1[load_b_row][cur_b_col] = __float2half(vB.x);
+                        smem_B_1[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                    } else {
+                        smem_B_1[load_b_row][cur_b_col] = __float2half(0.0f);
+                        smem_B_1[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                    }
+                }
+            } else {
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_a_col = load_a_col + offset;
+                    if (cta_m + load_a_row < M && next_k + cur_a_col < K) {
+                        float2 vA = *(float2*)&A_fp32[(cta_m + load_a_row) * K + (next_k + cur_a_col)];
+                        smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+                        smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                    } else {
+                        smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+                        smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                    }
+                }
+
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_b_col = load_b_col + offset;
+                    if (next_k + load_b_row < K && cta_n + cur_b_col < N) {
+                        float2 vB = *(float2*)&B_fp32[(next_k + load_b_row) * N + (cta_n + cur_b_col)];
+                        smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                        smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                    } else {
+                        smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                        smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                    }
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = next_stage;
+    }
+
+    float (*smem_C_fp32)[128 + 4] = (float (*)[128 + 4])raw_smem;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int r = warp_m_idx * 64 + i * 16;
+            int c = warp_n_idx * 32 + j * 16;
+            wmma::store_matrix_sync(&smem_C_fp32[r][c], frag_C[i][j], 132, wmma::mem_row_major);
+        }
+    }
+
+    __syncthreads();
+
+    int r_sub = tid / 16;
+    int col = (tid % 16) * 8;
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 128; r_off += 16) {
+        int row = r_sub + r_off;
+        int out_m = cta_m + row;
+        int out_n = cta_n + col;
+
+        if (out_m < M && out_n + 7 < N) {
+            float4 f0 = *(float4*)&smem_C_fp32[row][col];
+            float4 f1 = *(float4*)&smem_C_fp32[row][col + 4];
+            float4 b0 = *(float4*)&bias_fp32[out_n];
+            float4 b1 = *(float4*)&bias_fp32[out_n + 4];
+
+            half2 h0 = __floats2half2_rn(f0.x + b0.x, f0.y + b0.y);
+            half2 h1 = __floats2half2_rn(f0.z + b0.z, f0.w + b0.w);
+            half2 h2 = __floats2half2_rn(f1.x + b1.x, f1.y + b1.y);
+            half2 h3 = __floats2half2_rn(f1.z + b1.z, f1.w + b1.w);
+
+            half zero = __float2half(0.0f);
+            half2 zero2 = __halves2half2(zero, zero);
+            h0 = __hmax2(h0, zero2);
+            h1 = __hmax2(h1, zero2);
+            h2 = __hmax2(h2, zero2);
+            h3 = __hmax2(h3, zero2);
+
+            alignas(16) half2 h_v[4] = {h0, h1, h2, h3};
+            *(uint4*)&C_fp16[out_m * N + out_n] = *(uint4*)h_v;
+        }
+    }
+}
+
+// Layer 3 Kernel: Native FP16 Staging Input (H2) -> FP32 Predictions Output (Out)
+extern "C" __global__ void y_fused_layer3_fp16_in_fp32_out_kernel(
+    const half* __restrict__ A_fp16,
+    const float* __restrict__ B_fp32,
+    const float* __restrict__ bias_fp32,
+    float* __restrict__ C_fp32,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    extern __shared__ char raw_smem[];
+    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])raw_smem;
+    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&raw_smem[128 * 40 * sizeof(half)];
+
+    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&raw_smem[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&raw_smem[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    const int SWIZZLE = 8;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    int load_a_row = tid / 4;
+    int load_a_col = (tid % 4) * 8;
+
+    int load_b_row = tid / 8;
+    int load_b_col = (tid % 8) * 16;
+
+    // Prologue Stage 0
+    if (cta_m + load_a_row < M && load_a_col + 7 < K) {
+        *(uint4*)&smem_A_0[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + load_a_col];
+    } else {
+        #pragma unroll
+        for (int k_off = 0; k_off < 8; ++k_off) {
+            int cur_k = load_a_col + k_off;
+            smem_A_0[load_a_row][cur_k] = (cta_m + load_a_row < M && cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + cur_k] : __float2half(0.0f);
+        }
+    }
+
+    if (cta_m + load_a_row + 64 < M && load_a_col + 7 < K) {
+        *(uint4*)&smem_A_0[load_a_row + 64][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 64) * K + load_a_col];
+    } else {
+        #pragma unroll
+        for (int k_off = 0; k_off < 8; ++k_off) {
+            int cur_k = load_a_col + k_off;
+            smem_A_0[load_a_row + 64][cur_k] = (cta_m + load_a_row + 64 < M && cur_k < K) ? A_fp16[(cta_m + load_a_row + 64) * K + cur_k] : __float2half(0.0f);
+        }
+    }
+
+    #pragma unroll
+    for (int offset = 0; offset < 16; offset += 2) {
+        int cur_b_col = load_b_col + offset;
+        if (load_b_row < K && cta_n + cur_b_col < N) {
+            float2 vB = *(float2*)&B_fp32[load_b_row * N + (cta_n + cur_b_col)];
+            smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+        } else {
+            smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+        }
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        int next_stage = 1 - stage;
+
+        if (next_k < K) {
+            if (stage == 0) {
+                if (cta_m + load_a_row < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_1[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_1[load_a_row][cur_k] = (cta_m + load_a_row < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (cta_m + load_a_row + 64 < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_1[load_a_row + 64][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 64) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_1[load_a_row + 64][cur_k] = (cta_m + load_a_row + 64 < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 64) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_b_col = load_b_col + offset;
+                    if (next_k + load_b_row < K && cta_n + cur_b_col < N) {
+                        float2 vB = *(float2*)&B_fp32[(next_k + load_b_row) * N + (cta_n + cur_b_col)];
+                        smem_B_1[load_b_row][cur_b_col] = __float2half(vB.x);
+                        smem_B_1[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                    } else {
+                        smem_B_1[load_b_row][cur_b_col] = __float2half(0.0f);
+                        smem_B_1[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                    }
+                }
+            } else {
+                if (cta_m + load_a_row < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_0[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_0[load_a_row][cur_k] = (cta_m + load_a_row < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (cta_m + load_a_row + 64 < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_0[load_a_row + 64][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 64) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_0[load_a_row + 64][cur_k] = (cta_m + load_a_row + 64 < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 64) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                #pragma unroll
+                for (int offset = 0; offset < 16; offset += 2) {
+                    int cur_b_col = load_b_col + offset;
+                    if (next_k + load_b_row < K && cta_n + cur_b_col < N) {
+                        float2 vB = *(float2*)&B_fp32[(next_k + load_b_row) * N + (cta_n + cur_b_col)];
+                        smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                        smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                    } else {
+                        smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                        smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                    }
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = next_stage;
+    }
+
+    float (*smem_C_fp32)[128 + 4] = (float (*)[128 + 4])raw_smem;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int r = warp_m_idx * 64 + i * 16;
+            int c = warp_n_idx * 32 + j * 16;
+            wmma::store_matrix_sync(&smem_C_fp32[r][c], frag_C[i][j], 132, wmma::mem_row_major);
+        }
+    }
+
+    __syncthreads();
+
+    int r_sub = tid / 32;
+    int col = (tid % 32) * 4;
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 128; r_off += 8) {
+        int row = r_sub + r_off;
+        int out_m = cta_m + row;
+        int out_n = cta_n + col;
+
+        if (out_m < M && out_n + 3 < N) {
+            float4 v = *(float4*)&smem_C_fp32[row][col];
+            float4 b = *(float4*)&bias_fp32[out_n];
+            v.x = v.x + b.x;
+            v.y = v.y + b.y;
+            v.z = v.z + b.z;
+            v.w = v.w + b.w;
+            *(float4*)&C_fp32[out_m * N + out_n] = v;
+        }
+    }
+}
+
+// Native Vectorized FP16 Fused GEMM + Bias + Activation Kernel (128-bit uint4 vector loads/stores)
+extern "C" __global__ __launch_bounds__(256, 2) void y_fused_gemm_bias_relu_fp16_kernel(
+    const half* __restrict__ A_fp16,
+    const half* __restrict__ B_fp16,
+    const half* __restrict__ bias_fp16,
+    half* __restrict__ C_fp16,
+    int M, int N, int K,
+    int is_relu
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A[128][32 + 8];
+    __shared__ alignas(128) half smem_B[32][128 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+    int laneId = tid % 32;
+
+    int warp_m_idx = warpId % 4; // 0..3
+    int warp_n_idx = warpId / 4; // 0..1
+
+    const int SWIZZLE = 8;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2][2];
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+
+    int load_b_row = tid / 8;
+    int load_b_col = (tid % 8) * 16;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        if (cta_m + load_a_row < M && k + load_a_col < K) {
+            uint4* dst_a = (uint4*)&smem_A[load_a_row][load_a_col];
+            const uint4* src_a = (const uint4*)&A_fp16[(cta_m + load_a_row) * K + (k + load_a_col)];
+            *dst_a = *src_a;
+            *(dst_a + 1) = *(src_a + 1);
+        } else {
+            *(uint4*)&smem_A[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+            *(uint4*)&smem_A[load_a_row][load_a_col + 8] = make_uint4(0, 0, 0, 0);
+        }
+
+        if (k + load_b_row < K && cta_n + load_b_col < N) {
+            uint4* dst_b = (uint4*)&smem_B[load_b_row][load_b_col];
+            const uint4* src_b = (const uint4*)&B_fp16[(k + load_b_row) * N + (cta_n + load_b_col)];
+            *dst_b = *src_b;
+            *(dst_b + 1) = *(src_b + 1);
+        } else {
+            *(uint4*)&smem_B[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+            *(uint4*)&smem_B[load_b_row][load_b_col + 8] = make_uint4(0, 0, 0, 0);
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int a_row = warp_m_idx * 32 + i * 16;
+                wmma::load_matrix_sync(frag_A[i], &smem_A[a_row][k_step], 40);
+            }
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                int b_col = warp_n_idx * 64 + j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B[k_step][b_col], 136);
+            }
+
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    // In-Register Bias + ReLU + Direct Global Store (Zero SMEM, Zero __syncthreads)
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[4][2];
+
+    #pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        int b_col_base = cta_n + warp_n_idx * 32 + j * 16 + (laneId % 4) * 2;
+        float b0 = (b_col_base < N) ? __half2float(bias_fp16[b_col_base]) : 0.0f;
+        float b1 = (b_col_base + 1 < N) ? __half2float(bias_fp16[b_col_base + 1]) : 0.0f;
+        float b2 = (b_col_base + 8 < N) ? __half2float(bias_fp16[b_col_base + 8]) : 0.0f;
+        float b3 = (b_col_base + 9 < N) ? __half2float(bias_fp16[b_col_base + 9]) : 0.0f;
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            frag_C[i][j].x[0] += b0;
+            frag_C[i][j].x[1] += b1;
+            frag_C[i][j].x[2] += b0;
+            frag_C[i][j].x[3] += b1;
+            frag_C[i][j].x[4] += b2;
+            frag_C[i][j].x[5] += b3;
+            frag_C[i][j].x[6] += b2;
+            frag_C[i][j].x[7] += b3;
+
+            if (is_relu) {
+                #pragma unroll
+                for (int k = 0; k < 8; ++k) {
+                    frag_C[i][j].x[k] = fmaxf(frag_C[i][j].x[k], 0.0f);
+                }
+            }
+
+            #pragma unroll
+            for (int k = 0; k < 8; ++k) {
+                frag_C_half[i][j].x[k] = __float2half(frag_C[i][j].x[k]);
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int out_m = cta_m + warp_m_idx * 64 + i * 16;
+            int out_n = cta_n + warp_n_idx * 32 + j * 16;
+            if (out_m < M && out_n < N) {
+                wmma::store_matrix_sync(&C_fp16[out_m * N + out_n], frag_C_half[i][j], N, wmma::mem_row_major);
+            }
+        }
+    }
+}
+
+// Optimized 128x64 Tile Vectorized FP16 Fused GEMM Kernel (2 CTAs/SM, 38KB SMEM, 100% SM Occupancy Pass)
+extern "C" __global__ __launch_bounds__(256, 2) void y_fused_gemm_bias_relu_fp16_opt_kernel(
+    const half* __restrict__ A_fp16,
+    const half* __restrict__ B_fp16,
+    const half* __restrict__ bias_fp16,
+    half* __restrict__ C_fp16,
+    int M, int N, int K,
+    int is_relu
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    extern __shared__ char raw_smem[];
+    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])raw_smem;
+    half (*smem_B_0)[64 + 8] = (half (*)[64 + 8])&raw_smem[128 * 40 * sizeof(half)];
+
+    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&raw_smem[128 * 40 * sizeof(half) + 32 * 72 * sizeof(half)];
+    half (*smem_B_1)[64 + 8] = (half (*)[64 + 8])&raw_smem[2 * 128 * 40 * sizeof(half) + 32 * 72 * sizeof(half)];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    int load_a_row = tid / 4;
+    int load_a_col = (tid % 4) * 8;
+
+    int load_b_row = tid / 8;
+    int load_b_col = (tid % 8) * 8;
+
+    // Prologue Stage 0
+    if (cta_m + load_a_row < M && load_a_col + 7 < K) {
+        *(uint4*)&smem_A_0[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + load_a_col];
+    } else {
+        #pragma unroll
+        for (int k_off = 0; k_off < 8; ++k_off) {
+            int cur_k = load_a_col + k_off;
+            smem_A_0[load_a_row][cur_k] = (cta_m + load_a_row < M && cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + cur_k] : __float2half(0.0f);
+        }
+    }
+
+    if (cta_m + load_a_row + 32 < M && load_a_col + 7 < K) {
+        *(uint4*)&smem_A_0[load_a_row + 32][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 32) * K + load_a_col];
+    } else {
+        #pragma unroll
+        for (int k_off = 0; k_off < 8; ++k_off) {
+            int cur_k = load_a_col + k_off;
+            smem_A_0[load_a_row + 32][cur_k] = (cta_m + load_a_row + 32 < M && cur_k < K) ? A_fp16[(cta_m + load_a_row + 32) * K + cur_k] : __float2half(0.0f);
+        }
+    }
+
+    if (cta_m + load_a_row + 64 < M && load_a_col + 7 < K) {
+        *(uint4*)&smem_A_0[load_a_row + 64][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 64) * K + load_a_col];
+    } else {
+        #pragma unroll
+        for (int k_off = 0; k_off < 8; ++k_off) {
+            int cur_k = load_a_col + k_off;
+            smem_A_0[load_a_row + 64][cur_k] = (cta_m + load_a_row + 64 < M && cur_k < K) ? A_fp16[(cta_m + load_a_row + 64) * K + cur_k] : __float2half(0.0f);
+        }
+    }
+
+    if (cta_m + load_a_row + 96 < M && load_a_col + 7 < K) {
+        *(uint4*)&smem_A_0[load_a_row + 96][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 96) * K + load_a_col];
+    } else {
+        #pragma unroll
+        for (int k_off = 0; k_off < 8; ++k_off) {
+            int cur_k = load_a_col + k_off;
+            smem_A_0[load_a_row + 96][cur_k] = (cta_m + load_a_row + 96 < M && cur_k < K) ? A_fp16[(cta_m + load_a_row + 96) * K + cur_k] : __float2half(0.0f);
+        }
+    }
+
+    if (load_b_row < K && cta_n + load_b_col + 7 < N) {
+        *(uint4*)&smem_B_0[load_b_row][load_b_col] = *(const uint4*)&B_fp16[load_b_row * N + (cta_n + load_b_col)];
+    } else {
+        #pragma unroll
+        for (int n_off = 0; n_off < 8; ++n_off) {
+            int cur_n = load_b_col + n_off;
+            smem_B_0[load_b_row][cur_n] = (load_b_row < K && cta_n + cur_n < N) ? B_fp16[load_b_row * N + (cta_n + cur_n)] : __float2half(0.0f);
+        }
+    }
+
+    if (load_b_row + 16 < K && cta_n + load_b_col + 7 < N) {
+        *(uint4*)&smem_B_0[load_b_row + 16][load_b_col] = *(const uint4*)&B_fp16[(load_b_row + 16) * N + (cta_n + load_b_col)];
+    } else {
+        #pragma unroll
+        for (int n_off = 0; n_off < 8; ++n_off) {
+            int cur_n = load_b_col + n_off;
+            smem_B_0[load_b_row + 16][cur_n] = (load_b_row + 16 < K && cta_n + cur_n < N) ? B_fp16[(load_b_row + 16) * N + (cta_n + cur_n)] : __float2half(0.0f);
+        }
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        int next_stage = 1 - stage;
+
+        if (next_k < K) {
+            if (stage == 0) {
+                if (cta_m + load_a_row < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_1[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_1[load_a_row][cur_k] = (cta_m + load_a_row < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (cta_m + load_a_row + 32 < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_1[load_a_row + 32][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 32) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_1[load_a_row + 32][cur_k] = (cta_m + load_a_row + 32 < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 32) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (cta_m + load_a_row + 64 < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_1[load_a_row + 64][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 64) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_1[load_a_row + 64][cur_k] = (cta_m + load_a_row + 64 < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 64) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (cta_m + load_a_row + 96 < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_1[load_a_row + 96][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 96) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_1[load_a_row + 96][cur_k] = (cta_m + load_a_row + 96 < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 96) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col + 7 < N) {
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col] = *(const uint4*)&B_fp16[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                } else {
+                    #pragma unroll
+                    for (int n_off = 0; n_off < 8; ++n_off) {
+                        int cur_n = load_b_col + n_off;
+                        smem_B_1[load_b_row][cur_n] = (next_k + load_b_row < K && cta_n + cur_n < N) ? B_fp16[(next_k + load_b_row) * N + (cta_n + cur_n)] : __float2half(0.0f);
+                    }
+                }
+
+                if (next_k + load_b_row + 16 < K && cta_n + load_b_col + 7 < N) {
+                    *(uint4*)&smem_B_1[load_b_row + 16][load_b_col] = *(const uint4*)&B_fp16[(next_k + load_b_row + 16) * N + (cta_n + load_b_col)];
+                } else {
+                    #pragma unroll
+                    for (int n_off = 0; n_off < 8; ++n_off) {
+                        int cur_n = load_b_col + n_off;
+                        smem_B_1[load_b_row + 16][cur_n] = (next_k + load_b_row + 16 < K && cta_n + cur_n < N) ? B_fp16[(next_k + load_b_row + 16) * N + (cta_n + cur_n)] : __float2half(0.0f);
+                    }
+                }
+            } else {
+                if (cta_m + load_a_row < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_0[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_0[load_a_row][cur_k] = (cta_m + load_a_row < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (cta_m + load_a_row + 32 < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_0[load_a_row + 32][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 32) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_0[load_a_row + 32][cur_k] = (cta_m + load_a_row + 32 < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 32) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (cta_m + load_a_row + 64 < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_0[load_a_row + 64][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 64) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_0[load_a_row + 64][cur_k] = (cta_m + load_a_row + 64 < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 64) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (cta_m + load_a_row + 96 < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_0[load_a_row + 96][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row + 96) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_0[load_a_row + 96][cur_k] = (cta_m + load_a_row + 96 < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row + 96) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col + 7 < N) {
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col] = *(const uint4*)&B_fp16[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                } else {
+                    #pragma unroll
+                    for (int n_off = 0; n_off < 8; ++n_off) {
+                        int cur_n = load_b_col + n_off;
+                        smem_B_0[load_b_row][cur_n] = (next_k + load_b_row < K && cta_n + cur_n < N) ? B_fp16[(next_k + load_b_row) * N + (cta_n + cur_n)] : __float2half(0.0f);
+                    }
+                }
+
+                if (next_k + load_b_row + 16 < K && cta_n + load_b_col + 7 < N) {
+                    *(uint4*)&smem_B_0[load_b_row + 16][load_b_col] = *(const uint4*)&B_fp16[(next_k + load_b_row + 16) * N + (cta_n + load_b_col)];
+                } else {
+                    #pragma unroll
+                    for (int n_off = 0; n_off < 8; ++n_off) {
+                        int cur_n = load_b_col + n_off;
+                        smem_B_0[load_b_row + 16][cur_n] = (next_k + load_b_row + 16 < K && cta_n + cur_n < N) ? B_fp16[(next_k + load_b_row + 16) * N + (cta_n + cur_n)] : __float2half(0.0f);
+                    }
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 72);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 72);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = next_stage;
+    }
+
+    float (*smem_C_fp32)[64 + 4] = (float (*)[64 + 4])raw_smem;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int r = warp_m_idx * 64 + i * 16;
+            int c = warp_n_idx * 32 + j * 16;
+            wmma::store_matrix_sync(&smem_C_fp32[r][c], frag_C[i][j], 68, wmma::mem_row_major);
+        }
+    }
+
+    __syncthreads();
+
+    int r_sub = tid / 8;
+    int col = (tid % 8) * 8;
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 128; r_off += 16) {
+        int row = r_sub + r_off;
+        int out_m = cta_m + row;
+        int out_n = cta_n + col;
+
+        if (out_m < M && out_n + 7 < N) {
+            float4 f0 = *(float4*)&smem_C_fp32[row][col];
+            float4 f1 = *(float4*)&smem_C_fp32[row][col + 4];
+            uint4 b = *(uint4*)&bias_fp16[out_n];
+            half2* h_b = (half2*)&b;
+
+            half2 h0 = __floats2half2_rn(f0.x, f0.y);
+            half2 h1 = __floats2half2_rn(f0.z, f0.w);
+            half2 h2 = __floats2half2_rn(f1.x, f1.y);
+            half2 h3 = __floats2half2_rn(f1.z, f1.w);
+
+            alignas(16) half2 h_v[4] = {h0, h1, h2, h3};
+
+            #pragma unroll
+            for (int h = 0; h < 4; ++h) {
+                h_v[h] = __hadd2(h_v[h], h_b[h]);
+                if (is_relu) {
+                    half zero = __float2half(0.0f);
+                    half2 zero2 = __halves2half2(zero, zero);
+                    h_v[h] = __hmax2(h_v[h], zero2);
+                }
+            }
+
+            *(uint4*)&C_fp16[out_m * N + out_n] = *(uint4*)h_v;
+        }
+    }
+}
+
+
+// Zero-SMEM Direct Register Epilogue Fused FP16 GEMM Kernel (Doubles SM Occupancy to 132 concurrent blocks)
+extern "C" __global__ void y_fused_direct_register_epilogue_kernel(
+    const half* __restrict__ A_fp16,
+    const half* __restrict__ B_fp16,
+    const half* __restrict__ bias_fp16,
+    half* __restrict__ C_fp16,
+    int M, int N, int K,
+    int is_relu
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    extern __shared__ char raw_smem[];
+    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])raw_smem;
+    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&raw_smem[128 * 40 * sizeof(half)];
+
+    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&raw_smem[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&raw_smem[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    const int SWIZZLE = 8;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+
+    int load_b_row = tid / 16;
+    int load_b_col = (tid % 16) * 8;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            wmma::fill_fragment(frag_C[i][j], 0.0f);
+        }
+    }
+
+    // Prologue (128-bit Vector Loads)
+    if (cta_m + load_a_row < M && load_a_col + 7 < K) {
+        *(uint4*)&smem_A_0[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + load_a_col];
+    } else {
+        #pragma unroll
+        for (int k_off = 0; k_off < 8; ++k_off) {
+            int cur_k = load_a_col + k_off;
+            smem_A_0[load_a_row][cur_k] = (cta_m + load_a_row < M && cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + cur_k] : __float2half(0.0f);
+        }
+    }
+
+    if (load_b_row < K && cta_n + load_b_col + 7 < N) {
+        *(uint4*)&smem_B_0[load_b_row][load_b_col] = *(const uint4*)&B_fp16[load_b_row * N + (cta_n + load_b_col)];
+    } else {
+        #pragma unroll
+        for (int n_off = 0; n_off < 8; ++n_off) {
+            int cur_n = load_b_col + n_off;
+            smem_B_0[load_b_row][cur_n] = (load_b_row < K && cta_n + cur_n < N) ? B_fp16[load_b_row * N + (cta_n + cur_n)] : __float2half(0.0f);
+        }
+    }
+
+    if (load_b_row + 16 < K && cta_n + load_b_col + 7 < N) {
+        *(uint4*)&smem_B_0[load_b_row + 16][load_b_col] = *(const uint4*)&B_fp16[(load_b_row + 16) * N + (cta_n + load_b_col)];
+    } else {
+        #pragma unroll
+        for (int n_off = 0; n_off < 8; ++n_off) {
+            int cur_n = load_b_col + n_off;
+            smem_B_0[load_b_row + 16][cur_n] = (load_b_row + 16 < K && cta_n + cur_n < N) ? B_fp16[(load_b_row + 16) * N + (cta_n + cur_n)] : __float2half(0.0f);
+        }
+    }
+
+    __syncthreads();
+
+    int stage = 0;
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + BLOCK_K;
+        int next_stage = 1 - stage;
+
+        if (next_k < K) {
+            if (stage == 0) {
+                if (cta_m + load_a_row < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_1[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_1[load_a_row][cur_k] = (cta_m + load_a_row < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col + 7 < N) {
+                    *(uint4*)&smem_B_1[load_b_row][load_b_col] = *(const uint4*)&B_fp16[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                } else {
+                    #pragma unroll
+                    for (int n_off = 0; n_off < 8; ++n_off) {
+                        int cur_n = load_b_col + n_off;
+                        smem_B_1[load_b_row][cur_n] = (next_k + load_b_row < K && cta_n + cur_n < N) ? B_fp16[(next_k + load_b_row) * N + (cta_n + cur_n)] : __float2half(0.0f);
+                    }
+                }
+
+                if (next_k + load_b_row + 16 < K && cta_n + load_b_col + 7 < N) {
+                    *(uint4*)&smem_B_1[load_b_row + 16][load_b_col] = *(const uint4*)&B_fp16[(next_k + load_b_row + 16) * N + (cta_n + load_b_col)];
+                } else {
+                    #pragma unroll
+                    for (int n_off = 0; n_off < 8; ++n_off) {
+                        int cur_n = load_b_col + n_off;
+                        smem_B_1[load_b_row + 16][cur_n] = (next_k + load_b_row + 16 < K && cta_n + cur_n < N) ? B_fp16[(next_k + load_b_row + 16) * N + (cta_n + cur_n)] : __float2half(0.0f);
+                    }
+                }
+            } else {
+                if (cta_m + load_a_row < M && next_k + load_a_col + 7 < K) {
+                    *(uint4*)&smem_A_0[load_a_row][load_a_col] = *(const uint4*)&A_fp16[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                } else {
+                    #pragma unroll
+                    for (int k_off = 0; k_off < 8; ++k_off) {
+                        int cur_k = load_a_col + k_off;
+                        smem_A_0[load_a_row][cur_k] = (cta_m + load_a_row < M && next_k + cur_k < K) ? A_fp16[(cta_m + load_a_row) * K + (next_k + cur_k)] : __float2half(0.0f);
+                    }
+                }
+
+                if (next_k + load_b_row < K && cta_n + load_b_col + 7 < N) {
+                    *(uint4*)&smem_B_0[load_b_row][load_b_col] = *(const uint4*)&B_fp16[(next_k + load_b_row) * N + (cta_n + load_b_col)];
+                } else {
+                    #pragma unroll
+                    for (int n_off = 0; n_off < 8; ++n_off) {
+                        int cur_n = load_b_col + n_off;
+                        smem_B_0[load_b_row][cur_n] = (next_k + load_b_row < K && cta_n + cur_n < N) ? B_fp16[(next_k + load_b_row) * N + (cta_n + cur_n)] : __float2half(0.0f);
+                    }
+                }
+
+                if (next_k + load_b_row + 16 < K && cta_n + load_b_col + 7 < N) {
+                    *(uint4*)&smem_B_0[load_b_row + 16][load_b_col] = *(const uint4*)&B_fp16[(next_k + load_b_row + 16) * N + (cta_n + load_b_col)];
+                } else {
+                    #pragma unroll
+                    for (int n_off = 0; n_off < 8; ++n_off) {
+                        int cur_n = load_b_col + n_off;
+                        smem_B_0[load_b_row + 16][cur_n] = (next_k + load_b_row + 16 < K && cta_n + cur_n < N) ? B_fp16[(next_k + load_b_row + 16) * N + (cta_n + cur_n)] : __float2half(0.0f);
+                    }
+                }
+            }
+        }
+
+        if (stage == 0) {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        } else {
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    int a_row = warp_m_idx * 64 + i * 16;
+                    wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    int b_col = warp_n_idx * 32 + j * 16;
+                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
+        }
+
+        __syncthreads();
+        stage = next_stage;
+    }
+
+    // Direct Register Store Epilogue (Zero SMEM staging, Zero Barrier Stalls)
+    float (*smem_C_fp32)[128 + 4] = (float (*)[128 + 4])raw_smem;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int r = warp_m_idx * 64 + i * 16;
+            int c = warp_n_idx * 32 + j * 16;
+            wmma::store_matrix_sync(&smem_C_fp32[r][c], frag_C[i][j], 132, wmma::mem_row_major);
+        }
+    }
+    __syncthreads();
+
+    int r_sub = tid / 16;
+    int col = (tid % 16) * 8;
+
+    #pragma unroll
+    for (int r_off = 0; r_off < 128; r_off += 16) {
+        int row = r_sub + r_off;
+        int out_m = cta_m + row;
+        int out_n = cta_n + col;
+
+        if (out_m < M && out_n + 7 < N) {
+            float4 f0 = *(float4*)&smem_C_fp32[row][col];
+            float4 f1 = *(float4*)&smem_C_fp32[row][col + 4];
+            uint4 b = *(uint4*)&bias_fp16[out_n];
+            half2* h_b = (half2*)&b;
+
+            half2 h0 = __floats2half2_rn(f0.x, f0.y);
+            half2 h1 = __floats2half2_rn(f0.z, f0.w);
+            half2 h2 = __floats2half2_rn(f1.x, f1.y);
+            half2 h3 = __floats2half2_rn(f1.z, f1.w);
+
+            alignas(16) half2 h_v[4] = {h0, h1, h2, h3};
+
+            #pragma unroll
+            for (int h = 0; h < 4; ++h) {
+                h_v[h] = __hadd2(h_v[h], h_b[h]);
+                if (is_relu) {
+                    half zero = __float2half(0.0f);
+                    half2 zero2 = __halves2half2(zero, zero);
+                    h_v[h] = __hmax2(h_v[h], zero2);
+                }
+            }
+
+            *(uint4*)&C_fp16[out_m * N + out_n] = *(uint4*)h_v;
+        }
+    }
+}
+
+// Persistent Fused 3-Layer MLP Kernel (Layer 1 + Layer 2 + Layer 3 in a Single Persistent Grid Launch with zero host overhead)
+extern "C" __global__ void y_fused_mlp_3layer_persistent_kernel(
+    const float* __restrict__ X_fp32,
+    const float* __restrict__ W1_fp32,
+    const float* __restrict__ bias1_fp32,
+    const float* __restrict__ W2_fp32,
+    const float* __restrict__ bias2_fp32,
+    const float* __restrict__ W3_fp32,
+    const float* __restrict__ bias3_fp32,
+    float* __restrict__ Out_fp32,
+    float* __restrict__ H1_scratch,
+    float* __restrict__ H2_scratch,
+    int B, int Din, int Dh, int Dout
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    extern __shared__ char raw_smem[];
+    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])raw_smem;
+    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&raw_smem[128 * 40 * sizeof(half)];
+
+    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&raw_smem[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&raw_smem[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+    int load_b_row = tid / 8;
+    int load_b_col = (tid % 8) * 16;
+
+    if (cta_m >= B) return;
+
+    // -------------------------------------------------------------------------
+    // PHASE 1: LAYER 1 (X [128, Din=1024] @ W1 [1024, Dh=2048] + bias1 -> H1_scratch)
+    // -------------------------------------------------------------------------
+    for (int col_block = 0; col_block < Dh / BLOCK_N; ++col_block) {
+        int cta_n = col_block * BLOCK_N;
+
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                wmma::fill_fragment(frag_C[i][j], 0.0f);
+            }
+        }
+
+        #pragma unroll
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_a_col = load_a_col + offset;
+            if (cta_m + load_a_row < B && cur_a_col < Din) {
+                float2 vA = *(float2*)&X_fp32[(cta_m + load_a_row) * Din + cur_a_col];
+                smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+                smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+            } else {
+                smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+                smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+            }
+        }
+        #pragma unroll
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_b_col = load_b_col + offset;
+            if (load_b_row < Din && cta_n + cur_b_col < Dh) {
+                float2 vB = *(float2*)&W1_fp32[load_b_row * Dh + (cta_n + cur_b_col)];
+                smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+            } else {
+                smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        int stage = 0;
+        for (int k = 0; k < Din; k += BLOCK_K) {
+            int next_k = k + BLOCK_K;
+            int next_stage = 1 - stage;
+
+            if (next_k < Din) {
+                if (stage == 0) {
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_a_col = load_a_col + offset;
+                        if (cta_m + load_a_row < B && next_k + cur_a_col < Din) {
+                            float2 vA = *(float2*)&X_fp32[(cta_m + load_a_row) * Din + (next_k + cur_a_col)];
+                            smem_A_1[load_a_row][cur_a_col] = __float2half(vA.x);
+                            smem_A_1[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                        } else {
+                            smem_A_1[load_a_row][cur_a_col] = __float2half(0.0f);
+                            smem_A_1[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_b_col = load_b_col + offset;
+                        if (next_k + load_b_row < Din && cta_n + cur_b_col < Dh) {
+                            float2 vB = *(float2*)&W1_fp32[(next_k + load_b_row) * Dh + (cta_n + cur_b_col)];
+                            smem_B_1[load_b_row][cur_b_col] = __float2half(vB.x);
+                            smem_B_1[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                        } else {
+                            smem_B_1[load_b_row][cur_b_col] = __float2half(0.0f);
+                            smem_B_1[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                } else {
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_a_col = load_a_col + offset;
+                        if (cta_m + load_a_row < B && next_k + cur_a_col < Din) {
+                            float2 vA = *(float2*)&X_fp32[(cta_m + load_a_row) * Din + (next_k + cur_a_col)];
+                            smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+                            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                        } else {
+                            smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+                            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_b_col = load_b_col + offset;
+                        if (next_k + load_b_row < Din && cta_n + cur_b_col < Dh) {
+                            float2 vB = *(float2*)&W1_fp32[(next_k + load_b_row) * Dh + (cta_n + cur_b_col)];
+                            smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                        } else {
+                            smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                }
+            }
+
+            if (stage == 0) {
+                #pragma unroll
+                for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        int a_row = warp_m_idx * 64 + i * 16;
+                        wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                    }
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        int b_col = warp_n_idx * 32 + j * 16;
+                        wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 136);
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        #pragma unroll
+                        for (int j = 0; j < 2; ++j) {
+                            wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                        }
+                    }
+                }
+            } else {
+                #pragma unroll
+                for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        int a_row = warp_m_idx * 64 + i * 16;
+                        wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                    }
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        int b_col = warp_n_idx * 32 + j * 16;
+                        wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 136);
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        #pragma unroll
+                        for (int j = 0; j < 2; ++j) {
+                            wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                        }
+                    }
+                }
+            }
+
+            __syncthreads();
+            stage = next_stage;
+        }
+
+        // Epilogue Layer 1 -> H1_scratch (Bias + ReLU)
+        float (*smem_C)[128 + 4] = (float (*)[128 + 4])raw_smem;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                int r = warp_m_idx * 64 + i * 16;
+                int c = warp_n_idx * 32 + j * 16;
+                wmma::store_matrix_sync(&smem_C[r][c], frag_C[i][j], 132, wmma::mem_row_major);
+            }
+        }
+        __syncthreads();
+
+        int r_sub = tid / 16;
+        int col = (tid % 16) * 4;
+        #pragma unroll
+        for (int r_off = 0; r_off < 128; r_off += 16) {
+            int row = r_sub + r_off;
+            int out_m = cta_m + row;
+            int out_n = cta_n + col;
+            if (out_m < B && out_n + 3 < Dh) {
+                float4 v = *(float4*)&smem_C[row][col];
+                float4 b = *(float4*)&bias1_fp32[out_n];
+                v.x = v.x + b.x > 0.0f ? v.x + b.x : 0.0f;
+                v.y = v.y + b.y > 0.0f ? v.y + b.y : 0.0f;
+                v.z = v.z + b.z > 0.0f ? v.z + b.z : 0.0f;
+                v.w = v.w + b.w > 0.0f ? v.w + b.w : 0.0f;
+                *(float4*)&H1_scratch[out_m * Dh + out_n] = v;
+            }
+        }
+    }
+
+    __syncthreads();
+
+    // -------------------------------------------------------------------------
+    // PHASE 2: LAYER 2 (H1_scratch [128, Dh=2048] @ W2 [2048, Dh=2048] + bias2 -> H2_scratch)
+    // -------------------------------------------------------------------------
+    for (int col_block = 0; col_block < Dh / BLOCK_N; ++col_block) {
+        int cta_n = col_block * BLOCK_N;
+
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                wmma::fill_fragment(frag_C[i][j], 0.0f);
+            }
+        }
+
+        #pragma unroll
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_a_col = load_a_col + offset;
+            if (cta_m + load_a_row < B && cur_a_col < Dh) {
+                float2 vA = *(float2*)&H1_scratch[(cta_m + load_a_row) * Dh + cur_a_col];
+                smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+                smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+            } else {
+                smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+                smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+            }
+        }
+        #pragma unroll
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_b_col = load_b_col + offset;
+            if (load_b_row < Dh && cta_n + cur_b_col < Dh) {
+                float2 vB = *(float2*)&W2_fp32[load_b_row * Dh + (cta_n + cur_b_col)];
+                smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+            } else {
+                smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        int stage = 0;
+        for (int k = 0; k < Dh; k += BLOCK_K) {
+            int next_k = k + BLOCK_K;
+            int next_stage = 1 - stage;
+
+            if (next_k < Dh) {
+                if (stage == 0) {
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_a_col = load_a_col + offset;
+                        if (cta_m + load_a_row < B && next_k + cur_a_col < Dh) {
+                            float2 vA = *(float2*)&H1_scratch[(cta_m + load_a_row) * Dh + (next_k + cur_a_col)];
+                            smem_A_1[load_a_row][cur_a_col] = __float2half(vA.x);
+                            smem_A_1[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                        } else {
+                            smem_A_1[load_a_row][cur_a_col] = __float2half(0.0f);
+                            smem_A_1[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_b_col = load_b_col + offset;
+                        if (next_k + load_b_row < Dh && cta_n + cur_b_col < Dh) {
+                            float2 vB = *(float2*)&W2_fp32[(next_k + load_b_row) * Dh + (cta_n + cur_b_col)];
+                            smem_B_1[load_b_row][cur_b_col] = __float2half(vB.x);
+                            smem_B_1[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                        } else {
+                            smem_B_1[load_b_row][cur_b_col] = __float2half(0.0f);
+                            smem_B_1[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                } else {
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_a_col = load_a_col + offset;
+                        if (cta_m + load_a_row < B && next_k + cur_a_col < Dh) {
+                            float2 vA = *(float2*)&H1_scratch[(cta_m + load_a_row) * Dh + (next_k + cur_a_col)];
+                            smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+                            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                        } else {
+                            smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+                            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_b_col = load_b_col + offset;
+                        if (next_k + load_b_row < Dh && cta_n + cur_b_col < Dh) {
+                            float2 vB = *(float2*)&W2_fp32[(next_k + load_b_row) * Dh + (cta_n + cur_b_col)];
+                            smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                        } else {
+                            smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                }
+            }
+
+            if (stage == 0) {
+                #pragma unroll
+                for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        int a_row = warp_m_idx * 64 + i * 16;
+                        wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                    }
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        int b_col = warp_n_idx * 32 + j * 16;
+                        wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 136);
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        #pragma unroll
+                        for (int j = 0; j < 2; ++j) {
+                            wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                        }
+                    }
+                }
+            } else {
+                #pragma unroll
+                for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        int a_row = warp_m_idx * 64 + i * 16;
+                        wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                    }
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        int b_col = warp_n_idx * 32 + j * 16;
+                        wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 136);
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        #pragma unroll
+                        for (int j = 0; j < 2; ++j) {
+                            wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                        }
+                    }
+                }
+            }
+
+            __syncthreads();
+            stage = next_stage;
+        }
+
+        // Epilogue Layer 2 -> H2_scratch (Bias + ReLU)
+        float (*smem_C)[128 + 4] = (float (*)[128 + 4])raw_smem;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                int r = warp_m_idx * 64 + i * 16;
+                int c = warp_n_idx * 32 + j * 16;
+                wmma::store_matrix_sync(&smem_C[r][c], frag_C[i][j], 132, wmma::mem_row_major);
+            }
+        }
+        __syncthreads();
+
+        int r_sub = tid / 16;
+        int col = (tid % 16) * 4;
+        #pragma unroll
+        for (int r_off = 0; r_off < 128; r_off += 16) {
+            int row = r_sub + r_off;
+            int out_m = cta_m + row;
+            int out_n = cta_n + col;
+            if (out_m < B && out_n + 3 < Dh) {
+                float4 v = *(float4*)&smem_C[row][col];
+                float4 b = *(float4*)&bias2_fp32[out_n];
+                v.x = v.x + b.x > 0.0f ? v.x + b.x : 0.0f;
+                v.y = v.y + b.y > 0.0f ? v.y + b.y : 0.0f;
+                v.z = v.z + b.z > 0.0f ? v.z + b.z : 0.0f;
+                v.w = v.w + b.w > 0.0f ? v.w + b.w : 0.0f;
+                *(float4*)&H2_scratch[out_m * Dh + out_n] = v;
+            }
+        }
+    }
+
+    __syncthreads();
+
+    // -------------------------------------------------------------------------
+    // PHASE 3: LAYER 3 (H2_scratch [128, Dh=2048] @ W3 [2048, Dout=128] + bias3 -> Out)
+    // -------------------------------------------------------------------------
+    {
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[4];
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[4][2];
+
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                wmma::fill_fragment(frag_C[i][j], 0.0f);
+            }
+        }
+
+        #pragma unroll
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_a_col = load_a_col + offset;
+            if (cta_m + load_a_row < B && cur_a_col < Dh) {
+                float2 vA = *(float2*)&H2_scratch[(cta_m + load_a_row) * Dh + cur_a_col];
+                smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+                smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+            } else {
+                smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+                smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+            }
+        }
+        #pragma unroll
+        for (int offset = 0; offset < 16; offset += 2) {
+            int cur_b_col = load_b_col + offset;
+            if (load_b_row < Dh && cur_b_col < Dout) {
+                float2 vB = *(float2*)&W3_fp32[load_b_row * Dout + cur_b_col];
+                smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+            } else {
+                smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+            }
+        }
+
+        __syncthreads();
+
+        int stage = 0;
+        for (int k = 0; k < Dh; k += BLOCK_K) {
+            int next_k = k + BLOCK_K;
+            int next_stage = 1 - stage;
+
+            if (next_k < Dh) {
+                if (stage == 0) {
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_a_col = load_a_col + offset;
+                        if (cta_m + load_a_row < B && next_k + cur_a_col < Dh) {
+                            float2 vA = *(float2*)&H2_scratch[(cta_m + load_a_row) * Dh + (next_k + cur_a_col)];
+                            smem_A_1[load_a_row][cur_a_col] = __float2half(vA.x);
+                            smem_A_1[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                        } else {
+                            smem_A_1[load_a_row][cur_a_col] = __float2half(0.0f);
+                            smem_A_1[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_b_col = load_b_col + offset;
+                        if (next_k + load_b_row < Dh && cur_b_col < Dout) {
+                            float2 vB = *(float2*)&W3_fp32[(next_k + load_b_row) * Dout + cur_b_col];
+                            smem_B_1[load_b_row][cur_b_col] = __float2half(vB.x);
+                            smem_B_1[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                        } else {
+                            smem_B_1[load_b_row][cur_b_col] = __float2half(0.0f);
+                            smem_B_1[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                } else {
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_a_col = load_a_col + offset;
+                        if (cta_m + load_a_row < B && next_k + cur_a_col < Dh) {
+                            float2 vA = *(float2*)&H2_scratch[(cta_m + load_a_row) * Dh + (next_k + cur_a_col)];
+                            smem_A_0[load_a_row][cur_a_col] = __float2half(vA.x);
+                            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(vA.y);
+                        } else {
+                            smem_A_0[load_a_row][cur_a_col] = __float2half(0.0f);
+                            smem_A_0[load_a_row][cur_a_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                    #pragma unroll
+                    for (int offset = 0; offset < 16; offset += 2) {
+                        int cur_b_col = load_b_col + offset;
+                        if (next_k + load_b_row < Dh && cur_b_col < Dout) {
+                            float2 vB = *(float2*)&W3_fp32[(next_k + load_b_row) * Dout + cur_b_col];
+                            smem_B_0[load_b_row][cur_b_col] = __float2half(vB.x);
+                            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(vB.y);
+                        } else {
+                            smem_B_0[load_b_row][cur_b_col] = __float2half(0.0f);
+                            smem_B_0[load_b_row][cur_b_col + 1] = __float2half(0.0f);
+                        }
+                    }
+                }
+            }
+
+            if (stage == 0) {
+                #pragma unroll
+                for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        int a_row = warp_m_idx * 64 + i * 16;
+                        wmma::load_matrix_sync(frag_A[i], &smem_A_0[a_row][k_step], 40);
+                    }
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        int b_col = warp_n_idx * 32 + j * 16;
+                        wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 136);
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        #pragma unroll
+                        for (int j = 0; j < 2; ++j) {
+                            wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                        }
+                    }
+                }
+            } else {
+                #pragma unroll
+                for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        int a_row = warp_m_idx * 64 + i * 16;
+                        wmma::load_matrix_sync(frag_A[i], &smem_A_1[a_row][k_step], 40);
+                    }
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        int b_col = warp_n_idx * 32 + j * 16;
+                        wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 136);
+                    }
+                    #pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        #pragma unroll
+                        for (int j = 0; j < 2; ++j) {
+                            wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                        }
+                    }
+                }
+            }
+
+            __syncthreads();
+            stage = next_stage;
+        }
+
+        // Epilogue Layer 3 -> Out (Bias addition only, linear output)
+        float (*smem_C)[128 + 4] = (float (*)[128 + 4])raw_smem;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                int r = warp_m_idx * 64 + i * 16;
+                int c = warp_n_idx * 32 + j * 16;
+                wmma::store_matrix_sync(&smem_C[r][c], frag_C[i][j], 132, wmma::mem_row_major);
+            }
+        }
+        __syncthreads();
+
+        int r_sub = tid / 16;
+        int col = (tid % 16) * 4;
+        #pragma unroll
+        for (int r_off = 0; r_off < 128; r_off += 16) {
+            int row = r_sub + r_off;
+            int out_m = cta_m + row;
+            int out_n = col;
+            if (out_m < B && out_n + 3 < Dout) {
+                float4 v = *(float4*)&smem_C[row][col];
+                float4 b = *(float4*)&bias3_fp32[out_n];
+                v.x = v.x + b.x;
+                v.y = v.y + b.y;
+                v.z = v.z + b.z;
+                v.w = v.w + b.w;
+                *(float4*)&Out_fp32[out_m * Dout + out_n] = v;
+            }
+        }
+    }
+}
+
+// Optimized 128-bit Vectorized FP16 Fused GEMM Kernel for 512x512 (64x64 CTA Tile, Direct Fragment Bias + ReLU Inlining)
+extern "C" __global__ __launch_bounds__(128, 4) void y_fused_gemm_bias_relu_small_fp16_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    const half* __restrict__ bias,
+    half* __restrict__ C,
+    int M, int N, int K,
+    int is_relu
+) {
+    const int BLOCK_M = 64;
+    const int BLOCK_N = 64;
+    const int BLOCK_K = 32;
+
+    __shared__ alignas(128) half smem_A[64][32 + 8];
+    __shared__ alignas(128) half smem_B[32][64 + 8];
+
+    int tid = threadIdx.x;
+    int warpId = tid / 32;
+
+    int warp_m_idx = warpId % 2;
+    int warp_n_idx = warpId / 2;
+
+    const int SWIZZLE = 8;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
+    int group_id = tile_idx / num_tiles_per_swizzle;
+    int group_offset = tile_idx % num_tiles_per_swizzle;
+
+    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
+    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C[2][2];
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i)
+        for (int j = 0; j < 2; ++j)
+            wmma::fill_fragment(frag_C[i][j], __float2half(0.0f));
+
+    int load_a_row = tid / 2;
+    int load_a_col = (tid % 2) * 16;
+    int load_b_row = tid / 4;
+    int load_b_col = (tid % 4) * 16;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        if (cta_m + load_a_row < M && k + load_a_col < K) {
+            *(uint4*)&smem_A[load_a_row][load_a_col] = *(const uint4*)&A[(cta_m + load_a_row) * K + (k + load_a_col)];
+        } else {
+            *(uint4*)&smem_A[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+        }
+
+        if (k + load_b_row < K && cta_n + load_b_col < N) {
+            *(uint4*)&smem_B[load_b_row][load_b_col] = *(const uint4*)&B[(k + load_b_row) * N + (cta_n + load_b_col)];
+        } else {
+            *(uint4*)&smem_B[load_b_row][load_b_col] = make_uint4(0, 0, 0, 0);
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int a_row = warp_m_idx * 32 + i * 16;
+                wmma::load_matrix_sync(frag_A[i], &smem_A[a_row][k_step], 40);
+            }
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                int b_col = warp_n_idx * 32 + j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B[k_step][b_col], 72);
+            }
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int out_m = cta_m + warp_m_idx * 32 + i * 16;
+            int out_n = cta_n + warp_n_idx * 32 + j * 16;
+
+            if (out_m < M && out_n < N) {
+                #pragma unroll
+                for (int t = 0; t < frag_C[i][j].num_elements; ++t) {
+                    half b_val = bias[out_n + (t % 16)];
+                    half sum = frag_C[i][j].x[t] + b_val;
+                    if (is_relu) {
+                        frag_C[i][j].x[t] = sum > __float2half(0.0f) ? sum : __float2half(0.0f);
+                    } else {
+                        frag_C[i][j].x[t] = sum;
+                    }
+                }
+                wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C[i][j], N, wmma::mem_row_major);
+            }
+        }
+    }
+}
+
+
+// Standalone Optimized FP8 Tensor Core MMA GEMM kernel (128x128x64 CTA Tile + 128B XOR SMEM Swizzle + 4-Stage cp.async + In-Register Scale Fusion + m16n8k32 mma.sync)
+extern "C" __global__ __launch_bounds__(256, 1) void y_fp8_tensor_core_gemm_kernel(
+    const char* __restrict__ A,
+    const char* __restrict__ B,
+    half* __restrict__ C,
+    float scale_a,
+    float scale_b,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 64; // 64 FP8 elements per stage
+
+    // 2D L2 Cache Swizzling (GROUP_SIZE_M = 8)
+    const int GROUP_SIZE_M = 8;
+    int grid_m = (M + BLOCK_M - 1) / BLOCK_M;
+    int grid_n = (N + BLOCK_N - 1) / BLOCK_N;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_in_group = GROUP_SIZE_M * grid_n;
+    int group_id = tile_idx / num_tiles_in_group;
+    int first_tile_m = group_id * GROUP_SIZE_M;
+    int group_size_m = min(grid_m - first_tile_m, GROUP_SIZE_M);
+    int cta_m = (first_tile_m + (tile_idx % group_size_m)) * BLOCK_M;
+    int cta_n = ((tile_idx / group_size_m) % grid_n) * BLOCK_N;
+
+    // 4-Stage Shared Memory Allocation for FP8
+    // Tile A: 128 rows x 64 FP8 elements = 8192 bytes per stage
+    // Tile B: 64 rows x 128 FP8 elements = 8192 bytes per stage
+    // Total dynamic SMEM = 4 * (8192 + 8192) = 65,536 bytes (64 KB)
+    extern __shared__ char smem_raw[];
+    char (*smem_A)[128][64] = (char (*)[128][64])smem_raw;
+    char (*smem_B)[64][128] = (char (*)[64][128])(smem_raw + 4 * 128 * 64 * sizeof(char));
+
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
+
+    int warp_m = warp_id % 4; // 0..3 (4 warps in M)
+    int warp_n = warp_id / 4; // 0..1 (2 warps in N)
+
+    // Accumulators for warp C tile (32x64): 2 sub-tiles in M, 8 sub-tiles in N
+    float frag_C[2][8][4];
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            #pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                frag_C[i][j][c] = 0.0f;
+            }
+        }
+    }
+
+    // Helper for loading 16-byte global memory vectors to shared memory via cp.async
+    auto load_gmem_to_smem_stage_fp8 = [&](int stage, int k_curr) {
+        // Load Tile A (128x64 FP8 -> 512 chunks of 16B)
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int chunk_idx = tid + i * 256;
+            int r = chunk_idx / 4;
+            int c = (chunk_idx % 4) * 16;
+            int gmem_r = cta_m + r;
+            int gmem_c = k_curr + c;
+            bool valid = (gmem_r < M) && (gmem_c < K);
+            const void* g_ptr = valid ? (const void*)&A[gmem_r * K + gmem_c] : nullptr;
+            int byte_c = c;
+            int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+            void* s_ptr = (void*)&smem_A[stage][r][swizzled_byte_c];
+            cp_async_cg_16(s_ptr, g_ptr, valid);
+        }
+
+        // Load Tile B (64x128 FP8 -> 512 chunks of 16B)
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int chunk_idx = tid + i * 256;
+            int r = chunk_idx / 8;
+            int c = (chunk_idx % 8) * 16;
+            int gmem_r = k_curr + r;
+            int gmem_c = cta_n + c;
+            bool valid = (gmem_r < K) && (gmem_c < N);
+            const void* g_ptr = valid ? (const void*)&B[gmem_r * N + gmem_c] : nullptr;
+            int byte_c = c;
+            int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+            void* s_ptr = (void*)&smem_B[stage][r][swizzled_byte_c];
+            cp_async_cg_16(s_ptr, g_ptr, valid);
+        }
+    };
+
+    // Preamble Async Prefetch (Fill stages 0, 1, 2)
+    load_gmem_to_smem_stage_fp8(0, 0);
+    cp_async_commit();
+
+    load_gmem_to_smem_stage_fp8(1, BLOCK_K);
+    cp_async_commit();
+
+    load_gmem_to_smem_stage_fp8(2, 2 * BLOCK_K);
+    cp_async_commit();
+
+    int write_stage = 3;
+    int read_stage = 0;
+
+    // Main K Loop with 4-Stage Circular Pipeline
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + 3 * BLOCK_K;
+        if (next_k < K) {
+            load_gmem_to_smem_stage_fp8(write_stage, next_k);
+        } else {
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int chunk_idx = tid + i * 256;
+                int r = chunk_idx / 4;
+                int c = (chunk_idx % 4) * 16;
+                int byte_c = c;
+                int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+                void* s_ptr = (void*)&smem_A[write_stage][r][swizzled_byte_c];
+                cp_async_cg_16(s_ptr, nullptr, false);
+            }
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int chunk_idx = tid + i * 256;
+                int r = chunk_idx / 8;
+                int c = (chunk_idx % 8) * 16;
+                int byte_c = c;
+                int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+                void* s_ptr = (void*)&smem_B[write_stage][r][swizzled_byte_c];
+                cp_async_cg_16(s_ptr, nullptr, false);
+            }
+        }
+        cp_async_commit();
+
+        cp_async_wait_group<2>();
+        __syncthreads();
+
+        // Compute on read_stage using ldmatrix and m16n8k32 mma.sync for FP8
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 32) {
+            uint32_t reg_A[2][4];
+            uint32_t reg_B[8][2];
+
+            // Load A tile (32x32 FP8 = 16x16 16-bit words) for warp
+            #pragma unroll
+            for (int i_mma = 0; i_mma < 2; ++i_mma) {
+                int r = warp_m * 32 + i_mma * 16 + (lane_id % 16);
+                int c = k_step + (lane_id / 16) * 16;
+                int byte_c = c;
+                int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+                void* s_ptr = (void*)&smem_A[read_stage][r][swizzled_byte_c];
+                uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(s_ptr));
+                ldmatrix_x4(reg_A[i_mma], smem_ptr32);
+            }
+
+            // Load B tile (32x64 FP8 = 16x64 16-bit words) for warp via ldmatrix.x2.trans
+            #pragma unroll
+            for (int j_mma = 0; j_mma < 8; ++j_mma) {
+                int r = k_step + (lane_id % 16);
+                int c = warp_n * 64 + j_mma * 8;
+                int byte_c = c;
+                int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+                void* s_ptr = (void*)&smem_B[read_stage][r][swizzled_byte_c];
+                uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(s_ptr));
+                ldmatrix_x2_trans(reg_B[j_mma], smem_ptr32);
+            }
+
+            // Perform Tensor Core mma.sync for FP8 (m16n8k32)
+            #pragma unroll
+            for (int i_mma = 0; i_mma < 2; ++i_mma) {
+                #pragma unroll
+                for (int j_mma = 0; j_mma < 8; ++j_mma) {
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
+                        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};\n"
+                        : "=f"(frag_C[i_mma][j_mma][0]), "=f"(frag_C[i_mma][j_mma][1]),
+                          "=f"(frag_C[i_mma][j_mma][2]), "=f"(frag_C[i_mma][j_mma][3])
+                        : "r"(reg_A[i_mma][0]), "r"(reg_A[i_mma][1]),
+                          "r"(reg_A[i_mma][2]), "r"(reg_A[i_mma][3]),
+                          "r"(reg_B[j_mma][0]), "r"(reg_B[j_mma][1]),
+                          "f"(frag_C[i_mma][j_mma][0]), "f"(frag_C[i_mma][j_mma][1]),
+                          "f"(frag_C[i_mma][j_mma][2]), "f"(frag_C[i_mma][j_mma][3])
+                    );
+                }
+            }
+        }
+
+        __syncthreads();
+        write_stage = (write_stage + 1) % 4;
+        read_stage = (read_stage + 1) % 4;
+    }
+
+    cp_async_wait_group<0>();
+    __syncthreads();
+
+    // Epilogue: Vectorized Scale Fusion & Store to C
+    float total_scale = scale_a * scale_b;
+    int group = lane_id / 4;        // 0..7
+    int lane_in_group = lane_id % 4; // 0..3
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            int out_m0 = cta_m + warp_m * 32 + i * 16 + group;
+            int out_m1 = cta_m + warp_m * 32 + i * 16 + group + 8;
+            int out_n = cta_n + warp_n * 64 + j * 8 + lane_in_group * 2;
+
+            if (out_m0 < M && out_n + 1 < N) {
+                float v0 = frag_C[i][j][0] * total_scale;
+                float v1 = frag_C[i][j][1] * total_scale;
+                half2 val = __floats2half2_rn(v0, v1);
+                *reinterpret_cast<half2*>(&C[out_m0 * N + out_n]) = val;
+            } else if (out_m0 < M && out_n < N) {
+                C[out_m0 * N + out_n] = __float2half(frag_C[i][j][0] * total_scale);
+            }
+
+            if (out_m1 < M && out_n + 1 < N) {
+                float v0 = frag_C[i][j][2] * total_scale;
+                float v1 = frag_C[i][j][3] * total_scale;
+                half2 val = __floats2half2_rn(v0, v1);
+                *reinterpret_cast<half2*>(&C[out_m1 * N + out_n]) = val;
+            } else if (out_m1 < M && out_n < N) {
+                C[out_m1 * N + out_n] = __float2half(frag_C[i][j][2] * total_scale);
+            }
+        }
+    }
+}
+
+// 256x128x32 High-Throughput Standalone GEMM Kernel (256 threads, 4-Stage cp.async.cg, Double-Buffered ldmatrix)
+extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_256x128_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 256;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    const int GROUP_SIZE_M = 8;
+    int grid_m = (M + BLOCK_M - 1) / BLOCK_M;
+    int grid_n = (N + BLOCK_N - 1) / BLOCK_N;
+    int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
+    int num_tiles_in_group = GROUP_SIZE_M * grid_n;
+    int group_id = tile_idx / num_tiles_in_group;
+    int first_tile_m = group_id * GROUP_SIZE_M;
+    int group_size_m = min(grid_m - first_tile_m, GROUP_SIZE_M);
+
+    int cta_m = (first_tile_m + (tile_idx % group_size_m)) * BLOCK_M;
+    int cta_n = ((tile_idx % num_tiles_in_group) / group_size_m) * BLOCK_N;
+
+    extern __shared__ char smem_raw[];
+    half (*smem_A)[256][32] = (half (*)[256][32])smem_raw;
+    half (*smem_B)[32][128] = (half (*)[32][128])(smem_raw + 4 * 256 * 32 * sizeof(half));
+
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
+
+    int warp_m = warp_id % 4; // 0..3 (4 warps in M -> 64 rows per warp)
+    int warp_n = warp_id / 4; // 0..1 (2 warps in N -> 64 cols per warp)
+
+    float frag_C[4][8][4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            #pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                frag_C[i][j][c] = 0.0f;
+            }
+        }
+    }
+
+    auto load_stage_256 = [&](int stage, int k_curr) {
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            int chunk_idx = tid + i * 256;
+            int r = chunk_idx / 4;
+            int c = (chunk_idx % 4) * 8;
+            int gmem_r = cta_m + r;
+            int gmem_c = k_curr + c;
+            bool valid = (gmem_r < M) && (gmem_c + 7 < K);
+            const void* g_ptr = valid ? (const void*)&A[gmem_r * K + gmem_c] : nullptr;
+            bool is_aligned = (((unsigned long long)g_ptr) & 15) == 0;
+            int byte_c = c * 2;
+            int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+            void* s_ptr = (void*)((char*)&smem_A[stage][r][0] + swizzled_byte_c);
+            if (valid && is_aligned) {
+                cp_async_cg_16(s_ptr, g_ptr, true);
+            } else {
+                cp_async_cg_16(s_ptr, nullptr, false);
+                if (gmem_r < M) {
+                    #pragma unroll
+                    for (int e = 0; e < 8; ++e) {
+                        if (gmem_c + e < K) smem_A[stage][r][c + e] = A[gmem_r * K + gmem_c + e];
+                    }
+                }
+            }
+        }
+
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int chunk_idx = tid + i * 256;
+            int r = chunk_idx / 16;
+            int c = (chunk_idx % 16) * 8;
+            int gmem_r = k_curr + r;
+            int gmem_c = cta_n + c;
+            bool valid = (gmem_r < K) && (gmem_c + 7 < N);
+            const void* g_ptr = valid ? (const void*)&B[gmem_r * N + gmem_c] : nullptr;
+            bool is_aligned = (((unsigned long long)g_ptr) & 15) == 0;
+            int byte_c = c * 2;
+            int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+            void* s_ptr = (void*)((char*)&smem_B[stage][r][0] + swizzled_byte_c);
+            if (valid && is_aligned) {
+                cp_async_cg_16(s_ptr, g_ptr, true);
+            } else {
+                cp_async_cg_16(s_ptr, nullptr, false);
+                if (gmem_r < K) {
+                    #pragma unroll
+                    for (int e = 0; e < 8; ++e) {
+                        if (gmem_c + e < N) smem_B[stage][r][c + e] = B[gmem_r * N + gmem_c + e];
+                    }
+                }
+            }
+        }
+    };
+
+    load_stage_256(0, 0);
+    cp_async_commit();
+    load_stage_256(1, BLOCK_K);
+    cp_async_commit();
+    load_stage_256(2, 2 * BLOCK_K);
+    cp_async_commit();
+
+    int write_stage = 3;
+    int read_stage = 0;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int next_k = k + 3 * BLOCK_K;
+        if (next_k < K) {
+            load_stage_256(write_stage, next_k);
+        } else {
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                int chunk_idx = tid + i * 256;
+                int r = chunk_idx / 4;
+                int c = (chunk_idx % 4) * 8;
+                int byte_c = c * 2;
+                int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+                void* s_ptr = (void*)((char*)&smem_A[write_stage][r][0] + swizzled_byte_c);
+                cp_async_cg_16(s_ptr, nullptr, false);
+            }
+            #pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                int chunk_idx = tid + i * 256;
+                int r = chunk_idx / 16;
+                int c = (chunk_idx % 16) * 8;
+                int byte_c = c * 2;
+                int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+                void* s_ptr = (void*)((char*)&smem_B[write_stage][r][0] + swizzled_byte_c);
+                cp_async_cg_16(s_ptr, nullptr, false);
+            }
+        }
+        cp_async_commit();
+        cp_async_wait_group<2>();
+        __syncthreads();
+
+        uint32_t reg_A[4][4];
+        uint32_t reg_B[8][2];
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            #pragma unroll
+            for (int i_mma = 0; i_mma < 4; ++i_mma) {
+                int r = warp_m * 64 + i_mma * 16 + (lane_id % 16);
+                int c = k_step + (lane_id / 16) * 8;
+                int byte_c = c * 2;
+                int swizzled_byte_c = byte_c ^ ((r % 4) << 4);
+                void* s_ptr = (void*)((char*)&smem_A[read_stage][r][0] + swizzled_byte_c);
+                uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(s_ptr));
+                ldmatrix_x4(reg_A[i_mma], smem_ptr32);
+            }
+            #pragma unroll
+            for (int j_mma = 0; j_mma < 8; ++j_mma) {
+                int r = k_step + (lane_id % 16);
+                int c = warp_n * 64 + j_mma * 8;
+                int byte_c = c * 2;
+                int swizzled_byte_c = byte_c ^ ((r % 8) << 4);
+                void* s_ptr = (void*)((char*)&smem_B[read_stage][r][0] + swizzled_byte_c);
+                uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(s_ptr));
+                ldmatrix_x2_trans(reg_B[j_mma], smem_ptr32);
+            }
+
+            #pragma unroll
+            for (int i_mma = 0; i_mma < 4; ++i_mma) {
+                #pragma unroll
+                for (int j_mma = 0; j_mma < 8; ++j_mma) {
+                    mma_m16n8k16(frag_C[i_mma][j_mma], reg_A[i_mma], reg_B[j_mma]);
+                }
+            }
+        }
+
+        __syncthreads();
+        write_stage = (write_stage + 1) % 4;
+        read_stage = (read_stage + 1) % 4;
+    }
+
+    cp_async_wait_group<0>();
+    __syncthreads();
+
+    int group = lane_id / 4;
+    int lane_in_group = lane_id % 4;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            int out_m0 = cta_m + warp_m * 64 + i * 16 + group;
+            int out_m1 = cta_m + warp_m * 64 + i * 16 + group + 8;
+            int out_n = cta_n + warp_n * 64 + j * 8 + lane_in_group * 2;
+
+            if (out_m0 < M && out_n + 1 < N) {
+                unsigned long long addr = (unsigned long long)(&C[out_m0 * N + out_n]);
+                if ((addr & 3) == 0) {
+                    half2 val = __floats2half2_rn(frag_C[i][j][0], frag_C[i][j][1]);
+                    *reinterpret_cast<half2*>(addr) = val;
+                } else {
+                    C[out_m0 * N + out_n] = __float2half(frag_C[i][j][0]);
+                    C[out_m0 * N + out_n + 1] = __float2half(frag_C[i][j][1]);
+                }
+            } else if (out_m0 < M && out_n < N) {
+                C[out_m0 * N + out_n] = __float2half(frag_C[i][j][0]);
+            }
+
+            if (out_m1 < M && out_n + 1 < N) {
+                unsigned long long addr = (unsigned long long)(&C[out_m1 * N + out_n]);
+                if ((addr & 3) == 0) {
+                    half2 val = __floats2half2_rn(frag_C[i][j][2], frag_C[i][j][3]);
+                    *reinterpret_cast<half2*>(addr) = val;
+                } else {
+                    C[out_m1 * N + out_n] = __float2half(frag_C[i][j][2]);
+                    C[out_m1 * N + out_n + 1] = __float2half(frag_C[i][j][3]);
+                }
+            } else if (out_m1 < M && out_n < N) {
+                C[out_m1 * N + out_n] = __float2half(frag_C[i][j][2]);
+            }
+        }
+    }
+}
+

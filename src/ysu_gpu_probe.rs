@@ -668,7 +668,44 @@ struct OneApiProber;
 struct FallbackProber;
 
 fn build_cuda_profile(name: String, sm: String, mem_mb: u64) -> GpuLatencies {
-    if sm.starts_with("9.0") {
+    if sm.starts_with("10.") || sm.starts_with("12.") || sm.starts_with("100") || sm.starts_with("120") || sm.starts_with("sm_10") || sm.starts_with("sm_12") {
+        GpuLatencies {
+            gpu_name: if name == "Unknown GPU" { "NVIDIA RTX 50-Series (Blackwell)".to_string() } else { name },
+            gpu_vendor: "NVIDIA".to_string(),
+            sm_version: sm.clone(),
+            compute_capability: sm,
+            total_mem_mb: if mem_mb == 0 { 16384 } else { mem_mb },
+            fma_latency: 3.8,
+            imad_latency: 2.0,
+            smem_latency: 22.0,
+            l1_latency: 26.0,
+            l2_latency: 75.0,
+            vram_latency: 100.0,
+            hmma_f16_latency: 35.0,
+            tf32_latency: 55.0,
+            bar_sync_latency: 28.0,
+            shfl_sync_latency: 1.0,
+            smem_exchange_latency: 4.0,
+            branch_uniform: 4.0,
+            branch_divergent: 8.0,
+            imad_wide_latency: 2.0,
+            hfma2_latency: 3.8,
+            bf16x2_fma_latency: 3.2,
+            lop3_lut_latency: 4.0,
+            dadd_latency: 38.0,
+            max_regs_per_thread: 255,
+            max_regs_per_sm: 65536,
+            warp_size: 32,
+            max_threads_per_sm: 2048,
+            max_warps_per_sm: 64,
+            smem_noconflict: 4.0,
+            smem_2way_conflict: 8.0,
+            smem_4way_conflict: 16.0,
+            smem_broadcast: 4.0,
+            cp_async_latency: 160.0,
+            fma_ilp_throughput: 2.0,
+        }
+    } else if sm.starts_with("9.0") {
         GpuLatencies {
             gpu_name: name,
             gpu_vendor: "NVIDIA".to_string(),

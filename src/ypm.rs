@@ -121,7 +121,7 @@ impl Manifest {
 }
 
 fn print_usage() {
-    println!("Y Package Manager & Build System (YPM) v0.1");
+    println!("Y Package Manager & Build System (YPM) v1.0");
     println!("Usage:");
     println!("  ypm new <project_name>  - Create a new project directory template");
     println!("  ypm init                - Initialize a project in the current directory");

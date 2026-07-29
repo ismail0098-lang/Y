@@ -231,3 +231,36 @@ node run_dot_product_benchmark.js
 # Run end-to-end equivalence checks
 node verify_benchmarks.js
 ```
+
+---
+
+## 6. GPU Backend Physical Hardware Benchmarks (Y vs OpenAI Triton, cuBLAS & cuDNN)
+
+* **Target Device**: NVIDIA GeForce RTX 4070 Ti SUPER (Ada Lovelace, SM 8.9, 16 GB VRAM)
+* **Full Documentation**: [docs/y_gpu_benchmark_results.md](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/docs/y_gpu_benchmark_results.md)
+
+### Standalone FP16 GEMM & Extreme 64K Matrix Performance
+
+| Matrix Shape ($M=N=K$) | cuBLAS ($\mu s$) | OpenAI Triton 3.7.0 ($\mu s$) | Y Compiler Autotuned ($\mu s$) | TFLOPS | Speedup vs cuBLAS | Speedup vs Triton |
+|---|---|---|---|---|---|---|
+| **512x512** | 71.67 | 12.12 | **8.18** | 32.0 TFLOPS | **8.76x** | **1.48x** |
+| **1024x1024** | 87.56 | 31.15 | **30.28** | 71.0 TFLOPS | **2.89x** | **1.03x** |
+| **2048x2048** | 222.87 | 210.20 | **149.53** | 114.9 TFLOPS | **1.49x** | **1.41x** |
+| **4096x4096** | 1627.84 | 1615.50 | **1242.87** | 110.6 TFLOPS | **1.31x** | **1.30x** |
+| **8192x8192** | 12788.02 | 12741.94 | **9594.65** | 114.6 TFLOPS | **1.33x** | **1.33x** |
+| **16384x16384** | 101823.28 | 105751.15 | **80061.03** | 110.0 TFLOPS | **1.27x** | **1.32x** |
+| **32768x32768** | 837205.02 | 873836.55 | **644496.52** | 109.1 TFLOPS | **1.30x** | **1.36x** |
+| **65536x65536 (64K)** | **6.885 s** | **6.848 s** | **5.056 s** | **111.35 TFLOPS** | **1.36x** | **1.35x** |
+
+### Fused Operations (GEMM + Bias + ReLU Activation)
+
+| Matrix Shape ($M=N=K$) | cuBLAS Multi-Kernel ($\mu s$) | OpenAI Triton Fused ($\mu s$) | Y Fused Tensor Core ($\mu s$) | Speedup vs cuBLAS | Speedup vs Triton |
+|---|---|---|---|---|---|
+| **512x512** | 21.57 | 12.22 | **7.05** | **3.06x** | **1.73x** |
+| **1024x1024** | 102.69 | 30.01 | **30.00** | **3.42x** | **1.00x** |
+| **2048x2048** | 642.41 | 216.96 | **171.19** | **3.75x** | **1.27x** |
+| **4096x4096** | 5052.42 | 1768.22 | **1278.44** | **3.95x** | **1.38x** |
+| **8192x8192** | 42978.24 | 14355.00 | **9898.04** | **4.34x** | **1.45x** |
+| **16384x16384** | 113447.52 | 114697.62 | **77665.64** | **1.46x** | **1.48x** |
+| **32768x32768** | 929587.71 | 939088.38 | **764916.20** | **1.22x** | **1.23x** |
+

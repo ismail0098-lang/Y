@@ -317,7 +317,7 @@ static void start_manual_recording() {
         if (dpy) {
             close(ConnectionNumber(dpy));
         }
-        char* dpy_env = getenv("DISPLAY");
+        const char* dpy_env = getenv("DISPLAY");
         if (!dpy_env) dpy_env = ":0.0";
         
         char grab_res[64];
@@ -363,7 +363,7 @@ static void start_manual_recording() {
                 strcpy(quality_preset, "high");
             }
 
-            char* codec_str = "h264";
+            const char* codec_str = "h264";
             if (video_codec == 1) codec_str = "hevc";
             else if (video_codec == 2) codec_str = "av1";
 
@@ -436,7 +436,7 @@ static void start_replay_buffer() {
         if (dpy) {
             close(ConnectionNumber(dpy));
         }
-        char* dpy_env = getenv("DISPLAY");
+        const char* dpy_env = getenv("DISPLAY");
         if (!dpy_env) dpy_env = ":0.0";
         
         char grab_res[64];
@@ -491,7 +491,7 @@ static void start_replay_buffer() {
                 strcpy(quality_preset, "high");
             }
 
-            char* codec_str = "h264";
+            const char* codec_str = "h264";
             if (video_codec == 1) codec_str = "hevc";
             else if (video_codec == 2) codec_str = "av1";
 
@@ -589,7 +589,7 @@ static void save_replay_clip() {
     }
 }
 
-extern void cleanup_shadowplay_gui() {
+static inline void cleanup_shadowplay_gui() {
     stop_manual_recording();
     stop_replay_buffer();
     if (dpy) {
@@ -946,7 +946,7 @@ static void draw_ui() {
         XDrawString(dpy, win, gc, 30, row3_y + 15, "  Save Keybind:", 15);
     }
 
-    char* bind_labels[] = {"Alt+S", "Alt+F10", "Alt+R", "Alt+X"};
+    const char* bind_labels[] = {"Alt+S", "Alt+F10", "Alt+R", "Alt+X"};
     XSetForeground(dpy, gc, color_green);
     char opt_bind[32];
     snprintf(opt_bind, sizeof(opt_bind), "[ %s ]", bind_labels[replay_keybind_idx]);
@@ -997,7 +997,7 @@ static void handle_sigint(int sig) {
 }
 
 // Global initialization
-extern int32_t init_shadowplay_gui() {
+static inline int32_t init_shadowplay_gui() {
     signal(SIGINT, handle_sigint);
     signal(SIGTERM, handle_sigint);
 
@@ -1129,20 +1129,20 @@ extern int32_t init_shadowplay_gui() {
 }
 
 // State accessors for Y code
-extern int32_t is_overlay_visible() { return visible; }
-extern int32_t get_instant_replay_state() { return instant_replay; }
-extern int32_t get_recording_state() { return recording; }
-extern int32_t get_broadcast_state() { return broadcast; }
-extern int32_t get_file_format_state() { return file_format; }
-extern int32_t get_quality_state() { return quality; }
-extern int32_t get_codec_state() { return video_codec; }
-extern int32_t get_replay_duration() { return replay_durations[replay_duration_idx]; }
-extern int32_t get_replay_duration_idx() { return replay_duration_idx; }
-extern int32_t get_microphone_index() { return selected_mic_idx; }
-extern void get_microphone_name(char* out_buf) { strcpy(out_buf, mic_labels[selected_mic_idx]); }
+static inline int32_t is_overlay_visible() { return visible; }
+static inline int32_t get_instant_replay_state() { return instant_replay; }
+static inline int32_t get_recording_state() { return recording; }
+static inline int32_t get_broadcast_state() { return broadcast; }
+static inline int32_t get_file_format_state() { return file_format; }
+static inline int32_t get_quality_state() { return quality; }
+static inline int32_t get_codec_state() { return video_codec; }
+static inline int32_t get_replay_duration() { return replay_durations[replay_duration_idx]; }
+static inline int32_t get_replay_duration_idx() { return replay_duration_idx; }
+static inline int32_t get_microphone_index() { return selected_mic_idx; }
+static inline void get_microphone_name(char* out_buf) { strcpy(out_buf, mic_labels[selected_mic_idx]); }
 
 // Check X11 events and update the display
-extern int32_t update_shadowplay_gui() {
+static inline int32_t update_shadowplay_gui() {
     if (!dpy) return -1;
 
     if (toast_active && (time(NULL) - toast_start_time >= 3)) {

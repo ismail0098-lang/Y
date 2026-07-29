@@ -48,6 +48,10 @@ pub enum SemanticType {
         element: Box<SemanticType>,
         size: usize,
     },
+    BlockTile {
+        element: Box<SemanticType>,
+        size: usize,
+    },
     TransferObligation,
     Pipeline,
     Unknown,
@@ -1047,6 +1051,7 @@ impl TypeChecker {
                         rows: *rows,
                         cols: *cols,
                         swizzle: swizzle.clone(),
+                        swizzle_mode: None,
                         bytes_per_element: 2, // Defaulting F16 for prototype logic
                     };
 
@@ -1674,20 +1679,20 @@ impl TypeChecker {
         let t_b = self.check_expr(&args[1]);
         let t_c = self.check_expr(&args[2]);
 
-        let mut require_role = |ty: &SemanticType, expected_role: &str| {
+        let mut require_role = |ty: &SemanticType, expected_roles: &[&str]| {
             if let SemanticType::Fragment { role, .. } = ty {
-                if role != expected_role {
+                if !expected_roles.contains(&role.as_str()) {
                     self.errors.push(format!(
                         "Line {}: Fragment Role Error: expected Fragment<{}, ...>, got Fragment<{}, ...>.",
-                        span.line, expected_role, role
+                        span.line, expected_roles.join("/"), role
                     ));
                 }
             }
         };
 
-        require_role(&t_a, "A");
-        require_role(&t_b, "B");
-        require_role(&t_c, "C"); // Or D commonly used for accumulator feedback
+        require_role(&t_a, &["A"]);
+        require_role(&t_b, &["B"]);
+        require_role(&t_c, &["C", "D"]); // Or D commonly used for accumulator feedback
     }
 
     // ── Type Resolution ─────────────────────────────────────
@@ -1778,6 +1783,25 @@ impl TypeChecker {
                     return SemanticType::TransferObligation;
                 }
 
+                if base == "BlockTile" {
+                    let mut elem_resolved = SemanticType::Primitive("F32".into());
+                    let mut sz = 128;
+                    if !args.is_empty() {
+                        if let GenericArg::Type(t) = &args[0] {
+                            elem_resolved = self.resolve_type(t);
+                        }
+                    }
+                    if args.len() >= 2 {
+                        if let GenericArg::Value(Expr::IntLit(v, _)) = &args[1] {
+                            sz = *v as usize;
+                        }
+                    }
+                    return SemanticType::BlockTile {
+                        element: Box::new(elem_resolved),
+                        size: sz,
+                    };
+                }
+
                 SemanticType::Unknown
             }
             Type::Array { element, size, .. } => {
@@ -1787,6 +1811,17 @@ impl TypeChecker {
                     sz = *val as usize;
                 }
                 SemanticType::Array {
+                    element: Box::new(elem_resolved),
+                    size: sz,
+                }
+            }
+            Type::BlockTile { element, size, .. } => {
+                let elem_resolved = self.resolve_type(element);
+                let mut sz = 128;
+                if let Expr::IntLit(val, _) = &**size {
+                    sz = *val as usize;
+                }
+                SemanticType::BlockTile {
                     element: Box::new(elem_resolved),
                     size: sz,
                 }
