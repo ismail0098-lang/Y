@@ -79,7 +79,20 @@ impl CtaTileConfig {
     /// Uses 64x64x32 for small matrices (M,N <= 512) to maximize SM occupancy,
     /// and 128x128x32 for large matrices (M,N >= 1024) to maximize Tensor Core pipeline throughput.
     pub fn select_tile_for_dim(m: u32, n: u32) -> Self {
-        if m <= 512 || n <= 512 {
+        if m <= 32 {
+            Self {
+                cta_m: 16,
+                cta_n: 32,
+                cta_k: 64,
+                warps_m: 1,
+                warps_n: 4,
+                mma_m: 16,
+                mma_n: 16,
+                mma_k: 16,
+                num_stages: 2,
+                num_warps: 4,
+            }
+        } else if m <= 512 || n <= 512 {
             Self {
                 cta_m: 64,
                 cta_n: 64,

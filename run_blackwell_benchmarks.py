@@ -152,6 +152,8 @@ def run_benchmarks():
     y_hopper_wgmma = None
     y_hopper_ws = None
     y_hopper_fp8 = None
+    y_hopper_small_m = None
+    y_hopper_wgmma_fused = None
 
     # Optional Hopper sm_90a WGMMA & Cluster Kernels with explicit cuLaunchKernelEx cluster launch config
     try:
@@ -167,6 +169,15 @@ def run_benchmarks():
     try:
         y_hopper_fp8 = y_mod.get_function("y_hopper_fp8_wgmma_dual_acc_kernel")
         y_hopper_fp8.max_dynamic_shared_size_bytes = 98304
+    except Exception:
+        pass
+    try:
+        y_hopper_small_m = y_mod.get_function("y_hopper_small_m_gemm_kernel")
+    except Exception:
+        pass
+    try:
+        y_hopper_wgmma_fused = y_mod.get_function("y_hopper_wgmma_fused_bias_relu_kernel")
+        y_hopper_wgmma_fused.max_dynamic_shared_size_bytes = 65536
     except Exception:
         pass
 
@@ -338,18 +349,25 @@ def run_benchmarks():
             y_end.synchronize()
             y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
         elif M <= 32:
-            grid_m = (M + 31) // 32
-            grid_n = (N + 63) // 64
-            threads = 128
+            if cap_major == 9 and y_hopper_small_m is not None:
+                grid_m = (M + 15) // 16
+                grid_n = (N + 31) // 32
+                threads = 128
+                target_k = y_hopper_small_m
+            else:
+                grid_m = (M + 31) // 32
+                grid_n = (N + 63) // 64
+                threads = 128
+                target_k = y_gemm_32x64
             for _ in range(10):
-                y_gemm_32x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                target_k((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
             cp.cuda.Device(0).synchronize()
 
             y_start = cp.cuda.Event()
             y_end = cp.cuda.Event()
             y_start.record()
             for _ in range(50):
-                y_gemm_32x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                target_k((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
             y_end.record()
             y_end.synchronize()
             y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
@@ -432,23 +450,38 @@ def run_benchmarks():
         torch.cuda.synchronize()
         pt_fused_us = (t_start.elapsed_time(t_end) / float(iters)) * 1000.0
 
-        grid_m = (M + 127) // 128
-        grid_n = (N + 127) // 128
-        threads = 256
+        if cap_major == 9 and y_hopper_wgmma_fused is not None:
+            grid_m = (M + 127) // 128
+            grid_n = (N + 127) // 128
+            threads = 128
+            for _ in range(10):
+                y_hopper_wgmma_fused((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K))
+            cp.cuda.Device(0).synchronize()
 
-        # Warmup Y Fused
-        for _ in range(10):
-            y_fused_bias_relu((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K, 1))
-        cp.cuda.Device(0).synchronize()
+            y_start = cp.cuda.Event()
+            y_end = cp.cuda.Event()
+            y_start.record()
+            for _ in range(iters):
+                y_hopper_wgmma_fused((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K))
+            y_end.record()
+            y_end.synchronize()
+            y_fused_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
+        else:
+            grid_m = (M + 127) // 128
+            grid_n = (N + 127) // 128
+            threads = 256
+            for _ in range(10):
+                y_fused_bias_relu((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K, 1))
+            cp.cuda.Device(0).synchronize()
 
-        y_start = cp.cuda.Event()
-        y_end = cp.cuda.Event()
-        y_start.record()
-        for _ in range(iters):
-            y_fused_bias_relu((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K, 1))
-        y_end.record()
-        y_end.synchronize()
-        y_fused_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
+            y_start = cp.cuda.Event()
+            y_end = cp.cuda.Event()
+            y_start.record()
+            for _ in range(iters):
+                y_fused_bias_relu((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K, 1))
+            y_end.record()
+            y_end.synchronize()
+            y_fused_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
 
         speedup = pt_fused_us / y_fused_us
         print(f"{M}x{N}x{K:<12} | {pt_fused_us:<18.2f} | {y_fused_us:<22.2f} | {speedup:<10.2f}x", flush=True)

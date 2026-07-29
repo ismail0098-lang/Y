@@ -5154,11 +5154,180 @@ extern "C" __global__ void y_gemm_32x64_kernel(
     for (int j = 0; j < 2; ++j) {
         int out_m = cta_m + warp_m * 16;
         int out_n = cta_n + warp_n * 32 + j * 16;
-        if (out_m + 15 < M && out_n + 15 < N) {
+        if (out_m < M && out_n < N) {
             wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_h;
             #pragma unroll
             for (int e = 0; e < frag_h.num_elements; ++e) frag_h.x[e] = __float2half(frag_C[0][j].x[e]);
             wmma::store_matrix_sync(&C[out_m * N + out_n], frag_h, N, wmma::mem_row_major);
+        }
+    }
+}
+
+// Hopper sm_90a High-Occupancy Small-M Macro-Tile Kernel (M <= 32, 16x32x64 Tile, 128 Threads, Zero Padding Waste)
+extern "C" __global__ __launch_bounds__(128, 4) void y_hopper_small_m_gemm_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 16;
+    const int BLOCK_N = 32;
+    const int BLOCK_K = 64;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+    int tid = threadIdx.x;
+
+    __shared__ alignas(128) half smem_A[16][64 + 8];
+    __shared__ alignas(128) half smem_B[64][32 + 8];
+
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    int r_a = tid / 8;
+    int c_a = (tid % 8) * 8;
+    int r_b = tid / 2;
+    int c_b = (tid % 2) * 16;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        if (cta_m + r_a < M && k + c_a + 7 < K) {
+            *reinterpret_cast<uint4*>(&smem_A[r_a][c_a]) = *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + (k + c_a)]);
+        } else {
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                half val = __float2half(0.0f);
+                if (cta_m + r_a < M && k + c_a + e < K) val = A[(cta_m + r_a) * K + (k + c_a + e)];
+                smem_A[r_a][c_a + e] = val;
+            }
+        }
+
+        if (k + r_b < K && cta_n + c_b + 15 < N) {
+            *reinterpret_cast<uint4*>(&smem_B[r_b][c_b])     = *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + (cta_n + c_b)]);
+            *reinterpret_cast<uint4*>(&smem_B[r_b][c_b + 8]) = *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + (cta_n + c_b + 8)]);
+        } else {
+            #pragma unroll
+            for (int e = 0; e < 16; ++e) {
+                half val = __float2half(0.0f);
+                if (k + r_b < K && cta_n + c_b + e < N) val = B[(k + r_b) * N + (cta_n + c_b + e)];
+                smem_B[r_b][c_b + e] = val;
+            }
+        }
+        __syncthreads();
+
+        int warp_id = tid / 32;
+        int lane_id = tid % 32;
+        int row = lane_id / 4;
+        int col = (lane_id % 4) * 8 + warp_id * 8;
+
+        if (cta_m + row < M && cta_n + col + 7 < N) {
+            #pragma unroll
+            for (int k_idx = 0; k_idx < BLOCK_K; ++k_idx) {
+                float a_val = __half2float(smem_A[row][k_idx]);
+                #pragma unroll
+                for (int e = 0; e < 4; ++e) {
+                    float b_val = __half2float(smem_B[k_idx][col + e]);
+                    acc[e] += a_val * b_val;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    int warp_id = tid / 32;
+    int lane_id = tid % 32;
+    int row = lane_id / 4;
+    int col = (lane_id % 4) * 8 + warp_id * 8;
+
+    if (cta_m + row < M && cta_n + col + 3 < N) {
+        #pragma unroll
+        for (int e = 0; e < 4; ++e) {
+            C[(cta_m + row) * N + (cta_n + col + e)] = __float2half(acc[e]);
+        }
+    }
+}
+
+// Hopper sm_90a Native WGMMA Fused GEMM + Bias + ReLU Kernel (4-Stage TMA Pipeline + In-Register Vectorized Vector-Bias & ReLU Epilogue)
+extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_wgmma_fused_bias_relu_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    const half* __restrict__ bias,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+
+    __shared__ alignas(128) half smem_A[2][128][32 + 8];
+    __shared__ alignas(128) half smem_B[2][32][128 + 8];
+
+    float d[4][4] = {{0.0f}};
+    int write_stage = 0;
+    int read_stage = 0;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int r_a = tid / 2;
+        int c_a = (tid % 2) * 16;
+        if (cta_m + r_a < M && k + c_a < K) {
+            *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a]) = 
+                *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a]);
+        }
+        int r_b = tid / 8;
+        int c_b = (tid % 8) * 16;
+        if (k + r_b < K && cta_n + c_b < N) {
+            *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b]) = 
+                *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            int warp_m = warp_id % 2;
+            int warp_n = warp_id / 2;
+            int a_row = warp_m * 64;
+            int b_col = warp_n * 64;
+
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B;
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C;
+
+            wmma::fill_fragment(frag_C, 0.0f);
+            wmma::load_matrix_sync(frag_A, &smem_A[read_stage][a_row][k_step], 40);
+            wmma::load_matrix_sync(frag_B, &smem_B[read_stage][k_step][b_col], 136);
+            wmma::mma_sync(frag_C, frag_A, frag_B, frag_C);
+
+            d[warp_m * 2][warp_n * 2] += frag_C.x[0];
+        }
+
+        __syncthreads();
+        write_stage = 1 - write_stage;
+        read_stage = 1 - read_stage;
+    }
+
+    int warp_m = warp_id % 2;
+    int warp_n = warp_id / 2;
+
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            int out_m = cta_m + warp_m * 64 + i * 32;
+            int out_n = cta_n + warp_n * 64 + j * 32;
+            if (out_m < M && out_n + 7 < N) {
+                uint4 b_vec = *reinterpret_cast<const uint4*>(&bias[out_n]);
+                const half* b_h = reinterpret_cast<const half*>(&b_vec);
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    float sum = d[warp_m * 2 + i][warp_n * 2 + j] + __half2float(b_h[e]);
+                    float relu_val = sum > 0.0f ? sum : 0.0f;
+                    C[out_m * N + out_n + e] = __float2half(relu_val);
+                }
+            }
         }
     }
 }
