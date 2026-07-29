@@ -186,7 +186,7 @@ def main():
             grid_n = (N + 31) // 32
             threads_per_block = 32
             target_gemm_kernel = y_gemm_micro_kernel
-        elif M <= 512:
+        elif M <= 1024:
             grid_m = (M + 63) // 64
             grid_n = (N + 63) // 64
             threads_per_block = 128
