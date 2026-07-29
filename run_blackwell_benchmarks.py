@@ -100,9 +100,23 @@ def run_benchmarks():
     print(f"[*] Triton Available:   {HAS_TRITON}")
     print("=" * 90)
 
-    # NVRTC Compile Options
+    # NVRTC Compile Options with dynamic CUDA header path discovery
     arch_target = f"sm_{cap_major}{cap_minor}a" if cap_major == 9 else f"sm_{cap_major}{cap_minor}"
-    compile_options = ["-std=c++17", "--use_fast_math", f"-arch={arch_target}"]
+    include_options = []
+    possible_inc_dirs = ["/usr/local/cuda/include", "/usr/include"]
+    import site
+    for site_pkg in site.getsitepackages():
+        nvidia_dir = os.path.join(site_pkg, "nvidia")
+        if os.path.exists(nvidia_dir):
+            for sub in os.listdir(nvidia_dir):
+                inc_path = os.path.join(nvidia_dir, sub, "include")
+                if os.path.exists(inc_path):
+                    possible_inc_dirs.append(inc_path)
+    for d in possible_inc_dirs:
+        if os.path.exists(d):
+            include_options.append(f"-I{d}")
+
+    compile_options = ["-std=c++17", "--use_fast_math", f"-arch={arch_target}"] + include_options
     if cap_major >= 10:
         print("[*] Blackwell GPU detected (SM 10.0+)! Enabling Blackwell architecture targets.")
     elif cap_major == 9:

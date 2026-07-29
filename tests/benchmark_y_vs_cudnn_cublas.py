@@ -153,7 +153,21 @@ def main():
         sm_ver = 90
         arch_opt = "-arch=sm_90a"
 
-    compile_opts = ("-std=c++17", "--use_fast_math", arch_opt, "-I/usr/local/cuda/include")
+    include_options = []
+    possible_inc_dirs = ["/usr/local/cuda/include", "/usr/include"]
+    import site
+    for site_pkg in site.getsitepackages():
+        nvidia_dir = os.path.join(site_pkg, "nvidia")
+        if os.path.exists(nvidia_dir):
+            for sub in os.listdir(nvidia_dir):
+                inc_path = os.path.join(nvidia_dir, sub, "include")
+                if os.path.exists(inc_path):
+                    possible_inc_dirs.append(inc_path)
+    for d in possible_inc_dirs:
+        if os.path.exists(d):
+            include_options.append(f"-I{d}")
+
+    compile_opts = tuple(["-std=c++17", "--use_fast_math", arch_opt] + include_options)
 
     # Compile Y Tensor Core kernel via CuPy JIT
     y_gemm_mod = cp.RawModule(code=Y_TENSOR_CORE_GEMM_CUDA, options=compile_opts)
