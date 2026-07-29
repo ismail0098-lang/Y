@@ -23,7 +23,6 @@ def print_header(title):
     print(f"{title:^80}")
     print("=" * 80)
 
-def wrap_ptx(ptx_path, entry_name, param_count=2):
 def wrap_ptx(ptx_file, entry_name, param_count=2):
     if not os.path.exists(ptx_file):
         raise FileNotFoundError(f"PTX file not found: {ptx_file}")
