@@ -2677,13 +2677,11 @@ extern "C" __global__ __launch_bounds__(256, 2) void y_fused_gemm_bias_relu_fp16
     int warp_n_idx = warpId / 4; // 0..1
 
     const int SWIZZLE = 8;
+    int grid_m = (M + BLOCK_M - 1) / BLOCK_M;
+    int grid_n = (N + BLOCK_N - 1) / BLOCK_N;
     int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
-    int num_tiles_per_swizzle = gridDim.x * SWIZZLE;
-    int group_id = tile_idx / num_tiles_per_swizzle;
-    int group_offset = tile_idx % num_tiles_per_swizzle;
-
-    int cta_m = (group_id * SWIZZLE + (group_offset % SWIZZLE)) * BLOCK_M;
-    int cta_n = (group_offset / SWIZZLE) * BLOCK_N;
+    int cta_m, cta_n;
+    get_morton_cta_coords(tile_idx, grid_m, grid_n, BLOCK_M, BLOCK_N, cta_m, cta_n);
 
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
