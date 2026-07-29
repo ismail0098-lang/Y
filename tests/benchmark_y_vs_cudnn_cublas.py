@@ -36,7 +36,7 @@ def wrap_ptx(ptx_file, entry_name, param_count=2):
         minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, device_id)
         target_sm = f"sm_{major}{minor}"
     except Exception:
-        target_sm = "sm_86"
+        target_sm = "sm_90"
 
     version_str = ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
 
@@ -134,8 +134,21 @@ def main():
     matrix_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384]
     suite1_results = []
 
+    # Detect GPU Architecture Flags
+    try:
+        dev = cp.cuda.Device(0)
+        major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, dev.id)
+        minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, dev.id)
+        sm_ver = major * 10 + minor
+        arch_opt = f"-arch=sm_{major}{minor}"
+    except Exception:
+        sm_ver = 90
+        arch_opt = "-arch=sm_90"
+
+    compile_opts = ("-std=c++17", "--use_fast_math", arch_opt, "-I/usr/local/cuda/include")
+
     # Compile Y Tensor Core kernel via CuPy JIT
-    y_gemm_mod = cp.RawModule(code=Y_TENSOR_CORE_GEMM_CUDA, options=("-std=c++17", "--use_fast_math", "-I/usr/local/cuda/include"))
+    y_gemm_mod = cp.RawModule(code=Y_TENSOR_CORE_GEMM_CUDA, options=compile_opts)
     y_gemm_256x128_kernel = y_gemm_mod.get_function("y_tensor_core_gemm_256x128_kernel")
     y_gemm_large_kernel = y_gemm_mod.get_function("y_tensor_core_gemm_kernel")
     y_gemm_small_kernel = y_gemm_mod.get_function("y_fused_gemm_small_64x64_kernel")
@@ -187,15 +200,6 @@ def main():
         torch.cuda.synchronize()
         cudnn_us = (start_evt.elapsed_time(end_evt) / iterations) * 1000.0
 
-        # Architecture-Aware Macro-Tile Routing via GPU hardware probe
-        try:
-            dev = cp.cuda.Device(0)
-            major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, dev.id)
-            minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, dev.id)
-            sm_ver = major * 10 + minor
-        except Exception:
-            sm_ver = 86
-
         smem_size = 0
         if M <= 256:
             grid_m = (M + 15) // 16
@@ -209,14 +213,14 @@ def main():
             target_gemm_kernel = y_gemm_small_kernel
         else:
             if sm_ver >= 89:
-                # Ada / Hopper (sm_89, sm_90): Target 256x128x32 tile, 4-stage buffer (96KB SMEM)
+                # Hopper / Ada (sm_90, sm_89): Target 256x128x32 tile, 4-stage buffer (96KB SMEM)
                 grid_m = (M + 255) // 256
                 grid_n = (N + 127) // 128
                 threads_per_block = 256
                 target_gemm_kernel = y_gemm_256x128_kernel
                 smem_size = 98304
             else:
-                # Ampere (sm_80, sm_86): Target 128x128x32 tile, 3-stage buffer (48KB SMEM, 2 blocks/SM occupancy)
+                # Ampere (sm_80, sm_86): Target 128x128x32 tile
                 grid_m = (M + 127) // 128
                 grid_n = (N + 127) // 128
                 threads_per_block = 256
@@ -226,9 +230,10 @@ def main():
         cp.cuda.Device(0).synchronize()
         if smem_size > 0:
             try:
-                target_gemm_kernel.max_dynamic_shared_size_bytes = smem_size
-            except Exception:
-                pass
+                from cupy_backends.cuda.api import driver
+                driver.funcSetAttribute(target_gemm_kernel.kernel.ptr, 8, smem_size)
+            except Exception as e:
+                print(f"[!] Dynamic SMEM attribute warning: {e}")
         for _ in range(50):
             target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K), shared_mem=smem_size)
         cp.cuda.Device(0).synchronize()

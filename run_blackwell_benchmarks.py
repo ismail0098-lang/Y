@@ -99,10 +99,9 @@ def run_benchmarks():
     print("=" * 90)
 
     # NVRTC Compile Options
-    compile_options = ["-std=c++17", "--use_fast_math"]
+    compile_options = ["-std=c++17", "--use_fast_math", f"-arch=sm_{cap_major}{cap_minor}"]
     if cap_major >= 10:
         print("[*] Blackwell GPU detected (SM 10.0+)! Enabling Blackwell architecture targets.")
-        compile_options.append(f"-arch=compute_{cap_major}0")
 
     y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")

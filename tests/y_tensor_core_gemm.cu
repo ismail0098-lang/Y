@@ -9,15 +9,16 @@ using namespace nvcuda;
 // Helper functions for PTX cp.async (.cg L1 cache bypass), ldmatrix, and mma.sync
 __device__ __forceinline__ void cp_async_cg_16(void* smem_ptr, const void* gmem_ptr, bool valid) {
     uint32_t smem_ptr32 = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-    if (valid) {
+    if (valid && gmem_ptr != nullptr) {
         asm volatile(
             "cp.async.cg.shared.global [%0], [%1], 16;\n"
             :: "r"(smem_ptr32), "l"(gmem_ptr)
         );
     } else {
+        const void* safe_gptr = (gmem_ptr != nullptr) ? gmem_ptr : (const void*)smem_ptr;
         asm volatile(
             "cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
-            :: "r"(smem_ptr32), "l"(gmem_ptr), "r"(0)
+            :: "r"(smem_ptr32), "l"(safe_gptr), "r"(0)
         );
     }
 }
@@ -4386,14 +4387,14 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_256x128_
             void* s_ptr = (void*)((char*)&smem_A[stage][r][0] + swizzled_byte_c);
             if (valid && is_aligned) {
                 cp_async_cg_16(s_ptr, g_ptr, true);
+            } else if (valid && !is_aligned) {
+                cp_async_cg_16(s_ptr, g_ptr, false);
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    if (gmem_c + e < K) smem_A[stage][r][c + e] = A[gmem_r * K + gmem_c + e];
+                }
             } else {
                 cp_async_cg_16(s_ptr, nullptr, false);
-                if (gmem_r < M) {
-                    #pragma unroll
-                    for (int e = 0; e < 8; ++e) {
-                        if (gmem_c + e < K) smem_A[stage][r][c + e] = A[gmem_r * K + gmem_c + e];
-                    }
-                }
             }
         }
 
@@ -4412,14 +4413,14 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_256x128_
             void* s_ptr = (void*)((char*)&smem_B[stage][r][0] + swizzled_byte_c);
             if (valid && is_aligned) {
                 cp_async_cg_16(s_ptr, g_ptr, true);
+            } else if (valid && !is_aligned) {
+                cp_async_cg_16(s_ptr, g_ptr, false);
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    if (gmem_c + e < N) smem_B[stage][r][c + e] = B[gmem_r * N + gmem_c + e];
+                }
             } else {
                 cp_async_cg_16(s_ptr, nullptr, false);
-                if (gmem_r < K) {
-                    #pragma unroll
-                    for (int e = 0; e < 8; ++e) {
-                        if (gmem_c + e < N) smem_B[stage][r][c + e] = B[gmem_r * N + gmem_c + e];
-                    }
-                }
             }
         }
     };
