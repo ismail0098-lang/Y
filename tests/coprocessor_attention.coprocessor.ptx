@@ -1,4 +1,4 @@
-.version 8.0
+.version 7.5
 .target sm_89
 .address_size 64
 
@@ -29,11 +29,11 @@
     // BVH encodes point cloud as AABB leaf nodes
     // Query point -> ray origin, search radius -> t_max
     // Encode query vector as ray origin in 128D space
-    add.u64 %rt_rd0, nns_query_ptr, 0;
+    add.u64 %rt_rd0, %rd1, 0;
     ld.global.ca.f32 %rt_f0, [%rt_rd0];  // q[0]
-    add.u64 %rt_rd1, nns_query_ptr, 4;
+    add.u64 %rt_rd1, %rd1, 4;
     ld.global.ca.f32 %rt_f1, [%rt_rd1];  // q[1]
-    add.u64 %rt_rd2, nns_query_ptr, 8;
+    add.u64 %rt_rd2, %rd1, 8;
     ld.global.ca.f32 %rt_f2, [%rt_rd2];  // q[2]
     // Issue BVH traversal: spherical range query
     // Hardware prunes branches where AABB is outside search sphere

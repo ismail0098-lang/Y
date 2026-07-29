@@ -252,7 +252,7 @@ impl RtCoreEmitter {
         .unwrap();
         writeln!(
             &mut self.buffer,
-            "    add.u64 {}, rt_A_ptr, {};  // calculate row address",
+            "    add.u64 {}, %rd0, {};  // calculate row address",
             row_addr, row_offset_bytes
         )
         .unwrap();
@@ -458,7 +458,7 @@ impl RtCoreEmitter {
             let addr_reg = self.alloc_r64();
             writeln!(
                 &mut self.buffer,
-                "    add.u64 {}, nns_query_ptr, {};",
+                "    add.u64 {}, %rd1, {};",
                 addr_reg,
                 d * 4
             )

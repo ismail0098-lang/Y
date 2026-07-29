@@ -19,8 +19,6 @@ def print_header(title):
     print(f"{title:^70}")
     print("=" * 70)
 
-def wrap_ptx(ptx_path, name="y_coprocessor_db_index"):
-    if not os.path.exists(ptx_path):
 def wrap_ptx(ptx_file, name="y_coprocessor_db_index", param_count=2):
     if not os.path.exists(ptx_file):
         raise FileNotFoundError(f"PTX file not found: {ptx_file}")
