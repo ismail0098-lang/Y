@@ -134,6 +134,9 @@ def run_benchmarks():
 
     y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
+    y_gemm_64x64 = y_mod.get_function("y_tensor_core_gemm_64x64_kernel")
+    y_gemv_vec = y_mod.get_function("y_gemv_fp16_vector_kernel")
+    y_gemm_32x64 = y_mod.get_function("y_gemm_32x64_kernel")
     y_barrier_free = y_mod.get_function("y_fused_gemm_barrier_free_16x32_kernel")
     y_splitk_ws = y_mod.get_function("y_fused_gemm_splitk_workspace_kernel")
     y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
@@ -194,11 +197,16 @@ def run_benchmarks():
         torch.cuda.synchronize()
         cublas_us = (start_c.elapsed_time(end_c) / float(iters)) * 1000.0
 
-        if dim <= 1024:
+        if dim <= 512:
             grid_m = (M + 15) // 16
             grid_n = (N + 31) // 32
             threads = 32
             kernel_fn = y_barrier_free
+        elif dim <= 1024:
+            grid_m = (M + 63) // 64
+            grid_n = (N + 63) // 64
+            threads = 128
+            kernel_fn = y_gemm_64x64
         else:
             grid_m = (M + 127) // 128
             grid_n = (N + 127) // 128
@@ -274,31 +282,62 @@ def run_benchmarks():
         torch.cuda.synchronize()
         cublas_us = (start_c.elapsed_time(end_c) / 50.0) * 1000.0
 
-        k_splits = 16 if M == 1 else 4
-        workspace = cp.zeros((k_splits, M, N), dtype=cp.float32)
-        grid_m = (M + 31) // 32
-        grid_n = (N + 63) // 64
-        threads = 128
-        total_elems = M * N
-        red_blocks = (total_elems + 255) // 256
+        if M == 1 and N <= 4096:
+            grid_n = (N + 7) // 8
+            for _ in range(10):
+                y_gemv_vec((grid_n, 1, 1), (256, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+            cp.cuda.Device(0).synchronize()
 
-        # Warmup Y
-        for _ in range(10):
-            workspace.fill(0)
-            y_splitk_ws((grid_n, grid_m, k_splits), (threads, 1, 1), (A_cp, B_cp, workspace, M, N, K, k_splits))
-            y_splitk_red((red_blocks, 1, 1), (256, 1, 1), (workspace, C_y, total_elems, M, N, k_splits))
-        cp.cuda.Device(0).synchronize()
+            y_start = cp.cuda.Event()
+            y_end = cp.cuda.Event()
+            y_start.record()
+            for _ in range(50):
+                y_gemv_vec((grid_n, 1, 1), (256, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+            y_end.record()
+            y_end.synchronize()
+            y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
+        elif M <= 32:
+            grid_m = (M + 31) // 32
+            grid_n = (N + 63) // 64
+            threads = 128
+            for _ in range(10):
+                y_gemm_32x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+            cp.cuda.Device(0).synchronize()
 
-        y_start = cp.cuda.Event()
-        y_end = cp.cuda.Event()
-        y_start.record()
-        for _ in range(50):
-            workspace.fill(0)
-            y_splitk_ws((grid_n, grid_m, k_splits), (threads, 1, 1), (A_cp, B_cp, workspace, M, N, K, k_splits))
-            y_splitk_red((red_blocks, 1, 1), (256, 1, 1), (workspace, C_y, total_elems, M, N, k_splits))
-        y_end.record()
-        y_end.synchronize()
-        y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
+            y_start = cp.cuda.Event()
+            y_end = cp.cuda.Event()
+            y_start.record()
+            for _ in range(50):
+                y_gemm_32x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+            y_end.record()
+            y_end.synchronize()
+            y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
+        else:
+            k_splits = 16 if M == 1 else 4
+            workspace = cp.zeros((k_splits, M, N), dtype=cp.float32)
+            grid_m = (M + 31) // 32
+            grid_n = (N + 63) // 64
+            threads = 128
+            total_elems = M * N
+            red_blocks = (total_elems + 255) // 256
+
+            # Warmup Y
+            for _ in range(10):
+                workspace.fill(0)
+                y_splitk_ws((grid_n, grid_m, k_splits), (threads, 1, 1), (A_cp, B_cp, workspace, M, N, K, k_splits))
+                y_splitk_red((red_blocks, 1, 1), (256, 1, 1), (workspace, C_y, total_elems, M, N, k_splits))
+            cp.cuda.Device(0).synchronize()
+
+            y_start = cp.cuda.Event()
+            y_end = cp.cuda.Event()
+            y_start.record()
+            for _ in range(50):
+                workspace.fill(0)
+                y_splitk_ws((grid_n, grid_m, k_splits), (threads, 1, 1), (A_cp, B_cp, workspace, M, N, K, k_splits))
+                y_splitk_red((red_blocks, 1, 1), (256, 1, 1), (workspace, C_y, total_elems, M, N, k_splits))
+            y_end.record()
+            y_end.synchronize()
+            y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
 
         C_y_torch = torch.from_dlpack(C_y)
         is_close = torch.allclose(C_y_torch, C_ref, atol=1e-1, rtol=1e-1)
