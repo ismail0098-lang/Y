@@ -134,6 +134,7 @@ def run_benchmarks():
 
     y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
+    y_barrier_free = y_mod.get_function("y_fused_gemm_barrier_free_16x32_kernel")
     y_splitk_ws = y_mod.get_function("y_fused_gemm_splitk_workspace_kernel")
     y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
     y_fused_bias_relu = y_mod.get_function("y_fused_gemm_bias_relu_fp16_kernel")
@@ -193,20 +194,27 @@ def run_benchmarks():
         torch.cuda.synchronize()
         cublas_us = (start_c.elapsed_time(end_c) / float(iters)) * 1000.0
 
-        grid_m = (M + 127) // 128
-        grid_n = (N + 127) // 128
-        threads = 256
+        if dim <= 1024:
+            grid_m = (M + 15) // 16
+            grid_n = (N + 31) // 32
+            threads = 32
+            kernel_fn = y_barrier_free
+        else:
+            grid_m = (M + 127) // 128
+            grid_n = (N + 127) // 128
+            threads = 256
+            kernel_fn = y_gemm_large
 
         # Warmup Y
         for _ in range(50):
-            y_gemm_large((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+            kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
         cp.cuda.Device(0).synchronize()
 
         y_start = cp.cuda.Event()
         y_end = cp.cuda.Event()
         y_start.record()
         for _ in range(iters):
-            y_gemm_large((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+            kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
         y_end.record()
         y_end.synchronize()
         y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0

@@ -241,10 +241,10 @@ extern "C" __global__ __launch_bounds__(32, 4) void y_fused_gemm_barrier_free_16
     const int BLOCK_N = 32;
     const int BLOCK_K = 32;
 
-    __shared__ alignas(128) half smem_A_0[16][32 + 8];
-    __shared__ alignas(128) half smem_B_0[32][32 + 8];
-    __shared__ alignas(128) half smem_A_1[16][32 + 8];
-    __shared__ alignas(128) half smem_B_1[32][32 + 8];
+    __shared__ alignas(128) half smem_A_0[16][40];
+    __shared__ alignas(128) half smem_B_0[32][40];
+    __shared__ alignas(128) half smem_A_1[16][40];
+    __shared__ alignas(128) half smem_B_1[32][40];
 
     int tid = threadIdx.x; // 0..31 (Single Warp)
 
@@ -270,113 +270,84 @@ extern "C" __global__ __launch_bounds__(32, 4) void y_fused_gemm_barrier_free_16
     wmma::fill_fragment(frag_C[0], 0.0f);
     wmma::fill_fragment(frag_C[1], 0.0f);
 
-    // 32 threads load 16x32 halfs (512 halfs = 32 uint4s) -> 1 uint4 per thread
     int load_a_row = tid / 2;        // 0..15
-    int load_a_col = (tid % 2) * 16;  // 0, 16
-
-    // 32 threads load 32x32 halfs (1024 halfs = 64 uint4s) -> 2 uint4s per thread
+    int load_a_col = (tid % 2) * 16; // 0, 16
     int load_b_row = tid;            // 0..31
 
     // Prologue Stage 0
-    if (cta_m + load_a_row < M && load_a_col < K) {
-        uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
-        const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + load_a_col];
-        *dst_a = *src_a;
+    if (cta_m + load_a_row < M && load_a_col + 15 < K) {
+        *(uint4*)&smem_A_0[load_a_row][load_a_col]     = *(const uint4*)&A[(cta_m + load_a_row) * K + load_a_col];
+        *(uint4*)&smem_A_0[load_a_row][load_a_col + 8] = *(const uint4*)&A[(cta_m + load_a_row) * K + load_a_col + 8];
     } else {
-        *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_A_0[load_a_row][load_a_col]     = make_uint4(0, 0, 0, 0);
+        *(uint4*)&smem_A_0[load_a_row][load_a_col + 8] = make_uint4(0, 0, 0, 0);
     }
 
-    if (load_b_row < K && cta_n < N) {
+    if (load_b_row < K && cta_n + 31 < N) {
         uint4* dst_b = (uint4*)&smem_B_0[load_b_row][0];
         const uint4* src_b = (const uint4*)&B[load_b_row * N + cta_n];
-        *dst_b = *src_b;
-        *(dst_b + 1) = *(src_b + 1);
+        dst_b[0] = src_b[0]; dst_b[1] = src_b[1]; dst_b[2] = src_b[2]; dst_b[3] = src_b[3];
     } else {
-        *(uint4*)&smem_B_0[load_b_row][0] = make_uint4(0, 0, 0, 0);
-        *(uint4*)&smem_B_0[load_b_row][16] = make_uint4(0, 0, 0, 0);
+        #pragma unroll
+        for (int c_idx = 0; c_idx < 32; c_idx += 8) {
+            *(uint4*)&smem_B_0[load_b_row][c_idx] = make_uint4(0, 0, 0, 0);
+        }
     }
 
     int stage = 0;
     for (int k = 0; k < K; k += BLOCK_K) {
         int next_k = k + BLOCK_K;
         if (next_k < K) {
-            if (stage == 0) {
-                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
-                    uint4* dst_a = (uint4*)&smem_A_1[load_a_row][load_a_col];
-                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
-                    *dst_a = *src_a;
-                } else {
-                    *(uint4*)&smem_A_1[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
-                }
-
-                if (next_k + load_b_row < K && cta_n < N) {
-                    uint4* dst_b = (uint4*)&smem_B_1[load_b_row][0];
-                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + cta_n];
-                    *dst_b = *src_b;
-                    *(dst_b + 1) = *(src_b + 1);
-                } else {
-                    *(uint4*)&smem_B_1[load_b_row][0] = make_uint4(0, 0, 0, 0);
-                    *(uint4*)&smem_B_1[load_b_row][16] = make_uint4(0, 0, 0, 0);
-                }
+            half (*smem_A_next)[40] = (stage == 0) ? smem_A_1 : smem_A_0;
+            half (*smem_B_next)[40] = (stage == 0) ? smem_B_1 : smem_B_0;
+            if (cta_m + load_a_row < M && next_k + load_a_col + 15 < K) {
+                *(uint4*)&smem_A_next[load_a_row][load_a_col]     = *(const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
+                *(uint4*)&smem_A_next[load_a_row][load_a_col + 8] = *(const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col + 8)];
             } else {
-                if (cta_m + load_a_row < M && next_k + load_a_col < K) {
-                    uint4* dst_a = (uint4*)&smem_A_0[load_a_row][load_a_col];
-                    const uint4* src_a = (const uint4*)&A[(cta_m + load_a_row) * K + (next_k + load_a_col)];
-                    *dst_a = *src_a;
-                } else {
-                    *(uint4*)&smem_A_0[load_a_row][load_a_col] = make_uint4(0, 0, 0, 0);
-                }
+                *(uint4*)&smem_A_next[load_a_row][load_a_col]     = make_uint4(0, 0, 0, 0);
+                *(uint4*)&smem_A_next[load_a_row][load_a_col + 8] = make_uint4(0, 0, 0, 0);
+            }
 
-                if (next_k + load_b_row < K && cta_n < N) {
-                    uint4* dst_b = (uint4*)&smem_B_0[load_b_row][0];
-                    const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + cta_n];
-                    *dst_b = *src_b;
-                    *(dst_b + 1) = *(src_b + 1);
-                } else {
-                    *(uint4*)&smem_B_0[load_b_row][0] = make_uint4(0, 0, 0, 0);
-                    *(uint4*)&smem_B_0[load_b_row][16] = make_uint4(0, 0, 0, 0);
+            if (next_k + load_b_row < K && cta_n + 31 < N) {
+                uint4* dst_b = (uint4*)&smem_B_next[load_b_row][0];
+                const uint4* src_b = (const uint4*)&B[(next_k + load_b_row) * N + cta_n];
+                dst_b[0] = src_b[0]; dst_b[1] = src_b[1]; dst_b[2] = src_b[2]; dst_b[3] = src_b[3];
+            } else {
+                #pragma unroll
+                for (int c_idx = 0; c_idx < 32; c_idx += 8) {
+                    *(uint4*)&smem_B_next[load_b_row][c_idx] = make_uint4(0, 0, 0, 0);
                 }
             }
         }
 
-        if (stage == 0) {
+        half (*smem_A_curr)[40] = (stage == 0) ? smem_A_0 : smem_A_1;
+        half (*smem_B_curr)[40] = (stage == 0) ? smem_B_0 : smem_B_1;
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            wmma::load_matrix_sync(frag_A, &smem_A_curr[0][k_step], 40);
             #pragma unroll
-            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
-                wmma::load_matrix_sync(frag_A, &smem_A_0[0][k_step], 40);
-                #pragma unroll
-                for (int j = 0; j < 2; ++j) {
-                    int b_col = j * 16;
-                    wmma::load_matrix_sync(frag_B[j], &smem_B_0[k_step][b_col], 40);
-                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
-                }
-            }
-        } else {
-            #pragma unroll
-            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
-                wmma::load_matrix_sync(frag_A, &smem_A_1[0][k_step], 40);
-                #pragma unroll
-                for (int j = 0; j < 2; ++j) {
-                    int b_col = j * 16;
-                    wmma::load_matrix_sync(frag_B[j], &smem_B_1[k_step][b_col], 40);
-                    wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
-                }
+            for (int j = 0; j < 2; ++j) {
+                int b_col = j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B_curr[k_step][b_col], 40);
+                wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
             }
         }
 
         stage = 1 - stage;
     }
 
-    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[2];
     #pragma unroll
     for (int j = 0; j < 2; ++j) {
-        #pragma unroll
-        for (int k = 0; k < 8; ++k) {
-            frag_C_half[j].x[k] = __float2half(frag_C[j].x[k]);
-        }
         int out_m = cta_m;
         int out_n = cta_n + j * 16;
-        if (out_m < M && out_n < N) {
-            wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C_half[j], N, wmma::mem_row_major);
+        if (out_m + 15 < M && out_n + 15 < N) {
+            wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_h;
+            #pragma unroll
+            for (int k = 0; k < frag_h.num_elements; ++k) {
+                frag_h.x[k] = __float2half(frag_C[j].x[k]);
+            }
+            wmma::store_matrix_sync(&C[out_m * N + out_n], frag_h, N, wmma::mem_row_major);
         }
     }
 }
