@@ -1,6 +1,6 @@
 // ============================================================
 //  Y  —  CPU Backend: 256-bit Register Wrapper
-//  Subagent A | avx_wrapper.rs
+//  avx_wrapper.rs
 //
 //  Wraps std::arch::x86_64 intrinsics into a safe, typed API
 //  that mirrors Y's type system on the CPU side.

@@ -84,6 +84,9 @@ fn ast_type_to_string(ty: &Type) -> String {
         } => {
             format!("[{}]", ast_type_to_string(element))
         }
+        Type::BlockTile { element, .. } => {
+            format!("[{}]", ast_type_to_string(element))
+        }
     }
 }
 
@@ -610,6 +613,7 @@ impl LlvmEmitter {
                 _ => "ptr".into(),
             },
             Type::Array { .. } => "ptr".into(),
+            Type::BlockTile { .. } => "ptr".into(),
         };
         if res == "%ptr" {
             "ptr".into()

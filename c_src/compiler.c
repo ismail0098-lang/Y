@@ -87,8 +87,14 @@ static YVec yvec_new(size_t elem_size) {
 
 static void yvec_push(YVec* v, const void* elem) {
     if (v->len >= v->cap) {
-        v->cap = v->cap == 0 ? 8 : v->cap * 2;
-        v->data = realloc(v->data, v->cap * v->elem_size);
+        size_t new_cap = v->cap == 0 ? 8 : v->cap * 2;
+        void* new_data = realloc(v->data, new_cap * v->elem_size);
+        if (!new_data) {
+            fprintf(stderr, "Fatal error: realloc failed in yvec_push\n");
+            exit(1);
+        }
+        v->data = new_data;
+        v->cap = new_cap;
     }
     memcpy((char*)v->data + v->len * v->elem_size, elem, v->elem_size);
     v->len++;
@@ -165,96 +171,6 @@ static void yfile_write(const YStr* path_str, const YStr* content) {
 }
 
 /* ── User Code ───────────────────────────────── */
-
-
-typedef struct Token Token;
-typedef struct Lexer Lexer;
-typedef struct Span Span;
-typedef struct FuncDecl FuncDecl;
-typedef struct ParamDecl ParamDecl;
-typedef struct FieldDecl FieldDecl;
-typedef struct StructDecl StructDecl;
-typedef struct MatchArm MatchArm;
-typedef struct AstArena AstArena;
-typedef struct Parser Parser;
-typedef struct LlvmEmitter LlvmEmitter;
-
-struct Token {
-    TokenKind kind;
-    size_t line;
-    size_t col;
-    YStr lexeme;
-};
-
-struct Lexer {
-    YVec input;
-    size_t pos;
-    size_t line;
-    size_t col;
-};
-
-struct Span {
-    size_t line;
-    size_t col;
-};
-
-struct FuncDecl {
-    YStr name;
-    int32_t is_safe;
-    size_t param_start;
-    size_t param_count;
-    size_t body_start;
-    size_t body_count;
-    size_t line;
-    size_t col;
-};
-
-struct ParamDecl {
-    YStr name;
-    YStr type_str;
-};
-
-struct FieldDecl {
-    YStr name;
-    YStr type_str;
-};
-
-struct StructDecl {
-    YStr name;
-    size_t field_start;
-    size_t field_count;
-};
-
-struct MatchArm {
-    MatchPattern pattern;
-    size_t body_start;
-    size_t body_count;
-};
-
-struct AstArena {
-    YVec exprs;
-    YVec stmts;
-    YVec params;
-    YVec funcs;
-    YVec structs;
-    YVec fields;
-    YVec match_arms;
-    YVec arg_indices;
-    YVec struct_lit_names;
-    YVec struct_lit_exprs;
-};
-
-struct Parser {
-    YVec tokens;
-    size_t pos;
-    size_t token_count;
-};
-
-struct LlvmEmitter {
-    YStr buffer;
-    size_t tmp_counter;
-    size_t label_counter;
-};
 
 typedef enum {
     TokenKind_TAG_Kernel,
@@ -429,7 +345,7 @@ typedef struct {
     char _0;
 } TokenKind_Unknown_Data;
 
-typedef struct {
+typedef struct TokenKind {
     TokenKind_Tag tag;
     union {
         TokenKind_MmaMod_Data MmaMod;
@@ -443,6 +359,126 @@ typedef struct {
         TokenKind_Unknown_Data Unknown;
     } data;
 } TokenKind;
+
+typedef enum {
+    MatchPattern_TAG_Ident,
+    MatchPattern_TAG_EnumVariant,
+    MatchPattern_TAG_Literal,
+    MatchPattern_TAG_Wildcard
+} MatchPattern_Tag;
+
+typedef struct {
+    YStr _0;
+} MatchPattern_Ident_Data;
+
+typedef struct {
+    YStr _0;
+    YStr _1;
+} MatchPattern_EnumVariant_Data;
+
+typedef struct {
+    size_t _0;
+} MatchPattern_Literal_Data;
+
+typedef struct MatchPattern {
+    MatchPattern_Tag tag;
+    union {
+        MatchPattern_Ident_Data Ident;
+        MatchPattern_EnumVariant_Data EnumVariant;
+        MatchPattern_Literal_Data Literal;
+    } data;
+} MatchPattern;
+
+typedef struct Token Token;
+typedef struct Lexer Lexer;
+typedef struct Span Span;
+typedef struct FuncDecl FuncDecl;
+typedef struct ParamDecl ParamDecl;
+typedef struct FieldDecl FieldDecl;
+typedef struct StructDecl StructDecl;
+typedef struct MatchArm MatchArm;
+typedef struct AstArena AstArena;
+typedef struct Parser Parser;
+typedef struct LlvmEmitter LlvmEmitter;
+
+struct Token {
+    TokenKind kind;
+    size_t line;
+    size_t col;
+    YStr lexeme;
+};
+
+struct Lexer {
+    YVec input;
+    size_t pos;
+    size_t line;
+    size_t col;
+};
+
+struct Span {
+    size_t line;
+    size_t col;
+};
+
+struct FuncDecl {
+    YStr name;
+    int32_t is_safe;
+    size_t param_start;
+    size_t param_count;
+    size_t body_start;
+    size_t body_count;
+    size_t line;
+    size_t col;
+};
+
+struct ParamDecl {
+    YStr name;
+    YStr type_str;
+};
+
+struct FieldDecl {
+    YStr name;
+    YStr type_str;
+};
+
+struct StructDecl {
+    YStr name;
+    size_t field_start;
+    size_t field_count;
+};
+
+struct MatchArm {
+    MatchPattern pattern;
+    size_t body_start;
+    size_t body_count;
+};
+
+struct AstArena {
+    YVec exprs;
+    YVec stmts;
+    YVec params;
+    YVec funcs;
+    YVec structs;
+    YVec fields;
+    YVec match_arms;
+    YVec arg_indices;
+    YVec struct_lit_names;
+    YVec struct_lit_exprs;
+};
+
+struct Parser {
+    YVec tokens;
+    size_t pos;
+    size_t token_count;
+};
+
+struct LlvmEmitter {
+    YStr buffer;
+    size_t tmp_counter;
+    size_t label_counter;
+};
+
+/* TokenKind defined above */
 
 #define TokenKind_Kernel ((TokenKind){ .tag = TokenKind_TAG_Kernel })
 #define TokenKind_Let ((TokenKind){ .tag = TokenKind_TAG_Let })
@@ -1022,34 +1058,7 @@ static inline Stmt Stmt_ExprStmt(size_t _0) {
     return res;
 }
 
-typedef enum {
-    MatchPattern_TAG_Ident,
-    MatchPattern_TAG_EnumVariant,
-    MatchPattern_TAG_Literal,
-    MatchPattern_TAG_Wildcard
-} MatchPattern_Tag;
-
-typedef struct {
-    YStr _0;
-} MatchPattern_Ident_Data;
-
-typedef struct {
-    YStr _0;
-    YStr _1;
-} MatchPattern_EnumVariant_Data;
-
-typedef struct {
-    size_t _0;
-} MatchPattern_Literal_Data;
-
-typedef struct {
-    MatchPattern_Tag tag;
-    union {
-        MatchPattern_Ident_Data Ident;
-        MatchPattern_EnumVariant_Data EnumVariant;
-        MatchPattern_Literal_Data Literal;
-    } data;
-} MatchPattern;
+/* MatchPattern defined above */
 
 static inline MatchPattern MatchPattern_Ident(YStr _0) {
     MatchPattern res;
@@ -1136,7 +1145,7 @@ void LlvmEmitter_emit_func(LlvmEmitter* e, const AstArena* arena, size_t func_id
 void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_idx);
 YStr LlvmEmitter_emit_lvalue(LlvmEmitter* e, const AstArena* arena, size_t expr_idx);
 YStr LlvmEmitter_emit_expr(LlvmEmitter* e, const AstArena* arena, size_t expr_idx);
-void main(void);
+int main(void);
 
 /* impl Vec */
 YVec Vec_new(int32_t elem_size) {
@@ -2496,18 +2505,11 @@ LlvmEmitter LlvmEmitter_new(void) {
     e.buffer = ystr_new("");
     e.tmp_counter = 0;
     e.label_counter = 0;
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("; ================================================
-"); &__tmp; }));
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new(";  Generated by Y Self-Hosted Compiler (LLVM)
-"); &__tmp; }));
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("; ================================================
-
-"); &__tmp; }));
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"
-"); &__tmp; }));
-    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("target triple = \"x86_64-pc-windows-msvc\"
-
-"); &__tmp; }));
+    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("; ================================================\n"); &__tmp; }));
+    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new(";  Generated by Y Self-Hosted Compiler (LLVM)\n"); &__tmp; }));
+    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("; ================================================\n\n"); &__tmp; }));
+    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n"); &__tmp; }));
+    String_push_str((&e.buffer), ({ YStr __tmp = ystr_new("target triple = \"x86_64-pc-windows-msvc\"\n\n"); &__tmp; }));
     return e;
 }
 
@@ -2577,22 +2579,18 @@ void LlvmEmitter_emit_func(LlvmEmitter* e, const AstArena* arena, size_t func_id
         }
         p += 1;
     }
-    String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(") {
-entry:
-"); &__tmp; }));
+    String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(") {\nentry:\n"); &__tmp; }));
     size_t ap = 0;
     while ((ap < fdecl.param_count)) {
         ParamDecl param = (*(ParamDecl*)yvec_get((&(*arena).params), (fdecl.param_start + ap)));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&param.name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = alloca i32
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = alloca i32\n"); &__tmp; }));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  store i32 %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&param.name));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(".arg, ptr %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&param.name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         ap += 1;
     }
     size_t s = 0;
@@ -2600,10 +2598,7 @@ entry:
         LlvmEmitter_emit_stmt(e, arena, (fdecl.body_start + s));
         s += 1;
     }
-    String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  ret i32 0
-}
-
-"); &__tmp; }));
+    String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  ret i32 0\n}\n\n"); &__tmp; }));
 }
 
 void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_idx) {
@@ -2613,16 +2608,14 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         size_t init_idx = stmt.data.Let._2;
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&var_name));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = alloca i32
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = alloca i32\n"); &__tmp; }));
         if ((init_idx > 0)) {
             YStr val = LlvmEmitter_emit_expr(e, arena, (init_idx - 1));
             String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  store i32 "); &__tmp; }));
             String_push_str((&(*e).buffer), (&val));
             String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", ptr %"); &__tmp; }));
             String_push_str((&(*e).buffer), (&var_name));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         }
     } else     if ((stmt.tag == Stmt_TAG_Assign)) {
         size_t target_idx = stmt.data.Assign._0;
@@ -2633,19 +2626,16 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         String_push_str((&(*e).buffer), (&val));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", ptr "); &__tmp; }));
         String_push_str((&(*e).buffer), (&target_addr));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
     } else     if ((stmt.tag == Stmt_TAG_Return)) {
         size_t ret_idx = stmt.data.Return._0;
         if ((ret_idx > 0)) {
             YStr val = LlvmEmitter_emit_expr(e, arena, (ret_idx - 1));
             String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  ret i32 "); &__tmp; }));
             String_push_str((&(*e).buffer), (&val));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         } else {
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  ret i32 0
-"); &__tmp; }));
+            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  ret i32 0\n"); &__tmp; }));
         }
     } else     if ((stmt.tag == Stmt_TAG_If)) {
         size_t cond_idx = stmt.data.If._0;
@@ -2667,11 +2657,9 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         } else {
             String_push_str((&(*e).buffer), (&merge_lbl));
         }
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         String_push_str((&(*e).buffer), (&then_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":\n"); &__tmp; }));
         size_t i = 0;
         while ((i < then_count)) {
             LlvmEmitter_emit_stmt(e, arena, (then_start + i));
@@ -2679,12 +2667,10 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         }
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&merge_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         if ((else_count > 0)) {
             String_push_str((&(*e).buffer), (&else_lbl));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
-"); &__tmp; }));
+            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":\n"); &__tmp; }));
             size_t j = 0;
             while ((j < else_count)) {
                 LlvmEmitter_emit_stmt(e, arena, (else_start + j));
@@ -2692,12 +2678,10 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
             }
             String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
             String_push_str((&(*e).buffer), (&merge_lbl));
-            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+            String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         }
         String_push_str((&(*e).buffer), (&merge_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":\n"); &__tmp; }));
     } else     if ((stmt.tag == Stmt_TAG_While)) {
         size_t cond_idx = stmt.data.While._0;
         size_t body_start = stmt.data.While._1;
@@ -2707,11 +2691,9 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         YStr end_lbl = LlvmEmitter_fresh_label(e, ({ YStr __tmp = ystr_new("while.end"); &__tmp; }));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&cond_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         String_push_str((&(*e).buffer), (&cond_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":\n"); &__tmp; }));
         YStr cond = LlvmEmitter_emit_expr(e, arena, (cond_idx - 1));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br i1 "); &__tmp; }));
         String_push_str((&(*e).buffer), (&cond));
@@ -2719,11 +2701,9 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         String_push_str((&(*e).buffer), (&body_lbl));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", label %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&end_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         String_push_str((&(*e).buffer), (&body_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":\n"); &__tmp; }));
         size_t k = 0;
         while ((k < body_count)) {
             LlvmEmitter_emit_stmt(e, arena, (body_start + k));
@@ -2731,11 +2711,9 @@ void LlvmEmitter_emit_stmt(LlvmEmitter* e, const AstArena* arena, size_t stmt_id
         }
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("  br label %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&cond_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         String_push_str((&(*e).buffer), (&end_lbl));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(":\n"); &__tmp; }));
     } else     if ((stmt.tag == Stmt_TAG_ExprStmt)) {
         size_t expr_idx = stmt.data.ExprStmt._0;
         LlvmEmitter_emit_expr(e, arena, (expr_idx - 1));
@@ -2762,8 +2740,7 @@ YStr LlvmEmitter_emit_expr(LlvmEmitter* e, const AstArena* arena, size_t expr_id
         String_push_str((&(*e).buffer), (&tmp));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(" = load i32, ptr %"); &__tmp; }));
         String_push_str((&(*e).buffer), (&expr.data.Ident._0));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         return tmp;
     } else     if ((expr.tag == Expr_TAG_BinaryExpr)) {
         YStr lhs = LlvmEmitter_emit_expr(e, arena, (expr.data.BinaryExpr._0 - 1));
@@ -2795,8 +2772,7 @@ YStr LlvmEmitter_emit_expr(LlvmEmitter* e, const AstArena* arena, size_t expr_id
         String_push_str((&(*e).buffer), (&lhs));
         String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(", "); &__tmp; }));
         String_push_str((&(*e).buffer), (&rhs));
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new("\n"); &__tmp; }));
         return tmp;
     } else     if ((expr.tag == Expr_TAG_Call)) {
         size_t func_idx = expr.data.Call._0;
@@ -2824,14 +2800,13 @@ YStr LlvmEmitter_emit_expr(LlvmEmitter* e, const AstArena* arena, size_t expr_id
             }
             i += 1;
         }
-        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(")
-"); &__tmp; }));
+        String_push_str((&(*e).buffer), ({ YStr __tmp = ystr_new(")\n"); &__tmp; }));
         return tmp;
     }
     return ystr_new("0");
 }
 
-void main(void) {
+int main(void) {
     printf("%s\n", (ystr_new("--- Y Self-Hosted Compiler ---")).data);
     YStr source_file = ystr_new("test_program.yy");
     printf("%s", (ystr_new("[*] Reading source file: ")).data);
@@ -2863,7 +2838,7 @@ void main(void) {
     yfile_write((&out_path), (&emitter.buffer));
     printf("%s\n", (ystr_new("      -> Written to output.ll")).data);
     printf("%s\n", (ystr_new("--- Self-Compilation Complete ---")).data);
-    return;
+    return 0;
 }
 
 

@@ -1493,13 +1493,47 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::Gt, "'>'")?;
-            Ok(Type::Generic {
-                base: base_name,
-                args,
-                span,
-            })
+            if base_name == "BlockTile" {
+                let element = if !args.is_empty() {
+                    match &args[0] {
+                        GenericArg::Type(t) => t.clone(),
+                        _ => Type::Primitive("F32".into(), span.clone()),
+                    }
+                } else {
+                    Type::Primitive("F32".into(), span.clone())
+                };
+                let size = if args.len() >= 2 {
+                    match &args[1] {
+                        GenericArg::Value(v) => v.clone(),
+                        GenericArg::Type(Type::Ident(s, sp)) => Expr::Ident(s.clone(), sp.clone()),
+                        GenericArg::Type(Type::Primitive(s, sp)) => Expr::Ident(s.clone(), sp.clone()),
+                        _ => Expr::IntLit(128, span.clone()),
+                    }
+                } else {
+                    Expr::IntLit(128, span.clone())
+                };
+                Ok(Type::BlockTile {
+                    element: Box::new(element),
+                    size: Box::new(size),
+                    span,
+                })
+            } else {
+                Ok(Type::Generic {
+                    base: base_name,
+                    args,
+                    span,
+                })
+            }
         } else {
-            Ok(Type::Ident(base_name, span))
+            if base_name == "BlockTile" {
+                Ok(Type::BlockTile {
+                    element: Box::new(Type::Primitive("F32".into(), span.clone())),
+                    size: Box::new(Expr::IntLit(128, span.clone())),
+                    span,
+                })
+            } else {
+                Ok(Type::Ident(base_name, span))
+            }
         }
     }
 

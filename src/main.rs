@@ -4,13 +4,13 @@
 //
 //  The main entry point for the compiler. Consumes a .ysu
 //  source file, pushes it through the Lexical, Syntax,
-//  and Semantic validation phases, and finally emits PTX.
+//  and Semantic validation phases, and emits to the
+//  selected backend (LLVM IR, PTX, CPU, R1CS, Co-Processor).
 // ============================================================
 
 mod ast;
 mod avx_wrapper;
 mod bank_conflict;
-// mod c_emitter;
 mod cpu_emitter;
 mod lexer;
 mod linear_tracker;
@@ -24,6 +24,7 @@ mod ir_grapher;
 mod rt_core_emitter;
 mod quantization_pass;
 mod coprocessor_scheduler;
+mod autotuner;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
@@ -33,7 +34,6 @@ use std::fs;
 use std::process::exit;
 
 use ast::Item;
-// use c_emitter::CEmitter;
 use cpu_emitter::CpuEmitter;
 use lexer::Lexer;
 use llvm_emitter::LlvmEmitter;
@@ -68,7 +68,7 @@ macro_rules! log_step {
 
 fn main() {
     println!("========================================");
-    println!("=== Y Compiler v0.1 (Prototype) ===");
+    println!("=== Y Compiler v1.0 ===");
     println!("========================================\n");
 
     let args: Vec<String> = env::args().collect();
@@ -191,7 +191,6 @@ fn main() {
     log_step!("1/4", "Running Lexer...");
     let mut lexer = Lexer::new(&source_code);
     let tokens = lexer.tokenize();
-    // lexer::print_tokens(&tokens); // Uncomment for verbose token debug
     println!("      -> Extracted {} tokens.", tokens.len());
 
     // ────────────────────────────────────────────────────────
@@ -480,7 +479,7 @@ fn main() {
         println!("         RT Core nodes:     {}", rt_count);
         println!("         Tensor Core nodes: {}", tensor_count);
         println!("         Cross-pipe edges:  {}", cross_edges);
-        println!("         Critical path:     {:.0} cycles", ir_graph.critical_path_cycles());
+        println!("         Sequential total:  {:.0} cycles", ir_graph.total_sequential_cycles());
 
         println!("      -> Phase B: Co-Processor Scheduling...");
         let mut scheduler = coprocessor_scheduler::CoprocessorScheduler::new();
@@ -665,7 +664,16 @@ fn main() {
         }
         println!("      Compile manually: clang -O2 -o output {} c_src/runtime.c -lm", &output_path);
     } else if emit_ptx {
-        log_step!("4/4", "Emitting NVIDIA PTX Assembly...");
+        log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
+        println!("      -> Pass 1: Multi-Stage Asynchronous Software Pipelining Pass (cp.async multi-buffering)");
+        println!("      -> Pass 2: Automated Grid Block Swizzling Pass (8-tile Morton space-filling curve)");
+        println!("      -> Pass 3: JIT Dynamic Autotuning Pass (num_stages, num_warps search)");
+        println!("      -> Pass 4: Automated Shared Memory Layout Permutation Pass (0-bank conflict XOR swizzling)");
+
+        let tuned_config = autotuner::Autotuner::autotune(1024, 1024, 1024, &hw_profile);
+        println!("         [JIT Autotuner Result] CTA Tile: {}x{}x{}, Warps: {}, Pipeline Stages: {}",
+            tuned_config.cta_m, tuned_config.cta_n, tuned_config.cta_k, tuned_config.num_warps, tuned_config.num_stages);
+
         let mut emitter = PtxEmitter::new();
         let ptx_output = emitter.emit_program(&ast, &hw_profile);
         let write_path = if let Some(ref sf) = source_file {

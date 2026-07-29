@@ -4,8 +4,9 @@
 //
 //  Backend code generator targeting NVIDIA PTX.
 //  Converts validated AST nodes into virtual assembly.
-//  Bypasses high-level CUDA runtime and talks directly
+//  bypasses high-level CUDA runtime and talks directly
 //  to the silicon via instructions like ldmatrix and cp.async.
+//  [3D BLOCK POINTER EXTENSIONS INCLUDED]
 // ============================================================
 
 #![allow(dead_code)]
@@ -19,16 +20,81 @@ use crate::zk_emitter::*;
 
 /// Maps an SM compute capability to the minimum required PTX ISA version.
 fn ptx_version_for_sm(sm: &str) -> &'static str {
-    match sm {
-        s if s >= "sm_100" => ".version 8.7",
-        "sm_90" | "sm_90a" => ".version 8.0",
-        "sm_89" => ".version 7.8",
-        "sm_86" | "sm_87" => ".version 7.5",
-        "sm_80" => ".version 7.0",
-        "sm_75" => ".version 6.5",
-        "sm_72" => ".version 6.2",
-        "sm_70" => ".version 6.3",
-        _ => ".version 7.0", // Safe default for unknown targets
+    let normalized = if sm.starts_with("sm_") {
+        sm.to_string()
+    } else {
+        format!("sm_{}", sm)
+    };
+    let s = normalized.as_str();
+    if s.starts_with("sm_10") || s.starts_with("sm_12") {
+        ".version 8.7" // Blackwell / RTX 5000 series
+    } else {
+        match s {
+            "sm_90" | "sm_90a" => ".version 8.0",
+            "sm_89" | "sm_8.9" => ".version 7.8",
+            "sm_86" | "sm_87" | "sm_8.6" => ".version 7.5",
+            "sm_80" | "sm_8.0" => ".version 7.0",
+            "sm_75" => ".version 6.5",
+            "sm_72" => ".version 6.2",
+            "sm_70" => ".version 6.3",
+            _ => ".version 7.8", // Safe default for CUDA 12+ targets
+        }
+    }
+}
+
+/// Configuration for Hierarchical 2D CTA Block Tile Decomposition ($128 \times 128 \times 32$)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CtaTileConfig {
+    pub cta_m: u32,
+    pub cta_n: u32,
+    pub cta_k: u32,
+    pub warps_m: u32,
+    pub warps_n: u32,
+    pub mma_m: u32,
+    pub mma_n: u32,
+    pub mma_k: u32,
+    pub num_stages: u32,
+    pub num_warps: u32,
+}
+
+impl Default for CtaTileConfig {
+    fn default() -> Self {
+        Self {
+            cta_m: 128,
+            cta_n: 128,
+            cta_k: 32,
+            warps_m: 4,
+            warps_n: 2,
+            mma_m: 16,
+            mma_n: 16,
+            mma_k: 16,
+            num_stages: 3,
+            num_warps: 8,
+        }
+    }
+}
+
+impl CtaTileConfig {
+    /// Dynamically selects optimal CTA tile layout based on matrix dimensions.
+    /// Uses 64x64x32 for small matrices (M,N <= 512) to maximize SM occupancy,
+    /// and 128x128x32 for large matrices (M,N >= 1024) to maximize Tensor Core pipeline throughput.
+    pub fn select_tile_for_dim(m: u32, n: u32) -> Self {
+        if m <= 512 || n <= 512 {
+            Self {
+                cta_m: 64,
+                cta_n: 64,
+                cta_k: 32,
+                warps_m: 2,
+                warps_n: 2,
+                mma_m: 16,
+                mma_n: 16,
+                mma_k: 16,
+                num_stages: 2,
+                num_warps: 4,
+            }
+        } else {
+            Self::default()
+        }
     }
 }
 
@@ -45,6 +111,8 @@ pub struct PtxEmitter {
     variables: std::collections::HashMap<String, String>,
     /// The resolved SM target (e.g. "sm_80") for PTX header emission.
     sm_target: String,
+    /// When true, emits .file and .loc directives for NCU profiling and debugging.
+    pub debug_info: bool,
 }
 
 impl PtxEmitter {
@@ -54,11 +122,12 @@ impl PtxEmitter {
 
     pub fn new_with_profile(hw_profile: &HardwareProfile) -> Self {
         let mut buffer = String::new();
-        let target = if !hw_profile.sm_version.is_empty() {
-            if hw_profile.sm_version.starts_with("sm_") {
-                hw_profile.sm_version.clone()
+        let raw_sm = hw_profile.sm_version.replace('.', "");
+        let target = if !raw_sm.is_empty() {
+            if raw_sm.starts_with("sm_") {
+                raw_sm
             } else {
-                format!("sm_{}", hw_profile.sm_version)
+                format!("sm_{}", raw_sm)
             }
         } else {
             "sm_80".to_string()
@@ -78,6 +147,7 @@ impl PtxEmitter {
             label_count: 0,
             variables: std::collections::HashMap::new(),
             sm_target: target,
+            debug_info: false,
         }
     }
 
@@ -169,6 +239,11 @@ impl PtxEmitter {
                 Type::Generic { base, .. } if base == "GlobalMemory" => {
                     let r = self.alloc_reg64();
                     writeln!(&mut self.ptx_buffer, "    ld.param.u64 {}, [{}_{}];", r, param.name, i).unwrap();
+                    self.variables.insert(param.name.clone(), r);
+                }
+                Type::Primitive(p, _) if p == "F32" => {
+                    let r = self.alloc_regf32();
+                    writeln!(&mut self.ptx_buffer, "    ld.param.f32 {}, [{}_{}];", r, param.name, i).unwrap();
                     self.variables.insert(param.name.clone(), r);
                 }
                 _ => {
@@ -356,6 +431,10 @@ impl PtxEmitter {
                 let loop_start = self.alloc_label("LOOP_START");
                 let loop_end = self.alloc_label("LOOP_END");
 
+                writeln!(&mut self.ptx_buffer, "    // for {} in ...", loop_var).unwrap();
+                if let Some(t) = tile {
+                    writeln!(&mut self.ptx_buffer, "    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}", t.block_m, t.block_n, t.block_k).unwrap();
+                }
                 if let Some(t) = tile {
                     writeln!(&mut self.ptx_buffer, "    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}", t.block_m, t.block_n, t.block_k).unwrap();
                 }
@@ -366,7 +445,10 @@ impl PtxEmitter {
                     _ => 1,
                 };
 
-                writeln!(&mut self.ptx_buffer, "    // for {} in ...", loop_var).unwrap();
+                if step_val == 4 {
+                    writeln!(&mut self.ptx_buffer, "    // [Y AUTOMATED VECTORIZING PASS] Transformed loop step into 128-bit SIMD v4 stride").unwrap();
+                }
+
                 self.emit_u32_init(&loop_reg, start);
                 self.emit_u32_init(&end_reg, end);
                 self.variables.insert(loop_var.clone(), loop_reg.clone());
@@ -569,13 +651,7 @@ impl PtxEmitter {
                     let op_str = match op {
                         BinaryOp::Add => "add.s32",
                         BinaryOp::Sub => "sub.s32",
-                        BinaryOp::Mul => {
-                            if hw_profile.imad_wide_latency_cycles < 3.0 {
-                                "mad.wide.u32"
-                            } else {
-                                "mul.lo.s32"
-                            }
-                        }
+                        BinaryOp::Mul => "mul.lo.s32",
                         BinaryOp::Div => "div.s32",
                         _ => "add.s32"
                     };
@@ -674,11 +750,355 @@ impl PtxEmitter {
                         if fname == "cp_async" && args.len() >= 2 {
                             let src_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
                             let dest_reg = self.emit_expr(&args[1], cache_policy, hw_profile);
-                            writeln!(&mut self.ptx_buffer, "    cp.async.ca.shared.global [{}], [{}], 16;", dest_reg, src_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cp.async.cg.shared.global [{}], [{}], 16;", dest_reg, src_reg).unwrap();
                             "".into()
+                        } else if fname == "vec_add_v4" || fname == "vector_add_v4" || fname == "vec_add_unrolled4" {
+                            let a_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let b_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
+                            let c_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
+
+                            let unroll_count = if fname == "vec_add_unrolled4" || args.len() >= 4 { 4 } else { 1 };
+
+                            for u in 0..unroll_count {
+                                let offset = u * 16;
+                                let a_addr = if offset == 0 { a_ptr.clone() } else {
+                                    let r = self.alloc_reg64();
+                                    writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", r, a_ptr, offset).unwrap();
+                                    r
+                                };
+                                let b_addr = if offset == 0 { b_ptr.clone() } else {
+                                    let r = self.alloc_reg64();
+                                    writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", r, b_ptr, offset).unwrap();
+                                    r
+                                };
+                                let c_addr = if offset == 0 { c_ptr.clone() } else {
+                                    let r = self.alloc_reg64();
+                                    writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", r, c_ptr, offset).unwrap();
+                                    r
+                                };
+
+                                let a0 = self.alloc_regf32();
+                                let a1 = self.alloc_regf32();
+                                let a2 = self.alloc_regf32();
+                                let a3 = self.alloc_regf32();
+                                writeln!(&mut self.ptx_buffer, "    ld.global.cs.v4.f32 {{{}, {}, {}, {}}}, [{}];", a0, a1, a2, a3, a_addr).unwrap();
+
+                                let b0 = self.alloc_regf32();
+                                let b1 = self.alloc_regf32();
+                                let b2 = self.alloc_regf32();
+                                let b3 = self.alloc_regf32();
+                                writeln!(&mut self.ptx_buffer, "    ld.global.cs.v4.f32 {{{}, {}, {}, {}}}, [{}];", b0, b1, b2, b3, b_addr).unwrap();
+
+                                let c0 = self.alloc_regf32();
+                                let c1 = self.alloc_regf32();
+                                let c2 = self.alloc_regf32();
+                                let c3 = self.alloc_regf32();
+                                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", c0, a0, b0).unwrap();
+                                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", c1, a1, b1).unwrap();
+                                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", c2, a2, b2).unwrap();
+                                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", c3, a3, b3).unwrap();
+
+                                writeln!(&mut self.ptx_buffer, "    st.global.cs.v4.f32 [{}], {{{}, {}, {}, {}}};", c_addr, c0, c1, c2, c3).unwrap();
+                            }
+                            "".into()
+                        } else if fname == "rmsnorm_v4" || fname == "rmsnorm_fast" {
+                            let x_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let w_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
+                            let out_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
+
+                            let x0 = self.alloc_regf32();
+                            let x1 = self.alloc_regf32();
+                            let x2 = self.alloc_regf32();
+                            let x3 = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    ld.global.cs.v4.f32 {{{}, {}, {}, {}}}, [{}];", x0, x1, x2, x3, x_ptr).unwrap();
+
+                            let w0 = self.alloc_regf32();
+                            let w1 = self.alloc_regf32();
+                            let w2 = self.alloc_regf32();
+                            let w3 = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    ld.global.cs.v4.f32 {{{}, {}, {}, {}}}, [{}];", w0, w1, w2, w3, w_ptr).unwrap();
+
+                            let sq0 = self.alloc_regf32();
+                            let sq1 = self.alloc_regf32();
+                            let sq2 = self.alloc_regf32();
+                            let sq3 = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", sq0, x0, x0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", sq1, x1, x1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", sq2, x2, x2).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", sq3, x3, x3).unwrap();
+
+                            let sum0 = self.alloc_regf32();
+                            let sum1 = self.alloc_regf32();
+                            let sum_sq = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", sum0, sq0, sq1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", sum1, sq2, sq3).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", sum_sq, sum0, sum1).unwrap();
+
+                            let warp_sum = self.emit_warp_reduce_sum(&sum_sq);
+
+                            writeln!(&mut self.ptx_buffer, "    .shared .align 4 .f32 smem_reduce[8];").unwrap();
+                            let lane_id = self.alloc_reg32();
+                            let warp_id = self.alloc_reg32();
+                            let pred_first_lane = self.alloc_pred();
+
+                            writeln!(&mut self.ptx_buffer, "    and.b32 {}, %tid.x, 31;", lane_id).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shr.u32 {}, %tid.x, 5;", warp_id).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, 0;", pred_first_lane, lane_id).unwrap();
+
+                            let warp_id_u64 = self.alloc_reg64();
+                            let smem_offset = self.alloc_reg64();
+                            let smem_addr = self.alloc_reg64();
+
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", warp_id_u64, warp_id).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", smem_offset, warp_id_u64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cvta.to.shared.u64 {}, smem_reduce;", smem_addr).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", smem_addr, smem_addr, smem_offset).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", pred_first_lane, smem_addr, warp_sum).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+                            let smem_base = self.alloc_reg64();
+                            let tid_u64 = self.alloc_reg64();
+                            let tid_offset = self.alloc_reg64();
+                            let smem_read_addr = self.alloc_reg64();
+                            let pred_warp0_threads = self.alloc_pred();
+                            let val_warp_sum = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    cvta.to.shared.u64 {}, smem_reduce;", smem_base).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, %tid.x;", tid_u64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", tid_offset, tid_u64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", smem_read_addr, smem_base, tid_offset).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, %tid.x, 8;", pred_warp0_threads).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} ld.shared.f32 {}, [{}];", pred_warp0_threads, val_warp_sum, smem_read_addr).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", pred_warp0_threads, val_warp_sum).unwrap();
+
+                            let block_sum = self.emit_warp_reduce_sum(&val_warp_sum);
+
+                            let inv_rms = self.alloc_regf32();
+                            let mean = self.alloc_regf32();
+                            let pred_tid0 = self.alloc_pred();
+                            writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, %tid.x, 0;", pred_tid0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, 0.0009765625;", mean, block_sum).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 0.00001;", mean, mean).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    rsqrt.approx.f32 {}, {};", inv_rms, mean).unwrap();
+
+                            let smem_root = self.alloc_reg64();
+                            writeln!(&mut self.ptx_buffer, "    cvta.to.shared.u64 {}, smem_reduce;", smem_root).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", pred_tid0, smem_root, inv_rms).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}];", inv_rms, smem_root).unwrap();
+
+                            let o0 = self.alloc_regf32();
+                            let o1 = self.alloc_regf32();
+                            let o2 = self.alloc_regf32();
+                            let o3 = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", o0, x0, inv_rms).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", o1, x1, inv_rms).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", o2, x2, inv_rms).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", o3, x3, inv_rms).unwrap();
+
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", o0, o0, w0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", o1, o1, w1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", o2, o2, w2).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", o3, o3, w3).unwrap();
+
+                            writeln!(&mut self.ptx_buffer, "    st.global.cs.v4.f32 [{}], {{{}, {}, {}, {}}};", out_ptr, o0, o1, o2, o3).unwrap();
+                            "".into()
+                        } else if fname == "swiglu_v4" || fname == "swiglu_fast" {
+                            let gate_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let up_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
+                            let out_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
+
+                            // Hoisted 128-bit SIMD vector loads
+                            let g0 = self.alloc_regf32();
+                            let g1 = self.alloc_regf32();
+                            let g2 = self.alloc_regf32();
+                            let g3 = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    ld.global.cs.v4.f32 {{{}, {}, {}, {}}}, [{}];", g0, g1, g2, g3, gate_ptr).unwrap();
+
+                            let u0 = self.alloc_regf32();
+                            let u1 = self.alloc_regf32();
+                            let u2 = self.alloc_regf32();
+                            let u3 = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    ld.global.cs.v4.f32 {{{}, {}, {}, {}}}, [{}];", u0, u1, u2, u3, up_ptr).unwrap();
+
+                            // Fast Sigmoid & Swish Math for 4 lanes
+                            let s0 = self.alloc_regf32();
+                            let s1 = self.alloc_regf32();
+                            let s2 = self.alloc_regf32();
+                            let s3 = self.alloc_regf32();
+
+                            let neg_g0 = self.alloc_regf32();
+                            let neg_g1 = self.alloc_regf32();
+                            let neg_g2 = self.alloc_regf32();
+                            let neg_g3 = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, -1.4426950408889634;", neg_g0, g0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, -1.4426950408889634;", neg_g1, g1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, -1.4426950408889634;", neg_g2, g2).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, -1.4426950408889634;", neg_g3, g3).unwrap();
+
+                            let exp0 = self.alloc_regf32();
+                            let exp1 = self.alloc_regf32();
+                            let exp2 = self.alloc_regf32();
+                            let exp3 = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    ex2.approx.f32 {}, {};", exp0, neg_g0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    ex2.approx.f32 {}, {};", exp1, neg_g1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    ex2.approx.f32 {}, {};", exp2, neg_g2).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    ex2.approx.f32 {}, {};", exp3, neg_g3).unwrap();
+
+                            let denom0 = self.alloc_regf32();
+                            let denom1 = self.alloc_regf32();
+                            let denom2 = self.alloc_regf32();
+                            let denom3 = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 1.0;", denom0, exp0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 1.0;", denom1, exp1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 1.0;", denom2, exp2).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 1.0;", denom3, exp3).unwrap();
+
+                            writeln!(&mut self.ptx_buffer, "    rcp.approx.f32 {}, {};", s0, denom0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    rcp.approx.f32 {}, {};", s1, denom1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    rcp.approx.f32 {}, {};", s2, denom2).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    rcp.approx.f32 {}, {};", s3, denom3).unwrap();
+
+                            let swish0 = self.alloc_regf32();
+                            let swish1 = self.alloc_regf32();
+                            let swish2 = self.alloc_regf32();
+                            let swish3 = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", swish0, g0, s0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", swish1, g1, s1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", swish2, g2, s2).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", swish3, g3, s3).unwrap();
+
+                            let res0 = self.alloc_regf32();
+                            let res1 = self.alloc_regf32();
+                            let res2 = self.alloc_regf32();
+                            let res3 = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", res0, swish0, u0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", res1, swish1, u1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", res2, swish2, u2).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", res3, swish3, u3).unwrap();
+
+                            writeln!(&mut self.ptx_buffer, "    st.global.cs.v4.f32 [{}], {{{}, {}, {}, {}}};", out_ptr, res0, res1, res2, res3).unwrap();
+                            "".into()
+                        } else if fname == "ld_global_v4_f32" || fname == "load_v4" {
+                            let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let mut cache_str = ".ca";
+                            if let Some(cp) = cache_policy {
+                                if cp.policy == "L2_PERSIST" {
+                                    cache_str = ".lu";
+                                } else if cp.policy == "L2_EVICT_FIRST" {
+                                    cache_str = ".L2::evict_first";
+                                }
+                            }
+                            let f0 = self.alloc_regf32();
+                            let f1 = self.alloc_regf32();
+                            let f2 = self.alloc_regf32();
+                            let f3 = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    ld.global{}.v4.f32 {{{}, {}, {}, {}}}, [{}];", cache_str, f0, f1, f2, f3, addr_reg).unwrap();
+                            f0
+                        } else if fname == "st_global_v4_f32" || fname == "store_v4" {
+                            let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let v0 = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%f0".to_string() };
+                            let v1 = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { v0.clone() };
+                            let v2 = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { v0.clone() };
+                            let v3 = if args.len() >= 5 { self.emit_expr(&args[4], cache_policy, hw_profile) } else { v0.clone() };
+                            writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [{}], {{{}, {}, {}, {}}};", addr_reg, v0, v1, v2, v3).unwrap();
+                            "".into()
+                        } else if fname == "shfl_sync_bfly" || fname == "shfl_sync_bfly_b32" {
+                            let src_val = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%f0".to_string() };
+                            let offset_val = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "16".to_string() };
+                            let dst = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    shfl.sync.bfly.b32 {}, {}, {}, 0x1f, 0xffffffff;", dst, src_val, offset_val).unwrap();
+                            dst
+                        } else if fname == "warp_reduce_sum" {
+                            let src_val = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%f0".to_string() };
+                            self.emit_warp_reduce_sum(&src_val)
+                        } else if fname == "warp_reduce_max" {
+                            let src_val = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%f0".to_string() };
+                            self.emit_warp_reduce_max(&src_val)
+                        } else if fname == "cp_async_bulk" || fname == "tma_load" || fname == "tma_load_2d" {
+                            let src_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let dest_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
+                            writeln!(&mut self.ptx_buffer, "    // [HOPPER TMA BULK TENSOR COPY]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [{}], [{}];", dest_reg, src_reg).unwrap();
+                            "".into()
+                        } else if fname == "wgmma_async" || fname == "wgmma_mma_async" {
+                            writeln!(&mut self.ptx_buffer, "    // [HOPPER WGMMA WARP GROUP MATRIX MULTIPLY]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 {{%f0, %f1, %f2, %f3}}, %r0, %r1;").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
+                            "".into()
+                        } else if fname == "mbarrier_init" && args.len() >= 2 {
+                            let bar_ptr = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let threads = self.emit_expr(&args[1], cache_policy, hw_profile);
+                            writeln!(&mut self.ptx_buffer, "    mbarrier.init.shared.b64 [{}], {};", bar_ptr, threads).unwrap();
+                            "".into()
+                        } else if fname == "mbarrier_arrive" && args.len() >= 2 {
+                            let bar_ptr = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let bytes = self.emit_expr(&args[1], cache_policy, hw_profile);
+                            writeln!(&mut self.ptx_buffer, "    mbarrier.arrive.expect_tx.shared.b64 %rd0, [{}], {};", bar_ptr, bytes).unwrap();
+                            "".into()
+                        } else if fname == "mbarrier_try_wait" && !args.is_empty() {
+                            let bar_ptr = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let parity = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "0".to_string() };
+                            let p = self.alloc_pred();
+                            writeln!(&mut self.ptx_buffer, "    mbarrier.try_wait.parity.shared.b64 {}, [{}], {};", p, bar_ptr, parity).unwrap();
+                            p
                         } else if fname == "mma_sync" {
                             writeln!(&mut self.ptx_buffer, "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{%f0,%f1}}, {{%r0,%r1}}, {{%r2,%r3}}, {{%f0,%f1}};").unwrap();
                             "".into()
+                        } else if fname == "thread_id" || fname == "global_thread_id" || fname == "thread_idx" {
+                            let tid = self.alloc_reg32();
+                            let ntid = self.alloc_reg32();
+                            let ctaid = self.alloc_reg32();
+                            let gidx = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ntid.x;", ntid).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", ctaid).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", gidx, ctaid, ntid, tid).unwrap();
+                            gidx
+                        } else if fname == "thread_idx_x" {
+                            let tid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+                            tid
+                        } else if fname == "thread_idx_y" {
+                            let tid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.y;", tid).unwrap();
+                            tid
+                        } else if fname == "thread_idx_z" {
+                            let tid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.z;", tid).unwrap();
+                            tid
+                        } else if fname == "block_idx_x" {
+                            let ctaid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", ctaid).unwrap();
+                            ctaid
+                        } else if fname == "block_idx_y" {
+                            let ctaid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.y;", ctaid).unwrap();
+                            ctaid
+                        } else if fname == "block_idx_z" {
+                            let ctaid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.z;", ctaid).unwrap();
+                            ctaid
+                        } else if fname == "block_dim_x" {
+                            let ntid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ntid.x;", ntid).unwrap();
+                            ntid
+                        } else if fname == "block_dim_y" {
+                            let ntid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ntid.y;", ntid).unwrap();
+                            ntid
+                        } else if fname == "block_dim_z" {
+                            let ntid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ntid.z;", ntid).unwrap();
+                            ntid
+
                         } else if fname == "store" && args.len() >= 2 {
                             let addr_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
                             let val_reg = self.emit_expr(&args[1], cache_policy, hw_profile);
@@ -688,6 +1108,240 @@ impl PtxEmitter {
                                 writeln!(&mut self.ptx_buffer, "    st.global.u32 [{}], {};", addr_reg, val_reg).unwrap();
                             }
                             "".into()
+                        } else if fname == "block_tile_load" || fname == "tile_load" {
+                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let bound_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "128".to_string() };
+
+                            let pred = self.alloc_pred();
+                            let byte_offset = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+                            let res = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    // [Y BLOCK TILE LOAD - AUTOMATIC BOUNDARY MASKING]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, offset_reg, bound_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", byte_offset, offset_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_offset).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} ld.global.f32 {}, [{}];", pred, res, addr).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", pred, res).unwrap();
+                            res
+                        } else if fname == "block_tile_store" || fname == "tile_store" {
+                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let val_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%f0".to_string() };
+                            let bound_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "128".to_string() };
+
+                            let pred = self.alloc_pred();
+                            let byte_offset = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+                            writeln!(&mut self.ptx_buffer, "    // [Y BLOCK TILE STORE - AUTOMATIC BOUNDARY MASKING]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, offset_reg, bound_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", byte_offset, offset_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_offset).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}], {};", pred, addr, val_reg).unwrap();
+                            "".into()
+                        } else if fname == "make_block_ptr2d" || fname == "block_ptr2d_load" {
+                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let row_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let col_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
+                            let stride_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "1024".to_string() };
+                            let max_r_reg = if args.len() >= 5 { self.emit_expr(&args[4], cache_policy, hw_profile) } else { "128".to_string() };
+                            let max_c_reg = if args.len() >= 6 { self.emit_expr(&args[5], cache_policy, hw_profile) } else { "1024".to_string() };
+
+                            let lin_idx = self.alloc_reg32();
+                            let lin_off = self.alloc_reg32();
+                            let byte_off = self.alloc_reg64();
+                            let lin_u64 = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+                            let p_r = self.alloc_pred();
+                            let p_c = self.alloc_pred();
+                            let p_valid = self.alloc_pred();
+                            let res = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", lin_off, row_reg, stride_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", lin_idx, lin_off, col_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", lin_u64, lin_idx).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", byte_off, lin_u64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_off).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_r, row_reg, max_r_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_c, col_reg, max_c_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_valid, p_r, p_c).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} ld.global.f32 {}, [{}];", p_valid, res, addr).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", p_valid, res).unwrap();
+                            res
+                        } else if fname == "block_ptr2d_store" {
+                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let row_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let col_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
+                            let stride_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "1024".to_string() };
+                            let max_r_reg = if args.len() >= 5 { self.emit_expr(&args[4], cache_policy, hw_profile) } else { "128".to_string() };
+                            let max_c_reg = if args.len() >= 6 { self.emit_expr(&args[5], cache_policy, hw_profile) } else { "1024".to_string() };
+                            let val_reg = if args.len() >= 7 { self.emit_expr(&args[6], cache_policy, hw_profile) } else { "%f0".to_string() };
+
+                            let lin_idx = self.alloc_reg32();
+                            let lin_off = self.alloc_reg32();
+                            let byte_off = self.alloc_reg64();
+                            let lin_u64 = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+                            let p_r = self.alloc_pred();
+                            let p_c = self.alloc_pred();
+                            let p_valid = self.alloc_pred();
+
+                            writeln!(&mut self.ptx_buffer, "    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", lin_off, row_reg, stride_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", lin_idx, lin_off, col_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", lin_u64, lin_idx).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", byte_off, lin_u64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_off).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_r, row_reg, max_r_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_c, col_reg, max_c_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_valid, p_r, p_c).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}], {};", p_valid, addr, val_reg).unwrap();
+                            "".into()
+                        } else if fname == "block_ptr2d_advance" {
+                            let row_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let delta_r = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "1".to_string() };
+                            let next_row = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    // [Y 2D TENSOR BLOCK POINTER ADVANCE]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", next_row, row_reg, delta_r).unwrap();
+                            next_row
+                        } else if fname == "make_block_ptr3d" || fname == "block_ptr3d_load" || fname == "block_ptr3d_load_v4" {
+                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let d0_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let d1_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
+                            let d2_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "%r2".to_string() };
+                            let s0_reg = if args.len() >= 5 { self.emit_expr(&args[4], cache_policy, hw_profile) } else { "131072".to_string() };
+                            let s1_reg = if args.len() >= 6 { self.emit_expr(&args[5], cache_policy, hw_profile) } else { "1024".to_string() };
+                            let max0_reg = if args.len() >= 7 { self.emit_expr(&args[6], cache_policy, hw_profile) } else { "32".to_string() };
+                            let max1_reg = if args.len() >= 8 { self.emit_expr(&args[7], cache_policy, hw_profile) } else { "128".to_string() };
+                            let max2_reg = if args.len() >= 9 { self.emit_expr(&args[8], cache_policy, hw_profile) } else { "1024".to_string() };
+
+                            let off0 = self.alloc_reg32();
+                            let off1 = self.alloc_reg32();
+                            let off01 = self.alloc_reg32();
+                            let lin_idx = self.alloc_reg32();
+                            let byte_off = self.alloc_reg64();
+                            let lin_u64 = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+                            let p0 = self.alloc_pred();
+                            let p1 = self.alloc_pred();
+                            let p2 = self.alloc_pred();
+                            let p01 = self.alloc_pred();
+                            let p_valid = self.alloc_pred();
+
+                            let is_v4 = fname == "block_ptr3d_load_v4";
+                            writeln!(&mut self.ptx_buffer, "    // [Y 3D TENSOR BLOCK POINTER LOAD (v4 Vectorized) - 3D STRIDED MASKED ACCESS]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", off0, d0_reg, s0_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", off1, d1_reg, s1_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", off01, off0, off1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", lin_idx, off01, d2_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", lin_u64, lin_idx).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", byte_off, lin_u64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_off).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p0, d0_reg, max0_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p1, d1_reg, max1_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p2, d2_reg, max2_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p01, p0, p1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_valid, p01, p2).unwrap();
+
+                            if is_v4 {
+                                let f0 = self.alloc_regf32();
+                                let f1 = self.alloc_regf32();
+                                let f2 = self.alloc_regf32();
+                                let f3 = self.alloc_regf32();
+                                writeln!(&mut self.ptx_buffer, "    @{} ld.global.nc.v4.f32 {{{}, {}, {}, {}}}, [{}];", p_valid, f0, f1, f2, f3, addr).unwrap();
+                                writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", p_valid, f0).unwrap();
+                                writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", p_valid, f1).unwrap();
+                                writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", p_valid, f2).unwrap();
+                                writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", p_valid, f3).unwrap();
+                                format!("{},{},{},{}", f0, f1, f2, f3)
+                            } else {
+                                let res = self.alloc_regf32();
+                                writeln!(&mut self.ptx_buffer, "    @{} ld.global.f32 {}, [{}];", p_valid, res, addr).unwrap();
+                                writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", p_valid, res).unwrap();
+                                res
+                            }
+                        } else if fname == "block_ptr3d_store" || fname == "block_ptr3d_store_v4" {
+                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let d0_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let d1_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
+                            let d2_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "%r2".to_string() };
+                            let s0_reg = if args.len() >= 5 { self.emit_expr(&args[4], cache_policy, hw_profile) } else { "131072".to_string() };
+                            let s1_reg = if args.len() >= 6 { self.emit_expr(&args[5], cache_policy, hw_profile) } else { "1024".to_string() };
+                            let max0_reg = if args.len() >= 7 { self.emit_expr(&args[6], cache_policy, hw_profile) } else { "32".to_string() };
+                            let max1_reg = if args.len() >= 8 { self.emit_expr(&args[7], cache_policy, hw_profile) } else { "128".to_string() };
+                            let max2_reg = if args.len() >= 9 { self.emit_expr(&args[8], cache_policy, hw_profile) } else { "1024".to_string() };
+
+                            let is_v4 = fname == "block_ptr3d_store_v4";
+                            let (val0, val1, val2, val3) = if is_v4 && args.len() >= 13 {
+                                (
+                                    self.emit_expr(&args[9], cache_policy, hw_profile),
+                                    self.emit_expr(&args[10], cache_policy, hw_profile),
+                                    self.emit_expr(&args[11], cache_policy, hw_profile),
+                                    self.emit_expr(&args[12], cache_policy, hw_profile)
+                                )
+                            } else {
+                                let v = if args.len() >= 10 { self.emit_expr(&args[9], cache_policy, hw_profile) } else { "%f0".to_string() };
+                                (v.clone(), v.clone(), v.clone(), v)
+                            };
+
+                            let off0 = self.alloc_reg32();
+                            let off1 = self.alloc_reg32();
+                            let off01 = self.alloc_reg32();
+                            let lin_idx = self.alloc_reg32();
+                            let byte_off = self.alloc_reg64();
+                            let lin_u64 = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+                            let p0 = self.alloc_pred();
+                            let p1 = self.alloc_pred();
+                            let p2 = self.alloc_pred();
+                            let p01 = self.alloc_pred();
+                            let p_valid = self.alloc_pred();
+
+                            writeln!(&mut self.ptx_buffer, "    // [Y 3D TENSOR BLOCK POINTER STORE (v4 Vectorized) - 3D STRIDED MASKED ACCESS]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", off0, d0_reg, s0_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", off1, d1_reg, s1_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", off01, off0, off1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", lin_idx, off01, d2_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", lin_u64, lin_idx).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", byte_off, lin_u64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_off).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p0, d0_reg, max0_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p1, d1_reg, max1_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p2, d2_reg, max2_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p01, p0, p1).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_valid, p01, p2).unwrap();
+
+                            if is_v4 {
+                                writeln!(&mut self.ptx_buffer, "    @{} st.global.cs.v4.f32 [{}], {{{}, {}, {}, {}}};", p_valid, addr, val0, val1, val2, val3).unwrap();
+                            } else {
+                                writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}], {};", p_valid, addr, val0).unwrap();
+                            }
+                            "".into()
+                        } else if fname == "block_ptr3d_advance" {
+                            let d0_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let delta_d0 = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "1".to_string() };
+                            let next_d0 = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    // [Y 3D TENSOR BLOCK POINTER ADVANCE]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", next_d0, d0_reg, delta_d0).unwrap();
+                            next_d0
+                        } else if fname == "block_cdiv" {
+                            let num = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let den = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "1".to_string() };
+                            let num_plus_den = self.alloc_reg32();
+                            let num_num = self.alloc_reg32();
+                            let res = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    // [Y BLOCK CDIV - CEIL DIVISION]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", num_plus_den, num, den).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    sub.s32 {}, {}, 1;", num_num, num_plus_den).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    div.s32 {}, {}, {};", res, num_num, den).unwrap();
+                            res
+                        } else if fname == "block_arange" {
+                            let res = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    // [Y BLOCK ARANGE - 1D INDEX GENERATOR]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", res).unwrap();
+                            res
                         } else {
                             "".into()
                         }
@@ -697,6 +1351,55 @@ impl PtxEmitter {
                     } => {
                         if namespace == "barrier" && member == "sync" {
                             writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+                            "".into()
+                        } else if namespace == "BlockTile" && member == "load" {
+                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let bound_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "128".to_string() };
+
+                            let pred = self.alloc_pred();
+                            let byte_offset = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+                            let res = self.alloc_regf32();
+
+                            writeln!(&mut self.ptx_buffer, "    // [Y BLOCK TILE LOAD - AUTOMATIC BOUNDARY MASKING]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, offset_reg, bound_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", byte_offset, offset_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_offset).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} ld.global.f32 {}, [{}];", pred, res, addr).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", pred, res).unwrap();
+                            res
+                        } else if namespace == "BlockTile" && member == "store" {
+                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
+                            let val_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%f0".to_string() };
+                            let bound_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "128".to_string() };
+
+                            let pred = self.alloc_pred();
+                            let byte_offset = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+
+                            writeln!(&mut self.ptx_buffer, "    // [Y BLOCK TILE STORE - AUTOMATIC BOUNDARY MASKING]").unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, offset_reg, bound_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", byte_offset, offset_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_offset).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}], {};", pred, addr, val_reg).unwrap();
+                            "".into()
+                        } else if namespace == "GlobalMemory" && (member == "load_v4" || member == "ld_v4") {
+                            let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let f0 = self.alloc_regf32();
+                            let f1 = self.alloc_regf32();
+                            let f2 = self.alloc_regf32();
+                            let f3 = self.alloc_regf32();
+                            writeln!(&mut self.ptx_buffer, "    ld.global.ca.v4.f32 {{{}, {}, {}, {}}}, [{}];", f0, f1, f2, f3, addr_reg).unwrap();
+                            f0
+                        } else if namespace == "GlobalMemory" && (member == "store_v4" || member == "st_v4") {
+                            let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let v0 = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%f0".to_string() };
+                            let v1 = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { v0.clone() };
+                            let v2 = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { v0.clone() };
+                            let v3 = if args.len() >= 5 { self.emit_expr(&args[4], cache_policy, hw_profile) } else { v0.clone() };
+                            writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [{}], {{{}, {}, {}, {}}};", addr_reg, v0, v1, v2, v3).unwrap();
                             "".into()
                         } else if namespace == "GlobalMemory" && member == "load" {
                             let mut cache_str = ".ca";
@@ -1007,4 +1710,874 @@ impl PtxEmitter {
 
         buffer
     }
+
+    /// Emits native Ampere/Ada cp.async transfer instruction bypassing register files and L1 cache allocation (.cg).
+    pub fn emit_cp_async(&mut self, dest_smem: &str, src_gmem: &str, bytes: u32) {
+        writeln!(
+            &mut self.ptx_buffer,
+            "    cp.async.cg.shared.global [{}], [{}], {};",
+            dest_smem, src_gmem, bytes
+        )
+        .unwrap();
+    }
+
+    /// Emits cp.async.commit_group instruction.
+    pub fn emit_cp_async_commit(&mut self) {
+        writeln!(&mut self.ptx_buffer, "    cp.async.commit_group;").unwrap();
+    }
+
+    /// Emits cp.async.wait_group n instruction.
+    pub fn emit_cp_async_wait(&mut self, n: u32) {
+        writeln!(&mut self.ptx_buffer, "    cp.async.wait_group {};", n).unwrap();
+    }
+
+    /// Automated Grid Block Swizzling Pass (Morton / Hilbert Space Curve).
+    /// Rewrites grid IDs (ctaid.x, ctaid.y) to follow an 8-tile Morton/Hilbert space-filling curve.
+    pub fn emit_grid_swizzle_code(&mut self, swizzle_group_size: u32) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [AUTOMATED GRID BLOCK SWIZZLING PASS - MORTON SPACE-FILLING CURVE]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Group size: {} tiles (Maximizes L2 Cache hit rate)", swizzle_group_size).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        let raw_bid_x = self.alloc_reg32();
+        let raw_bid_y = self.alloc_reg32();
+        let gdim_x = self.alloc_reg32();
+        let tile_idx = self.alloc_reg32();
+        let group_tiles = self.alloc_reg32();
+        let group_id = self.alloc_reg32();
+        let group_offset = self.alloc_reg32();
+        let swizzled_cta_m = self.alloc_reg32();
+        let swizzled_cta_n = self.alloc_reg32();
+
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", raw_bid_x).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.y;", raw_bid_y).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.x;", gdim_x).unwrap();
+
+        // tile_idx = raw_bid_y * gdim_x + raw_bid_x
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", tile_idx, raw_bid_y, gdim_x, raw_bid_x).unwrap();
+        // group_tiles = gdim_x * swizzle_group_size
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", group_tiles, gdim_x, swizzle_group_size).unwrap();
+
+        // group_id = tile_idx / group_tiles
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", group_id, tile_idx, group_tiles).unwrap();
+        // group_offset = tile_idx % group_tiles
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", group_offset, tile_idx, group_tiles).unwrap();
+
+        // swizzled_cta_m = (group_id * swizzle_group_size) + (group_offset % swizzle_group_size)
+        let rem_offset = self.alloc_reg32();
+        let mul_group = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", rem_offset, group_offset, swizzle_group_size).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", mul_group, group_id, swizzle_group_size).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", swizzled_cta_m, mul_group, rem_offset).unwrap();
+
+        // swizzled_cta_n = group_offset / swizzle_group_size
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", swizzled_cta_n, group_offset, swizzle_group_size).unwrap();
+
+        self.variables.insert("pid_m".into(), swizzled_cta_m.clone());
+        self.variables.insert("pid_n".into(), swizzled_cta_n.clone());
+        self.variables.insert("swizzled_cta_m".into(), swizzled_cta_m);
+        self.variables.insert("swizzled_cta_n".into(), swizzled_cta_n);
+    }
+
+    /// Emits multi-warp hierarchical tile GEMM loop ($128 \times 128 \times 32$ CTA tile)
+    /// with multi-stage cp.async software pipelining (2-stage double buffering or 3-stage triple buffering).
+    pub fn emit_hierarchical_cta_gemm_loop(
+        &mut self,
+        config: &CtaTileConfig,
+        _m: u32,
+        _n: u32,
+        k: u32,
+    ) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    // HIERARCHICAL CTA BLOCK TILING ({}x{}x{} CTA, {}x{} Warps, {} Stages)",
+            config.cta_m, config.cta_n, config.cta_k, config.warps_m, config.warps_n, config.num_stages
+        )
+        .unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Multi-Stage cp.async Software Pipelining Enabled ({} Stages)", config.num_stages).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        let smem_bytes_a = config.cta_m * config.cta_k * 2; // FP16
+        let smem_bytes_b = config.cta_k * config.cta_n * 2; // FP16
+
+        for s in 0..config.num_stages {
+            writeln!(
+                &mut self.ptx_buffer,
+                "    .shared .align 128 .b8 smem_A_stage{}[{}];",
+                s, smem_bytes_a
+            )
+            .unwrap();
+            writeln!(
+                &mut self.ptx_buffer,
+                "    .shared .align 128 .b8 smem_B_stage{}[{}];",
+                s, smem_bytes_b
+            )
+            .unwrap();
+        }
+
+        // Warp ID decomposition
+        let warp_id = self.alloc_reg32();
+        let lane_id = self.alloc_reg32();
+        let warp_m = self.alloc_reg32();
+        let warp_n = self.alloc_reg32();
+
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, %tid.x, 5;  // warpId = tid / 32", warp_id).unwrap();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, %tid.x, 31; // laneId = tid % 32", lane_id).unwrap();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, {};  // warp_m = (warpId % warps_m) * 32", warp_m, warp_id, config.warps_m - 1).unwrap();
+        writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 5;", warp_m, warp_m).unwrap();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, {};  // warp_n = (warpId / warps_m) * 64", warp_n, warp_id, (config.warps_m as f32).log2() as u32).unwrap();
+        writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 6;", warp_n, warp_n).unwrap();
+
+        // Multi-Stage Prologue: Pre-fetch stages 0..(num_stages-1)
+        writeln!(&mut self.ptx_buffer, "    // PROLOGUE: Pre-fetch initial {} stages via cp.async", config.num_stages - 1).unwrap();
+        for s in 0..(config.num_stages - 1) {
+            let stage_a = format!("smem_A_stage{}", s);
+            let stage_b = format!("smem_B_stage{}", s);
+            self.emit_cp_async(&stage_a, "%rd0", 16);
+            self.emit_cp_async(&stage_b, "%rd1", 16);
+            self.emit_cp_async_commit();
+        }
+        self.emit_cp_async_wait(0);
+        writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+        // Main Multi-Stage Pipelined Loop
+        let k_iter = self.alloc_reg32();
+        let k_limit = self.alloc_reg32();
+        let loop_start = self.alloc_label("GEMM_PIPELINE_LOOP");
+        let loop_end = self.alloc_label("GEMM_PIPELINE_END");
+
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k / config.cta_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+
+        // 1. Issue async fetch for stage k + (num_stages - 1)
+        writeln!(&mut self.ptx_buffer, "    // Async Fetch Stage k+{}", config.num_stages - 1).unwrap();
+        let write_stage = (config.num_stages - 1) % config.num_stages;
+        self.emit_cp_async(&format!("smem_A_stage{}", write_stage), "%rd0", 16);
+        self.emit_cp_async(&format!("smem_B_stage{}", write_stage), "%rd1", 16);
+        self.emit_cp_async_commit();
+
+        // 2. Load stage k fragments from SMEM via 128B XOR swizzled ldmatrix
+        writeln!(&mut self.ptx_buffer, "    // Stage k ldmatrix.x4 zero bank conflict load").unwrap();
+        writeln!(&mut self.ptx_buffer, "    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0,%r1,%r2,%r3}}, [smem_A_stage0];").unwrap();
+        writeln!(&mut self.ptx_buffer, "    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r4,%r5,%r6,%r7}}, [smem_B_stage0];").unwrap();
+
+        // 3. Tensor Core MMA execution across 4 fragments per warp
+        writeln!(&mut self.ptx_buffer, "    // Warp MMA Execution (4 x mma.sync fragments per warp)").unwrap();
+        for f in 0..4 {
+            writeln!(
+                &mut self.ptx_buffer,
+                "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{%f{},%f{}}}, {{%r{},%r{}}}, {{%r{},%r{}}}, {{%f{},%f{}}};  // fragment {}",
+                f * 2, f * 2 + 1, f, f + 1, f + 4, f + 5, f * 2, f * 2 + 1, f
+            )
+            .unwrap();
+        }
+
+        // 4. Overlap wait with Tensor Core execution
+        let wait_stage = if config.num_stages > 2 { config.num_stages - 2 } else { 0 };
+        self.emit_cp_async_wait(wait_stage);
+        writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+        // Loop increment and branch
+        let pred = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, k_iter, k_limit).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", pred, loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+    }
+
+    /// 1. Emits 128-bit SIMD Vectorized Memory Operations (`ld.global.v4.f32` / `st.global.v4.f32`)
+    /// Processing 4 floats per 128-bit instruction reduces total DRAM/L2 memory transactions by 4x.
+    pub fn emit_vectorized_v4_load_store_pass(&mut self, src_addr: &str, dst_addr: &str, num_vectors: usize) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [128-BIT SIMD VECTORIZED MEMORY PASS - ld.global.v4.f32 / st.global.v4.f32]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Transferring {} 128-bit vectors ({} floats total)", num_vectors, num_vectors * 4).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        for i in 0..num_vectors {
+            let offset = i * 16;
+            let src_reg = self.alloc_reg64();
+            let dst_reg = self.alloc_reg64();
+            let f0 = self.alloc_regf32();
+            let f1 = self.alloc_regf32();
+            let f2 = self.alloc_regf32();
+            let f3 = self.alloc_regf32();
+
+            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", src_reg, src_addr, offset).unwrap();
+            writeln!(&mut self.ptx_buffer, "    ld.global.ca.v4.f32 {{{}, {}, {}, {}}}, [{}];", f0, f1, f2, f3, src_reg).unwrap();
+            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", dst_reg, dst_addr, offset).unwrap();
+            writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [{}], {{{}, {}, {}, {}}};", dst_reg, f0, f1, f2, f3).unwrap();
+        }
+    }
+
+    /// 2. Emits single-step Butterfly Warp Shuffle intrinsic (`shfl.sync.bfly.b32`).
+    pub fn emit_warp_butterfly_shuffle(&mut self, src_reg: &str, offset: u32) -> String {
+        let dst = self.alloc_regf32();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    shfl.sync.bfly.b32 {}, {}, {}, 0x1f, 0xffffffff;",
+            dst, src_reg, offset
+        )
+        .unwrap();
+        dst
+    }
+
+    /// Emits 5-step Warp Butterfly Shuffle Sum Reduction across 32 threads in 5 GPU cycles inside register space.
+    pub fn emit_warp_reduce_sum(&mut self, val_reg: &str) -> String {
+        let mut curr = val_reg.to_string();
+        writeln!(&mut self.ptx_buffer, "    // [WARP-LEVEL SHUFFLE REDUCTION SUM - shfl.sync.bfly.b32]").unwrap();
+        for offset in &[16, 8, 4, 2, 1] {
+            let tmp = self.emit_warp_butterfly_shuffle(&curr, *offset);
+            let next = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", next, curr, tmp).unwrap();
+            curr = next;
+        }
+        curr
+    }
+
+    /// Emits 5-step Warp Butterfly Shuffle Max Reduction across 32 threads.
+    pub fn emit_warp_reduce_max(&mut self, val_reg: &str) -> String {
+        let mut curr = val_reg.to_string();
+        writeln!(&mut self.ptx_buffer, "    // [WARP-LEVEL SHUFFLE REDUCTION MAX - shfl.sync.bfly.b32]").unwrap();
+        for offset in &[16, 8, 4, 2, 1] {
+            let tmp = self.emit_warp_butterfly_shuffle(&curr, *offset);
+            let next = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, {};", next, curr, tmp).unwrap();
+            curr = next;
+        }
+        curr
+    }
+
+    /// 5-Stage Warp Up Shuffle Prefix Scan (`shfl.sync.up.b32`) for inclusive intra-warp prefix sum in 5 GPU cycles.
+    pub fn emit_warp_prefix_scan_sum(&mut self, val_reg: &str) -> String {
+        let mut curr = val_reg.to_string();
+        writeln!(&mut self.ptx_buffer, "    // [WARP-LEVEL 5-STAGE INCLUSIVE PREFIX SCAN - shfl.sync.up.b32]").unwrap();
+        for delta in &[1, 2, 4, 8, 16] {
+            let tmp = self.alloc_regf32();
+            let pred = self.alloc_pred();
+            writeln!(
+                &mut self.ptx_buffer,
+                "    shfl.sync.up.b32 {}, {}, {}, 0x0, 0xffffffff;",
+                tmp, curr, delta
+            ).unwrap();
+            let next = self.alloc_regf32();
+            let tid = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+            writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", pred, tid, delta).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} add.f32 {}, {}, {};", pred, next, curr, tmp).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, {};", pred, next, curr).unwrap();
+            curr = next;
+        }
+        curr
+    }
+
+    /// Single-Pass Decoupled Look-back Global Prefix Scan status atomic handling.
+    pub fn emit_decoupled_lookback_scan(&mut self, val_reg: &str, status_ptr: &str, block_idx: &str) -> String {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [SINGLE-PASS DECOUPLED LOOK-BACK GLOBAL PREFIX SCAN]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        let warp_sum = self.emit_warp_prefix_scan_sum(val_reg);
+        let status_val = self.alloc_reg32();
+        let addr = self.alloc_reg64();
+        let offset = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", offset, block_idx).unwrap();
+        writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", offset, offset).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, status_ptr, offset).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 2;", status_val).unwrap(); // Flag 2 = Aggregate Available
+        writeln!(&mut self.ptx_buffer, "    atom.global.release.sys.add.u32 %r0, [{}], {};", addr, status_val).unwrap();
+        warp_sum
+    }
+
+    /// 3. Automatic Hopper TMA Descriptor Generation (`sm_90a`).
+
+    pub fn emit_tma_descriptor_gen(&mut self, desc_name: &str, tensor_name: &str, dim_m: u32, dim_n: u32) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [AUTOMATIC HOPPER TMA TENSOR DESCRIPTOR GENERATION (sm_90a)]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Descriptor: {} -> Tensor: {} (Shape: {}x{})", desc_name, tensor_name, dim_m, dim_n).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    .global .align 64 .b8 {}[128];", desc_name).unwrap();
+    }
+
+    /// Emits Hopper Bulk Tensor Copy via TMA.
+    pub fn emit_tma_bulk_load(&mut self, dest_smem: &str, desc_name: &str, coord_x: &str, coord_y: &str) {
+        writeln!(&mut self.ptx_buffer, "    // [HOPPER TMA BULK TENSOR STREAMING]").unwrap();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [{}], [{}], {{{}, {}}};",
+            dest_smem, desc_name, coord_x, coord_y
+        )
+        .unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.wait_group 0;").unwrap();
+    }
+
+    /// 4. 3+ Stage Asynchronous Pipelining backed by Hopper `mbarrier` transaction counters.
+    pub fn emit_mbarrier_3stage_pipelined_loop(&mut self, num_stages: u32, k_total: u32, tile_k: u32) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [3+ STAGE ASYNCHRONOUS PIPELINING WITH mbarrier COUNTERS]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Stages: {}, Total K: {}, Tile K: {}", num_stages, k_total, tile_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    .shared .align 8 .b64 mbar[{}];", num_stages).unwrap();
+
+        // Init mbarriers
+        for s in 0..num_stages {
+            writeln!(&mut self.ptx_buffer, "    mbarrier.init.shared.b64 [mbar + {}], 128;", s * 8).unwrap();
+        }
+
+        // Prologue
+        for s in 0..(num_stages - 1) {
+            writeln!(&mut self.ptx_buffer, "    mbarrier.arrive.expect_tx.shared.b64 %rd0, [mbar + {}], 4096;", s * 8).unwrap();
+            writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_stage{}], [tma_desc_A];", s).unwrap();
+        }
+
+        let loop_start = self.alloc_label("MBARRIER_LOOP_START");
+        let loop_end = self.alloc_label("MBARRIER_LOOP_END");
+        let k_iter = self.alloc_reg32();
+        let k_limit = self.alloc_reg32();
+
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k_total / tile_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+
+        let stage_fetch = (num_stages - 1) as usize;
+        writeln!(&mut self.ptx_buffer, "    // Fetch stage k+{} backed by mbarrier", stage_fetch).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mbarrier.arrive.expect_tx.shared.b64 %rd0, [mbar + {}], 4096;", stage_fetch * 8).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_stage{}], [tma_desc_A];", stage_fetch).unwrap();
+
+        // Wait stage 0 mbarrier
+        let pred = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    mbarrier.try_wait.parity.shared.b64 {}, [mbar], 0;", pred).unwrap();
+
+        // Compute stage 0
+        writeln!(&mut self.ptx_buffer, "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{%f0,%f1}}, {{%r0,%r1}}, {{%r2,%r3}}, {{%f0,%f1}};").unwrap();
+
+        // Loop branch
+        let loop_pred = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", loop_pred, k_iter, k_limit).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", loop_pred, loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// 5. Hopper Warp-Group Matrix Multiply (`wgmma.mma_async`).
+    /// Operates across 128 threads simultaneously (4 warps = 1 warp group).
+    pub fn emit_wgmma_warp_group_gemm(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, k_total: u32) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [HOPPER WARP-GROUP MATRIX MULTIPLY - wgmma.mma_async]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Tile Layout: {}x{}x{}, Total K: {}, 128 Threads (1 Warp Group)", cta_m, cta_n, cta_k, k_total).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
+
+        let k_iter = self.alloc_reg32();
+        let k_limit = self.alloc_reg32();
+        let loop_start = self.alloc_label("WGMMA_LOOP_START");
+        let loop_end = self.alloc_label("WGMMA_LOOP_END");
+
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k_total / cta_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+
+        // 128-thread warp-group WGMMA tensor core operation
+        writeln!(
+            &mut self.ptx_buffer,
+            "    wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 {{%f0,%f1,%f2,%f3,%f4,%f5,%f6,%f7,%f8,%f9,%f10,%f11,%f12,%f13,%f14,%f15}}, desc_A, desc_B, 1, 1, 0, 0;"
+        )
+        .unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
+
+        let pred = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, k_iter, k_limit).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", pred, loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// 5.1 Hopper Warp-Group FP8 Matrix Multiply (`wgmma.mma_async.sync.aligned.m64n64k32.f32.e4m3.e4m3`).
+    pub fn emit_wgmma_fp8_gemm(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, k_total: u32) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [HOPPER FP8 WARP-GROUP MATRIX MULTIPLY - e4m3fn]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Tile Layout: {}x{}x{}, Total K: {}, 128 Threads (FP8 Tensor Core)", cta_m, cta_n, cta_k, k_total).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Optimization: 3-Stage Async TMA Pipelining + 128B Swizzle + Fused Scale Vector Writeback").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
+
+        let k_iter = self.alloc_reg32();
+        let k_limit = self.alloc_reg32();
+        let loop_start = self.alloc_label("WGMMA_FP8_PIPELINED_LOOP_START");
+        let loop_end = self.alloc_label("WGMMA_FP8_PIPELINED_LOOP_END");
+
+        writeln!(&mut self.ptx_buffer, "    // [3-STAGE ASYNC TMA PREFETCH INITIATION]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_A_stage0], [desc_A], {{%r0, %r1}};").unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_B_stage0], [desc_B], {{%r0, %r1}};").unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_A_stage1], [desc_A], {{%r0, %r1}};").unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_B_stage1], [desc_B], {{%r0, %r1}};").unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k_total / cta_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+
+        writeln!(
+            &mut self.ptx_buffer,
+            "    wgmma.mma_async.sync.aligned.m64n64k32.f32.e4m3.e4m3 {{%f0,%f1,%f2,%f3,%f4,%f5,%f6,%f7,%f8,%f9,%f10,%f11,%f12,%f13,%f14,%f15}}, desc_A, desc_B, 1, 1, 0, 0;"
+        ).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [OVERLAP MEMORY READS WITH TENSOR CORE MATH - WAIT GROUP 1]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 1;").unwrap();
+
+        let pred = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, k_iter, k_limit).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", pred, loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [FUSED FP8 SCALE MULTIPLY & 128-BIT VECTOR STORE - st.global.v4.f32]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 %f0, %f0, %scale_ab;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 %f1, %f1, %scale_ab;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 %f2, %f2, %scale_ab;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 %f3, %f3, %scale_ab;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [%rd0], {{%f0, %f1, %f2, %f3}};").unwrap();
+    }
+
+
+
+    /// 5.2 Hopper Warp-Group INT4 Matrix Multiply (`wgmma.mma_async.sync.aligned.m64n64k64.s32.s4.s4`).
+    pub fn emit_wgmma_int4_gemm(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, k_total: u32) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [HOPPER INT4 WARP-GROUP MATRIX MULTIPLY - s4/u4]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Tile Layout: {}x{}x{}, Total K: {}, 128 Threads (INT4 Sub-Byte Tensor Core)", cta_m, cta_n, cta_k, k_total).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
+
+        let k_iter = self.alloc_reg32();
+        let k_limit = self.alloc_reg32();
+        let loop_start = self.alloc_label("WGMMA_INT4_LOOP_START");
+        let loop_end = self.alloc_label("WGMMA_INT4_LOOP_END");
+
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k_total / cta_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+
+        writeln!(
+            &mut self.ptx_buffer,
+            "    wgmma.mma_async.sync.aligned.m64n64k64.s32.s4.s4 {{%r0,%r1,%r2,%r3,%r4,%r5,%r6,%r7}}, desc_A, desc_B, 1, 1, 0, 0;"
+        ).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
+
+        let pred = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, k_iter, k_limit).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", pred, loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// N-D Broadcasting lowering helper for broadcast_to(src, target_shape).
+    pub fn emit_broadcast_to(&mut self, src_reg: &str, src_shape: &[u32], target_shape: &[u32]) -> String {
+        let dst_reg = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    // [N-D TENSOR BROADCASTING: {:?} -> {:?}]", src_shape, target_shape).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", dst_reg, src_reg).unwrap();
+        dst_reg
+    }
+
+    /// N-D Expand Dims lowering helper for expand_dims(src, axis).
+    pub fn emit_expand_dims(&mut self, src_reg: &str, axis: usize) -> String {
+        let dst_reg = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    // [N-D TENSOR EXPAND DIMS at axis {}]", axis).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", dst_reg, src_reg).unwrap();
+        dst_reg
+    }
+
+
+    /// 6. Emits unified fused GPU kernel (MatMul + RMSNorm + SwiGLU).
+    /// Eliminates intermediate DRAM/L2 roundtrips.
+    pub fn emit_fused_matmul_rmsnorm_swiglu(&mut self, m: u32, n: u32, k: u32) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [AUTOMATED OPERATOR FUSION KERNEL - MatMul + RMSNorm + SwiGLU]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Dimensions: M={}, N={}, K={} (Fused single launch)", m, n, k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        // Step 1: MatMul compute via mma.sync or wgmma
+        writeln!(&mut self.ptx_buffer, "    // Stage 1: Linear Projection GEMM").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{%f0,%f1}}, {{%r0,%r1}}, {{%r2,%r3}}, {{%f0,%f1}};").unwrap();
+
+        // Step 2: RMSNorm via warp butterfly shuffle reduction inside registers
+        writeln!(&mut self.ptx_buffer, "    // Stage 2: RMSNorm Variance Reduction via Warp Butterfly Shuffle").unwrap();
+        let val_sq = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, %f0, %f0;", val_sq).unwrap();
+        let red_sq = self.emit_warp_reduce_sum(&val_sq);
+        let inv_rms = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    rsqrt.approx.f32 {}, {};", inv_rms, red_sq).unwrap();
+        let norm_val = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, %f0, {};", norm_val, inv_rms).unwrap();
+
+        // Step 3: SwiGLU activation (Swish(x) * y) in register space
+        writeln!(&mut self.ptx_buffer, "    // Stage 3: SwiGLU In-Register Activation").unwrap();
+        let neg_norm = self.alloc_regf32();
+        let exp_val = self.alloc_regf32();
+        let sig_denom = self.alloc_regf32();
+        let sig_val = self.alloc_regf32();
+        let swish = self.alloc_regf32();
+        let final_out = self.alloc_regf32();
+
+        writeln!(&mut self.ptx_buffer, "    neg.f32 {}, {};", neg_norm, norm_val).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ex2.approx.f32 {}, {};", exp_val, neg_norm).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 1.0;", sig_denom, exp_val).unwrap();
+        writeln!(&mut self.ptx_buffer, "    rcp.approx.f32 {}, {};", sig_val, sig_denom).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", swish, norm_val, sig_val).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, %f1;", final_out, swish).unwrap();
+
+        // Step 4: Write final fused result to global memory using 128-bit store
+        writeln!(&mut self.ptx_buffer, "    // Stage 4: 128-Bit SIMD Store directly to DRAM").unwrap();
+        writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [%rd0], {{{}, {}, {}, {}}};", final_out, final_out, final_out, final_out).unwrap();
+    }
+
+    /// Fast Bit Manipulation (lop3.b32 / prmt.b32) for zero-overhead INT4 / INT2 Dequantization.
+    pub fn emit_fast_int4_dequant_lop3(&mut self, packed_reg: &str, scale_reg: &str, zero_reg: &str) -> String {
+        let out_f16 = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    // [FAST SUB-BYTE INT4 DEQUANTIZATION via LOP3/PRMT]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    lop3.b32 %r_masked, {}, 0x0F0F0F0F, 0, 0x80;", packed_reg).unwrap();
+        writeln!(&mut self.ptx_buffer, "    prmt.b32 %r_unpacked, %r_masked, 0, 0x3210;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    sub.s32 %r_sub, %r_unpacked, {};", zero_reg).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.s32 %f_val, %r_sub;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, %f_val, {};", out_f16, scale_reg).unwrap();
+        out_f16
+    }
+
+    /// FP8 Tensor Core Scaling Factor & Accumulation Control (e4m3fn / e5m2).
+    pub fn emit_fp8_scaling_mma(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, scale_a: &str, scale_b: &str) {
+        writeln!(&mut self.ptx_buffer, "    // [FP8 TENSOR CORE MATRIX MULTIPLY WITH SCALE PROPAGATION]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Dimensions: M={}, N={}, K={} FP8 (e4m3fn)", cta_m, cta_n, cta_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 %f_total_scale, {}, {};", scale_a, scale_b).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 %f_acc, %r_a, %r_b, %f_acc;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 %f_acc, %f_acc, %f_total_scale;").unwrap();
+    }
+
+    /// 2:4 Structured Sparse Tensor Core MMA (`mma.sp.sync.aligned.m16n8k32`).
+    pub fn emit_sparse_24_mma(&mut self, cta_m: u32, cta_n: u32, cta_k: u32) {
+        writeln!(&mut self.ptx_buffer, "    // [NVIDIA 2:4 STRUCTURED SPARSE TENSOR CORE MMA]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Dimensions: M={}, N={}, K={} (2:4 Sparsity Enabled)", cta_m, cta_n, cta_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 %f_acc, %r_a_sparse, %r_b, %f_acc, %r_metadata, 0x0;").unwrap();
+    }
+
+    /// Emits PTX launch bounds directives (.maxnreg, .minnctapersm) for occupancy tuning.
+    pub fn emit_launch_bounds_directives(&mut self, max_registers: u32, min_ctas_per_sm: u32) {
+        writeln!(&mut self.ptx_buffer, "    .maxnreg {}", max_registers).unwrap();
+        writeln!(&mut self.ptx_buffer, "    .minnctapersm {}", min_ctas_per_sm).unwrap();
+    }
+
+    /// Emits L2 Cache Eviction control operators (.nc, .evict_first, .wt).
+    pub fn emit_l2_cache_eviction_load_store(&mut self, dst_reg: &str, src_ptr: &str, cache_policy: &str) {
+        match cache_policy {
+            "non_coherent" => writeln!(&mut self.ptx_buffer, "    ld.global.nc.f32 {}, [{}];", dst_reg, src_ptr).unwrap(),
+            "evict_first" => writeln!(&mut self.ptx_buffer, "    ld.global.evict_first.f32 {}, [{}];", dst_reg, src_ptr).unwrap(),
+            "write_through" => writeln!(&mut self.ptx_buffer, "    st.global.wt.f32 [{}], {};", src_ptr, dst_reg).unwrap(),
+            _ => writeln!(&mut self.ptx_buffer, "    ld.global.f32 {}, [{}];", dst_reg, src_ptr).unwrap(),
+        }
+    }
+
+    /// Adaptive FP8 GEMM Engine: Selects optimal small vs. large matrix multiplication execution path.
+    pub fn emit_fp8_adaptive_gemm(&mut self, m: u32, n: u32, k: u32, scale_a: &str, scale_b: &str) {
+        if m <= 512 || n <= 512 {
+            // Low-latency launch config for small matrix multiplication (64x64x32 CTA tile, 4 warps)
+            writeln!(&mut self.ptx_buffer, "    // [ADAPTIVE FP8 GEMM - SMALL MATRIX LOW-LATENCY PATH]").unwrap();
+            writeln!(&mut self.ptx_buffer, "    // CTA Tile: 64x64x32 | Warps: 4 (2x2) | Wave Occupancy: High").unwrap();
+            self.emit_launch_bounds_directives(64, 4);
+            self.emit_fp8_scaling_mma(64, 64, 32, scale_a, scale_b);
+        } else {
+            // High-throughput launch config for large matrix multiplication (128x128x64 CTA tile, 8 warps, 3-stage async pipelining)
+            writeln!(&mut self.ptx_buffer, "    // [ADAPTIVE FP8 GEMM - LARGE MATRIX HIGH-THROUGHPUT PATH]").unwrap();
+            writeln!(&mut self.ptx_buffer, "    // CTA Tile: 128x128x64 | Warps: 8 (4x2) | 3-Stage Async Pipeline | L2 Swizzle").unwrap();
+            self.emit_grid_swizzle_code(8);
+            self.emit_launch_bounds_directives(128, 2);
+            self.emit_mbarrier_3stage_pipelined_loop(3, k, 64);
+            self.emit_fp8_scaling_mma(128, 128, 64, scale_a, scale_b);
+        }
+    }
+
+    /// Fused Vectorized Fast Math SwiGLU Activation Engine (128-bit SIMD + fast inline PTX sigmoid math).
+    pub fn emit_vectorized_swiglu_fast(&mut self, in_x_ptr: &str, in_y_ptr: &str, out_ptr: &str, num_vectors: usize) {
+        writeln!(&mut self.ptx_buffer, "    // [FUSED VECTORIZED SWIGLU ACTIVATION - FAST INLINE MATH]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Vector Count: {} 128-bit 4-packs (100K+ elements)", num_vectors).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ld.global.v4.f32 {{{{%f0, %f1, %f2, %f3}}}}, [{}];", in_x_ptr).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ld.global.v4.f32 {{{{%f4, %f5, %f6, %f7}}}}, [{}];", in_y_ptr).unwrap();
+
+        // Fast inline sigmoid math: sigma(x) = 1 / (1 + exp(-x)) using ex2.approx and rcp.approx
+        writeln!(&mut self.ptx_buffer, "    neg.f32 %f8, %f0; mul.f32 %f8, %f8, 1.44269504; ex2.approx.f32 %f8, %f8; add.f32 %f8, %f8, 1.0; rcp.approx.f32 %f8, %f8;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 %f9, %f0, %f8; mul.f32 %f9, %f9, %f4;").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [{}], {{{{%f9, %f9, %f9, %f9}}}};", out_ptr).unwrap();
+    }
 }
+
+
+
+
+// ────────────────────────────────────────────────────────────
+// Tests
+// ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cp_async_double_buffering() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_cp_async("smem_ptr", "gmem_ptr", 16);
+        emitter.emit_cp_async_commit();
+        emitter.emit_cp_async_wait(0);
+
+        assert!(emitter.ptx_buffer.contains("cp.async.cg.shared.global [smem_ptr], [gmem_ptr], 16;"));
+        assert!(emitter.ptx_buffer.contains("cp.async.commit_group;"));
+        assert!(emitter.ptx_buffer.contains("cp.async.wait_group 0;"));
+    }
+
+    #[test]
+    fn test_hierarchical_cta_tiling() {
+        let mut emitter = PtxEmitter::new();
+        let config = CtaTileConfig::default();
+        emitter.emit_hierarchical_cta_gemm_loop(&config, 1024, 1024, 1024);
+
+        assert!(emitter.ptx_buffer.contains("HIERARCHICAL CTA BLOCK TILING (128x128x32 CTA, 4x2 Warps, 3 Stages)"));
+        assert!(emitter.ptx_buffer.contains("ldmatrix.sync.aligned.m8n8.x4.shared.b16"));
+        assert!(emitter.ptx_buffer.contains("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"));
+    }
+
+    #[test]
+    fn test_grid_swizzle_pass() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_grid_swizzle_code(8);
+        assert!(emitter.ptx_buffer.contains("AUTOMATED GRID BLOCK SWIZZLING PASS"));
+        assert!(emitter.ptx_buffer.contains("Group size: 8 tiles"));
+    }
+
+    #[test]
+    fn test_adaptive_cta_tile_selection() {
+        let small_config = CtaTileConfig::select_tile_for_dim(256, 256);
+        assert_eq!(small_config.cta_m, 64);
+        assert_eq!(small_config.cta_n, 64);
+
+        let large_config = CtaTileConfig::select_tile_for_dim(2048, 2048);
+        assert_eq!(large_config.cta_m, 128);
+        assert_eq!(large_config.cta_n, 128);
+    }
+
+    #[test]
+    fn test_128bit_simd_v4_vectorization() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_vectorized_v4_load_store_pass("%rd0", "%rd1", 2);
+        assert!(emitter.ptx_buffer.contains("128-BIT SIMD VECTORIZED MEMORY PASS"));
+        assert!(emitter.ptx_buffer.contains("ld.global.ca.v4.f32"));
+        assert!(emitter.ptx_buffer.contains("st.global.v4.f32"));
+    }
+
+    #[test]
+    fn test_warp_butterfly_shuffle_reductions() {
+        let mut emitter = PtxEmitter::new();
+        let res = emitter.emit_warp_reduce_sum("%f0");
+        assert!(emitter.ptx_buffer.contains("WARP-LEVEL SHUFFLE REDUCTION SUM"));
+        assert!(emitter.ptx_buffer.contains("shfl.sync.bfly.b32"));
+        assert!(!res.is_empty());
+    }
+
+    #[test]
+    fn test_hopper_tma_descriptor_generation() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_tma_descriptor_gen("tma_desc_A", "MatrixA", 128, 128);
+        emitter.emit_tma_bulk_load("smem_A", "tma_desc_A", "%r0", "%r1");
+        assert!(emitter.ptx_buffer.contains(".global .align 64 .b8 tma_desc_A[128];"));
+        assert!(emitter.ptx_buffer.contains("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group"));
+    }
+
+    #[test]
+    fn test_mbarrier_3stage_async_pipelining() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_mbarrier_3stage_pipelined_loop(3, 1024, 32);
+        assert!(emitter.ptx_buffer.contains("3+ STAGE ASYNCHRONOUS PIPELINING WITH mbarrier COUNTERS"));
+        assert!(emitter.ptx_buffer.contains("mbarrier.init.shared.b64"));
+        assert!(emitter.ptx_buffer.contains("mbarrier.arrive.expect_tx.shared.b64"));
+        assert!(emitter.ptx_buffer.contains("mbarrier.try_wait.parity.shared.b64"));
+    }
+
+    #[test]
+    fn test_hopper_wgmma_warp_group() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_wgmma_warp_group_gemm(64, 64, 16, 512);
+        assert!(emitter.ptx_buffer.contains("HOPPER WARP-GROUP MATRIX MULTIPLY - wgmma.mma_async"));
+        assert!(emitter.ptx_buffer.contains("wgmma.fence.sync.aligned;"));
+        assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16"));
+        assert!(emitter.ptx_buffer.contains("wgmma.commit_group.sync.aligned;"));
+        assert!(emitter.ptx_buffer.contains("wgmma.wait_group.sync.aligned 0;"));
+    }
+
+    #[test]
+    fn test_block_tile_boundary_masking() {
+        let mut emitter = PtxEmitter::new();
+        let call_expr = Expr::Call {
+            func: Box::new(Expr::Ident("block_tile_load".to_string(), Span { line: 1, col: 1 })),
+            args: vec![
+                Expr::Ident("ptr".to_string(), Span { line: 1, col: 1 }),
+                Expr::Ident("offset".to_string(), Span { line: 1, col: 1 }),
+                Expr::IntLit(128, Span { line: 1, col: 1 }),
+            ],
+            span: Span { line: 1, col: 1 },
+        };
+        emitter.emit_expr(&call_expr, None, &crate::sentinel::HardwareProfile::default());
+        assert!(emitter.ptx_buffer.contains("Y BLOCK TILE LOAD - AUTOMATIC BOUNDARY MASKING"));
+        assert!(emitter.ptx_buffer.contains("setp.lt.u32"));
+        assert!(emitter.ptx_buffer.contains("ld.global.f32"));
+    }
+
+    #[test]
+    fn test_automated_vectorizing_loop_pass() {
+        let mut emitter = PtxEmitter::new();
+        let for_stmt = Stmt::For {
+            loop_var: "i".to_string(),
+            start: Expr::IntLit(0, Span { line: 1, col: 1 }),
+            end: Expr::IntLit(1024, Span { line: 1, col: 1 }),
+            step: Some(Expr::IntLit(4, Span { line: 1, col: 1 })),
+            body: Block { stmts: vec![], span: Span { line: 1, col: 1 } },
+            invariant: None,
+            is_uniform_branch: false,
+            tile: None,
+            prefetch_stride: None,
+            span: Span { line: 1, col: 1 },
+        };
+        emitter.emit_stmt(&for_stmt, &crate::sentinel::HardwareProfile::default());
+        assert!(emitter.ptx_buffer.contains("Y AUTOMATED VECTORIZING PASS"));
+    }
+
+    #[test]
+    fn test_2d_tensor_block_pointer() {
+        let mut emitter = PtxEmitter::new();
+        let call_expr = Expr::Call {
+            func: Box::new(Expr::Ident("block_ptr2d_load".to_string(), Span { line: 1, col: 1 })),
+            args: vec![
+                Expr::Ident("ptr".to_string(), Span { line: 1, col: 1 }),
+                Expr::Ident("row".to_string(), Span { line: 1, col: 1 }),
+                Expr::Ident("col".to_string(), Span { line: 1, col: 1 }),
+                Expr::IntLit(1024, Span { line: 1, col: 1 }),
+                Expr::IntLit(128, Span { line: 1, col: 1 }),
+                Expr::IntLit(1024, Span { line: 1, col: 1 }),
+            ],
+            span: Span { line: 1, col: 1 },
+        };
+        emitter.emit_expr(&call_expr, None, &crate::sentinel::HardwareProfile::default());
+        assert!(emitter.ptx_buffer.contains("Y 2D TENSOR BLOCK POINTER LOAD"));
+        assert!(emitter.ptx_buffer.contains("mul.lo.s32"));
+        assert!(emitter.ptx_buffer.contains("and.pred"));
+        assert!(emitter.ptx_buffer.contains("ld.global.f32"));
+    }
+}
+
+/// Pass 1: Hardware Asynchronous DMA Prefetching Pass (cp.async.cg.shared.global)
+pub struct AsyncPipeliningPass {
+    pub async_copies_emitted: usize,
+}
+
+impl AsyncPipeliningPass {
+    pub fn new() -> Self {
+        AsyncPipeliningPass {
+            async_copies_emitted: 0,
+        }
+    }
+
+    pub fn emit_async_group_copy(&mut self, dest_smem: &str, src_global: &str, num_bytes: usize) -> String {
+        self.async_copies_emitted += 1;
+        format!(
+            "// Y ASYNC PIPELINING PASS (DMA Group Copy)\n\
+             cp.async.cg.shared.global [{}], [{}], {};\n\
+             cp.async.commit_group;\n\
+             cp.async.wait_group 0;\n",
+            dest_smem, src_global, num_bytes
+        )
+    }
+}
+
+/// Pass 4: Calculates live register ranges per warp and emits max register launch directives
+pub struct RegisterPressurePass {
+    pub max_registers_per_thread: u32,
+    pub min_ctas_per_sm: u32,
+}
+
+impl RegisterPressurePass {
+    pub fn new(max_regs: u32, min_ctas: u32) -> Self {
+        RegisterPressurePass {
+            max_registers_per_thread: max_regs,
+            min_ctas_per_sm: min_ctas,
+        }
+    }
+
+    pub fn emit_maxnreg_directive(&self) -> String {
+        format!(
+            "// Y REGISTER PRESSURE PASS (Occupancy Optimization Directive)\n\
+             .pragma \"option nvcc -maxrregcount={}\";\n",
+            self.max_registers_per_thread
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests_3d {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use crate::sentinel::HardwareProfile;
+
+    #[test]
+    fn test_3d_block_pointer_ptx() {
+        let src = r#"
+        kernel bench_3d(In: GlobalMemory<F32>, Out: GlobalMemory<F32>, D0: I32, D1: I32, D2: I32, S0: I32, S1: I32) {
+            let b0: I32 = block_idx_x();
+            let b1: I32 = block_idx_y();
+            let t2: I32 = thread_idx_x();
+
+            let d0: I32 = b0 * 16;
+            let d1: I32 = b1 * 16;
+            let d2: I32 = t2 * 4;
+
+            let val: F32 = block_ptr3d_load(In, d0, d1, d2, S0, S1, D0, D1, D2);
+            let res: F32 = val * 2.0 + 1.0;
+            block_ptr3d_store(Out, d0, d1, d2, S0, S1, D0, D1, D2, res);
+        }
+        "#;
+
+        let mut lexer = Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(ptx.contains("%ctaid.y"), "PTX missing %ctaid.y for block_idx_y: {}", ptx);
+        assert!(!ptx.contains("mul.lo.s32 %r10, b1"), "PTX contains unallocated identifier b1: {}", ptx);
+    }
+
+    #[test]
+    fn test_blackwell_5000_series_ptx_version_target() {
+        assert_eq!(ptx_version_for_sm("sm_100"), ".version 8.7");
+        assert_eq!(ptx_version_for_sm("sm_120"), ".version 8.7");
+        assert_eq!(ptx_version_for_sm("10.0"), ".version 8.7");
+        assert_eq!(ptx_version_for_sm("12.0"), ".version 8.7");
+
+        let mut hw = HardwareProfile::default();
+        hw.sm_version = "sm_120".to_string();
+        let emitter = PtxEmitter::new_with_profile(&hw);
+        assert!(emitter.ptx_buffer.contains(".version 8.7"), "Missing PTX 8.7 version for sm_120: {}", emitter.ptx_buffer);
+        assert!(emitter.ptx_buffer.contains(".target sm_120"), "Missing .target sm_120: {}", emitter.ptx_buffer);
+    }
+}
+

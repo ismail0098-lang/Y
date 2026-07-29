@@ -360,6 +360,28 @@ impl CoprocessorScheduler {
                                     first_barrier,
                                 );
                             }
+                            TensorCoreMapping::Wgmma { m, n, k } => {
+                                writeln!(&mut out, "    // [HOPPER WGMMA WARP-GROUP MATRIX MULTIPLY] {}x{}x{}", m, n, k).unwrap();
+                                writeln!(&mut out, "    wgmma.fence.sync.aligned;").unwrap();
+                                writeln!(&mut out, "    wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 {{%f0, %f1, %f2, %f3}}, %r0, %r1;").unwrap();
+                                writeln!(&mut out, "    wgmma.commit_group.sync.aligned;").unwrap();
+                                writeln!(&mut out, "    wgmma.wait_group.sync.aligned 0;").unwrap();
+                            }
+                            TensorCoreMapping::FusedOp { kind, m, n, k } => {
+                                writeln!(&mut out, "    // [FUSED OPERATOR KERNEL: {:?}] {}x{}x{}", kind, m, n, k).unwrap();
+                                self.emit_mma_sync(
+                                    &mut out,
+                                    *m,
+                                    *n,
+                                    *k,
+                                    Precision::FP16,
+                                    Precision::FP32,
+                                    hw,
+                                    &mut smem_load_offset,
+                                    &mut first_mma,
+                                    first_barrier,
+                                );
+                            }
                         }
                     } else {
                         writeln!(
@@ -482,3 +504,70 @@ impl CoprocessorScheduler {
         ).unwrap();
     }
 }
+
+// ────────────────────────────────────────────────────────────
+// Tests
+// ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::Span;
+
+    #[test]
+    fn test_interleaved_double_buffer() {
+        let mut graph = IrGraph::new();
+        let hw = HardwareProfile::default();
+
+        graph.nodes.push(IrNode {
+            id: 0,
+            pipeline: Pipeline::RtCore,
+            rt_mapping: None,
+            tensor_mapping: None,
+            estimated_cycles: 133.0,
+            label: "bvh_traversal".to_string(),
+            span: Span { line: 0, col: 0 },
+            output_precision: Precision::FP32,
+            needs_quantization: true,
+            smem_bytes: 1024,
+        });
+
+        graph.nodes.push(IrNode {
+            id: 1,
+            pipeline: Pipeline::TensorCore,
+            rt_mapping: None,
+            tensor_mapping: Some(TensorCoreMapping::MmaSync {
+                m: 16,
+                n: 16,
+                k: 16,
+                input_precision: Precision::FP16,
+                accumulator_precision: Precision::FP32,
+            }),
+            estimated_cycles: 64.0,
+            label: "tensor_projection".to_string(),
+            span: Span { line: 0, col: 0 },
+            output_precision: Precision::FP32,
+            needs_quantization: false,
+            smem_bytes: 1024,
+        });
+
+        graph.edges.push(IrEdge {
+            from: 0,
+            to: 1,
+            transfer_bytes: 1024,
+            crosses_pipeline: true,
+        });
+
+        let mut scheduler = CoprocessorScheduler::new();
+        scheduler.schedule(&graph, &hw);
+
+        assert_eq!(scheduler.schedule.rt_slots.len(), 1);
+        assert_eq!(scheduler.schedule.tensor_slots.len(), 1);
+        assert!(scheduler.schedule.overlap_savings_cycles > 0.0);
+
+        let ptx = scheduler.emit_fused_ptx(&graph, &hw);
+        assert!(ptx.contains("Y DUAL-ACCELERATOR CO-PROCESSING SCHEDULE"));
+        assert!(ptx.contains("mma.sync.aligned.m16n16k16"));
+    }
+}
+
