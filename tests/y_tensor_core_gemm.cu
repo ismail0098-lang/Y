@@ -114,13 +114,14 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
     }
 
     auto load_stage = [&](int stage, int k_curr) {
-        // Tile A: 128 rows x 32 halfs = 4096 halfs = 256 uint4s (128-bit vector per thread)
+        // Tile A: 128 rows x 32 halfs = 4096 halfs = 256 16-half packs (2 uint4s per thread)
         int r = tid / 2;        // 0..127
         int c = (tid % 2) * 16; // 0, 16
         int gmem_r = cta_m + r;
         int gmem_c = k_curr + c;
         if (gmem_r < M && (gmem_c + 15) < K) {
-            *reinterpret_cast<uint4*>(&smem_A[stage][r][c]) = *reinterpret_cast<const uint4*>(&A[gmem_r * K + gmem_c]);
+            *reinterpret_cast<uint4*>(&smem_A[stage][r][c])     = *reinterpret_cast<const uint4*>(&A[gmem_r * K + gmem_c]);
+            *reinterpret_cast<uint4*>(&smem_A[stage][r][c + 8]) = *reinterpret_cast<const uint4*>(&A[gmem_r * K + gmem_c + 8]);
         } else {
             #pragma unroll
             for (int e = 0; e < 16; ++e) {
@@ -132,13 +133,14 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
             }
         }
 
-        // Tile B: 32 rows x 128 halfs = 4096 halfs = 256 uint4s (128-bit vector per thread)
+        // Tile B: 32 rows x 128 halfs = 4096 halfs = 256 16-half packs (2 uint4s per thread)
         int br = tid / 8;        // 0..31
         int bc = (tid % 8) * 16;  // 0, 16, 32, ..., 112
         int bgmem_r = k_curr + br;
         int bgmem_c = cta_n + bc;
         if (bgmem_r < K && (bgmem_c + 15) < N) {
-            *reinterpret_cast<uint4*>(&smem_B[stage][br][bc]) = *reinterpret_cast<const uint4*>(&B[bgmem_r * N + bgmem_c]);
+            *reinterpret_cast<uint4*>(&smem_B[stage][br][bc])     = *reinterpret_cast<const uint4*>(&B[bgmem_r * N + bgmem_c]);
+            *reinterpret_cast<uint4*>(&smem_B[stage][br][bc + 8]) = *reinterpret_cast<const uint4*>(&B[bgmem_r * N + bgmem_c + 8]);
         } else {
             #pragma unroll
             for (int e = 0; e < 16; ++e) {
@@ -187,36 +189,27 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
         read_stage = 1 - read_stage;
     }
 
-    // Epilogue Store with Boundary Protection for Arbitrary/Unaligned Shapes
-    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_C_half[2][4];
+    // Epilogue Store with Float-to-Half Conversion via Shared Buffer
+    __shared__ alignas(16) float smem_C_buf[8][16][16];
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
         #pragma unroll
         for (int j = 0; j < 4; ++j) {
-            #pragma unroll
-            for (int e = 0; e < 8; ++e) {
-                frag_C_half[i][j].x[e] = __float2half(frag_C[i][j].x[e]);
-            }
             int out_m = cta_m + warp_m * 32 + i * 16;
             int out_n = cta_n + warp_n * 64 + j * 16;
-            if (out_m + 15 < M && out_n + 15 < N) {
-                wmma::store_matrix_sync(&C[out_m * N + out_n], frag_C_half[i][j], N, wmma::mem_row_major);
-            } else if (out_m < M && out_n < N) {
-                __shared__ alignas(16) half smem_C_buf[8][16][16];
-                wmma::store_matrix_sync(&smem_C_buf[warp_id][0][0], frag_C_half[i][j], 16, wmma::mem_row_major);
-                __syncthreads();
-                int lane = tid % 32;
-                if (lane < 16) {
-                    for (int c_idx = 0; c_idx < 16; ++c_idx) {
-                        int r_gmem = out_m + lane;
-                        int c_gmem = out_n + c_idx;
-                        if (r_gmem < M && c_gmem < N) {
-                            C[r_gmem * N + c_gmem] = smem_C_buf[warp_id][lane][c_idx];
-                        }
+            wmma::store_matrix_sync(&smem_C_buf[warp_id][0][0], frag_C[i][j], 16, wmma::mem_row_major);
+            __syncthreads();
+            int lane = tid % 32;
+            if (lane < 16) {
+                for (int c_idx = 0; c_idx < 16; ++c_idx) {
+                    int r_gmem = out_m + lane;
+                    int c_gmem = out_n + c_idx;
+                    if (r_gmem < M && c_gmem < N) {
+                        C[r_gmem * N + c_gmem] = __float2half(smem_C_buf[warp_id][lane][c_idx]);
                     }
                 }
-                __syncthreads();
             }
+            __syncthreads();
         }
     }
 }
