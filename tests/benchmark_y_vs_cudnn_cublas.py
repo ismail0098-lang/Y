@@ -205,6 +205,8 @@ def main():
             smem_size = 65536
 
         cp.cuda.Device(0).synchronize()
+        if smem_size > 48128:
+            target_gemm_kernel.max_dynamic_shared_size_bytes = smem_size
         for _ in range(50):
             target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K), shared_mem=smem_size)
         cp.cuda.Device(0).synchronize()
