@@ -104,14 +104,24 @@ def run_benchmarks():
     arch_target = f"sm_{cap_major}{cap_minor}a" if cap_major == 9 else f"sm_{cap_major}{cap_minor}"
     include_options = []
     possible_inc_dirs = ["/usr/local/cuda/include", "/usr/include"]
-    import site
-    for site_pkg in site.getsitepackages():
-        nvidia_dir = os.path.join(site_pkg, "nvidia")
-        if os.path.exists(nvidia_dir):
-            for sub in os.listdir(nvidia_dir):
-                inc_path = os.path.join(nvidia_dir, sub, "include")
-                if os.path.exists(inc_path):
-                    possible_inc_dirs.append(inc_path)
+    search_paths = list(sys.path)
+    try:
+        import site
+        search_paths.extend(site.getsitepackages())
+    except Exception:
+        pass
+    for p in search_paths:
+        if os.path.exists(p):
+            nvidia_dir = os.path.join(p, "nvidia")
+            if os.path.exists(nvidia_dir):
+                for sub in os.listdir(nvidia_dir):
+                    inc_path = os.path.join(nvidia_dir, sub, "include")
+                    if os.path.exists(inc_path) and inc_path not in possible_inc_dirs:
+                        possible_inc_dirs.append(inc_path)
+            triton_inc = os.path.join(p, "triton", "backends", "nvidia", "include")
+            if os.path.exists(triton_inc) and triton_inc not in possible_inc_dirs:
+                possible_inc_dirs.append(triton_inc)
+
     for d in possible_inc_dirs:
         if os.path.exists(d):
             include_options.append(f"-I{d}")
