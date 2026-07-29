@@ -5343,12 +5343,12 @@ extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_wgmma_fused_bias_r
             int out_m = cta_m + warp_m * 64 + i * 32;
             int out_n = cta_n + warp_n * 64 + j * 32;
             if (out_m < M && out_n + 7 < N) {
-                uint4 b_vec = *reinterpret_cast<const uint4*>(&bias[out_n]);
+                uint4 b_vec = bias != nullptr ? *reinterpret_cast<const uint4*>(&bias[out_n]) : make_uint4(0, 0, 0, 0);
                 const half* b_h = reinterpret_cast<const half*>(&b_vec);
                 #pragma unroll
                 for (int e = 0; e < 8; ++e) {
-                    float sum = d[warp_m * 2 + i][warp_n * 2 + j] + __half2float(b_h[e]);
-                    float relu_val = sum > 0.0f ? sum : 0.0f;
+                    float sum = d[warp_m * 2 + i][warp_n * 2 + j] + (bias != nullptr ? __half2float(b_h[e]) : 0.0f);
+                    float relu_val = (bias != nullptr) ? (sum > 0.0f ? sum : 0.0f) : sum;
                     C[out_m * N + out_n + e] = __float2half(relu_val);
                 }
             }
