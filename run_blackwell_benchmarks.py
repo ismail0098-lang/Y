@@ -321,10 +321,7 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
             y_end.synchronize()
             y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
 
-            C_y_single = cp.zeros((M, N), dtype=cp.float16)
-            kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
-            cp.cuda.Device(0).synchronize()
-            y_out = torch.from_dlpack(C_y_single)
+            y_out = torch.from_dlpack(C_y)
             ref_out = C_ref
             parity_passed = verify_parity(y_out, ref_out, shape_str=f"{M}x{N}x{K}")
             parity = "PASSED" if parity_passed else "WARN"
