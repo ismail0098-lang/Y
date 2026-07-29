@@ -42,6 +42,29 @@ fn ptx_version_for_sm(sm: &str) -> &'static str {
     }
 }
 
+/// Kernel Dispatch Strategy for H100 / Hopper / Blackwell architectures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelDispatch {
+    /// Single-token decode ONLY (M = 1): Use Split-K GEMV.
+    SplitKGemv,
+    /// Batch 16/32 prompt eval (1 < M <= 64): BYPASS SPLIT-K AND ATOMICS ENTIRELY.
+    /// Launch direct 32x128 TMA Tile kernel (y_hopper_small_m_gemm_kernel).
+    SmallMDirectTma,
+    /// Large dense GEMM (M > 64): Full 256x128 WGMMA cluster kernel.
+    WgmmClusterGemm,
+}
+
+/// Restructures the kernel dispatcher so Split-K is strictly restricted to M = 1.
+pub fn dispatch_kernel(m: u32, _n: u32, _k: u32) -> KernelDispatch {
+    if m == 1 {
+        KernelDispatch::SplitKGemv
+    } else if m > 1 && m <= 64 {
+        KernelDispatch::SmallMDirectTma
+    } else {
+        KernelDispatch::WgmmClusterGemm
+    }
+}
+
 /// Configuration for Hierarchical 2D CTA Block Tile Decomposition ($128 \times 128 \times 32$)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CtaTileConfig {

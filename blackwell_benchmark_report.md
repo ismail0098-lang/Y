@@ -7,25 +7,25 @@
 ## 1. Standalone Dense GEMM Benchmarks (M=N=K)
 | Matrix (M=N=K) | cuBLAS (us) | Y Compiler (us) | Y TFLOPS | Speedup vs cuBLAS | Parity |
 |---|:---:|:---:|:---:|:---:|:---:|
-| 512x512x512 | 9.99 | 23.20 | 11.57 | 0.43x | PASSED |
-| 1024x1024x1024 | 61.44 | 54.48 | 39.42 | 1.13x | PASSED |
-| 2048x2048x2048 | 618.35 | 1050.09 | 16.36 | 0.59x | PASSED |
-| 4096x4096x4096 | 6137.23 | 2949.09 | 46.60 | 2.08x | PASSED |
-| 8192x8192x8192 | 13078.53 | 22227.56 | 49.47 | 0.59x | PASSED |
-| 16384x16384x16384 | 101878.10 | 213629.36 | 41.17 | 0.48x | WARN |
+| 512x512x512 | 7.21 | 15.73 | 17.07 | 0.46x | WARN |
+| 1024x1024x1024 | 33.67 | 38.36 | 55.98 | 0.88x | WARN |
+| 2048x2048x2048 | 377.65 | 595.46 | 28.85 | 0.63x | WARN |
+| 4096x4096x4096 | 6447.92 | 2882.36 | 47.68 | 2.24x | WARN |
+| 8192x8192x8192 | 12994.94 | 22452.90 | 48.97 | 0.58x | WARN |
+| 16384x16384x16384 | 102440.86 | 213541.38 | 41.19 | 0.48x | WARN |
 
 ## 2. Real-World LLM Inference & Prompt Decoding Shapes
 | Shape (M x N x K) | Workload Description | cuBLAS (us) | Y Split-K (us) | Memory Bandwidth | Speedup | Parity |
 |---|---|:---:|:---:|:---:|:---:|:---:|
-| 1x4096x4096 | LLaMA 7B Single-Token Decode | 66.52 | 38.28 | 877.0 GB/s | 1.74x | PASSED |
-| 1x11008x4096 | LLaMA 7B SwiGLU FFN Gate/Up | 188.14 | 169.49 | 532.2 GB/s | 1.11x | WARN |
-| 16x4096x4096 | Batch 16 Prompt Evaluation | 50.67 | 40.20 | 841.2 GB/s | 1.26x | PASSED |
-| 32x4096x4096 | Batch 32 Prompt Evaluation | 24.06 | 42.21 | 807.4 GB/s | 0.57x | PASSED |
+| 1x4096x4096 | LLaMA 7B Single-Token Decode | 67.24 | 38.03 | 882.6 GB/s | 1.77x | PASSED |
+| 1x11008x4096 | LLaMA 7B SwiGLU FFN Gate/Up | 160.09 | 495.51 | 182.1 GB/s | 0.32x | PASSED |
+| 16x4096x4096 | Batch 16 Prompt Evaluation | 50.65 | 39.38 | 858.7 GB/s | 1.29x | PASSED |
+| 32x4096x4096 | Batch 32 Prompt Evaluation | 24.07 | 41.23 | 826.6 GB/s | 0.58x | PASSED |
 
 ## 3. Fused Neural Network Layers (Y Compiler vs PyTorch Fused GEMM+Bias+ReLU)
 | Matrix (M=N=K) | PyTorch Fused (us) | Y Compiler Fused (us) | Speedup vs PyTorch |
 |---|:---:|:---:|:---:|
-| 512x512x512 | 10.24 | 14.60 | 0.70x |
-| 1024x1024x1024 | 35.01 | 29.78 | 1.18x |
-| 2048x2048x2048 | 231.28 | 156.30 | 1.48x |
-| 4096x4096x4096 | 1834.19 | 1217.26 | 1.51x |
+| 512x512x512 | 10.25 | 14.60 | 0.70x |
+| 1024x1024x1024 | 35.00 | 29.61 | 1.18x |
+| 2048x2048x2048 | 235.92 | 158.33 | 1.49x |
+| 4096x4096x4096 | 1851.53 | 1219.99 | 1.52x |
