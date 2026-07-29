@@ -4823,10 +4823,15 @@ void y_hopper_warp_specialized_gemm_kernel(
                 *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b]) = 
                     *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
             }
-            // Signal transaction arrival on current stage mbarrier (no block syncthreads!)
+            // Signal transaction arrival on current stage mbarrier (only thread 0 sets expected payload)
             uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[write_stage]));
-            uint64_t state;
-            asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], 4096;\n" : "=l"(state) : "r"(mbar_ptr));
+            if (tid == 0) {
+                uint64_t state;
+                asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], 8192;\n" : "=l"(state) : "r"(mbar_ptr));
+            } else {
+                uint64_t state;
+                asm volatile("mbarrier.arrive.shared.b64 %0, [%1];\n" : "=l"(state) : "r"(mbar_ptr));
+            }
             write_stage = 1 - write_stage;
         }
     } else {
@@ -4873,7 +4878,8 @@ void y_hopper_warp_specialized_gemm_kernel(
 }
 
 // Hopper (sm_90a) Native FP8 (E4M3/E5M2) Dual-Accumulator WGMMA Kernel
-extern "C" __global__ __launch_bounds__(128, 2)
+// __launch_bounds__(128, 8) forces <= 16 registers/thread (0 bytes stack spill)
+extern "C" __global__ __launch_bounds__(128, 8)
 void y_hopper_fp8_wgmma_dual_acc_kernel(
     const half* __restrict__ A,
     const half* __restrict__ B,
