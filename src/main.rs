@@ -512,10 +512,18 @@ fn main() {
             "output.coprocessor.ptx".to_string()
         };
 
-        // Wrap in a PTX module
+        // Wrap in a PTX module with dynamic target SM
+        let target_sm = if hw_profile.sm_version.starts_with("sm_") {
+            hw_profile.sm_version.clone()
+        } else if !hw_profile.sm_version.is_empty() && hw_profile.sm_version != "0.0" {
+            format!("sm_{}", hw_profile.sm_version.replace('.', ""))
+        } else {
+            "sm_80".to_string()
+        };
+
         let mut full_ptx = String::new();
-        full_ptx.push_str(".version 8.0\n");
-        full_ptx.push_str(".target sm_89\n");
+        full_ptx.push_str(".version 7.5\n");
+        full_ptx.push_str(&format!(".target {}\n", target_sm));
         full_ptx.push_str(".address_size 64\n\n");
         full_ptx.push_str("// =======================================================\n");
         full_ptx.push_str("// Y Compiler - Dual-Accelerator Co-Processing Backend\n");
