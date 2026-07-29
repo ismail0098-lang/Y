@@ -1,5 +1,9 @@
 {
   "files.associations": {
     "*.ysu": "Y"
-  }
+  },
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/venv/lib/python3.14/site-packages"
+  ]
 }

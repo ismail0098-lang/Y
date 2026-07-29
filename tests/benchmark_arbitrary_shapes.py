@@ -27,12 +27,11 @@ def main():
     # Compile Y CuPy Module
     y_mod = cp.RawModule(code=CUDA_SRC, options=("-std=c++17", "--use_fast_math"))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
-    y_gemm_large.max_dynamic_shared_size_bytes = 65536
     y_gemm_256x128 = y_mod.get_function("y_tensor_core_gemm_256x128_kernel")
-    y_gemm_256x128.max_dynamic_shared_size_bytes = 98304
     y_gemm_small64 = y_mod.get_function("y_fused_gemm_small_64x64_kernel")
     y_gemm_micro = y_mod.get_function("y_fused_gemm_barrier_free_16x32_kernel")
-    y_gemm_splitk = y_mod.get_function("y_fused_gemm_splitk_32x64_kernel")
+    y_splitk_ws = y_mod.get_function("y_fused_gemm_splitk_workspace_kernel")
+    y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
 
     shape_categories = [
         ("CATEGORY 1: STANDARD POWER-OF-2 SHAPES", [
@@ -90,57 +89,48 @@ def main():
             cublas_us = (start_evt.elapsed_time(end_evt) / iters) * 1000.0
 
             # Y Kernel Selection & Execution
-            smem_size = 0
-            is_unaligned = (M % 64 != 0) or (N % 64 != 0) or (K % 16 != 0)
-
-            if is_unaligned:
-                grid_m = (M + 127) // 128
-                grid_n = (N + 127) // 128
-                threads = 256
-                target_kernel = y_gemm_large
-                smem_size = 65536
-            elif M <= 16:
+            if M <= 16:
+                k_splits = 16 if M == 1 else 4
+                workspace = cp.zeros((k_splits, M, N), dtype=cp.float32)
                 grid_m = (M + 31) // 32
                 grid_n = (N + 63) // 64
-                threads = 64
-                target_kernel = y_gemm_splitk
-            elif M <= 256 and N <= 256:
-                grid_m = (M + 15) // 16
-                grid_n = (N + 31) // 32
-                threads = 32
-                target_kernel = y_gemm_micro
-            elif M <= 512 and N <= 512:
-                grid_m = (M + 63) // 64
-                grid_n = (N + 63) // 64
                 threads = 128
-                target_kernel = y_gemm_small64
-            elif M >= 4096 and N >= 4096:
-                grid_m = (M + 255) // 256
-                grid_n = (N + 127) // 128
-                threads = 256
-                target_kernel = y_gemm_256x128
-                smem_size = 98304
+                total_elems = M * N
+                red_blocks = (total_elems + 255) // 256
+
+                for _ in range(warmup):
+                    workspace.fill(0)
+                    y_splitk_ws((grid_n, grid_m, k_splits), (threads, 1, 1), (A_cp, B_cp, workspace, M, N, K, k_splits))
+                    y_splitk_red((red_blocks, 1, 1), (256, 1, 1), (workspace, C_y, total_elems, M, N, k_splits))
+                cp.cuda.Device(0).synchronize()
+
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(iters):
+                    workspace.fill(0)
+                    y_splitk_ws((grid_n, grid_m, k_splits), (threads, 1, 1), (A_cp, B_cp, workspace, M, N, K, k_splits))
+                    y_splitk_red((red_blocks, 1, 1), (256, 1, 1), (workspace, C_y, total_elems, M, N, k_splits))
+                y_end.record()
+                y_end.synchronize()
+                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iters) * 1000.0
             else:
                 grid_m = (M + 127) // 128
                 grid_n = (N + 127) // 128
                 threads = 256
-                target_kernel = y_gemm_large
-                smem_size = 65536
 
-            cp.cuda.Device(0).synchronize()
-            for _ in range(warmup):
-                C_y.fill(0)
-                target_kernel((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K), shared_mem=smem_size)
-            cp.cuda.Device(0).synchronize()
+                for _ in range(warmup):
+                    y_gemm_large((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                cp.cuda.Device(0).synchronize()
 
-            y_start = cp.cuda.Event()
-            y_end = cp.cuda.Event()
-            y_start.record()
-            for _ in range(iters):
-                target_kernel((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K), shared_mem=smem_size)
-            y_end.record()
-            y_end.synchronize()
-            y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iters) * 1000.0
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(iters):
+                    y_gemm_large((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                y_end.record()
+                y_end.synchronize()
+                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iters) * 1000.0
 
             # Parity Check
             C_y_torch = torch.from_dlpack(C_y)
