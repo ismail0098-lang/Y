@@ -282,12 +282,12 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
             torch.cuda.synchronize()
             cublas_us = (start_c.elapsed_time(end_c) / float(iters)) * 1000.0
 
-            if cap_major == 9 and y_hopper_wgmma_fused is not None:
+            if cap_major == 9 and y_hopper_wgmma is not None:
                 grid_m = (M + 127) // 128
                 grid_n = (N + 127) // 128
                 threads = 128
-                kernel_fn = y_hopper_wgmma_fused
-                k_args = (A_cp, B_cp, 0, C_y, M, N, K)
+                kernel_fn = y_hopper_wgmma
+                k_args = (A_cp, B_cp, C_y, M, N, K)
             elif dim <= 512:
                 grid_m = (M + 15) // 16
                 grid_n = (N + 31) // 32
