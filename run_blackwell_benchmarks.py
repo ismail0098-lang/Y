@@ -149,6 +149,10 @@ def run_benchmarks():
         except Exception:
             pass
 
+    y_hopper_wgmma = None
+    y_hopper_ws = None
+    y_hopper_fp8 = None
+
     # Optional Hopper sm_90a WGMMA & Cluster Kernels with explicit cuLaunchKernelEx cluster launch config
     try:
         y_hopper_wgmma = y_mod.get_function("y_hopper_wgmma_tma_gemm_kernel")
@@ -229,7 +233,12 @@ def run_benchmarks():
         torch.cuda.synchronize()
         cublas_us = (start_c.elapsed_time(end_c) / float(iters)) * 1000.0
 
-        if dim <= 512:
+        if cap_major == 9 and y_hopper_wgmma is not None and dim >= 1024:
+            grid_m = (M + 127) // 128
+            grid_n = (N + 127) // 128
+            threads = 128
+            kernel_fn = y_hopper_wgmma
+        elif dim <= 512:
             grid_m = (M + 15) // 16
             grid_n = (N + 31) // 32
             threads = 32
