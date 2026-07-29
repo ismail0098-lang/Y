@@ -244,43 +244,47 @@ def run_benchmarks():
         torch.cuda.synchronize()
         cublas_us = (start_c.elapsed_time(end_c) / float(iters)) * 1000.0
 
-        if cap_major == 9 and y_hopper_wgmma is not None and dim >= 1024:
+        if cap_major == 9 and y_hopper_wgmma_fused is not None:
             grid_m = (M + 127) // 128
             grid_n = (N + 127) // 128
             threads = 128
-            kernel_fn = y_hopper_wgmma
+            kernel_fn = y_hopper_wgmma_fused
+            k_args = (A_cp, B_cp, 0, C_y, M, N, K)
         elif dim <= 512:
             grid_m = (M + 15) // 16
             grid_n = (N + 31) // 32
             threads = 32
             kernel_fn = y_barrier_free
+            k_args = (A_cp, B_cp, C_y, M, N, K)
         elif dim <= 1024:
             grid_m = (M + 63) // 64
             grid_n = (N + 63) // 64
             threads = 128
             kernel_fn = y_gemm_64x64
+            k_args = (A_cp, B_cp, C_y, M, N, K)
         else:
             grid_m = (M + 127) // 128
             grid_n = (N + 127) // 128
             threads = 256
             kernel_fn = y_gemm_large
+            k_args = (A_cp, B_cp, C_y, M, N, K)
 
         # Warmup Y
         for _ in range(50):
-            kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+            kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
         cp.cuda.Device(0).synchronize()
 
         y_start = cp.cuda.Event()
         y_end = cp.cuda.Event()
         y_start.record()
         for _ in range(iters):
-            kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+            kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
         y_end.record()
         y_end.synchronize()
         y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
 
         C_y_single = cp.zeros((M, N), dtype=cp.float16)
-        kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y_single, M, N, K))
+        kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
         cp.cuda.Device(0).synchronize()
         C_y_torch = torch.from_dlpack(C_y_single)
         is_close = torch.allclose(C_y_torch, C_ref, atol=5e-1, rtol=1e-1)
@@ -352,28 +356,38 @@ def run_benchmarks():
             y_end.synchronize()
             y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
         elif M <= 32:
-            if cap_major == 9 and y_hopper_small_m is not None:
-                grid_m = (M + 15) // 16
-                grid_n = (N + 63) // 64
+            if cap_major == 9 and y_hopper_wgmma_fused is not None:
+                grid_m = (M + 127) // 128
+                grid_n = (N + 127) // 128
                 threads = 128
-                target_k = y_hopper_small_m
+                for _ in range(10):
+                    y_hopper_wgmma_fused((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, 0, C_y, M, N, K))
+                cp.cuda.Device(0).synchronize()
+
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(50):
+                    y_hopper_wgmma_fused((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, 0, C_y, M, N, K))
+                y_end.record()
+                y_end.synchronize()
+                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
             else:
                 grid_m = (M + 31) // 32
                 grid_n = (N + 63) // 64
                 threads = 128
-                target_k = y_gemm_32x64
-            for _ in range(10):
-                target_k((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-            cp.cuda.Device(0).synchronize()
+                for _ in range(10):
+                    y_gemm_32x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                cp.cuda.Device(0).synchronize()
 
-            y_start = cp.cuda.Event()
-            y_end = cp.cuda.Event()
-            y_start.record()
-            for _ in range(50):
-                target_k((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-            y_end.record()
-            y_end.synchronize()
-            y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(50):
+                    y_gemm_32x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                y_end.record()
+                y_end.synchronize()
+                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
         else:
             k_splits = 16 if M == 1 else 4
             workspace = cp.zeros((k_splits, M, N), dtype=cp.float32)
