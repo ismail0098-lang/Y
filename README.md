@@ -1,4 +1,5 @@
-Y -----  A Systems Language and Compiler for GPU/CPU Hardware-Aware Code Generation
+Y 
+-----  A Systems Language and Compiler for GPU/CPU Hardware-Aware Code Generation
 
 Y is a compiler and systems language for writing hardware-aware code across CPU (x86/AVX-512) and GPU (NVIDIA PTX) targets. It also includes a zero-knowledge circuit compiler (R1CS constraint generation) and a dual-accelerator co-processor pipeline that automatically fuses RT Core and Tensor Core workloads.
 
