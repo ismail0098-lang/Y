@@ -4086,7 +4086,8 @@ extern "C" __global__ __launch_bounds__(128, 4) void y_fused_gemm_bias_relu_smal
 }
 
 
-// Standalone Optimized FP8 Tensor Core MMA GEMM kernel (128x128x64 CTA Tile + 128B XOR SMEM Swizzle + 4-Stage cp.async + In-Register Scale Fusion + m16n8k32 mma.sync)
+// // Standalone Optimized FP8 Tensor Core MMA GEMM kernel (128x128x64 CTA Tile + 128B XOR SMEM Swizzle + 4-Stage cp.async + In-Register Scale Fusion + m16n8k32 mma.sync)
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 890
 extern "C" __global__ __launch_bounds__(256, 1) void y_fp8_tensor_core_gemm_kernel(
     const char* __restrict__ A,
     const char* __restrict__ B,
@@ -4300,9 +4301,9 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_fp8_tensor_core_gemm_kern
             }
 
             if (out_m1 < M && out_n + 1 < N) {
-                float v0 = frag_C[i][j][2] * total_scale;
-                float v1 = frag_C[i][j][3] * total_scale;
-                half2 val = __floats2half2_rn(v0, v1);
+                float v2 = frag_C[i][j][2] * total_scale;
+                float v3 = frag_C[i][j][3] * total_scale;
+                half2 val = __floats2half2_rn(v2, v3);
                 *reinterpret_cast<half2*>(&C[out_m1 * N + out_n]) = val;
             } else if (out_m1 < M && out_n < N) {
                 C[out_m1 * N + out_n] = __float2half(frag_C[i][j][2] * total_scale);
@@ -4310,6 +4311,18 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_fp8_tensor_core_gemm_kern
         }
     }
 }
+#else
+extern "C" __global__ __launch_bounds__(256, 1) void y_fp8_tensor_core_gemm_kernel(
+    const char* __restrict__ A,
+    const char* __restrict__ B,
+    half* __restrict__ C,
+    float scale_a,
+    float scale_b,
+    int M, int N, int K
+) {
+    // Stub for pre-Ada Lovelace GPUs (SM < 890)
+}
+#endif
 
 // 256x128x32 High-Throughput Standalone GEMM Kernel (256 threads, 4-Stage cp.async.cg, Double-Buffered ldmatrix)
 extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_256x128_kernel(
