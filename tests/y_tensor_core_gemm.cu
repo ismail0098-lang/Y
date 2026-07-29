@@ -73,6 +73,32 @@ __device__ __forceinline__ void mma_m16n8k16(
 
 // Standalone Y Tensor Core MMA GEMM simulation kernel (128x128x32 CTA Tile + 128B XOR SMEM Swizzle + 4-Stage cp.async + mma.sync)
 // 64 KB Dynamic Shared Memory Allocation (32KB smem_A + 32KB smem_B)
+__device__ __forceinline__ void get_morton_cta_coords(
+    int tile_idx, int grid_m, int grid_n,
+    int block_m, int block_n,
+    int& cta_m, int& cta_n
+) {
+    const int PANEL_M = 8;
+    const int PANEL_N = 8;
+    const int PANEL_SIZE = PANEL_M * PANEL_N;
+    int panel_idx = tile_idx / PANEL_SIZE;
+    int in_panel_idx = tile_idx % PANEL_SIZE;
+    int panels_in_n = (grid_n + PANEL_N - 1) / PANEL_N;
+    int panel_m = panel_idx / panels_in_n;
+    int panel_n = panel_idx % panels_in_n;
+    int in_m = ((in_panel_idx & 1)) | ((in_panel_idx & 4) >> 1) | ((in_panel_idx & 16) >> 2);
+    int in_n = ((in_panel_idx & 2) >> 1) | ((in_panel_idx & 8) >> 2) | ((in_panel_idx & 32) >> 3);
+    int block_idx_m = panel_m * PANEL_M + in_m;
+    int block_idx_n = panel_n * PANEL_N + in_n;
+    if (block_idx_m < grid_m && block_idx_n < grid_n) {
+        cta_m = block_idx_m * block_m;
+        cta_n = block_idx_n * block_n;
+    } else {
+        cta_m = blockIdx.y * block_m;
+        cta_n = blockIdx.x * block_n;
+    }
+}
+
 extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
     const half* __restrict__ A,
     const half* __restrict__ B,
@@ -83,17 +109,11 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
     const int BLOCK_N = 128;
     const int BLOCK_K = 32;
 
-    // 2D L2 Cache Swizzling (GROUP_SIZE_M = 8)
-    const int GROUP_SIZE_M = 8;
     int grid_m = (M + BLOCK_M - 1) / BLOCK_M;
     int grid_n = (N + BLOCK_N - 1) / BLOCK_N;
     int tile_idx = blockIdx.y * gridDim.x + blockIdx.x;
-    int num_tiles_in_group = GROUP_SIZE_M * grid_n;
-    int group_id = tile_idx / num_tiles_in_group;
-    int first_tile_m = group_id * GROUP_SIZE_M;
-    int group_size_m = min(grid_m - first_tile_m, GROUP_SIZE_M);
-    int cta_m = (first_tile_m + (tile_idx % group_size_m)) * BLOCK_M;
-    int cta_n = ((tile_idx / group_size_m) % grid_n) * BLOCK_N;
+    int cta_m, cta_n;
+    get_morton_cta_coords(tile_idx, grid_m, grid_n, BLOCK_M, BLOCK_N, cta_m, cta_n);
 
     // Padded Dynamic Shared Memory Allocation (32+8=40 stride for A, 128+8=136 stride for B to eliminate bank conflicts)
     __shared__ alignas(128) half smem_storage[20480 / 2];
