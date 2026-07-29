@@ -126,7 +126,7 @@ def run_benchmarks():
         if os.path.exists(d):
             include_options.append(f"-I{d}")
 
-    base_compile_options = ["-std=c++17", "--use_fast_math"] + include_options
+    base_compile_options = ["-std=c++17", "--use_fast_math", "--device-as-default-execution-space", "-w"] + include_options
     if cap_major >= 10:
         print("[*] Blackwell GPU detected (SM 10.0+)! Enabling Blackwell architecture targets.")
     elif cap_major == 9:

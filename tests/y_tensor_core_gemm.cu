@@ -1,8 +1,8 @@
-// tests/y_tensor_core_gemm.cu
 #include <mma.h>
 #include <cuda_fp16.h>
 
 typedef unsigned int uint32_t;
+typedef unsigned long long uint64_t;
 
 using namespace nvcuda;
 
@@ -1559,12 +1559,12 @@ extern "C" __global__ __launch_bounds__(256, 2) void y_fused_gemm_bias_relu_kern
     const int BLOCK_N = 128;
     const int BLOCK_K = 32;
 
-    extern __shared__ char raw_smem[];
-    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])raw_smem;
-    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&raw_smem[128 * 40 * sizeof(half)];
+    extern __shared__ char smem_buf_bias[];
+    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])smem_buf_bias;
+    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&smem_buf_bias[128 * 40 * sizeof(half)];
 
-    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&raw_smem[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
-    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&raw_smem[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&smem_buf_bias[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&smem_buf_bias[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
 
     int tid = threadIdx.x;
     int warpId = tid / 32; // 0..7
@@ -1737,7 +1737,7 @@ extern "C" __global__ __launch_bounds__(256, 2) void y_fused_gemm_bias_relu_kern
     }
 
     // Epilogue Shared Memory Reuse
-    float (*smem_C)[128 + 4] = (float (*)[128 + 4])raw_smem;
+    float (*smem_C)[128 + 4] = (float (*)[128 + 4])smem_buf_bias;
 
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -2184,12 +2184,12 @@ extern "C" __global__ void y_fused_layer1_fp32_in_fp16_out_kernel(
     const int BLOCK_N = 128;
     const int BLOCK_K = 32;
 
-    extern __shared__ char raw_smem[];
-    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])raw_smem;
-    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&raw_smem[128 * 40 * sizeof(half)];
+    extern __shared__ char smem_buf_bias16[];
+    half (*smem_A_0)[32 + 8] = (half (*)[32 + 8])smem_buf_bias16;
+    half (*smem_B_0)[128 + 8] = (half (*)[128 + 8])&smem_buf_bias16[128 * 40 * sizeof(half)];
 
-    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&raw_smem[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
-    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&raw_smem[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_A_1)[32 + 8] = (half (*)[32 + 8])&smem_buf_bias16[128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
+    half (*smem_B_1)[128 + 8] = (half (*)[128 + 8])&smem_buf_bias16[2 * 128 * 40 * sizeof(half) + 32 * 136 * sizeof(half)];
 
     int tid = threadIdx.x;
     int warpId = tid / 32;
@@ -2362,7 +2362,7 @@ extern "C" __global__ void y_fused_layer1_fp32_in_fp16_out_kernel(
         stage = next_stage;
     }
 
-    float (*smem_C_fp32)[128 + 4] = (float (*)[128 + 4])raw_smem;
+    float (*smem_C_fp32)[128 + 4] = (float (*)[128 + 4])smem_buf_bias16;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
         #pragma unroll
