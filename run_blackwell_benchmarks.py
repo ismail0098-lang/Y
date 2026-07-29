@@ -334,7 +334,7 @@ def run_benchmarks():
         torch.cuda.synchronize()
         cublas_us = (start_c.elapsed_time(end_c) / 50.0) * 1000.0
 
-        if M == 1 and N <= 4096:
+        if M == 1:
             grid_n = (N + 7) // 8
             for _ in range(10):
                 y_gemv_vec((grid_n, 1, 1), (256, 1, 1), (A_cp, B_cp, C_y, M, N, K))

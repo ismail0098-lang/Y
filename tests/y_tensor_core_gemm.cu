@@ -4766,10 +4766,22 @@ extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_wgmma_tma_gemm_ker
     }
 
     int warp_id = tid / 32;
-    int out_m = cta_m + (warp_id % 2) * 64;
-    int out_n = cta_n + (warp_id / 2) * 64;
-    if (out_m < M && out_n < N) {
-        C[out_m * N + out_n] = __float2half(d[0][0]);
+    int warp_m = warp_id % 2;
+    int warp_n = warp_id / 2;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            int out_m = cta_m + warp_m * 64 + i * 16;
+            int out_n = cta_n + warp_n * 64 + j * 16;
+            if (out_m < M && out_n + 7 < N) {
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    C[out_m * N + out_n + e] = __float2half(d[i][j]);
+                }
+            }
+        }
     }
 }
 
