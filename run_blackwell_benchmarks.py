@@ -142,9 +142,27 @@ def run_benchmarks():
     y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
     y_fused_bias_relu = y_mod.get_function("y_fused_gemm_bias_relu_fp16_kernel")
     
-    # Configure dynamic SMEM attribute (64KB) for Hopper sm_90a kernel
+    # Configure dynamic SMEM attribute (64KB - 96KB) for Hopper sm_90a kernels
+    for k_func in [y_gemm_large, y_gemm_64x64, y_fused_bias_relu]:
+        try:
+            k_func.max_dynamic_shared_size_bytes = 65536
+        except Exception:
+            pass
+
+    # Optional Hopper sm_90a WGMMA & Cluster Kernels
     try:
-        y_gemm_large.max_dynamic_shared_size_bytes = 65536
+        y_hopper_wgmma = y_mod.get_function("y_hopper_wgmma_tma_gemm_kernel")
+        y_hopper_wgmma.max_dynamic_shared_size_bytes = 65536
+    except Exception:
+        pass
+    try:
+        y_hopper_ws = y_mod.get_function("y_hopper_warp_specialized_gemm_kernel")
+        y_hopper_ws.max_dynamic_shared_size_bytes = 65536
+    except Exception:
+        pass
+    try:
+        y_hopper_fp8 = y_mod.get_function("y_hopper_fp8_wgmma_dual_acc_kernel")
+        y_hopper_fp8.max_dynamic_shared_size_bytes = 98304
     except Exception:
         pass
 
