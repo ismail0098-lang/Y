@@ -126,14 +126,18 @@ def run_benchmarks():
         if os.path.exists(d):
             include_options.append(f"-I{d}")
 
-    compile_options = ["-std=c++17", "--use_fast_math", f"-arch={arch_target}"] + include_options
+    base_compile_options = ["-std=c++17", "--use_fast_math"] + include_options
     if cap_major >= 10:
         print("[*] Blackwell GPU detected (SM 10.0+)! Enabling Blackwell architecture targets.")
     elif cap_major == 9:
         print(f"[*] Hopper GPU detected (sm_90a)! Enabling TMA & WGMMA architecture targets ({arch_target}).")
 
-    y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
-    y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
+    try:
+        y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(base_compile_options + [f"-arch={arch_target}"]))
+        y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
+    except Exception:
+        y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(base_compile_options))
+        y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
     y_gemm_64x64 = y_mod.get_function("y_tensor_core_gemm_64x64_kernel")
     y_gemv_vec = y_mod.get_function("y_gemv_fp16_vector_kernel")
     y_gemm_32x64 = y_mod.get_function("y_gemm_32x64_kernel")
@@ -149,7 +153,7 @@ def run_benchmarks():
         except Exception:
             pass
 
-    # Optional Hopper sm_90a WGMMA & Cluster Kernels
+    # Optional Hopper sm_90a WGMMA & Cluster Kernels with explicit cuLaunchKernelEx cluster launch config
     try:
         y_hopper_wgmma = y_mod.get_function("y_hopper_wgmma_tma_gemm_kernel")
         y_hopper_wgmma.max_dynamic_shared_size_bytes = 65536
@@ -165,6 +169,20 @@ def run_benchmarks():
         y_hopper_fp8.max_dynamic_shared_size_bytes = 98304
     except Exception:
         pass
+
+    # Setup Host-Side CUDA Driver API cuLaunchKernelEx for Cluster Attributes (sm_90a)
+    import ctypes
+    class CUlaunchAttributeValue(ctypes.Union):
+        _fields_ = [("clusterDim", ctypes.c_uint * 3)]
+    class CUlaunchAttribute(ctypes.Structure):
+        _fields_ = [("id", ctypes.c_int), ("val", CUlaunchAttributeValue)]
+    class CUlaunchConfig(ctypes.Structure):
+        _fields_ = [
+            ("gridDimX", ctypes.c_uint), ("gridDimY", ctypes.c_uint), ("gridDimZ", ctypes.c_uint),
+            ("blockDimX", ctypes.c_uint), ("blockDimY", ctypes.c_uint), ("blockDimZ", ctypes.c_uint),
+            ("sharedMemBytes", ctypes.c_uint), ("hStream", ctypes.c_void_p),
+            ("attrs", ctypes.POINTER(CUlaunchAttribute)), ("numAttrs", ctypes.c_uint)
+        ]
 
     report_lines = [
         f"# Blackwell / Next-Gen GPU Benchmark Report",
