@@ -124,10 +124,15 @@ impl PtxEmitter {
         let mut buffer = String::new();
         let raw_sm = hw_profile.sm_version.replace('.', "");
         let target = if !raw_sm.is_empty() {
-            if raw_sm.starts_with("sm_") {
+            let t = if raw_sm.starts_with("sm_") {
                 raw_sm
             } else {
                 format!("sm_{}", raw_sm)
+            };
+            if t == "sm_90" {
+                "sm_90a".to_string()
+            } else {
+                t
             }
         } else {
             "sm_80".to_string()
@@ -2002,7 +2007,7 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    // [AUTOMATIC HOPPER TMA TENSOR DESCRIPTOR GENERATION (sm_90a)]").unwrap();
         writeln!(&mut self.ptx_buffer, "    // Descriptor: {} -> Tensor: {} (Shape: {}x{})", desc_name, tensor_name, dim_m, dim_n).unwrap();
         writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    .global .align 64 .b8 {}[128];", desc_name).unwrap();
+        writeln!(&mut self.ptx_buffer, "    .global .align 128 .b8 {}[128];", desc_name).unwrap();
     }
 
     /// Emits Hopper Bulk Tensor Copy via TMA.
@@ -2236,6 +2241,7 @@ impl PtxEmitter {
         // Consumer Warpgroup Branch (Warps 1..3)
         writeln!(&mut self.ptx_buffer, "    {}:", consumer_label).unwrap();
         writeln!(&mut self.ptx_buffer, "    // [CONSUMER WARPGROUP 1..3: RUNNING CONTINUOUS WGMMA COMPUTATION]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mbarrier.try_wait.parity.shared.b64 %p0, [mbar], 0;").unwrap();
         writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
         writeln!(
             &mut self.ptx_buffer,
@@ -2480,7 +2486,7 @@ mod tests {
         let mut emitter = PtxEmitter::new();
         emitter.emit_tma_descriptor_gen("tma_desc_A", "MatrixA", 128, 128);
         emitter.emit_tma_bulk_load("smem_A", "tma_desc_A", "%r0", "%r1");
-        assert!(emitter.ptx_buffer.contains(".global .align 64 .b8 tma_desc_A[128];"));
+        assert!(emitter.ptx_buffer.contains(".global .align 128 .b8 tma_desc_A[128];"));
         assert!(emitter.ptx_buffer.contains("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group"));
     }
 

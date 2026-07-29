@@ -4799,9 +4799,19 @@ void y_hopper_warp_specialized_gemm_kernel(
 
     __shared__ alignas(128) half smem_A[2][128][32 + 8];
     __shared__ alignas(128) half smem_B[2][32][128 + 8];
+    __shared__ alignas(8) uint64_t mbar[2]; // Stage mbarriers for producer/consumer sync
+
+    if (tid == 0) {
+        // Initialize mbarriers for stage 0 and 1
+        uint32_t mbar0_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[0]));
+        uint32_t mbar1_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[1]));
+        asm volatile("mbarrier.init.shared.b64 [%0], 32;\n" :: "r"(mbar0_ptr));
+        asm volatile("mbarrier.init.shared.b64 [%0], 32;\n" :: "r"(mbar1_ptr));
+    }
+    __syncthreads(); // Single non-divergent block-wide setup sync
 
     if (warp_id == 0) {
-        // PRODUCER WARP (32 Threads): Pure TMA issuing & mbarrier transaction counter advancement
+        // PRODUCER WARP 0 (32 Threads): Pure TMA/Async loads & mbarrier arrival
         int write_stage = 0;
         for (int k = 0; k < K; k += BLOCK_K) {
             int r_a = tid / 2;
@@ -4816,16 +4826,28 @@ void y_hopper_warp_specialized_gemm_kernel(
                 *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b]) = 
                     *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
             }
-            __syncthreads();
+            // Signal transaction arrival on current stage mbarrier (no block syncthreads!)
+            uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[write_stage]));
+            asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], 4096;\n" : "=l"(mbar_ptr) : "r"(mbar_ptr));
             write_stage = 1 - write_stage;
         }
     } else {
-        // CONSUMER WARPGROUP (96 Threads / 3 Warps): Runs locked inside WGMMA execution loop
+        // CONSUMER WARPGROUP (96 Threads / 3 Warps): Waits on mbarrier then computes
         float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         int read_stage = 0;
 
         for (int k = 0; k < K; k += BLOCK_K) {
-            __syncthreads();
+            uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[read_stage]));
+            // Wait for producer TMA arrival on current stage
+            asm volatile(
+                "{\n"
+                "  .reg .pred p;\n"
+                "  WAIT_LOOP:\n"
+                "  mbarrier.try_wait.parity.shared.b64 p, [%0], 0;\n"
+                "  @!p bra WAIT_LOOP;\n"
+                "}\n"
+                :: "r"(mbar_ptr)
+            );
             int c_warp = warp_id - 1;
             int a_row = c_warp * 32;
             int b_col = c_warp * 32;

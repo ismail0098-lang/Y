@@ -31,9 +31,9 @@ def wrap_ptx(ptx_file, name="y_coprocessor_db_index", param_count=2):
         device_id = cp.cuda.Device(0).id
         major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, device_id)
         minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, device_id)
-        target_sm = f"sm_{major}{minor}"
+        target_sm = f"sm_{major}{minor}a" if major == 9 else f"sm_{major}{minor}"
     except Exception:
-        target_sm = "sm_90"
+        target_sm = "sm_90a"
 
     version_str = ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
     
@@ -197,7 +197,6 @@ def compile_and_run_benchmarks():
         print("[*] GPU access is restricted or blocked in this environment.")
         print("[*] Falling back to Cycle-Accurate Co-Processor Simulator Mode...")
         
-        import subprocess
         cmd = ["./target/release/Y", "tests/coprocessor_db_index.ysu", "--emit-coprocessor"]
         result = subprocess.run(cmd, capture_output=True, text=True)
         

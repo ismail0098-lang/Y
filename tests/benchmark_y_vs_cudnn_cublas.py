@@ -42,9 +42,9 @@ def wrap_ptx(ptx_file, entry_name, param_count=2):
         device_id = cp.cuda.Device(0).id
         major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, device_id)
         minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, device_id)
-        target_sm = f"sm_{major}{minor}"
+        target_sm = f"sm_{major}{minor}a" if major == 9 else f"sm_{major}{minor}"
     except Exception:
-        target_sm = "sm_90"
+        target_sm = "sm_90a"
 
     version_str = ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
 
@@ -148,10 +148,10 @@ def main():
         major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, dev.id)
         minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, dev.id)
         sm_ver = major * 10 + minor
-        arch_opt = f"-arch=sm_{major}{minor}"
+        arch_opt = f"-arch=sm_{major}{minor}a" if major == 9 else f"-arch=sm_{major}{minor}"
     except Exception:
         sm_ver = 90
-        arch_opt = "-arch=sm_90"
+        arch_opt = "-arch=sm_90a"
 
     compile_opts = ("-std=c++17", "--use_fast_math", arch_opt, "-I/usr/local/cuda/include")
 

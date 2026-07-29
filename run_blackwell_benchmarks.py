@@ -40,9 +40,11 @@ try:
     HAS_TRITON = True
 except ImportError:
     HAS_TRITON = False
+    triton = None
+    tl = None
 
 # Triton Fused GEMM + Bias + ReLU Kernel
-if HAS_TRITON:
+if HAS_TRITON and triton is not None and tl is not None:
     @triton.jit
     def triton_fused_bias_relu_kernel(
         a_ptr, b_ptr, bias_ptr, c_ptr,
@@ -99,15 +101,24 @@ def run_benchmarks():
     print("=" * 90)
 
     # NVRTC Compile Options
-    compile_options = ["-std=c++17", "--use_fast_math", f"-arch=sm_{cap_major}{cap_minor}"]
+    arch_target = f"sm_{cap_major}{cap_minor}a" if cap_major == 9 else f"sm_{cap_major}{cap_minor}"
+    compile_options = ["-std=c++17", "--use_fast_math", f"-arch={arch_target}"]
     if cap_major >= 10:
         print("[*] Blackwell GPU detected (SM 10.0+)! Enabling Blackwell architecture targets.")
+    elif cap_major == 9:
+        print(f"[*] Hopper GPU detected (sm_90a)! Enabling TMA & WGMMA architecture targets ({arch_target}).")
 
     y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
     y_splitk_ws = y_mod.get_function("y_fused_gemm_splitk_workspace_kernel")
     y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
     y_fused_bias_relu = y_mod.get_function("y_fused_gemm_bias_relu_fp16_kernel")
+    
+    # Configure dynamic SMEM attribute (64KB) for Hopper sm_90a kernel
+    try:
+        y_gemm_large.max_dynamic_shared_size_bytes = 65536
+    except Exception:
+        pass
 
     report_lines = [
         f"# Blackwell / Next-Gen GPU Benchmark Report",
