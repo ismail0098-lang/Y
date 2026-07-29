@@ -1852,16 +1852,21 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
 
         // 1. Issue async fetch for stage k + (num_stages - 1)
-        writeln!(&mut self.ptx_buffer, "    // Async Fetch Stage k+{}", config.num_stages - 1).unwrap();
-        let write_stage = (config.num_stages - 1) % config.num_stages;
-        self.emit_cp_async(&format!("smem_A_stage{}", write_stage), "%rd0", 16);
-        self.emit_cp_async(&format!("smem_B_stage{}", write_stage), "%rd1", 16);
+        let write_stage_reg = self.alloc_reg32();
+        let read_stage_reg = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    // Dynamic Stage Rotation (num_stages = {})", config.num_stages).unwrap();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", read_stage_reg, k_iter, config.num_stages).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", write_stage_reg, k_iter, config.num_stages - 1).unwrap();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", write_stage_reg, write_stage_reg, config.num_stages).unwrap();
+
+        self.emit_cp_async("smem_A", "%rd0", 16);
+        self.emit_cp_async("smem_B", "%rd1", 16);
         self.emit_cp_async_commit();
 
         // 2. Load stage k fragments from SMEM via 128B XOR swizzled ldmatrix
         writeln!(&mut self.ptx_buffer, "    // Stage k ldmatrix.x4 zero bank conflict load").unwrap();
-        writeln!(&mut self.ptx_buffer, "    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0,%r1,%r2,%r3}}, [smem_A_stage0];").unwrap();
-        writeln!(&mut self.ptx_buffer, "    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r4,%r5,%r6,%r7}}, [smem_B_stage0];").unwrap();
+        writeln!(&mut self.ptx_buffer, "    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0,%r1,%r2,%r3}}, [smem_A];").unwrap();
+        writeln!(&mut self.ptx_buffer, "    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r4,%r5,%r6,%r7}}, [smem_B];").unwrap();
 
         // 3. Tensor Core MMA execution across 4 fragments per warp
         writeln!(&mut self.ptx_buffer, "    // Warp MMA Execution (4 x mma.sync fragments per warp)").unwrap();
