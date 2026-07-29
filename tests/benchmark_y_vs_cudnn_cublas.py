@@ -18,6 +18,14 @@ except ImportError:
     print("[!] GPU libraries (PyTorch / CuPy) missing.")
     sys.exit(1)
 
+def set_smem_attribute(func_ptr, smem_size):
+    try:
+        import importlib
+        drv = importlib.import_module("cupy_backends.cuda.api.driver")
+        drv.funcSetAttribute(func_ptr, 8, smem_size)
+    except Exception as e:
+        print(f"[!] Dynamic SMEM attribute warning: {e}")
+
 def print_header(title):
     print("\n" + "=" * 80)
     print(f"{title:^80}")
@@ -229,11 +237,7 @@ def main():
 
         cp.cuda.Device(0).synchronize()
         if smem_size > 0:
-            try:
-                from cupy_backends.cuda.api import driver
-                driver.funcSetAttribute(target_gemm_kernel.kernel.ptr, 8, smem_size)
-            except Exception as e:
-                print(f"[!] Dynamic SMEM attribute warning: {e}")
+            set_smem_attribute(target_gemm_kernel.kernel.ptr, smem_size)
         for _ in range(50):
             target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K), shared_mem=smem_size)
         cp.cuda.Device(0).synchronize()
@@ -342,8 +346,7 @@ def main():
             threads_per_block = 256
             target_fused_kernel = y_fused_large_kernel
             smem_bytes = 68000
-            from cupy_backends.cuda.api import driver
-            driver.funcSetAttribute(y_fused_large_kernel.kernel.ptr, 8, 68000)
+            set_smem_attribute(y_fused_large_kernel.kernel.ptr, 68000)
 
         cp.cuda.Device(0).synchronize()
         for _ in range(20):

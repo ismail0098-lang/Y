@@ -2187,6 +2187,85 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
     }
 
+    /// Emits Thread Block Cluster dimensions directive (.cluster_dimensions x, y, z) for Hopper/Blackwell.
+    pub fn emit_cluster_dimensions(&mut self, x: u32, y: u32, z: u32) {
+        writeln!(&mut self.ptx_buffer, "    // [HOPPER/BLACKWELL CLUSTER DIMENSIONS]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    .cluster_dimensions {}, {}, {};", x, y, z).unwrap();
+    }
+
+    /// Emits Hopper TMA Multicast Bulk Tensor Load directly to Shared Memory of Cluster CTAs.
+    pub fn emit_tma_multicast_bulk_load(&mut self, dest_smem: &str, desc_name: &str, coord_x: &str, coord_y: &str, cluster_mask: &str) {
+        writeln!(&mut self.ptx_buffer, "    // [HOPPER TMA MULTICAST BROADCAST TO CLUSTER DSMEM]").unwrap();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    cp.async.bulk.tensor.multicast.shared::cluster.global.mbarrier::complete_tx::bytes [{}], [{}], {{{}, {}}}, {};",
+            dest_smem, desc_name, coord_x, coord_y, cluster_mask
+        )
+        .unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.wait_group 0;").unwrap();
+    }
+
+    /// Emits Warp-Specialized Producer/Consumer Pipeline (Warp 0 = TMA Producer, Warps 1..3 = WGMMA Consumer).
+    pub fn emit_warp_specialized_producer_consumer_pipeline(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, k_total: u32) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [WARP-SPECIALIZED PRODUCER/CONSUMER PIPELINE]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Warp 0: TMA Producer (<=16 regs) | Warps 1..3: Consumer WGMMA (96 Threads)").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Tile: {}x{}x{}, Total K: {}", cta_m, cta_n, cta_k, k_total).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        let tid_reg = self.alloc_reg32();
+        let warp_id_reg = self.alloc_reg32();
+        let is_producer = self.alloc_pred();
+        let producer_label = self.alloc_label("PRODUCER_LOOP");
+        let consumer_label = self.alloc_label("CONSUMER_WARPGROUP_LOOP");
+        let end_label = self.alloc_label("WARP_SPEC_END");
+
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid_reg).unwrap();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp_id_reg, tid_reg).unwrap();
+        writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, 0;", is_producer, warp_id_reg).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", is_producer, producer_label).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", consumer_label).unwrap();
+
+        // Producer Warp Branch (Warp 0)
+        writeln!(&mut self.ptx_buffer, "    {}:", producer_label).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [PRODUCER WARP 0: ISSUING TMA LOADS & ADVANCING MBARRIER]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    mbarrier.arrive.expect_tx.shared.b64 %rd0, [mbar], 4096;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_A], [desc_A], {{%r0, %r1}};").unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", end_label).unwrap();
+
+        // Consumer Warpgroup Branch (Warps 1..3)
+        writeln!(&mut self.ptx_buffer, "    {}:", consumer_label).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [CONSUMER WARPGROUP 1..3: RUNNING CONTINUOUS WGMMA COMPUTATION]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 {{%f0,%f1,%f2,%f3,%f4,%f5,%f6,%f7}}, desc_A, desc_B, 1, 1, 0, 0;"
+        ).unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    {}:", end_label).unwrap();
+    }
+
+    /// Emits Hopper FP8 (E4M3 / E5M2) Dual-Accumulator WGMMA Pipeline (`wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3`).
+    pub fn emit_wgmma_fp8_dual_accumulator_gemm(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, scale_a: &str, scale_b: &str) {
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [HOPPER NATIVE FP8 E4M3 DUAL-ACCUMULATOR WGMMA PIPELINE]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Dimensions: M={}, N={}, K={} FP8 (e4m3fn)", cta_m, cta_n, cta_k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Scales: A={}, B={}", scale_a, scale_b).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 {{%f0,%f1,%f2,%f3,%f4,%f5,%f6,%f7,%f8,%f9,%f10,%f11,%f12,%f13,%f14,%f15}}, desc_A, desc_B, {}, {}, 0, 0;",
+            scale_a, scale_b
+        )
+        .unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
+    }
+
     /// N-D Broadcasting lowering helper for broadcast_to(src, target_shape).
     pub fn emit_broadcast_to(&mut self, src_reg: &str, src_shape: &[u32], target_shape: &[u32]) -> String {
         let dst_reg = self.alloc_regf32();
@@ -2424,6 +2503,32 @@ mod tests {
         assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16"));
         assert!(emitter.ptx_buffer.contains("wgmma.commit_group.sync.aligned;"));
         assert!(emitter.ptx_buffer.contains("wgmma.wait_group.sync.aligned 0;"));
+    }
+
+    #[test]
+    fn test_tma_multicast_cluster() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_cluster_dimensions(2, 1, 1);
+        emitter.emit_tma_multicast_bulk_load("smem_A", "desc_A", "%r0", "%r1", "0x3");
+        assert!(emitter.ptx_buffer.contains(".cluster_dimensions 2, 1, 1;"));
+        assert!(emitter.ptx_buffer.contains("cp.async.bulk.tensor.multicast.shared::cluster.global.mbarrier::complete_tx::bytes"));
+    }
+
+    #[test]
+    fn test_warp_specialized_producer_consumer_pipeline() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_warp_specialized_producer_consumer_pipeline(128, 128, 32, 1024);
+        assert!(emitter.ptx_buffer.contains("WARP-SPECIALIZED PRODUCER/CONSUMER PIPELINE"));
+        assert!(emitter.ptx_buffer.contains("Warp 0: TMA Producer"));
+        assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16"));
+    }
+
+    #[test]
+    fn test_wgmma_fp8_dual_accumulator() {
+        let mut emitter = PtxEmitter::new();
+        emitter.emit_wgmma_fp8_dual_accumulator_gemm(64, 128, 32, "%f_sa", "%f_sb");
+        assert!(emitter.ptx_buffer.contains("HOPPER NATIVE FP8 E4M3 DUAL-ACCUMULATOR WGMMA PIPELINE"));
+        assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3"));
     }
 
     #[test]

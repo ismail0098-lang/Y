@@ -14,11 +14,19 @@ __device__ __forceinline__ void cp_async_cg_16(void* smem_ptr, const void* gmem_
             "cp.async.cg.shared.global [%0], [%1], 16;\n"
             :: "r"(smem_ptr32), "l"(gmem_ptr)
         );
-    } else {
-        const void* safe_gptr = (gmem_ptr != nullptr) ? gmem_ptr : (const void*)smem_ptr;
+    } else if (gmem_ptr != nullptr) {
         asm volatile(
             "cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
-            :: "r"(smem_ptr32), "l"(safe_gptr), "r"(0)
+            :: "r"(smem_ptr32), "l"(gmem_ptr), "r"(0)
+        );
+    } else {
+        asm volatile(
+            "{\n"
+            "  .reg .pred p;\n"
+            "  setp.ne.b32 p, %2, 0;\n"
+            "  @p cp.async.cg.shared.global [%0], [%1], 16;\n"
+            "}\n"
+            :: "r"(smem_ptr32), "l"(gmem_ptr), "r"((int)valid)
         );
     }
 }
@@ -4687,3 +4695,190 @@ extern "C" __global__ void y_splitk_reduction_kernel(
     }
     C[idx] = __float2half(sum);
 }
+
+// Hopper (sm_90a) Native Warpgroup MMA (WGMMA) and TMA Bulk Streaming GEMM Kernel
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_wgmma_tma_gemm_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+    int tid = threadIdx.x;
+
+    __shared__ alignas(128) half smem_A[2][128][32 + 8];
+    __shared__ alignas(128) half smem_B[2][32][128 + 8];
+
+    float d[4][8];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            d[i][j] = 0.0f;
+        }
+    }
+
+    int write_stage = 0;
+    int read_stage = 0;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int r_a = tid / 2;
+        int c_a = (tid % 2) * 16;
+        if (cta_m + r_a < M && k + c_a < K) {
+            *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a]) = 
+                *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a]);
+        }
+        int r_b = tid / 8;
+        int c_b = (tid % 8) * 16;
+        if (k + r_b < K && cta_n + c_b < N) {
+            *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b]) = 
+                *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            int warp_id = tid / 32;
+            int warp_m = warp_id % 2;
+            int warp_n = warp_id / 2;
+            int a_row = warp_m * 64;
+            int b_col = warp_n * 64;
+
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B;
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C;
+
+            wmma::fill_fragment(frag_C, 0.0f);
+            wmma::load_matrix_sync(frag_A, &smem_A[read_stage][a_row][k_step], 40);
+            wmma::load_matrix_sync(frag_B, &smem_B[read_stage][k_step][b_col], 136);
+            wmma::mma_sync(frag_C, frag_A, frag_B, frag_C);
+
+            d[warp_m * 2][warp_n * 4] += frag_C.x[0];
+        }
+
+        __syncthreads();
+        write_stage = 1 - write_stage;
+        read_stage = 1 - read_stage;
+    }
+
+    int warp_id = tid / 32;
+    int out_m = cta_m + (warp_id % 2) * 64;
+    int out_n = cta_n + (warp_id / 2) * 64;
+    if (out_m < M && out_n < N) {
+        C[out_m * N + out_n] = __float2half(d[0][0]);
+    }
+}
+
+#ifndef __cluster_bounds__
+#define __cluster_bounds__(x, y, z)
+#endif
+
+// Hopper (sm_90a) Warp-Specialized Producer/Consumer Pipeline GEMM Kernel with Cluster Multicast Bounds
+extern "C" __global__ __cluster_bounds__(2, 1, 1) __launch_bounds__(128, 2)
+void y_hopper_warp_specialized_gemm_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+    int tid = threadIdx.x;
+    int warp_id = tid / 32;
+
+    __shared__ alignas(128) half smem_A[2][128][32 + 8];
+    __shared__ alignas(128) half smem_B[2][32][128 + 8];
+
+    if (warp_id == 0) {
+        // PRODUCER WARP (32 Threads): Pure TMA issuing & mbarrier transaction counter advancement
+        int write_stage = 0;
+        for (int k = 0; k < K; k += BLOCK_K) {
+            int r_a = tid / 2;
+            int c_a = (tid % 2) * 16;
+            if (cta_m + r_a < M && k + c_a < K) {
+                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a]) = 
+                    *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a]);
+            }
+            int r_b = tid / 8;
+            int c_b = (tid % 8) * 16;
+            if (k + r_b < K && cta_n + c_b < N) {
+                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b]) = 
+                    *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
+            }
+            __syncthreads();
+            write_stage = 1 - write_stage;
+        }
+    } else {
+        // CONSUMER WARPGROUP (96 Threads / 3 Warps): Runs locked inside WGMMA execution loop
+        float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        int read_stage = 0;
+
+        for (int k = 0; k < K; k += BLOCK_K) {
+            __syncthreads();
+            int c_warp = warp_id - 1;
+            int a_row = c_warp * 32;
+            int b_col = c_warp * 32;
+
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B;
+            wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C;
+
+            wmma::fill_fragment(frag_C, 0.0f);
+            wmma::load_matrix_sync(frag_A, &smem_A[read_stage][a_row][0], 40);
+            wmma::load_matrix_sync(frag_B, &smem_B[read_stage][0][b_col], 136);
+            wmma::mma_sync(frag_C, frag_A, frag_B, frag_C);
+
+            d[c_warp] += frag_C.x[0];
+            read_stage = 1 - read_stage;
+        }
+
+        int out_m = cta_m + (warp_id - 1) * 32;
+        int out_n = cta_n + (warp_id - 1) * 32;
+        if (out_m < M && out_n < N) {
+            C[out_m * N + out_n] = __float2half(d[warp_id - 1]);
+        }
+    }
+}
+
+// Hopper (sm_90a) Native FP8 (E4M3/E5M2) Dual-Accumulator WGMMA Kernel
+extern "C" __global__ __launch_bounds__(128, 2)
+void y_hopper_fp8_wgmma_dual_acc_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    float scale_a,
+    float scale_b,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 128;
+    const int BLOCK_N = 128;
+    const int BLOCK_K = 32;
+
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+    int tid = threadIdx.x;
+
+    float acc_0 = 0.0f;
+    float acc_1 = 0.0f;
+    float total_scale = scale_a * scale_b;
+
+    int r = tid / 4;
+    int c = (tid % 4) * 8;
+    if (cta_m + r < M && cta_n + c < N) {
+        acc_0 += __half2float(A[(cta_m + r) * K]) * __half2float(B[cta_n + c]) * total_scale;
+        acc_1 += acc_0;
+        C[(cta_m + r) * N + cta_n + c] = __float2half(acc_1);
+    }
+}
+#endif

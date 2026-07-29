@@ -4,6 +4,7 @@ os.environ["CUPY_CACHE_DIR"] = "/tmp/cupy_cache"
 
 import time
 import sys
+import subprocess
 import numpy as np
 
 # Try importing GPU libraries
@@ -172,7 +173,7 @@ def compile_and_run_benchmarks():
     
     # Compile the Y file
     print("[*] Re-compiling Y coprocessor files...")
-    os.system("./target/release/Y tests/coprocessor_db_index.ysu --emit-coprocessor")
+    subprocess.run(["./target/release/Y", "tests/coprocessor_db_index.ysu", "--emit-coprocessor"], check=False)
     
     # Wrap Y PTX
     print("[*] Wrapping Y generated PTX instruction streams...")
