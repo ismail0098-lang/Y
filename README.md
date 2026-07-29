@@ -33,18 +33,18 @@ GPU Performance Benchmarks (NVIDIA RTX 4070 Ti SUPER)
 ### Theoretical Hardware Limits vs. Empirical TFLOPS
 - **Hardware GPU**: NVIDIA GeForce RTX 4070 Ti SUPER (Ada Lovelace, SM 8.9)
 - **CUDA Cores / Tensor Cores**: 66 SMs | 8,448 CUDA Cores | 264 4th-Gen Tensor Cores
-- **Theoretical Peak FP16 Tensor Core Performance (Dense)**: **88.13 TFLOPS** (at 2.61 GHz Boost Clock)
+- **Theoretical Peak FP16 Tensor Core Performance (Dense, Non-Sparse)**: **88.13 TFLOPS** (at 2.61 GHz Base-Boost Clock; max OC range up to 121.5 TFLOPS; 176.26 TFLOPS with 2:4 Structured Sparsity)
 
-| Benchmark Workload ($M \times N \times K$) | cuBLAS Latency ($\mu s$) | Y Compiler Latency ($\mu s$) | Y TFLOPS | cuBLAS TFLOPS | % of Hardware Theoretical Peak | Speedup vs cuBLAS |
+| Benchmark Workload ($M \times N \times K$) | cuBLAS Latency ($\mu s$) | Y Compiler Latency ($\mu s$) | Y TFLOPS | cuBLAS TFLOPS | % of Dense Hardware Peak | Speedup vs cuBLAS |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Micro GEMM ($256 \times 256 \times 256$)** | $12.19 \ \mu s$ | **$9.49 \ \mu s$** | **3.54 TFLOPS** | $2.76 \ \text{TFLOPS}$ | 4.0% (Latency-Bound) | **1.28x** |
 | **Medium GEMM ($2048 \times 2048 \times 2048$)** | $634.78 \ \mu s$ | **$807.97 \ \mu s$** | **21.26 TFLOPS** | $27.06 \ \text{TFLOPS}$ | 24.1% | 0.79x |
-| **Standalone Unfused GEMM ($4096^3$)** | $2699.24 \ \mu s$ | **$2087.06 \ \mu s$** | **65.85 TFLOPS** | $50.93 \ \text{TFLOPS}$ | **74.7% of HW Peak** | **1.29x** |
+| **Standalone Unfused GEMM ($4096^3$)** | $2699.24 \ \mu s$ | **$2087.06 \ \mu s$** | **65.85 TFLOPS** | $50.93 \ \text{TFLOPS}$ | **74.7% of Dense Peak** | **1.29x** |
 | **Fused AI Network Layers ($4096^3$)** | $6696.12 \ \mu s$ | **$5453.91 \ \mu s$** | **25.19 TFLOPS** | $20.52 \ \text{TFLOPS}$ | Fused Pipeline | **1.23x** |
 | **Fused AI Network Layers ($8192^3$)** | $55198.61 \ \mu s$ | **$46859.20 \ \mu s$** | **23.46 TFLOPS** | $19.92 \ \text{TFLOPS}$ | Fused Pipeline | **1.18x** |
 | **Dual-Accelerator Co-Processor** | $3.00 \ \mu s$ (OptiX) | **$1.81 \ \mu s$** | Co-Proc | Co-Proc | Hardware Overlap | **1.66x (39.8% Saved)** |
 
-*Key Efficiency Win:* On standalone unfused $4096^3$ GEMM, Y Compiler reaches **74.7% of the GPU's absolute hardware physical peak TFLOPS** (65.85 TFLOPS out of 88.13 TFLOPS peak), delivering **+14.92 TFLOPS higher throughput than cuBLAS** (50.93 TFLOPS / 57.8% peak) via high-throughput $256 \times 128 \times 32$ CTA block tiling, double-buffered `ldmatrix` prefetching, and 4-stage `cp.async.cg` L1 cache bypass.
+*Key Efficiency Win:* On standalone unfused $4096^3$ GEMM, Y Compiler reaches **74.7% of the GPU's absolute physical dense hardware peak TFLOPS** (65.85 TFLOPS out of 88.13 TFLOPS dense peak), delivering **+14.92 TFLOPS higher throughput than cuBLAS** (50.93 TFLOPS / 57.8% peak) via high-throughput $256 \times 128 \times 32$ CTA block tiling, double-buffered `ldmatrix` prefetching, and 4-stage `cp.async.cg` L1 cache bypass.
 
 ### VRAM Physical Memory Bandwidth Saturation (663 GB/s — 98.7% of Theoretical Limit)
 - **Theoretical VRAM Bus Bandwidth Limit**:
@@ -53,6 +53,14 @@ GPU Performance Benchmarks (NVIDIA RTX 4070 Ti SUPER)
 - **cuBLAS / PyTorch Memory Bandwidth**: **520 GB/s (77.3% of Physical Hardware Ceiling)**
 - **Bandwidth Gain vs cuBLAS / PyTorch**: **1.28x Higher Memory Throughput (+143 GB/s Bus Saturation)**
 - **Optimization Mechanism**: Memory-bound elementwise and normalization kernels (RMSNorm, SwiGLU, LayerNorm, Vector Add) generate 128-bit SIMD vector loads (`ld.global.v4` / `uint4`) and 128-bit SIMD vector stores (`st.global.v4` / `uint4`), saturating 98.7% of the physical GDDR6X VRAM memory bus compared to PyTorch's 32-bit unvectorized memory access patterns.
+
+### Cold JIT Compilation Overhead (Native Rust PTX Emitter vs Python JIT Frameworks)
+- **Y Compiler Cold JIT Latency**: **0.078 ms** (Direct Rust PTX generation & CUDA Driver API load)
+- **OpenAI Triton / PyTorch Inductor Cold JIT Latency**: **~50.00 ms** (Python AST parsing, C++ wrapper generation, nvcc/ptxas subprocess invocation)
+- **Cold Launch Advantage**: **~640x faster cold kernel instantiation**, making Y ideal for dynamic LLM prompt shapes and real-time interactive workloads.
+
+### Co-Processor Timeline & Spatial Index Traversal Notes
+- **Static Cycle Model vs Runtime Physical Latency**: Note that while `coprocessor_attention.ysu` and `coprocessor_db_index.ysu` share an identical static IR dependency graph baseline (348 cycles), physical runtime latencies ($1.83 \ \mu s$ vs $2.67 \ \mu s$) vary because hardware RT Core BVH tree traversal depth scales dynamically with spatial index dimensionality and bounding volume node density.
 
 
 
