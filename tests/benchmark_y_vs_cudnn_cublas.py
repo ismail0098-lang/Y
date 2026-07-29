@@ -24,18 +24,27 @@ def print_header(title):
     print("=" * 80)
 
 def wrap_ptx(ptx_path, entry_name, param_count=2):
-    if not os.path.exists(ptx_path):
-        raise FileNotFoundError(f"PTX file not found: {ptx_path}")
+def wrap_ptx(ptx_file, entry_name, param_count=2):
+    if not os.path.exists(ptx_file):
+        raise FileNotFoundError(f"PTX file not found: {ptx_file}")
         
-    with open(ptx_path, "r") as f:
+    with open(ptx_file, "r") as f:
         content = f.read()
-    
-    content = content.encode('ascii', 'ignore').decode('ascii')
-    
+
+    try:
+        device_id = cp.cuda.Device(0).id
+        major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, device_id)
+        minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, device_id)
+        target_sm = f"sm_{major}{minor}"
+    except Exception:
+        target_sm = "sm_86"
+
+    version_str = ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
+
     shared_decls = []
     body_lines = []
-    
-    for line in content.splitlines():
+
+    for line in content.split("\n"):
         trimmed = line.strip()
         if not trimmed:
             continue
@@ -45,15 +54,15 @@ def wrap_ptx(ptx_path, entry_name, param_count=2):
             shared_decls.append(line)
         else:
             body_lines.append(line)
-            
+
     shared_str = "\n".join(shared_decls)
     body_str = "\n".join(body_lines)
-    
+
     params_decl = ",\n".join([f"    .param .u64 param_{i}" for i in range(param_count)])
     params_load = "\n".join([f"    ld.param.u64 %rd{i}, [param_{i}];" for i in range(param_count)])
 
-    wrapped = f""".version 8.0
-.target sm_89
+    wrapped = f"""{version_str}
+.target {target_sm}
 .address_size 64
 
 {shared_str}
