@@ -105,16 +105,16 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
     }
 
     auto load_stage = [&](int stage, int k_curr) {
-        // Load Tile A (128x32 halfs)
-        #pragma unroll
-        for (int i = 0; i < 2; ++i) {
-            int chunk_idx = tid + i * 256;
-            int r = chunk_idx / 4;
-            int c = (chunk_idx % 4) * 8;
-            int gmem_r = cta_m + r;
-            int gmem_c = k_curr + c;
+        // Tile A: 128 rows x 32 halfs = 4096 halfs = 256 uint4s (128-bit vector per thread)
+        int r = tid / 2;        // 0..127
+        int c = (tid % 2) * 16; // 0, 16
+        int gmem_r = cta_m + r;
+        int gmem_c = k_curr + c;
+        if (gmem_r < M && (gmem_c + 15) < K) {
+            *reinterpret_cast<uint4*>(&smem_A[stage][r][c]) = *reinterpret_cast<const uint4*>(&A[gmem_r * K + gmem_c]);
+        } else {
             #pragma unroll
-            for (int e = 0; e < 8; ++e) {
+            for (int e = 0; e < 16; ++e) {
                 half val = __float2half(0.0f);
                 if (gmem_r < M && (gmem_c + e) < K) {
                     val = A[gmem_r * K + gmem_c + e];
@@ -123,21 +123,21 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
             }
         }
 
-        // Load Tile B (32x128 halfs)
-        #pragma unroll
-        for (int i = 0; i < 2; ++i) {
-            int chunk_idx = tid + i * 256;
-            int r = chunk_idx / 16;
-            int c = (chunk_idx % 16) * 8;
-            int gmem_r = k_curr + r;
-            int gmem_c = cta_n + c;
+        // Tile B: 32 rows x 128 halfs = 4096 halfs = 256 uint4s (128-bit vector per thread)
+        int br = tid / 8;        // 0..31
+        int bc = (tid % 8) * 16;  // 0, 16, 32, ..., 112
+        int bgmem_r = k_curr + br;
+        int bgmem_c = cta_n + bc;
+        if (bgmem_r < K && (bgmem_c + 15) < N) {
+            *reinterpret_cast<uint4*>(&smem_B[stage][br][bc]) = *reinterpret_cast<const uint4*>(&B[bgmem_r * N + bgmem_c]);
+        } else {
             #pragma unroll
-            for (int e = 0; e < 8; ++e) {
+            for (int e = 0; e < 16; ++e) {
                 half val = __float2half(0.0f);
-                if (gmem_r < K && (gmem_c + e) < N) {
-                    val = B[gmem_r * N + gmem_c + e];
+                if (bgmem_r < K && (bgmem_c + e) < N) {
+                    val = B[bgmem_r * N + bgmem_c + e];
                 }
-                smem_B[stage][r][c + e] = val;
+                smem_B[stage][br][bc + e] = val;
             }
         }
     };
