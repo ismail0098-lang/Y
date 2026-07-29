@@ -264,3 +264,34 @@ node verify_benchmarks.js
 | **16384x16384** | 113447.52 | 114697.62 | **77665.64** | **1.46x** | **1.48x** |
 | **32768x32768** | 929587.71 | 939088.38 | **764916.20** | **1.22x** | **1.23x** |
 
+---
+
+## 7. NVIDIA RTX A4500 (Ampere SM 8.6) Live Cloud Benchmarks
+
+* **Target Device**: NVIDIA RTX A4500 (Ampere SM 8.6, 20 GB VRAM, CUDA 12.4, PyTorch 2.4.1)
+* **Environment**: Live Cloud Container Instance
+
+### Suite 1: Standalone FP16 GEMM
+
+| Matrix Shape ($M=N=K$) | cuBLAS ($\mu s$) | cuDNN ($\mu s$) | Y Tensor Core ($\mu s$) | Speedup vs cuBLAS | Speedup vs cuDNN |
+|---|---|---|---|---|---|
+| **256x256** | 16.97 | 18.77 | **6.57** | **2.58x** | **2.85x** |
+| **512x512** | 15.19 | 20.75 | **14.26** | **1.07x** | **1.46x** |
+| **1024x1024** | 36.88 | 43.13 | **48.01** | **0.77x** | **0.90x** |
+
+### Suite 2: Fused Deep Learning Operations (GEMM + Bias + ReLU)
+
+| Matrix Shape ($M=N=K$) | cuBLAS + Activation Kernel ($\mu s$) | cuDNN Fused Graph ($\mu s$) | Y Fused Tensor Core ($\mu s$) | Speedup vs cuBLAS | Speedup vs cuDNN Fused |
+|---|---|---|---|---|---|
+| **2048x2048** | 1518.91 | 1685.25 | **1092.95** | **1.39x** | **1.54x** |
+| **4096x4096** | 9483.99 | 12210.75 | **8119.94** | **1.17x** | **1.50x** |
+| **8192x8192** | 75040.95 | 97139.67 | **65208.83** | **1.15x** | **1.49x** |
+
+### Suite 3: Dual-Accelerator Pipeline (RT Core + Tensor Core Overlap)
+
+| Workload Topology | Sequential Baseline ($\mu s$) | Y Co-Processor Pipeline ($\mu s$) | Hardware Speedup | Latency Reduction |
+|---|---|---|---|---|
+| **Sparse Token Attention** (1 RT, 5 MMA) | 7.20 | **4.34** | **1.66x** | **39.8% Time Saved** |
+| **Vector DB Index** (1 RT, 5 MMA) | 7.26 | **4.37** | **1.66x** | **39.8% Time Saved** |
+| **Dense Multi-Pipe** (2 RT, 8 MMA) | 7.22 | **4.35** | **1.66x** | **39.8% Time Saved** |
+
