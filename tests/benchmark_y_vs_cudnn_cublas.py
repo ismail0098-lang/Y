@@ -192,21 +192,40 @@ def main():
             threads_per_block = 128
             target_gemm_kernel = y_gemm_small_kernel
         elif M >= 4096:
-            grid_m = (M + 255) // 256
-            grid_n = (N + 127) // 128
-            threads_per_block = 256
-            target_gemm_kernel = y_gemm_256x128_kernel
-            smem_size = 98304
+            # Check if GPU device supports >= 96KB dynamic SMEM optin (e.g. GA102 / Ada / Hopper)
+            try:
+                device_id = cp.cuda.Device(0).id
+                max_optin = cp.cuda.runtime.deviceGetAttribute(
+                    cp.cuda.runtime.cudaDevAttrMaxSharedMemoryPerBlockOptin, device_id
+                )
+            except Exception:
+                max_optin = 49152
+
+            if max_optin >= 98304:
+                grid_m = (M + 255) // 256
+                grid_n = (N + 127) // 128
+                threads_per_block = 256
+                target_gemm_kernel = y_gemm_256x128_kernel
+                smem_size = 98304
+            else:
+                grid_m = (M + 127) // 128
+                grid_n = (N + 127) // 128
+                threads_per_block = 256
+                target_gemm_kernel = y_gemm_large_kernel
+                smem_size = 0
         else:
             grid_m = (M + 127) // 128
             grid_n = (N + 127) // 128
             threads_per_block = 256
             target_gemm_kernel = y_gemm_large_kernel
-            smem_size = 65536
+            smem_size = 0
 
         cp.cuda.Device(0).synchronize()
-        if smem_size > 48128:
-            target_gemm_kernel.max_dynamic_shared_size_bytes = smem_size
+        if smem_size > 0:
+            try:
+                target_gemm_kernel.max_dynamic_shared_size_bytes = smem_size
+            except Exception:
+                pass
         for _ in range(50):
             target_gemm_kernel((grid_n, grid_m, 1), (threads_per_block, 1, 1), (A_cp, B_cp, C_cp, M, N, K), shared_mem=smem_size)
         cp.cuda.Device(0).synchronize()
