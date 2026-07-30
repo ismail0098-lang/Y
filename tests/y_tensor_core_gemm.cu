@@ -4821,23 +4821,29 @@ extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_warp_specialized_g
         // PRODUCER WARP 0 (32 Threads): Pure TMA/Async loads & mbarrier arrival
         int write_stage = 0;
         for (int k = 0; k < K; k += BLOCK_K) {
-            int r_a = tid / 2;
-            int c_a = (tid % 2) * 16;
-            if (cta_m + r_a < M && k + c_a < K) {
-                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a])     = *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a]);
-                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a + 8]) = *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a + 8]);
-            } else {
-                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a])     = make_uint4(0, 0, 0, 0);
-                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a + 8]) = make_uint4(0, 0, 0, 0);
+            #pragma unroll
+            for (int pass = 0; pass < 8; ++pass) {
+                int r_a = (tid / 2) + pass * 16;
+                int c_a = (tid % 2) * 16;
+                if (cta_m + r_a < M && k + c_a + 15 < K) {
+                    *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a])     = *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a]);
+                    *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a + 8]) = *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a + 8]);
+                } else {
+                    *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a])     = make_uint4(0, 0, 0, 0);
+                    *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a + 8]) = make_uint4(0, 0, 0, 0);
+                }
             }
-            int r_b = tid / 8;
-            int c_b = (tid % 8) * 16;
-            if (k + r_b < K && cta_n + c_b < N) {
-                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b])     = *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
-                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b + 8]) = *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b + 8]);
-            } else {
-                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b])     = make_uint4(0, 0, 0, 0);
-                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b + 8]) = make_uint4(0, 0, 0, 0);
+            #pragma unroll
+            for (int pass = 0; pass < 4; ++pass) {
+                int r_b = (tid / 8) + pass * 8;
+                int c_b = (tid % 8) * 16;
+                if (k + r_b < K && cta_n + c_b + 15 < N) {
+                    *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b])     = *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
+                    *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b + 8]) = *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b + 8]);
+                } else {
+                    *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b])     = make_uint4(0, 0, 0, 0);
+                    *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b + 8]) = make_uint4(0, 0, 0, 0);
+                }
             }
             uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[write_stage]));
             uint64_t state;
