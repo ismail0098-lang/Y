@@ -4789,8 +4789,6 @@ extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_wgmma_tma_gemm_ker
 #define __cluster_bounds__(x, y, z)
 #endif
 
-// Hopper (sm_90a) Warp-Specialized Producer/Consumer Pipeline GEMM Kernel with Cluster Multicast Bounds
-extern "C" __global__ __cluster_bounds__(2, 1, 1) __launch_bounds__(128, 2)
 // Hopper (sm_90a) Native Warp-Specialized WGMMA Matrix Multiplication Kernel
 extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_warp_specialized_gemm_kernel(
     const half* __restrict__ A,
