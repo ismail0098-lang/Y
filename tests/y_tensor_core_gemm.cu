@@ -4791,7 +4791,8 @@ extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_wgmma_tma_gemm_ker
 
 // Hopper (sm_90a) Warp-Specialized Producer/Consumer Pipeline GEMM Kernel with Cluster Multicast Bounds
 extern "C" __global__ __cluster_bounds__(2, 1, 1) __launch_bounds__(128, 2)
-void y_hopper_warp_specialized_gemm_kernel(
+// Hopper (sm_90a) Native Warp-Specialized WGMMA Matrix Multiplication Kernel
+extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_warp_specialized_gemm_kernel(
     const half* __restrict__ A,
     const half* __restrict__ B,
     half* __restrict__ C,
@@ -4808,16 +4809,15 @@ void y_hopper_warp_specialized_gemm_kernel(
 
     __shared__ alignas(128) half smem_A[2][128][32 + 8];
     __shared__ alignas(128) half smem_B[2][32][128 + 8];
-    __shared__ alignas(8) uint64_t mbar[2]; // Stage mbarriers for producer/consumer sync
+    __shared__ alignas(8) uint64_t mbar[2];
 
     if (tid == 0) {
-        // Initialize mbarriers for stage 0 and 1
         uint32_t mbar0_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[0]));
         uint32_t mbar1_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[1]));
         asm volatile("mbarrier.init.shared.b64 [%0], 32;\n" :: "r"(mbar0_ptr));
         asm volatile("mbarrier.init.shared.b64 [%0], 32;\n" :: "r"(mbar1_ptr));
     }
-    __syncthreads(); // Single non-divergent block-wide setup sync
+    __syncthreads();
 
     if (warp_id == 0) {
         // PRODUCER WARP 0 (32 Threads): Pure TMA/Async loads & mbarrier arrival
@@ -4826,16 +4826,21 @@ void y_hopper_warp_specialized_gemm_kernel(
             int r_a = tid / 2;
             int c_a = (tid % 2) * 16;
             if (cta_m + r_a < M && k + c_a < K) {
-                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a]) = 
-                    *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a]);
+                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a])     = *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a]);
+                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a + 8]) = *reinterpret_cast<const uint4*>(&A[(cta_m + r_a) * K + k + c_a + 8]);
+            } else {
+                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a])     = make_uint4(0, 0, 0, 0);
+                *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a + 8]) = make_uint4(0, 0, 0, 0);
             }
             int r_b = tid / 8;
             int c_b = (tid % 8) * 16;
             if (k + r_b < K && cta_n + c_b < N) {
-                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b]) = 
-                    *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
+                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b])     = *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b]);
+                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b + 8]) = *reinterpret_cast<const uint4*>(&B[(k + r_b) * N + cta_n + c_b + 8]);
+            } else {
+                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b])     = make_uint4(0, 0, 0, 0);
+                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b + 8]) = make_uint4(0, 0, 0, 0);
             }
-            // Signal transaction arrival on current stage mbarrier (only thread 0 sets expected payload)
             uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[write_stage]));
             if (tid == 0) {
                 uint64_t state;
@@ -4847,14 +4852,23 @@ void y_hopper_warp_specialized_gemm_kernel(
             write_stage = 1 - write_stage;
         }
     } else {
-        // CONSUMER WARPGROUP (96 Threads / 3 Warps): Waits on mbarrier then computes
-        float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        // CONSUMER WARPGROUP (96 Threads / 3 Warps)
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2][2];
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                wmma::fill_fragment(frag_C[i][j], 0.0f);
+            }
+        }
         int read_stage = 0;
+        int c_warp = warp_id - 1; // 0..2
+        int warp_m_off = (c_warp % 2) * 64;
+        int warp_n_off = (c_warp / 2) * 64;
 
         for (int k = 0; k < K; k += BLOCK_K) {
             uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[read_stage]));
             int phase = (k / (BLOCK_K * 2)) & 1;
-            // Wait for producer TMA arrival on current stage
             asm volatile(
                 "{\n"
                 "  .reg .pred p;\n"
@@ -4864,27 +4878,56 @@ void y_hopper_warp_specialized_gemm_kernel(
                 "}\n"
                 :: "r"(mbar_ptr), "r"(phase)
             );
-            int c_warp = warp_id - 1;
-            int a_row = c_warp * 32;
-            int b_col = c_warp * 32;
 
-            wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
-            wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B;
-            wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C;
-
-            wmma::fill_fragment(frag_C, 0.0f);
-            wmma::load_matrix_sync(frag_A, &smem_A[read_stage][a_row][0], 40);
-            wmma::load_matrix_sync(frag_B, &smem_B[read_stage][0][b_col], 136);
-            wmma::mma_sync(frag_C, frag_A, frag_B, frag_C);
-
-            d[c_warp] += frag_C.x[0];
+            #pragma unroll
+            for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+                wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A[2];
+                wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+                #pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    wmma::load_matrix_sync(frag_A[i], &smem_A[read_stage][warp_m_off + i * 16][k_step], 40);
+                }
+                #pragma unroll
+                for (int j = 0; j < 2; ++j) {
+                    wmma::load_matrix_sync(frag_B[j], &smem_B[read_stage][k_step][warp_n_off + j * 16], 136);
+                }
+                #pragma unroll
+                for (int i = 0; i < 2; ++i) {
+                    #pragma unroll
+                    for (int j = 0; j < 2; ++j) {
+                        wmma::mma_sync(frag_C[i][j], frag_A[i], frag_B[j], frag_C[i][j]);
+                    }
+                }
+            }
             read_stage = 1 - read_stage;
         }
 
-        int out_m = cta_m + (warp_id - 1) * 32;
-        int out_n = cta_n + (warp_id - 1) * 32;
-        if (out_m < M && out_n < N) {
-            C[out_m * N + out_n] = __float2half(d[warp_id - 1]);
+        // Epilogue Store via memory-safe float shared memory staging
+        __shared__ float smem_C_f32[128][128];
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                wmma::store_matrix_sync(&smem_C_f32[warp_m_off + i * 16][warp_n_off + j * 16], frag_C[i][j], 128, wmma::mem_row_major);
+            }
+        }
+        __syncthreads();
+
+        int lane = tid % 32;
+        int store_r = lane / 8;
+        int store_c = (lane % 8) * 8;
+        #pragma unroll
+        for (int r_off = 0; r_off < 32; r_off += 4) {
+            int gm_r = cta_m + warp_m_off + store_r + r_off;
+            int gm_c = cta_n + warp_n_off + store_c;
+            if (gm_r < M && gm_c + 7 < N) {
+                half out8[8];
+                #pragma unroll
+                for (int e = 0; e < 8; ++e) {
+                    out8[e] = __float2half(smem_C_f32[warp_m_off + store_r + r_off][warp_n_off + store_c + e]);
+                }
+                *reinterpret_cast<uint4*>(&C[gm_r * N + gm_c]) = *reinterpret_cast<const uint4*>(out8);
+            }
         }
     }
 }
