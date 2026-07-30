@@ -390,43 +390,21 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
                 y_end.synchronize()
                 y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
             elif route == "small_m_direct_tma":
-                try:
-                    y_small_m_gemm = y_mod.get_function("y_hopper_small_m_gemm_kernel")
-                except Exception:
-                    y_small_m_gemm = None
+                grid_m = (M + 15) // 16
+                grid_n = (N + 63) // 64
+                threads = 64
+                for _ in range(10):
+                    y_gemm_16x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                cp.cuda.Device(0).synchronize()
 
-                if cap_major == 9 and y_small_m_gemm is not None:
-                    grid_m = (M + 31) // 32
-                    grid_n = (N + 127) // 128
-                    threads = 128
-                    for _ in range(10):
-                        y_small_m_gemm((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                    cp.cuda.Device(0).synchronize()
-
-                    y_start = cp.cuda.Event()
-                    y_end = cp.cuda.Event()
-                    y_start.record()
-                    for _ in range(50):
-                        y_small_m_gemm((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                    y_end.record()
-                    y_end.synchronize()
-                    y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
-                else:
-                    grid_m = (M + 15) // 16
-                    grid_n = (N + 63) // 64
-                    threads = 64
-                    for _ in range(10):
-                        y_gemm_16x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                    cp.cuda.Device(0).synchronize()
-
-                    y_start = cp.cuda.Event()
-                    y_end = cp.cuda.Event()
-                    y_start.record()
-                    for _ in range(50):
-                        y_gemm_16x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                    y_end.record()
-                    y_end.synchronize()
-                    y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(50):
+                    y_gemm_16x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                y_end.record()
+                y_end.synchronize()
+                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
             else:
                 if cap_major == 9 and y_hopper_wgmma is not None:
                     grid_m = (M + 127) // 128
