@@ -211,26 +211,21 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
     }
 
     // Fast Vectorized Epilogue Store via Memory Reuse
-    half (*smem_C)[32][64] = (half (*)[32][64])smem_storage;
+    float (*smem_C_f32)[32][64] = (float (*)[32][64])smem_storage;
     #pragma unroll
-    for (int pass = 0; pass < 2; ++pass) {
-        int active_warp = warp_id - pass * 4;
-        if (active_warp >= 0 && active_warp < 4) {
+    for (int pass = 0; pass < 4; ++pass) {
+        int active_warp = warp_id - pass * 2;
+        if (active_warp >= 0 && active_warp < 2) {
             #pragma unroll
             for (int i = 0; i < 2; ++i) {
                 #pragma unroll
                 for (int j = 0; j < 4; ++j) {
-                    wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_h;
-                    #pragma unroll
-                    for (int e = 0; e < frag_h.num_elements; ++e) {
-                        frag_h.x[e] = __float2half(frag_C[i][j].x[e]);
-                    }
-                    wmma::store_matrix_sync(&smem_C[active_warp][i * 16][j * 16], frag_h, 64, wmma::mem_row_major);
+                    wmma::store_matrix_sync(&smem_C_f32[active_warp][i * 16][j * 16], frag_C[i][j], 64, wmma::mem_row_major);
                 }
             }
         }
         __syncthreads();
-        if (active_warp >= 0 && active_warp < 4) {
+        if (active_warp >= 0 && active_warp < 2) {
             int warp_out_m = cta_m + warp_m * 32;
             int warp_out_n = cta_n + warp_n * 64;
             int lane = tid % 32;
@@ -241,7 +236,12 @@ extern "C" __global__ __launch_bounds__(256, 1) void y_tensor_core_gemm_kernel(
                 int gm_r = warp_out_m + store_r + r_off;
                 int gm_c = warp_out_n + store_c;
                 if (gm_r < M && (gm_c + 7) < N) {
-                    *reinterpret_cast<uint4*>(&C[gm_r * N + gm_c]) = *reinterpret_cast<const uint4*>(&smem_C[active_warp][store_r + r_off][store_c]);
+                    half out8[8];
+                    #pragma unroll
+                    for (int e = 0; e < 8; ++e) {
+                        out8[e] = __float2half(smem_C_f32[active_warp][store_r + r_off][store_c + e]);
+                    }
+                    *reinterpret_cast<uint4*>(&C[gm_r * N + gm_c]) = *reinterpret_cast<const uint4*>(out8);
                 }
             }
         }
