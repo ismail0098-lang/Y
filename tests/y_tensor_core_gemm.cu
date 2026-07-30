@@ -5061,43 +5061,34 @@ extern "C" __global__ __launch_bounds__(128, 4) void y_tensor_core_gemm_64x64_ke
 }
 
 // Single-Pass GEMV Vector Reduction Kernel (M=1 Single-Token Decode)
-extern "C" __global__ void y_gemv_fp16_vector_kernel(
+extern "C" __global__ __launch_bounds__(256, 4) void y_gemv_fp16_vector_kernel(
     const half* __restrict__ A,
     const half* __restrict__ B,
     half* __restrict__ C,
     int M, int N, int K
 ) {
-    int col = blockIdx.x * 8 + (threadIdx.x % 8);
-    if (col >= N) return;
-
-    int slice_idx = threadIdx.x / 8; // 0..31
-    int col_lane = threadIdx.x % 8;
+    int col = blockIdx.x * 256 + threadIdx.x;
     float sum = 0.0f;
 
-    for (int k = slice_idx * 8; k < K; k += 32 * 8) {
-        if (k + 7 < K) {
-            uint4 a_vec = *reinterpret_cast<const uint4*>(&A[k]);
-            const half* a_h = reinterpret_cast<const half*>(&a_vec);
-            #pragma unroll
-            for (int e = 0; e < 8; ++e) {
-                float b_val = __half2float(B[(k + e) * N + col]);
-                float a_val = __half2float(a_h[e]);
-                sum += a_val * b_val;
-            }
+    int k_vec_end = (K / 8) * 8;
+    for (int k = 0; k < k_vec_end; k += 8) {
+        uint4 a_vec = *reinterpret_cast<const uint4*>(&A[k]);
+        const half* a_h = reinterpret_cast<const half*>(&a_vec);
+        #pragma unroll
+        for (int e = 0; e < 8; ++e) {
+            float a_val = __half2float(a_h[e]);
+            float b_val = (col < N) ? __half2float(B[(k + e) * N + col]) : 0.0f;
+            sum += a_val * b_val;
         }
     }
+    for (int k = k_vec_end; k < K; ++k) {
+        float a_val = __half2float(A[k]);
+        float b_val = (col < N) ? __half2float(B[k * N + col]) : 0.0f;
+        sum += a_val * b_val;
+    }
 
-    __shared__ float smem_red[32][8];
-    smem_red[slice_idx][col_lane] = sum;
-    __syncthreads();
-
-    if (slice_idx == 0) {
-        float final_sum = 0.0f;
-        #pragma unroll
-        for (int s = 0; s < 32; ++s) {
-            final_sum += smem_red[s][col_lane];
-        }
-        C[col] = __float2half(final_sum);
+    if (col < N) {
+        C[col] = __float2half(sum);
     }
 }
 

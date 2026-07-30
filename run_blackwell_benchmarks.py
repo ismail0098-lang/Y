@@ -374,7 +374,7 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
 
             route = dispatch_kernel(M, N, K)
             if route == "splitk_gemv":
-                grid_n = (N + 7) // 8
+                grid_n = (N + 255) // 256
                 for _ in range(10):
                     y_gemv_vec((grid_n, 1, 1), (256, 1, 1), (A_cp, B_cp, C_y, M, N, K))
                 cp.cuda.Device(0).synchronize()
