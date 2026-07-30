@@ -5177,6 +5177,88 @@ extern "C" __global__ void y_gemm_32x64_kernel(
     }
 }
 
+// Dedicated 16x64 CTA Tile GEMM Kernel for Batch 32 Prompt Evaluation (128 CTAs grid occupancy)
+extern "C" __global__ __launch_bounds__(64, 4) void y_gemm_16x64_kernel(
+    const half* __restrict__ A,
+    const half* __restrict__ B,
+    half* __restrict__ C,
+    int M, int N, int K
+) {
+    const int BLOCK_M = 16, BLOCK_N = 64, BLOCK_K = 32;
+    int cta_m = blockIdx.y * BLOCK_M;
+    int cta_n = blockIdx.x * BLOCK_N;
+    int tid = threadIdx.x; // 64 threads (2 warps)
+    int warp_id = tid / 32; // 0 or 1
+
+    __shared__ alignas(128) half smem_A[2][16][40];
+    __shared__ alignas(128) half smem_B[2][32][72];
+
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> frag_C[2];
+    wmma::fill_fragment(frag_C[0], 0.0f);
+    wmma::fill_fragment(frag_C[1], 0.0f);
+
+    int r_a = tid / 4;        // 0..15
+    int c_a = (tid % 4) * 8;  // 0, 8, 16, 24
+    int r_b = tid / 8;        // 0..7
+    int c_b = (tid % 8) * 8;  // 0, 8, ..., 56
+
+    int write_stage = 0, read_stage = 0;
+
+    for (int k = 0; k < K; k += BLOCK_K) {
+        int gmem_r = cta_m + r_a, gmem_c = k + c_a;
+        if (gmem_r < M && (gmem_c + 7) < K) {
+            *reinterpret_cast<uint4*>(&smem_A[write_stage][r_a][c_a]) = *reinterpret_cast<const uint4*>(&A[gmem_r * K + gmem_c]);
+        }
+        #pragma unroll
+        for (int b_step = 0; b_step < 32; b_step += 8) {
+            int bgmem_r = k + r_b + b_step, bgmem_c = cta_n + c_b;
+            if (bgmem_r < K && (bgmem_c + 7) < N) {
+                *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b + b_step][c_b]) = *reinterpret_cast<const uint4*>(&B[bgmem_r * N + bgmem_c]);
+            }
+        }
+        __syncthreads();
+
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> frag_A;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> frag_B[2];
+
+        #pragma unroll
+        for (int k_step = 0; k_step < BLOCK_K; k_step += 16) {
+            wmma::load_matrix_sync(frag_A, &smem_A[read_stage][0][k_step], 40);
+            #pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                int b_col = warp_id * 32 + j * 16;
+                wmma::load_matrix_sync(frag_B[j], &smem_B[read_stage][k_step][b_col], 72);
+                wmma::mma_sync(frag_C[j], frag_A, frag_B[j], frag_C[j]);
+            }
+        }
+        __syncthreads();
+        write_stage = 1 - write_stage; read_stage = 1 - read_stage;
+    }
+
+    __shared__ float smem_C_f32[16][64];
+    #pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        wmma::store_matrix_sync(&smem_C_f32[0][warp_id * 32 + j * 16], frag_C[j], 64, wmma::mem_row_major);
+    }
+    __syncthreads();
+
+    int store_r = tid / 8; // 0..7
+    int store_c = (tid % 8) * 8; // 0, 8, ..., 56
+    #pragma unroll
+    for (int r_off = 0; r_off < 16; r_off += 8) {
+        int gm_r = cta_m + store_r + r_off;
+        int gm_c = cta_n + store_c;
+        if (gm_r < M && gm_c + 7 < N) {
+            half out8[8];
+            #pragma unroll
+            for (int e = 0; e < 8; ++e) {
+                out8[e] = __float2half(smem_C_f32[store_r + r_off][store_c + e]);
+            }
+            *reinterpret_cast<uint4*>(&C[gm_r * N + gm_c]) = *reinterpret_cast<const uint4*>(out8);
+        }
+    }
+}
+
 
 
 // Hopper sm_90a Native WGMMA Fused GEMM + Bias + ReLU Kernel (4-Stage TMA Pipeline + In-Register Vectorized Vector-Bias & ReLU Epilogue)
