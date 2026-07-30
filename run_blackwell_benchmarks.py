@@ -268,16 +268,17 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
             B_cp = cp.asarray(B_t)
             C_y = cp.zeros((M, N), dtype=cp.float16)
 
+            C_cublas = torch.empty((M, N), dtype=torch.float16, device="cuda")
             # Warmup cuBLAS
             for _ in range(warmup):
-                _ = torch.matmul(A_t, B_t)
+                torch.mm(A_t, B_t, out=C_cublas)
             torch.cuda.synchronize()
 
             start_c = torch.cuda.Event(enable_timing=True)
             end_c = torch.cuda.Event(enable_timing=True)
             start_c.record()
             for _ in range(iters):
-                _ = torch.matmul(A_t, B_t)
+                torch.mm(A_t, B_t, out=C_cublas)
             end_c.record()
             torch.cuda.synchronize()
             cublas_us = (start_c.elapsed_time(end_c) / float(iters)) * 1000.0
@@ -358,16 +359,17 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
             B_cp = cp.asarray(B_t)
             C_y = cp.zeros((M, N), dtype=cp.float16)
 
+            C_cublas = torch.empty((M, N), dtype=torch.float16, device="cuda")
             # Warmup cuBLAS
             for _ in range(10):
-                _ = torch.matmul(A_t, B_t)
+                torch.mm(A_t, B_t, out=C_cublas)
             torch.cuda.synchronize()
 
             start_c = torch.cuda.Event(enable_timing=True)
             end_c = torch.cuda.Event(enable_timing=True)
             start_c.record()
             for _ in range(50):
-                _ = torch.matmul(A_t, B_t)
+                torch.mm(A_t, B_t, out=C_cublas)
             end_c.record()
             torch.cuda.synchronize()
             cublas_us = (start_c.elapsed_time(end_c) / 50.0) * 1000.0
