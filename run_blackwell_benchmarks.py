@@ -169,6 +169,7 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
 
     y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
+    y_gemm_256x128 = y_mod.get_function("y_tensor_core_gemm_256x128_kernel")
     y_barrier_free = y_mod.get_function("y_fused_gemm_barrier_free_16x32_kernel")
     y_gemm_64x64 = y_mod.get_function("y_tensor_core_gemm_64x64_kernel")
     y_gemm_32x64 = y_mod.get_function("y_gemm_32x64_kernel")
@@ -178,9 +179,9 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
     y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
     
     # Configure dynamic SMEM attribute (64KB - 96KB) for Hopper sm_90a kernels
-    for k_func in [y_gemm_large, y_gemm_64x64, y_fused_bias_relu]:
+    for k_func in [y_gemm_large, y_gemm_256x128, y_gemm_64x64, y_fused_bias_relu]:
         try:
-            k_func.max_dynamic_shared_size_bytes = 65536
+            k_func.max_dynamic_shared_size_bytes = 98304
         except Exception:
             pass
 
@@ -295,6 +296,12 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
                 threads = 128
                 kernel_fn = y_gemm_64x64
                 k_args = (A_cp, B_cp, C_y, M, N, K)
+            elif cap_major == 9 and y_gemm_256x128 is not None:
+                grid_m = (M + 255) // 256
+                grid_n = (N + 127) // 128
+                threads = 256
+                kernel_fn = y_gemm_256x128
+                k_args = (A_cp, B_cp, C_y, M, N, K)
             else:
                 grid_m = (M + 127) // 128
                 grid_n = (N + 127) // 128
@@ -302,24 +309,42 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
                 kernel_fn = y_gemm_large
                 k_args = (A_cp, B_cp, C_y, M, N, K)
 
-            # Warmup Y
-            for _ in range(50):
-                kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
-            cp.cuda.Device(0).synchronize()
+            if kernel_fn == y_gemm_256x128:
+                for _ in range(warmup):
+                    kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args, shared_mem=98304)
+                cp.cuda.Device(0).synchronize()
 
-            y_start = cp.cuda.Event()
-            y_end = cp.cuda.Event()
-            y_start.record()
-            for _ in range(iters):
-                kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
-            y_end.record()
-            y_end.synchronize()
-            y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(iters):
+                    kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args, shared_mem=98304)
+                y_end.record()
+                y_end.synchronize()
+                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
 
-            y_out = torch.from_dlpack(C_y)
-            ref_out = C_ref
-            parity_passed = verify_parity(y_out, ref_out, shape_str=f"{M}x{N}x{K}")
-            parity = "PASSED" if parity_passed else "WARN"
+                y_out = torch.from_dlpack(C_y)
+                ref_out = C_ref
+                parity_passed = verify_parity(y_out, ref_out, shape_str=f"{M}x{N}x{K}")
+                parity = "PASSED" if parity_passed else "WARN"
+            else:
+                for _ in range(warmup):
+                    kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
+                cp.cuda.Device(0).synchronize()
+
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(iters):
+                    kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
+                y_end.record()
+                y_end.synchronize()
+                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
+
+                y_out = torch.from_dlpack(C_y)
+                ref_out = C_ref
+                parity_passed = verify_parity(y_out, ref_out, shape_str=f"{M}x{N}x{K}")
+                parity = "PASSED" if parity_passed else "WARN"
 
             tflops = (2.0 * M * N * K) / (y_us * 1e-6) / 1e12
             speedup = cublas_us / y_us
