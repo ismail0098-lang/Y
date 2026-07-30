@@ -4840,13 +4840,8 @@ extern "C" __global__ __launch_bounds__(128, 2) void y_hopper_warp_specialized_g
                 *reinterpret_cast<uint4*>(&smem_B[write_stage][r_b][c_b + 8]) = make_uint4(0, 0, 0, 0);
             }
             uint32_t mbar_ptr = static_cast<uint32_t>(__cvta_generic_to_shared(&mbar[write_stage]));
-            if (tid == 0) {
-                uint64_t state;
-                asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], 8192;\n" : "=l"(state) : "r"(mbar_ptr));
-            } else {
-                uint64_t state;
-                asm volatile("mbarrier.arrive.shared.b64 %0, [%1];\n" : "=l"(state) : "r"(mbar_ptr));
-            }
+            uint64_t state;
+            asm volatile("mbarrier.arrive.shared.b64 %0, [%1];\n" : "=l"(state) : "r"(mbar_ptr));
             write_stage = 1 - write_stage;
         }
     } else {
