@@ -412,7 +412,7 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
                     y_end.synchronize()
                     y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
                 else:
-                    grid_m = (M + 31) // 32
+                    grid_m = (M + 15) // 16
                     grid_n = (N + 63) // 64
                     threads = 128
                     for _ in range(10):
