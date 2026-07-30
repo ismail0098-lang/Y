@@ -5153,15 +5153,26 @@ extern "C" __global__ void y_gemm_32x64_kernel(
         write_stage = 1 - write_stage; read_stage = 1 - read_stage;
     }
 
+    __shared__ float smem_C_f32[32][64];
     #pragma unroll
     for (int j = 0; j < 2; ++j) {
-        int out_m = cta_m + warp_m * 16;
-        int out_n = cta_n + warp_n * 32 + j * 16;
-        if (out_m < M && out_n < N) {
-            wmma::fragment<wmma::accumulator, 16, 16, 16, half> frag_h;
+        wmma::store_matrix_sync(&smem_C_f32[warp_m * 16][warp_n * 32 + j * 16], frag_C[0][j], 64, wmma::mem_row_major);
+    }
+    __syncthreads();
+
+    int r_idx = tid / 8;
+    int c_idx = (tid % 8) * 8;
+    #pragma unroll
+    for (int r_off = 0; r_off < 32; r_off += 16) {
+        int gm_r = cta_m + r_idx + r_off;
+        int gm_c = cta_n + c_idx;
+        if (gm_r < M && gm_c + 7 < N) {
+            half out8[8];
             #pragma unroll
-            for (int e = 0; e < frag_h.num_elements; ++e) frag_h.x[e] = __float2half(frag_C[0][j].x[e]);
-            wmma::store_matrix_sync(&C[out_m * N + out_n], frag_h, N, wmma::mem_row_major);
+            for (int e = 0; e < 8; ++e) {
+                out8[e] = __float2half(smem_C_f32[r_idx + r_off][c_idx + e]);
+            }
+            *reinterpret_cast<uint4*>(&C[gm_r * N + gm_c]) = *reinterpret_cast<const uint4*>(out8);
         }
     }
 }
