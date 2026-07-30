@@ -169,13 +169,13 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
 
     y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
-    y_gemm_64x64 = y_mod.get_function("y_tensor_core_gemm_64x64_kernel")
-    y_gemv_vec = y_mod.get_function("y_gemv_fp16_vector_kernel")
-    y_gemm_32x64 = y_mod.get_function("y_gemm_32x64_kernel")
     y_barrier_free = y_mod.get_function("y_fused_gemm_barrier_free_16x32_kernel")
-    y_splitk_ws = y_mod.get_function("y_fused_gemm_splitk_workspace_kernel")
-    y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
+    y_gemm_64x64 = y_mod.get_function("y_tensor_core_gemm_64x64_kernel")
+    y_gemm_32x64 = y_mod.get_function("y_gemm_32x64_kernel")
+    y_gemm_16x64 = y_mod.get_function("y_gemm_16x64_kernel")
+    y_gemv_vec = y_mod.get_function("y_gemv_fp16_vector_kernel")
     y_fused_bias_relu = y_mod.get_function("y_fused_gemm_bias_relu_fp16_kernel")
+    y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
     
     # Configure dynamic SMEM attribute (64KB - 96KB) for Hopper sm_90a kernels
     for k_func in [y_gemm_large, y_gemm_64x64, y_fused_bias_relu]:
@@ -414,16 +414,16 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
                 else:
                     grid_m = (M + 15) // 16
                     grid_n = (N + 63) // 64
-                    threads = 128
+                    threads = 64
                     for _ in range(10):
-                        y_gemm_32x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                        y_gemm_16x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
                     cp.cuda.Device(0).synchronize()
 
                     y_start = cp.cuda.Event()
                     y_end = cp.cuda.Event()
                     y_start.record()
                     for _ in range(50):
-                        y_gemm_32x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+                        y_gemm_16x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
                     y_end.record()
                     y_end.synchronize()
                     y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
