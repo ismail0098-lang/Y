@@ -14,6 +14,22 @@ use std::sync::{Mutex, OnceLock};
 use crate::ptx_emitter::CtaTileConfig;
 use crate::sentinel::HardwareProfile;
 
+/// Compile-time operand precision for a `@tile`d kernel. Currently plumbed
+/// through as call-site compatibility only (`generate_candidates`/`autotune`
+/// accept it but don't yet branch the search space on it) - this file was
+/// restored from an older checkpoint that predates whatever precision-aware
+/// tuning logic the working tree previously had (see git history), so this
+/// is a deliberately conservative reintroduction of the public API surface
+/// `ptx_emitter.rs`/`c_api.rs`/`src/bin/autotune_verify.rs` call with, not a
+/// claim that per-precision tuning is implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precision {
+    F16,
+    F32,
+    BF16,
+    Fp8,
+}
+
 /// Represents a candidate configuration parameter set for autotuning.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AutotuneCandidate {
@@ -53,7 +69,9 @@ pub struct Autotuner;
 
 impl Autotuner {
     /// Generates candidate search space for matrix dimensions M, N, K.
-    pub fn generate_candidates(m: u32, n: u32, _k: u32) -> Vec<AutotuneCandidate> {
+    /// `_precision` is accepted for call-site compatibility (see
+    /// `Precision`'s doc comment) but does not yet affect the search space.
+    pub fn generate_candidates(m: u32, n: u32, _k: u32, _precision: Precision) -> Vec<AutotuneCandidate> {
         let mut candidates = Vec::new();
 
         let tile_sizes = if m <= 256 || n <= 256 {
@@ -155,7 +173,9 @@ impl Autotuner {
     }
 
     /// Automatically selects optimal CTA tile layout, warp count, and stage count for target dim.
-    pub fn autotune(m: u32, n: u32, k: u32, hw_profile: &HardwareProfile) -> CtaTileConfig {
+    /// `precision` is accepted for call-site compatibility (see
+    /// `Precision`'s doc comment) but does not yet affect selection.
+    pub fn autotune(m: u32, n: u32, k: u32, hw_profile: &HardwareProfile, precision: Precision) -> CtaTileConfig {
         let key = (m, n, k);
         if let Ok(cache) = get_cache().lock() {
             if let Some(cached_candidate) = cache.get(&key) {
@@ -163,7 +183,7 @@ impl Autotuner {
             }
         }
 
-        let candidates = Self::generate_candidates(m, n, k);
+        let candidates = Self::generate_candidates(m, n, k, precision);
         let mut best_candidate = candidates[0].clone();
         let mut best_score = -1.0;
 
@@ -187,6 +207,58 @@ impl Autotuner {
             cache.clear();
         }
     }
+
+    /// Rough, formula-based occupancy estimate for a candidate (register/
+    /// shared-memory/warp/thread limits vs hardware maxima -> blocks/SM ->
+    /// achieved occupancy). Restored as a fresh, disclosed approximation to
+    /// satisfy `src/bin/autotune_verify.rs`'s diagnostic printout after this
+    /// file was reverted to an older checkpoint (see `Precision`'s doc
+    /// comment) - this is NOT a reconstruction of whatever occupancy model
+    /// the working tree previously had; `est_regs_per_thread` in particular
+    /// is a coarse heuristic (scales with accumulator-fragment count per
+    /// warp), not a real `ptxas -v` measurement. Only feeds this bin's own
+    /// printed diagnostics, not `score_candidate`/`autotune`'s actual
+    /// selection - so it has no bearing on the real GEMM codegen path.
+    pub fn estimate_occupancy(candidate: &AutotuneCandidate, hw_profile: &HardwareProfile) -> OccupancyEstimate {
+        let max_regs_per_sm = if hw_profile.max_regs_per_sm > 0 { hw_profile.max_regs_per_sm as f64 } else { 65536.0 };
+        let max_warps_per_sm = if hw_profile.max_warps_per_sm > 0 { hw_profile.max_warps_per_sm as f64 } else { 48.0 };
+        let max_smem_per_sm = if hw_profile.max_smem_per_sm_bytes > 0 { hw_profile.max_smem_per_sm_bytes as f64 } else { 49152.0 };
+        let max_threads_per_sm = if hw_profile.max_threads_per_sm > 0 { hw_profile.max_threads_per_sm as f64 } else { 1536.0 };
+
+        let per_warp_m = (candidate.cta_m / candidate.warps_m).max(1);
+        let per_warp_n = (candidate.cta_n / candidate.warps_n).max(1);
+        let num_frags = ((per_warp_m / 16).max(1) * (per_warp_n / 16).max(1)) as f64;
+        // 8 f32 accumulator regs/fragment + fixed per-thread bookkeeping overhead.
+        let est_regs_per_thread = 32.0 + num_frags * 8.0 * 1.5;
+
+        let threads_per_block = (candidate.num_warps * 32) as f64;
+        let regs_limit_blocks = (max_regs_per_sm / (est_regs_per_thread * threads_per_block)).floor();
+
+        let bytes_per_elem = 2.0; // F16 operand staging
+        let smem_bytes_per_block =
+            (candidate.cta_m * candidate.cta_k) as f64 * bytes_per_elem * candidate.num_stages as f64
+                + (candidate.cta_k * candidate.cta_n) as f64 * bytes_per_elem * candidate.num_stages as f64;
+        let smem_limit_blocks = if smem_bytes_per_block > 0.0 { (max_smem_per_sm / smem_bytes_per_block).floor() } else { f64::INFINITY };
+
+        let warps_limit_blocks = (max_warps_per_sm / candidate.num_warps as f64).floor();
+        let threads_limit_blocks = (max_threads_per_sm / threads_per_block).floor();
+
+        let achieved_blocks_per_sm = [regs_limit_blocks, smem_limit_blocks, warps_limit_blocks, threads_limit_blocks]
+            .into_iter()
+            .fold(f64::INFINITY, f64::min)
+            .max(0.0);
+        let achieved_occupancy = ((achieved_blocks_per_sm * candidate.num_warps as f64) / max_warps_per_sm).min(1.0);
+
+        OccupancyEstimate { est_regs_per_thread, achieved_blocks_per_sm, achieved_occupancy }
+    }
+}
+
+/// See `Autotuner::estimate_occupancy`'s doc comment.
+#[derive(Debug, Clone, Copy)]
+pub struct OccupancyEstimate {
+    pub est_regs_per_thread: f64,
+    pub achieved_blocks_per_sm: f64,
+    pub achieved_occupancy: f64,
 }
 
 
@@ -196,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_autotuner_candidate_generation() {
-        let candidates = Autotuner::generate_candidates(1024, 1024, 1024);
+        let candidates = Autotuner::generate_candidates(1024, 1024, 1024, Precision::F16);
         assert!(!candidates.is_empty());
         for cand in &candidates {
             assert!(cand.num_stages >= 2);
@@ -207,10 +279,9 @@ mod tests {
     #[test]
     fn test_autotuner_selection() {
         let hw = HardwareProfile::default();
-        let config = Autotuner::autotune(2048, 2048, 2048, &hw);
+        let config = Autotuner::autotune(2048, 2048, 2048, &hw, Precision::F16);
         assert!(config.cta_m >= 64);
         assert!(config.num_stages >= 2);
         assert!(config.num_warps >= 4);
     }
 }
-

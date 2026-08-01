@@ -188,7 +188,7 @@ def run_benchmarks():
         y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
 
         C_y_torch = torch.from_dlpack(C_y)
-        is_close = torch.allclose(C_y_torch, C_ref, atol=1e-1, rtol=1e-1)
+        is_close = torch.allclose(C_y_torch, C_ref, atol=1e-2, rtol=1e-2)
         parity = "PASSED" if is_close else "WARN"
 
         tflops = (2.0 * M * N * K) / (y_us * 1e-6) / 1e12
@@ -269,7 +269,7 @@ def run_benchmarks():
         y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
 
         C_y_torch = torch.from_dlpack(C_y)
-        is_close = torch.allclose(C_y_torch, C_ref, atol=1e-1, rtol=1e-1)
+        is_close = torch.allclose(C_y_torch, C_ref, atol=1e-2, rtol=1e-2)
         parity = "PASSED" if is_close else "WARN"
 
         bytes_loaded = 2.0 * (M * K + K * N + M * N)

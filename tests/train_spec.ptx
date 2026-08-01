@@ -1,0 +1,36 @@
+.version 7.8
+.target sm_89
+.address_size 64
+
+.visible .entry train_step_gpu(
+    .param .u64 weights_0,
+    .param .b32 size_1
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 8
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 32 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 100.00% (6 active blocks per SM)
+.maxnreg 32
+{
+    .reg .b32 %r<3>;
+    .reg .f32 %f<3>;
+    .reg .b64 %rd<1>;
+    .reg .pred %p<1>;
+
+    ld.param.u64 %rd0, [weights_0];
+    ld.param.u32 %r0, [size_1];
+    ld.global.ca.f32 %f0, [%rd0];
+    mov.f32 %f1, 0.0;
+    // for i in ...
+    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M=IntLit(16, Span { line: 15, col: 15 }), N=IntLit(16, Span { line: 15, col: 19 }), K=Some(IntLit(8, Span { line: 15, col: 23 }))
+    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M=IntLit(16, Span { line: 15, col: 15 }), N=IntLit(16, Span { line: 15, col: 19 }), K=Some(IntLit(8, Span { line: 15, col: 23 }))
+    mov.u32 %r1, 0;
+    mov.u32 %r2, 1024;
+    $LOOP_START_0:
+    setp.ge.u32 %p0, %r1, %r2;
+    @%p0 bra $LOOP_END_1;
+    add.f32 %f2, %f1, %f0;
+    mov.f32 %f1, %f2;
+    add.u32 %r1, %r1, 1;
+    bra $LOOP_START_0;
+    $LOOP_END_1:
+}

@@ -12,11 +12,28 @@
 #![allow(dead_code)]
 
 use crate::ast::*;
+use crate::autotuner::{Autotuner, Precision};
 use crate::sentinel::HardwareProfile;
 use std::fmt::Write;
 
 #[cfg(feature = "zk")]
 use crate::zk_emitter::*;
+
+/// L2-locality grid-swizzle group size for `emit_tensor_core_gemm_kernel`
+/// (see `emit_grid_swizzle_code`'s doc comment for the algorithm).
+/// Empirically swept over {4, 8, 16, 32} against real sm_89 (RTX 4070 Ti
+/// SUPER) hardware at the 4096-16384 M=N=K scale via
+/// tests/benchmark_y_tensor_core_gemm.py: all four measured statistically
+/// identical (0.74x-0.75x vs cuBLAS, well within this benchmark's
+/// run-to-run noise band) - enabling the swizzle at all is what moved the
+/// needle (0.67x-0.70x -> ~0.74x), not this constant's value. Kept at 8 as
+/// the conventional CUTLASS/Triton default rather than a measured optimum,
+/// since none was found in range. Re-sweep if this kernel's tile sizes,
+/// target GPU, or L2 capacity change materially. Not shape-dependent for
+/// correctness: the swizzle math is a verified bijection (see
+/// test_grid_swizzle_uneven_grid_is_bijection) for any group size against
+/// any grid, including grids far smaller than this constant.
+pub const GEMM_SWIZZLE_GROUP_SIZE: u32 = 8;
 
 /// Maps an SM compute capability to the minimum required PTX ISA version.
 fn ptx_version_for_sm(sm: &str) -> &'static str {
@@ -113,6 +130,21 @@ pub struct PtxEmitter {
     sm_target: String,
     /// When true, emits .file and .loc directives for NCU profiling and debugging.
     pub debug_info: bool,
+    /// Module-scope declarations (currently just `.extern .shared` arrays for
+    /// cp.async-pipelined GEMM kernels - see `emit_tensor_core_gemm_kernel`)
+    /// that a kernel body emitter discovers a need for but cannot write
+    /// directly: `emit_kernel` temporarily swaps `ptx_buffer` for a
+    /// function-body-local buffer while lowering a kernel's body (so it can
+    /// wrap the result in `.visible .entry ... { }` afterward), and PTX
+    /// requires `.extern` linkage declarations to sit outside any `{ }`
+    /// block, not nested inside one alongside ordinary instructions
+    /// (confirmed by direct experiment - ptxas's parser rejects it there,
+    /// unlike a plain non-extern `.shared` local declaration, which PTX does
+    /// allow mid-body). Pushed here during body lowering, then drained by
+    /// `emit_kernel` into the real `ptx_buffer` right before that same
+    /// kernel's `.visible .entry` line - i.e. still module scope, and still
+    /// textually before its only use.
+    pending_extern_decls: Vec<String>,
 }
 
 impl PtxEmitter {
@@ -153,6 +185,7 @@ impl PtxEmitter {
             variables: std::collections::HashMap::new(),
             sm_target: target,
             debug_info: false,
+            pending_extern_decls: Vec::new(),
         }
     }
 
@@ -259,11 +292,28 @@ impl PtxEmitter {
             }
         }
 
-        // Emit body
-        self.emit_block(&kernel.body, hw_profile);
+        // Emit body: a validated kernel-level `@tile(M, N, K)` dispatches to
+        // the tile-aware Tensor Core GEMM path wholesale instead of the
+        // normal generic per-statement lowering (see `tile_gemm_operands`).
+        // Captures the real launch block size for the `.maxnreg` computation
+        // below - see that computation's doc comment for why this matters.
+        let tile_gemm_threads_per_cta = if let Some((m, n, k, a_ptr, b_ptr, c_ptr, bias_ptr)) = self.tile_gemm_operands(kernel) {
+            Some(self.emit_tensor_core_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &c_ptr, bias_ptr.as_deref(), hw_profile, &kernel.name))
+        } else {
+            self.emit_block(&kernel.body, hw_profile);
+            None
+        };
 
         // Take back the body_buffer and restore the original self.ptx_buffer
         let body_code = std::mem::replace(&mut self.ptx_buffer, saved_buffer);
+
+        // Flush any module-scope declarations the body emitter queued up
+        // (currently just `.extern .shared` for a pipelined tile-GEMM
+        // kernel - see `pending_extern_decls`'s doc comment) into the real
+        // buffer now, before this kernel's own `.visible .entry` line.
+        for decl in self.pending_extern_decls.drain(..) {
+            writeln!(&mut self.ptx_buffer, "{}", decl).unwrap();
+        }
 
         // Emit kernel signature to original self.ptx_buffer
         writeln!(&mut self.ptx_buffer, ".visible .entry {}(", kernel.name).unwrap();
@@ -301,9 +351,30 @@ impl PtxEmitter {
             255
         };
 
-        let block_size = 256;
+        // block_size here assumes 256 threads/block for every kernel except
+        // a tile-aware GEMM (`tile_gemm_threads_per_cta`, its own real,
+        // autotuned thread count - which can be 512 for the largest
+        // candidates). That assumption isn't just a display-comment
+        // inaccuracy for those kernels: `limit` above is a coarse 32/64/
+        // 128/255 bucket of a virtual-register-count estimate that is not
+        // ptxas's real, final per-thread allocation, so `.maxnreg` was
+        // landing far above what a 512-thread block can actually afford
+        // (max_regs_per_sm=65536 / 512 threads = 128 regs/thread ceiling,
+        // vs the 255 this bucketing was picking) - confirmed on real
+        // hardware as CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES ("too many
+        // resources requested for launch") the first time a tile-aware
+        // kernel's real per-thread register need got close enough to that
+        // ceiling to matter. Clamping `limit` itself (not just the display
+        // math below) to what the real block size can afford fixes this at
+        // the source rather than papering over it in the estimate.
+        let block_size = tile_gemm_threads_per_cta.unwrap_or(256);
         let max_regs_per_sm = hw_profile.max_regs_per_sm;
         let max_threads_per_sm = hw_profile.max_threads_per_sm;
+        let limit = if block_size > 0 {
+            limit.min(max_regs_per_sm / block_size)
+        } else {
+            limit
+        };
 
         let active_blocks = if limit > 0 && block_size > 0 {
             (max_regs_per_sm / (block_size * limit))
@@ -1736,52 +1807,1162 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    cp.async.wait_group {};", n).unwrap();
     }
 
-    /// Automated Grid Block Swizzling Pass (Morton / Hilbert Space Curve).
-    /// Rewrites grid IDs (ctaid.x, ctaid.y) to follow an 8-tile Morton/Hilbert space-filling curve.
-    pub fn emit_grid_swizzle_code(&mut self, swizzle_group_size: u32) {
+    /// Automated Grid Block Swizzling Pass (grouped-raster L2 locality swizzle,
+    /// in the style of CUTLASS's `ThreadblockSwizzle` / Triton's grouped-order
+    /// matmul tutorial - despite the historical name this is not actually a
+    /// Morton/Hilbert curve).
+    ///
+    /// Groups `swizzle_group_size` consecutive M-direction CTA row-tiles and
+    /// walks them column-first (instead of raw row-major raster order), so
+    /// that CTAs with nearby linear ctaid - which tend to run concurrently -
+    /// reuse the same A/B tiles through L2 instead of one fixed A-row-tile
+    /// paired with `gdim_x` different B-column-tiles.
+    ///
+    /// Returns `(swizzled_cta_m_reg, swizzled_cta_n_reg)` for callers that
+    /// want the registers directly; also stashed in `self.variables` under
+    /// `"pid_m"`/`"pid_n"`/`"swizzled_cta_m"`/`"swizzled_cta_n"` for the
+    /// generic per-statement lowering path.
+    ///
+    /// Handles `%nctaid.y` (`gdim_y`, i.e. the number of M-direction tiles)
+    /// NOT being an exact multiple of `swizzle_group_size` - and
+    /// `swizzle_group_size > gdim_y` outright - by clamping the divisor used
+    /// for the last (short) group to the rows actually remaining
+    /// (`group_size_m = min(swizzle_group_size, gdim_y - first_m)`). Without
+    /// this clamp the naive formula both emits out-of-range `swizzled_cta_m`
+    /// values (CTAs writing outside the M extent - illegal-memory-access
+    /// territory) and never produces some valid in-range tiles at all (their
+    /// output would silently stay uninitialized) whenever `gdim_y` isn't a
+    /// clean multiple - see `test_grid_swizzle_uneven_grid_is_bijection`,
+    /// which enumerates every `(ctaid.x, ctaid.y)` pair for a battery of
+    /// grid shapes (including primes, `gdim_y < swizzle_group_size`, and
+    /// `gdim_y == 1`) and asserts the resulting `(swizzled_cta_n,
+    /// swizzled_cta_m)` map is a bijection onto the same grid.
+    pub fn emit_grid_swizzle_code(&mut self, swizzle_group_size: u32) -> (String, String) {
         writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [AUTOMATED GRID BLOCK SWIZZLING PASS - MORTON SPACE-FILLING CURVE]").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [AUTOMATED GRID BLOCK SWIZZLING PASS - GROUPED RASTER L2 LOCALITY]").unwrap();
         writeln!(&mut self.ptx_buffer, "    // Group size: {} tiles (Maximizes L2 Cache hit rate)", swizzle_group_size).unwrap();
         writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
 
         let raw_bid_x = self.alloc_reg32();
         let raw_bid_y = self.alloc_reg32();
         let gdim_x = self.alloc_reg32();
+        let gdim_y = self.alloc_reg32();
         let tile_idx = self.alloc_reg32();
         let group_tiles = self.alloc_reg32();
         let group_id = self.alloc_reg32();
         let group_offset = self.alloc_reg32();
+        let first_m = self.alloc_reg32();
+        let rows_remaining = self.alloc_reg32();
+        let group_size_m = self.alloc_reg32();
+        let rem_offset = self.alloc_reg32();
         let swizzled_cta_m = self.alloc_reg32();
         let swizzled_cta_n = self.alloc_reg32();
 
         writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", raw_bid_x).unwrap();
         writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.y;", raw_bid_y).unwrap();
         writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.x;", gdim_x).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.y;", gdim_y).unwrap();
 
         // tile_idx = raw_bid_y * gdim_x + raw_bid_x
         writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", tile_idx, raw_bid_y, gdim_x, raw_bid_x).unwrap();
-        // group_tiles = gdim_x * swizzle_group_size
+        // group_tiles = gdim_x * swizzle_group_size (tiles in one *full-size* row-group)
         writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", group_tiles, gdim_x, swizzle_group_size).unwrap();
 
-        // group_id = tile_idx / group_tiles
+        // group_id = tile_idx / group_tiles ; group_offset = tile_idx % group_tiles.
+        // Using the constant (unclamped) group_tiles here is still correct
+        // even though the LAST group may be short: every earlier group is
+        // exactly full-size, so integer division still buckets tile_idx into
+        // the right group_id, and group_offset still lands in [0, actual
+        // tiles in that group) for the last group specifically (see doc
+        // comment / test for the full argument).
         writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", group_id, tile_idx, group_tiles).unwrap();
-        // group_offset = tile_idx % group_tiles
         writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", group_offset, tile_idx, group_tiles).unwrap();
 
-        // swizzled_cta_m = (group_id * swizzle_group_size) + (group_offset % swizzle_group_size)
-        let rem_offset = self.alloc_reg32();
-        let mul_group = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", rem_offset, group_offset, swizzle_group_size).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", mul_group, group_id, swizzle_group_size).unwrap();
-        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", swizzled_cta_m, mul_group, rem_offset).unwrap();
+        // first_m = group_id * swizzle_group_size (first M-row-tile of this group)
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", first_m, group_id, swizzle_group_size).unwrap();
 
-        // swizzled_cta_n = group_offset / swizzle_group_size
-        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", swizzled_cta_n, group_offset, swizzle_group_size).unwrap();
+        // group_size_m = min(swizzle_group_size, gdim_y - first_m): clamps
+        // the divisor for a short last group (or swizzle_group_size >
+        // gdim_y outright) down to the rows actually available.
+        writeln!(&mut self.ptx_buffer, "    sub.u32 {}, {}, {};", rows_remaining, gdim_y, first_m).unwrap();
+        writeln!(&mut self.ptx_buffer, "    min.u32 {}, {}, {};", group_size_m, rows_remaining, swizzle_group_size).unwrap();
+
+        // swizzled_cta_m = first_m + (group_offset % group_size_m)
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", rem_offset, group_offset, group_size_m).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", swizzled_cta_m, first_m, rem_offset).unwrap();
+
+        // swizzled_cta_n = group_offset / group_size_m
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", swizzled_cta_n, group_offset, group_size_m).unwrap();
 
         self.variables.insert("pid_m".into(), swizzled_cta_m.clone());
         self.variables.insert("pid_n".into(), swizzled_cta_n.clone());
-        self.variables.insert("swizzled_cta_m".into(), swizzled_cta_m);
-        self.variables.insert("swizzled_cta_n".into(), swizzled_cta_n);
+        self.variables.insert("swizzled_cta_m".into(), swizzled_cta_m.clone());
+        self.variables.insert("swizzled_cta_n".into(), swizzled_cta_n.clone());
+        (swizzled_cta_m, swizzled_cta_n)
+    }
+
+    /// Returns `(m, n, k, a_reg, b_reg, c_reg, bias_reg)` if `kernel` carries
+    /// a validated kernel-level `@tile(M, N, K)` directive (see
+    /// `KernelDecl::tile`'s doc comment) with either exactly 3
+    /// `GlobalMemory<F16/F16/F32>` params in declaration order (A, B, C -
+    /// plain GEMM, `bias_reg` is `None`), or exactly 4
+    /// (A, B: `GlobalMemory<F16>`, Bias, C: `GlobalMemory<F32>` - fused
+    /// GEMM+Bias+ReLU, `bias_reg` is `Some`). `type_checker`'s
+    /// `verify_tile_gemm_kernel` already enforces this shape as a hard
+    /// compile error in the normal CLI/C-ABI pipeline, but it is re-checked
+    /// here rather than just trusted, because `PtxEmitter` can be driven
+    /// directly with no type_checker pass at all - this file's own unit
+    /// tests do exactly that. `None` means "fall back to the normal generic
+    /// per-statement lowering" - never a panic, and never a best-effort
+    /// guess at a kernel this codegen isn't sure matches its assumptions.
+    fn tile_gemm_operands(&self, kernel: &KernelDecl) -> Option<(u32, u32, u32, String, String, String, Option<String>)> {
+        let tile = kernel.tile.as_ref()?;
+
+        fn as_positive_u32(e: &Expr) -> Option<u32> {
+            match e {
+                Expr::IntLit(v, _) if *v > 0 => u32::try_from(*v).ok(),
+                _ => None,
+            }
+        }
+        let m = as_positive_u32(&tile.block_m)?;
+        let n = as_positive_u32(&tile.block_n)?;
+        let k = as_positive_u32(tile.block_k.as_deref()?)?;
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+        // A, B: f16 Tensor Core operands. C (and, in the 4-param fused
+        // shape, Bias): f32 (see emit_tensor_core_gemm_kernel's doc comment
+        // - it hardcodes 4 bytes/element and wmma.store.d...f32 for C
+        // specifically, so this is not an arbitrary choice mirrored from
+        // type_checker for its own sake - the codegen below is only correct
+        // for exactly this shape).
+        let has_bias = kernel.params.len() == 4;
+        if (kernel.params.len() != 3 && kernel.params.len() != 4)
+            || !is_global_memory_of(&kernel.params[0].ty, "F16")
+            || !is_global_memory_of(&kernel.params[1].ty, "F16")
+            || !is_global_memory_of(&kernel.params[2].ty, "F32")
+            || (has_bias && !is_global_memory_of(&kernel.params[3].ty, "F32"))
+        {
+            return None;
+        }
+
+        let a_reg = self.variables.get(&kernel.params[0].name)?.clone();
+        let b_reg = self.variables.get(&kernel.params[1].name)?.clone();
+        let c_idx = if has_bias { 3 } else { 2 };
+        let c_reg = self.variables.get(&kernel.params[c_idx].name)?.clone();
+        let bias_reg = if has_bias {
+            Some(self.variables.get(&kernel.params[2].name)?.clone())
+        } else {
+            None
+        };
+        Some((m, n, k, a_reg, b_reg, c_reg, bias_reg))
+    }
+
+    /// Emits a thread-strided, boundary-masked cooperative load of one CTA's
+    /// tile from global into padded shared memory - shared by the A- and
+    /// B-tile loads inside `emit_tensor_core_gemm_kernel`'s K-loop.
+    /// `(local_rows, local_cols)` is the tile shape being loaded;
+    /// `(gmem_row0, gmem_col0)` are runtime registers giving the tile's
+    /// top-left corner within the full row-major source matrix (row stride
+    /// `gmem_row_stride` elements).
+    ///
+    /// Moves 8 f16 elements (128 bits) per thread per iteration via
+    /// `ld.global.v4.u32`/`st.shared.v4.u32` (ground-truth instruction
+    /// syntax and register count confirmed against real nvcc/ptxas output
+    /// before this was written) rather than one element at a time: an
+    /// earlier scalar (16-bit-at-a-time) version of this function was
+    /// measured - median of 5 real-hardware runs per size, all 7 benchmark
+    /// sizes, via tests/benchmark_y_tensor_core_gemm.py - to leave the
+    /// compiled kernel 4-25x slower than cuBLAS, and the gap did not shrink
+    /// at large sizes the way pure launch-overhead/grid-underutilization
+    /// would predict, pointing at this loop's sheer per-element instruction
+    /// count (loop control + div/rem + two bounds checks + address math, all
+    /// repeated per 2-byte element) as a real, structural cost, not just a
+    /// small-size artifact. Re-measuring after this change (same harness,
+    /// same discipline) confirmed the diagnosis: the gap narrowed to
+    /// 1.7x-3.2x slower across sizes (from 2x-25x), with two of the seven
+    /// sizes (512, 2048) landing within run-to-run noise of cuBLAS
+    /// (statistically indistinguishable, not a clean win - see that
+    /// script's README/report output for the exact numbers). It does not
+    /// close the gap outright: the remaining, *not yet implemented* cost is
+    /// the lack of real `cp.async` pipelining (this path stages
+    /// synchronously - see `emit_tensor_core_gemm_kernel`'s doc comment),
+    /// which is a separate, disclosed scope cut, not something this
+    /// vectorization pass attempted to fix.
+    ///
+    /// Boundary masking is therefore at 8-element chunk granularity, not
+    /// per-element (a whole chunk is skipped, zero-filled, if the *last* of
+    /// its 8 columns would be out of bounds) - the same whole-fragment
+    /// masking philosophy `emit_tensor_core_gemm_kernel`'s epilogue already
+    /// uses, for the same reason (finer-grained masking isn't expressible
+    /// with a single vectorized instruction). Requires `local_cols`,
+    /// `smem_stride`, and `gmem_row_stride` to each be a multiple of 8: true
+    /// for every candidate `Autotuner::generate_candidates` produces
+    /// (cta_k/cta_n are always multiples of 32, and the padding in
+    /// `emit_tensor_core_gemm_kernel` preserves that) and true for every
+    /// M/N/K this has actually been verified against (powers of two >= 256)
+    /// - `debug_assert`ed rather than silently violated for any @tile shape
+    /// that breaks it.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_gemm_tile_load(
+        &mut self,
+        label_tag: &str,
+        gmem_ptr: &str,
+        gmem_row0: &str,
+        gmem_col0: &str,
+        gmem_row_stride: u32,
+        gmem_row_bound: u32,
+        gmem_col_bound: u32,
+        local_rows: u32,
+        local_cols: u32,
+        smem_base: &str,
+        smem_stride: u32,
+        threads_per_cta: u32,
+    ) {
+        debug_assert_eq!(local_cols % 8, 0, "vectorized tile load requires local_cols a multiple of 8");
+        debug_assert_eq!(smem_stride % 8, 0, "vectorized tile load requires smem_stride a multiple of 8");
+        debug_assert_eq!(gmem_row_stride % 8, 0, "vectorized tile load requires gmem_row_stride a multiple of 8");
+
+        let cols_per_chunk = local_cols / 8;
+        let total_chunks = local_rows * cols_per_chunk;
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+        let loop_start = self.alloc_label(&format!("LOAD_{}", label_tag));
+        let loop_end = self.alloc_label(&format!("LOAD_{}_DONE", label_tag));
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_chunks).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
+
+        let lr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", lr, idx, cols_per_chunk).unwrap();
+        let lc_chunk = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", lc_chunk, idx, cols_per_chunk).unwrap();
+        let lc = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 8;", lc, lc_chunk).unwrap();
+
+        let grow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, gmem_row0, lr).unwrap();
+        let gcol = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", gcol, gmem_col0, lc).unwrap();
+        let gcol_end = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 8;", gcol_end, gcol).unwrap();
+
+        let p_row = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_row, grow, gmem_row_bound).unwrap();
+        let p_col = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.le.u32 {}, {}, {};", p_col, gcol_end, gmem_col_bound).unwrap();
+        let p_ok = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_ok, p_row, p_col).unwrap();
+
+        let gidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", gidx, grow, gmem_row_stride, gcol).unwrap();
+        let gbyte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 2;", gbyte, gidx).unwrap();
+        let gaddr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr, gmem_ptr, gbyte).unwrap();
+
+        // 8 x f16 raw bit patterns (no value conversion) via one 128-bit
+        // vector transfer - see doc comment.
+        let v: Vec<String> = (0..4).map(|_| self.alloc_reg32()).collect();
+        writeln!(&mut self.ptx_buffer, "    @{} ld.global.v4.u32 {{{}}}, [{}];", p_ok, v.join(","), gaddr).unwrap();
+        for r in &v {
+            writeln!(&mut self.ptx_buffer, "    @!{} mov.u32 {}, 0;", p_ok, r).unwrap();
+        }
+
+        let sidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, lr, smem_stride, lc).unwrap();
+        let sbyte = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", sbyte, sidx).unwrap();
+        let saddr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_base, sbyte).unwrap();
+        writeln!(&mut self.ptx_buffer, "    st.shared.v4.u32 [{}], {{{}}};", saddr, v.join(",")).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// Async (`cp.async`) sibling of `emit_gemm_tile_load`: identical thread
+    /// striding, chunk geometry, and boundary-address arithmetic (same
+    /// `local_cols`/`smem_stride`/`gmem_row_stride`-multiple-of-8
+    /// requirements, `debug_assert`ed identically - see that function's doc
+    /// comment for the full rationale), but issues a direct global->shared
+    /// `cp.async.cg` copy per chunk instead of routing through
+    /// `ld.global.v4`+`st.shared.v4` registers - see
+    /// `emit_tensor_core_gemm_kernel`'s pipelined path, the only caller.
+    ///
+    /// Per-chunk validity uses `cp.async`'s own 4-operand zero-fill form
+    /// (`cp.async.cg.shared.global [dst], [src], 16, srcSize;` with `srcSize`
+    /// a runtime register that is 0 or 16 via `selp`) rather than a
+    /// predicated `@p` guard on the copy itself. This distinction matters
+    /// here specifically: an `@p`-guarded instruction simply does not
+    /// execute for false lanes, leaving the destination whatever it was
+    /// before, whereas the zero-fill form unconditionally *writes* the
+    /// destination (real data or zero) every call. Pipelining reuses the
+    /// same physical stage slot across multiple, non-adjacent K-loop
+    /// iterations, so an invalid chunk must be re-zeroed (or at least
+    /// re-confirmed zero) every time that slot is refilled, not just once -
+    /// the unconditional-write form makes this automatic. Both that
+    /// property and the safety of the out-of-range address the invalid-lane
+    /// case still computes (never dereferenced by the hardware when
+    /// srcSize=0 - confirmed with a deliberately wild address far outside
+    /// any mapped region, not just a mildly-past-the-buffer one) were
+    /// verified with a standalone hand-written PTX probe compiled and run
+    /// on real sm_89 hardware before this function was written, not assumed
+    /// from documentation.
+    ///
+    /// `extra_valid_pred`, when `Some`, is AND-ed into the per-chunk mask -
+    /// used by the main pipeline loop to additionally suppress the load
+    /// when the K-tile being prefetched doesn't exist yet
+    /// (`next_tile >= k_tiles`, near the end of the K loop). The prologue
+    /// never passes this: it only ever prefetches compile-time-known-in-
+    /// bounds tiles (stage count is already clamped to `k_tiles` before the
+    /// prologue runs - see `emit_tensor_core_gemm_kernel`).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_gemm_tile_load_async(
+        &mut self,
+        label_tag: &str,
+        gmem_ptr: &str,
+        gmem_row0: &str,
+        gmem_col0: &str,
+        gmem_row_stride: u32,
+        gmem_row_bound: u32,
+        gmem_col_bound: u32,
+        local_rows: u32,
+        local_cols: u32,
+        smem_stage_base: &str,
+        smem_stride: u32,
+        threads_per_cta: u32,
+        extra_valid_pred: Option<&str>,
+    ) {
+        debug_assert_eq!(local_cols % 8, 0, "vectorized async tile load requires local_cols a multiple of 8");
+        debug_assert_eq!(smem_stride % 8, 0, "vectorized async tile load requires smem_stride a multiple of 8");
+        debug_assert_eq!(gmem_row_stride % 8, 0, "vectorized async tile load requires gmem_row_stride a multiple of 8");
+
+        let cols_per_chunk = local_cols / 8;
+        let total_chunks = local_rows * cols_per_chunk;
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+        let loop_start = self.alloc_label(&format!("ALOAD_{}", label_tag));
+        let loop_end = self.alloc_label(&format!("ALOAD_{}_DONE", label_tag));
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_chunks).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
+
+        let lr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", lr, idx, cols_per_chunk).unwrap();
+        let lc_chunk = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", lc_chunk, idx, cols_per_chunk).unwrap();
+        let lc = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 8;", lc, lc_chunk).unwrap();
+
+        let grow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, gmem_row0, lr).unwrap();
+        let gcol = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", gcol, gmem_col0, lc).unwrap();
+        let gcol_end = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 8;", gcol_end, gcol).unwrap();
+
+        let p_row = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_row, grow, gmem_row_bound).unwrap();
+        let p_col = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.le.u32 {}, {}, {};", p_col, gcol_end, gmem_col_bound).unwrap();
+        let mut p_ok = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_ok, p_row, p_col).unwrap();
+        if let Some(extra) = extra_valid_pred {
+            let combined = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", combined, p_ok, extra).unwrap();
+            p_ok = combined;
+        }
+
+        let gidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", gidx, grow, gmem_row_stride, gcol).unwrap();
+        let gbyte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 2;", gbyte, gidx).unwrap();
+        let gaddr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr, gmem_ptr, gbyte).unwrap();
+
+        // Register-driven zero-fill size operand - see doc comment.
+        let rsize = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    selp.u32 {}, 16, 0, {};", rsize, p_ok).unwrap();
+
+        let sidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, lr, smem_stride, lc).unwrap();
+        let sbyte = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", sbyte, sidx).unwrap();
+        let saddr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_stage_base, sbyte).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cp.async.cg.shared.global [{}], [{}], 16, {};", saddr, gaddr, rsize).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// Shared compute core of `emit_tensor_core_gemm_kernel`'s K-loop body,
+    /// used identically by both the synchronous-fallback and
+    /// cp.async-pipelined paths: loads each B fragment once per `kk`
+    /// sub-step (reused across all `i`), then each A fragment once (reused
+    /// across all `j`), accumulating via `wmma.mma` into `acc[i][j]`. The
+    /// two paths differ only in *which* smem addresses `smem_a_base`/
+    /// `smem_b_base` point at (a fixed compile-time base for the
+    /// single-buffered fallback, a per-iteration `read_stage`-offset base
+    /// for the pipelined path) - this function neither knows nor cares.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_gemm_compute_block(
+        &mut self,
+        acc: &[Vec<Vec<String>>],
+        warp_col0_local: &str,
+        warp_row0_scaled: &str,
+        smem_a_base: &str,
+        smem_b_base: &str,
+        smem_a_stride: u32,
+        smem_b_stride: u32,
+        stride_a_reg: &str,
+        stride_b_reg: &str,
+        k_substeps: u32,
+        num_i: u32,
+        num_j: u32,
+    ) {
+        for kk_step in 0..k_substeps {
+            let kk = kk_step * 16;
+
+            let mut b_frags: Vec<Vec<String>> = Vec::with_capacity(num_j as usize);
+            for j in 0..num_j {
+                let b_const = kk * smem_b_stride + j * 16;
+                let b_lin = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", b_lin, warp_col0_local, b_const).unwrap();
+                let b_byte = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", b_byte, b_lin).unwrap();
+                let b_addr = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", b_addr, smem_b_base, b_byte).unwrap();
+                let frag: Vec<String> = (0..8).map(|_| self.alloc_reg32()).collect();
+                writeln!(
+                    &mut self.ptx_buffer,
+                    "    wmma.load.b.sync.aligned.row.m16n16k16.shared.f16 {{{}}}, [{}], {};",
+                    frag.join(","), b_addr, stride_b_reg
+                ).unwrap();
+                b_frags.push(frag);
+            }
+
+            for i in 0..num_i {
+                let a_const = i * 16 * smem_a_stride + kk;
+                let a_lin = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", a_lin, warp_row0_scaled, a_const).unwrap();
+                let a_byte = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", a_byte, a_lin).unwrap();
+                let a_addr = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", a_addr, smem_a_base, a_byte).unwrap();
+                let a_frag: Vec<String> = (0..8).map(|_| self.alloc_reg32()).collect();
+                writeln!(
+                    &mut self.ptx_buffer,
+                    "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 {{{}}}, [{}], {};",
+                    a_frag.join(","), a_addr, stride_a_reg
+                ).unwrap();
+
+                for j in 0..num_j {
+                    let d = acc[i as usize][j as usize].join(",");
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 {{{}}}, {{{}}}, {{{}}}, {{{}}};",
+                        d, a_frag.join(","), b_frags[j as usize].join(","), d
+                    ).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Emits a complete, self-contained Tensor Core GEMM kernel body (grid
+    /// mapping, warp decomposition, cooperative shared-memory staging, wmma
+    /// load/mma/store, boundary-masked epilogue) for a kernel carrying a
+    /// validated `@tile(M, N, K)` directive - see `KernelDecl::tile` and
+    /// `tile_gemm_operands`. Bypasses the normal generic per-statement
+    /// lowering entirely: the `.ysu` kernel body is not consulted here at
+    /// all (for a `@tile`d kernel its role is documentation of intent,
+    /// checked by `type_checker` but not literally lowered).
+    ///
+    /// Tile/warp/pipeline-stage selection comes from `Autotuner::autotune`
+    /// (hardened against real probed hardware occupancy limits - see
+    /// autotuner.rs), keyed on this kernel's own compile-time M/N/K rather
+    /// than a hardcoded guess.
+    ///
+    /// Uses PTX ISA `wmma.load`/`wmma.mma`/`wmma.store` (`.m16n16k16`, f16
+    /// in / f32 out) rather than hand-rolled `ldmatrix` + raw `mma.sync`
+    /// fragment-register bookkeeping: getting per-lane fragment layout wrong
+    /// by hand produces a silently wrong answer, not a compile error, while
+    /// a malformed `wmma.*` shape/register-count is rejected outright by
+    /// ptxas - a real safety net worth leaning on for a codegen path this
+    /// new. The exact instruction sequence, padding, and address arithmetic
+    /// below were validated standalone first: hand-written PTX, run via the
+    /// CUDA driver API on real sm_89 hardware, covering a single 16x16x16
+    /// tile and then a multi-warp/multi-k-tile/non-square-stride case
+    /// (M=32,N=48,K=64, which a square M=N=K test cannot - it can't tell A's
+    /// K-stride, B's N-stride, and C's N-stride apart) - both matched a CPU
+    /// reference exactly before this function was written.
+    ///
+    /// Shared-memory tiles are padded (+8 f16 elements/row - matching
+    /// tests/y_tensor_core_gemm.cu, the one other Tensor Core kernel in this
+    /// repo proven on real hardware) rather than XOR-swizzled via
+    /// bank_conflict.rs: `wmma.load` takes a flat base address plus a row
+    /// stride with no hook for swizzled addressing, so bank_conflict.rs's
+    /// swizzle math (built around raw `ldmatrix`'s specific 32-lane access
+    /// pattern) does not model this instruction sequence - invoking it here
+    /// would be validation theater, not a real check. This does not affect
+    /// correctness either way (bank conflicts cost throughput, not
+    /// correctness - the smoke tests above passed before padding was even
+    /// tuned); it is a real but secondary, disclosed simplification.
+    ///
+    /// Scope, stated plainly:
+    /// - `K` must be a multiple of the autotuned `cta_k` (`debug_assert`ed,
+    ///   not silently truncated); the M/N grid and every A/B tile load IS
+    ///   boundary-masked (safe, zero-filled) for any M/N, but a CTA's output
+    ///   *store* is skipped whole-fragment (not partially written) if it
+    ///   would run past M or N - correct for the exact-multiple shapes this
+    ///   was verified against, ragged (non-16-aligned) M/N edges are left
+    ///   unwritten rather than partially computed.
+    /// - Staging is `cp.async`-pipelined across `effective_stages` shared-
+    ///   memory buffers (see below) rather than a single synchronous
+    ///   load/`bar.sync`/compute/`bar.sync` step: while the tensor cores
+    ///   consume stage `read_stage`, the async-copy engine is already
+    ///   filling stage `write_stage` (`(k_iter + effective_stages - 1) %
+    ///   effective_stages`) for a future iteration in the background. This
+    ///   was a disclosed, deliberate scope cut on the first,
+    ///   correctness-first pass (see git history); `emit_cp_async`/
+    ///   `emit_cp_async_commit`/`emit_cp_async_wait` and the K-tail/smem
+    ///   accounting below are what a later pass (this one) used to layer it
+    ///   on top. `effective_stages` is `Autotuner::autotune`'s `num_stages`
+    ///   clamped down by two things it doesn't itself account for:
+    ///     1. `k_tiles` (`k / cta_k`) - a pipeline can never usefully
+    ///        prefetch more tiles ahead than exist at all.
+    ///     2. The REAL, padding-inclusive per-stage shared-memory footprint
+    ///        against the real per-CTA hardware ceiling.
+    ///        `Autotuner::score_candidate`/`estimate_occupancy`'s own smem
+    ///        model uses raw `cta_m*cta_k`/`cta_k*cta_n` tile bytes with no
+    ///        `+8`-element padding term (a known, disclosed blind spot - see
+    ///        autotuner.rs), so it can green-light a candidate whose padded
+    ///        reality doesn't actually fit - re-derived here from the real
+    ///        per-stage byte count rather than trusted from the candidate.
+    ///        Separately, `hw_profile.max_smem_per_sm_bytes` (102400 B
+    ///        measured on this project's sm_89 dev machine) is a *per-SM*
+    ///        total used for occupancy reasoning elsewhere in the autotuner,
+    ///        not the single-CTA dynamic-shared-memory opt-in ceiling a
+    ///        launch can actually request
+    ///        (`cudaDevAttrMaxSharedMemoryPerBlockOptin`, measured at
+    ///        101376 B on that same machine via `cupy` - close to but not
+    ///        the same number) - a margin well past the ~1KB observed gap is
+    ///        subtracted to stay safe on hardware this was never measured
+    ///        on. When `effective_stages` ends up below 2 (only possible for
+    ///        a @tile K with fewer than 2 whole `cta_k` tiles - not
+    ///        exercised by any shape `Autotuner::generate_candidates`
+    ///        currently produces for this project's tested shapes), this
+    ///        falls back to the exact original single-buffered synchronous
+    ///        path instead of degenerating into a 1-stage "pipeline".
+    ///   Stage buffers live in one combined *dynamic* (`.extern .shared`)
+    ///   array rather than N statically-sized `.shared` declarations: a
+    ///   statically-sized `.shared` array is hard-capped at 48KB by ptxas on
+    ///   this hardware regardless of the GPU's real (~100KB) capacity
+    ///   (confirmed by direct experiment - ptxas rejects a >48KB static
+    ///   array outright), while dynamic shared memory can go up to the real
+    ///   per-CTA opt-in ceiling as long as the launcher requests it (sets
+    ///   `cudaFuncAttributeMaxDynamicSharedMemorySize`/
+    ///   `max_dynamic_shared_size_bytes` and passes the byte count at
+    ///   launch) - see the `[Y TENSOR CORE GEMM]` PTX comment this function
+    ///   emits, which documents the exact byte count the launcher must
+    ///   request, and `tests/benchmark_y_tensor_core_gemm.py`'s
+    ///   `compile_kernel`/`run_once` for the reference launcher
+    ///   implementation. This declaration-size ceiling and the dynamic-smem
+    ///   opt-in launch mechanism were both confirmed with standalone probes
+    ///   (a deliberately oversized static `.shared` array rejected by
+    ///   ptxas; a >48KB `.extern .shared` array loaded and launched
+    ///   end-to-end via `cupy.RawModule` + `max_dynamic_shared_size_bytes` +
+    ///   `shared_mem=`) on real sm_89 hardware before this function was
+    ///   written.
+    /// Returns the CTA's real thread count (`config.num_warps * 32`) so the
+    /// caller (`emit_kernel`) can size its `.maxnreg` register-pressure
+    /// estimate against this kernel's actual launch block size instead of a
+    /// generic 256-thread assumption - see the call site's doc comment.
+    fn emit_tensor_core_gemm_kernel(
+        &mut self,
+        m: u32,
+        n: u32,
+        k: u32,
+        a_ptr: &str,
+        b_ptr: &str,
+        c_ptr: &str,
+        bias_ptr: Option<&str>,
+        hw_profile: &HardwareProfile,
+        kernel_name: &str,
+    ) -> u32 {
+        let config = Autotuner::autotune(m, n, k, hw_profile, Precision::F16);
+        let cta_m = config.cta_m;
+        let cta_n = config.cta_n;
+        let cta_k = config.cta_k;
+        let warps_m = config.warps_m;
+        let warps_n = config.warps_n;
+        let threads_per_cta = config.num_warps * 32;
+
+        let per_warp_m = cta_m / warps_m;
+        let per_warp_n = cta_n / warps_n;
+        let num_i = per_warp_m / 16;
+        let num_j = per_warp_n / 16;
+        let k_substeps = cta_k / 16;
+        debug_assert_eq!(num_i * 16 * warps_m, cta_m, "autotuned cta_m must split evenly into 16-row warp fragments");
+        debug_assert_eq!(num_j * 16 * warps_n, cta_n, "autotuned cta_n must split evenly into 16-col warp fragments");
+        debug_assert_eq!(k_substeps * 16, cta_k, "autotuned cta_k must be a multiple of wmma's m16n16k16 K dimension");
+        debug_assert_eq!(k % cta_k, 0, "@tile K must be a multiple of the autotuned cta_k - see doc comment scope note");
+
+        let smem_a_stride = cta_k + 8; // padded, elements/row - see doc comment
+        let smem_b_stride = cta_n + 8;
+        let k_tiles = k / cta_k;
+
+        // ---- effective pipeline depth: see doc comment ----
+        let stage_a_bytes = cta_m * smem_a_stride * 2;
+        let stage_b_bytes = cta_k * smem_b_stride * 2;
+        let per_stage_bytes = stage_a_bytes + stage_b_bytes;
+        let safe_smem_ceiling = hw_profile.max_smem_per_sm_bytes.saturating_sub(4096);
+        let max_stages_by_smem = (safe_smem_ceiling / per_stage_bytes).max(1);
+        let effective_stages = config.num_stages.min(k_tiles).min(max_stages_by_smem).max(1);
+        let mut total_dyn_smem_bytes = effective_stages * per_stage_bytes;
+
+        // ---- fused Bias+ReLU epilogue: reuses this same dynamic shared
+        // buffer (already idle by the time the epilogue runs - see
+        // emit_gemm_bias_relu_epilogue's doc comment) as a row-major f32
+        // scratch tile. A *full* cta_m x cta_n f32 tile (e.g. 128x260x4 =
+        // ~133KB for a 128x256 CTA tile) can exceed this GPU's real per-CTA
+        // dynamic-smem opt-in ceiling (~101376B measured on this project's
+        // sm_89 dev machine - see emit_tensor_core_gemm_kernel's doc
+        // comment) even though the A/B pipeline stages themselves fit fine.
+        // So the epilogue instead runs in `warps_n` passes, one per warp
+        // *column* (see emit_kernel's write-loop below and
+        // emit_gemm_bias_relu_epilogue): each pass's scratch tile is only
+        // cta_m x per_warp_n wide - `per_warp_n <= cta_n`, so this is always
+        // <= the full-tile size, and for every autotuned config observed so
+        // far comfortably fits alongside the pipeline's own smem budget.
+        // Supported in BOTH the pipelined and `effective_stages < 2`
+        // fallback branches - the fallback branch switches to this same
+        // dynamic extern-shared mechanism (instead of static `.shared`
+        // arrays) whenever bias is present specifically so this holds; see
+        // that branch's own doc comment for why it's real, observed
+        // (M=N=K=2048 on this project's dev GPU clamps to 1 stage on smem
+        // pressure alone, before the epilogue even factors in), not a
+        // theoretical edge case.
+        let smem_c_stride = per_warp_n + 4; // padded, elements/row - matches tests/y_tensor_core_gemm.cu's fused kernel (there: cta_n-wide, here: per-warp-column-banded, see above)
+        let smem_c_bytes = cta_m * smem_c_stride * 4;
+        if bias_ptr.is_some() {
+            total_dyn_smem_bytes = total_dyn_smem_bytes.max(smem_c_bytes);
+        }
+
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [Y TENSOR CORE GEMM] M={} N={} K={} | CTA {}x{}x{} | {}x{} warps | wmma.sync.m16n16k16.f16->f32", m, n, k, cta_m, cta_n, cta_k, warps_m, warps_n).unwrap();
+        if effective_stages >= 2 {
+            writeln!(&mut self.ptx_buffer, "    // Autotuner selected {} pipeline stages ({} used after k_tiles/smem clamping); cp.async multi-stage pipelined. Dynamic shared memory required: {} bytes.", config.num_stages, effective_stages, total_dyn_smem_bytes).unwrap();
+        } else if bias_ptr.is_some() {
+            // Unlike the plain-GEMM fallback (static `.shared`, needs no
+            // launch-time dynamic smem request), this kernel's fused
+            // Bias+ReLU epilogue always needs a *dynamic* buffer - see the
+            // `effective_stages < 2` branch's `bias_ptr.is_some()` case -
+            // so the launcher-facing byte count must be reported here too,
+            // not just on the `>=2`-stage path above.
+            writeln!(&mut self.ptx_buffer, "    // Autotuner selected {} pipeline stages; only {} K-tile(s) exist so this path stages synchronously (see emit_tensor_core_gemm_kernel doc comment). Dynamic shared memory required: {} bytes.", config.num_stages, k_tiles, total_dyn_smem_bytes).unwrap();
+        } else {
+            writeln!(&mut self.ptx_buffer, "    // Autotuner selected {} pipeline stages; only {} K-tile(s) exist so this path stages synchronously (see emit_tensor_core_gemm_kernel doc comment).", config.num_stages, k_tiles).unwrap();
+        }
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        // ---- cvta.to.global for A, B, C (matches nvcc's own wmma-lowering
+        // convention for global-space wmma.load/store, verified against real
+        // ptxas output on this machine before this function was written) ----
+        let a_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", a_g, a_ptr).unwrap();
+        let b_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", b_g, b_ptr).unwrap();
+        let c_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", c_g, c_ptr).unwrap();
+        let bias_g = bias_ptr.map(|p| {
+            let r = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", r, p).unwrap();
+            r
+        });
+
+        let stride_a_reg = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_a_reg, smem_a_stride).unwrap();
+        let stride_b_reg = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_b_reg, smem_b_stride).unwrap();
+
+        // ---- grid position: L2-locality grid swizzle ----
+        // Groups GEMM_SWIZZLE_GROUP_SIZE consecutive M-row CTA tiles and
+        // walks them column-first (see emit_grid_swizzle_code's doc comment)
+        // instead of raw `%ctaid.y`/`%ctaid.x` raster order, so CTAs that
+        // run concurrently reuse the same A/B tiles through L2 rather than
+        // one fixed A-row-tile paired with every B-column-tile in the grid.
+        // Correct for grids whose dimensions aren't an exact multiple of
+        // the group size (the common case) - see
+        // test_grid_swizzle_uneven_grid_is_bijection.
+        let (bid_m, bid_n) = self.emit_grid_swizzle_code(GEMM_SWIZZLE_GROUP_SIZE);
+        let cta_m_start = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", cta_m_start, bid_m, cta_m).unwrap();
+        let cta_n_start = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", cta_n_start, bid_n, cta_n).unwrap();
+
+        // ---- warp/lane decomposition ----
+        let tid = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+        let warp_id = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp_id, tid).unwrap();
+        let warp_m = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", warp_m, warp_id, warps_m).unwrap();
+        let warp_n = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", warp_n, warp_id, warps_m).unwrap();
+        let warp_row0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", warp_row0, warp_m, per_warp_m, cta_m_start).unwrap();
+        let warp_col0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", warp_col0, warp_n, per_warp_n, cta_n_start).unwrap();
+        // Loop-invariant, hoisted: every A-fragment address needs
+        // (warp_row0_within_cta) * smem_a_stride, so compute the CTA-local
+        // (not grid-global) warp row once, up front.
+        let warp_row0_local = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_row0_local, warp_m, per_warp_m).unwrap();
+        let warp_col0_local = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_col0_local, warp_n, per_warp_n).unwrap();
+        let warp_row0_scaled = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_row0_scaled, warp_row0_local, smem_a_stride).unwrap();
+
+        // ---- accumulator fragments acc[i][j]: 8 f32 regs each, zeroed ----
+        let mut acc: Vec<Vec<Vec<String>>> = Vec::with_capacity(num_i as usize);
+        for _ in 0..num_i {
+            let mut row = Vec::with_capacity(num_j as usize);
+            for _ in 0..num_j {
+                let mut frag = Vec::with_capacity(8);
+                for _ in 0..8 {
+                    let r = self.alloc_regf32();
+                    writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", r).unwrap();
+                    frag.push(r);
+                }
+                row.push(frag);
+            }
+            acc.push(row);
+        }
+
+        // Captured from whichever branch below runs, so the fused Bias+ReLU
+        // epilogue can reuse this same dynamic shared buffer as its scratch
+        // tile once the K-loop is done with it - see the `effective_stages <
+        // 2` branch's `bias_ptr.is_some()` special case just below for why
+        // this is populated in BOTH branches, not just the pipelined one.
+        let mut smem_pipeline_base_for_epilogue: Option<String> = None;
+
+        if effective_stages < 2 {
+            // ---- Fallback: original single-buffered synchronous path
+            // (load -> bar.sync -> compute -> bar.sync). Only reachable when
+            // `effective_stages` was clamped all the way down to 1 - see
+            // doc comment; not exercised by any candidate
+            // `Autotuner::generate_candidates` currently produces for this
+            // project's tested shapes, kept as a real, correct fallback
+            // rather than a debug_assert/panic since nothing about a
+            // validated `@tile(M,N,K)` rules it out for a future shape.
+            // (This branch IS reachable with a fused Bias+ReLU kernel,
+            // though - a large-N tile's per_stage_bytes can be big enough on
+            // its own, before the epilogue even enters the picture, to clamp
+            // `effective_stages` to 1 - real, observed on this project's own
+            // dev GPU at M=N=K=2048 with a 128x256x64 CTA tile. So unlike
+            // the plain-GEMM case, this path can't just use static `.shared`
+            // arrays when bias is present: the epilogue needs a *dynamic*
+            // buffer it can address at a runtime-computed size across
+            // multiple warp-column passes - see the smem-sizing doc comment
+            // above.)
+            let smem_a_base;
+            let smem_b_base;
+            if bias_g.is_some() {
+                let smem_symbol = format!("smem_pipeline_{}", kernel_name);
+                self.pending_extern_decls.push(format!(".extern .shared .align 16 .b8 {}[];", smem_symbol));
+                let base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", base, smem_symbol).unwrap();
+                smem_pipeline_base_for_epilogue = Some(base.clone());
+                let a_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", a_base, base).unwrap();
+                let b_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", b_base, base, stage_a_bytes).unwrap();
+                smem_a_base = a_base;
+                smem_b_base = b_base;
+            } else {
+                writeln!(&mut self.ptx_buffer, "    .shared .align 4 .b8 smem_A[{}];", stage_a_bytes).unwrap();
+                writeln!(&mut self.ptx_buffer, "    .shared .align 4 .b8 smem_B[{}];", stage_b_bytes).unwrap();
+                let a_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, smem_A;", a_base).unwrap();
+                let b_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, smem_B;", b_base).unwrap();
+                smem_a_base = a_base;
+                smem_b_base = b_base;
+            }
+
+            let k_iter = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+            let loop_start = self.alloc_label("GEMM_K_LOOP");
+            let loop_end = self.alloc_label("GEMM_K_DONE");
+            writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+            let exit_pred = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", exit_pred, k_iter, k_tiles).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} bra {};", exit_pred, loop_end).unwrap();
+            let k0 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", k0, k_iter, cta_k).unwrap();
+
+            self.emit_gemm_tile_load(
+                "A", &a_g, &cta_m_start, &k0, k, m, k, cta_m, cta_k, &smem_a_base, smem_a_stride, threads_per_cta,
+            );
+            self.emit_gemm_tile_load(
+                "B", &b_g, &k0, &cta_n_start, n, k, n, cta_k, cta_n, &smem_b_base, smem_b_stride, threads_per_cta,
+            );
+
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+            self.emit_gemm_compute_block(
+                &acc, &warp_col0_local, &warp_row0_scaled, &smem_a_base, &smem_b_base,
+                smem_a_stride, smem_b_stride, &stride_a_reg, &stride_b_reg, k_substeps, num_i, num_j,
+            );
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+            writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+            writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+        } else {
+            // ---- N-stage cp.async pipelined path - see doc comment ----
+            let n_stages = effective_stages;
+
+            // `.extern .shared` must sit at module scope, not nested inside
+            // this kernel's `{ }` body (confirmed by direct experiment -
+            // unlike a plain non-extern `.shared` local, ptxas's parser
+            // rejects it there) - queued for `emit_kernel` to flush just
+            // before this kernel's own `.visible .entry` line instead of
+            // written here directly. Symbol name is kernel-qualified so two
+            // different @tile kernels compiled into the same program never
+            // collide on one shared top-level symbol.
+            let smem_symbol = format!("smem_pipeline_{}", kernel_name);
+            self.pending_extern_decls.push(format!(".extern .shared .align 16 .b8 {}[];", smem_symbol));
+            let smem_pipeline_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", smem_pipeline_base, smem_symbol).unwrap();
+            smem_pipeline_base_for_epilogue = Some(smem_pipeline_base.clone());
+            // B's stages live right after all of A's stages in the one
+            // combined dynamic array (mirrors src/bin/autotune_verify.rs's
+            // KERNEL_TEMPLATE: one extern buffer, sliced by constant byte
+            // offsets - PTX/the launch API only supports one dynamic
+            // shared-memory region per kernel).
+            let smem_b_region_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_b_region_base, smem_pipeline_base, n_stages * stage_a_bytes).unwrap();
+
+            // ---- Prologue: prefetch stages 0..n_stages-2 (compile-time
+            // constant tile indices - always in-bounds since n_stages <=
+            // k_tiles by construction, so no K-tail masking is needed here,
+            // unlike the main loop's prefetch below). ----
+            for s in 0..(n_stages - 1) {
+                let k0_s = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k0_s, s * cta_k).unwrap();
+                let a_stage_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", a_stage_base, smem_pipeline_base, s * stage_a_bytes).unwrap();
+                let b_stage_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", b_stage_base, smem_b_region_base, s * stage_b_bytes).unwrap();
+
+                self.emit_gemm_tile_load_async(
+                    &format!("PA{}", s), &a_g, &cta_m_start, &k0_s, k, m, k, cta_m, cta_k, &a_stage_base, smem_a_stride, threads_per_cta, None,
+                );
+                self.emit_gemm_tile_load_async(
+                    &format!("PB{}", s), &b_g, &k0_s, &cta_n_start, n, k, n, cta_k, cta_n, &b_stage_base, smem_b_stride, threads_per_cta, None,
+                );
+                self.emit_cp_async_commit();
+            }
+            self.emit_cp_async_wait(n_stages - 2);
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+            let k_iter = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+            let loop_start = self.alloc_label("GEMM_K_LOOP");
+            let loop_end = self.alloc_label("GEMM_K_DONE");
+            writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+            let exit_pred = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", exit_pred, k_iter, k_tiles).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} bra {};", exit_pred, loop_end).unwrap();
+
+            // read_stage: which physical stage slot holds THIS iteration's
+            // already-ready data (guaranteed by the previous iteration's -
+            // or the prologue's, for k_iter==0 - wait_group+bar.sync below).
+            let read_stage = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", read_stage, k_iter, n_stages).unwrap();
+            // next_tile: the tile index to prefetch NOW so it's ready
+            // n_stages-1 iterations from now; also doubles as the physical
+            // write_stage slot index (write_stage(k_iter) == next_tile %
+            // n_stages, by construction - see doc comment derivation).
+            let next_tile = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", next_tile, k_iter, n_stages - 1).unwrap();
+            let write_stage = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", write_stage, next_tile, n_stages).unwrap();
+            let p_tile_valid = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_tile_valid, next_tile, k_tiles).unwrap();
+            let k0_next = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", k0_next, next_tile, cta_k).unwrap();
+
+            let a_write_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", a_write_base, write_stage, stage_a_bytes, smem_pipeline_base).unwrap();
+            let b_write_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", b_write_base, write_stage, stage_b_bytes, smem_b_region_base).unwrap();
+
+            // Issue the prefetch for `next_tile` (masked off via
+            // `p_tile_valid` if it doesn't exist), commit, then compute on
+            // `read_stage` (already confirmed ready) - the tensor-core work
+            // below overlaps with this prefetch's async-copy-engine traffic
+            // instead of waiting for it first.
+            self.emit_gemm_tile_load_async(
+                "A", &a_g, &cta_m_start, &k0_next, k, m, k, cta_m, cta_k, &a_write_base, smem_a_stride, threads_per_cta, Some(&p_tile_valid),
+            );
+            self.emit_gemm_tile_load_async(
+                "B", &b_g, &k0_next, &cta_n_start, n, k, n, cta_k, cta_n, &b_write_base, smem_b_stride, threads_per_cta, Some(&p_tile_valid),
+            );
+            self.emit_cp_async_commit();
+
+            let a_read_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", a_read_base, read_stage, stage_a_bytes, smem_pipeline_base).unwrap();
+            let b_read_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", b_read_base, read_stage, stage_b_bytes, smem_b_region_base).unwrap();
+
+            self.emit_gemm_compute_block(
+                &acc, &warp_col0_local, &warp_row0_scaled, &a_read_base, &b_read_base,
+                smem_a_stride, smem_b_stride, &stride_a_reg, &stride_b_reg, k_substeps, num_i, num_j,
+            );
+
+            // Wait until group `k_iter+1` (the tile that will become
+            // read_stage next iteration) has landed, then make it visible
+            // block-wide; also what makes it safe for the NEXT iteration's
+            // prefetch-write to reuse this iteration's `read_stage` slot
+            // (that slot is only written again as write_stage one iteration
+            // from now - see doc comment derivation).
+            self.emit_cp_async_wait(n_stages - 2);
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+            writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+            writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+
+            // Drain any still-in-flight tail prefetch before the epilogue -
+            // avoids leaving an async copy targeting this CTA's shared
+            // memory outstanding when the kernel exits.
+            self.emit_cp_async_wait(0);
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+        }
+
+        if let Some(bias_g) = bias_g {
+            // ---- fused epilogue: `warps_n` passes, one per warp-column band
+            // (see the smem-sizing doc comment above for why) - each pass
+            // does wmma.store.d into the (small, per_warp_n-wide) shared
+            // scratch tile for just that band's warps, then a CTA-wide
+            // bias-broadcast + ReLU + boundary-masked store to global for
+            // that band - see emit_gemm_bias_relu_epilogue's doc comment ----
+            let smem_c_base = smem_pipeline_base_for_epilogue
+                .expect("smem_pipeline_base_for_epilogue must be set in both branches when bias_ptr is Some - see the effective_stages<2 branch's bias_ptr.is_some() case");
+            let stride_c_smem_reg = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_c_smem_reg, smem_c_stride).unwrap();
+            for n_slot in 0..warps_n {
+                let p_slot = self.alloc_pred();
+                writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, {};", p_slot, warp_n, n_slot).unwrap();
+                for i in 0..num_i {
+                    for j in 0..num_j {
+                        // Row spans the whole CTA (per_warp_m band, warp-relative)
+                        // same as before; column is LOCAL to this pass's
+                        // per_warp_n-wide scratch tile - not warp_col0_local
+                        // + j*16 - since only one warp-column band's data
+                        // lives in the scratch buffer at a time.
+                        let c_row_local = self.alloc_reg32();
+                        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", c_row_local, warp_row0_local, i * 16).unwrap();
+
+                        let sidx = self.alloc_reg32();
+                        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, c_row_local, stride_c_smem_reg, j * 16).unwrap();
+                        let sbyte = self.alloc_reg32();
+                        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", sbyte, sidx).unwrap();
+                        let saddr = self.alloc_reg32();
+                        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_c_base, sbyte).unwrap();
+
+                        let d = acc[i as usize][j as usize].join(",");
+                        writeln!(
+                            &mut self.ptx_buffer,
+                            "    @{} wmma.store.d.sync.aligned.row.m16n16k16.shared.f32 [{}], {{{}}}, {};",
+                            p_slot, saddr, d, stride_c_smem_reg
+                        ).unwrap();
+                    }
+                }
+                writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+                let cta_n_start_slot = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", cta_n_start_slot, cta_n_start, n_slot * per_warp_n).unwrap();
+                self.emit_gemm_bias_relu_epilogue(
+                    &smem_c_base, smem_c_stride, &cta_m_start, &cta_n_start_slot, cta_m, per_warp_n, m, n, &c_g, &bias_g, threads_per_cta,
+                );
+                // Next slot's wmma.store reuses this same scratch buffer -
+                // must not begin until every thread is done reading this
+                // slot's data out of it.
+                writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+            }
+        } else {
+            // ---- epilogue: boundary-masked store, whole-fragment granularity
+            // (see scope note in the doc comment above) ----
+            let stride_c_reg = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_c_reg, n).unwrap();
+            for i in 0..num_i {
+                for j in 0..num_j {
+                    let c_row = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", c_row, warp_row0, i * 16).unwrap();
+                    let c_col = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", c_col, warp_col0, j * 16).unwrap();
+                    let c_row_end = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 16;", c_row_end, c_row).unwrap();
+                    let c_col_end = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 16;", c_col_end, c_col).unwrap();
+                    let p_row = self.alloc_pred();
+                    writeln!(&mut self.ptx_buffer, "    setp.le.u32 {}, {}, {};", p_row, c_row_end, m).unwrap();
+                    let p_col = self.alloc_pred();
+                    writeln!(&mut self.ptx_buffer, "    setp.le.u32 {}, {}, {};", p_col, c_col_end, n).unwrap();
+                    let p_ok = self.alloc_pred();
+                    writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_ok, p_row, p_col).unwrap();
+
+                    let c_lin = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", c_lin, c_row, n, c_col).unwrap();
+                    let c_byte = self.alloc_reg64();
+                    writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", c_byte, c_lin).unwrap();
+                    let c_addr = self.alloc_reg64();
+                    writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", c_addr, c_g, c_byte).unwrap();
+
+                    let d = acc[i as usize][j as usize].join(",");
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    @{} wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [{}], {{{}}}, {};",
+                        p_ok, c_addr, d, stride_c_reg
+                    ).unwrap();
+                }
+            }
+        }
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        threads_per_cta
+    }
+
+    /// Fused Bias+ReLU epilogue for `emit_tensor_core_gemm_kernel`'s 4-param
+    /// (A, B, Bias, C) shape: reads the just-computed CTA output tile back
+    /// out of shared memory (written there by a `wmma.store.d...shared.f32`
+    /// pass over every warp's accumulator fragments, then a CTA-wide
+    /// `bar.sync` - both emitted by the caller before this runs), adds the
+    /// per-output-column `Bias` value (broadcast down every row - the same
+    /// semantics a real `nn.Linear` bias add has), applies ReLU
+    /// (`max(x, 0)`), and stores the result to global `C`. Mirrors
+    /// `tests/y_tensor_core_gemm.cu`'s `y_fused_gemm_bias_relu_kernel`
+    /// epilogue (the hand-written CUDA reference this is meant to match/beat
+    /// - see that kernel's own comments), but with a runtime thread-strided
+    /// loop over `cta_m * (cta_n / 4)` `float4` chunks (`idx` starting at
+    /// `%tid.x`, incrementing by `threads_per_cta` each iteration - the same
+    /// striding pattern `emit_gemm_tile_load` already uses) rather than the
+    /// reference's compile-time-unrolled fixed 256-thread/128x128-tile
+    /// mapping, so this works for any autotuned `(cta_m, cta_n,
+    /// threads_per_cta)` combination without needing them to divide evenly.
+    ///
+    /// Boundary masking is at 4-element (one `float4`) chunk granularity,
+    /// same whole-chunk-skipped philosophy as `emit_gemm_tile_load` and the
+    /// plain-GEMM epilogue above: a chunk is skipped entirely (not written)
+    /// if the row is out of bounds or the last of its 4 columns would be.
+    /// Requires `tile_n` a multiple of 4 - true for every autotuned tile
+    /// this codegen produces (`tile_n` is always a multiple of 16).
+    ///
+    /// Generic over which column band it's covering: the caller passes
+    /// `tile_n`/`tile_n_start` for whatever slice of the CTA's output tile
+    /// currently lives in `smem_c_base` (the full `cta_m x cta_n` tile when
+    /// it fits the shared-memory budget, or one `cta_m x per_warp_n`
+    /// warp-column band per pass otherwise - see
+    /// `emit_tensor_core_gemm_kernel`'s smem-sizing doc comment for why the
+    /// latter is needed).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_gemm_bias_relu_epilogue(
+        &mut self,
+        smem_c_base: &str,
+        smem_c_stride: u32,
+        cta_m_start: &str,
+        tile_n_start: &str,
+        cta_m: u32,
+        tile_n: u32,
+        m: u32,
+        n: u32,
+        c_g: &str,
+        bias_g: &str,
+        threads_per_cta: u32,
+    ) {
+        debug_assert_eq!(tile_n % 4, 0, "vectorized bias+relu epilogue requires tile_n a multiple of 4");
+        let cols_per_chunk = tile_n / 4;
+        let total_chunks = cta_m * cols_per_chunk;
+
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+        let loop_start = self.alloc_label("EPI_BIAS_RELU");
+        let loop_end = self.alloc_label("EPI_BIAS_RELU_DONE");
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_chunks).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
+
+        let lr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", lr, idx, cols_per_chunk).unwrap();
+        let lc_chunk = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", lc_chunk, idx, cols_per_chunk).unwrap();
+        let lc = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", lc, lc_chunk).unwrap();
+
+        let grow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, cta_m_start, lr).unwrap();
+        let gcol = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", gcol, tile_n_start, lc).unwrap();
+        let gcol_end = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 4;", gcol_end, gcol).unwrap();
+
+        let p_row = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_row, grow, m).unwrap();
+        let p_col = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.le.u32 {}, {}, {};", p_col, gcol_end, n).unwrap();
+        let p_ok = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_ok, p_row, p_col).unwrap();
+
+        // Shared-memory scratch tile read (local row/col, smem_c_stride).
+        let sidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, lr, smem_c_stride, lc).unwrap();
+        let sbyte = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", sbyte, sidx).unwrap();
+        let saddr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_c_base, sbyte).unwrap();
+        let s: Vec<String> = (0..4).map(|_| self.alloc_regf32()).collect();
+        writeln!(&mut self.ptx_buffer, "    @{} ld.shared.v4.f32 {{{}}}, [{}];", p_ok, s.join(","), saddr).unwrap();
+
+        // Bias: one value per output column, broadcast across every row in
+        // this chunk's row - so only `gcol` (not `grow`) feeds its address.
+        let bias_byte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", bias_byte, gcol).unwrap();
+        let bias_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", bias_addr, bias_g, bias_byte).unwrap();
+        let b: Vec<String> = (0..4).map(|_| self.alloc_regf32()).collect();
+        writeln!(&mut self.ptx_buffer, "    @{} ld.global.v4.f32 {{{}}}, [{}];", p_ok, b.join(","), bias_addr).unwrap();
+
+        // Global C write address (row-major, stride n).
+        let gidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", gidx, grow, n, gcol).unwrap();
+        let gbyte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", gbyte, gidx).unwrap();
+        let gaddr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr, c_g, gbyte).unwrap();
+
+        let r: Vec<String> = (0..4).map(|_| self.alloc_regf32()).collect();
+        for lane in 0..4 {
+            writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", r[lane], s[lane], b[lane]).unwrap();
+            writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, 0f00000000;", r[lane], r[lane]).unwrap();
+        }
+        writeln!(&mut self.ptx_buffer, "    @{} st.global.v4.f32 [{}], {{{}}};", p_ok, gaddr, r.join(",")).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
     }
 
     /// Emits multi-warp hierarchical tile GEMM loop ($128 \times 128 \times 32$ CTA tile)
@@ -2450,6 +3631,81 @@ mod tests {
         emitter.emit_grid_swizzle_code(8);
         assert!(emitter.ptx_buffer.contains("AUTOMATED GRID BLOCK SWIZZLING PASS"));
         assert!(emitter.ptx_buffer.contains("Group size: 8 tiles"));
+        // The uneven-grid clamp (see test_grid_swizzle_uneven_grid_is_bijection)
+        // depends on these two instructions actually being emitted.
+        assert!(emitter.ptx_buffer.contains("%nctaid.y;"));
+        assert!(emitter.ptx_buffer.contains("min.u32"));
+    }
+
+    /// Bit-for-bit mirror (u32 wrapping div/rem/sub/min, one Rust line per
+    /// PTX instruction) of the integer sequence `emit_grid_swizzle_code`
+    /// emits. Kept deliberately line-for-line so a future edit to one is
+    /// easy to cross-check against the other - see that function's doc
+    /// comment.
+    fn simulate_grid_swizzle(raw_bid_x: u32, raw_bid_y: u32, gdim_x: u32, gdim_y: u32, swizzle_group_size: u32) -> (u32, u32) {
+        let tile_idx = raw_bid_y * gdim_x + raw_bid_x;
+        let group_tiles = gdim_x * swizzle_group_size;
+        let group_id = tile_idx / group_tiles;
+        let group_offset = tile_idx % group_tiles;
+        let first_m = group_id * swizzle_group_size;
+        let rows_remaining = gdim_y - first_m; // proven <= gdim_y always; panics on underflow if that's ever wrong
+        let group_size_m = rows_remaining.min(swizzle_group_size);
+        let rem_offset = group_offset % group_size_m;
+        let swizzled_cta_m = first_m + rem_offset;
+        let swizzled_cta_n = group_offset / group_size_m;
+        (swizzled_cta_n, swizzled_cta_m)
+    }
+
+    /// The exact bug this test guards against: with the grid's M-direction
+    /// tile count (`gdim_y`, i.e. `%nctaid.y`) not an exact multiple of the
+    /// swizzle group size - the overwhelmingly common case, since real
+    /// `ceil(M/cta_m)` grid dims are rarely clean multiples of an arbitrary
+    /// group size - a naive (unclamped) grouped-raster swizzle both maps
+    /// some CTAs to an out-of-range `swizzled_cta_m` (would read/write
+    /// outside the M extent of A/C on real hardware) and never produces
+    /// some valid in-range tiles at all (their C output would stay
+    /// uninitialized). This enumerates every `(ctaid.x, ctaid.y)` pair for
+    /// a battery of grid shapes and asserts the swizzle is a bijection onto
+    /// that same grid every time, including when `swizzle_group_size >
+    /// gdim_y` outright (realistic for our smallest autotuned shapes, e.g.
+    /// M=256 with a 64-row CTA tile gives gdim_y=4 < a group size of 8).
+    #[test]
+    fn test_grid_swizzle_uneven_grid_is_bijection() {
+        let grids: &[(u32, u32)] = &[
+            (8, 8), (16, 16), (32, 32), (64, 64), (128, 128), // exact-multiple-friendly squares
+            (4, 5), (5, 4), (7, 13), (13, 7), (3, 17),        // deliberately awkward / non-multiples
+            (16, 24), (24, 16),                               // non-square, still not group-aligned
+            (1, 1), (1, 7), (7, 1), (2, 3),
+            (64, 4), (4, 64),                                 // group_size (up to 16) > gdim_y
+        ];
+        let groups: &[u32] = &[2, 4, 8, 16];
+
+        for &(gdim_x, gdim_y) in grids {
+            for &group in groups {
+                let mut seen = std::collections::HashSet::new();
+                for by in 0..gdim_y {
+                    for bx in 0..gdim_x {
+                        let (n, m) = simulate_grid_swizzle(bx, by, gdim_x, gdim_y, group);
+                        assert!(
+                            m < gdim_y && n < gdim_x,
+                            "out-of-range swizzle: gdim_x={gdim_x} gdim_y={gdim_y} group={group} \
+                             raw=({bx},{by}) -> swizzled=(n={n},m={m})"
+                        );
+                        let fresh = seen.insert((n, m));
+                        assert!(
+                            fresh,
+                            "swizzle collision: gdim_x={gdim_x} gdim_y={gdim_y} group={group} \
+                             raw=({bx},{by}) -> swizzled=(n={n},m={m}) already produced by another CTA"
+                        );
+                    }
+                }
+                assert_eq!(
+                    seen.len(),
+                    (gdim_x * gdim_y) as usize,
+                    "swizzle did not cover the full grid: gdim_x={gdim_x} gdim_y={gdim_y} group={group}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2594,6 +3850,81 @@ mod tests {
         assert!(emitter.ptx_buffer.contains("mul.lo.s32"));
         assert!(emitter.ptx_buffer.contains("and.pred"));
         assert!(emitter.ptx_buffer.contains("ld.global.f32"));
+    }
+
+    /// Structural check for the fused GEMM+Bias+ReLU epilogue dispatch (see
+    /// `tile_gemm_operands`'s 4-param shape and
+    /// `emit_gemm_bias_relu_epilogue`): a kernel with a 4th `Bias:
+    /// GlobalMemory<F32>` param must emit the shared-memory wmma store, the
+    /// bias-broadcast/ReLU epilogue loop, and must NOT fall back to the
+    /// plain-GEMM direct-to-global epilogue. Real numeric correctness (the
+    /// bar this alone cannot meet) is checked end-to-end on real GPU
+    /// hardware via tests/gemm_f16_bias_relu*.ysu and
+    /// tests/benchmark_y_tensor_core_gemm.py, not here - this test only
+    /// guards the codegen dispatch/shape, matching this file's other
+    /// structural PTX-content tests.
+    #[test]
+    fn test_fused_bias_relu_epilogue_dispatch() {
+        let src = r#"
+        @tile(256, 256, 256)
+        kernel fused_gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, Bias: GlobalMemory<F32>, C: GlobalMemory<F32>) {
+            let x: I32 = 0;
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        // Real sm_89 (RTX 4070 Ti SUPER) limits - see
+        // autotuner::tests::test_score_candidate_matches_y_tensor_core_gemm_session.
+        // `HardwareProfile::default()` alone zeroes `max_smem_per_sm_bytes`,
+        // which forces `emit_tensor_core_gemm_kernel`'s own smem-ceiling math
+        // (unlike the autotuner, it has no zero fallback) down to the
+        // single-buffered `effective_stages < 2` path that the fused
+        // epilogue's `debug_assert!` deliberately doesn't support.
+        let hw = crate::sentinel::HardwareProfile {
+            sm_count: 66,
+            warp_size: 32,
+            max_regs_per_thread: 255,
+            max_regs_per_sm: 65536,
+            max_warps_per_sm: 48,
+            max_threads_per_sm: 1536,
+            max_smem_per_sm_bytes: 102400,
+            ..crate::sentinel::HardwareProfile::default()
+        };
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.shared.f32"), "missing shared-memory wmma store for fused epilogue: {}", ptx);
+        assert!(ptx.contains("EPI_BIAS_RELU"), "missing bias+relu epilogue loop: {}", ptx);
+        assert!(ptx.contains("max.f32"), "missing ReLU (max.f32) in fused epilogue: {}", ptx);
+        assert!(ptx.contains("ld.global.v4.f32"), "missing vectorized bias load: {}", ptx);
+        assert!(!ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.global.f32"), "plain-GEMM direct-to-global epilogue should not run for the 4-param fused shape: {}", ptx);
+    }
+
+    /// Plain 3-param `@tile` GEMM must still take the original direct-to-
+    /// global epilogue path, unaffected by the 4-param fused shape added
+    /// alongside it - regression guard for `tile_gemm_operands`.
+    #[test]
+    fn test_plain_gemm_epilogue_unaffected_by_fused_shape() {
+        let src = r#"
+        @tile(64, 64, 32)
+        kernel plain_gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+            let x: I32 = 0;
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.global.f32"), "plain GEMM must keep its direct-to-global epilogue: {}", ptx);
+        assert!(!ptx.contains("EPI_BIAS_RELU"), "plain GEMM must not emit the fused bias+relu epilogue: {}", ptx);
     }
 }
 

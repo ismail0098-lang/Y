@@ -1,10 +1,10 @@
-.version 8.0
+.version 7.5
 .target sm_89
 .address_size 64
 
 // =======================================================
 // Y Compiler - Dual-Accelerator Co-Processing Backend
-// Hardware: RTX 4070 Ti SUPER
+// Hardware: NVIDIA GeForce RTX 4070 Ti SUPER
 // RT Nodes: 1 | Tensor Nodes: 5 | Barriers: 1
 // =======================================================
 
@@ -22,14 +22,13 @@
 
     // ===================================================
     // RT CORE CO-PROCESSING PIPELINE  (1 nodes)
-    // Hardware: RTX 4070 Ti SUPER | RT traversal latency ~200 cy
+    // Hardware: NVIDIA GeForce RTX 4070 Ti SUPER | RT traversal latency ~200 cy
     // ===================================================
 
     // -- RT GEMM via Ray-Plane Dot Product --
     // Matrix A[128xK] -> ray origins/directions
     // Matrix B[Kx128] -> geometric planes
     // RT Core evaluates dot(ray_dir, plane_normal) natively
-    .shared .align 128 .b8 rt_bvh_scratch[65536];
     // Step 1: Encode A rows -> ray {origin, direction}
     mov.u32 %rt_r0, 0;
     mov.u32 %rt_r1, 128;
@@ -40,7 +39,7 @@
     // Load A[row, :] into ray direction vector
     mul.lo.u32 %rt_r2, %rt_r0, 12;      // 3 floats = 12 bytes per row
     cvt.u64.u32 %rt_rd0, %rt_r2;
-    add.u64 %rt_rd1, rt_A_ptr, %rt_rd0;  // calculate row address
+    add.u64 %rt_rd1, %rd0, %rt_rd0;  // calculate row address
     add.u64 %rt_rd2, %rt_rd1, 4;      // calculate row address + 4
     add.u64 %rt_rd3, %rt_rd1, 8;      // calculate row address + 8
     ld.global.ca.f32 %rt_f3, [%rt_rd1];      // dir.x = A[row,0]
@@ -56,7 +55,7 @@
     mov.f32 %rt_f8, %rt_f6;  // C[row, col] = t_hit (dot product result)
     mul.lo.u32 %rt_r3, %rt_r0, 4;       // 1 float = 4 bytes
     cvt.u64.u32 %rt_rd4, %rt_r3;
-    mov.u64 %rt_rd6, rt_bvh_scratch;
+    mov.u64 %rt_rd6, coprocessor_smem;
     add.u64 %rt_rd5, %rt_rd6, %rt_rd4;      // offset address
     st.shared.f32 [%rt_rd5], %rt_f8;    // Stage in SMEM for Tensor Core pickup
     add.u32 %rt_r0, %rt_r0, 1;
@@ -64,7 +63,7 @@
     @%rt_p0 bra $RT_ROW_ENCODE_0;
     $RT_ROW_ENCODE_END_1:
     // RT GEMM complete: 16384 dot products evaluated in hardware
-    // Estimated RT latency: 800 cycles (vs 74383 ALU cycles)
+    // Estimated RT latency: 800 cycles (vs 106332 ALU cycles)
 
     // -- CROSS-PIPELINE SYNC BARRIER 0 --
     // RT -> Tensor handoff at cycle 200, 65536 bytes via SMEM[0..65536]
@@ -127,7 +126,7 @@
         add.u64 %mma_addr_b, %mma_addr_b, 66048;
         ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
     }
-    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on NVIDIA GeForce RTX 4070 Ti SUPER
     mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
     // Tensor node [2] 'tensor_ldmatrix': generic mma.sync
     // ldmatrix: load A fragment from quantized SMEM[66304..66816]
@@ -144,7 +143,7 @@
         add.u64 %mma_addr_b, %mma_addr_b, 66816;
         ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
     }
-    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on NVIDIA GeForce RTX 4070 Ti SUPER
     mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
     // Tensor node [3] 'tensor_ldmatrix': generic mma.sync
     // ldmatrix: load A fragment from quantized SMEM[67072..67584]
@@ -161,7 +160,7 @@
         add.u64 %mma_addr_b, %mma_addr_b, 67584;
         ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
     }
-    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on NVIDIA GeForce RTX 4070 Ti SUPER
     mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
     // Tensor node [4] 'tensor_ldmatrix': generic mma.sync
     // ldmatrix: load A fragment from quantized SMEM[67840..68352]
@@ -178,7 +177,7 @@
         add.u64 %mma_addr_b, %mma_addr_b, 68352;
         ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
     }
-    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on NVIDIA GeForce RTX 4070 Ti SUPER
     mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
     // ldmatrix: load A fragment from quantized SMEM[68608..69120]
     {
@@ -194,5 +193,5 @@
         add.u64 %mma_addr_b, %mma_addr_b, 69120;
         ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r4,%r5}, [%mma_addr_b];
     }
-    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on RTX 4070 Ti SUPER
+    // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on NVIDIA GeForce RTX 4070 Ti SUPER
     mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};

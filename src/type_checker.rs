@@ -876,8 +876,87 @@ impl TypeChecker {
         self.check_block(&kernel.body);
 
         self.verify_kernel_coherence(kernel);
+        self.verify_tile_gemm_kernel(kernel);
 
         self.pop_scope();
+    }
+
+    /// Validates a kernel-level `@tile(M, N, K)` directive (see
+    /// `KernelDecl::tile`'s doc comment) - promotes it from
+    /// parseable-but-unchecked to a real, enforced precondition before
+    /// `ptx_emitter` trusts it to dispatch to tile-aware Tensor Core GEMM
+    /// codegen instead of the normal generic per-statement lowering. Runs
+    /// regardless of target backend, like the rest of type_checker, but only
+    /// has any effect on kernels that opt in by writing `@tile(...)` before
+    /// `kernel` - kernels without it are completely untouched.
+    fn verify_tile_gemm_kernel(&mut self, kernel: &KernelDecl) {
+        let tile = match &kernel.tile {
+            Some(t) => t,
+            None => return,
+        };
+
+        fn as_positive_i64(e: &Expr) -> Option<i64> {
+            match e {
+                Expr::IntLit(v, _) if *v > 0 => Some(*v),
+                _ => None,
+            }
+        }
+
+        if as_positive_i64(&tile.block_m).is_none() || as_positive_i64(&tile.block_n).is_none() {
+            self.errors.push(format!(
+                "Line {}: Kernel-level @tile(M, N, K) on `{}` requires M and N to be positive integer literals (the compile-time GEMM problem size this kernel is specialized for).",
+                tile.span.line, kernel.name
+            ));
+        }
+        if tile.block_k.as_deref().and_then(as_positive_i64).is_none() {
+            self.errors.push(format!(
+                "Line {}: Kernel-level @tile(M, N, K) on `{}` requires K (the third argument) - unlike the loop-scoped use of @tile, K is not optional here, and must be a positive integer literal.",
+                tile.span.line, kernel.name
+            ));
+        }
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(
+                            args.as_slice(),
+                            [GenericArg::Type(Type::Primitive(p, _))] if p == elem
+                        )
+            )
+        }
+        // A, B are the f16 Tensor Core operands; C is the accumulator/output
+        // in f32 (matching wmma's f16-in/f32-out contract - see
+        // ptx_emitter::emit_tensor_core_gemm_kernel, which hardcodes 4
+        // bytes/element and `wmma.store.d...f32` for C specifically). A
+        // 4-parameter shape (A, B, Bias, C) is also accepted: Bias sits in
+        // the same F32 "everything past the two F16 operands" bucket as C,
+        // so `expected_elem` doesn't need a special case for it - see
+        // `ptx_emitter::tile_gemm_operands`'s doc comment for the fused
+        // GEMM+Bias+ReLU epilogue this shape dispatches to.
+        let expected_elem = |i: usize| if i < 2 { "F16" } else { "F32" };
+        let bad_params: Vec<String> = kernel
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| !is_global_memory_of(&p.ty, expected_elem(*i)))
+            .map(|(i, p)| format!("{} (expected GlobalMemory<{}>)", p.name, expected_elem(i)))
+            .collect();
+
+        if (kernel.params.len() != 3 && kernel.params.len() != 4) || !bad_params.is_empty() {
+            self.errors.push(format!(
+                "Line {}: Kernel-level @tile(M, N, K) on `{}` requires either 3 parameters (A, B: GlobalMemory<F16>, C: GlobalMemory<F32>) for a plain GEMM, or 4 (A, B: GlobalMemory<F16>, Bias, C: GlobalMemory<F32>) for a fused GEMM+Bias+ReLU epilogue, in that order - tile-aware GEMM codegen binds them positionally and supports no other shape. Found {} parameter(s){}.",
+                tile.span.line,
+                kernel.name,
+                kernel.params.len(),
+                if bad_params.is_empty() {
+                    String::new()
+                } else {
+                    format!(", mismatched param(s): {}", bad_params.join(", "))
+                }
+            ));
+        }
     }
 
     fn check_func(&mut self, f: &FuncDecl) {
@@ -2550,6 +2629,81 @@ mod tests {
         let res = tc.eval_interval(&expr_pos).unwrap();
         assert_eq!(res.min, 5);
         assert_eq!(res.max, 5);
+    }
+
+    fn parse_src(src: &str) -> Program {
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        parser.parse_program().expect("parse should succeed")
+    }
+
+    #[test]
+    fn test_kernel_level_tile_valid_shape_passes() {
+        let program = parse_src(
+            "
+            @tile(4096, 4096, 4096)
+            kernel gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+                let x: I32 = 0;
+            }
+            ",
+        );
+        let mut tc = TypeChecker::new();
+        tc.check_program(&program);
+        assert!(tc.errors.is_empty(), "unexpected errors: {:?}", tc.errors);
+    }
+
+    #[test]
+    fn test_kernel_level_tile_fused_bias_relu_shape_passes() {
+        let program = parse_src(
+            "
+            @tile(4096, 4096, 4096)
+            kernel fused_gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, Bias: GlobalMemory<F32>, C: GlobalMemory<F32>) {
+                let x: I32 = 0;
+            }
+            ",
+        );
+        let mut tc = TypeChecker::new();
+        tc.check_program(&program);
+        assert!(tc.errors.is_empty(), "unexpected errors: {:?}", tc.errors);
+    }
+
+    #[test]
+    fn test_kernel_level_tile_rejects_wrong_param_shape() {
+        let program = parse_src(
+            "
+            @tile(4096, 4096, 4096)
+            kernel bad_gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, M: I32) {
+                let x: I32 = 0;
+            }
+            ",
+        );
+        let mut tc = TypeChecker::new();
+        tc.check_program(&program);
+        assert!(
+            tc.errors.iter().any(|e| e.contains("either 3 parameters")),
+            "expected a validation error for a non-GlobalMemory<F16> param, got: {:?}",
+            tc.errors
+        );
+    }
+
+    #[test]
+    fn test_kernel_level_tile_rejects_missing_k() {
+        let program = parse_src(
+            "
+            @tile(4096, 4096)
+            kernel bad_gemm2(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+                let x: I32 = 0;
+            }
+            ",
+        );
+        let mut tc = TypeChecker::new();
+        tc.check_program(&program);
+        assert!(
+            tc.errors.iter().any(|e| e.contains("requires K")),
+            "expected a missing-K validation error, got: {:?}",
+            tc.errors
+        );
     }
 }
 

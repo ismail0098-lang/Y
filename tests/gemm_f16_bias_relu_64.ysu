@@ -1,0 +1,7 @@
+// Small, hand-checkable-scale fused GEMM+Bias+ReLU correctness smoke test.
+@tile(64, 64, 64)
+kernel gemm_f16_bias_relu_64(A: GlobalMemory<F16>, B: GlobalMemory<F16>, Bias: GlobalMemory<F32>, C: GlobalMemory<F32>) {
+}
+
+fn main() {
+}
