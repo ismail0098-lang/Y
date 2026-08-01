@@ -1,0 +1,10 @@
+// Fused Tensor Core GEMM + Bias + ReLU test at M=N=K=4096, matching
+// tests/benchmark_y_vs_cudnn_cublas.py Suite 2's size table. 4-param
+// @tile shape (A, B, Bias, C) dispatches ptx_emitter's fused epilogue -
+// see tile_gemm_operands / emit_gemm_bias_relu_epilogue.
+@tile(4096, 4096, 4096)
+kernel gemm_f16_bias_relu_4096(A: GlobalMemory<F16>, B: GlobalMemory<F16>, Bias: GlobalMemory<F32>, C: GlobalMemory<F32>) {
+}
+
+fn main() {
+}

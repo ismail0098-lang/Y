@@ -1,0 +1,20 @@
+// Regression test for the grid-swizzle uneven-grid bug (see
+// emit_grid_swizzle_code's doc comment and
+// test_grid_swizzle_uneven_grid_is_bijection in src/ptx_emitter.rs).
+//
+// M=1280 with the autotuner's chosen CTA tile (128x256x32 on this machine)
+// gives gdim_y = ceil(1280/128) = 10 M-direction CTA tiles - NOT a multiple
+// of GEMM_SWIZZLE_GROUP_SIZE (8), so the grid splits into one full 8-row
+// swizzle group plus one short 2-row group. None of the other gemm_f16_*.ysu
+// shapes exercise this: their M values are all powers of two with
+// autotuned CTA tiles that happen to divide them evenly, so their grids
+// are exact multiples of every group size tried here. N=1024 is kept an
+// exact multiple of its CTA tile (gdim_x = 1024/256 = 4) so this shape
+// isolates the uneven-M-grid swizzle path specifically, rather than also
+// exercising the (separate, pre-existing) M/N-tail boundary-masking path.
+@tile(1280, 1024, 1024)
+kernel gemm_f16_uneven(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+}
+
+fn main() {
+}

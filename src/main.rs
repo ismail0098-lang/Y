@@ -674,15 +674,44 @@ fn main() {
     } else if emit_ptx {
         log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
         println!("      -> Pass 1: Multi-Stage Asynchronous Software Pipelining Pass (cp.async multi-buffering)");
-        println!("      -> Pass 2: Automated Grid Block Swizzling Pass (8-tile Morton space-filling curve)");
+        println!("      -> Pass 2: Automated Grid Block Swizzling Pass (grouped-raster L2 locality, group size {})", ptx_emitter::GEMM_SWIZZLE_GROUP_SIZE);
         println!("      -> Pass 3: JIT Dynamic Autotuning Pass (num_stages, num_warps search)");
         println!("      -> Pass 4: Automated Shared Memory Layout Permutation Pass (0-bank conflict XOR swizzling)");
 
-        let tuned_config = autotuner::Autotuner::autotune(1024, 1024, 1024, &hw_profile);
-        println!("         [JIT Autotuner Result] CTA Tile: {}x{}x{}, Warps: {}, Pipeline Stages: {}",
-            tuned_config.cta_m, tuned_config.cta_n, tuned_config.cta_k, tuned_config.num_warps, tuned_config.num_stages);
+        // Autotune diagnostics are printed per @tile'd kernel, using that
+        // kernel's own real compile-time M/N/K - not a single hardcoded
+        // 1024x1024x1024 guess regardless of what's actually in the source
+        // (the previous behavior here). A compile unit can hold multiple
+        // kernels, and for any @tile'd one, `emit_program` below now calls
+        // `Autotuner::autotune` itself with its real dimensions (see
+        // `ptx_emitter::emit_tensor_core_gemm_kernel`) - this block exists
+        // only to surface that same result to the CLI's own log output.
+        let mut printed_any_tune = false;
+        for item in &ast.items {
+            if let Item::Kernel(k) = item {
+                if let Some(t) = &k.tile {
+                    fn as_u32(e: &ast::Expr) -> Option<u32> {
+                        match e {
+                            ast::Expr::IntLit(v, _) if *v > 0 => u32::try_from(*v).ok(),
+                            _ => None,
+                        }
+                    }
+                    if let (Some(m), Some(n), Some(k_dim)) =
+                        (as_u32(&t.block_m), as_u32(&t.block_n), t.block_k.as_deref().and_then(as_u32))
+                    {
+                        let tuned_config = autotuner::Autotuner::autotune(m, n, k_dim, &hw_profile, autotuner::Precision::F16);
+                        println!("         [JIT Autotuner Result] `{}` (M={}, N={}, K={}): CTA Tile: {}x{}x{}, Warps: {}, Pipeline Stages: {}",
+                            k.name, m, n, k_dim, tuned_config.cta_m, tuned_config.cta_n, tuned_config.cta_k, tuned_config.num_warps, tuned_config.num_stages);
+                        printed_any_tune = true;
+                    }
+                }
+            }
+        }
+        if !printed_any_tune {
+            println!("         [JIT Autotuner] No @tile'd kernel in this source - nothing to autotune.");
+        }
 
-        let mut emitter = PtxEmitter::new();
+        let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
         let ptx_output = emitter.emit_program(&ast, &hw_profile);
         let write_path = if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);

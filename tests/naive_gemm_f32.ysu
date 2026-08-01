@@ -1,0 +1,19 @@
+// Naive scalar FP32 GEMM: one thread computes one output element.
+// C[row][col] = sum_k A[row][k] * B[k][col]
+kernel naive_gemm_f32(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, M: I32, N: I32, K: I32) {
+    let row: I32 = block_idx_y() * 16 + thread_idx_y();
+    let col: I32 = block_idx_x() * 16 + thread_idx_x();
+
+    let acc: F32 = 0.0;
+    @invariant(k >= 0)
+    for k in 0..K step 1 {
+        let a_val: F32 = block_ptr2d_load(A, row, k, K, M, K);
+        let b_val: F32 = block_ptr2d_load(B, k, col, N, K, N);
+        acc = acc + a_val * b_val;
+    }
+
+    block_ptr2d_store(C, row, col, N, M, N, acc);
+}
+
+fn main() {
+}

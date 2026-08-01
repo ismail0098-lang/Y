@@ -21,6 +21,10 @@ path = "src/ysu_gpu_probe.rs"
 name = "ypm"
 path = "src/ypm.rs"
 
+[[bin]]
+name = "autotune_verify"
+path = "src/bin/autotune_verify.rs"
+
 
 
 [dependencies]

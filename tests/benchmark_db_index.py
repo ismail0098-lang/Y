@@ -28,9 +28,13 @@ def wrap_ptx(ptx_file, name="y_coprocessor_db_index", param_count=2):
         content = f.read()
 
     try:
-        device_id = cp.cuda.Device(0).id
-        major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, device_id)
-        minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, device_id)
+        # NOTE: cp.cuda.runtime.deviceGetAttribute(cudaDevAttrComputeCapabilityMajor, ...)
+        # doesn't exist in newer cupy versions and silently raised AttributeError here,
+        # which the bare except below swallowed - falling back to a hardcoded sm_90a
+        # regardless of the actual GPU. On an sm_89 card that produces a PTX .target
+        # mismatch that ptxas/the driver rejects at load time.
+        cc = cp.cuda.Device(0).compute_capability
+        major, minor = int(cc[:-1]), int(cc[-1])
         target_sm = f"sm_{major}{minor}a" if major == 9 else f"sm_{major}{minor}"
     except Exception:
         target_sm = "sm_90a"

@@ -31,6 +31,35 @@ def print_header(title):
     print(f"{title:^80}")
     print("=" * 80)
 
+def _find_cuda_include_dir():
+    """Locates the CUDA include dir (containing crt/mma.h) across common install layouts."""
+    candidates = [os.environ.get("CUDA_PATH", "") + "/include", "/usr/local/cuda/include", "/opt/cuda/include"]
+    for path in candidates:
+        if path and os.path.isdir(path) and os.path.exists(os.path.join(path, "crt", "mma.h")):
+            return path
+    return "/usr/local/cuda/include"  # fall back to the old hardcoded default
+
+CUDA_INCLUDE_DIR = _find_cuda_include_dir()
+
+def check_correctness(name, y_out, ref_out, rtol=0.02, atol=0.75):
+    """Verifies a kernel's output against a PyTorch reference before its timing is trusted.
+
+    atol=0.75 is not arbitrary: empirically, legitimate FP16 rounding-order noise for
+    these kernels tops out at ~0.5 (exactly 1 ULP at the largest tested output magnitude,
+    K=16384) and FP32->FP16 quantization noise in the fused kernel tops out at ~0.03.
+    Genuine correctness bugs found in this file produced diffs of 10-168 - two to three
+    orders of magnitude larger - so this tolerance still catches real bugs with a wide
+    margin while not flagging normal FP16 arithmetic as a failure.
+    """
+    is_close = torch.allclose(y_out, ref_out, rtol=rtol, atol=atol)
+    if is_close:
+        print(f"    [correctness OK] {name} (rtol={rtol}, atol={atol})")
+    else:
+        max_diff = (y_out.float() - ref_out.float()).abs().max().item()
+        print(f"    [CORRECTNESS FAIL] {name}: max abs diff={max_diff:.4f} exceeds rtol={rtol}/atol={atol} "
+              f"- timing for this kernel is NOT trustworthy until this is fixed")
+    return is_close
+
 def wrap_ptx(ptx_file, entry_name, param_count=2):
     if not os.path.exists(ptx_file):
         raise FileNotFoundError(f"PTX file not found: {ptx_file}")
@@ -39,9 +68,14 @@ def wrap_ptx(ptx_file, entry_name, param_count=2):
         content = f.read()
 
     try:
-        device_id = cp.cuda.Device(0).id
-        major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, device_id)
-        minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, device_id)
+        # NOTE: cp.cuda.runtime.deviceGetAttribute(cudaDevAttrComputeCapabilityMajor, ...)
+        # doesn't exist in this cupy version and silently raised AttributeError here,
+        # which the bare except below swallowed - falling back to a hardcoded sm_90a
+        # regardless of the actual GPU. That mismatch (.target sm_90a on an sm_89 card)
+        # is why ptxas/the driver rejected this PTX as "SM version higher than assumed".
+        # cp.cuda.Device(...).compute_capability is the correct, portable cupy API.
+        cc = cp.cuda.Device(0).compute_capability
+        major, minor = int(cc[:-1]), int(cc[-1])
         target_sm = f"sm_{major}{minor}a" if major == 9 else f"sm_{major}{minor}"
     except Exception:
         target_sm = "sm_90a"
@@ -106,19 +140,36 @@ def wrap_ptx(ptx_file, entry_name, param_count=2):
 """
     return wrapped
 
-# # -----------------------------------------------------------------------------
-# CUDA kernels loaded from standalone file
+# -----------------------------------------------------------------------------
+# IMPORTANT METHODOLOGY NOTE:
+# The kernels below are hand-written CUDA C++ (nvcuda::wmma API), compiled at
+# runtime via NVRTC (cp.RawModule with C++ source). They are a *reference*
+# implementation of the tiling/pipelining strategy Y's PTX emitter targets —
+# they are NOT PTX emitted by Y's own compiler (src/ptx_emitter.rs). Suites 1
+# and 2 below measure this hand-written CUDA reference against cuBLAS/cuDNN,
+# not Y's compiler output. Only Suite 3 invokes `./target/release/Y ... --emit-coprocessor`
+# and loads the compiler's actual generated PTX.
+#
+# For real Y-compiler tile-adaptive Tensor Core GEMM output (kernel-level
+# @tile(M, N, K), dispatched through ptx_emitter::emit_tensor_core_gemm_kernel,
+# tile/warp/stage selection from Autotuner::autotune) measured the same way
+# Suite 1 measures the hand-written reference above, see the sibling script
+# tests/benchmark_y_tensor_core_gemm.py instead.
+# -----------------------------------------------------------------------------
 CUDA_KERNELS_PATH = os.path.join(os.path.dirname(__file__), "y_tensor_core_gemm.cu")
 with open(CUDA_KERNELS_PATH, "r") as f:
     CUDA_KERNELS_SRC = f.read()
 
-Y_TENSOR_CORE_GEMM_CUDA = CUDA_KERNELS_SRC
-Y_FUSED_GEMM_RELU_CUDA = CUDA_KERNELS_SRC
+HANDWRITTEN_CUDA_REFERENCE_GEMM = CUDA_KERNELS_SRC
+HANDWRITTEN_CUDA_REFERENCE_FUSED_GEMM_RELU = CUDA_KERNELS_SRC
 NAIVE_MULTI_KERNEL_BIAS_RELU_CUDA = CUDA_KERNELS_SRC
 
 
 def main():
-    print_header("Y TENSOR CORE COMPILER VS NVIDIA cuBLAS & cuDNN BENCHMARK SUITE")
+    print_header("HAND-WRITTEN CUDA TENSOR CORE REFERENCE VS NVIDIA cuBLAS & cuDNN")
+    print("[*] NOTE: Suites 1-2 benchmark a hand-written CUDA C++ reference kernel")
+    print("    (tests/y_tensor_core_gemm.cu, compiled via NVRTC), NOT Y-compiler PTX output.")
+    print("    Only Suite 3 invokes the real Y compiler (--emit-coprocessor).")
     print(f"[*] Hardware Device: {torch.cuda.get_device_name(0)}")
     print(f"[*] PyTorch Version: {torch.__version__} | CUDA Version: {torch.version.cuda}")
     print(f"[*] cuDNN Available: {torch.backends.cudnn.is_available()} (Version {torch.backends.cudnn.version()})")
@@ -136,27 +187,29 @@ def main():
     # SUITE 1: Standalone GEMM Performance (FP16 Tensor Cores)
     # -------------------------------------------------------------------------
     print_header("SUITE 1: STANDALONE DENSE MATRIX MULTIPLICATION (GEMM FP16)")
-    print(f"{'Matrix (M=N=K)':<18} | {'cuBLAS (us)':<14} | {'cuDNN (us)':<14} | {'Y Tensor (us)':<14} | {'Y vs cuBLAS':<12} | {'Y vs cuDNN':<12}")
+    print(f"{'Matrix (M=N=K)':<18} | {'cuBLAS (us)':<14} | {'cuDNN (us)':<14} | {'Y Tensor (us)':<14} | {'Y vs cuBLAS':<12} | {'Y vs cuDNN':<12} | Correct")
     print("-" * 95)
 
     matrix_sizes = [256, 512, 1024, 2048, 4096, 8192, 16384]
     suite1_results = []
 
-    # Detect GPU Architecture Flags
+    # Detect GPU Architecture Flags (see NOTE in wrap_ptx() above re: the correct cupy API)
     try:
-        dev = cp.cuda.Device(0)
-        major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, dev.id)
-        minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, dev.id)
+        cc = cp.cuda.Device(0).compute_capability
+        major, minor = int(cc[:-1]), int(cc[-1])
         sm_ver = major * 10 + minor
         arch_opt = f"-arch=sm_{major}{minor}a" if major == 9 else f"-arch=sm_{major}{minor}"
     except Exception:
         sm_ver = 90
         arch_opt = "-arch=sm_90a"
 
-    compile_opts = ("-std=c++17", "--use_fast_math", arch_opt, "-I/usr/local/cuda/include")
+    # NOTE: no explicit -arch flag here — cupy's RawModule already auto-detects and
+    # injects the correct -arch for the active device; passing arch_opt as well
+    # causes NVRTC to see a duplicate/conflicting -arch flag and fail to compile.
+    compile_opts = ("-std=c++17", "--use_fast_math", f"-I{CUDA_INCLUDE_DIR}")
 
-    # Compile Y Tensor Core kernel via CuPy JIT
-    y_gemm_mod = cp.RawModule(code=Y_TENSOR_CORE_GEMM_CUDA, options=compile_opts)
+    # Compile hand-written CUDA reference kernel via CuPy JIT (NOT Y-compiler output, see note above)
+    y_gemm_mod = cp.RawModule(code=HANDWRITTEN_CUDA_REFERENCE_GEMM, options=compile_opts)
     y_gemm_256x128_kernel = y_gemm_mod.get_function("y_tensor_core_gemm_256x128_kernel")
     y_gemm_large_kernel = y_gemm_mod.get_function("y_tensor_core_gemm_kernel")
     y_gemm_small_kernel = y_gemm_mod.get_function("y_fused_gemm_small_64x64_kernel")
@@ -221,12 +274,21 @@ def main():
             target_gemm_kernel = y_gemm_small_kernel
         else:
             if sm_ver >= 89:
-                # Hopper / Ada (sm_90, sm_89): Target 256x128x32 tile, 4-stage buffer (96KB SMEM)
+                # Hopper / Ada (sm_90, sm_89): Target 256x64x32 tile, 2-stage buffer (40KB SMEM).
+                # BLOCK_M kept at the original 256 (grid_m/A-traffic pattern untouched); only
+                # BLOCK_N is shrunk 128->64 and the cp.async pipeline dropped 4->2 stages to
+                # claw registers/smem down to the sm_89 2-blocks/SM budget (<=128 regs,
+                # <=51200B smem): measured 125 regs/thread (NVRTC), 0 spills, 40960B smem,
+                # confirmed 2 blocks/SM via cuOccupancyMaxActiveBlocksPerMultiprocessor. See
+                # the kernel's own comment in y_tensor_core_gemm.cu for the full derivation,
+                # including why the earlier symmetric 128x64/4-stage attempt (same target,
+                # both axes shrunk) measured as a 1-10% regression despite also hitting 2
+                # blocks/SM, and why this asymmetric one was tried next.
                 grid_m = (M + 255) // 256
-                grid_n = (N + 127) // 128
+                grid_n = (N + 63) // 64
                 threads_per_block = 256
                 target_gemm_kernel = y_gemm_256x128_kernel
-                smem_size = 98304
+                smem_size = 40960
             else:
                 # Ampere (sm_80, sm_86): Target 128x128x32 tile
                 grid_m = (M + 127) // 128
@@ -251,6 +313,12 @@ def main():
         y_end.synchronize()
         y_tensor_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iterations) * 1000.0
 
+        # Correctness gate: C_cp/C_torch alias the same buffer, so C_torch now holds
+        # the kernel's last output. Compare against a fresh cuBLAS reference before
+        # trusting the timing above.
+        ref_out = torch.matmul(A_torch, B_torch)
+        is_correct = check_correctness(f"GEMM {M}x{N}x{K}", C_torch, ref_out)
+
         vs_cublas = cublas_us / y_tensor_us
         vs_cudnn = cudnn_us / y_tensor_us
 
@@ -260,23 +328,25 @@ def main():
             "cudnn_us": cudnn_us,
             "y_us": y_tensor_us,
             "vs_cublas": vs_cublas,
-            "vs_cudnn": vs_cudnn
+            "vs_cudnn": vs_cudnn,
+            "correct": is_correct
         })
 
-        print(f"{M}x{N}x{K:<12} | {cublas_us:<14.2f} | {cudnn_us:<14.2f} | {y_tensor_us:<14.2f} | {vs_cublas:<12.2f}x | {vs_cudnn:<12.2f}x")
+        correctness_tag = "OK" if is_correct else "FAIL"
+        print(f"{M}x{N}x{K:<12} | {cublas_us:<14.2f} | {cudnn_us:<14.2f} | {y_tensor_us:<14.2f} | {vs_cublas:<12.2f}x | {vs_cudnn:<12.2f}x | {correctness_tag}")
 
     # -------------------------------------------------------------------------
     # SUITE 2: Fused Operations (GEMM + Bias + ReLU Activation)
     # -------------------------------------------------------------------------
     print_header("SUITE 2: FUSED DEEP LEARNING OPERATIONS (GEMM + BIAS + RELU)")
-    print(f"{'Matrix (M=N=K)':<18} | {'cuBLAS+Kernel':<14} | {'cuDNN Fused':<14} | {'Y Fused Tensor':<14} | {'Y vs cuBLAS':<12} | {'Y vs cuDNN':<12}")
+    print(f"{'Matrix (M=N=K)':<18} | {'cuBLAS+Kernel':<14} | {'cuDNN Fused':<14} | {'Y Fused Tensor':<14} | {'Y vs cuBLAS':<12} | {'Y vs cuDNN':<12} | Correct")
     print("-" * 95)
 
-    y_fused_mod = cp.RawModule(code=Y_FUSED_GEMM_RELU_CUDA, options=("-std=c++17", "--use_fast_math", "-I/usr/local/cuda/include"))
+    y_fused_mod = cp.RawModule(code=HANDWRITTEN_CUDA_REFERENCE_FUSED_GEMM_RELU, options=("-std=c++17", "--use_fast_math", f"-I{CUDA_INCLUDE_DIR}"))
     y_fused_large_kernel = y_fused_mod.get_function("y_fused_gemm_bias_relu_kernel")
     y_fused_small_kernel = y_fused_mod.get_function("y_fused_gemm_bias_relu_small_kernel")
 
-    naive_bias_mod = cp.RawModule(code=NAIVE_MULTI_KERNEL_BIAS_RELU_CUDA, options=("-std=c++17", "--use_fast_math", "-I/usr/local/cuda/include"))
+    naive_bias_mod = cp.RawModule(code=NAIVE_MULTI_KERNEL_BIAS_RELU_CUDA, options=("-std=c++17", "--use_fast_math", f"-I{CUDA_INCLUDE_DIR}"))
     naive_bias_kernel = naive_bias_mod.get_function("naive_bias_relu_kernel")
 
     fused_sizes = [512, 1024, 2048, 4096, 8192]
@@ -362,6 +432,11 @@ def main():
         y_end.synchronize()
         y_fused_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iterations) * 1000.0
 
+        # Correctness gate: compare fused kernel output against an unfused PyTorch reference.
+        ref_fused = torch.relu(torch.addmm(bias_fp32, A_fp32, B_fp32))
+        y_fused_torch = torch.from_dlpack(C_cp)
+        is_correct = check_correctness(f"Fused GEMM+Bias+ReLU {M}x{N}x{K}", y_fused_torch, ref_fused)
+
         vs_cublas = cublas_multi_us / y_fused_us
         vs_cudnn = cudnn_fused_us / y_fused_us
 
@@ -371,17 +446,22 @@ def main():
             "cudnn_fused_us": cudnn_fused_us,
             "y_fused_us": y_fused_us,
             "vs_cublas": vs_cublas,
-            "vs_cudnn": vs_cudnn
+            "vs_cudnn": vs_cudnn,
+            "correct": is_correct
         })
 
-        print(f"{M}x{N}x{K:<12} | {cublas_multi_us:<14.2f} | {cudnn_fused_us:<14.2f} | {y_fused_us:<14.2f} | {vs_cublas:<12.2f}x | {vs_cudnn:<12.2f}x")
+        correctness_tag = "OK" if is_correct else "FAIL"
+        print(f"{M}x{N}x{K:<12} | {cublas_multi_us:<14.2f} | {cudnn_fused_us:<14.2f} | {y_fused_us:<14.2f} | {vs_cublas:<12.2f}x | {vs_cudnn:<12.2f}x | {correctness_tag}")
 
     # -------------------------------------------------------------------------
     # SUITE 3: Dual-Accelerator Co-Processor (RT Core BVH + Tensor Core MMA)
     # -------------------------------------------------------------------------
     print_header("SUITE 3: DUAL-ACCELERATOR PIPELINE (RT CORE ROUTING + TENSOR CORE MMA)")
-    print(f"{'Topology / Workload':<28} | {'Sequential (us)':<14} | {'Y Co-Proc (us)':<14} | {'Speedup':<12} | {'Time Saved':<12}")
-    print("-" * 88)
+    print("[*] This suite compiles and runs real Y-compiler PTX output (--emit-coprocessor).")
+    print("    No unfused sequential baseline exists yet, so only fused latency is reported —")
+    print("    no speedup number is fabricated.")
+    print(f"{'Topology / Workload':<28} | {'Y Co-Proc (us, fused)':<22}")
+    print("-" * 55)
 
     coproc_workloads = [
         ("coprocessor_attention", "Sparse Token Attention (1 RT, 5 MMA)"),
@@ -410,40 +490,43 @@ def main():
         rt_A = cp.random.randn(1024, dtype=cp.float32)
         nns_query = cp.random.randn(8, dtype=cp.float32)
 
-        # Warmup Y Co-Processor Kernel
+        # Warmup Y Co-Processor Kernel. Launch failures are NOT swallowed here: a
+        # kernel that fails to launch is not "fast", it's broken, and a benchmark
+        # that silently times failed launches reports meaningless numbers.
+        launch_failed = False
         for _ in range(50):
             try:
                 y_coproc_kernel((1, 1, 1), (32, 1, 1), (rt_A, nns_query))
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"    [!] {desc}: kernel launch failed during warmup: {e}")
+                launch_failed = True
+                break
         cp.cuda.Device(0).synchronize()
+
+        if launch_failed:
+            print(f"    [!] Skipping {desc}: kernel did not launch successfully.")
+            continue
 
         iterations = 5000
         y_start.record()
         for _ in range(iterations):
-            try:
-                y_coproc_kernel((1, 1, 1), (32, 1, 1), (rt_A, nns_query))
-            except Exception:
-                pass
+            y_coproc_kernel((1, 1, 1), (32, 1, 1), (rt_A, nns_query))
         y_end.record()
         y_end.synchronize()
         y_coproc_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iterations) * 1000.0
 
-        # Sequential baseline (sequential execution of RT traversal and Tensor MMA without cycle overlap)
-        seq_baseline_us = y_coproc_us * 1.66
-
-        speedup = seq_baseline_us / y_coproc_us
-        reduction = (1 - (y_coproc_us / seq_baseline_us)) * 100.0
-
+        # NOTE: There is currently no unfused baseline to compare against. A
+        # genuine "sequential, non-overlapped" number would require the coprocessor
+        # scheduler to emit RT traversal and Tensor Core MMA as two separate,
+        # non-interleaved kernel launches, then timing those the same way as above.
+        # That capability doesn't exist yet, so we report ONLY the measured fused
+        # latency below rather than fabricate a speedup ratio from a constant.
         suite3_results.append({
             "workload": desc,
-            "seq_us": seq_baseline_us,
             "y_us": y_coproc_us,
-            "speedup": speedup,
-            "reduction": reduction
         })
 
-        print(f"{desc:<28} | {seq_baseline_us:<14.2f} | {y_coproc_us:<14.2f} | {speedup:<12.2f}x | {reduction:<11.1f}%")
+        print(f"{desc:<28} | {y_coproc_us:<14.2f} (fused; no verified unfused baseline yet)")
 
     print_header("BENCHMARK EXECUTION COMPLETE")
     print("[*] Generating Summary File...")
@@ -455,22 +538,34 @@ def main():
         f.write(f"**CUDA Version**: {torch.version.cuda} | **cuDNN Version**: {torch.backends.cudnn.version()}\n\n")
 
         f.write("## 1. Standalone Dense GEMM Performance (FP16 Tensor Cores)\n\n")
-        f.write("| Matrix (M=N=K) | cuBLAS Latency (µs) | cuDNN Latency (µs) | Y Tensor Core Latency (µs) | Speedup vs cuBLAS | Speedup vs cuDNN |\n")
-        f.write("|---|---|---|---|---|---|\n")
+        f.write("**NOTE**: The kernel measured here is a hand-written CUDA C++ reference "
+                "(`tests/y_tensor_core_gemm.cu`, compiled via NVRTC) representing the tiling "
+                "strategy Y's PTX emitter targets. It is NOT output from Y's own compiler. "
+                "The `Correct` column reports `torch.allclose` against a cuBLAS reference "
+                "(rtol=atol=1e-2); numbers for FAILed rows are not meaningful.\n\n")
+        f.write("| Matrix (M=N=K) | cuBLAS Latency (µs) | cuDNN Latency (µs) | Kernel Latency (µs) | Speedup vs cuBLAS | Speedup vs cuDNN | Correct |\n")
+        f.write("|---|---|---|---|---|---|---|\n")
         for r in suite1_results:
-            f.write(f"| {r['size']} | {r['cublas_us']:.2f} | {r['cudnn_us']:.2f} | {r['y_us']:.2f} | **{r['vs_cublas']:.2f}x** | **{r['vs_cudnn']:.2f}x** |\n")
+            f.write(f"| {r['size']} | {r['cublas_us']:.2f} | {r['cudnn_us']:.2f} | {r['y_us']:.2f} | **{r['vs_cublas']:.2f}x** | **{r['vs_cudnn']:.2f}x** | {'OK' if r['correct'] else 'FAIL'} |\n")
 
         f.write("\n## 2. Fused Operations (GEMM + Bias + ReLU Activation)\n\n")
-        f.write("| Matrix (M=N=K) | cuBLAS + CUDA Multi-Kernel (µs) | cuDNN Fused Linear (µs) | Y Fused Tensor Core (µs) | Speedup vs cuBLAS | Speedup vs cuDNN |\n")
-        f.write("|---|---|---|---|---|---|\n")
+        f.write("**NOTE**: Same hand-written CUDA reference caveat as Suite 1 above.\n\n")
+        f.write("| Matrix (M=N=K) | cuBLAS + CUDA Multi-Kernel (µs) | cuDNN Fused Linear (µs) | Fused Kernel Latency (µs) | Speedup vs cuBLAS | Speedup vs cuDNN | Correct |\n")
+        f.write("|---|---|---|---|---|---|---|\n")
         for r in suite2_results:
-            f.write(f"| {r['size']} | {r['cublas_multi_us']:.2f} | {r['cudnn_fused_us']:.2f} | {r['y_fused_us']:.2f} | **{r['vs_cublas']:.2f}x** | **{r['vs_cudnn']:.2f}x** |\n")
+            f.write(f"| {r['size']} | {r['cublas_multi_us']:.2f} | {r['cudnn_fused_us']:.2f} | {r['y_fused_us']:.2f} | **{r['vs_cublas']:.2f}x** | **{r['vs_cudnn']:.2f}x** | {'OK' if r['correct'] else 'FAIL'} |\n")
 
         f.write("\n## 3. Dual-Accelerator Pipeline (RT Core BVH + Tensor Core MMA)\n\n")
-        f.write("| Workload Topology | Sequential CUDA / OptiX (µs) | Y Co-Processor Pipeline (µs) | Hardware Speedup | Latency Reduction |\n")
-        f.write("|---|---|---|---|---|\n")
+        f.write("**NOTE**: This is the one suite that runs real Y-compiler PTX output "
+                "(`--emit-coprocessor`). There is currently no verified unfused/sequential "
+                "baseline to compare against, so only the measured fused latency is reported. "
+                "A previous version of this script fabricated a baseline as `fused_us * 1.66` "
+                "and reported the resulting ratio as a hardware speedup; that has been removed "
+                "because it wasn't a measurement.\n\n")
+        f.write("| Workload Topology | Y Co-Processor Pipeline (µs, fused) |\n")
+        f.write("|---|---|\n")
         for r in suite3_results:
-            f.write(f"| {r['workload']} | {r['seq_us']:.2f} | {r['y_us']:.2f} | **{r['speedup']:.2f}x** | **{r['reduction']:.1f}%** |\n")
+            f.write(f"| {r['workload']} | {r['y_us']:.2f} |\n")
 
     print("[*] Saved results to benchmark_y_tensor_core_results.md.")
 

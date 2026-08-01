@@ -32,6 +32,7 @@ struct GpuLatencies {
     warp_size: u32,
     max_threads_per_sm: u32,
     max_warps_per_sm: u32,
+    max_smem_per_sm: u32,
     smem_noconflict: f64,
     smem_2way_conflict: f64,
     smem_4way_conflict: f64,
@@ -265,7 +266,14 @@ unsafe fn compile_cuda_to_ptx(nvrtc: &Nvrtc, src: &str) -> Option<Vec<u8>> {
         return None;
     }
     
-    let opt_gpu = std::ffi::CString::new("-arch=compute_70").ok()?;
+    // compute_70 (Volta) was the historical floor here, but newer CUDA
+    // toolkits (confirmed: CUDA 13.3's NVRTC) have dropped it - `nvcc
+    // --list-gpu-arch` on such installs starts at compute_75 (Turing).
+    // This only affects this probe's own internal microbenchmark compile
+    // target, not what hardware the Y compiler itself can emit PTX for
+    // (that's driven by the actual detected GPU's compute_capability
+    // elsewhere, e.g. ptx_emitter.rs's ptx_version_for_sm).
+    let opt_gpu = std::ffi::CString::new("-arch=compute_75").ok()?;
     let options = [opt_gpu.as_ptr() as *const u8];
     
     let comp_res = (nvrtc.nvrtcCompileProgram)(prog, 1, options.as_ptr());
@@ -299,7 +307,7 @@ unsafe fn compile_cuda_to_ptx(nvrtc: &Nvrtc, src: &str) -> Option<Vec<u8>> {
 
 const PTX_SOURCE: &[u8] = b"
 .version 7.0
-.target sm_70
+.target sm_75
 .address_size 64
 
 .visible .entry fma_latency_kernel(
@@ -410,6 +418,7 @@ struct LiveResults {
     vram_latency: f64,
     temp_start: u32,
     temp_end: u32,
+    sm_count: i32,
 }
 
 fn get_gpu_temperature() -> Option<u32> {
@@ -422,6 +431,25 @@ fn get_gpu_temperature() -> Option<u32> {
         s.trim().parse::<u32>().ok()
     } else {
         None
+    }
+}
+
+/// How many independent cudaEvent-timed samples each live latency
+/// measurement below takes before reducing to a single number via
+/// `median_of`. A single sample is not trustworthy on its own - see the
+/// comment at the FMA latency loop for a concrete repro (10x spread across
+/// 3 separate probe runs on idle, unchanged hardware).
+const LATENCY_SAMPLES: u32 = 7;
+
+/// Median (not mean, so 1-2 outlier samples can't drag the result) of a set
+/// of independent latency-cycle samples.
+fn median_of(samples: &mut [f64]) -> f64 {
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mid = samples.len() / 2;
+    if samples.len() % 2 == 0 {
+        (samples[mid - 1] + samples[mid]) / 2.0
+    } else {
+        samples[mid]
     }
 }
 
@@ -442,10 +470,26 @@ unsafe fn run_live_benchmarks() -> Option<LiveResults> {
         return None;
     }
     
+    // Was previously queried with attribute code 16, which is actually
+    // CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, not CLOCK_RATE (that's code
+    // 13) - clock_rate_khz was silently being populated with the SM count
+    // instead of a real clock rate and used as one in the cycle-latency math
+    // below, e.g. producing a nonsense "0.01 cycles" SMEM latency instead of
+    // the real ~28. Confirmed and fixed here since it directly corrupts the
+    // fma/smem/vram cycle-latency numbers this function measures.
     let mut clock_rate_khz: i32 = 0;
-    (cuda.cuDeviceGetAttribute)(&mut clock_rate_khz, 16, device); // 16 = CU_DEVICE_ATTRIBUTE_CLOCK_RATE
+    (cuda.cuDeviceGetAttribute)(&mut clock_rate_khz, 13, device); // CU_DEVICE_ATTRIBUTE_CLOCK_RATE
     if clock_rate_khz == 0 {
         clock_rate_khz = 1500000;
+    }
+
+    // Real SM (multiprocessor) count - needed by the autotuner's grid-wave
+    // alignment math (previously hardcoded to a wrong constant regardless of
+    // actual hardware; see HardwareProfile::sm_count).
+    let mut sm_count: i32 = 0;
+    (cuda.cuDeviceGetAttribute)(&mut sm_count, 16, device); // CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT
+    if sm_count <= 0 {
+        sm_count = 66;
     }
 
     let mut dynamic_ptx: Option<Vec<u8>> = None;
@@ -535,22 +579,48 @@ extern "C" __global__ void vram_latency_kernel(unsigned long long **array_ptr, u
         &mut iterations_val as *mut u32 as *mut std::ffi::c_void,
     ];
     
-    // Warm up FMA
-    (cuda.cuLaunchKernel)(fma_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), fma_args.as_ptr(), std::ptr::null_mut());
-    (cuda.cuCtxSynchronize)();
-    
+    // Warm up FMA, and let any GPU idle->boost clock/power-state ramp settle
+    // before measuring "cold" latency - a fresh CUDA context can start at a
+    // low idle clock, and a single launch isn't always enough time for the
+    // driver to ramp it to normal operating clock. Caught this directly: 5
+    // consecutive standalone probe runs (fresh process each time) measured
+    // FMA latency at 29.87 / 18.69 / 6.49 / 5.74 / 5.74 cycles - a clear
+    // decaying-then-stable pattern, not random noise, and this is what was
+    // corrupting the "cold" baseline (a different effect from the
+    // intentional post-stress thermal-throttling comparison below - that one
+    // SHOULD show a real difference; this ramp shouldn't be there at all).
+    // Time-boxed, not launch-count-boxed: P-state transitions are a
+    // real-time phenomenon, and how many launches that takes varies by GPU.
+    let warmup_start = std::time::Instant::now();
+    while warmup_start.elapsed() < std::time::Duration::from_millis(150) {
+        (cuda.cuLaunchKernel)(fma_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), fma_args.as_ptr(), std::ptr::null_mut());
+        (cuda.cuCtxSynchronize)();
+    }
+
     let temp_start = get_gpu_temperature().unwrap_or(40);
-    
-    (cuda.cuEventRecord)(start, std::ptr::null_mut());
-    (cuda.cuLaunchKernel)(fma_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), fma_args.as_ptr(), std::ptr::null_mut());
-    (cuda.cuEventRecord)(end, std::ptr::null_mut());
-    (cuda.cuEventSynchronize)(end);
-    
-    let mut ms: f32 = 0.0;
-    (cuda.cuEventElapsedTime)(&mut ms, start, end);
     let total_ops = iterations as f64 * 8.0;
-    let total_cycles = (ms as f64 / 1000.0) * (clock_rate_khz as f64 * 1000.0);
-    let fma_latency = total_cycles / total_ops;
+
+    // A single cudaEvent-timed sample here is not trustworthy: 3 separate
+    // probe runs on the same idle machine measured 4.43 / 53.49 / 6.12
+    // cycles for this exact FMA latency - over 10x apart, almost certainly
+    // GPU clock/power-state transitions rather than a real change in the
+    // hardware. LATENCY_SAMPLES back-to-back timed launches + median (not
+    // mean, so 1-2 stragglers can't drag the result) smooths that out; see
+    // `median_of`. This affects more than the autotuner - type_checker.rs
+    // and others consume these latency fields too.
+    let mut fma_samples: Vec<f64> = Vec::with_capacity(LATENCY_SAMPLES as usize);
+    for _ in 0..LATENCY_SAMPLES {
+        (cuda.cuEventRecord)(start, std::ptr::null_mut());
+        (cuda.cuLaunchKernel)(fma_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), fma_args.as_ptr(), std::ptr::null_mut());
+        (cuda.cuEventRecord)(end, std::ptr::null_mut());
+        (cuda.cuEventSynchronize)(end);
+
+        let mut ms: f32 = 0.0;
+        (cuda.cuEventElapsedTime)(&mut ms, start, end);
+        let total_cycles = (ms as f64 / 1000.0) * (clock_rate_khz as f64 * 1000.0);
+        fma_samples.push(total_cycles / total_ops);
+    }
+    let fma_latency = median_of(&mut fma_samples);
     
     // 2. Thermal drift: stress GPU to heat it up
     let stress_iterations = 200000;
@@ -566,16 +636,24 @@ extern "C" __global__ void vram_latency_kernel(unsigned long long **array_ptr, u
     
     let temp_end = get_gpu_temperature().unwrap_or(temp_start);
     
-    // Measure hot latency
-    (cuda.cuEventRecord)(start, std::ptr::null_mut());
-    (cuda.cuLaunchKernel)(fma_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), fma_args.as_ptr(), std::ptr::null_mut());
-    (cuda.cuEventRecord)(end, std::ptr::null_mut());
-    (cuda.cuEventSynchronize)(end);
-    
-    let mut ms_hot: f32 = 0.0;
-    (cuda.cuEventElapsedTime)(&mut ms_hot, start, end);
-    let total_cycles_hot = (ms_hot as f64 / 1000.0) * (clock_rate_khz as f64 * 1000.0);
-    let fma_latency_hot = total_cycles_hot / total_ops;
+    // Measure hot latency: sampled immediately after the single stress burst
+    // above, not re-stressed per sample - thermal state moves on a much
+    // slower timescale than a handful of back-to-back kernel launches, so
+    // repeating the (expensive, 64x256-thread) stress kernel per sample would
+    // only slow the probe without improving accuracy.
+    let mut fma_hot_samples: Vec<f64> = Vec::with_capacity(LATENCY_SAMPLES as usize);
+    for _ in 0..LATENCY_SAMPLES {
+        (cuda.cuEventRecord)(start, std::ptr::null_mut());
+        (cuda.cuLaunchKernel)(fma_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), fma_args.as_ptr(), std::ptr::null_mut());
+        (cuda.cuEventRecord)(end, std::ptr::null_mut());
+        (cuda.cuEventSynchronize)(end);
+
+        let mut ms_hot: f32 = 0.0;
+        (cuda.cuEventElapsedTime)(&mut ms_hot, start, end);
+        let total_cycles_hot = (ms_hot as f64 / 1000.0) * (clock_rate_khz as f64 * 1000.0);
+        fma_hot_samples.push(total_cycles_hot / total_ops);
+    }
+    let fma_latency_hot = median_of(&mut fma_hot_samples);
     
     (cuda.cuMemFree)(d_input);
     (cuda.cuMemFree)(d_output);
@@ -589,15 +667,19 @@ extern "C" __global__ void vram_latency_kernel(unsigned long long **array_ptr, u
         &mut iterations_val as *mut u32 as *mut std::ffi::c_void,
     ];
     
-    (cuda.cuEventRecord)(start, std::ptr::null_mut());
-    (cuda.cuLaunchKernel)(smem_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), smem_args.as_ptr(), std::ptr::null_mut());
-    (cuda.cuEventRecord)(end, std::ptr::null_mut());
-    (cuda.cuEventSynchronize)(end);
-    
-    let mut ms_smem: f32 = 0.0;
-    (cuda.cuEventElapsedTime)(&mut ms_smem, start, end);
-    let smem_cycles = (ms_smem as f64 / 1000.0) * (clock_rate_khz as f64 * 1000.0);
-    let smem_latency = smem_cycles / iterations as f64;
+    let mut smem_samples: Vec<f64> = Vec::with_capacity(LATENCY_SAMPLES as usize);
+    for _ in 0..LATENCY_SAMPLES {
+        (cuda.cuEventRecord)(start, std::ptr::null_mut());
+        (cuda.cuLaunchKernel)(smem_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), smem_args.as_ptr(), std::ptr::null_mut());
+        (cuda.cuEventRecord)(end, std::ptr::null_mut());
+        (cuda.cuEventSynchronize)(end);
+
+        let mut ms_smem: f32 = 0.0;
+        (cuda.cuEventElapsedTime)(&mut ms_smem, start, end);
+        let smem_cycles = (ms_smem as f64 / 1000.0) * (clock_rate_khz as f64 * 1000.0);
+        smem_samples.push(smem_cycles / iterations as f64);
+    }
+    let smem_latency = median_of(&mut smem_samples);
     
     (cuda.cuMemFree)(d_smem_out);
     
@@ -626,15 +708,19 @@ extern "C" __global__ void vram_latency_kernel(unsigned long long **array_ptr, u
         &mut iterations_val as *mut u32 as *mut std::ffi::c_void,
     ];
     
-    (cuda.cuEventRecord)(start, std::ptr::null_mut());
-    (cuda.cuLaunchKernel)(vram_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), vram_args.as_ptr(), std::ptr::null_mut());
-    (cuda.cuEventRecord)(end, std::ptr::null_mut());
-    (cuda.cuEventSynchronize)(end);
-    
-    let mut ms_vram: f32 = 0.0;
-    (cuda.cuEventElapsedTime)(&mut ms_vram, start, end);
-    let vram_cycles = (ms_vram as f64 / 1000.0) * (clock_rate_khz as f64 * 1000.0);
-    let vram_latency = vram_cycles / iterations as f64;
+    let mut vram_samples: Vec<f64> = Vec::with_capacity(LATENCY_SAMPLES as usize);
+    for _ in 0..LATENCY_SAMPLES {
+        (cuda.cuEventRecord)(start, std::ptr::null_mut());
+        (cuda.cuLaunchKernel)(vram_func, 1, 1, 1, 1, 1, 1, 0, std::ptr::null_mut(), vram_args.as_ptr(), std::ptr::null_mut());
+        (cuda.cuEventRecord)(end, std::ptr::null_mut());
+        (cuda.cuEventSynchronize)(end);
+
+        let mut ms_vram: f32 = 0.0;
+        (cuda.cuEventElapsedTime)(&mut ms_vram, start, end);
+        let vram_cycles = (ms_vram as f64 / 1000.0) * (clock_rate_khz as f64 * 1000.0);
+        vram_samples.push(vram_cycles / iterations as f64);
+    }
+    let vram_latency = median_of(&mut vram_samples);
     
     (cuda.cuMemFree)(d_vram_array);
     (cuda.cuMemFree)(d_vram_out);
@@ -650,6 +736,7 @@ extern "C" __global__ void vram_latency_kernel(unsigned long long **array_ptr, u
         vram_latency,
         temp_start,
         temp_end,
+        sm_count,
     })
 }
 
@@ -698,6 +785,9 @@ fn build_cuda_profile(name: String, sm: String, mem_mb: u64) -> GpuLatencies {
             warp_size: 32,
             max_threads_per_sm: 2048,
             max_warps_per_sm: 64,
+            // Estimated: published spec for Blackwell datacenter parts keeps Hopper's
+            // 228KB/SM class; unconfirmed for consumer Blackwell at time of writing.
+            max_smem_per_sm: 233472,
             smem_noconflict: 4.0,
             smem_2way_conflict: 8.0,
             smem_4way_conflict: 16.0,
@@ -735,6 +825,7 @@ fn build_cuda_profile(name: String, sm: String, mem_mb: u64) -> GpuLatencies {
             warp_size: 32,
             max_threads_per_sm: 2048,
             max_warps_per_sm: 64,
+            max_smem_per_sm: 233472, // 228KB/SM, H100/Hopper published spec
             smem_noconflict: 4.0,
             smem_2way_conflict: 8.0,
             smem_4way_conflict: 16.0,
@@ -772,6 +863,7 @@ fn build_cuda_profile(name: String, sm: String, mem_mb: u64) -> GpuLatencies {
             warp_size: 32,
             max_threads_per_sm: 1536,
             max_warps_per_sm: 48,
+            max_smem_per_sm: 102400, // 100KB/SM, Ampere GA10x consumer spec (Orin's 164KB not modeled separately)
             smem_noconflict: 4.0,
             smem_2way_conflict: 8.0,
             smem_4way_conflict: 16.0,
@@ -809,6 +901,7 @@ fn build_cuda_profile(name: String, sm: String, mem_mb: u64) -> GpuLatencies {
             warp_size: 32,
             max_threads_per_sm: 1024,
             max_warps_per_sm: 32,
+            max_smem_per_sm: 65536, // 64KB/SM, Turing spec (this bucket already skews Turing over Volta's 96KB)
             smem_noconflict: 4.0,
             smem_2way_conflict: 8.0,
             smem_4way_conflict: 16.0,
@@ -846,6 +939,7 @@ fn build_cuda_profile(name: String, sm: String, mem_mb: u64) -> GpuLatencies {
             warp_size: 32,
             max_threads_per_sm: 1536,
             max_warps_per_sm: 48,
+            max_smem_per_sm: 102400, // 100KB/SM, Ada (sm_89) published spec - matches CLAUDE.md's measured 102400B/SM
             smem_noconflict: 4.53,
             smem_2way_conflict: 9.06,
             smem_4way_conflict: 18.12,
@@ -886,6 +980,7 @@ fn build_amd_profile(name: String, arch: String, mem_mb: u64) -> GpuLatencies {
         warp_size: 64,
         max_threads_per_sm: 2048,
         max_warps_per_sm: 32,
+        max_smem_per_sm: 65536, // 64KB LDS/WGP estimate, RDNA-class
         smem_noconflict: 4.0,
         smem_2way_conflict: 8.0,
         smem_4way_conflict: 16.0,
@@ -925,6 +1020,7 @@ fn build_intel_profile(name: String, arch: String, mem_mb: u64) -> GpuLatencies 
         warp_size: 32,
         max_threads_per_sm: 1024,
         max_warps_per_sm: 32,
+        max_smem_per_sm: 65536, // 64KB SLM/Xe-core estimate
         smem_noconflict: 4.0,
         smem_2way_conflict: 8.0,
         smem_4way_conflict: 16.0,
@@ -964,6 +1060,7 @@ fn get_generic_fallback_profile() -> GpuLatencies {
         warp_size: 32,
         max_threads_per_sm: 1024,
         max_warps_per_sm: 32,
+        max_smem_per_sm: 49152, // conservative 48KB default, safe pre-opt-in limit on virtually every arch
         smem_noconflict: 4.0,
         smem_2way_conflict: 8.0,
         smem_4way_conflict: 16.0,
@@ -1192,6 +1289,12 @@ fn main() {
     let mut temp_start = 40;
     let mut temp_end = 40;
     let mut live_benchmarked = false;
+    // Real per-SKU multiprocessor count - SM count varies within a compute
+    // capability (e.g. RTX 4070 Ti SUPER's 66 vs RTX 4090's 128, both sm_89),
+    // so unlike max_regs_per_sm/max_warps_per_sm/etc. there's no valid
+    // per-architecture default; 108 here is only a last-resort fallback for
+    // non-NVIDIA or failed-probe cases, same as before this field existed.
+    let mut sm_count: u32 = 108;
 
     let mut live_opt = None;
     if profile.gpu_vendor == "NVIDIA" {
@@ -1209,10 +1312,14 @@ fn main() {
         profile.vram_latency = live.vram_latency;
         temp_start = live.temp_start;
         temp_end = live.temp_end;
+        if live.sm_count > 0 {
+            sm_count = live.sm_count as u32;
+        }
         println!("[OK] Live GPU Microbenchmarks succeeded.");
         println!("     -> Measured FMA Latency: {:.2} cycles", live.fma_latency);
         println!("     -> Measured SMEM Latency: {:.2} cycles", live.smem_latency);
         println!("     -> Measured VRAM Latency: {:.2} cycles", live.vram_latency);
+        println!("     -> Measured SM (Multiprocessor) Count: {}", sm_count);
     } else {
         println!("[!] Dynamic live GPU JIT benchmarks skipped or unsupported. Falling back to static model.");
     }
@@ -1290,6 +1397,8 @@ fn main() {
     println!("WARP_SIZE={}", profile.warp_size);
     println!("MAX_THREADS_PER_SM={}", profile.max_threads_per_sm);
     println!("MAX_WARPS_PER_SM={}", profile.max_warps_per_sm);
+    println!("MAX_SMEM_PER_SM_BYTES={}", profile.max_smem_per_sm);
+    println!("SM_COUNT={}", sm_count);
     println!("TOTAL_GLOBAL_MEM_MB={}", profile.total_mem_mb);
 
     println!("DRIFT_FREE_TYPES=Q32.32,F64");
