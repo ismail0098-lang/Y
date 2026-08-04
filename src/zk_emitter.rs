@@ -539,6 +539,37 @@ pub enum WitnessOp {
         outputs: Vec<SignalId>,
         ops: Vec<HintOp>,
     },
+
+    // ---- linear-combination recipes ----
+    //
+    // The variants above all take `SignalId`s, which is enough for wires the
+    // constraint scan in `build_witness_ir` can reconstruct (`a * b = c` with
+    // one term per side). The gadgets below cannot be reconstructed that way:
+    // an is-zero flag and its inverse witness appear together in constraints
+    // that each have TWO unknowns, so no amount of algebraic back-propagation
+    // pins either one. That is exactly why every circuit containing `==`, `!=`
+    // or a comparison used to come back `satisfied = false` from
+    // `solve_r1cs_witness` - unprovable, not merely slow.
+    //
+    // These carry the linear combination directly so the witness pass can
+    // evaluate it against the wires it has already solved.
+    /// 1 if the linear combination evaluates to zero, else 0.
+    IsZeroLc(LinearCombination),
+    /// The inverse of the linear combination, or 0 when it is zero (the
+    /// standard non-deterministic advice for an is-zero gadget).
+    InvOrZeroLc(LinearCombination),
+    /// Bit `bit` of the linear combination's value, LSB-first.
+    BitOfLc { lc: LinearCombination, bit: u32 },
+    /// This wire's value cannot be reconstructed by the forward pass; leave it
+    /// for the R1CS back-propagation in `solve_r1cs_witness`.
+    ///
+    /// The fallback here used to be `Const(0)`, which was actively harmful:
+    /// `solve_r1cs_witness` treats `Const` as already-solved, so any wire the
+    /// constraint scan could not recognise was pinned to ZERO and
+    /// back-propagation was never allowed to correct it. That silently broke
+    /// every output computed as `constant - wire` (e.g. `1 - lt`, `1 - eq`),
+    /// which is exactly the shape every comparison and `!=` produces.
+    Unknown,
 }
 
 #[derive(Clone, Debug)]
@@ -734,6 +765,7 @@ pub enum WireBinding {
     Linear(LinearCombination),
 }
 
+#[derive(Clone, Debug)]
 pub struct Circuit {
     pub num_variables: usize,
     pub variables: Vec<String>,
@@ -746,6 +778,14 @@ pub struct Circuit {
 // ────────────────────────────────────────────────────────
 // 3. Lowering and Optimization Pass
 // ────────────────────────────────────────────────────────
+
+/// Bit width used for ordering comparisons (`<`, `<=`, `>`, `>=`).
+///
+/// Y's integer type is `I32`, so 32 bits is the natural range for both
+/// operands. An operand outside `[0, 2^32)` makes its range check
+/// unsatisfiable, which means no proof can be produced - fail-closed, never
+/// silently wrong. See `emit_less_than`.
+pub const ZK_COMPARISON_BITS: u32 = 32;
 
 pub struct ZkEmitter {
     pub variables: Vec<String>,
@@ -765,6 +805,11 @@ pub struct ZkEmitter {
     pub active_scheme: ProofScheme,
     // Track unconstrained hint variables to enforce sound R1CS matrix constraints (error[Z0042])
     pub unconstrained_hint_vars: HashMap<usize, (String, Span)>,
+    /// Explicit witness recipes for wires that `build_witness_ir`'s constraint
+    /// scan cannot reconstruct - see the linear-combination `WitnessOp`
+    /// variants. Without these, gadget wires stay unsolved and the circuit
+    /// cannot be proved.
+    witness_recipes: HashMap<usize, WitnessOp>,
 }
 
 fn expr_references_var(expr: &Expr, name: &str) -> bool {
@@ -795,6 +840,7 @@ impl ZkEmitter {
             active_field: ScalarField::Bn254,
             active_scheme: ProofScheme::R1cs,
             unconstrained_hint_vars: HashMap::new(),
+            witness_recipes: HashMap::new(),
         }
     }
 
@@ -818,6 +864,93 @@ impl ZkEmitter {
         self.next_var_id += 1;
         self.variables.push(format!("{}_{}", name, id));
         id
+    }
+
+    /// Bit-decomposes `value` into `n_bits` boolean wires, LSB first, and
+    /// constrains their recomposition back to `value`.
+    ///
+    /// This is the classic `Num2Bits`, and it does two jobs at once: it hands
+    /// back the bits, and - because every bit is constrained boolean and they
+    /// must recompose exactly - it PROVES `0 <= value < 2^n_bits`. That range
+    /// proof is the part a sound field comparison cannot do without. Cost is
+    /// `n_bits + 1` constraints.
+    fn emit_num2bits(&mut self, value: &LinearCombination, n_bits: u32, span: &Span) -> Vec<usize> {
+        let mut bits = Vec::with_capacity(n_bits as usize);
+        let mut recomposed = LinearCombination::zero();
+        let mut coeff = Fr::one();
+        let two = Fr::from_u64(2);
+
+        for i in 0..n_bits {
+            let b = self.new_wire(&format!("bit{}", i));
+            // The witness pass cannot recover a bit from the constraints (b*b=b
+            // has two satisfying values), so record how to compute it.
+            self.witness_recipes
+                .insert(b, WitnessOp::BitOfLc { lc: value.clone(), bit: i });
+            // Booleanity: b * b = b, satisfied only by 0 and 1.
+            self.add_constraint(Constraint {
+                a: LinearCombination::variable(b),
+                b: LinearCombination::variable(b),
+                c: LinearCombination::variable(b),
+                span: Some(span.clone()),
+            });
+            recomposed.add_term(b, coeff.clone());
+            coeff = coeff.mul(&two);
+            bits.push(b);
+        }
+
+        // Recomposition: (sum 2^i * b_i) * 1 = value.
+        self.add_constraint(Constraint {
+            a: recomposed,
+            b: LinearCombination::constant(Fr::one()),
+            c: value.clone(),
+            span: Some(span.clone()),
+        });
+
+        bits
+    }
+
+    /// `a < b` as a boolean linear combination, for operands that fit in
+    /// `n_bits` bits.
+    ///
+    /// A field has no order, so "less than" is only meaningful once both
+    /// operands are pinned to a bounded integer range - otherwise a prover can
+    /// pick `a = p-1` and any ordering claim is vacuous. So both operands are
+    /// range-checked first, then the standard trick: `a + 2^n - b` lies in
+    /// `[1, 2^(n+1))` and therefore never wraps, and its top bit is 0 exactly
+    /// when `a < b`.
+    ///
+    /// Cost is roughly `3n + 6` constraints (two operand range checks plus one
+    /// `n+1`-bit decomposition) - about 102 at `n = 32`. That is inherent to
+    /// comparison in R1CS, not an inefficiency here: circom's `LessThan` pays
+    /// the same shape of cost, and the previous 3-constraint version of this
+    /// operator was cheap only because it was computing something else
+    /// entirely.
+    ///
+    /// If an operand does not fit in `n_bits`, its range check is unsatisfiable
+    /// and no proof can be produced. That is fail-closed - a prover cannot slip
+    /// an out-of-range value past it.
+    fn emit_less_than(
+        &mut self,
+        a: &LinearCombination,
+        b: &LinearCombination,
+        n_bits: u32,
+        span: &Span,
+    ) -> LinearCombination {
+        self.emit_num2bits(a, n_bits, span);
+        self.emit_num2bits(b, n_bits, span);
+
+        // diff = a + 2^n - b
+        let mut diff = a.clone();
+        diff.add_constant(Fr::from_u64(1u64 << n_bits));
+        diff.add_linear(b, Fr::from_u64(0).sub(&Fr::one()));
+
+        let bits = self.emit_num2bits(&diff, n_bits + 1, span);
+        let top = bits[n_bits as usize];
+
+        // a < b  <=>  top bit clear  =>  out = 1 - top
+        let mut out = LinearCombination::constant(Fr::one());
+        out.add_term(top, Fr::from_u64(0).sub(&Fr::one()));
+        out
     }
 
     fn enter_scope(&mut self) {
@@ -892,25 +1025,37 @@ impl ZkEmitter {
         nodes.push(WitnessOp::Const(BigUint::one()));
         signal_names.insert(0, "const_1".to_string());
 
+        // Index the `a*b = c` constraints by their single output wire, ONCE.
+        //
+        // This loop used to be nested inside the per-variable loop below - a
+        // full scan of every constraint for every variable, i.e. O(V*C). It is
+        // quadratic in the circuit size and it showed: building the witness IR
+        // for the polynomial circuit cost 0.06s at 10k constraints but 5.96s at
+        // 100k, each doubling costing ~4x. Emitting the R1CS itself is linear,
+        // so this one function was the entire super-linear term in the pipeline.
+        // `or_insert` keeps the FIRST matching constraint, preserving the
+        // original "break on first match" semantics exactly.
+        let mut mul_by_output: HashMap<usize, (usize, usize)> = HashMap::new();
+        for c in &self.constraints {
+            if c.c.terms.len() == 1 && c.a.terms.len() == 1 && c.b.terms.len() == 1 {
+                mul_by_output
+                    .entry(c.c.terms[0].0)
+                    .or_insert((c.a.terms[0].0, c.b.terms[0].0));
+            }
+        }
+
         for (idx, name) in self.variables.iter().enumerate().skip(1) {
             signal_names.insert(idx, name.clone());
             if self.public_inputs.contains(&idx) {
                 nodes.push(WitnessOp::LoadInput { input_idx: idx, is_public: true });
             } else if self.private_inputs.contains(&idx) {
                 nodes.push(WitnessOp::LoadInput { input_idx: idx, is_public: false });
+            } else if let Some(op) = self.witness_recipes.get(&idx) {
+                nodes.push(op.clone());
+            } else if let Some((a, b)) = mul_by_output.get(&idx) {
+                nodes.push(WitnessOp::Mul(SignalId(*a), SignalId(*b)));
             } else {
-                let mut found_op = None;
-                for c in &self.constraints {
-                    if c.c.terms.len() == 1 && c.c.terms[0].0 == idx {
-                        if c.a.terms.len() == 1 && c.b.terms.len() == 1 {
-                            let a_sig = SignalId(c.a.terms[0].0);
-                            let b_sig = SignalId(c.b.terms[0].0);
-                            found_op = Some(WitnessOp::Mul(a_sig, b_sig));
-                            break;
-                        }
-                    }
-                }
-                nodes.push(found_op.unwrap_or(WitnessOp::Const(BigUint::zero())));
+                nodes.push(WitnessOp::Unknown);
             }
         }
 
@@ -1347,7 +1492,19 @@ impl ZkEmitter {
                 let end_bi = end_const.0;
 
                 let mut unroll_count: usize = 0;
-                let max_unroll_limit: usize = 10_000;
+                // Soft guard against a typo'd bound turning into an OOM, NOT a
+                // structural limit of the lowering - nothing about R1CS or this
+                // emitter breaks above it. It is overridable because real
+                // circuits are routinely millions of constraints, and a
+                // hardcoded 10k silently put every such circuit out of reach:
+                // it is why this repo's own headline benchmark (1,000,000
+                // constraints) could not be reproduced. Raise it deliberately
+                // and watch memory - see docs/heavy_circuit_speed_test.md for
+                // measured cost per constraint.
+                let max_unroll_limit: usize = std::env::var("Y_ZK_MAX_UNROLL")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(10_000);
 
                 while current.0 < end_bi {
                     unroll_count += 1;
@@ -1749,6 +1906,16 @@ impl ZkEmitter {
 
                         let eq_wire = self.new_wire("eq_tmp");
                         let inv_d_wire = self.new_wire("inv_d_tmp");
+                        // Both constraints below carry two unknowns, so the
+                        // witness pass cannot back-propagate either wire -
+                        // record how to compute them directly. Without this,
+                        // every circuit using `==`/`!=` (and so every
+                        // comparison) was unwitnessable and therefore
+                        // unprovable.
+                        self.witness_recipes
+                            .insert(eq_wire, WitnessOp::IsZeroLc(d.clone()));
+                        self.witness_recipes
+                            .insert(inv_d_wire, WitnessOp::InvOrZeroLc(d.clone()));
 
                         // Constraint 1: d * eq = 0
                         self.add_constraint(Constraint {
@@ -1797,13 +1964,40 @@ impl ZkEmitter {
                             let val = if is_true { Fr::one() } else { Fr::zero() };
                             Ok(LinearCombination::constant(val))
                         } else {
-                            let neq_lc = self.emit_expr(&Expr::BinaryOp {
-                                left: left.clone(),
-                                op: BinaryOp::NotEq,
-                                right: right.clone(),
-                                span: span.clone(),
-                            }, items)?;
-                            Ok(neq_lc)
+                            // Real ordering comparison via bit decomposition.
+                            //
+                            // This arm previously re-emitted the expression as
+                            // `BinaryOp::NotEq` and returned that, so `x < y`
+                            // lowered to `x != y`. That is not an
+                            // under-constrained comparison, it is a DIFFERENT
+                            // FUNCTION: `5 <= 5` came out false, and `5 > 3`
+                            // and `3 > 5` were both true. Groth16 will prove a
+                            // wrong statement just as happily as a right one,
+                            // so this was a soundness hole, not a precision
+                            // issue. All four operators emitted an identical 3
+                            // constraints, which is the tell - see
+                            // `emit_less_than` for what the real cost is.
+                            let n = ZK_COMPARISON_BITS;
+                            let lt = match op {
+                                // a < b, and a > b is just b < a.
+                                BinaryOp::Lt => self.emit_less_than(&left_lc, &right_lc, n, span),
+                                BinaryOp::Gt => self.emit_less_than(&right_lc, &left_lc, n, span),
+                                // a <= b  <=>  !(b < a);  a >= b  <=>  !(a < b)
+                                BinaryOp::Le => {
+                                    let gt = self.emit_less_than(&right_lc, &left_lc, n, span);
+                                    let mut r = LinearCombination::constant(Fr::one());
+                                    r.add_linear(&gt, Fr::from_u64(0).sub(&Fr::one()));
+                                    r
+                                }
+                                BinaryOp::Ge => {
+                                    let lt = self.emit_less_than(&left_lc, &right_lc, n, span);
+                                    let mut r = LinearCombination::constant(Fr::one());
+                                    r.add_linear(&lt, Fr::from_u64(0).sub(&Fr::one()));
+                                    r
+                                }
+                                _ => unreachable!(),
+                            };
+                            Ok(lt)
                         }
                     }
                     _ => Err(format!("Circuit target error: Operator {:?} is not natively supported in ZK field constraints. Line {}", op, span.line)),
