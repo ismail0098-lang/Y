@@ -160,6 +160,9 @@ pub fn execute_host_witness_ir(
                 let v = eval_lc(lc, &w);
                 w[node_idx] = if v.0.get_bit(*bit as usize) { Fr::one() } else { Fr::zero() };
             }
+            WitnessOp::MulLc(a, b) => {
+                w[node_idx] = eval_lc(a, &w).mul(&eval_lc(b, &w));
+            }
         }
     }
 
@@ -212,7 +215,8 @@ pub fn solve_r1cs_witness(
         | WitnessOp::HintBlock { .. }
         | WitnessOp::IsZeroLc(_)
         | WitnessOp::InvOrZeroLc(_)
-        | WitnessOp::BitOfLc { .. } = op
+        | WitnessOp::BitOfLc { .. }
+        | WitnessOp::MulLc(..) = op
         {
             if node_idx < solved_mask.len() {
                 solved_mask[node_idx] = true;

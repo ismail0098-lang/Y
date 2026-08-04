@@ -30,6 +30,8 @@ mod empirical_autotune;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
+#[cfg(feature = "zk")]
+mod zk_poseidon_constants;
 
 use std::env;
 use std::fs;

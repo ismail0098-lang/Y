@@ -9,6 +9,10 @@
 #![allow(dead_code)]
 
 use crate::ast::*;
+use crate::zk_poseidon_constants::{
+    POSEIDON_C_T3, POSEIDON_M_T3, POSEIDON_P_T3, POSEIDON_S_T3, POSEIDON_T3_ROUNDS_F,
+    POSEIDON_T3_ROUNDS_P,
+};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -162,6 +166,27 @@ impl BigUint {
         res
     }
 
+    /// `self / (2^32)^n` - drop the `n` least significant limbs.
+    pub fn shr_limbs(&self, n: usize) -> Self {
+        if n >= self.digits.len() {
+            return Self::zero();
+        }
+        let mut res = Self { digits: self.digits[n..].to_vec() };
+        res.trim();
+        res
+    }
+
+    /// `self mod (2^32)^n` - keep the `n` least significant limbs.
+    pub fn low_limbs(&self, n: usize) -> Self {
+        let take = n.min(self.digits.len());
+        let mut res = Self { digits: self.digits[..take].to_vec() };
+        if res.digits.is_empty() {
+            res.digits.push(0);
+        }
+        res.trim();
+        res
+    }
+
     pub fn bit_len(&self) -> usize {
         if self.is_zero() {
             return 0;
@@ -241,20 +266,74 @@ impl BigUint {
         res
     }
 
+    /// Parse a hex literal, with or without a `0x` prefix.
+    ///
+    /// Separate from `from_str` on purpose. `from_str` reads DECIMAL and
+    /// silently skips any character that is not a decimal digit, so feeding it
+    /// `"0xee9a"` returns 0*10+... over just the `0` and `9` - a wrong number,
+    /// no error. The Poseidon constants are hex, and a silently mis-parsed
+    /// round constant is a hash that matches nothing.
+    pub fn from_hex_str(s: &str) -> Result<Self, String> {
+        let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+        if body.is_empty() {
+            return Err(format!("empty hex literal: {:?}", s));
+        }
+        let mut res = Self::zero();
+        let sixteen = Self::from_u64(16);
+        for c in body.chars() {
+            let digit = c
+                .to_digit(16)
+                .ok_or_else(|| format!("invalid hex digit {:?} in {:?}", c, s))?;
+            res = res.mul(&sixteen).add(&Self::from_u64(digit as u64));
+        }
+        Ok(res)
+    }
+
+    /// Divide by a single 32-bit digit, returning quotient and remainder.
+    ///
+    /// One pass of 64-bit divides, versus `div_mod`'s bit-at-a-time loop.
+    pub fn div_rem_small(&self, d: u32) -> (Self, u32) {
+        debug_assert!(d != 0, "division by zero");
+        let mut q = vec![0u32; self.digits.len()];
+        let mut rem: u64 = 0;
+        for i in (0..self.digits.len()).rev() {
+            let cur = (rem << 32) | self.digits[i] as u64;
+            q[i] = (cur / d as u64) as u32;
+            rem = cur % d as u64;
+        }
+        let mut res = Self { digits: q };
+        res.trim();
+        (res, rem as u32)
+    }
+
+    /// Decimal rendering, 9 digits at a time.
+    ///
+    /// This used to peel one digit per iteration via `div_mod(10)`, and
+    /// `div_mod` is a bit-by-bit long division - so each digit cost ~254
+    /// allocating loop iterations, and a full 254-bit value cost ~20,000. That
+    /// made *printing* the R1CS the single most expensive phase of ZK
+    /// compilation: emitting one 241-constraint Poseidon spent 0.007s building
+    /// the circuit and 1.3s formatting it. It stayed hidden because the
+    /// polynomial benchmark circuit's coefficients are 0, 1 and 2, which are
+    /// one iteration each; only dense constants like Poseidon's round keys
+    /// expose it.
     pub fn to_decimal_string(&self) -> String {
         if self.is_zero() {
             return "0".to_string();
         }
+        // 10^9 is the largest power of ten fitting in a u32.
         let mut temp = self.clone();
-        let ten = Self::from_u64(10);
-        let mut chars = Vec::new();
+        let mut chunks = Vec::new();
         while !temp.is_zero() {
-            let (q, r) = temp.div_mod(&ten);
-            let digit = r.digits[0];
-            chars.push(std::char::from_digit(digit, 10).unwrap());
+            let (q, r) = temp.div_rem_small(1_000_000_000);
             temp = q;
+            chunks.push(r);
         }
-        chars.into_iter().rev().collect()
+        let mut s = chunks.last().unwrap().to_string();
+        for chunk in chunks.iter().rev().skip(1) {
+            s.push_str(&format!("{:09}", chunk));
+        }
+        s
     }
 
     pub fn to_bytes_le(&self, byte_len: usize) -> Vec<u8> {
@@ -272,6 +351,80 @@ use std::cell::RefCell;
 
 thread_local! {
     pub static ACTIVE_MODULUS: RefCell<BigUint> = RefCell::new(BigUint::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495617"));
+}
+
+thread_local! {
+    /// `(modulus, mu, k)` for the Barrett reduction below, recomputed only when
+    /// the active field changes.
+    static BARRETT: RefCell<Option<(BigUint, BigUint, usize)>> = const { RefCell::new(None) };
+}
+
+/// `x mod p` for any `x < b^(2k)`, where `b = 2^32` and `k` is `p`'s limb count.
+///
+/// Replaces a bit-by-bit long division that was costing the ZK backend
+/// everything. `BigUint::div_mod` walks one bit at a time, and each step does a
+/// shift, a compare and possibly a subtract - all allocating - so reducing a
+/// 512-bit product ran 512 such rounds. A single `Fr::mul` measured **26 us**.
+/// For scale, a competent BN254 multiply is tens of nanoseconds, and the
+/// polynomial benchmark circuit only looked fast because its linear
+/// combinations are one or two terms wide and it therefore barely multiplies.
+/// Anything with dense constant coefficients - Poseidon above all - hit this
+/// directly: one 241-constraint hash took 1.4s to emit, 13x slower than circom
+/// compiling the same circuit.
+///
+/// Barrett needs no division at all: with `mu = floor(b^(2k) / p)` precomputed
+/// once, an estimate of the quotient is two multiplications away, and the
+/// estimate is never more than two off.
+///
+/// The correction loop is `while`, not `if`, deliberately. The standard bound
+/// says at most two subtractions are needed for `x < b^(2k)`; looping costs
+/// nothing when the bound holds and stays correct if it ever does not, which is
+/// the right trade for code the soundness of every proof rests on.
+pub fn barrett_reduce(x: &BigUint, p: &BigUint) -> BigUint {
+    if x < p {
+        let mut r = x.clone();
+        r.trim();
+        return r;
+    }
+
+    let (mu, k) = BARRETT.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if let Some((m, mu, k)) = cell.as_ref() {
+            if m == p {
+                return (mu.clone(), *k);
+            }
+        }
+        // mu = floor(b^(2k) / p). Uses the slow path exactly once per field.
+        let k = p.effective_len();
+        let mut num = BigUint { digits: vec![0u32; 2 * k + 1] };
+        num.digits[2 * k] = 1;
+        let (mu, _) = num.div_mod(p);
+        *cell = Some((p.clone(), mu.clone(), k));
+        (mu, k)
+    });
+
+    // q3 = floor(floor(x / b^(k-1)) * mu / b^(k+1))
+    let q1 = x.shr_limbs(k - 1);
+    let q3 = q1.mul(&mu).shr_limbs(k + 1);
+
+    // r = (x - q3*p) mod b^(k+1); the modulus keeps the subtraction in range.
+    let r1 = x.low_limbs(k + 1);
+    let r2 = q3.mul(p).low_limbs(k + 1);
+
+    let mut r = if r1 >= r2 {
+        r1.sub(&r2)
+    } else {
+        // Borrow b^(k+1) rather than going signed.
+        let mut base = BigUint { digits: vec![0u32; k + 2] };
+        base.digits[k + 1] = 1;
+        r1.add(&base).sub(&r2)
+    };
+
+    while r >= *p {
+        r = r.sub(p);
+    }
+    r.trim();
+    r
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
@@ -332,11 +485,7 @@ impl Fr {
     }
 
     pub fn mul(&self, other: &Self) -> Self {
-        Self::with_modulus(|modulus| {
-            let prod = self.0.mul(&other.0);
-            let (_, r) = prod.div_mod(modulus);
-            Fr(r)
-        })
+        Self::with_modulus(|modulus| Fr(barrett_reduce(&self.0.mul(&other.0), modulus)))
     }
 
     pub fn try_inv(&self) -> Result<Self, String> {
@@ -560,6 +709,16 @@ pub enum WitnessOp {
     InvOrZeroLc(LinearCombination),
     /// Bit `bit` of the linear combination's value, LSB-first.
     BitOfLc { lc: LinearCombination, bit: u32 },
+    /// The product of two linear combinations.
+    ///
+    /// R1CS lets the `A` and `B` of a constraint be arbitrary linear
+    /// combinations, and Poseidon's S-box uses that: `x2 = (state + C) * (state
+    /// + C)` is one constraint with no wire allocated for `state + C`. But the
+    /// `a * b = c` scan in `build_witness_ir` only recognises constraints with
+    /// a SINGLE term per side, so it cannot reconstruct those outputs and would
+    /// hand all 243 of a Poseidon's wires to back-propagation - correct, but it
+    /// drops the circuit off the fast path that made witness generation linear.
+    MulLc(LinearCombination, LinearCombination),
     /// This wire's value cannot be reconstructed by the forward pass; leave it
     /// for the R1CS back-propagation in `solve_r1cs_witness`.
     ///
@@ -1044,6 +1203,38 @@ impl ZkEmitter {
             }
         }
 
+        // Second chance for wires the single-term scan above cannot see.
+        //
+        // R1CS allows `A` and `B` to be arbitrary linear combinations, and the
+        // emitter uses that freely - binding `main`'s return value emits
+        // `<dense lc> * 1 = out`, and Poseidon squares a whole linear
+        // combination without allocating a wire for it. None of those match the
+        // one-term-per-side pattern, so their outputs came back `Unknown` and
+        // were left to back-propagation. That is correct but ruinous: a single
+        // unknown wire makes the forward pass fail its satisfiability check,
+        // which forfeits the early exit and runs the full sweep. One Poseidon
+        // hash spent 0.002s in the forward pass and then 0.427s rediscovering
+        // exactly one wire.
+        //
+        // Only wires the first scan missed are entered here, so the common case
+        // (a million tiny `a*b=c` constraints) does not pay to clone any linear
+        // combinations. The `w < out` guard keeps the recipe evaluable in wire
+        // order: a constraint whose `A` or `B` mentions its own output cannot
+        // be used to define it, and would otherwise read a zero and look solved.
+        let mut lc_by_output: HashMap<usize, (LinearCombination, LinearCombination)> = HashMap::new();
+        for c in &self.constraints {
+            if c.c.terms.len() != 1 || c.c.terms[0].1 != Fr::one() {
+                continue;
+            }
+            let out = c.c.terms[0].0;
+            if out == 0 || mul_by_output.contains_key(&out) || lc_by_output.contains_key(&out) {
+                continue;
+            }
+            if c.a.terms.iter().chain(c.b.terms.iter()).all(|(w, _)| *w < out) {
+                lc_by_output.insert(out, (c.a.clone(), c.b.clone()));
+            }
+        }
+
         for (idx, name) in self.variables.iter().enumerate().skip(1) {
             signal_names.insert(idx, name.clone());
             if self.public_inputs.contains(&idx) {
@@ -1054,6 +1245,8 @@ impl ZkEmitter {
                 nodes.push(op.clone());
             } else if let Some((a, b)) = mul_by_output.get(&idx) {
                 nodes.push(WitnessOp::Mul(SignalId(*a), SignalId(*b)));
+            } else if let Some((a, b)) = lc_by_output.get(&idx) {
+                nodes.push(WitnessOp::MulLc(a.clone(), b.clone()));
             } else {
                 nodes.push(WitnessOp::Unknown);
             }
@@ -2096,101 +2289,198 @@ impl ZkEmitter {
         }
     }
 
+    /// One R1CS constraint `a * b = w` for a fresh wire `w`, with a witness
+    /// recipe so the forward pass can compute it.
+    ///
+    /// The recipe is the point. R1CS allows `a` and `b` to be arbitrary linear
+    /// combinations, which is what makes Poseidon cheap - `(x + C)^2` needs no
+    /// wire for `x + C`. But `build_witness_ir`'s reconstruction scan only
+    /// recognises single-term sides, so without the explicit recipe every one
+    /// of these wires falls to back-propagation.
+    fn emit_mul_lc(
+        &mut self,
+        a: &LinearCombination,
+        b: &LinearCombination,
+        name: &str,
+    ) -> LinearCombination {
+        let wire = self.new_wire(name);
+        self.constraints.push(Constraint {
+            a: a.clone(),
+            b: b.clone(),
+            c: LinearCombination::variable(wire),
+            span: None,
+        });
+        self.witness_recipes
+            .insert(wire, WitnessOp::MulLc(a.clone(), b.clone()));
+        LinearCombination::variable(wire)
+    }
+
+    /// Poseidon's S-box, `x^5`, in 3 constraints.
+    fn emit_poseidon_sbox(&mut self, x: &LinearCombination) -> LinearCombination {
+        // A fully constant lane (the initial capacity element is 0, and literal
+        // arguments stay constant through the first rounds) folds instead of
+        // burning constraints. Same value either way.
+        if let Some(c) = x.is_constant() {
+            let c2 = c.mul(&c);
+            let c4 = c2.mul(&c2);
+            return LinearCombination::constant(c4.mul(&c));
+        }
+        let x2 = self.emit_mul_lc(x, x, "pos_x2");
+        let x4 = self.emit_mul_lc(&x2, &x2, "pos_x4");
+        self.emit_mul_lc(&x4, x, "pos_x5")
+    }
+
+    /// circomlib-compatible Poseidon over BN254.
+    ///
+    /// This function used to be a Poseidon-shaped construction rather than
+    /// Poseidon: the round constants came from an LCG seeded with `0x12345678`,
+    /// only 60 were generated where t=3 needs 195, and the remaining 135 all
+    /// fell through to a hardcoded `123456789`. The MDS was a hand-rolled 3x3
+    /// Cauchy matrix. The result was a permutation, and it hashed
+    /// deterministically, so nothing downstream complained - but it agreed with
+    /// no other implementation on earth, and repeated round constants are
+    /// precisely what Poseidon's security argument against algebraic attacks
+    /// assumes you do not have. A Merkle proof built by circomlib could not be
+    /// verified here, nor the reverse.
+    ///
+    /// Now it transcribes circomlib's parameters (see
+    /// `zk_poseidon_constants.rs`) and follows the same optimized round
+    /// structure, so the digests are equal. `poseidon_matches_circomlib` pins
+    /// that against the published test vector.
+    ///
+    /// Costs 243 constraints: 81 S-boxes (`t*R_F + R_P = 3*8 + 57`) at 3 each.
+    /// Every mix is a linear combination and therefore free.
     fn emit_poseidon(&mut self, args: &[Expr], items: &[Item]) -> Result<LinearCombination, String> {
-        let mut state = Vec::new();
+        const T: usize = 3;
+
+        // Fail closed on anything we do not have real parameters for. The
+        // alternative - extending the constant table by generating filler, as
+        // the previous implementation effectively did - produces a hash that is
+        // wrong in a way no test downstream can see.
+        if args.len() != T - 1 {
+            return Err(format!(
+                "Circuit target error: poseidon_hash currently supports exactly {} inputs (t={}), \
+                 got {}. Y ships circomlib's t=3 parameters, which is the arity Merkle trees and \
+                 commitments use; other arities would need their constant tables transcribed too, \
+                 and inventing them would produce a hash incompatible with every other tool.",
+                T - 1,
+                T,
+                args.len()
+            ));
+        }
+        if self.active_field != ScalarField::Bn254 {
+            return Err(format!(
+                "Circuit target error: poseidon_hash is parameterised for BN254; the active field \
+                 is {:?}. Poseidon's round constants and MDS are field-specific - reusing BN254's \
+                 over another field is not a different-but-valid hash, it is an unanalysed one.",
+                self.active_field
+            ));
+        }
+
+        let hex = |s: &str| -> Result<Fr, String> {
+            BigUint::from_hex_str(s).map(Fr::from_biguint)
+        };
+        let c: Vec<Fr> = POSEIDON_C_T3.iter().map(|s| hex(s)).collect::<Result<_, _>>()?;
+        let s_sparse: Vec<Fr> = POSEIDON_S_T3.iter().map(|s| hex(s)).collect::<Result<_, _>>()?;
+        let mut m = [[Fr::zero(), Fr::zero(), Fr::zero()], [Fr::zero(), Fr::zero(), Fr::zero()], [Fr::zero(), Fr::zero(), Fr::zero()]];
+        let mut p = m.clone();
+        for i in 0..T {
+            for j in 0..T {
+                m[i][j] = hex(POSEIDON_M_T3[i][j])?;
+                p[i][j] = hex(POSEIDON_P_T3[i][j])?;
+            }
+        }
+
+        let r_f = POSEIDON_T3_ROUNDS_F;
+        let r_p = POSEIDON_T3_ROUNDS_P;
+        let half_f = r_f / 2;
+
+        // `out[i] = sum_j mat[j][i] * in[j]` - note the transposed index, which
+        // is circomlib's convention in `Mix`. Getting this backwards yields a
+        // valid-looking hash that differs from circomlib's.
+        let mix = |state: &[LinearCombination], mat: &[[Fr; T]; T]| -> Vec<LinearCombination> {
+            let mut out = vec![LinearCombination::zero(); T];
+            for i in 0..T {
+                for (j, s) in state.iter().enumerate().take(T) {
+                    out[i].add_linear(s, mat[j][i].clone());
+                }
+                out[i].simplify();
+            }
+            out
+        };
+
+        // state = [capacity 0, inputs...]
+        let mut state = Vec::with_capacity(T);
         state.push(LinearCombination::constant(Fr::zero()));
         for arg in args {
             state.push(self.emit_expr(arg, items)?);
         }
 
-        let t = state.len();
-        if t < 2 {
-            return Err("poseidon_hash requires at least one input".to_string());
+        // Ark(t, C, 0)
+        for (j, s) in state.iter_mut().enumerate() {
+            s.add_constant(c[j].clone());
         }
 
-        let config = FieldConfig::get(self.active_field);
-
-        let r_f = 8;
-        let r_p = 57;
-        let total_rounds = r_f + r_p;
-
-        let mut rc_idx = 0;
-
-        for r in 0..total_rounds {
-            // 1. Add round constants
-            for i in 0..t {
-                let rc = config.round_constants.get(rc_idx)
-                    .cloned()
-                    .unwrap_or_else(|| Fr::from_u64(123456789));
-                rc_idx += 1;
-                state[i].add_constant(rc);
+        // First half of the full rounds, all but the last.
+        for r in 0..half_f - 1 {
+            let sig: Vec<_> = state.iter().map(|x| self.emit_poseidon_sbox(&x.clone())).collect::<Vec<_>>();
+            let mut arked = sig;
+            for (j, s) in arked.iter_mut().enumerate() {
+                s.add_constant(c[(r + 1) * T + j].clone());
             }
-
-            // 2. S-box: x^5
-            let is_full = r < r_f / 2 || r >= r_f / 2 + r_p;
-            for i in 0..t {
-                if is_full || i == 0 {
-                    if let Some(const_val) = state[i].is_constant() {
-                        let x2 = const_val.mul(&const_val);
-                        let x4 = x2.mul(&x2);
-                        let x5 = x4.mul(&const_val);
-                        state[i] = LinearCombination::constant(x5);
-                    } else {
-                        let x_var = self.allocate_var_from_lc(&state[i]);
-                        
-                        let x2_var = self.new_wire("pos_x2");
-                        let x2_lc = LinearCombination::variable(x2_var);
-                        self.constraints.push(Constraint {
-                            a: LinearCombination::variable(x_var),
-                            b: LinearCombination::variable(x_var),
-                            c: x2_lc.clone(),
-                            span: None,
-                        });
-
-                        let x4_var = self.new_wire("pos_x4");
-                        let x4_lc = LinearCombination::variable(x4_var);
-                        self.constraints.push(Constraint {
-                            a: x2_lc.clone(),
-                            b: x2_lc,
-                            c: x4_lc.clone(),
-                            span: None,
-                        });
-
-                        let x5_var = self.new_wire("pos_x5");
-                        let x5_lc = LinearCombination::variable(x5_var);
-                        self.constraints.push(Constraint {
-                            a: x4_lc,
-                            b: LinearCombination::variable(x_var),
-                            c: x5_lc.clone(),
-                            span: None,
-                        });
-
-                        state[i] = x5_lc;
-                    }
-                }
-            }
-
-            // 3. Mix with MDS matrix
-            let mut next_state = vec![LinearCombination::zero(); t];
-            for i in 0..t {
-                for j in 0..t {
-                    let coeff = if i < config.mds_matrix.len() && j < config.mds_matrix[i].len() {
-                        config.mds_matrix[i][j].clone()
-                    } else {
-                        let val = (i + j + 5) as u64;
-                        Fr::from_u64(val).inv()
-                    };
-                    next_state[i].add_linear(&state[j], coeff);
-                }
-                next_state[i].simplify();
-            }
-            state = next_state;
+            state = mix(&arked, &m);
         }
 
-        state[0].simplify();
-        Ok(state[0].clone())
+        // Last full round of the first half mixes with P, the change of basis
+        // into the sparse partial-round representation.
+        {
+            let sig: Vec<_> = state.iter().map(|x| self.emit_poseidon_sbox(&x.clone())).collect::<Vec<_>>();
+            let mut arked = sig;
+            for (j, s) in arked.iter_mut().enumerate() {
+                s.add_constant(c[half_f * T + j].clone());
+            }
+            state = mix(&arked, &p);
+        }
+
+        // Partial rounds: S-box on lane 0 only, mixed by the sparse matrices.
+        let width = T * 2 - 1;
+        for r in 0..r_p {
+            let mut inp = state.clone();
+            inp[0] = self.emit_poseidon_sbox(&state[0]);
+            inp[0].add_constant(c[(half_f + 1) * T + r].clone());
+
+            let mut out = vec![LinearCombination::zero(); T];
+            for (i, s) in inp.iter().enumerate().take(T) {
+                out[0].add_linear(s, s_sparse[width * r + i].clone());
+            }
+            out[0].simplify();
+            for j in 1..T {
+                out[j] = inp[j].clone();
+                out[j].add_linear(&inp[0], s_sparse[width * r + T + j - 1].clone());
+                out[j].simplify();
+            }
+            state = out;
+        }
+
+        // Second half of the full rounds, all but the last.
+        for r in 0..half_f - 1 {
+            let sig: Vec<_> = state.iter().map(|x| self.emit_poseidon_sbox(&x.clone())).collect::<Vec<_>>();
+            let mut arked = sig;
+            for (j, s) in arked.iter_mut().enumerate() {
+                s.add_constant(c[(half_f + 1) * T + r_p + r * T + j].clone());
+            }
+            state = mix(&arked, &m);
+        }
+
+        // Final round has no Ark; MixLast takes column 0 only.
+        let sig: Vec<_> = state.iter().map(|x| self.emit_poseidon_sbox(&x.clone())).collect::<Vec<_>>();
+        let mut out = LinearCombination::zero();
+        for (j, s) in sig.iter().enumerate().take(T) {
+            out.add_linear(s, m[j][0].clone());
+        }
+        out.simplify();
+        Ok(out)
     }
-
     fn allocate_var_from_lc(&mut self, lc: &LinearCombination) -> usize {
         if lc.terms.len() == 1 && lc.terms[0].0 != 0 && lc.terms[0].1 == Fr::one() {
             return lc.terms[0].0;
@@ -2565,14 +2855,18 @@ mod tests {
 
     #[test]
     fn test_end_to_end_zk_target() {
+        // This exercises `@zk_target` field/scheme selection. It used to call
+        // `poseidon_hash` here, which is now refused over Pallas - Y only has
+        // circomlib's BN254 parameters, and there is no such thing as a
+        // field-agnostic Poseidon. See `poseidon_over_non_bn254_is_refused`.
         let source = r#"
         @zk_target(field = "pallas", scheme = "r1cs", opt_level = 1)
         module PallasCircuit {
             fn main(x: I32, y: I32) -> I32 {
                 @bounds(min=0, max=15)
                 let bounded_var = x;
-                let hash = poseidon_hash(bounded_var, y);
-                return hash;
+                let scaled = bounded_var * y;
+                return scaled + y;
             }
         }
         "#;
@@ -2589,6 +2883,31 @@ mod tests {
         assert!(r1cs_text.contains("Modulus r: 28948022309329048855892746252171976963363056481941560715954676764349967630337"));
         assert!(r1cs_text.contains("Proof Scheme: R1cs"));
         assert!(emitter.constraints.len() > 0);
+    }
+
+    /// Poseidon must refuse a field it has no parameters for.
+    ///
+    /// The round constants and MDS are derived per-prime; running BN254's over
+    /// Pallas does not give a different-but-valid hash, it gives one nobody has
+    /// analysed and nobody else can reproduce. The previous implementation
+    /// accepted every field and every arity by generating filler constants,
+    /// which is the failure mode this pins shut.
+    #[test]
+    fn poseidon_over_non_bn254_is_refused() {
+        let source = r#"
+        @zk_target(field = "pallas", scheme = "r1cs", opt_level = 1)
+        module PallasCircuit {
+            fn main(x: I32, y: I32) -> I32 {
+                return poseidon_hash(x, y);
+            }
+        }
+        "#;
+        let tokens = crate::lexer::Lexer::new(source).tokenize();
+        let prog = crate::parser::Parser::new(tokens).parse_program().unwrap();
+        let err = ZkEmitter::new()
+            .emit_program(&prog)
+            .expect_err("poseidon over Pallas must be refused");
+        assert!(err.contains("BN254"), "error should name the supported field: {}", err);
     }
 
     #[test]
