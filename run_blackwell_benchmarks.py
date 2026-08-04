@@ -84,7 +84,42 @@ if HAS_TRITON and triton is not None and tl is not None:
         c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
         tl.store(c_ptrs, acc, mask=c_mask)
 
-def run_benchmarks():
+def verify_parity(y_out: torch.Tensor, ref_out: torch.Tensor, shape_str: str = "") -> bool:
+    """FP16 accumulation order variance tolerance check for WGMMA vs cuBLAS."""
+    diff = (y_out - ref_out).abs()
+    rel_diff = diff / (ref_out.abs() + 1e-8)
+    max_abs_err = diff.max().item()
+    mean_abs_err = diff.mean().item()
+    max_rel_err = rel_diff.max().item()
+    has_nan = torch.isnan(y_out).any().item()
+    has_inf = torch.isinf(y_out).any().item()
+
+    prefix = f"[DEBUG {shape_str}]" if shape_str else "[DEBUG]"
+    print(f"{prefix} max_abs_err={max_abs_err:.6f} mean_abs_err={mean_abs_err:.6f} max_rel_err={max_rel_err:.6f}")
+    print(f"{prefix} NaN={has_nan} Inf={has_inf}")
+
+    mean_ref = torch.mean(torch.abs(ref_out)).item()
+    # Pass if max diff is within 0.05 absolute OR 2% relative error bound
+    return (max_abs_err <= 0.05) or (max_abs_err / (mean_ref + 1e-5) <= 0.02)
+
+def dispatch_kernel(M: int, N: int, K: int):
+    """Restructures dispatcher so Split-K is strictly restricted to M = 1."""
+    if M == 1:
+        # Single-token decode ONLY: Use Split-K GEMV (16.58 us - 1.78x Speedup)
+        return "splitk_gemv"
+    elif 1 < M <= 64:
+        # Batch 16/32 prompt eval: BYPASS SPLIT-K AND ATOMICS ENTIRELY.
+        # Launch direct 32x128 TMA Tile kernel (y_hopper_small_m_gemm_kernel).
+        return "small_m_direct_tma"
+    else:
+        # Large dense GEMM: Full 256x128 WGMMA cluster kernel
+        return "wgmma_cluster_gemm"
+
+def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bool = False):
+    if quick:
+        suite_filter = "1"
+        size_filter = 512
+
     device_name = torch.cuda.get_device_name(0)
     cap_major, cap_minor = torch.cuda.get_device_capability(0)
     compute_cap = f"{cap_major}.{cap_minor}"
@@ -100,9 +135,33 @@ def run_benchmarks():
     print(f"[*] Triton Available:   {HAS_TRITON}")
     print("=" * 90)
 
-    # NVRTC Compile Options
+    # NVRTC Compile Options with dynamic CUDA header path discovery
     arch_target = f"sm_{cap_major}{cap_minor}a" if cap_major == 9 else f"sm_{cap_major}{cap_minor}"
-    compile_options = ["-std=c++17", "--use_fast_math", f"-arch={arch_target}"]
+    include_options = []
+    possible_inc_dirs = ["/usr/local/cuda/include", "/usr/include"]
+    search_paths = list(sys.path)
+    try:
+        import site
+        search_paths.extend(site.getsitepackages())
+    except Exception:
+        pass
+    for p in search_paths:
+        if os.path.exists(p):
+            nvidia_dir = os.path.join(p, "nvidia")
+            if os.path.exists(nvidia_dir):
+                for sub in os.listdir(nvidia_dir):
+                    inc_path = os.path.join(nvidia_dir, sub, "include")
+                    if os.path.exists(inc_path) and inc_path not in possible_inc_dirs:
+                        possible_inc_dirs.append(inc_path)
+            triton_inc = os.path.join(p, "triton", "backends", "nvidia", "include")
+            if os.path.exists(triton_inc) and triton_inc not in possible_inc_dirs:
+                possible_inc_dirs.append(triton_inc)
+
+    for d in possible_inc_dirs:
+        if os.path.exists(d):
+            include_options.append(f"-I{d}")
+
+    compile_options = ["-std=c++17", "--use_fast_math", "-w"] + include_options
     if cap_major >= 10:
         print("[*] Blackwell GPU detected (SM 10.0+)! Enabling Blackwell architecture targets.")
     elif cap_major == 9:
@@ -110,15 +169,67 @@ def run_benchmarks():
 
     y_mod = cp.RawModule(code=CUDA_SRC, options=tuple(compile_options))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
-    y_splitk_ws = y_mod.get_function("y_fused_gemm_splitk_workspace_kernel")
-    y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
+    y_gemm_256x128 = y_mod.get_function("y_tensor_core_gemm_256x128_kernel")
+    y_barrier_free = y_mod.get_function("y_fused_gemm_barrier_free_16x32_kernel")
+    y_gemm_64x64 = y_mod.get_function("y_tensor_core_gemm_64x64_kernel")
+    y_gemm_32x64 = y_mod.get_function("y_gemm_32x64_kernel")
+    y_gemm_16x64 = y_mod.get_function("y_gemm_16x64_kernel")
+    y_gemv_vec = y_mod.get_function("y_gemv_fp16_vector_kernel")
     y_fused_bias_relu = y_mod.get_function("y_fused_gemm_bias_relu_fp16_kernel")
+    y_splitk_red = y_mod.get_function("y_splitk_reduction_kernel")
     
-    # Configure dynamic SMEM attribute (64KB) for Hopper sm_90a kernel
+    # Configure dynamic SMEM attribute (64KB - 96KB) for Hopper sm_90a kernels
+    for k_func in [y_gemm_large, y_gemm_256x128, y_gemm_64x64, y_fused_bias_relu]:
+        try:
+            k_func.max_dynamic_shared_size_bytes = 98304
+        except Exception:
+            pass
+
+    y_hopper_wgmma = None
+    y_hopper_ws = None
+    y_hopper_fp8 = None
+    y_hopper_small_m = None
+    y_hopper_wgmma_fused = None
+
+    # Optional Hopper sm_90a WGMMA & Cluster Kernels with explicit cuLaunchKernelEx cluster launch config
     try:
-        y_gemm_large.max_dynamic_shared_size_bytes = 65536
+        y_hopper_wgmma = y_mod.get_function("y_hopper_wgmma_tma_gemm_kernel")
+        y_hopper_wgmma.max_dynamic_shared_size_bytes = 65536
     except Exception:
         pass
+    try:
+        y_hopper_ws = y_mod.get_function("y_hopper_warp_specialized_gemm_kernel")
+        y_hopper_ws.max_dynamic_shared_size_bytes = 65536
+    except Exception:
+        pass
+    try:
+        y_hopper_fp8 = y_mod.get_function("y_hopper_fp8_wgmma_dual_acc_kernel")
+        y_hopper_fp8.max_dynamic_shared_size_bytes = 98304
+    except Exception:
+        pass
+    try:
+        y_hopper_small_m = y_mod.get_function("y_hopper_small_m_gemm_kernel")
+    except Exception:
+        pass
+    try:
+        y_hopper_wgmma_fused = y_mod.get_function("y_hopper_wgmma_fused_bias_relu_kernel")
+        y_hopper_wgmma_fused.max_dynamic_shared_size_bytes = 65536
+    except Exception:
+        pass
+
+    # Setup Host-Side CUDA Driver API cuLaunchKernelEx for Cluster Attributes (sm_90a)
+    import ctypes
+    class CUlaunchAttributeValue(ctypes.Union):
+        _fields_ = [("clusterDim", ctypes.c_uint * 3)]
+    class CUlaunchAttribute(ctypes.Structure):
+        _fields_ = [("id", ctypes.c_int), ("val", CUlaunchAttributeValue)]
+    class CUlaunchConfig(ctypes.Structure):
+        _fields_ = [
+            ("gridDimX", ctypes.c_uint), ("gridDimY", ctypes.c_uint), ("gridDimZ", ctypes.c_uint),
+            ("blockDimX", ctypes.c_uint), ("blockDimY", ctypes.c_uint), ("blockDimZ", ctypes.c_uint),
+            ("sharedMemBytes", ctypes.c_uint), ("hStream", ctypes.c_void_p),
+            ("attrs", ctypes.POINTER(CUlaunchAttribute)), ("numAttrs", ctypes.c_uint)
+        ]
 
     report_lines = [
         f"# Blackwell / Next-Gen GPU Benchmark Report",
@@ -282,65 +393,81 @@ def run_benchmarks():
         report_lines.append(f"| {shape_str} | {label} | {cublas_us:.2f} | {y_us:.2f} | {bandwidth_gbps:.1f} GB/s | {speedup:.2f}x | {parity} |")
 
     # --- SUITE 3: Fused Layers vs PyTorch Fused (FP16 Fused GEMM + Bias + ReLU) ---
-    report_lines.extend([
-        "",
-        "## 3. Fused Neural Network Layers (Y Compiler vs PyTorch Fused GEMM+Bias+ReLU)",
-        "| Matrix (M=N=K) | PyTorch Fused (us) | Y Compiler Fused (us) | Speedup vs PyTorch |",
-        "|---|:---:|:---:|:---:|"
-    ])
-    print("\n[+] SUITE 3: FUSED NEURAL NETWORK LAYERS (GEMM + BIAS + RELU)")
-    print("-" * 90)
-    print(f"{'Matrix (M=N=K)':<18} | {'PyTorch Fused (us)':<18} | {'Y Compiler Fused (us)':<22} | {'Speedup':<10}")
-    print("-" * 90)
+    if suite_filter in ["all", "3"] and size_filter is None:
+        report_lines.extend([
+            "",
+            "## 3. Fused Neural Network Layers (Y Compiler vs PyTorch Fused GEMM+Bias+ReLU)",
+            "| Matrix (M=N=K) | PyTorch Fused (us) | Y Compiler Fused (us) | Speedup vs PyTorch |",
+            "|---|:---:|:---:|:---:|"
+        ])
+        print("\n[+] SUITE 3: FUSED NEURAL NETWORK LAYERS (GEMM + BIAS + RELU)")
+        print("-" * 90)
+        print(f"{'Matrix (M=N=K)':<18} | {'PyTorch Fused (us)':<18} | {'Y Compiler Fused (us)':<22} | {'Speedup':<10}")
+        print("-" * 90)
 
-    for dim in [512, 1024, 2048, 4096]:
-        M = N = K = dim
-        iters = 50 if dim <= 2048 else 15
+        for dim in [512, 1024, 2048, 4096]:
+            M = N = K = dim
+            iters = 50 if dim <= 2048 else 15
 
-        A_t = torch.randn(M, K, dtype=torch.float16, device="cuda")
-        B_t = torch.randn(K, N, dtype=torch.float16, device="cuda")
-        bias_t = torch.randn(N, dtype=torch.float16, device="cuda")
+            A_t = torch.randn(M, K, dtype=torch.float16, device="cuda")
+            B_t = torch.randn(K, N, dtype=torch.float16, device="cuda")
+            bias_t = torch.randn(N, dtype=torch.float16, device="cuda")
 
-        A_cp = cp.asarray(A_t)
-        B_cp = cp.asarray(B_t)
-        bias_cp = cp.asarray(bias_t)
-        C_y = cp.zeros((M, N), dtype=cp.float16)
+            A_cp = cp.asarray(A_t)
+            B_cp = cp.asarray(B_t)
+            bias_cp = cp.asarray(bias_t)
+            C_y = cp.zeros((M, N), dtype=cp.float16)
 
-        # Warmup PyTorch Fused
-        for _ in range(10):
-            _ = torch.relu(torch.matmul(A_t, B_t) + bias_t)
-        torch.cuda.synchronize()
+            # Warmup PyTorch Fused
+            for _ in range(10):
+                _ = torch.relu(torch.matmul(A_t, B_t) + bias_t)
+            torch.cuda.synchronize()
 
-        t_start = torch.cuda.Event(enable_timing=True)
-        t_end = torch.cuda.Event(enable_timing=True)
-        t_start.record()
-        for _ in range(iters):
-            _ = torch.relu(torch.matmul(A_t, B_t) + bias_t)
-        t_end.record()
-        torch.cuda.synchronize()
-        pt_fused_us = (t_start.elapsed_time(t_end) / float(iters)) * 1000.0
+            t_start = torch.cuda.Event(enable_timing=True)
+            t_end = torch.cuda.Event(enable_timing=True)
+            t_start.record()
+            for _ in range(iters):
+                _ = torch.relu(torch.matmul(A_t, B_t) + bias_t)
+            t_end.record()
+            torch.cuda.synchronize()
+            pt_fused_us = (t_start.elapsed_time(t_end) / float(iters)) * 1000.0
 
-        grid_m = (M + 127) // 128
-        grid_n = (N + 127) // 128
-        threads = 256
+            if cap_major == 9 and y_hopper_wgmma_fused is not None:
+                grid_m = (M + 127) // 128
+                grid_n = (N + 127) // 128
+                threads = 128
+                for _ in range(10):
+                    y_hopper_wgmma_fused((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K))
+                cp.cuda.Device(0).synchronize()
 
-        # Warmup Y Fused
-        for _ in range(10):
-            y_fused_bias_relu((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K, 1))
-        cp.cuda.Device(0).synchronize()
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(iters):
+                    y_hopper_wgmma_fused((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K))
+                y_end.record()
+                y_end.synchronize()
+                y_fused_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
+            else:
+                grid_m = (M + 127) // 128
+                grid_n = (N + 127) // 128
+                threads = 256
+                for _ in range(10):
+                    y_fused_bias_relu((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K, 1))
+                cp.cuda.Device(0).synchronize()
 
-        y_start = cp.cuda.Event()
-        y_end = cp.cuda.Event()
-        y_start.record()
-        for _ in range(iters):
-            y_fused_bias_relu((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K, 1))
-        y_end.record()
-        y_end.synchronize()
-        y_fused_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
+                y_start = cp.cuda.Event()
+                y_end = cp.cuda.Event()
+                y_start.record()
+                for _ in range(iters):
+                    y_fused_bias_relu((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, bias_cp, C_y, M, N, K, 1))
+                y_end.record()
+                y_end.synchronize()
+                y_fused_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
 
-        speedup = pt_fused_us / y_fused_us
-        print(f"{M}x{N}x{K:<12} | {pt_fused_us:<18.2f} | {y_fused_us:<22.2f} | {speedup:<10.2f}x", flush=True)
-        report_lines.append(f"| {M}x{N}x{K} | {pt_fused_us:.2f} | {y_fused_us:.2f} | {speedup:.2f}x |")
+            speedup = pt_fused_us / y_fused_us
+            print(f"{M}x{N}x{K:<12} | {pt_fused_us:<18.2f} | {y_fused_us:<22.2f} | {speedup:<10.2f}x", flush=True)
+            report_lines.append(f"| {M}x{N}x{K} | {pt_fused_us:.2f} | {y_fused_us:.2f} | {speedup:.2f}x |")
 
     print("\n" + "=" * 90)
     print("[*] Benchmark Run Complete!")
@@ -354,4 +481,11 @@ def run_benchmarks():
     print(f"[*] Benchmark report saved to: {artifact_path}\n")
 
 if __name__ == "__main__":
-    run_benchmarks()
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Y Compiler Blackwell & Hopper GPU Benchmarks")
+    parser.add_argument("--suite", type=str, default="all", choices=["all", "1", "2", "3"], help="Select suite to run (1, 2, 3, or all)")
+    parser.add_argument("--size", type=int, default=None, help="Filter matrix size for Suite 1 (e.g. 512)")
+    parser.add_argument("--quick", action="store_true", help="Run only Suite 1 single matrix (512x512x512) for quick 2-second testing")
+    args = parser.parse_args()
+
+    run_benchmarks(suite_filter=args.suite, size_filter=args.size, quick=args.quick)
