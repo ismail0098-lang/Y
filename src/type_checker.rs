@@ -2103,6 +2103,47 @@ impl TypeChecker {
         }
     }
 
+    /// Handles an SMT solver that could not be run at all.
+    ///
+    /// This FAILS THE BUILD by default, and that is a deliberate reversal. It
+    /// used to print `[Warning] SMT Solver execution failed` to stdout and
+    /// carry on, which meant that on any machine without z3 - the default -
+    /// every `@invariant` in every `@safe` block was accepted unchecked. A
+    /// deliberately false invariant like `@invariant(i > 1000)` on a `0..10`
+    /// loop compiled cleanly and reported "Compilation Successful!".
+    ///
+    /// An `@invariant` is a proof obligation, not a comment. A `@safe` block
+    /// whose obligations were never discharged guarantees nothing, and the
+    /// whole point of the annotation is that the guarantee is checkable. Being
+    /// unable to check it is a failure, not a detail - the same reasoning that
+    /// makes an out-of-range operand unprovable in the ZK backend rather than
+    /// silently accepted.
+    ///
+    /// `Y_ALLOW_UNVERIFIED_INVARIANTS=1` restores the old behaviour for anyone
+    /// who genuinely cannot install a solver. It is loud on purpose.
+    fn smt_unavailable(&mut self, line: usize, invariant: &Expr, phase: &str, err: &str) {
+        if std::env::var("Y_ALLOW_UNVERIFIED_INVARIANTS").is_ok() {
+            println!(
+                "[Warning] SMT solver unavailable; invariant `{}` was NOT verified ({} check). {}",
+                expr_to_string(invariant),
+                phase,
+                err
+            );
+            return;
+        }
+        self.errors.push(format!(
+            "Line {}: [Strict Safety] Could not verify invariant `{}` ({} check) because the \
+SMT solver could not be run.\n  {}\n  An @invariant is a proof obligation - accepting it \
+unchecked would make @safe guarantee nothing on this machine.\n  Install z3 (`pip install \
+z3-solver`, or your package manager) or set Y_Z3_PATH to its absolute path.\n  To compile \
+anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
+            line,
+            expr_to_string(invariant),
+            phase,
+            err
+        ));
+    }
+
     fn verify_while_loop_invariant(&mut self, condition: &Expr, body: &Block, invariant: &Expr, span: &Span) {
         let mut vars = std::collections::HashSet::new();
         for frame in &self.scopes {
@@ -2147,7 +2188,7 @@ impl TypeChecker {
                 }
             }
             Err(e) => {
-                println!("[Warning] SMT Solver execution failed: {}", e);
+                self.smt_unavailable(span.line, invariant, "initiation", &e);
             }
         }
 
@@ -2188,7 +2229,7 @@ impl TypeChecker {
                 }
             }
             Err(e) => {
-                println!("[Warning] SMT Solver execution failed: {}", e);
+                self.smt_unavailable(span.line, invariant, "preservation", &e);
             }
         }
     }
@@ -2250,7 +2291,7 @@ impl TypeChecker {
                 }
             }
             Err(e) => {
-                println!("[Warning] SMT Solver execution failed: {}", e);
+                self.smt_unavailable(span.line, invariant, "initiation", &e);
             }
         }
 
@@ -2312,43 +2353,66 @@ impl TypeChecker {
                 }
             }
             Err(e) => {
-                println!("[Warning] SMT Solver execution failed: {}", e);
+                self.smt_unavailable(span.line, invariant, "preservation", &e);
             }
         }
     }
 }
 
+/// Z3 binaries to try, in priority order.
+///
+/// `Y_Z3_PATH` wins when set, then bare `z3` from `PATH`. The rest exist
+/// because it is easy to have a perfectly good solver installed that the
+/// compiler cannot see: a `pip install z3-solver` inside a project virtualenv
+/// puts one in `venv/bin/z3`, which the old two-entry search missed - this
+/// repo had exactly that, while the type checker reported the solver as
+/// missing and waved every invariant through.
+fn z3_candidates() -> Vec<String> {
+    let mut v = Vec::new();
+    if let Ok(p) = std::env::var("Y_Z3_PATH") {
+        if !p.is_empty() {
+            v.push(p);
+        }
+    }
+    v.push("z3".to_string());
+    for p in [
+        "venv/bin/z3",
+        "./venv/bin/z3",
+        ".venv/bin/z3",
+        "./.venv/bin/z3",
+        "./z3/build/z3",
+        "z3/build/z3",
+    ] {
+        v.push(p.to_string());
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        v.push(format!("{}/.local/bin/z3", home));
+    }
+    v
+}
+
 fn run_z3(query: &str) -> Result<String, String> {
-    let z3_path = std::env::var("Y_Z3_PATH").unwrap_or_else(|_| "z3".to_string());
-    let mut child = Command::new(&z3_path)
-        .args(&["-smt2", "-in"])
-        .env("Z3_GPU_THRESHOLD", "2147483647")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .or_else(|_| {
-            Command::new("./z3/build/z3")
-                .args(&["-smt2", "-in"])
-                .env("Z3_GPU_THRESHOLD", "2147483647")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-        })
-        .or_else(|_| {
-            Command::new("z3/build/z3")
-                .args(&["-smt2", "-in"])
-                .env("Z3_GPU_THRESHOLD", "2147483647")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-        })
-        .map_err(|e| format!(
-            "Failed to spawn Z3 process: {}\n  Searched: '{}', './z3/build/z3', 'z3/build/z3'\n  hint: set Y_Z3_PATH to the absolute path of your z3 binary",
-            e, z3_path
-        ))?;
+    let candidates = z3_candidates();
+    let mut spawned = None;
+    for cand in &candidates {
+        let attempt = Command::new(cand)
+            .args(&["-smt2", "-in"])
+            .env("Z3_GPU_THRESHOLD", "2147483647")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        if let Ok(child) = attempt {
+            spawned = Some(child);
+            break;
+        }
+    }
+    let mut child = spawned.ok_or_else(|| {
+        format!(
+            "No Z3 binary could be started. Searched: {}",
+            candidates.join(", ")
+        )
+    })?;
 
     {
         let stdin = child.stdin.as_mut().ok_or("Failed to open stdin")?;
