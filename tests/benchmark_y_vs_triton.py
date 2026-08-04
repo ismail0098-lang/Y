@@ -16,10 +16,46 @@ except ImportError:
     print("[!] Triton missing from environment.")
     sys.exit(1)
 
-# CUDA kernel source for Y
+# -----------------------------------------------------------------------------
+# IMPORTANT METHODOLOGY NOTE:
+# The kernels below are hand-written CUDA C++ (nvcuda::wmma API), compiled at
+# runtime via NVRTC. They are a *reference* implementation of the tiling
+# strategy Y's PTX emitter targets, NOT PTX emitted by Y's own compiler
+# (src/ptx_emitter.rs). This script measures that hand-written CUDA reference
+# against Triton, not Y's compiler output.
+# -----------------------------------------------------------------------------
 CUDA_KERNELS_PATH = os.path.join(os.path.dirname(__file__), "y_tensor_core_gemm.cu")
 with open(CUDA_KERNELS_PATH, "r") as f:
-    CUDA_SRC = f.read()
+    HANDWRITTEN_CUDA_REFERENCE_SRC = f.read()
+
+def _find_cuda_include_dir():
+    """Locates the CUDA include dir (containing crt/mma.h) across common install layouts."""
+    candidates = [os.environ.get("CUDA_PATH", "") + "/include", "/usr/local/cuda/include", "/opt/cuda/include"]
+    for path in candidates:
+        if path and os.path.isdir(path) and os.path.exists(os.path.join(path, "crt", "mma.h")):
+            return path
+    return "/usr/local/cuda/include"  # fall back to whatever NVRTC's default search finds
+
+CUDA_INCLUDE_DIR = _find_cuda_include_dir()
+
+def check_correctness(name, y_out, ref_out, rtol=0.02, atol=0.75):
+    """Verifies a kernel's output against a PyTorch/cuBLAS reference before its timing is trusted.
+
+    atol=0.75 is not arbitrary: empirically, legitimate FP16 rounding-order noise for
+    these kernels tops out at ~0.5 (exactly 1 ULP at the largest tested output magnitude,
+    K=16384) and FP32->FP16 quantization noise in the fused kernel tops out at ~0.03.
+    Genuine correctness bugs found in tests/y_tensor_core_gemm.cu produced diffs of
+    10-168 - two to three orders of magnitude larger - so this tolerance still catches
+    real bugs with a wide margin while not flagging normal FP16 arithmetic as a failure.
+    """
+    is_close = torch.allclose(y_out, ref_out, rtol=rtol, atol=atol)
+    if is_close:
+        print(f"    [correctness OK] {name} (rtol={rtol}, atol={atol})")
+    else:
+        max_diff = (y_out.float() - ref_out.float()).abs().max().item()
+        print(f"    [CORRECTNESS FAIL] {name}: max abs diff={max_diff:.4f} exceeds rtol={rtol}/atol={atol} "
+              f"- timing for this kernel is NOT trustworthy until this is fixed")
+    return is_close
 
 # -----------------------------------------------------------------------------
 # Triton Kernels
@@ -131,15 +167,17 @@ def _triton_fused_gemm_bias_relu_kernel(
 # -----------------------------------------------------------------------------
 def main():
     print("=" * 85)
-    print("           Y TENSOR CORE COMPILER vs TRITON NATIVE JIT COMPILER")
+    print("       HAND-WRITTEN CUDA TENSOR CORE REFERENCE vs TRITON NATIVE JIT COMPILER")
     print("                     HEAD-TO-HEAD BENCHMARK SUITE")
     print("=" * 85)
     print(f"[*] Hardware GPU: {torch.cuda.get_device_name(0)}")
     print(f"[*] PyTorch Version: {torch.__version__} | CUDA: {torch.version.cuda}")
     print(f"[*] Triton Version: {triton.__version__}")
+    print("[*] NOTE: the 'Y' kernels here are a hand-written CUDA C++ reference")
+    print("    (tests/y_tensor_core_gemm.cu, compiled via NVRTC), NOT Y-compiler PTX output.")
 
-    # Compile Y CuPy Module
-    y_mod = cp.RawModule(code=CUDA_SRC, options=("-std=c++17", "--use_fast_math"))
+    # Compile hand-written CUDA reference module (NOT Y-compiler output, see note above)
+    y_mod = cp.RawModule(code=HANDWRITTEN_CUDA_REFERENCE_SRC, options=("-std=c++17", "--use_fast_math", f"-I{CUDA_INCLUDE_DIR}"))
     y_gemm_large = y_mod.get_function("y_tensor_core_gemm_kernel")
     y_gemm_small = y_mod.get_function("y_fused_gemm_small_64x64_kernel")
     y_fused_large = y_mod.get_function("y_fused_gemm_bias_relu_fp16_kernel")
@@ -151,7 +189,7 @@ def main():
     print("\n" + "=" * 85)
     print(" SECTION 1: STANDALONE GEMM FP16 (Y vs TRITON)")
     print("=" * 85)
-    print(f"{'Matrix (M=N=K)':<18} | {'Triton (us)':<14} | {'Y Compiler (us)':<16} | {'Speedup (Y / Triton)':<20}")
+    print(f"{'Matrix (M=N=K)':<18} | {'Triton (us)':<14} | {'CUDA Ref (us)':<16} | {'Speedup (Ref / Triton)':<20} | Correct")
     print("-" * 85)
 
     for dim in dimensions:
@@ -216,8 +254,14 @@ def main():
 
         y_us = best_y_us
 
+        # Correctness gate against a cuBLAS reference computed from the same inputs.
+        ref_out = torch.matmul(A_pt, B_pt)
+        y_out_torch = torch.from_dlpack(C_y_f16)
+        is_correct = check_correctness(f"GEMM {dim}x{dim}x{dim}", y_out_torch, ref_out)
+
         speedup = triton_us / y_us
-        print(f"{f'{dim}x{dim}x{dim}':<18} | {triton_us:<14.2f} | {y_us:<16.2f} | {speedup:<20.2f}x")
+        correctness_tag = "OK" if is_correct else "FAIL"
+        print(f"{f'{dim}x{dim}x{dim}':<18} | {triton_us:<14.2f} | {y_us:<16.2f} | {speedup:<20.2f}x | {correctness_tag}")
 
         del A_pt, B_pt, C_triton, A_cp, B_cp, C_y
         torch.cuda.empty_cache()
@@ -227,7 +271,7 @@ def main():
     print("\n" + "=" * 85)
     print(" SECTION 2: FUSED GEMM + BIAS + RELU (Y vs TRITON)")
     print("=" * 85)
-    print(f"{'Matrix (M=N=K)':<18} | {'Triton Fused (us)':<18} | {'Y Fused (us)':<16} | {'Speedup (Y / Triton)':<20}")
+    print(f"{'Matrix (M=N=K)':<18} | {'Triton Fused (us)':<18} | {'CUDA Ref Fused (us)':<16} | {'Speedup (Ref / Triton)':<20} | Correct")
     print("-" * 85)
 
     for dim in dimensions:
@@ -301,8 +345,14 @@ def main():
         y_end.synchronize()
         y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iters) * 1000.0
 
+        # Correctness gate against a cuBLAS + bias + ReLU reference.
+        ref_fused = torch.relu(torch.addmm(bias_pt.half(), A_pt, B_pt))
+        y_out_torch = torch.from_dlpack(C_y)
+        is_correct = check_correctness(f"Fused GEMM+Bias+ReLU {dim}x{dim}x{dim}", y_out_torch, ref_fused)
+
         speedup = triton_us / y_us
-        print(f"{f'{dim}x{dim}x{dim}':<18} | {triton_us:<18.2f} | {y_us:<16.2f} | {speedup:<20.2f}x")
+        correctness_tag = "OK" if is_correct else "FAIL"
+        print(f"{f'{dim}x{dim}x{dim}':<18} | {triton_us:<18.2f} | {y_us:<16.2f} | {speedup:<20.2f}x | {correctness_tag}")
 
         del A_pt, B_pt, bias_pt, C_triton, A_cp, B_cp, bias_cp, C_y
         torch.cuda.empty_cache()

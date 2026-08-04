@@ -152,6 +152,17 @@ pub struct KernelDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub body: Block,
+    /// `@tile(M, N, K)` at kernel scope (as opposed to the loop-scoped use of
+    /// the same attribute, see `Stmt::For::tile`): declares this kernel as a
+    /// GEMM specialized for the exact compile-time problem dimensions M, N, K
+    /// (`block_m`/`block_n`/`block_k` hold those, not CTA tile sizes - the
+    /// field is shared with the loop-level meaning to keep the grammar/AST
+    /// surface minimal). Requires exactly 3 params in declaration order:
+    /// A, B as `GlobalMemory<F16>` (Tensor Core operands) and C as
+    /// `GlobalMemory<F32>` (accumulator/output, matching wmma's f16-in/
+    /// f32-out contract); see `ptx_emitter::PtxEmitter::emit_kernel` for the
+    /// dispatch and validation that consumes this.
+    pub tile: Option<TileAttr>,
     pub span: Span,
 }
 

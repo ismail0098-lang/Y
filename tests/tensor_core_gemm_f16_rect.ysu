@@ -1,0 +1,9 @@
+// Non-square M/N/K variant - a square M=N=K test can't distinguish A's
+// K-stride from B's/C's N-stride, so this exercises that path for real
+// (see emit_tensor_core_gemm_kernel's doc comment).
+@tile(512, 1024, 256)
+kernel gemm_f16_rect(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+}
+
+fn main() {
+}

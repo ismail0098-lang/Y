@@ -244,232 +244,153 @@ def run_benchmarks(suite_filter: str = "all", size_filter: int = None, quick: bo
     ]
 
     # --- SUITE 1: Standalone Dense GEMM ---
-    if suite_filter in ["all", "1"]:
-        print("\n[+] SUITE 1: STANDALONE DENSE MATRIX MULTIPLICATION (FP16)")
-        print("-" * 90)
-        print(f"{'Matrix (M=N=K)':<18} | {'cuBLAS (us)':<12} | {'Y Compiler (us)':<16} | {'Y TFLOPS':<10} | {'Speedup':<10} | {'Parity':<8}")
-        print("-" * 90)
+    print("\n[+] SUITE 1: STANDALONE DENSE MATRIX MULTIPLICATION (FP16)")
+    print("-" * 90)
+    print(f"{'Matrix (M=N=K)':<18} | {'cuBLAS (us)':<12} | {'Y Compiler (us)':<16} | {'Y TFLOPS':<10} | {'Speedup':<10} | {'Parity':<8}")
+    print("-" * 90)
 
-        gemm_sizes = [512, 1024, 2048, 4096, 8192, 16384]
-        if size_filter is not None:
-            gemm_sizes = [s for s in gemm_sizes if s == size_filter]
-        for dim in gemm_sizes:
-            gc.collect()
-            torch.cuda.empty_cache()
+    gemm_sizes = [512, 1024, 2048, 4096, 8192, 16384]
+    for dim in gemm_sizes:
+        gc.collect()
+        torch.cuda.empty_cache()
 
-            M = N = K = dim
-            iters = 50 if dim <= 2048 else (15 if dim <= 4096 else (5 if dim <= 8192 else 2))
-            warmup = 10 if dim <= 2048 else (3 if dim <= 8192 else 1)
+        M = N = K = dim
+        iters = 50 if dim <= 2048 else (15 if dim <= 4096 else (5 if dim <= 8192 else 2))
+        warmup = 10 if dim <= 2048 else (3 if dim <= 8192 else 1)
 
-            A_t = torch.randn(M, K, dtype=torch.float16, device="cuda")
-            B_t = torch.randn(K, N, dtype=torch.float16, device="cuda")
-            C_ref = torch.matmul(A_t, B_t)
+        A_t = torch.randn(M, K, dtype=torch.float16, device="cuda")
+        B_t = torch.randn(K, N, dtype=torch.float16, device="cuda")
+        C_ref = torch.matmul(A_t, B_t)
 
-            A_cp = cp.asarray(A_t)
-            B_cp = cp.asarray(B_t)
-            C_y = cp.zeros((M, N), dtype=cp.float16)
+        A_cp = cp.asarray(A_t)
+        B_cp = cp.asarray(B_t)
+        C_y = cp.zeros((M, N), dtype=cp.float16)
 
-            C_cublas = torch.empty((M, N), dtype=torch.float16, device="cuda")
-            # Warmup cuBLAS
-            for _ in range(warmup):
-                torch.mm(A_t, B_t, out=C_cublas)
-            torch.cuda.synchronize()
+        # Warmup cuBLAS
+        for _ in range(warmup):
+            _ = torch.matmul(A_t, B_t)
+        torch.cuda.synchronize()
 
-            start_c = torch.cuda.Event(enable_timing=True)
-            end_c = torch.cuda.Event(enable_timing=True)
-            start_c.record()
-            for _ in range(iters):
-                torch.mm(A_t, B_t, out=C_cublas)
-            end_c.record()
-            torch.cuda.synchronize()
-            cublas_us = (start_c.elapsed_time(end_c) / float(iters)) * 1000.0
+        start_c = torch.cuda.Event(enable_timing=True)
+        end_c = torch.cuda.Event(enable_timing=True)
+        start_c.record()
+        for _ in range(iters):
+            _ = torch.matmul(A_t, B_t)
+        end_c.record()
+        torch.cuda.synchronize()
+        cublas_us = (start_c.elapsed_time(end_c) / float(iters)) * 1000.0
 
-            if dim <= 512:
-                grid_m = (M + 15) // 16
-                grid_n = (N + 31) // 32
-                threads = 32
-                kernel_fn = y_barrier_free
-                k_args = (A_cp, B_cp, C_y, M, N, K)
-            elif dim <= 1024:
-                grid_m = (M + 63) // 64
-                grid_n = (N + 63) // 64
-                threads = 128
-                kernel_fn = y_gemm_64x64
-                k_args = (A_cp, B_cp, C_y, M, N, K)
-            else:
-                grid_m = (M + 127) // 128
-                grid_n = (N + 127) // 128
-                threads = 256
-                kernel_fn = y_gemm_large
-                k_args = (A_cp, B_cp, C_y, M, N, K)
+        grid_m = (M + 127) // 128
+        grid_n = (N + 127) // 128
+        threads = 256
 
-            if kernel_fn == y_gemm_256x128:
-                for _ in range(warmup):
-                    kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args, shared_mem=98304)
-                cp.cuda.Device(0).synchronize()
+        # Warmup Y
+        for _ in range(50):
+            y_gemm_large((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+        cp.cuda.Device(0).synchronize()
 
-                y_start = cp.cuda.Event()
-                y_end = cp.cuda.Event()
-                y_start.record()
-                for _ in range(iters):
-                    kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args, shared_mem=98304)
-                y_end.record()
-                y_end.synchronize()
-                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
+        y_start = cp.cuda.Event()
+        y_end = cp.cuda.Event()
+        y_start.record()
+        for _ in range(iters):
+            y_gemm_large((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
+        y_end.record()
+        y_end.synchronize()
+        y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
 
-                y_out = torch.from_dlpack(C_y)
-                ref_out = C_ref
-                parity_passed = verify_parity(y_out, ref_out, shape_str=f"{M}x{N}x{K}")
-                parity = "PASSED" if parity_passed else "WARN"
-            else:
-                for _ in range(warmup):
-                    kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
-                cp.cuda.Device(0).synchronize()
+        C_y_torch = torch.from_dlpack(C_y)
+        is_close = torch.allclose(C_y_torch, C_ref, atol=1e-2, rtol=1e-2)
+        parity = "PASSED" if is_close else "WARN"
 
-                y_start = cp.cuda.Event()
-                y_end = cp.cuda.Event()
-                y_start.record()
-                for _ in range(iters):
-                    kernel_fn((grid_n, grid_m, 1), (threads, 1, 1), k_args)
-                y_end.record()
-                y_end.synchronize()
-                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / float(iters)) * 1000.0
+        tflops = (2.0 * M * N * K) / (y_us * 1e-6) / 1e12
+        speedup = cublas_us / y_us
 
-                y_out = torch.from_dlpack(C_y)
-                ref_out = C_ref
-                parity_passed = verify_parity(y_out, ref_out, shape_str=f"{M}x{N}x{K}")
-                parity = "PASSED" if parity_passed else "WARN"
-
-            tflops = (2.0 * M * N * K) / (y_us * 1e-6) / 1e12
-            speedup = cublas_us / y_us
-
-            print(f"{M}x{N}x{K:<12} | {cublas_us:<12.2f} | {y_us:<16.2f} | {tflops:<10.2f} | {speedup:<10.2f}x | {parity:<8}", flush=True)
-            report_lines.append(f"| {M}x{N}x{K} | {cublas_us:.2f} | {y_us:.2f} | {tflops:.2f} | {speedup:.2f}x | {parity} |")
+        print(f"{M}x{N}x{K:<12} | {cublas_us:<12.2f} | {y_us:<16.2f} | {tflops:<10.2f} | {speedup:<10.2f}x | {parity:<8}", flush=True)
+        report_lines.append(f"| {M}x{N}x{K} | {cublas_us:.2f} | {y_us:.2f} | {tflops:.2f} | {speedup:.2f}x | {parity} |")
 
     # --- SUITE 2: Real-World LLM Inference Shapes ---
-    if suite_filter in ["all", "2"] and size_filter is None:
-        report_lines.extend([
-            "",
-            "## 2. Real-World LLM Inference & Prompt Decoding Shapes",
-            "| Shape (M x N x K) | Workload Description | cuBLAS (us) | Y Split-K (us) | Memory Bandwidth | Speedup | Parity |",
-            "|---|---|:---:|:---:|:---:|:---:|:---:|"
-        ])
-        print("\n[+] SUITE 2: REAL-WORLD LLM INFERENCE & PROMPT DECODING SHAPES")
-        print("-" * 90)
-        print(f"{'Shape (M x N x K)':<20} | {'Workload':<24} | {'cuBLAS (us)':<12} | {'Y Split-K (us)':<14} | {'GB/s':<8} | {'Speedup':<8}")
-        print("-" * 90)
+    report_lines.extend([
+        "",
+        "## 2. Real-World LLM Inference & Prompt Decoding Shapes",
+        "| Shape (M x N x K) | Workload Description | cuBLAS (us) | Y Split-K (us) | Memory Bandwidth | Speedup | Parity |",
+        "|---|---|:---:|:---:|:---:|:---:|:---:|"
+    ])
+    print("\n[+] SUITE 2: REAL-WORLD LLM INFERENCE & PROMPT DECODING SHAPES")
+    print("-" * 90)
+    print(f"{'Shape (M x N x K)':<20} | {'Workload':<24} | {'cuBLAS (us)':<12} | {'Y Split-K (us)':<14} | {'GB/s':<8} | {'Speedup':<8}")
+    print("-" * 90)
 
-        llm_shapes = [
-            (1, 4096, 4096, "LLaMA 7B Single-Token Decode"),
-            (1, 11008, 4096, "LLaMA 7B SwiGLU FFN Gate/Up"),
-            (16, 4096, 4096, "Batch 16 Prompt Evaluation"),
-            (32, 4096, 4096, "Batch 32 Prompt Evaluation")
-        ]
+    llm_shapes = [
+        (1, 4096, 4096, "LLaMA 7B Single-Token Decode"),
+        (1, 11008, 4096, "LLaMA 7B SwiGLU FFN Gate/Up"),
+        (16, 4096, 4096, "Batch 16 Prompt Evaluation"),
+        (32, 4096, 4096, "Batch 32 Prompt Evaluation"),
+    ]
 
-        for M, N, K, label in llm_shapes:
-            gc.collect()
-            torch.cuda.empty_cache()
+    for M, N, K, label in llm_shapes:
+        gc.collect()
+        torch.cuda.empty_cache()
 
-            A_t = torch.randn(M, K, dtype=torch.float16, device="cuda")
-            B_t = torch.randn(K, N, dtype=torch.float16, device="cuda")
-            C_ref = torch.matmul(A_t, B_t)
+        A_t = torch.randn(M, K, dtype=torch.float16, device="cuda")
+        B_t = torch.randn(K, N, dtype=torch.float16, device="cuda")
+        C_ref = torch.matmul(A_t, B_t)
 
-            A_cp = cp.asarray(A_t)
-            B_cp = cp.asarray(B_t)
-            C_y = cp.zeros((M, N), dtype=cp.float16)
+        A_cp = cp.asarray(A_t)
+        B_cp = cp.asarray(B_t)
+        C_y = cp.zeros((M, N), dtype=cp.float16)
 
-            C_cublas = torch.empty((M, N), dtype=torch.float16, device="cuda")
-            # Warmup cuBLAS
-            for _ in range(10):
-                torch.mm(A_t, B_t, out=C_cublas)
-            torch.cuda.synchronize()
+        # Warmup cuBLAS
+        for _ in range(10):
+            _ = torch.matmul(A_t, B_t)
+        torch.cuda.synchronize()
 
-            start_c = torch.cuda.Event(enable_timing=True)
-            end_c = torch.cuda.Event(enable_timing=True)
-            start_c.record()
-            for _ in range(50):
-                torch.mm(A_t, B_t, out=C_cublas)
-            end_c.record()
-            torch.cuda.synchronize()
-            cublas_us = (start_c.elapsed_time(end_c) / 50.0) * 1000.0
+        start_c = torch.cuda.Event(enable_timing=True)
+        end_c = torch.cuda.Event(enable_timing=True)
+        start_c.record()
+        for _ in range(50):
+            _ = torch.matmul(A_t, B_t)
+        end_c.record()
+        torch.cuda.synchronize()
+        cublas_us = (start_c.elapsed_time(end_c) / 50.0) * 1000.0
 
-            route = dispatch_kernel(M, N, K)
-            if route == "splitk_gemv":
-                grid_n = (N + 255) // 256
-                for _ in range(10):
-                    y_gemv_vec((grid_n, 1, 1), (256, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                cp.cuda.Device(0).synchronize()
+        k_splits = 16 if M == 1 else 4
+        workspace = cp.zeros((k_splits, M, N), dtype=cp.float32)
+        grid_m = (M + 31) // 32
+        grid_n = (N + 63) // 64
+        threads = 128
+        total_elems = M * N
+        red_blocks = (total_elems + 255) // 256
 
-                y_start = cp.cuda.Event()
-                y_end = cp.cuda.Event()
-                y_start.record()
-                for _ in range(50):
-                    y_gemv_vec((grid_n, 1, 1), (256, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                y_end.record()
-                y_end.synchronize()
-                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
-            elif route == "small_m_direct_tma":
-                grid_m = (M + 15) // 16
-                grid_n = (N + 63) // 64
-                threads = 64
-                for _ in range(10):
-                    y_gemm_16x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                cp.cuda.Device(0).synchronize()
+        # Warmup Y
+        for _ in range(10):
+            workspace.fill(0)
+            y_splitk_ws((grid_n, grid_m, k_splits), (threads, 1, 1), (A_cp, B_cp, workspace, M, N, K, k_splits))
+            y_splitk_red((red_blocks, 1, 1), (256, 1, 1), (workspace, C_y, total_elems, M, N, k_splits))
+        cp.cuda.Device(0).synchronize()
 
-                y_start = cp.cuda.Event()
-                y_end = cp.cuda.Event()
-                y_start.record()
-                for _ in range(50):
-                    y_gemm_16x64((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                y_end.record()
-                y_end.synchronize()
-                y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
-            else:
-                if cap_major == 9 and y_hopper_wgmma is not None:
-                    grid_m = (M + 127) // 128
-                    grid_n = (N + 127) // 128
-                    threads = 128
-                    for _ in range(10):
-                        y_hopper_wgmma((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                    cp.cuda.Device(0).synchronize()
+        y_start = cp.cuda.Event()
+        y_end = cp.cuda.Event()
+        y_start.record()
+        for _ in range(50):
+            workspace.fill(0)
+            y_splitk_ws((grid_n, grid_m, k_splits), (threads, 1, 1), (A_cp, B_cp, workspace, M, N, K, k_splits))
+            y_splitk_red((red_blocks, 1, 1), (256, 1, 1), (workspace, C_y, total_elems, M, N, k_splits))
+        y_end.record()
+        y_end.synchronize()
+        y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
 
-                    y_start = cp.cuda.Event()
-                    y_end = cp.cuda.Event()
-                    y_start.record()
-                    for _ in range(50):
-                        y_hopper_wgmma((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                    y_end.record()
-                    y_end.synchronize()
-                    y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
-                else:
-                    grid_m = (M + 127) // 128
-                    grid_n = (N + 127) // 128
-                    threads = 256
-                    for _ in range(10):
-                        y_gemm_large((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                    cp.cuda.Device(0).synchronize()
+        C_y_torch = torch.from_dlpack(C_y)
+        is_close = torch.allclose(C_y_torch, C_ref, atol=1e-2, rtol=1e-2)
+        parity = "PASSED" if is_close else "WARN"
 
-                    y_start = cp.cuda.Event()
-                    y_end = cp.cuda.Event()
-                    y_start.record()
-                    for _ in range(50):
-                        y_gemm_large((grid_n, grid_m, 1), (threads, 1, 1), (A_cp, B_cp, C_y, M, N, K))
-                    y_end.record()
-                    y_end.synchronize()
-                    y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / 50.0) * 1000.0
+        bytes_loaded = 2.0 * (M * K + K * N + M * N)
+        bandwidth_gbps = (bytes_loaded / (y_us * 1e-6)) / 1e9
+        speedup = cublas_us / y_us
 
-            C_y_torch = torch.from_dlpack(C_y)
-            parity_passed = verify_parity(C_y_torch, C_ref, shape_str=f"{M}x{N}x{K}")
-            parity = "PASSED" if parity_passed else "WARN"
-
-            bytes_loaded = 2.0 * (M * K + K * N + M * N)
-            bandwidth_gbps = (bytes_loaded / (y_us * 1e-6)) / 1e9
-            speedup = cublas_us / y_us
-
-            shape_str = f"{M}x{N}x{K}"
-            print(f"{shape_str:<20} | {label:<24} | {cublas_us:<12.2f} | {y_us:<14.2f} | {bandwidth_gbps:<8.1f} | {speedup:<8.2f}x")
-            sys.stdout.flush()
-            report_lines.append(f"| {shape_str} | {label} | {cublas_us:.2f} | {y_us:.2f} | {bandwidth_gbps:.1f} GB/s | {speedup:.2f}x | {parity} |")
+        shape_str = f"{M}x{N}x{K}"
+        print(f"{shape_str:<20} | {label:<24} | {cublas_us:<12.2f} | {y_us:<14.2f} | {bandwidth_gbps:<8.1f} | {speedup:<8.2f}x")
+        sys.stdout.flush()
+        report_lines.append(f"| {shape_str} | {label} | {cublas_us:.2f} | {y_us:.2f} | {bandwidth_gbps:.1f} GB/s | {speedup:.2f}x | {parity} |")
 
     # --- SUITE 3: Fused Layers vs PyTorch Fused (FP16 Fused GEMM + Bias + ReLU) ---
     if suite_filter in ["all", "3"] and size_filter is None:
