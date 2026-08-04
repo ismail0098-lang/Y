@@ -33,7 +33,11 @@ mod zk_emitter;
 #[cfg(feature = "zk")]
 mod zk_poseidon_constants;
 #[cfg(feature = "zk")]
+mod mini_json;
+#[cfg(feature = "zk")]
 mod zk_solidity;
+#[cfg(feature = "zk")]
+mod zk_witness;
 
 use std::env;
 use std::fs;
@@ -133,6 +137,71 @@ fn emit_verifier_cli(args: &[String], pos: usize) {
         },
         None => print!("{}", sol),
     }
+}
+
+/// Solves the circuit against a JSON input file and writes a `.wtns`.
+///
+/// Inputs are matched by NAME against `fn main`'s parameters, not by position:
+/// a file listing them in the wrong order would otherwise produce a valid proof
+/// of the wrong statement, which is exactly the class of error this backend
+/// cannot afford. Every parameter must be present and no unknown key is
+/// accepted.
+#[cfg(feature = "zk")]
+fn solve_and_write_witness(
+    emitter: &zk_emitter::ZkEmitter,
+    inputs_path: &str,
+    wtns_path: &str,
+) -> Result<usize, String> {
+    use zk_emitter::{BigUint, Fr};
+
+    let json = fs::read_to_string(inputs_path)
+        .map_err(|e| format!("Failed to read {}: {}", inputs_path, e))?;
+    let supplied = mini_json::parse_scalar_map(&json)?;
+
+    let names = emitter.private_input_names();
+    let mut ordered = Vec::with_capacity(names.len());
+    for name in &names {
+        let v = supplied
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| {
+                format!(
+                    "input {:?} is missing from {}; this circuit takes [{}]",
+                    name,
+                    inputs_path,
+                    names.join(", ")
+                )
+            })?;
+        ordered.push(Fr::from_biguint(BigUint::from_str(&v)));
+    }
+    for (k, _) in &supplied {
+        if !names.contains(k) {
+            return Err(format!(
+                "{} sets {:?}, which is not an input of this circuit; it takes [{}]",
+                inputs_path,
+                k,
+                names.join(", ")
+            ));
+        }
+    }
+
+    let circuit = emitter.build_circuit();
+    let ir = emitter.build_witness_ir();
+    let (witness, satisfied) =
+        zk_witness::solve_r1cs_witness(&circuit.constraints, &ir, circuit.num_variables, &[], &ordered);
+    if !satisfied {
+        return Err(format!(
+            "no satisfying witness exists for these inputs. A range check almost \
+             certainly failed: comparisons and the bitwise, shift and division \
+             gadgets treat values as unsigned {}-bit, so a negative or oversized \
+             input is unprovable by design.",
+            zk_emitter::ZK_COMPARISON_BITS
+        ));
+    }
+    zk_emitter::ZkEmitter::write_wtns_binary(&circuit, &witness, wtns_path)
+        .map_err(|e| format!("Failed to write {}: {}", wtns_path, e))?;
+    Ok(witness.len())
 }
 
 fn main() {
@@ -729,6 +798,27 @@ fn main() {
                             // Also write human-readable constraints text to .r1cs.txt
                             let txt_path = format!("{}.r1cs.txt", prefix);
                             let _ = fs::write(&txt_path, &r1cs_text);
+
+                            // --witness inputs.json also solves the circuit and
+                            // writes a .wtns, which is what `snarkjs groth16
+                            // prove` needs alongside the .r1cs.
+                            if let Some(inputs_path) = args
+                                .iter()
+                                .position(|a| a == "--witness")
+                                .and_then(|i| args.get(i + 1))
+                            {
+                                let wtns_path = format!("{}.wtns", prefix);
+                                match solve_and_write_witness(&emitter, inputs_path, &wtns_path) {
+                                    Ok(n) => {
+                                        println!("      -> Solved {} witness values.", n);
+                                        println!("      -> Written witness to: {}", wtns_path);
+                                    }
+                                    Err(e) => {
+                                        log_error!("{}", e);
+                                        exit(1);
+                                    }
+                                }
+                            }
                             println!("      -> Written human-readable constraints to: {}", txt_path);
                         }
                         Err(e) => {
