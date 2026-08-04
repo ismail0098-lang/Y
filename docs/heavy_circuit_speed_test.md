@@ -188,12 +188,14 @@ Compile time is one of four stages and the cheapest. Measured with
 
 | Constraints | emit | witness | setup | prove | verify | **total** |
 |---|---|---|---|---|---|---|
-| 10,000 | 0.01 s | 0.28 s | 0.03 s | 0.04 s | 0.002 s | **0.36 s** |
-| 100,000 | 0.13 s | 2.89 s | 0.30 s | 0.33 s | 0.002 s | **3.65 s** |
-| 1,000,000 | 1.57 s | 28.36 s | 2.86 s | 2.89 s | 0.002 s | **35.68 s** |
+| 10,000 | 0.01 s | 0.00 s | 0.04 s | 0.04 s | 0.002 s | **0.10 s** |
+| 25,000 | 0.03 s | 0.02 s | 0.09 s | 0.10 s | 0.002 s | **0.24 s** |
+| 50,000 | 0.07 s | 0.03 s | 0.18 s | 0.19 s | 0.002 s | **0.46 s** |
+| 100,000 | 0.16 s | 0.07 s | 0.33 s | 0.36 s | 0.002 s | **0.92 s** |
+| 1,000,000 | 1.77 s | 0.57 s | 2.80 s | 2.87 s | 0.002 s | **8.02 s** |
 
-Every stage is linear. Two fixes got it there, and both were in Y's own code —
-arkworks was never the problem (setup+prove is under 6 s even at 1M):
+Every stage is linear, and **arkworks is now 71% of the total** — Y's own two
+stages are 2.34 s of the 8.02 s at 1M. Five fixes got it there, all in Y's code:
 
 * **`build_witness_ir` was O(V·C)**, scanning every constraint for every
   variable. It now indexes the `a*b = c` constraints by output wire in one
@@ -206,26 +208,66 @@ arkworks was never the problem (setup+prove is under 6 s even at 1M):
   sufficed. That is not a heuristic: an assignment satisfying every constraint
   IS a valid witness, so the fast path cannot accept anything the sweep would
   have rejected. Witness at 100k: **106.61 s → 2.89 s**.
+* **`Fr::mul` reduced its product by bit-at-a-time long division**, costing
+  **26 µs per field multiplication** — around 500x off a competent BN254
+  multiply. Barrett reduction against a per-field cached `mu` brought it to
+  **0.229 µs (113x)**. This is the fix that took witness generation at 1M from
+  28.36 s to 0.57 s.
+* **`to_decimal_string` peeled one digit at a time** through that same
+  division, so rendering one 254-bit coefficient cost ~20,000 allocating steps.
+  It now divides by 10⁹ in a single-limb pass.
+* **`build_witness_ir` only recognised single-term `a*b=c`**, so binding
+  `main`'s return value — `<dense lc> * 1 = out` — left one wire unreconstructed,
+  which was enough to fail the forward pass's satisfiability check and forfeit
+  the early exit above.
 
-Total prove path at 100k went **115.30 s → 3.65 s (32x)**.
+The last three were invisible to the benchmark on this page. A chain of
+multiplications has linear combinations one or two terms wide and coefficients
+of 0, 1 and 2, so it barely multiplies and never prints a large number. It took
+a Poseidon circuit to expose them — see §4c.
 
 ### Against SP1
 
 | | SP1 (32 cores) | Y + arkworks |
 |---|---|---|
 | workload | 1M multiplications = 3,004,938 RISC-V cycles | 1M multiplications = 1,000,001 constraints |
-| build / emit | 7.0 s (one-off) | 1.57 s |
-| prove path | 24.9 s | **35.68 s** |
+| build / emit | 7.0 s (one-off) | 1.77 s |
+| prove path | 24.9 s | **8.02 s** |
 
-Comparable, where before these fixes Y's path was ~1,070 s. Read it with the
-caveats though: SP1 used 32 cores and arkworks here is single-threaded, and the
-statements differ — SP1 proves `u32` wrapping multiplication in a RISC-V trace,
-Y's circuit proves BN254 *field* multiplication. Y still has no prover of its
-own, so the setup/prove column is arkworks reached through Y's R1CS.
+Read it with the caveats: SP1 used 32 cores and arkworks here is
+single-threaded, and the statements differ — SP1 proves `u32` wrapping
+multiplication in a RISC-V trace, Y's circuit proves BN254 *field*
+multiplication. Y still has no prover of its own, so the setup/prove column is
+arkworks reached through Y's R1CS.
 
-The remaining Y-side cost is the satisfiability check inside witness generation
-(23 s of the 28 s at 1M) — it is what makes the fast path sound, so it cannot
-simply be deleted, but it is the obvious next target.
+---
+
+## 4c. Poseidon: the circuit that actually matters
+
+Hash circuits, not chained multiplications, are what real ZK applications spend
+their constraints on. Y's Poseidon is now circomlib's — same parameters, same
+digests, checked against circomlib's own `Poseidon(2)` in
+`tests/zk_poseidon_interop.rs`.
+
+| | circom 2.2.3 | Y |
+|---|---|---|
+| compile `Poseidon(2)` | 0.104 s | **0.011 s** (9.5x faster) |
+| constraints | 243 non-linear + 274 linear | **241**, no linear |
+
+Y emits 241 because the capacity lane starts at a constant and folds (−3), and
+`main`'s return binding adds one (+1). It emits no linear constraints at all,
+folding each mix directly into the `A`/`B` operands of the next multiplication
+instead of allocating a signal for it.
+
+**This circuit is why §4b's numbers moved.** Before those fixes, one Poseidon
+took **3.04 s** end to end (1.41 s emit, 1.63 s witness) — that is, Y was
+**13.5x slower than circom** on the workload real circuits are made of, while
+simultaneously being 154x faster on the benchmark at the top of this page. It
+is now 0.016 s, a 190x improvement, and faster than circom on both.
+
+The lesson is worth keeping: a benchmark circuit chosen for how large it can
+grow selected for exactly the operations Y was already good at, and hid three
+separate 100x defects in the arithmetic underneath.
 
 ## 5. Scope and limits
 
