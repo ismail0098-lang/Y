@@ -143,6 +143,29 @@ fn ptx_version_for_sm(sm: &str) -> &'static str {
     }
 }
 
+/// Kernel Dispatch Strategy for H100 / Hopper / Blackwell architectures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelDispatch {
+    /// Single-token decode ONLY (M = 1): Use Split-K GEMV.
+    SplitKGemv,
+    /// Batch 16/32 prompt eval (1 < M <= 64): BYPASS SPLIT-K AND ATOMICS ENTIRELY.
+    /// Launch direct 32x128 TMA Tile kernel (y_hopper_small_m_gemm_kernel).
+    SmallMDirectTma,
+    /// Large dense GEMM (M > 64): Full 256x128 WGMMA cluster kernel.
+    WgmmClusterGemm,
+}
+
+/// Restructures the kernel dispatcher so Split-K is strictly restricted to M = 1.
+pub fn dispatch_kernel(m: u32, _n: u32, _k: u32) -> KernelDispatch {
+    if m == 1 {
+        KernelDispatch::SplitKGemv
+    } else if m > 1 && m <= 64 {
+        KernelDispatch::SmallMDirectTma
+    } else {
+        KernelDispatch::WgmmClusterGemm
+    }
+}
+
 /// Configuration for Hierarchical 2D CTA Block Tile Decomposition ($128 \times 128 \times 32$)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CtaTileConfig {
@@ -180,7 +203,20 @@ impl CtaTileConfig {
     /// Uses 64x64x32 for small matrices (M,N <= 512) to maximize SM occupancy,
     /// and 128x128x32 for large matrices (M,N >= 1024) to maximize Tensor Core pipeline throughput.
     pub fn select_tile_for_dim(m: u32, n: u32) -> Self {
-        if m <= 512 || n <= 512 {
+        if m <= 64 {
+            Self {
+                cta_m: 32,
+                cta_n: 128,
+                cta_k: 64,
+                warps_m: 2,
+                warps_n: 2,
+                mma_m: 16,
+                mma_n: 16,
+                mma_k: 16,
+                num_stages: 2,
+                num_warps: 4,
+            }
+        } else if m <= 512 || n <= 512 {
             Self {
                 cta_m: 64,
                 cta_n: 64,
