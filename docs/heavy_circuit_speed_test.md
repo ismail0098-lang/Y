@@ -309,6 +309,48 @@ enormous field element. Both constraints hold and the circuit proves
 stays under 2⁶⁴ and cannot wrap the modulus, so the field equation forces the
 integer one. `forged_quotient_is_rejected` pins exactly that attack.
 
+## 4e. On-chain verifier
+
+A proof nobody can check is not worth producing. Y generates a deployable
+Groth16 verifier from a verifying key:
+
+```bash
+# key comes from a trusted setup - snarkjs or arkworks, not Y
+snarkjs zkey export verificationkey circuit.zkey verification_key.json
+Y --emit-verifier verification_key.json -o Verifier.sol --name MyVerifier
+```
+
+The contract calls the BN254 precompiles at `0x06` (G1 add), `0x07` (G1 scalar
+multiply) and `0x08` (pairing), and exposes the same `verifyProof(uint[2],
+uint[2][2], uint[2], uint[N])` signature snarkjs emits, so existing front-ends
+and its exported `callData` work unchanged.
+
+**The G2 coordinate trap.** An element of `Fq2` is `c0 + c1·u`, and every
+library reports `c0` first. Precompile `0x08` takes the **imaginary part
+first**: `x.c1, x.c0, y.c1, y.c0`. Get it backwards and you get a contract that
+compiles, deploys, burns the full gas of a pairing check, and rejects every
+valid proof — no type error, no revert, nothing to grep for. `Groth16VerifyingKey`
+therefore takes `(c0, c1)` and does the swap once, at emission.
+
+Which is why `tests/zk_solidity_verifier.rs` does not string-match the output.
+It runs the whole chain — Y circuit → R1CS → arkworks setup and proof → Y's
+verifier → `solc` → **`revm`** — and calls `verifyProof` on a real EVM against
+the real precompiles. An honest proof must be accepted, a tampered public input
+rejected, and a corrupted proof element rejected. It needs `solc` or `solcjs`
+on `PATH` (`npm install solc`) and skips with a notice otherwise, the same way
+the PTX tests gate on `ptxas`.
+
+Two behaviours worth knowing:
+
+* A corrupted proof element is usually not a curve point at all, so the
+  precompile rejects its input and the contract **reverts** rather than
+  returning `false`. Fail-closed, and what snarkjs's verifier does too.
+* Public inputs at or above the scalar field modulus are rejected, so a caller
+  cannot re-present a proof under a congruent input.
+
+Y still performs no trusted setup and has no prover of its own. This closes the
+last step of the chain — the one that makes a proof worth anything.
+
 ## 5. Scope and limits
 
 * **The default unroll cap is 10,000 iterations**, overridable with

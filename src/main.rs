@@ -32,6 +32,8 @@ mod empirical_autotune;
 mod zk_emitter;
 #[cfg(feature = "zk")]
 mod zk_poseidon_constants;
+#[cfg(feature = "zk")]
+mod zk_solidity;
 
 use std::env;
 use std::fs;
@@ -70,12 +72,89 @@ macro_rules! log_step {
     };
 }
 
+/// `Y --emit-verifier <verification_key.json> [-o Verifier.sol] [--name N]`
+///
+/// Turns a Groth16 verifying key into a deployable Solidity contract. The key
+/// comes from a trusted setup, which Y does not perform - snarkjs
+/// (`snarkjs groth16 setup` then `snarkjs zkey export verificationkey`) and
+/// arkworks both produce a key this reads.
+#[cfg(feature = "zk")]
+fn emit_verifier_cli(args: &[String], pos: usize) {
+    let vkey_path = match args.get(pos + 1) {
+        Some(p) if !p.starts_with('-') => p.clone(),
+        _ => {
+            log_error!("--emit-verifier needs a verification key: Y --emit-verifier verification_key.json");
+            exit(1);
+        }
+    };
+    let out_path = args
+        .iter()
+        .position(|a| a == "-o" || a == "--output")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let name = args
+        .iter()
+        .position(|a| a == "--name")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "Groth16Verifier".to_string());
+
+    log_info!("Reading verifying key: {}", vkey_path);
+    let json = match fs::read_to_string(&vkey_path) {
+        Ok(j) => j,
+        Err(e) => {
+            log_error!("Failed to read {}: {}", vkey_path, e);
+            exit(1);
+        }
+    };
+    let vk = match zk_solidity::parse_snarkjs_vkey(&json) {
+        Ok(vk) => vk,
+        Err(e) => {
+            log_error!("{}", e);
+            exit(1);
+        }
+    };
+    log_info!(
+        "Groth16 / BN254, {} public input(s), {} IC points",
+        vk.num_public_inputs(),
+        vk.ic.len()
+    );
+
+    let sol = zk_solidity::emit_groth16_verifier(&vk, &name);
+    match out_path {
+        Some(p) => match fs::write(&p, &sol) {
+            Ok(()) => {
+                log_step!("done", "Wrote {} ({} bytes)", p, sol.len());
+            }
+            Err(e) => {
+                log_error!("Failed to write {}: {}", p, e);
+                exit(1);
+            }
+        },
+        None => print!("{}", sol),
+    }
+}
+
 fn main() {
     println!("========================================");
     println!("=== Y Compiler v1.0 ===");
     println!("========================================\n");
 
     let args: Vec<String> = env::args().collect();
+
+    // Verifier generation takes a verifying key, not a .ysu source, and touches
+    // none of the compilation pipeline - so handle it before the hardware probe
+    // rather than paying for a GPU probe to format a contract.
+    #[cfg(feature = "zk")]
+    if let Some(pos) = args.iter().position(|a| a == "--emit-verifier") {
+        emit_verifier_cli(&args, pos);
+        return;
+    }
+    #[cfg(not(feature = "zk"))]
+    if args.iter().any(|a| a == "--emit-verifier") {
+        log_error!("--emit-verifier requires a build with the ZK backend: cargo build --release --features zk");
+        exit(1);
+    }
 
     // Phase 0: Sentinel Hardware Probe
     let mut hw_profile = sentinel::check_or_probe_hardware();
