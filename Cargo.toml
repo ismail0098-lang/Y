@@ -38,11 +38,13 @@ path = "src/bin/autotune_verify.rs"
 # with arkworks used only as an INDEPENDENT oracle to check it against.
 [dev-dependencies]
 ark-bn254 = "0.5"
+ark-ec = "0.5"
 ark-ff = "0.5"
 ark-groth16 = "0.5"
 ark-relations = "0.5"
 ark-snark = "0.5"
 ark-std = "0.5"
+revm = "42.0.1"
 
 [features]
 default = []

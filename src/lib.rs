@@ -29,6 +29,8 @@ pub mod zk_emitter;
 pub mod zk_witness;
 #[cfg(feature = "zk")]
 pub mod zk_poseidon_constants;
+#[cfg(feature = "zk")]
+pub mod zk_solidity;
 
 /// Runs all 5 advanced compiler optimization passes on a Program AST.
 pub fn run_all_optimization_passes(prog: &mut ast::Program) {
