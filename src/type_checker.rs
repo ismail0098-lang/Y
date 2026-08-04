@@ -926,16 +926,65 @@ impl TypeChecker {
                         )
             )
         }
+        // A 5-parameter shape (A, B: GlobalMemory<F32>, scale_a, scale_b:
+        // F32 scalar, C: GlobalMemory<F32>) is accepted separately from the
+        // 3/4-param F16 shapes below: A/B are quantized to e4m3 on the fly
+        // (fused - see ptx_emitter::emit_fp8_gemm_kernel's doc comment) via
+        // mma.sync.m16n8k32.row.col.f32.e4m3.e4m3.f32 (Ada/sm_89-compatible,
+        // unlike the Hopper-only WGMMA path), scale_a/scale_b are the
+        // per-tensor dequant scales (typically amax/448 - the caller's/
+        // launcher's responsibility to compute, not this kernel's), applied
+        // to the f32 accumulator in the epilogue. Checked positionally, told
+        // apart from the F16 shapes purely by param count (5) - see
+        // `ptx_emitter::tile_gemm_fp8_operands`'s doc comment, which this
+        // must never disagree with about which shape a given kernel is.
+        if kernel.params.len() == 5 {
+            fn is_scalar_f32(ty: &Type) -> bool {
+                matches!(ty, Type::Primitive(p, _) if p == "F32")
+            }
+            let expected = ["GlobalMemory<F32>", "GlobalMemory<F32>", "F32", "F32", "GlobalMemory<F32>"];
+            let checks: [bool; 5] = [
+                is_global_memory_of(&kernel.params[0].ty, "F32"),
+                is_global_memory_of(&kernel.params[1].ty, "F32"),
+                is_scalar_f32(&kernel.params[2].ty),
+                is_scalar_f32(&kernel.params[3].ty),
+                is_global_memory_of(&kernel.params[4].ty, "F32"),
+            ];
+            let bad_params: Vec<String> = kernel
+                .params
+                .iter()
+                .zip(checks.iter())
+                .enumerate()
+                .filter(|(_, (_, ok))| !**ok)
+                .map(|(i, (p, _))| format!("{} (expected {})", p.name, expected[i]))
+                .collect();
+            if !bad_params.is_empty() {
+                self.errors.push(format!(
+                    "Line {}: Kernel-level @tile(M, N, K) on `{}` with 5 parameters requires (A, B: GlobalMemory<F32>, scale_a, scale_b: F32, C: GlobalMemory<F32>) for a fused FP8 (e4m3) GEMM - A/B are quantized on the fly, scale_a/scale_b dequant the f32 accumulator. Mismatched param(s): {}.",
+                    tile.span.line, kernel.name, bad_params.join(", ")
+                ));
+            }
+            return;
+        }
+
         // A, B are the f16 Tensor Core operands; C is the accumulator/output
         // in f32 (matching wmma's f16-in/f32-out contract - see
         // ptx_emitter::emit_tensor_core_gemm_kernel, which hardcodes 4
-        // bytes/element and `wmma.store.d...f32` for C specifically). A
-        // 4-parameter shape (A, B, Bias, C) is also accepted: Bias sits in
-        // the same F32 "everything past the two F16 operands" bucket as C,
-        // so `expected_elem` doesn't need a special case for it - see
-        // `ptx_emitter::tile_gemm_operands`'s doc comment for the fused
-        // GEMM+Bias+ReLU epilogue this shape dispatches to.
-        let expected_elem = |i: usize| if i < 2 { "F16" } else { "F32" };
+        // bytes/element and `wmma.store.d...f32` for C specifically). Two
+        // 4-parameter shapes are also accepted, told apart purely by
+        // param[2]'s element type (matching ptx_emitter's own dispatch
+        // logic exactly, so type-checking and codegen never disagree about
+        // which shape a given kernel is):
+        // - (A, B, Bias, C): Bias is F32, sitting in the same "everything
+        //   past the two F16 operands" bucket as C - see
+        //   `ptx_emitter::tile_gemm_operands`'s doc comment for the fused
+        //   GEMM+Bias+ReLU epilogue this shape dispatches to.
+        // - (X, W_gate, W_up, Out): W_up is F16 (unlike Bias) since it's a
+        //   second Tensor Core operand, not an epilogue addend - see
+        //   `ptx_emitter::tile_gemm_swiglu_operands`'s doc comment for the
+        //   fused Linear+SwiGLU epilogue this shape dispatches to.
+        let is_swiglu_shape = kernel.params.len() == 4 && is_global_memory_of(&kernel.params[2].ty, "F16");
+        let expected_elem = |i: usize| if i < 2 || (is_swiglu_shape && i == 2) { "F16" } else { "F32" };
         let bad_params: Vec<String> = kernel
             .params
             .iter()
@@ -946,7 +995,7 @@ impl TypeChecker {
 
         if (kernel.params.len() != 3 && kernel.params.len() != 4) || !bad_params.is_empty() {
             self.errors.push(format!(
-                "Line {}: Kernel-level @tile(M, N, K) on `{}` requires either 3 parameters (A, B: GlobalMemory<F16>, C: GlobalMemory<F32>) for a plain GEMM, or 4 (A, B: GlobalMemory<F16>, Bias, C: GlobalMemory<F32>) for a fused GEMM+Bias+ReLU epilogue, in that order - tile-aware GEMM codegen binds them positionally and supports no other shape. Found {} parameter(s){}.",
+                "Line {}: Kernel-level @tile(M, N, K) on `{}` requires 3 parameters (A, B: GlobalMemory<F16>, C: GlobalMemory<F32>) for a plain GEMM, 4 (A, B: GlobalMemory<F16>, Bias, C: GlobalMemory<F32>) for a fused GEMM+Bias+ReLU epilogue, or 4 (X, W_gate, W_up: GlobalMemory<F16>, Out: GlobalMemory<F32>) for a fused Linear+SwiGLU epilogue, in that order - tile-aware GEMM codegen binds them positionally and supports no other shape. Found {} parameter(s){}.",
                 tile.span.line,
                 kernel.name,
                 kernel.params.len(),
@@ -2669,6 +2718,21 @@ mod tests {
     }
 
     #[test]
+    fn test_kernel_level_tile_swiglu_shape_passes() {
+        let program = parse_src(
+            "
+            @tile(4096, 4096, 4096)
+            kernel fused_swiglu(X: GlobalMemory<F16>, Wgate: GlobalMemory<F16>, Wup: GlobalMemory<F16>, Out: GlobalMemory<F32>) {
+                let x: I32 = 0;
+            }
+            ",
+        );
+        let mut tc = TypeChecker::new();
+        tc.check_program(&program);
+        assert!(tc.errors.is_empty(), "unexpected errors: {:?}", tc.errors);
+    }
+
+    #[test]
     fn test_kernel_level_tile_rejects_wrong_param_shape() {
         let program = parse_src(
             "
@@ -2681,7 +2745,7 @@ mod tests {
         let mut tc = TypeChecker::new();
         tc.check_program(&program);
         assert!(
-            tc.errors.iter().any(|e| e.contains("either 3 parameters")),
+            tc.errors.iter().any(|e| e.contains("requires 3 parameters")),
             "expected a validation error for a non-GlobalMemory<F16> param, got: {:?}",
             tc.errors
         );

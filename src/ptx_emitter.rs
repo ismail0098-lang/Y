@@ -35,6 +35,83 @@ use crate::zk_emitter::*;
 /// any grid, including grids far smaller than this constant.
 pub const GEMM_SWIZZLE_GROUP_SIZE: u32 = 8;
 
+/// Two hand-picked CTA tile shapes for `emit_fp8_gemm_kernel`'s multi-warp
+/// codegen, chosen by `emit_fp8_gemm_kernel` per-kernel from `M`/`N` (see
+/// that function's doc comment for the selection heuristic) - still no
+/// real Autotuner integration (`Autotuner::generate_candidates` accepts
+/// but ignores `Precision::Fp8` - see that enum's doc comment in
+/// autotuner.rs), so this is two fixed shapes and a size threshold, not a
+/// real per-problem-size search (a disclosed, deliberate scope cut - see
+/// `emit_fp8_gemm_kernel`'s doc comment for the next-session priority
+/// list).
+///
+/// `_LARGE` (128x128x64, 4x2 warps) directly mirrors a REAL, already-
+/// proven F16 autotuner candidate - `(128, 128, 64, 4, 2)` in
+/// `Autotuner::generate_candidates`'s `m/n > 512` branch - rather than a
+/// fresh guess: the resulting per-warp tile (32x64) needs
+/// `num_i=2`/`num_j=8` `mma.m16n8k32` calls (FP8's N=8 mma granularity is
+/// half F16 wmma's N=16, so `num_j` is doubled vs the analogous F16
+/// config), but each accumulator fragment is half the register count (4
+/// f32 regs vs 8, since `mma.m16n8k32`'s M16N8 accumulator is half of
+/// wmma's M16N16) - so total accumulator register pressure per warp comes
+/// out the same either way (`num_i*num_j*4` = 64 registers, matching the
+/// F16 config's `num_i*num_j*8`). Combined A+B shared-memory footprint at
+/// this shape (`128*64 + 64*128` = 16384 bytes, e4m3 is 1 byte/element) is
+/// well under `ptxas`'s 48KB static-`.shared` cap.
+///
+/// `_SMALL` (64x64x64, 2x2 warps) exists because `_LARGE` measured a real
+/// regression at M=N=256 on real hardware (0.374x -> ~0.11x of
+/// `torch._scaled_mm`, see `investigation_fp8_gemm_findings.md`'s
+/// "Session 2" results): a 128x128 CTA tile only produces a 2x2=4-CTA
+/// grid at that problem size, leaving most of the GPU's SMs idle no
+/// matter how efficient each CTA is internally. `_SMALL`'s per-warp tile
+/// is 32x32 (`num_i=2`/`num_j=4`), accumulator register pressure is
+/// `num_i*num_j*4` = 32 registers/warp (half of `_LARGE`'s, consistent
+/// with the smaller tile), and its A+B shared-memory footprint is
+/// `64*64 + 64*64` = 8192 bytes - both confirmed by `ptxas -v` (see
+/// `emit_fp8_gemm_kernel`'s doc comment).
+///
+/// **Threshold raised 256 -> 512 (session 5)**: real-hardware A/B at
+/// M=N=K=512 (`_LARGE`'s own 4-CTA grid at that size, `(4,4)`) measured
+/// `_SMALL` at ~0.148x-0.150x vs `_LARGE`'s ~0.10x-0.11x (both after this
+/// session's vectorized quantize+stage - see that section's doc comment) -
+/// a real, reproducible win from `_SMALL`'s 64-CTA grid at 512, so `_SMALL`
+/// now covers `m <= 512 || n <= 512`.
+///
+/// **A fourth, `_TINY` (32x32x64, 1x1 warp) tier was also built and
+/// standalone-benchmarked this session, and REJECTED** - flagged as a
+/// plausible next step by Session 3's own list ("a 32x32x64/1-warp tier...
+/// would roughly quadruple the CTA count again at 256"), but real hardware
+/// disagreed at every shape tried: M=N=64 (`_TINY` 4-CTA grid vs `_SMALL`'s
+/// 1-CTA grid: `_SMALL` 0.81x vs `_TINY` 0.57x), M=64,N=2048,K=128 (`_TINY`
+/// 128 CTAs vs `_SMALL` 32 CTAs: `_SMALL` 0.26x vs `_TINY` 0.24x-0.49x
+/// depending on run), and M=32,N=2048,K=128 (`_TINY`'s tile fits M=32
+/// exactly, `_SMALL`'s wastes half its M-tile: `_SMALL` STILL wins, 0.48x
+/// vs `_TINY`'s 0.33x). `_SMALL`'s 4 warps/CTA apparently hide global-
+/// memory latency via intra-CTA warp scheduling better than `_TINY`'s
+/// extra CTA-level parallelism compensates for losing that - CTA count
+/// alone is not the whole story, contrary to the pure grid-occupancy
+/// argument that motivated trying it. Reported here as a real, disclosed
+/// negative result (matching this project's session 4 precedent) rather
+/// than silently dropped - a plausible-sounding lever that real
+/// measurement ruled out.
+pub const FP8_GEMM_CTA_M_LARGE: u32 = 128;
+pub const FP8_GEMM_CTA_N_LARGE: u32 = 128;
+pub const FP8_GEMM_WARPS_M_LARGE: u32 = 4;
+pub const FP8_GEMM_WARPS_N_LARGE: u32 = 2;
+pub const FP8_GEMM_CTA_M_SMALL: u32 = 64;
+pub const FP8_GEMM_CTA_N_SMALL: u32 = 64;
+pub const FP8_GEMM_WARPS_M_SMALL: u32 = 2;
+pub const FP8_GEMM_WARPS_N_SMALL: u32 = 2;
+/// K tile size - shared by both `_LARGE` and `_SMALL` (only M/N/warp
+/// counts vary between tiers), so this has no `_LARGE`/`_SMALL` suffix.
+pub const FP8_GEMM_CTA_K: u32 = 64;
+/// `m <= FP8_GEMM_SMALL_THRESHOLD || n <= FP8_GEMM_SMALL_THRESHOLD`
+/// selects `_SMALL` over `_LARGE` - see `FP8_GEMM_CTA_M_LARGE`'s doc
+/// comment for why this is 512, not `Autotuner::generate_candidates`'s
+/// F16 threshold (256) it originally mirrored.
+pub const FP8_GEMM_SMALL_THRESHOLD: u32 = 512;
+
 /// Maps an SM compute capability to the minimum required PTX ISA version.
 fn ptx_version_for_sm(sm: &str) -> &'static str {
     let normalized = if sm.starts_with("sm_") {
@@ -48,7 +125,14 @@ fn ptx_version_for_sm(sm: &str) -> &'static str {
     } else {
         match s {
             "sm_90" | "sm_90a" => ".version 8.0",
-            "sm_89" | "sm_8.9" => ".version 7.8",
+            // 7.8 assembles fine in general, but FP8 mma.sync
+            // (mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32) needs
+            // >=8.4 on sm_89 - confirmed empirically (see
+            // investigation_fp8_int8_quantization_findings.md): identical
+            // instruction, identical -arch=sm_89, fails on 7.8 with
+            // "Feature 'mma with FP8 floating point type' requires PTX ISA
+            // .version 8.4 or later", assembles clean on 8.4+.
+            "sm_89" | "sm_8.9" => ".version 8.4",
             "sm_86" | "sm_87" | "sm_8.6" => ".version 7.5",
             "sm_80" | "sm_8.0" => ".version 7.0",
             "sm_75" => ".version 6.5",
@@ -124,6 +208,7 @@ pub struct PtxEmitter {
     reg_f32_count: u32,
     reg_u64_count: u32,
     reg_pred_count: u32,
+    reg_b16_count: u32,
     label_count: u32,
     variables: std::collections::HashMap<String, String>,
     /// The resolved SM target (e.g. "sm_80") for PTX header emission.
@@ -181,6 +266,7 @@ impl PtxEmitter {
             reg_f32_count: 0,
             reg_u64_count: 0,
             reg_pred_count: 0,
+            reg_b16_count: 0,
             label_count: 0,
             variables: std::collections::HashMap::new(),
             sm_target: target,
@@ -214,6 +300,16 @@ impl PtxEmitter {
     fn alloc_pred(&mut self) -> String {
         let name = format!("%p{}", self.reg_pred_count);
         self.reg_pred_count += 1;
+        name
+    }
+
+    /// Allocates a new virtual 16-bit register (e.g. `%h1`) - needed for
+    /// `cvt.rn.satfinite.e4m3x2.f32`, whose destination the PTX ISA
+    /// mandates be `.b16` (packs two e4m3 bytes) - see
+    /// `emit_fp8_quantize_stage_a`/`_b`.
+    fn alloc_reg16(&mut self) -> String {
+        let name = format!("%h{}", self.reg_b16_count);
+        self.reg_b16_count += 1;
         name
     }
 
@@ -264,6 +360,7 @@ impl PtxEmitter {
         self.reg_f32_count = 0;
         self.reg_u64_count = 0;
         self.reg_pred_count = 0;
+        self.reg_b16_count = 0;
 
         // Create a temporary buffer for parameter loading and kernel body
         let body_buffer = String::new();
@@ -299,6 +396,21 @@ impl PtxEmitter {
         // below - see that computation's doc comment for why this matters.
         let tile_gemm_threads_per_cta = if let Some((m, n, k, a_ptr, b_ptr, c_ptr, bias_ptr)) = self.tile_gemm_operands(kernel) {
             Some(self.emit_tensor_core_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &c_ptr, bias_ptr.as_deref(), hw_profile, &kernel.name))
+        } else if let Some((m, n, k, a_ptr, b_ptr, scale_a_reg, scale_b_reg, c_ptr)) = self.tile_gemm_fp8_operands(kernel) {
+            Some(self.emit_fp8_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &scale_a_reg, &scale_b_reg, &c_ptr, &kernel.name))
+        } else if let Some((m, n, k, x_ptr, wgate_ptr, wup_ptr, out_ptr)) = self.tile_gemm_swiglu_operands(kernel) {
+            Some(self.emit_gemm_swiglu_kernel(m, n, k, &x_ptr, &wgate_ptr, &wup_ptr, &out_ptr, hw_profile, &kernel.name))
+        } else if let Some((hidden_dim, x_ptr, res_ptr, w_ptr, out_ptr, newres_ptr)) = self.rmsnorm_residual_operands(kernel) {
+            Some(self.emit_rmsnorm_residual_kernel(hidden_dim, &x_ptr, &res_ptr, &w_ptr, &out_ptr, &newres_ptr))
+        } else if let Some((head_dim, x_ptr, pos_ptr, out_ptr)) = self.rope_operands(kernel) {
+            Some(self.emit_rope_kernel(head_dim, &x_ptr, &pos_ptr, &out_ptr))
+        } else if let Some((head_dim, nqh, nkvh, page_size, warps, q, kc, vc, pt, sl, out, max_pages)) =
+            self.paged_decode_attention_operands(kernel)
+        {
+            Some(self.emit_paged_decode_attention_kernel(
+                head_dim, nqh, nkvh, page_size, warps, &q, &kc, &vc, &pt, &sl, &out, &max_pages,
+                &kernel.name,
+            ))
         } else {
             self.emit_block(&kernel.body, hw_profile);
             None
@@ -370,8 +482,20 @@ impl PtxEmitter {
         let block_size = tile_gemm_threads_per_cta.unwrap_or(256);
         let max_regs_per_sm = hw_profile.max_regs_per_sm;
         let max_threads_per_sm = hw_profile.max_threads_per_sm;
-        let limit = if block_size > 0 {
-            limit.min(max_regs_per_sm / block_size)
+        // The clamp only applies when there is a real register budget to
+        // clamp against. `HardwareProfile::default()` (no probe run, e.g. a
+        // cross-compile or any unit test that builds its own profile) leaves
+        // `max_regs_per_sm` at 0, and `limit.min(0 / block_size)` is 0 - which
+        // emits `.maxnreg 0` and makes ptxas reject the whole module with
+        // "Positive non-zero value expected for maxnreg". That produced
+        // structurally invalid PTX for EVERY kernel compiled without a
+        // hardware profile, not just this one; it went unnoticed because the
+        // PTX tests only string-matched their own expected substrings and
+        // never assembled the result (see
+        // `tests_paged_decode_attention::emitted_ptx_actually_assembles`,
+        // which is what caught it).
+        let limit = if block_size > 0 && max_regs_per_sm > 0 {
+            limit.min((max_regs_per_sm / block_size).max(1))
         } else {
             limit
         };
@@ -396,6 +520,9 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    .reg .f32 %f<{}>;", self.reg_f32_count.max(1)).unwrap();
         writeln!(&mut self.ptx_buffer, "    .reg .b64 %rd<{}>;", self.reg_u64_count.max(1)).unwrap();
         writeln!(&mut self.ptx_buffer, "    .reg .pred %p<{}>;", self.reg_pred_count.max(1)).unwrap();
+        if self.reg_b16_count > 0 {
+            writeln!(&mut self.ptx_buffer, "    .reg .b16 %h<{}>;", self.reg_b16_count).unwrap();
+        }
         writeln!(&mut self.ptx_buffer).unwrap();
 
         // Append the body code
@@ -1964,6 +2091,1239 @@ impl PtxEmitter {
         Some((m, n, k, a_reg, b_reg, c_reg, bias_reg))
     }
 
+    /// Returns `(m, n, k, a_reg, b_reg, scale_a_reg, scale_b_reg, c_reg)` if
+    /// `kernel` carries a validated kernel-level `@tile(M, N, K)` directive
+    /// with exactly 5 params: A, B: `GlobalMemory<F32>` (quantized to e4m3
+    /// on the fly - see `emit_fp8_gemm_kernel`), scale_a, scale_b: `F32`
+    /// scalars (per-tensor dequant scale, typically `amax/448.0` - the
+    /// caller's/launcher's job to compute), C: `GlobalMemory<F32>`.
+    /// `type_checker::verify_tile_gemm_kernel` enforces this shape as a hard
+    /// compile error in the normal CLI pipeline (see its own doc comment,
+    /// which this must never disagree with) - re-checked here for the same
+    /// reason `tile_gemm_operands` re-checks its own shape: `PtxEmitter` can
+    /// be driven directly with no type_checker pass at all (this file's own
+    /// unit tests do exactly that). `None` means "fall back to the normal
+    /// generic per-statement lowering", distinguished from
+    /// `tile_gemm_operands`'s 3/4-param F16 shapes by both param COUNT (5)
+    /// and TYPE (F32 GlobalMemory for A/B here, vs F16 there) - no ambiguity.
+    fn tile_gemm_fp8_operands(&self, kernel: &KernelDecl) -> Option<(u32, u32, u32, String, String, String, String, String)> {
+        let tile = kernel.tile.as_ref()?;
+
+        fn as_positive_u32(e: &Expr) -> Option<u32> {
+            match e {
+                Expr::IntLit(v, _) if *v > 0 => u32::try_from(*v).ok(),
+                _ => None,
+            }
+        }
+        let m = as_positive_u32(&tile.block_m)?;
+        let n = as_positive_u32(&tile.block_n)?;
+        let k = as_positive_u32(tile.block_k.as_deref()?)?;
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+        fn is_scalar_f32(ty: &Type) -> bool {
+            matches!(ty, Type::Primitive(p, _) if p == "F32")
+        }
+
+        if kernel.params.len() != 5
+            || !is_global_memory_of(&kernel.params[0].ty, "F32")
+            || !is_global_memory_of(&kernel.params[1].ty, "F32")
+            || !is_scalar_f32(&kernel.params[2].ty)
+            || !is_scalar_f32(&kernel.params[3].ty)
+            || !is_global_memory_of(&kernel.params[4].ty, "F32")
+        {
+            return None;
+        }
+
+        let a_reg = self.variables.get(&kernel.params[0].name)?.clone();
+        let b_reg = self.variables.get(&kernel.params[1].name)?.clone();
+        let scale_a_reg = self.variables.get(&kernel.params[2].name)?.clone();
+        let scale_b_reg = self.variables.get(&kernel.params[3].name)?.clone();
+        let c_reg = self.variables.get(&kernel.params[4].name)?.clone();
+        Some((m, n, k, a_reg, b_reg, scale_a_reg, scale_b_reg, c_reg))
+    }
+
+    /// Loads one of this warp's 4 A-fragment registers (`ld.shared.b32`, no
+    /// `ldmatrix` - PTX ISA 8.5's `ldmatrix` syntax block lists only
+    /// `.type = {.b16}`, no 8-bit variant at all) for
+    /// `mma.sync.m16n8k32.row.col.e4m3` from this CTA's `cta_m x
+    /// FP8_GEMM_CTA_K` e4m3 smem tile (row-major, `FP8_GEMM_CTA_K` B/row,
+    /// no padding - `cta_m` doesn't actually appear in this function's own
+    /// address formula, only via the caller-supplied `warp_row0_local`/`i`,
+    /// so unlike `emit_fp8_load_b_one` this function needs no `cta_m`
+    /// parameter). Generalizes the original single-warp/single-fragment
+    /// addressing with three multi-warp-tiling terms - `warp_row0_local`
+    /// (this warp's row origin within the CTA tile, `warp_m *
+    /// per_warp_m`), `i*16` (this warp's i-th 16-row M-fragment), and `kk`
+    /// (this K-substep's 32-wide offset within the current
+    /// `FP8_GEMM_CTA_K`-wide K-slab) - standalone-validated on real sm_89
+    /// hardware before this function was written (project scratchpad's
+    /// validate_fp8_multiwarp.py, checked against an exact-integer CPU
+    /// reference across single-CTA, multi-CTA, multi-K-tile, and ragged
+    /// M/N shapes). `row_plus_8`/`col_extra` still select which of the 4
+    /// registers, per PTX ISA 8.5 9.7.13.4.10's Multiplicand A
+    /// (`.e4m3`/`.e5m2` bullet, shared with `.s8`/`.u8`, unchanged from the
+    /// single-warp kernel): `groupID = lane>>2, tig = lane&3; row =
+    /// groupID (+8), col = tig*4 (+16) + [0..3]`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_load_a_one(
+        &mut self,
+        smem_a: &str,
+        group_id: &str,
+        tig: &str,
+        warp_row0_local: &str,
+        i: u32,
+        kk: u32,
+        row_plus_8: bool,
+        col_extra: u32,
+    ) -> String {
+        let row_base = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", row_base, warp_row0_local, i * 16).unwrap();
+        let mut row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", row, row_base, group_id).unwrap();
+        if row_plus_8 {
+            let row2 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 8;", row2, row).unwrap();
+            row = row2;
+        }
+        let mut col = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", col, tig).unwrap();
+        if col_extra > 0 {
+            let col2 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col2, col, col_extra).unwrap();
+            col = col2;
+        }
+        let k_local = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", k_local, col, kk).unwrap();
+        let lin = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", lin, row, FP8_GEMM_CTA_K, k_local).unwrap();
+        let addr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", addr, smem_a, lin).unwrap();
+        let reg = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    ld.shared.b32 {}, [{}];", reg, addr).unwrap();
+        reg
+    }
+
+    /// All 4 A-fragment registers for this warp's i-th M-fragment at
+    /// K-substep `kk`, in the order `mma.sync.m16n8k32` expects (`a0..a15`
+    /// packed low-to-high across `reg0..reg3`) - see `emit_fp8_load_a_one`.
+    fn emit_fp8_load_a_fragment(&mut self, smem_a: &str, group_id: &str, tig: &str, warp_row0_local: &str, i: u32, kk: u32) -> Vec<String> {
+        vec![
+            self.emit_fp8_load_a_one(smem_a, group_id, tig, warp_row0_local, i, kk, false, 0),
+            self.emit_fp8_load_a_one(smem_a, group_id, tig, warp_row0_local, i, kk, true, 0),
+            self.emit_fp8_load_a_one(smem_a, group_id, tig, warp_row0_local, i, kk, false, 16),
+            self.emit_fp8_load_a_one(smem_a, group_id, tig, warp_row0_local, i, kk, true, 16),
+        ]
+    }
+
+    /// Loads one of this warp's 2 B-fragment registers via 4x
+    /// `ld.shared.u8` + shift/or pack (B's 4 elements-per-register are 4
+    /// consecutive ROWS at a FIXED column - not contiguous in the row-
+    /// major/N-contiguous smem layout B shares with global B, unlike A -
+    /// see `emit_fp8_gemm_kernel`'s doc comment) from this CTA's
+    /// `FP8_GEMM_CTA_K x cta_n` e4m3 smem tile (row-major, `cta_n` B/row,
+    /// no padding - `cta_n` is a real parameter here, unlike
+    /// `emit_fp8_load_a_one`'s `cta_m`, since it's needed for the smem row
+    /// stride below). Generalizes the original
+    /// single-warp/single-fragment addressing with `warp_col0_local` (this
+    /// warp's column origin within the CTA tile, `warp_n * per_warp_n`),
+    /// `j*8` (this warp's j-th 8-col N-fragment), and `kk` (this
+    /// K-substep's 32-wide offset within the current `FP8_GEMM_CTA_K`-wide
+    /// K-slab) - standalone-validated on real sm_89 hardware before this
+    /// function was written (project scratchpad's
+    /// validate_fp8_multiwarp.py, checked against an exact-integer CPU
+    /// reference across single-CTA, multi-CTA, multi-K-tile, and ragged
+    /// M/N shapes). `row_base_extra` still selects which of the 2
+    /// registers, per PTX ISA 8.5 9.7.13.4.10's Multiplicand B (unchanged
+    /// from the single-warp kernel): `row = tig*4 (+16) + [0..3], col =
+    /// groupID`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_load_b_one(
+        &mut self,
+        smem_b: &str,
+        group_id: &str,
+        tig: &str,
+        warp_col0_local: &str,
+        j: u32,
+        kk: u32,
+        cta_n: u32,
+        row_base_extra: u32,
+    ) -> String {
+        let mut base_row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", base_row, tig).unwrap();
+        if row_base_extra > 0 {
+            let br2 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", br2, base_row, row_base_extra).unwrap();
+            base_row = br2;
+        }
+        let col_base = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col_base, warp_col0_local, j * 8).unwrap();
+        let col = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col, col_base, group_id).unwrap();
+        let mut packed = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", packed).unwrap();
+        for byte_idx in 0..4u32 {
+            let row = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", row, base_row, byte_idx).unwrap();
+            let k_local = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", k_local, row, kk).unwrap();
+            let lin = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", lin, k_local, cta_n, col).unwrap();
+            let addr = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", addr, smem_b, lin).unwrap();
+            let byte_val = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    ld.shared.u8 {}, [{}];", byte_val, addr).unwrap();
+            let shifted = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, {};", shifted, byte_val, byte_idx * 8).unwrap();
+            let new_packed = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    or.b32 {}, {}, {};", new_packed, packed, shifted).unwrap();
+            packed = new_packed;
+        }
+        packed
+    }
+
+    /// Both B-fragment registers for this warp's j-th N-fragment at
+    /// K-substep `kk` - see `emit_fp8_load_b_one`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_load_b_fragment(&mut self, smem_b: &str, group_id: &str, tig: &str, warp_col0_local: &str, j: u32, kk: u32, cta_n: u32) -> Vec<String> {
+        vec![
+            self.emit_fp8_load_b_one(smem_b, group_id, tig, warp_col0_local, j, kk, cta_n, 0),
+            self.emit_fp8_load_b_one(smem_b, group_id, tig, warp_col0_local, j, kk, cta_n, 16),
+        ]
+    }
+
+    /// This lane's local `(row, col)` within the 16x8 output tile for
+    /// accumulator element `i` (0..3), per PTX ISA 8.5 9.7.13.4.9's
+    /// accumulator formula - reused verbatim by 9.7.13.4.10 (m16n8k32),
+    /// since accumulator shape depends only on M=16/N=8, not K (confirmed
+    /// by comparing the m16n8k16-float, m16n8k16-integer, and m16n8k32
+    /// sections directly - all three state the identical formula):
+    /// `groupID = lane>>2, tig = lane&3; row = groupID (i<2) or groupID+8
+    /// (i>=2); col = tig*2 + (i&1)`.
+    fn emit_fp8_accum_row_col(&mut self, group_id: &str, tig: &str, i: u32) -> (String, String) {
+        let row = self.alloc_reg32();
+        if i < 2 {
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", row, group_id).unwrap();
+        } else {
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 8;", row, group_id).unwrap();
+        }
+        let col = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 2;", col, tig).unwrap();
+        if i % 2 == 1 {
+            let col2 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", col2, col).unwrap();
+            return (row, col2);
+        }
+        (row, col)
+    }
+
+    /// Loads 2 f32 elements at `[gaddr_base+gmem_byte_off]` /
+    /// `[+gmem_byte_off+4]` (zero if the respective predicate is false - a
+    /// predicated `ld.global.f32`, never an out-of-bounds access attempt),
+    /// quantizes both by `inv_scale` (`= 1/scale`, the caller's job to
+    /// compute once, outside any loop), packs via
+    /// `cvt.rn.satfinite.e4m3x2.f32` (element 0 -> low byte, element 1 ->
+    /// high byte, i.e. called as `a=elem1, b=elem0` per the ISA's "input a
+    /// -> upper 8 bits, input b -> lower 8 bits" convention - standalone-
+    /// validated bit-for-bit against `torch.float8_e4m3fn`'s own byte order
+    /// AND numeric encoding, including rounding and `.satfinite` out-of-
+    /// range saturation, on real sm_89 hardware before this function was
+    /// written: project scratchpad's validate_fp8_quantize.py), and stores
+    /// the packed `.b16` to `[saddr_base+smem_byte_off]`.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_quantize_pair(
+        &mut self,
+        gaddr_base: &str,
+        gmem_byte_off: u32,
+        p_ok0: &str,
+        p_ok1: &str,
+        inv_scale: &str,
+        saddr_base: &str,
+        smem_byte_off: u32,
+    ) {
+        let f0 = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", f0).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} ld.global.f32 {}, [{}+{}];", p_ok0, f0, gaddr_base, gmem_byte_off).unwrap();
+        let f1 = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", f1).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} ld.global.f32 {}, [{}+{}];", p_ok1, f1, gaddr_base, gmem_byte_off + 4).unwrap();
+
+        let q0 = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", q0, f0, inv_scale).unwrap();
+        let q1 = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", q1, f1, inv_scale).unwrap();
+
+        let packed = self.alloc_reg16();
+        writeln!(&mut self.ptx_buffer, "    cvt.rn.satfinite.e4m3x2.f32 {}, {}, {};", packed, q1, q0).unwrap();
+        writeln!(&mut self.ptx_buffer, "    st.shared.b16 [{}+{}], {};", saddr_base, smem_byte_off, packed).unwrap();
+    }
+
+    /// Quantizes 4 already-loaded f32 values `f[0..4]` (element `i` -> byte
+    /// `i` of the result, low-to-high) into one packed `.b32` register via
+    /// 2x `cvt.rn.satfinite.e4m3x2.f32` + `cvt.u32.u16` zero-extend +
+    /// `shl`/`or` - the vectorized-store counterpart to
+    /// `emit_fp8_quantize_pair` (which stores 2 bytes at a time via
+    /// `st.shared.b16`; this emits one value suitable for a single
+    /// `st.shared.b32`/`st.global.u32`, halving store-instruction count on
+    /// top of the load-side savings from `ld.global.v4.f32`). Standalone-
+    /// validated bit-for-bit against `torch.float8_e4m3fn` on real sm_89
+    /// hardware, including the byte-order/packing convention, before this
+    /// was wired into the emitter (project scratchpad's
+    /// validate_fp8_vectorized_stage.py, `quant_a_vec`/`quant_b_vec`'s FAST
+    /// path).
+    fn emit_fp8_pack_quad(&mut self, f: &[String], inv_scale: &str) -> String {
+        debug_assert_eq!(f.len(), 4, "emit_fp8_pack_quad packs exactly 4 f32 values into one .b32");
+        let q: Vec<String> = f
+            .iter()
+            .map(|r| {
+                let q = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", q, r, inv_scale).unwrap();
+                q
+            })
+            .collect();
+        let packed_lo = self.alloc_reg16();
+        writeln!(&mut self.ptx_buffer, "    cvt.rn.satfinite.e4m3x2.f32 {}, {}, {};", packed_lo, q[1], q[0]).unwrap();
+        let packed_hi = self.alloc_reg16();
+        writeln!(&mut self.ptx_buffer, "    cvt.rn.satfinite.e4m3x2.f32 {}, {}, {};", packed_hi, q[3], q[2]).unwrap();
+        let lo32 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    cvt.u32.u16 {}, {};", lo32, packed_lo).unwrap();
+        let hi32 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    cvt.u32.u16 {}, {};", hi32, packed_hi).unwrap();
+        let hi_shifted = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 16;", hi_shifted, hi32).unwrap();
+        let combined = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    or.b32 {}, {}, {};", combined, lo32, hi_shifted).unwrap();
+        combined
+    }
+
+    /// Quantize+stages this CTA's `cta_m x FP8_GEMM_CTA_K` F32
+    /// A-tile (source: `a_g[cta_row0+local_row][k0+local_col]`, row-major/
+    /// K-contiguous, matching global A's natural layout) into `smem_a` as
+    /// packed e4m3 bytes (row-major, `FP8_GEMM_CTA_K` B/row, no padding).
+    /// `threads_per_cta`-wide cooperative RUNTIME loop (mirroring
+    /// `emit_gemm_tile_load`'s thread-striding pattern: `idx = %tid.x`,
+    /// `+= threads_per_cta` each iteration).
+    ///
+    /// **Vectorized (session 5)**: each thread/iteration now processes a
+    /// 4-element (128-bit) quad via one `ld.global.v4.f32` + one
+    /// `st.shared.b32` (via `emit_fp8_pack_quad`) instead of the original
+    /// 2-element/iteration scalar `ld.global.f32` pair - a 4x reduction in
+    /// load-instruction count and 2x in store-instruction count, raised as
+    /// a concrete hypothesis by session 4's inconclusive pipelining result
+    /// (see `investigation_fp8_gemm_findings.md`'s "Session 4" section:
+    /// "the quantize+stage step's cost is dominated by its sheer scalar
+    /// instruction count... rather than by raw memory latency"). This is
+    /// unconditionally safe for A: K-side (columns) is always in-bounds
+    /// (caller `debug_assert`s `K % FP8_GEMM_CTA_K == 0`), so all 4
+    /// elements of a quad always share the same row and therefore the same
+    /// M-boundary validity - one predicate per quad, same masking
+    /// granularity the original per-pair version already used, just wider.
+    /// Standalone-validated on real sm_89 hardware before this was wired in
+    /// (project scratchpad's validate_fp8_vectorized_stage.py,
+    /// `quant_a_vec`, including ragged row-bound cases).
+    ///
+    /// `extra_valid_pred`, when `Some`, is AND-ed into the per-quad
+    /// validity predicate - used by the software-pipelined K-loop (see
+    /// `emit_fp8_gemm_kernel`'s doc comment) to additionally suppress this
+    /// prefetch when the K-tile being staged doesn't exist yet
+    /// (`next_k_iter >= k_tiles`, only reachable on the loop's last
+    /// iteration).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_quantize_stage_a(
+        &mut self,
+        a_g: &str,
+        cta_row0: &str,
+        k0: &str,
+        m: u32,
+        k: u32,
+        smem_a: &str,
+        inv_scale_a: &str,
+        threads_per_cta: u32,
+        cta_m: u32,
+        extra_valid_pred: Option<&str>,
+    ) {
+        debug_assert_eq!(FP8_GEMM_CTA_K % 4, 0, "vectorized A stage requires FP8_GEMM_CTA_K a multiple of 4");
+        let total_quads = (cta_m * FP8_GEMM_CTA_K) / 4;
+        let quads_per_row = FP8_GEMM_CTA_K / 4;
+
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+        let loop_start = self.alloc_label("FP8_STAGE_A");
+        let loop_end = self.alloc_label("FP8_STAGE_A_DONE");
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_quads).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
+
+        let local_row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", local_row, idx, quads_per_row).unwrap();
+        let quad_in_row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", quad_in_row, idx, quads_per_row).unwrap();
+        let col_start = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", col_start, quad_in_row).unwrap();
+
+        let grow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, cta_row0, local_row).unwrap();
+        let mut p_ok = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_ok, grow, m).unwrap();
+        if let Some(extra) = extra_valid_pred {
+            let combined = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", combined, p_ok, extra).unwrap();
+            p_ok = combined;
+        }
+
+        let gcol = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", gcol, k0, col_start).unwrap();
+        let g_lin = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", g_lin, grow, k, gcol).unwrap();
+        let g_byte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", g_byte, g_lin).unwrap();
+        let gaddr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr, a_g, g_byte).unwrap();
+
+        let f: Vec<String> = (0..4).map(|_| self.alloc_regf32()).collect();
+        for r in &f {
+            writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", r).unwrap();
+        }
+        writeln!(&mut self.ptx_buffer, "    @{} ld.global.v4.f32 {{{}}}, [{}];", p_ok, f.join(","), gaddr).unwrap();
+
+        let combined = self.emit_fp8_pack_quad(&f, inv_scale_a);
+
+        let s_lin = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", s_lin, local_row, FP8_GEMM_CTA_K, col_start).unwrap();
+        let saddr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_a, s_lin).unwrap();
+        writeln!(&mut self.ptx_buffer, "    st.shared.b32 [{}], {};", saddr, combined).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// Quantize+stages this CTA's `FP8_GEMM_CTA_K x cta_n` F32
+    /// B-tile (source: `b_g[k0+local_row][cta_col0+local_col]`, row-major/
+    /// N-contiguous, matching global B's natural layout) into `smem_b` as
+    /// packed e4m3 bytes (row-major, `cta_n` B/row, no padding).
+    /// Same `threads_per_cta`-wide cooperative runtime-loop generalization
+    /// as `emit_fp8_quantize_stage_a` - see that function's doc comment.
+    ///
+    /// **Vectorized, hybrid fast/slow path (session 5)**: unlike A, the
+    /// N-side (columns) needs PER-ELEMENT boundary masking (N need not be
+    /// a multiple of anything in particular, and a 4-element quad's
+    /// columns can straddle the boundary) - a single `@p
+    /// ld.global.v4.f32` cannot express "3 of 4 lanes valid" the way the
+    /// original per-element-predicated scalar loads could, so
+    /// unconditionally vectorizing (as A safely does) would silently zero
+    /// genuinely in-bounds tail columns whenever `N` isn't a multiple of 4.
+    /// Instead, each quad iteration branches at runtime:
+    /// - **FAST** (`col_start+3 < n`, the common case - true for every
+    ///   quad except possibly the last one or two per CTA-row, only in
+    ///   CTAs whose tile straddles N): the whole quad is guaranteed
+    ///   in-bounds, so it takes the same unconditional `ld.global.v4.f32` +
+    ///   `emit_fp8_pack_quad` + single `st.shared.b32` path as A.
+    /// - **SLOW** (quad straddles the N boundary): falls back to the
+    ///   original per-element-predicated scalar path - two
+    ///   `emit_fp8_quantize_pair` calls, preserving the exact per-element
+    ///   masking granularity the ragged-shape tests (down to 17x9, 33x17)
+    ///   already depend on.
+    ///
+    /// Standalone-validated on real sm_89 hardware before this was wired
+    /// in (project scratchpad's validate_fp8_vectorized_stage.py,
+    /// `quant_b_vec`) across exact-fit, every mid-quad boundary offset
+    /// (n_bound mod 4 = 0/1/2/3), and extreme (n_bound=0, n_bound=1)
+    /// cases.
+    ///
+    /// `extra_valid_pred` - see `emit_fp8_quantize_stage_a`'s doc comment;
+    /// AND-ed into the FAST path's combined predicate and into both of the
+    /// SLOW path's per-element predicates.
+    ///
+    /// **Alignment precondition, found the hard way**: `ld.global.v4.f32`
+    /// requires its address 16-byte aligned. B's row byte-stride is `n*4`
+    /// (real N, arbitrary - unlike A, whose row-stride `k*4` is always a
+    /// multiple of 16 since `K % FP8_GEMM_CTA_K(64) == 0` is already
+    /// required). When `n % 4 != 0`, `(grow*n + col0)*4` is NOT a multiple
+    /// of 16 for most `grow` (K-row) values, even though `col0` itself is
+    /// always a multiple of 4 - a real `CUDA_ERROR_MISALIGNED_ADDRESS`
+    /// crash, caught by this project's own ragged-shape real-hardware
+    /// testing discipline at M=33,N=17,K=64 before this ever reached a
+    /// released kernel (17 % 4 == 1). Since `n` is a compile-time constant
+    /// here (the kernel's `@tile` N, not a runtime value), this is
+    /// resolved at Rust codegen time: `emit_fp8_quantize_stage_b` (the
+    /// public entry point below) only calls this vectorized path when
+    /// `n % 4 == 0`; otherwise it falls back to
+    /// `emit_fp8_quantize_stage_b_scalar`, the original pair-at-a-time
+    /// scalar design (4-byte `ld.global.f32` never has an alignment
+    /// concern). Standalone-reconfirmed for both the failing (misaligned)
+    /// and fixed (gated) cases on real sm_89 hardware.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_quantize_stage_b_vectorized(
+        &mut self,
+        b_g: &str,
+        k0: &str,
+        cta_col0: &str,
+        k: u32,
+        n: u32,
+        smem_b: &str,
+        inv_scale_b: &str,
+        threads_per_cta: u32,
+        cta_n: u32,
+        extra_valid_pred: Option<&str>,
+    ) {
+        debug_assert_eq!(
+            k % FP8_GEMM_CTA_K,
+            0,
+            "emit_fp8_quantize_stage_b assumes the caller already validated K % FP8_GEMM_CTA_K == 0 (B's row/K-side is never bounds-checked below)"
+        );
+        debug_assert_eq!(cta_n % 4, 0, "vectorized B stage requires cta_n a multiple of 4");
+        debug_assert_eq!(n % 4, 0, "emit_fp8_quantize_stage_b_vectorized requires n % 4 == 0 for ld.global.v4.f32 alignment - caller must dispatch to the scalar fallback otherwise");
+        let total_quads = (FP8_GEMM_CTA_K * cta_n) / 4;
+        let quads_per_row = cta_n / 4;
+
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+        let loop_start = self.alloc_label("FP8_STAGE_B");
+        let loop_end = self.alloc_label("FP8_STAGE_B_DONE");
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_quads).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
+
+        let local_row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", local_row, idx, quads_per_row).unwrap();
+        let quad_in_row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", quad_in_row, idx, quads_per_row).unwrap();
+        let col_start = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", col_start, quad_in_row).unwrap();
+
+        let grow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, k0, local_row).unwrap();
+
+        let col0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col0, cta_col0, col_start).unwrap();
+        let col_last = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 3;", col_last, col0).unwrap();
+        let mut p_fast = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_fast, col_last, n).unwrap();
+        if let Some(extra) = extra_valid_pred {
+            let combined = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", combined, p_fast, extra).unwrap();
+            p_fast = combined;
+        }
+
+        let slow_label = self.alloc_label("FP8_STAGE_B_SLOW");
+        let join_label = self.alloc_label("FP8_STAGE_B_JOIN");
+        writeln!(&mut self.ptx_buffer, "    @!{} bra {};", p_fast, slow_label).unwrap();
+
+        // ---- FAST: whole quad guaranteed in-bounds (p_fast true on this
+        // fall-through path) ----
+        let g_lin = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", g_lin, grow, n, col0).unwrap();
+        let g_byte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", g_byte, g_lin).unwrap();
+        let gaddr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr, b_g, g_byte).unwrap();
+
+        let f: Vec<String> = (0..4).map(|_| self.alloc_regf32()).collect();
+        writeln!(&mut self.ptx_buffer, "    ld.global.v4.f32 {{{}}}, [{}];", f.join(","), gaddr).unwrap();
+        let combined_word = self.emit_fp8_pack_quad(&f, inv_scale_b);
+
+        let s_lin = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", s_lin, local_row, cta_n, col_start).unwrap();
+        let saddr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_b, s_lin).unwrap();
+        writeln!(&mut self.ptx_buffer, "    st.shared.b32 [{}], {};", saddr, combined_word).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", join_label).unwrap();
+
+        // ---- SLOW: quad straddles the N boundary - original per-element-
+        // predicated scalar path, recomputed independently of the FAST
+        // path's (conditionally-assigned) registers above ----
+        writeln!(&mut self.ptx_buffer, "    {}:", slow_label).unwrap();
+
+        let mut p_ok0 = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_ok0, col0, n).unwrap();
+        let col1 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", col1, col0).unwrap();
+        let mut p_ok1 = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_ok1, col1, n).unwrap();
+        let col2 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 2;", col2, col0).unwrap();
+        let mut p_ok2 = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_ok2, col2, n).unwrap();
+        let col3 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 3;", col3, col0).unwrap();
+        let mut p_ok3 = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_ok3, col3, n).unwrap();
+        if let Some(extra) = extra_valid_pred {
+            for p in [&mut p_ok0, &mut p_ok1, &mut p_ok2, &mut p_ok3] {
+                let c = self.alloc_pred();
+                writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", c, p, extra).unwrap();
+                *p = c;
+            }
+        }
+
+        let g_lin_slow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", g_lin_slow, grow, n, col0).unwrap();
+        let g_byte_slow = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", g_byte_slow, g_lin_slow).unwrap();
+        let gaddr_slow = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr_slow, b_g, g_byte_slow).unwrap();
+
+        let s_lin_slow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", s_lin_slow, local_row, cta_n, col_start).unwrap();
+        let saddr_slow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr_slow, smem_b, s_lin_slow).unwrap();
+
+        self.emit_fp8_quantize_pair(&gaddr_slow, 0, &p_ok0, &p_ok1, inv_scale_b, &saddr_slow, 0);
+        self.emit_fp8_quantize_pair(&gaddr_slow, 8, &p_ok2, &p_ok3, inv_scale_b, &saddr_slow, 2);
+
+        writeln!(&mut self.ptx_buffer, "    {}:", join_label).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// Original (pre-session-5) pair-at-a-time scalar B quantize+stage -
+    /// kept as the fallback for `n % 4 != 0` (see
+    /// `emit_fp8_quantize_stage_b_vectorized`'s doc comment: `ld.global.f32`
+    /// is always 4-byte-aligned regardless of N's residue mod 4, unlike the
+    /// vectorized path's `ld.global.v4.f32`, so this is unconditionally
+    /// alignment-safe at the cost of not getting the vectorization win for
+    /// this dimension).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_quantize_stage_b_scalar(
+        &mut self,
+        b_g: &str,
+        k0: &str,
+        cta_col0: &str,
+        k: u32,
+        n: u32,
+        smem_b: &str,
+        inv_scale_b: &str,
+        threads_per_cta: u32,
+        cta_n: u32,
+        extra_valid_pred: Option<&str>,
+    ) {
+        debug_assert_eq!(
+            k % FP8_GEMM_CTA_K,
+            0,
+            "emit_fp8_quantize_stage_b_scalar assumes the caller already validated K % FP8_GEMM_CTA_K == 0 (B's row/K-side is never bounds-checked below)"
+        );
+        let total_pairs = (FP8_GEMM_CTA_K * cta_n) / 2;
+        let pairs_per_row = cta_n / 2;
+
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+        let loop_start = self.alloc_label("FP8_STAGE_B");
+        let loop_end = self.alloc_label("FP8_STAGE_B_DONE");
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_pairs).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
+
+        let local_row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", local_row, idx, pairs_per_row).unwrap();
+        let pair_in_row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", pair_in_row, idx, pairs_per_row).unwrap();
+        let col_start = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 2;", col_start, pair_in_row).unwrap();
+
+        let grow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, k0, local_row).unwrap();
+
+        let col0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col0, cta_col0, col_start).unwrap();
+        let mut p_ok0 = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_ok0, col0, n).unwrap();
+        let col1 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", col1, col0).unwrap();
+        let mut p_ok1 = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_ok1, col1, n).unwrap();
+        if let Some(extra) = extra_valid_pred {
+            let c0 = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", c0, p_ok0, extra).unwrap();
+            p_ok0 = c0;
+            let c1 = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", c1, p_ok1, extra).unwrap();
+            p_ok1 = c1;
+        }
+
+        let g_lin = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", g_lin, grow, n, col0).unwrap();
+        let g_byte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", g_byte, g_lin).unwrap();
+        let gaddr_base = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr_base, b_g, g_byte).unwrap();
+
+        let s_lin = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", s_lin, local_row, cta_n, col_start).unwrap();
+        let saddr_base = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr_base, smem_b, s_lin).unwrap();
+
+        self.emit_fp8_quantize_pair(&gaddr_base, 0, &p_ok0, &p_ok1, inv_scale_b, &saddr_base, 0);
+
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// Dispatches to the vectorized (`ld.global.v4.f32`) or scalar B
+    /// quantize+stage based on whether `n % 4 == 0` - see
+    /// `emit_fp8_quantize_stage_b_vectorized`'s doc comment for why this
+    /// gate exists (16-byte alignment of B's row stride).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_quantize_stage_b(
+        &mut self,
+        b_g: &str,
+        k0: &str,
+        cta_col0: &str,
+        k: u32,
+        n: u32,
+        smem_b: &str,
+        inv_scale_b: &str,
+        threads_per_cta: u32,
+        cta_n: u32,
+        extra_valid_pred: Option<&str>,
+    ) {
+        if n % 4 == 0 {
+            self.emit_fp8_quantize_stage_b_vectorized(b_g, k0, cta_col0, k, n, smem_b, inv_scale_b, threads_per_cta, cta_n, extra_valid_pred);
+        } else {
+            self.emit_fp8_quantize_stage_b_scalar(b_g, k0, cta_col0, k, n, smem_b, inv_scale_b, threads_per_cta, cta_n, extra_valid_pred);
+        }
+    }
+
+    /// FP8 analogue of `emit_gemm_compute_block` - see that function's doc
+    /// comment for the general "B-fragments-per-j computed once and reused
+    /// across every i, A-fragment-per-i computed once and reused across
+    /// every j" structure this mirrors (NOT copy-pasted: FP8's
+    /// `mma.sync.m16n8k32` already consumes a full 2-register B fragment
+    /// and 4-register A fragment in ONE call per `(i, j)` - unlike F16's
+    /// `mma.sync.m16n8k16`, there is no further N-half split here, since
+    /// this mma's own N=8 already matches the per-`j` granularity
+    /// exactly). Standalone-validated on real sm_89 hardware (project
+    /// scratchpad's validate_fp8_multiwarp.py) before this function was
+    /// written - see `emit_fp8_gemm_kernel`'s doc comment.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_gemm_compute_block(
+        &mut self,
+        acc: &[Vec<Vec<String>>],
+        smem_a: &str,
+        smem_b: &str,
+        group_id: &str,
+        tig: &str,
+        warp_row0_local: &str,
+        warp_col0_local: &str,
+        num_i: u32,
+        num_j: u32,
+        k_substeps: u32,
+        cta_n: u32,
+    ) {
+        for ks in 0..k_substeps {
+            let kk = ks * 32;
+
+            // B fragments per j, reused across every i below (same
+            // reuse-across-i optimization emit_gemm_compute_block uses for
+            // the F16 kernel's B fragments).
+            let mut b_frags: Vec<Vec<String>> = Vec::with_capacity(num_j as usize);
+            for j in 0..num_j {
+                b_frags.push(self.emit_fp8_load_b_fragment(smem_b, group_id, tig, warp_col0_local, j, kk, cta_n));
+            }
+
+            // A fragment per i, reused across every j below.
+            for i in 0..num_i {
+                let a_frag = self.emit_fp8_load_a_fragment(smem_a, group_id, tig, warp_row0_local, i, kk);
+                for j in 0..num_j {
+                    let d = acc[i as usize][j as usize].join(",");
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {{{}}}, {{{}}}, {{{}}}, {{{}}};",
+                        d, a_frag.join(","), b_frags[j as usize].join(","), d
+                    ).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Emits a complete, self-contained FP8 (e4m3) Tensor Core GEMM kernel
+    /// body for a kernel carrying a validated 5-param `@tile(M, N, K)` FP8
+    /// shape - see `tile_gemm_fp8_operands`. A, B arrive as F32 in global
+    /// memory and are quantized to e4m3 on the fly (fused - no separate
+    /// quantize kernel or pass; `quantization_pass.rs`'s own FP8 path
+    /// (`emit_fp32_to_fp8`) was checked and found unusable for this - it
+    /// never actually converts anything, just zeros a placeholder register
+    /// with a `// placeholder for cvt.rn.satfinite.e4m3x4` comment, and is
+    /// structurally coupled to the RT/Tensor coprocessor's
+    /// `coprocessor_smem` symbol, which
+    /// `investigation_rt_tensor_coprocessor_findings.md` already found never
+    /// produces valid PTX) via `cvt.rn.satfinite.e4m3x2.f32` while staging
+    /// into shared memory - that instruction is standalone-validated bit-
+    /// for-bit against `torch.float8_e4m3fn`'s own encoding, including
+    /// round-to-nearest and `.satfinite` out-of-range saturation, on real
+    /// sm_89 hardware (project scratchpad's validate_fp8_quantize.py). The
+    /// mma itself is `mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32` -
+    /// Ada/sm_89-compatible (unlike the Hopper-only WGMMA path this
+    /// project's other FP8 code was stuck on - see
+    /// investigation_fp8_int8_quantization_findings.md), requiring PTX ISA
+    /// >=8.4 on this target (see `ptx_version_for_sm`'s `sm_89` arm). Its
+    /// per-lane A/B/D fragment layout was derived from PTX ISA 8.5
+    /// 9.7.13.4.10 (A/B - the `.s8`/`.u8`/`.e4m3`/`.e5m2` bullets share one
+    /// formula) and 9.7.13.4.9 (D/C, reused verbatim - accumulator shape
+    /// only depends on M=16/N=8, not K) and standalone-validated on real
+    /// sm_89 hardware against both the ISA's own formula and an exact-
+    /// integer CPU reference (project scratchpad's validate_fp8_mma.py).
+    ///
+    /// **Multi-warp CTA tiling** (session 2 - see
+    /// `investigation_fp8_gemm_findings.md`'s "next session" list, item 1):
+    /// the original first pass used exactly one `mma` instruction's shape
+    /// (M=16, N=8, K=32) with a single warp (32 threads) per CTA - at
+    /// 4096x4096x4096 that was a grid of 131,072 CTAs, each running only 32
+    /// threads through 128 sequential K-iterations with zero intra-CTA
+    /// parallelism. This version tiles `cta_m x cta_n x FP8_GEMM_CTA_K`
+    /// per CTA across `warps_m x warps_n` warps, each warp computing a
+    /// `per_warp_m x per_warp_n` output tile via `num_i x num_j`
+    /// `mma.sync.m16n8k32` calls per K-substep. Structural template:
+    /// `emit_tensor_core_gemm_kernel`/`emit_gemm_compute_block` (the F16
+    /// kernel's OWN multi-warp tiling - see
+    /// benchmark_y_tensor_core_gemm_results.md), NOT copy-pasted (FP8's
+    /// `mma.sync.m16n8k32` has a different fragment shape/register count
+    /// than F16's `wmma`/`ldmatrix` path, and there is no `ldmatrix` 8-bit
+    /// variant at all - fragments are still hand-computed `ld.shared`, as
+    /// in the original single-warp kernel). The multi-warp address
+    /// composition (per-warp CTA-local tile origin, `lane = %tid.x & 31`
+    /// now that a CTA is more than one warp, and the generalized
+    /// cooperative quantize+stage step) was standalone-validated on real
+    /// sm_89 hardware BEFORE this function was written (project
+    /// scratchpad's validate_fp8_multiwarp.py) against an exact-integer CPU
+    /// reference across single-CTA, multi-CTA, multi-K-tile, and ragged M/N
+    /// shapes, and separately checked for the new risk multi-warp tiling
+    /// introduces - cross-warp shared-memory races if `bar.sync` placement
+    /// isn't right (multiple warps now share one smem_a/smem_b pair per
+    /// CTA, unlike the original's one warp racing only itself) - via 30
+    /// repeated launches with fixed input, confirmed bit-for-bit identical
+    /// (validate_fp8_multiwarp_race.py). This session's kernel was
+    /// single-buffered (stage -> `bar.sync` -> compute -> `bar.sync`,
+    /// 2 barriers/K-iteration) - see session 4 below for how that changed.
+    ///
+    /// **Two-tier tile selection** (session 3 - see
+    /// `investigation_fp8_gemm_findings.md`'s "Session 3" section): session
+    /// 2's single fixed 128x128x64/4x2-warp shape (`FP8_GEMM_CTA_M_LARGE`
+    /// etc.) measured a real regression at M=N=256 on real hardware
+    /// (0.374x -> ~0.11x of `torch._scaled_mm`) - a 128x128 CTA tile only
+    /// produces a 2x2=4-CTA grid at that size, leaving most SMs idle. This
+    /// session picks between `FP8_GEMM_CTA_M_LARGE`/`_N_LARGE`/
+    /// `_WARPS_M_LARGE`/`_WARPS_N_LARGE` and the smaller
+    /// `..._SMALL` variants (64x64x64, 2x2 warps) at emit time, purely from
+    /// the kernel's compile-time `M`/`N` (`m <= FP8_GEMM_SMALL_THRESHOLD ||
+    /// n <= FP8_GEMM_SMALL_THRESHOLD`, mirroring
+    /// `Autotuner::generate_candidates`'s own F16 small-shape threshold) -
+    /// see `FP8_GEMM_CTA_M_LARGE`'s doc comment for the two shapes' full
+    /// rationale and real hardware confirmation (`ptxas -v` register/smem
+    /// counts, standalone validate_fp8_smalltile.py). This is deliberately
+    /// a two-shape heuristic, not real Autotuner integration - see below.
+    ///
+    /// **Software double-buffered pipelining** (session 4 - see
+    /// `investigation_fp8_gemm_findings.md`'s "Session 4" section): real
+    /// `cp.async` - the mechanism `emit_gemm_tile_load_async` uses for the
+    /// F16 kernel's OWN pipelining - copies raw bytes global->shared with
+    /// NO type conversion, so it cannot perform this kernel's
+    /// `cvt.rn.satfinite.e4m3x2.f32` F32->e4m3 staging conversion; staging
+    /// RAW (unconverted) F32 instead would need 4x the shared-memory bytes
+    /// (e4m3 is 1 byte/elem, f32 is 4), which measured out to ~147KB for
+    /// the `_LARGE` tier - over this GPU's real ~100KB per-CTA dynamic-
+    /// shared ceiling (see `emit_tensor_core_gemm_kernel`'s doc comment for
+    /// where that number comes from). So this session pipelines with
+    /// ordinary SYNCHRONOUS `ld.global.f32`/`cvt`/`st.shared` instructions
+    /// instead of `cp.async`, issued earlier in program order relative to
+    /// when their result is needed: a double-buffered (2x the previous
+    /// smem footprint - still static, still under 48KB for both tiers) K-
+    /// loop with a prologue that unconditionally stages K-tile 0, then each
+    /// steady-state iteration issues the (predicated) prefetch of the NEXT
+    /// K-tile into the OTHER buffer BEFORE consuming the current
+    /// (already-staged) buffer - cutting `bar.sync` from 2/iteration down
+    /// to 1 (a thread's own later reads always see its own earlier writes
+    /// without a barrier; only cross-thread visibility needs one, and a
+    /// single barrier placed after both the prefetch-write and the
+    /// compute-read suffices for both directions of that visibility - see
+    /// `emit_fp8_quantize_stage_a`'s doc comment for the prefetch-
+    /// suppression predicate this needs on the loop's last iteration).
+    /// Standalone-validated on real sm_89 hardware BEFORE this was written
+    /// (project scratchpad's validate_fp8_pipeline.py): exact-integer
+    /// correctness across K depths from 1 K-tile (prologue-only - the
+    /// steady-state loop's single iteration must fully predicate off its
+    /// own prefetch) to 8, plus 30 repeated launches at the deepest depth
+    /// tested, confirming the reduced-to-1 `bar.sync`/iteration design
+    /// doesn't reopen a cross-warp race.
+    ///
+    /// **Vectorized quantize+stage, extended tile threshold, rejected
+    /// swizzle/tier attempts (session 5 - see
+    /// `investigation_fp8_gemm_findings.md`'s "Session 5" section)**: acted
+    /// on session 4's own top-priority next step ("vectorizing the
+    /// quantize+stage step... is now a concrete, testable hypothesis").
+    /// `emit_fp8_quantize_stage_a`/`_b` now move 4 elements (128 bits) per
+    /// thread/iteration via `ld.global.v4.f32` + `emit_fp8_pack_quad`
+    /// (2x `cvt.rn.satfinite.e4m3x2.f32` + one `st.shared.b32`) instead of
+    /// the original 2-element/iteration scalar pair - a real, large win at
+    /// 1024+ (see that section's benchmark table). B needs a hybrid fast/
+    /// slow path (`emit_fp8_quantize_stage_b_vectorized`/`_scalar`) since
+    /// N's boundary can fall inside a 4-element quad and - a real bug
+    /// caught by this project's own ragged-shape testing discipline before
+    /// release - B's row byte-stride isn't always a multiple of 16, so
+    /// `ld.global.v4.f32` isn't always alignment-safe; gated on `n % 4 ==
+    /// 0` at Rust codegen time (`n` is a compile-time `@tile` value).
+    /// `FP8_GEMM_SMALL_THRESHOLD` was also raised 256 -> 512 after a real
+    /// hardware A/B showed `_SMALL` beating `_LARGE` at M=N=512 by ~1.4x.
+    /// Two other hypotheses were built, standalone-benchmarked on real
+    /// hardware, and REJECTED as genuine negative results (not silently
+    /// dropped) - see `FP8_GEMM_CTA_M_LARGE`'s doc comment for a `_TINY`
+    /// (32x32/1-warp) tier that consistently lost to `_SMALL` despite
+    /// higher CTA counts, and `emit_fp8_load_a_one`'s neighborhood (git
+    /// history) for an XOR smem swizzle that mathematically eliminated a
+    /// real, confirmed 4-way bank conflict in A's fragment load but cost
+    /// enough extra registers (81->94 at `_SMALL`, 117->144 at `_LARGE`)
+    /// to regress 4096x4096x4096 from 0.219x to 0.120x via lost occupancy
+    /// - reverted rather than shipped.
+    ///
+    /// Deliberate, disclosed scope choices remaining after this pass (see
+    /// benchmark_y_tensor_core_gemm_results.md for how the f16 GEMM
+    /// kernel's OWN history went from correctness-first to optimized over
+    /// multiple sessions - multi-warp tiling, tile selection, and
+    /// pipelining are more steps along that arc for FP8, not a finished
+    /// optimization target):
+    /// - No grid swizzle, no REAL Autotuner integration (`generate_candidates`
+    ///   accepts but ignores `Precision::Fp8`, see that enum's doc comment) -
+    ///   this function's own `m <= FP8_GEMM_SMALL_THRESHOLD` branch is a
+    ///   disclosed, narrower stand-in: two fixed shapes and one threshold,
+    ///   not a real per-problem-size search over the full candidate space
+    ///   the F16 path gets.
+    /// - K must be an exact multiple of `FP8_GEMM_CTA_K` (64, shared by both
+    ///   tiers) (`debug_assert` - matches the f16 kernel's own "K must be a
+    ///   multiple of cta_k" scope note, narrowed from the original
+    ///   single-warp kernel's "K must be a multiple of 32" now that a full
+    ///   `FP8_GEMM_CTA_K`-wide K-slab is staged per iteration); M and N may
+    ///   be any positive value - both the A/B tile loads (predicated,
+    ///   zero-filled) and the C store (predicated per-element) are
+    ///   boundary-masked for ragged M/N edges, standalone-validated down to
+    ///   shapes smaller than one warp-tile edge (e.g. 17x9) for BOTH tiers.
+    /// - scale_a/scale_b are per-tensor scalars the caller/launcher computes
+    ///   (typically `amax/448.0`, e4m3's max normal magnitude) and passes in
+    ///   as plain F32 kernel params, applied to the f32 accumulator in the
+    ///   epilogue (`C = scale_a * scale_b * (A_e4m3 @ B_e4m3)`) - not
+    ///   computed on-device (would need a separate reduction pass, out of
+    ///   scope here).
+    /// - Static (not dynamic/`extern`) `.shared` arrays: the DOUBLE-
+    ///   buffered combined A+B tile footprint (32768 bytes for `_LARGE`,
+    ///   16384 for `_SMALL` - e4m3 is 1 byte/element, doubled again for the
+    ///   2-stage pipeline above) stays well under ptxas's 48KB static-
+    ///   shared cap for both tiers, so the simpler static form still
+    ///   suffices (unlike the F16 kernel's much larger, autotuned,
+    ///   `cp.async`-pipelined tiles, which need the dynamic/`extern`
+    ///   mechanism - see `pending_extern_decls`'s doc comment).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fp8_gemm_kernel(
+        &mut self,
+        m: u32,
+        n: u32,
+        k: u32,
+        a_ptr: &str,
+        b_ptr: &str,
+        scale_a_reg: &str,
+        scale_b_reg: &str,
+        c_ptr: &str,
+        kernel_name: &str,
+    ) -> u32 {
+        // Hard assert, not a `debug_assert!` - this kernel has no K-tail path,
+        // so a non-multiple K silently drops the remainder in release builds.
+        // See `emit_tensor_core_gemm_kernel`'s K-tail note.
+        assert_eq!(
+            k % FP8_GEMM_CTA_K,
+            0,
+            "@tile K={} must be a multiple of FP8_GEMM_CTA_K ({}) for the multi-warp FP8 GEMM \
+             kernel; it has no K-tail path and would silently drop the remainder",
+            k,
+            FP8_GEMM_CTA_K
+        );
+        // ---- two-tier tile selection (see doc comment): a disclosed
+        // stand-in for real Autotuner integration, purely a function of
+        // this kernel's compile-time M/N. ----
+        let is_small = m <= FP8_GEMM_SMALL_THRESHOLD || n <= FP8_GEMM_SMALL_THRESHOLD;
+        let (cta_m, cta_n, warps_m, warps_n) = if is_small {
+            (FP8_GEMM_CTA_M_SMALL, FP8_GEMM_CTA_N_SMALL, FP8_GEMM_WARPS_M_SMALL, FP8_GEMM_WARPS_N_SMALL)
+        } else {
+            (FP8_GEMM_CTA_M_LARGE, FP8_GEMM_CTA_N_LARGE, FP8_GEMM_WARPS_M_LARGE, FP8_GEMM_WARPS_N_LARGE)
+        };
+        let cta_k = FP8_GEMM_CTA_K;
+
+        let k_tiles = k / cta_k;
+        let grid_x = (m + cta_m - 1) / cta_m;
+        let grid_y = (n + cta_n - 1) / cta_n;
+        let num_warps = warps_m * warps_n;
+        let threads_per_cta = num_warps * 32;
+        let per_warp_m = cta_m / warps_m;
+        let per_warp_n = cta_n / warps_n;
+        let num_i = per_warp_m / 16;
+        let num_j = per_warp_n / 8;
+        let k_substeps = cta_k / 32;
+        debug_assert_eq!(num_i * 16 * warps_m, cta_m);
+        debug_assert_eq!(num_j * 8 * warps_n, cta_n);
+        debug_assert_eq!(k_substeps * 32, cta_k);
+
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    // [Y FP8 TENSOR CORE GEMM] M={} N={} K={} | CTA {}x{}x{} ({}) | {}x{} warps | mma.sync.m16n8k32.row.col.f32.e4m3.e4m3.f32",
+            m, n, k, cta_m, cta_n, cta_k, if is_small { "small" } else { "large" }, warps_m, warps_n
+        ).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Fused on-the-fly FP32->e4m3 quantization (cvt.rn.satfinite.e4m3x2.f32); epilogue dequants by scale_a*scale_b.").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // Launch grid required: ({}, {}, 1) CTAs, block ({},1,1).", grid_x, grid_y, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        // ---- double-buffered (2-stage) shared memory for the software-
+        // pipelined K-loop below (see that section's doc comment): one
+        // extra factor of 2 on top of the single-buffered byte count,
+        // still static (not dynamic/`extern`) since even doubled this
+        // stays well under ptxas's 48KB cap for both tiers (32768 bytes
+        // for LARGE, 16384 for SMALL).
+        let smem_a_sym = format!("smem_fp8_A_{}", kernel_name);
+        let smem_b_sym = format!("smem_fp8_B_{}", kernel_name);
+        let stage_a_bytes = cta_m * cta_k;
+        let stage_b_bytes = cta_k * cta_n;
+        writeln!(&mut self.ptx_buffer, "    .shared .align 4 .b8 {}[{}];", smem_a_sym, 2 * stage_a_bytes).unwrap();
+        writeln!(&mut self.ptx_buffer, "    .shared .align 4 .b8 {}[{}];", smem_b_sym, 2 * stage_b_bytes).unwrap();
+
+        let a_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", a_g, a_ptr).unwrap();
+        let b_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", b_g, b_ptr).unwrap();
+        let c_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", c_g, c_ptr).unwrap();
+
+        let smem_a = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", smem_a, smem_a_sym).unwrap();
+        let smem_b = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", smem_b, smem_b_sym).unwrap();
+
+        // ---- CTA tile origin (plain raster order - no grid swizzle yet,
+        // see doc comment) ----
+        let ctaid_x = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", ctaid_x).unwrap();
+        let ctaid_y = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.y;", ctaid_y).unwrap();
+        let cta_row0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", cta_row0, ctaid_x, cta_m).unwrap();
+        let cta_col0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", cta_col0, ctaid_y, cta_n).unwrap();
+
+        // ---- warp/lane decomposition - lane MUST be tid.x & 31, not
+        // tid.x directly, now that a CTA is warps_m * warps_n warps (128 or
+        // 256 threads depending on tier), not one warp - standalone-
+        // validated on real sm_89 hardware before this function was
+        // written (see doc comment). groupID/threadID_in_group per PTX ISA
+        // 9.7.13.4.10 (unchanged from the single-warp kernel); warp_m/
+        // warp_n/warp_row0_local/warp_col0_local mirror
+        // emit_tensor_core_gemm_kernel's own warp decomposition. ----
+        let tid = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+        let lane = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 31;", lane, tid).unwrap();
+        let group_id = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 2;", group_id, lane).unwrap();
+        let tig = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 3;", tig, lane).unwrap();
+        let warp_id = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp_id, tid).unwrap();
+        let warp_m = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", warp_m, warp_id, warps_m).unwrap();
+        let warp_n = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", warp_n, warp_id, warps_m).unwrap();
+        let warp_row0_local = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_row0_local, warp_m, per_warp_m).unwrap();
+        let warp_col0_local = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_col0_local, warp_n, per_warp_n).unwrap();
+
+        // ---- loop-invariant reciprocals for quantization (scale_a/
+        // scale_b are kernel params, unchanged across the K-loop) ----
+        let inv_scale_a = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    rcp.rn.f32 {}, {};", inv_scale_a, scale_a_reg).unwrap();
+        let inv_scale_b = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    rcp.rn.f32 {}, {};", inv_scale_b, scale_b_reg).unwrap();
+
+        // ---- accumulators acc[i][j]: 4 f32 regs each, allocated ONCE
+        // before the loop - loop-carried registers whose IDENTITY must stay
+        // fixed across every dynamic K iteration (see
+        // feedback_gemm_kernel_validation.md's loop-carried-accumulator
+        // trap: a fresh register per iteration would silently discard all
+        // but the last iteration's contribution) ----
+        let mut acc: Vec<Vec<Vec<String>>> = Vec::with_capacity(num_i as usize);
+        for _ in 0..num_i {
+            let mut row = Vec::with_capacity(num_j as usize);
+            for _ in 0..num_j {
+                let d: Vec<String> = (0..4).map(|_| self.alloc_regf32()).collect();
+                for r in &d {
+                    writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", r).unwrap();
+                }
+                row.push(d);
+            }
+            acc.push(row);
+        }
+
+        // ---- software-pipelined (double-buffered) K-loop. `cp.async` -
+        // the mechanism the F16 kernel uses for ITS pipelining (see
+        // `emit_gemm_tile_load_async`) - copies raw bytes global->shared
+        // with NO type conversion, so it cannot do this kernel's
+        // F32->e4m3 `cvt.rn.satfinite.e4m3x2.f32` staging conversion;
+        // staging raw (unconverted) F32 instead would need 4x the
+        // shared-memory bytes (e4m3 is 1 byte/elem, f32 is 4), which does
+        // not fit this kernel's tile sizes. So this pipelines with
+        // ordinary synchronous `ld.global.f32`/`cvt`/`st.shared`
+        // instructions instead, issued EARLIER in program order relative
+        // to when their result is needed: a PROLOGUE unconditionally
+        // stages K-tile 0 into buffer 0, then each steady-state iteration
+        // issues the (predicated) prefetch of the NEXT K-tile into the
+        // OTHER buffer before consuming the CURRENT (already-staged)
+        // buffer's fragments - cutting `bar.sync` from 2/iteration (the
+        // original single-buffered design) to 1, since a thread's own
+        // later reads always see its own earlier writes without a
+        // barrier (only cross-thread visibility needs one). Standalone-
+        // validated on real sm_89 hardware BEFORE this was written
+        // (project scratchpad's validate_fp8_pipeline.py: exact-integer
+        // correctness across K depths from 1 (prologue-only, prefetch
+        // must be fully predicated off) to 8 K-tiles, plus 30 repeated
+        // launches at K=8 - the deepest/most bar.sync round-trips tested
+        // - confirming this single-bar.sync design doesn't reopen a
+        // cross-warp race).
+        //
+        // Buffer index = k_iter % 2 (read) / (k_iter+1) % 2 (write, i.e.
+        // the OTHER buffer); byte offset into the doubled smem_a/smem_b
+        // arrays is `buf_index * stage_bytes`.
+        let k0_zero = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k0_zero).unwrap();
+        self.emit_fp8_quantize_stage_a(&a_g, &cta_row0, &k0_zero, m, k, &smem_a, &inv_scale_a, threads_per_cta, cta_m, None);
+        self.emit_fp8_quantize_stage_b(&b_g, &k0_zero, &cta_col0, k, n, &smem_b, &inv_scale_b, threads_per_cta, cta_n, None);
+        writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+        let k_iter = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+        let loop_start = self.alloc_label(&format!("FP8_GEMM_K_{}", kernel_name));
+        let loop_end = self.alloc_label(&format!("FP8_GEMM_K_DONE_{}", kernel_name));
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_exit = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_exit, k_iter, k_tiles).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_exit, loop_end).unwrap();
+
+        let read_idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, 2;", read_idx, k_iter).unwrap();
+        let next_k_iter = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", next_k_iter, k_iter).unwrap();
+        let write_idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, 2;", write_idx, next_k_iter).unwrap();
+
+        let read_a_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", read_a_off, read_idx, stage_a_bytes).unwrap();
+        let smem_a_read = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_a_read, smem_a, read_a_off).unwrap();
+        let read_b_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", read_b_off, read_idx, stage_b_bytes).unwrap();
+        let smem_b_read = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_b_read, smem_b, read_b_off).unwrap();
+
+        let write_a_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", write_a_off, write_idx, stage_a_bytes).unwrap();
+        let smem_a_write = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_a_write, smem_a, write_a_off).unwrap();
+        let write_b_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", write_b_off, write_idx, stage_b_bytes).unwrap();
+        let smem_b_write = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_b_write, smem_b, write_b_off).unwrap();
+
+        let p_next_valid = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_next_valid, next_k_iter, k_tiles).unwrap();
+        let next_k0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", next_k0, next_k_iter, cta_k).unwrap();
+
+        // Issue the prefetch for `next_k_iter` (masked off via
+        // `p_next_valid` if it doesn't exist - only possible on the
+        // loop's last iteration), THEN compute on `read_idx` (already
+        // staged, either by the prologue or a previous iteration's
+        // prefetch) - the high-latency global loads above are issued
+        // before the tensor-core work below needs their result, which is
+        // the whole latency-hiding point of this restructuring.
+        self.emit_fp8_quantize_stage_a(&a_g, &cta_row0, &next_k0, m, k, &smem_a_write, &inv_scale_a, threads_per_cta, cta_m, Some(&p_next_valid));
+        self.emit_fp8_quantize_stage_b(&b_g, &next_k0, &cta_col0, k, n, &smem_b_write, &inv_scale_b, threads_per_cta, cta_n, Some(&p_next_valid));
+
+        self.emit_fp8_gemm_compute_block(
+            &acc, &smem_a_read, &smem_b_read, &group_id, &tig, &warp_row0_local, &warp_col0_local, num_i, num_j, k_substeps, cta_n,
+        );
+
+        // Single bar.sync/iteration: ensures (a) every warp's prefetch
+        // writes to the write buffer above are visible before the NEXT
+        // iteration reads that same buffer, and (b) every warp is done
+        // reading the read buffer above before some LATER iteration's
+        // prefetch overwrites it (guaranteed since that reuse is always
+        // >=2 iterations away, and this same barrier gates every
+        // iteration in between) - see doc comment's cross-warp-race
+        // discussion and standalone validation.
+        writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+
+        // ---- epilogue: dequant scale + boundary-masked per-element store,
+        // over every warp's (i, j) accumulator fragments ----
+        let scale = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", scale, scale_a_reg, scale_b_reg).unwrap();
+
+        for i in 0..num_i {
+            for j in 0..num_j {
+                for idx4 in 0..4u32 {
+                    let (local_row, local_col) = self.emit_fp8_accum_row_col(&group_id, &tig, idx4);
+
+                    let row1 = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", row1, warp_row0_local, i * 16).unwrap();
+                    let grow_local = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow_local, row1, local_row).unwrap();
+                    let grow = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, cta_row0, grow_local).unwrap();
+
+                    let col1 = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col1, warp_col0_local, j * 8).unwrap();
+                    let gcol_local = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", gcol_local, col1, local_col).unwrap();
+                    let gcol = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", gcol, cta_col0, gcol_local).unwrap();
+
+                    let p_row = self.alloc_pred();
+                    writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_row, grow, m).unwrap();
+                    let p_col = self.alloc_pred();
+                    writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_col, gcol, n).unwrap();
+                    let p_ok = self.alloc_pred();
+                    writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_ok, p_row, p_col).unwrap();
+
+                    let dval = self.alloc_regf32();
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    mul.f32 {}, {}, {};",
+                        dval, acc[i as usize][j as usize][idx4 as usize], scale
+                    ).unwrap();
+
+                    let lin = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", lin, grow, n, gcol).unwrap();
+                    let byte = self.alloc_reg64();
+                    writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", byte, lin).unwrap();
+                    let addr = self.alloc_reg64();
+                    writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", addr, c_g, byte).unwrap();
+                    writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}], {};", p_ok, addr, dval).unwrap();
+                }
+            }
+        }
+
+        threads_per_cta
+    }
+
     /// Emits a thread-strided, boundary-masked cooperative load of one CTA's
     /// tile from global into padded shared memory - shared by the A- and
     /// B-tile loads inside `emit_tensor_core_gemm_kernel`'s K-loop.
@@ -2148,6 +3508,73 @@ impl PtxEmitter {
 
         let cols_per_chunk = local_cols / 8;
         let total_chunks = local_rows * cols_per_chunk;
+
+        // Tag the staging block with its call-site label in both the looped
+        // and unrolled forms below. In the looped form the tag also reaches
+        // the PTX as part of the `ALOAD_<tag>` label, but the unrolled form
+        // is branchless and emits no label at all, so the comment is what
+        // identifies which tile (and which pipeline stage) a given run of
+        // `cp.async`es belongs to - for reading emitted PTX, and for the
+        // dispatch tests that assert a particular prefetch was emitted.
+        writeln!(
+            &mut self.ptx_buffer,
+            "    // [Y ASYNC TILE LOAD] {} | {} chunks of 16B over {} threads",
+            label_tag, total_chunks, threads_per_cta
+        ).unwrap();
+
+        // ---- fully unrolled staging, when the trip count is small ----
+        // `total_chunks` and `threads_per_cta` are both compile-time
+        // constants here, so the per-thread chunk count is too. ptxas cannot
+        // derive that on its own: the loop below runs `idx = %tid.x;
+        // idx < total_chunks; idx += threads_per_cta`, whose trip count
+        // depends on `%tid.x`, an opaque runtime value. So ptxas keeps a
+        // real loop and re-executes the whole address computation - the
+        // div/rem row-column split, both bound checks, the 64-bit global
+        // address `mad`/`mul.wide`/`add`, and the shared-address `mad`/
+        // `shl`/`add` - once per single 16-byte `cp.async`. Measured on the
+        // emitted sm_89 SASS for M=N=K=4096 (128x128x32, 2x2 warps): ~22
+        // instructions per `LDGSTS`, i.e. ~200 instructions per K-tile to
+        // issue 8 copies, against 64 `HMMA` in the same iteration.
+        //
+        // Emitting the copies straight-line instead hands ptxas exactly what
+        // it already does well for the `ldmatrix` stream: every per-chunk
+        // address becomes base+constant and folds into the instruction's own
+        // immediate offset field. That takes the 4096 mainloop from 202 SASS
+        // instructions with two 4-trip inner loops (~352 executed) to 182
+        // straight-line ones, and measures **1.028x** end-to-end against the
+        // looped form, bit-identical output, on an interleaved A/B ranked by
+        // minimum (dispersion 0.4-1.0%, so the gain clears the tie band).
+        //
+        // It is deliberately *not* a large win: the mainloop is not
+        // issue-bound. `sm__warps_active` is 16.3% of peak for both this
+        // kernel and cuBLAS's `ampere_fp16_s1688gemm_fp16_128x128_...`, and a
+        // pure back-to-back `mma.sync` probe reaches the full ~185 TFLOPS at
+        // only 4 warps/SM. Halving the mainloop instruction count buying
+        // ~3% is the evidence for that, not a disappointment - do not expect
+        // further instruction-count work here to pay more.
+        //
+        // The unroll is capped because it is per *stage* and per A/B tile in
+        // an already-unrolled K-loop body; past this the I-cache cost turns
+        // it back into a loss. Beyond the cap, and for any tile whose chunk
+        // count is not a compile-time multiple of the CTA width, the
+        // original loop form below still applies.
+        const MAX_STAGE_UNROLL: u32 = 16;
+        if total_chunks % threads_per_cta == 0 && total_chunks / threads_per_cta <= MAX_STAGE_UNROLL {
+            for u in 0..(total_chunks / threads_per_cta) {
+                let idx = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+                if u > 0 {
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, u * threads_per_cta).unwrap();
+                }
+                self.emit_gemm_tile_load_async_chunk(
+                    &idx, gmem_ptr, gmem_row0, gmem_col0, gmem_row_stride,
+                    gmem_row_bound, gmem_col_bound, cols_per_chunk,
+                    smem_stage_base, smem_stride, extra_valid_pred,
+                );
+            }
+            return;
+        }
+
         let idx = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
         let loop_start = self.alloc_label(&format!("ALOAD_{}", label_tag));
@@ -2157,6 +3584,38 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_chunks).unwrap();
         writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
 
+        self.emit_gemm_tile_load_async_chunk(
+            &idx, gmem_ptr, gmem_row0, gmem_col0, gmem_row_stride,
+            gmem_row_bound, gmem_col_bound, cols_per_chunk,
+            smem_stage_base, smem_stride, extra_valid_pred,
+        );
+
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// One 16-byte `cp.async` chunk of `emit_gemm_tile_load_async`: splits the
+    /// flat chunk index `idx` into its tile row/column, bound-checks both
+    /// against the real matrix extent, and issues the copy in the zero-fill
+    /// form described on that function. Factored out so the looped and fully
+    /// unrolled forms there provably share one body rather than two copies
+    /// that can drift apart.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_gemm_tile_load_async_chunk(
+        &mut self,
+        idx: &str,
+        gmem_ptr: &str,
+        gmem_row0: &str,
+        gmem_col0: &str,
+        gmem_row_stride: u32,
+        gmem_row_bound: u32,
+        gmem_col_bound: u32,
+        cols_per_chunk: u32,
+        smem_stage_base: &str,
+        smem_stride: u32,
+        extra_valid_pred: Option<&str>,
+    ) {
         let lr = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", lr, idx, cols_per_chunk).unwrap();
         let lc_chunk = self.alloc_reg32();
@@ -2201,80 +3660,173 @@ impl PtxEmitter {
         let saddr = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_stage_base, sbyte).unwrap();
         writeln!(&mut self.ptx_buffer, "    cp.async.cg.shared.global [{}], [{}], 16, {};", saddr, gaddr, rsize).unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
-        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
     }
 
     /// Shared compute core of `emit_tensor_core_gemm_kernel`'s K-loop body,
     /// used identically by both the synchronous-fallback and
-    /// cp.async-pipelined paths: loads each B fragment once per `kk`
-    /// sub-step (reused across all `i`), then each A fragment once (reused
-    /// across all `j`), accumulating via `wmma.mma` into `acc[i][j]`. The
-    /// two paths differ only in *which* smem addresses `smem_a_base`/
-    /// `smem_b_base` point at (a fixed compile-time base for the
-    /// single-buffered fallback, a per-iteration `read_stage`-offset base
-    /// for the pipelined path) - this function neither knows nor cares.
+    /// cp.async-pipelined paths: for each `kk` sub-step, issues one
+    /// `ldmatrix.x4` per `i` (A, reused across all `j`) and two
+    /// `ldmatrix.x2.trans` per `j` (B, one per 8-wide N-half - native
+    /// `mma.sync.m16n8k16` granularity, see below - reused across all `i`),
+    /// then two `mma.sync.aligned.m16n8k16.row.col` calls per `(i,j)` (one
+    /// per N-half) accumulating into `acc[i][j][0..4]`/`acc[i][j][4..8]`
+    /// respectively. The two paths differ only in *which* smem addresses
+    /// `smem_a_base`/`smem_b_base` point at - this function neither knows
+    /// nor cares.
+    ///
+    /// Hand-rolled `ldmatrix` + `mma.sync.m16n8k16.row.col` replaces a
+    /// prior `wmma.load`/`wmma.mma.m16n16k16`-based version (see git
+    /// history) - ncu profiling (see project benchmark docs) found the
+    /// wmma path left 28% of shared-memory wavefronts "excessive"
+    /// (bank-conflicted), and `wmma.load` exposes no hook to control or
+    /// even inspect its access pattern (opaque by design). The exact
+    /// per-lane address formula below was derived from the PTX ISA's
+    /// documented mma.m16n8k16 fragment layout (9.7.13.4.8, verified
+    /// against the official NVIDIA PTX ISA 8.5 PDF directly, not memory or
+    /// a paraphrase - unlike wmma's fragment layout, which 9.7.13.3.1
+    /// states is "unspecified and target architecture dependent") and
+    /// validated standalone - hand-written PTX, single warp, real sm_89
+    /// hardware - against that documented formula AND an exact-integer CPU
+    /// reference (small-integer f16 operands keep every intermediate exact,
+    /// not floating-point-tolerance-close) before this function was
+    /// rewritten; see the project scratchpad's validate_mma.py for the
+    /// harness (all checks passed on first real-hardware run).
+    ///
+    /// Per lane (`%tid.x & 31`), decomposed once by the caller into
+    /// `row_off = lane & 15` and `col_bit_a = (lane & 16) >> 1`:
+    ///   - A is fed plain `ldmatrix.x4` (no `.trans`): A is stored
+    ///     row-major in smem (K contiguous), exactly what `.row` (A's
+    ///     layout in `mma.m16n8k16.row.col` - hardcoded in the PTX ISA
+    ///     grammar for this shape, there is no `.row.row` variant unlike
+    ///     `m8n8k4`) expects. `col_bit_a` (0 or 8) selects which half of
+    ///     the 16-wide K dimension a lane's group belongs to.
+    ///   - B is fed `ldmatrix.x2.trans`: `mma.m16n8k16` hardcodes B as
+    ///     `.col`, but B is ALSO stored row-major in smem (N contiguous,
+    ///     matching global B's own layout) - `.trans` reconciles the two
+    ///     (same "supply a physical smem row address" protocol as A, but
+    ///     the hardware transposes what lands in the destination
+    ///     registers), so the tile-load/cp.async code staging B into smem
+    ///     needs no changes at all.
+    ///   - `row_off` is reused as-is by both A (combined with the warp's
+    ///     row and `i*16`) and B (combined with `kk`) - it is the same
+    ///     per-lane "which of 16 rows within this half" term either way.
+    ///
+    /// Offline bank-conflict analysis (project scratchpad's
+    /// swizzle_design.py, using this exact validated address formula,
+    /// swept across every warp/i/j/kk/N-half combination this function
+    /// actually issues for every autotuned CTA shape) found the EXISTING
+    /// `+8`-element row padding already fully bank-conflict-free for this
+    /// access pattern - no XOR swizzle needed. The ncu-measured conflicts
+    /// referenced above appear to be an artifact of wmma.load's opaque
+    /// access pattern specifically, not the padded layout itself. This is
+    /// a prediction from static analysis, not yet re-confirmed by ncu on
+    /// this rewritten kernel - see benchmark docs for the real measurement
+    /// once taken.
+    ///
+    /// `acc[i][j]` keeps the EXACT SAME external shape/order the prior
+    /// wmma-based version used (8 f32 regs: `[0..4)` = this `(i,j)`
+    /// block's N=0..7 columns, `[4..8)` = N=8..15) - empirically confirmed
+    /// register-for-register identical to what `wmma.mma.m16n16k16` would
+    /// have produced for the same inputs, on this sm_89 + this ptxas (see
+    /// validate_mma.py's wmma-vs-mma.sync D-fragment check), so
+    /// `emit_tensor_core_gemm_kernel`'s epilogue (both the plain-GEMM
+    /// direct-to-global and the fused-bias-relu shared-memory
+    /// `wmma.store.d` paths) needed NO changes. IMPORTANT: per
+    /// 9.7.13.3.1 the PTX ISA does NOT guarantee this equivalence (wmma's
+    /// fragment layout is documented "unspecified") - this is an empirical
+    /// fact about THIS toolchain, not a portable one, and must be
+    /// re-verified on real hardware (rerun validate_mma.py) before ever
+    /// updating the CUDA toolchain/driver version this project targets, or
+    /// before relying on it for a different SM architecture.
     #[allow(clippy::too_many_arguments)]
     fn emit_gemm_compute_block(
         &mut self,
         acc: &[Vec<Vec<String>>],
         warp_col0_local: &str,
-        warp_row0_scaled: &str,
+        warp_row0_local: &str,
         smem_a_base: &str,
         smem_b_base: &str,
         smem_a_stride: u32,
         smem_b_stride: u32,
-        stride_a_reg: &str,
-        stride_b_reg: &str,
+        row_off: &str,
+        col_bit_a: &str,
         k_substeps: u32,
         num_i: u32,
         num_j: u32,
     ) {
+        // ldmatrix's address must be naturally 16-byte aligned (PTX ISA
+        // 9.7.13.4.15); every term added to a row/col-scaled linear index
+        // below is already a multiple of 8 elements EXCEPT the
+        // stride-scaled row term, which is only guaranteed a multiple of 8
+        // elements (16 bytes) if the stride itself is - true for every
+        // `+8`-padded cta_k/cta_n `Autotuner::generate_candidates` produces
+        // (32/64/128-multiple base + 8), not true in general.
+        debug_assert_eq!(smem_a_stride % 8, 0, "ldmatrix alignment requires smem_a_stride a multiple of 8 elements");
+        debug_assert_eq!(smem_b_stride % 8, 0, "ldmatrix alignment requires smem_b_stride a multiple of 8 elements");
+
         for kk_step in 0..k_substeps {
             let kk = kk_step * 16;
 
-            let mut b_frags: Vec<Vec<String>> = Vec::with_capacity(num_j as usize);
+            // ---- B: ldmatrix.x2.trans, two 8-wide N-halves per j (native
+            // mma.m16n8k16 granularity), reused across every i below (same
+            // reuse-across-i optimization the prior wmma.load.b loop used) ----
+            let mut b_frags: Vec<[Vec<String>; 2]> = Vec::with_capacity(num_j as usize);
             for j in 0..num_j {
-                let b_const = kk * smem_b_stride + j * 16;
-                let b_lin = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", b_lin, warp_col0_local, b_const).unwrap();
-                let b_byte = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", b_byte, b_lin).unwrap();
-                let b_addr = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", b_addr, smem_b_base, b_byte).unwrap();
-                let frag: Vec<String> = (0..8).map(|_| self.alloc_reg32()).collect();
-                writeln!(
-                    &mut self.ptx_buffer,
-                    "    wmma.load.b.sync.aligned.row.m16n16k16.shared.f16 {{{}}}, [{}], {};",
-                    frag.join(","), b_addr, stride_b_reg
-                ).unwrap();
-                b_frags.push(frag);
+                let mut halves: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+                for (half_idx, n_half) in [0u32, 8u32].into_iter().enumerate() {
+                    let col_reg = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col_reg, warp_col0_local, j * 16 + n_half).unwrap();
+                    let global_k = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", global_k, row_off, kk).unwrap();
+                    let lin = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", lin, global_k, smem_b_stride, col_reg).unwrap();
+                    let byte = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", byte, lin).unwrap();
+                    let addr = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", addr, smem_b_base, byte).unwrap();
+                    let frag: Vec<String> = (0..2).map(|_| self.alloc_reg32()).collect();
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {{{}}}, [{}];",
+                        frag.join(","), addr
+                    ).unwrap();
+                    halves[half_idx] = frag;
+                }
+                b_frags.push(halves);
             }
 
+            // ---- A: ldmatrix.x4, reused across every j below (same
+            // reuse-across-j optimization the prior wmma.load.a loop used) ----
             for i in 0..num_i {
-                let a_const = i * 16 * smem_a_stride + kk;
-                let a_lin = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", a_lin, warp_row0_scaled, a_const).unwrap();
-                let a_byte = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", a_byte, a_lin).unwrap();
-                let a_addr = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", a_addr, smem_a_base, a_byte).unwrap();
-                let a_frag: Vec<String> = (0..8).map(|_| self.alloc_reg32()).collect();
+                let row_reg = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", row_reg, warp_row0_local, row_off).unwrap();
+                let global_row = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", global_row, row_reg, i * 16).unwrap();
+                let col0 = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", col0, col_bit_a, kk).unwrap();
+                let lin = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", lin, global_row, smem_a_stride, col0).unwrap();
+                let byte = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 1;", byte, lin).unwrap();
+                let addr = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", addr, smem_a_base, byte).unwrap();
+                let a_frag: Vec<String> = (0..4).map(|_| self.alloc_reg32()).collect();
                 writeln!(
                     &mut self.ptx_buffer,
-                    "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 {{{}}}, [{}], {};",
-                    a_frag.join(","), a_addr, stride_a_reg
+                    "    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{{}}}, [{}];",
+                    a_frag.join(","), addr
                 ).unwrap();
 
                 for j in 0..num_j {
-                    let d = acc[i as usize][j as usize].join(",");
-                    writeln!(
-                        &mut self.ptx_buffer,
-                        "    wmma.mma.sync.aligned.row.row.m16n16k16.f32.f32 {{{}}}, {{{}}}, {{{}}}, {{{}}};",
-                        d, a_frag.join(","), b_frags[j as usize].join(","), d
-                    ).unwrap();
+                    for half in 0..2usize {
+                        let lo = 4 * half;
+                        let d = acc[i as usize][j as usize][lo..lo + 4].join(",");
+                        writeln!(
+                            &mut self.ptx_buffer,
+                            "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{{}}}, {{{}}}, {{{}}}, {{{}}};",
+                            d, a_frag.join(","), b_frags[j as usize][half].join(","), d
+                        ).unwrap();
+                    }
                 }
             }
         }
@@ -2417,11 +3969,56 @@ impl PtxEmitter {
         debug_assert_eq!(num_i * 16 * warps_m, cta_m, "autotuned cta_m must split evenly into 16-row warp fragments");
         debug_assert_eq!(num_j * 16 * warps_n, cta_n, "autotuned cta_n must split evenly into 16-col warp fragments");
         debug_assert_eq!(k_substeps * 16, cta_k, "autotuned cta_k must be a multiple of wmma's m16n16k16 K dimension");
-        debug_assert_eq!(k % cta_k, 0, "@tile K must be a multiple of the autotuned cta_k - see doc comment scope note");
 
-        let smem_a_stride = cta_k + 8; // padded, elements/row - see doc comment
-        let smem_b_stride = cta_n + 8;
-        let k_tiles = k / cta_k;
+        // ---- K tail ----
+        // `k_tiles` rounds UP, so the final K-tile may be partial. Both
+        // operand loaders already bound-check the K extent - A passes `k` as
+        // its column bound and B passes `k` as its row bound (see the
+        // `emit_gemm_tile_load_async` call sites below) - and the zero-fill
+        // `cp.async` form writes real zeros for every out-of-range chunk, so
+        // a partial K-tile contributes exact zeros to the accumulator rather
+        // than garbage. The prologue needs no extra tile predicate either:
+        // `effective_stages` is still clamped to `<= k_tiles`.
+        //
+        // Truncating here instead (`k / cta_k`, what this did before) SILENTLY
+        // DROPPED that tail. Measured at M=N=K=1000 with the autotuned
+        // 128x128x32 tile: 8 of 1000 K elements dropped, relative L2 error
+        // 9.1e-02, no diagnostic of any kind. At K=2 with cta_k=64 it gave
+        // `k_tiles = 0` and the kernel returned all zeros. M and N tails were
+        // always handled correctly by the same masking; only K was not.
+        //
+        // A's K extent is masked at 8-element (16-byte `cp.async` chunk)
+        // granularity because K is A's contiguous dimension, so K must be a
+        // multiple of 8. B's K masking is per-row and would accept any K.
+        // This is a hard `assert!`, deliberately not a `debug_assert!`: the
+        // release binary is what everything actually runs, and the failure
+        // mode being guarded is a silently wrong GEMM, which is worse than a
+        // failed compile.
+        assert_eq!(
+            k % 8,
+            0,
+            "@tile K={} is not a multiple of 8. The F16 tensor-core GEMM masks A's K tail at \
+             16-byte (8-element) cp.async chunk granularity, so the trailing {} element(s) would \
+             be silently dropped and the result would be wrong. Pad K to a multiple of 8.",
+            k,
+            k % 8
+        );
+
+        // Padding, elements/row - see doc comment. `Y_SMEM_PAD` exists to A/B
+        // the padding against the shared-memory budget it costs: at
+        // 128x128x32 the +8 costs 2560 B/stage, which is exactly what keeps a
+        // 3-stage pipeline from fitting two CTAs per SM (3 * 18944 * 2 =
+        // 113664 > 102400, but 3 * 16384 * 2 = 98304 fits). All the
+        // downstream addressing derives from these two strides, so a
+        // different pad is self-consistent - only the bank-conflict behaviour
+        // changes.
+        let smem_pad: u32 = std::env::var("Y_SMEM_PAD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        let smem_a_stride = cta_k + smem_pad;
+        let smem_b_stride = cta_n + smem_pad;
+        let k_tiles = (k + cta_k - 1) / cta_k;
 
         // ---- effective pipeline depth: see doc comment ----
         let stage_a_bytes = cta_m * smem_a_stride * 2;
@@ -2432,48 +4029,51 @@ impl PtxEmitter {
         let effective_stages = config.num_stages.min(k_tiles).min(max_stages_by_smem).max(1);
         let mut total_dyn_smem_bytes = effective_stages * per_stage_bytes;
 
-        // ---- fused Bias+ReLU epilogue: reuses this same dynamic shared
-        // buffer (already idle by the time the epilogue runs - see
-        // emit_gemm_bias_relu_epilogue's doc comment) as a row-major f32
+        // ---- fused epilogue (both the plain and Bias+ReLU shapes - see
+        // below): reuses this same dynamic shared buffer (already idle by
+        // the time the epilogue runs - see emit_gemm_bias_relu_epilogue's/
+        // emit_gemm_plain_epilogue's doc comments) as a row-major f32
         // scratch tile. A *full* cta_m x cta_n f32 tile (e.g. 128x260x4 =
         // ~133KB for a 128x256 CTA tile) can exceed this GPU's real per-CTA
         // dynamic-smem opt-in ceiling (~101376B measured on this project's
         // sm_89 dev machine - see emit_tensor_core_gemm_kernel's doc
         // comment) even though the A/B pipeline stages themselves fit fine.
         // So the epilogue instead runs in `warps_n` passes, one per warp
-        // *column* (see emit_kernel's write-loop below and
-        // emit_gemm_bias_relu_epilogue): each pass's scratch tile is only
-        // cta_m x per_warp_n wide - `per_warp_n <= cta_n`, so this is always
-        // <= the full-tile size, and for every autotuned config observed so
-        // far comfortably fits alongside the pipeline's own smem budget.
-        // Supported in BOTH the pipelined and `effective_stages < 2`
-        // fallback branches - the fallback branch switches to this same
-        // dynamic extern-shared mechanism (instead of static `.shared`
-        // arrays) whenever bias is present specifically so this holds; see
-        // that branch's own doc comment for why it's real, observed
-        // (M=N=K=2048 on this project's dev GPU clamps to 1 stage on smem
-        // pressure alone, before the epilogue even factors in), not a
-        // theoretical edge case.
+        // *column* (see emit_kernel's write-loop below): each pass's
+        // scratch tile is only cta_m x per_warp_n wide - `per_warp_n <=
+        // cta_n`, so this is always <= the full-tile size, and for every
+        // autotuned config observed so far comfortably fits alongside the
+        // pipeline's own smem budget. Supported in BOTH the pipelined and
+        // `effective_stages < 2` fallback branches - both branches already
+        // unconditionally use this same dynamic extern-shared mechanism
+        // (instead of static `.shared` arrays), see that branch's own doc
+        // comment for why (M=N=K=2048 on this project's dev GPU clamps to 1
+        // stage on smem pressure alone, before the epilogue even factors
+        // in - not a theoretical edge case).
+        //
+        // This budget line applies unconditionally (not just when
+        // `bias_ptr.is_some()`, prior to the M<16 all-zero-output fix
+        // below): the plain-GEMM epilogue now ALSO stages through this
+        // smem scratch tile rather than writing `wmma.store.d` directly to
+        // global with whole-16-row-fragment masking - see
+        // `emit_gemm_plain_epilogue`'s doc comment for why that direct
+        // path was a real correctness bug, not just a design choice, for
+        // any M < 16 (confirmed on real hardware: silently all-zero
+        // output, no error - see benchmark_y_decode_gemm_results.md).
         let smem_c_stride = per_warp_n + 4; // padded, elements/row - matches tests/y_tensor_core_gemm.cu's fused kernel (there: cta_n-wide, here: per-warp-column-banded, see above)
         let smem_c_bytes = cta_m * smem_c_stride * 4;
-        if bias_ptr.is_some() {
-            total_dyn_smem_bytes = total_dyn_smem_bytes.max(smem_c_bytes);
-        }
+        total_dyn_smem_bytes = total_dyn_smem_bytes.max(smem_c_bytes);
 
         writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
         writeln!(&mut self.ptx_buffer, "    // [Y TENSOR CORE GEMM] M={} N={} K={} | CTA {}x{}x{} | {}x{} warps | wmma.sync.m16n16k16.f16->f32", m, n, k, cta_m, cta_n, cta_k, warps_m, warps_n).unwrap();
         if effective_stages >= 2 {
             writeln!(&mut self.ptx_buffer, "    // Autotuner selected {} pipeline stages ({} used after k_tiles/smem clamping); cp.async multi-stage pipelined. Dynamic shared memory required: {} bytes.", config.num_stages, effective_stages, total_dyn_smem_bytes).unwrap();
-        } else if bias_ptr.is_some() {
-            // Unlike the plain-GEMM fallback (static `.shared`, needs no
-            // launch-time dynamic smem request), this kernel's fused
-            // Bias+ReLU epilogue always needs a *dynamic* buffer - see the
-            // `effective_stages < 2` branch's `bias_ptr.is_some()` case -
-            // so the launcher-facing byte count must be reported here too,
-            // not just on the `>=2`-stage path above.
-            writeln!(&mut self.ptx_buffer, "    // Autotuner selected {} pipeline stages; only {} K-tile(s) exist so this path stages synchronously (see emit_tensor_core_gemm_kernel doc comment). Dynamic shared memory required: {} bytes.", config.num_stages, k_tiles, total_dyn_smem_bytes).unwrap();
         } else {
-            writeln!(&mut self.ptx_buffer, "    // Autotuner selected {} pipeline stages; only {} K-tile(s) exist so this path stages synchronously (see emit_tensor_core_gemm_kernel doc comment).", config.num_stages, k_tiles).unwrap();
+            // Both the bias and no-bias cases use the same dynamic
+            // `.extern .shared` buffer mechanism in this branch (see its
+            // own doc comment below) - so the launcher-facing byte count is
+            // always reported here, not just when bias is present.
+            writeln!(&mut self.ptx_buffer, "    // Autotuner selected {} pipeline stages; only {} K-tile(s) exist so this path stages synchronously (see emit_tensor_core_gemm_kernel doc comment). Dynamic shared memory required: {} bytes.", config.num_stages, k_tiles, total_dyn_smem_bytes).unwrap();
         }
         writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
 
@@ -2492,10 +4092,6 @@ impl PtxEmitter {
             r
         });
 
-        let stride_a_reg = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_a_reg, smem_a_stride).unwrap();
-        let stride_b_reg = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_b_reg, smem_b_stride).unwrap();
 
         // ---- grid position: L2-locality grid swizzle ----
         // Groups GEMM_SWIZZLE_GROUP_SIZE consecutive M-row CTA tiles and
@@ -2521,19 +4117,42 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", warp_m, warp_id, warps_m).unwrap();
         let warp_n = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", warp_n, warp_id, warps_m).unwrap();
-        let warp_row0 = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", warp_row0, warp_m, per_warp_m, cta_m_start).unwrap();
-        let warp_col0 = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", warp_col0, warp_n, per_warp_n, cta_n_start).unwrap();
         // Loop-invariant, hoisted: every A-fragment address needs
         // (warp_row0_within_cta) * smem_a_stride, so compute the CTA-local
-        // (not grid-global) warp row once, up front.
+        // (not grid-global) warp row once, up front. Grid-global
+        // warp_row0/warp_col0 (`cta_m_start + warp_m*per_warp_m`, etc.) are
+        // NOT computed here: the epilogue that used to need them (plain-
+        // GEMM, direct-to-global whole-fragment-masked `wmma.store.d`) was
+        // replaced by `emit_gemm_plain_epilogue` (smem-staged, fine-grained
+        // masked, fixing the M<16 all-zero-output bug - see
+        // benchmark_y_decode_gemm_results.md), which - like
+        // `emit_gemm_bias_relu_epilogue` already did - derives its global
+        // addresses from `cta_m_start`/`tile_n_start` plus a per-thread
+        // local row/col instead.
         let warp_row0_local = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_row0_local, warp_m, per_warp_m).unwrap();
         let warp_col0_local = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_col0_local, warp_n, per_warp_n).unwrap();
-        let warp_row0_scaled = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_row0_scaled, warp_row0_local, smem_a_stride).unwrap();
+
+        // ---- per-lane ldmatrix address terms - see emit_gemm_compute_block's
+        // doc comment for the derivation and its real-hardware validation.
+        // lane = tid.x & 31 (single warp of thread IDs isn't assumed
+        // elsewhere, but %tid.x's low 5 bits always give the lane within
+        // whatever warp this thread belongs to). row_off = lane & 15 packs
+        // ldmatrix.x4's 2-bit submatrix-row-group selector and 3-bit
+        // within-submatrix row into one 4-bit "which of 16 rows in this
+        // K-or-M half" term (the two fields are disjoint bit ranges, so
+        // sum == bitwise-or == a plain mask). col_bit_a = (lane & 16) >> 1
+        // is A-only: selects which 8-wide half of the 16-wide K dimension
+        // this lane's ldmatrix.x4 submatrix-group falls in. ----
+        let lane = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 31;", lane, tid).unwrap();
+        let row_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 15;", row_off, lane).unwrap();
+        let col_bit_a_wide = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 16;", col_bit_a_wide, lane).unwrap();
+        let col_bit_a = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 1;", col_bit_a, col_bit_a_wide).unwrap();
 
         // ---- accumulator fragments acc[i][j]: 8 f32 regs each, zeroed ----
         let mut acc: Vec<Vec<Vec<String>>> = Vec::with_capacity(num_i as usize);
@@ -2556,51 +4175,51 @@ impl PtxEmitter {
         // tile once the K-loop is done with it - see the `effective_stages <
         // 2` branch's `bias_ptr.is_some()` special case just below for why
         // this is populated in BOTH branches, not just the pipelined one.
-        let mut smem_pipeline_base_for_epilogue: Option<String> = None;
+        let smem_pipeline_base_for_epilogue: String;
 
         if effective_stages < 2 {
             // ---- Fallback: original single-buffered synchronous path
-            // (load -> bar.sync -> compute -> bar.sync). Only reachable when
-            // `effective_stages` was clamped all the way down to 1 - see
-            // doc comment; not exercised by any candidate
-            // `Autotuner::generate_candidates` currently produces for this
-            // project's tested shapes, kept as a real, correct fallback
-            // rather than a debug_assert/panic since nothing about a
-            // validated `@tile(M,N,K)` rules it out for a future shape.
-            // (This branch IS reachable with a fused Bias+ReLU kernel,
-            // though - a large-N tile's per_stage_bytes can be big enough on
-            // its own, before the epilogue even enters the picture, to clamp
-            // `effective_stages` to 1 - real, observed on this project's own
-            // dev GPU at M=N=K=2048 with a 128x256x64 CTA tile. So unlike
-            // the plain-GEMM case, this path can't just use static `.shared`
-            // arrays when bias is present: the epilogue needs a *dynamic*
-            // buffer it can address at a runtime-computed size across
-            // multiple warp-column passes - see the smem-sizing doc comment
-            // above.)
-            let smem_a_base;
-            let smem_b_base;
-            if bias_g.is_some() {
-                let smem_symbol = format!("smem_pipeline_{}", kernel_name);
-                self.pending_extern_decls.push(format!(".extern .shared .align 16 .b8 {}[];", smem_symbol));
-                let base = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", base, smem_symbol).unwrap();
-                smem_pipeline_base_for_epilogue = Some(base.clone());
-                let a_base = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", a_base, base).unwrap();
-                let b_base = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", b_base, base, stage_a_bytes).unwrap();
-                smem_a_base = a_base;
-                smem_b_base = b_base;
-            } else {
-                writeln!(&mut self.ptx_buffer, "    .shared .align 4 .b8 smem_A[{}];", stage_a_bytes).unwrap();
-                writeln!(&mut self.ptx_buffer, "    .shared .align 4 .b8 smem_B[{}];", stage_b_bytes).unwrap();
-                let a_base = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, smem_A;", a_base).unwrap();
-                let b_base = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, smem_B;", b_base).unwrap();
-                smem_a_base = a_base;
-                smem_b_base = b_base;
-            }
+            // (load -> bar.sync -> compute -> bar.sync). Reachable whenever
+            // `effective_stages` is clamped all the way down to 1 - see doc
+            // comment. This is NOT a rare/theoretical edge case: with this
+            // project's current `Autotuner::generate_candidates` search
+            // space, the 128x256x64 CTA tile it selects for M=N=K >= 2048
+            // has `per_stage_bytes` = 52224B, and `safe_smem_ceiling /
+            // per_stage_bytes` floors to 1 on this project's dev GPU
+            // (102400B `max_smem_per_sm_bytes`) - so this branch is real and
+            // commonly hit for large square GEMMs, not just a fallback kept
+            // for shapes nothing currently produces.
+            //
+            // Always uses the same *dynamic* (`.extern .shared`) buffer
+            // mechanism as the `effective_stages >= 2` pipelined path below.
+            // A prior version of this branch used static `.shared
+            // smem_A[..]`/`smem_B[..]` arrays for the no-bias case, on the
+            // assumption a 1-stage tile's A+B footprint would always fit
+            // under ptxas's 48KB static-`.shared` hard cap - false for the
+            // 128x256x64/52224B case above: ptxas outright refuses to
+            // assemble a >48KB static `.shared` declaration regardless of
+            // this GPU's real ~100KB dynamic capacity (confirmed by direct
+            // experiment: `ptxas -arch=sm_89` on the emitted
+            // gemm_f16_{2048,4096,8192,16384}.ptx failed with "uses too much
+            // shared data (0xcc00 bytes, 0xc000 max)" before this fix - a
+            // failure `cargo test` alone can't catch, since it only
+            // exercises `emit_program`, never ptxas itself). The fused
+            // Bias+ReLU epilogue already needed the dynamic mechanism for
+            // its own reasons (runtime-sized scratch tile across multiple
+            // warp-column passes - see the smem-sizing doc comment above),
+            // so the plain-GEMM case now just reuses that same,
+            // already-proven-correct path instead of a second, narrower one.
+            let smem_symbol = format!("smem_pipeline_{}", kernel_name);
+            self.pending_extern_decls.push(format!(".extern .shared .align 16 .b8 {}[];", smem_symbol));
+            let base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", base, smem_symbol).unwrap();
+            smem_pipeline_base_for_epilogue = base.clone();
+            let a_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", a_base, base).unwrap();
+            let b_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", b_base, base, stage_a_bytes).unwrap();
+            let smem_a_base = a_base;
+            let smem_b_base = b_base;
 
             let k_iter = self.alloc_reg32();
             writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
@@ -2622,8 +4241,8 @@ impl PtxEmitter {
 
             writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
             self.emit_gemm_compute_block(
-                &acc, &warp_col0_local, &warp_row0_scaled, &smem_a_base, &smem_b_base,
-                smem_a_stride, smem_b_stride, &stride_a_reg, &stride_b_reg, k_substeps, num_i, num_j,
+                &acc, &warp_col0_local, &warp_row0_local, &smem_a_base, &smem_b_base,
+                smem_a_stride, smem_b_stride, &row_off, &col_bit_a, k_substeps, num_i, num_j,
             );
             writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
             writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
@@ -2645,7 +4264,7 @@ impl PtxEmitter {
             self.pending_extern_decls.push(format!(".extern .shared .align 16 .b8 {}[];", smem_symbol));
             let smem_pipeline_base = self.alloc_reg32();
             writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", smem_pipeline_base, smem_symbol).unwrap();
-            smem_pipeline_base_for_epilogue = Some(smem_pipeline_base.clone());
+            smem_pipeline_base_for_epilogue = smem_pipeline_base.clone();
             // B's stages live right after all of A's stages in the one
             // combined dynamic array (mirrors src/bin/autotune_verify.rs's
             // KERNEL_TEMPLATE: one extern buffer, sliced by constant byte
@@ -2728,8 +4347,8 @@ impl PtxEmitter {
             writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", b_read_base, read_stage, stage_b_bytes, smem_b_region_base).unwrap();
 
             self.emit_gemm_compute_block(
-                &acc, &warp_col0_local, &warp_row0_scaled, &a_read_base, &b_read_base,
-                smem_a_stride, smem_b_stride, &stride_a_reg, &stride_b_reg, k_substeps, num_i, num_j,
+                &acc, &warp_col0_local, &warp_row0_local, &a_read_base, &b_read_base,
+                smem_a_stride, smem_b_stride, &row_off, &col_bit_a, k_substeps, num_i, num_j,
             );
 
             // Wait until group `k_iter+1` (the tile that will become
@@ -2752,94 +4371,68 @@ impl PtxEmitter {
             writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
         }
 
-        if let Some(bias_g) = bias_g {
-            // ---- fused epilogue: `warps_n` passes, one per warp-column band
-            // (see the smem-sizing doc comment above for why) - each pass
-            // does wmma.store.d into the (small, per_warp_n-wide) shared
-            // scratch tile for just that band's warps, then a CTA-wide
-            // bias-broadcast + ReLU + boundary-masked store to global for
-            // that band - see emit_gemm_bias_relu_epilogue's doc comment ----
-            let smem_c_base = smem_pipeline_base_for_epilogue
-                .expect("smem_pipeline_base_for_epilogue must be set in both branches when bias_ptr is Some - see the effective_stages<2 branch's bias_ptr.is_some() case");
-            let stride_c_smem_reg = self.alloc_reg32();
-            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_c_smem_reg, smem_c_stride).unwrap();
-            for n_slot in 0..warps_n {
-                let p_slot = self.alloc_pred();
-                writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, {};", p_slot, warp_n, n_slot).unwrap();
-                for i in 0..num_i {
-                    for j in 0..num_j {
-                        // Row spans the whole CTA (per_warp_m band, warp-relative)
-                        // same as before; column is LOCAL to this pass's
-                        // per_warp_n-wide scratch tile - not warp_col0_local
-                        // + j*16 - since only one warp-column band's data
-                        // lives in the scratch buffer at a time.
-                        let c_row_local = self.alloc_reg32();
-                        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", c_row_local, warp_row0_local, i * 16).unwrap();
-
-                        let sidx = self.alloc_reg32();
-                        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, c_row_local, stride_c_smem_reg, j * 16).unwrap();
-                        let sbyte = self.alloc_reg32();
-                        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", sbyte, sidx).unwrap();
-                        let saddr = self.alloc_reg32();
-                        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_c_base, sbyte).unwrap();
-
-                        let d = acc[i as usize][j as usize].join(",");
-                        writeln!(
-                            &mut self.ptx_buffer,
-                            "    @{} wmma.store.d.sync.aligned.row.m16n16k16.shared.f32 [{}], {{{}}}, {};",
-                            p_slot, saddr, d, stride_c_smem_reg
-                        ).unwrap();
-                    }
-                }
-                writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
-
-                let cta_n_start_slot = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", cta_n_start_slot, cta_n_start, n_slot * per_warp_n).unwrap();
-                self.emit_gemm_bias_relu_epilogue(
-                    &smem_c_base, smem_c_stride, &cta_m_start, &cta_n_start_slot, cta_m, per_warp_n, m, n, &c_g, &bias_g, threads_per_cta,
-                );
-                // Next slot's wmma.store reuses this same scratch buffer -
-                // must not begin until every thread is done reading this
-                // slot's data out of it.
-                writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
-            }
-        } else {
-            // ---- epilogue: boundary-masked store, whole-fragment granularity
-            // (see scope note in the doc comment above) ----
-            let stride_c_reg = self.alloc_reg32();
-            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_c_reg, n).unwrap();
+        // ---- fused epilogue: `warps_n` passes, one per warp-column band
+        // (see the smem-sizing doc comment above for why) - each pass does
+        // wmma.store.d into the (small, per_warp_n-wide) shared scratch
+        // tile for just that band's warps, then a CTA-wide, fine-grained
+        // (per-row, not per-16-row-fragment - see emit_gemm_plain_epilogue's
+        // doc comment for why that distinction is a real correctness fix,
+        // not just style) boundary-masked copy to global for that band -
+        // either bias-add+ReLU (emit_gemm_bias_relu_epilogue) or a plain
+        // copy (emit_gemm_plain_epilogue), depending on whether this kernel
+        // has a Bias operand. Both shapes share this same staging loop -
+        // unified here (rather than duplicated per-branch) once the plain
+        // shape needed the same smem staging the Bias+ReLU shape already
+        // had, to fix the M<16 all-zero-output bug - see
+        // benchmark_y_decode_gemm_results.md. ----
+        let smem_c_base = smem_pipeline_base_for_epilogue;
+        let stride_c_smem_reg = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_c_smem_reg, smem_c_stride).unwrap();
+        for n_slot in 0..warps_n {
+            let p_slot = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, {};", p_slot, warp_n, n_slot).unwrap();
             for i in 0..num_i {
                 for j in 0..num_j {
-                    let c_row = self.alloc_reg32();
-                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", c_row, warp_row0, i * 16).unwrap();
-                    let c_col = self.alloc_reg32();
-                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", c_col, warp_col0, j * 16).unwrap();
-                    let c_row_end = self.alloc_reg32();
-                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 16;", c_row_end, c_row).unwrap();
-                    let c_col_end = self.alloc_reg32();
-                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 16;", c_col_end, c_col).unwrap();
-                    let p_row = self.alloc_pred();
-                    writeln!(&mut self.ptx_buffer, "    setp.le.u32 {}, {}, {};", p_row, c_row_end, m).unwrap();
-                    let p_col = self.alloc_pred();
-                    writeln!(&mut self.ptx_buffer, "    setp.le.u32 {}, {}, {};", p_col, c_col_end, n).unwrap();
-                    let p_ok = self.alloc_pred();
-                    writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_ok, p_row, p_col).unwrap();
+                    // Row spans the whole CTA (per_warp_m band, warp-relative)
+                    // same as before; column is LOCAL to this pass's
+                    // per_warp_n-wide scratch tile - not warp_col0_local
+                    // + j*16 - since only one warp-column band's data
+                    // lives in the scratch buffer at a time.
+                    let c_row_local = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", c_row_local, warp_row0_local, i * 16).unwrap();
 
-                    let c_lin = self.alloc_reg32();
-                    writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", c_lin, c_row, n, c_col).unwrap();
-                    let c_byte = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", c_byte, c_lin).unwrap();
-                    let c_addr = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", c_addr, c_g, c_byte).unwrap();
+                    let sidx = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, c_row_local, stride_c_smem_reg, j * 16).unwrap();
+                    let sbyte = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", sbyte, sidx).unwrap();
+                    let saddr = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_c_base, sbyte).unwrap();
 
                     let d = acc[i as usize][j as usize].join(",");
                     writeln!(
                         &mut self.ptx_buffer,
-                        "    @{} wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [{}], {{{}}}, {};",
-                        p_ok, c_addr, d, stride_c_reg
+                        "    @{} wmma.store.d.sync.aligned.row.m16n16k16.shared.f32 [{}], {{{}}}, {};",
+                        p_slot, saddr, d, stride_c_smem_reg
                     ).unwrap();
                 }
             }
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+            let cta_n_start_slot = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", cta_n_start_slot, cta_n_start, n_slot * per_warp_n).unwrap();
+            if let Some(ref bias_g) = bias_g {
+                self.emit_gemm_bias_relu_epilogue(
+                    &smem_c_base, smem_c_stride, &cta_m_start, &cta_n_start_slot, cta_m, per_warp_n, m, n, &c_g, bias_g, threads_per_cta,
+                );
+            } else {
+                self.emit_gemm_plain_epilogue(
+                    &smem_c_base, smem_c_stride, &cta_m_start, &cta_n_start_slot, cta_m, per_warp_n, m, n, &c_g, threads_per_cta,
+                );
+            }
+            // Next slot's wmma.store reuses this same scratch buffer -
+            // must not begin until every thread is done reading this
+            // slot's data out of it.
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
         }
         writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
         threads_per_cta
@@ -2963,6 +4556,1962 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
         writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
         writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// Plain (no Bias+ReLU) epilogue for `emit_tensor_core_gemm_kernel`'s
+    /// 3-param (A, B, C) shape: reads the just-computed CTA output tile
+    /// back out of shared memory (written there by a
+    /// `wmma.store.d...shared.f32` pass over every warp's accumulator
+    /// fragments, then a CTA-wide `bar.sync` - both emitted by the caller
+    /// before this runs, identically to `emit_gemm_bias_relu_epilogue`)
+    /// and stores it to global `C`, with no elementwise transform -
+    /// structurally identical to that function (same thread-striding, same
+    /// `float4`-chunk boundary masking), minus the bias load/add/ReLU.
+    ///
+    /// **Fixes a real, confirmed correctness bug**, not just a style
+    /// unification with the Bias+ReLU epilogue: the direct-to-global path
+    /// this replaced (`wmma.store.d.sync.aligned...global.f32`, gated by
+    /// `p_ok = (c_row_end <= M) && (c_col_end <= N)` where `c_row_end =
+    /// c_row + 16`) masked at whole-16-row-`wmma`-fragment granularity -
+    /// for any `M < 16`, `c_row_end` (minimum 16) always exceeds `M`, so
+    /// `p_ok` was false for every fragment of every CTA, and the kernel
+    /// silently wrote nothing at all (`C` stayed whatever it was
+    /// initialized to - all-zero in every test that surfaced this).
+    /// Confirmed on real hardware at `M=1,4,8` (`benchmark_y_decode_gemm.py`
+    /// against a fresh cuBLAS reference) before this fix, all three failing
+    /// with `C` identically zero; this function's masking is per-*row*
+    /// (`p_row: grow < m`, not `c_row_end <= m` for a whole 16-row band),
+    /// the same fine-grained approach `emit_gemm_bias_relu_epilogue` already
+    /// used, which has no minimum-`M` floor at all.
+    ///
+    /// Boundary masking is at 4-element (one `float4`) chunk granularity -
+    /// a chunk is skipped entirely (not written) if its row is out of
+    /// bounds or the last of its 4 columns would be. Requires `tile_n` a
+    /// multiple of 4 - true for every autotuned tile this codegen produces.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_gemm_plain_epilogue(
+        &mut self,
+        smem_c_base: &str,
+        smem_c_stride: u32,
+        cta_m_start: &str,
+        tile_n_start: &str,
+        cta_m: u32,
+        tile_n: u32,
+        m: u32,
+        n: u32,
+        c_g: &str,
+        threads_per_cta: u32,
+    ) {
+        debug_assert_eq!(tile_n % 4, 0, "vectorized plain epilogue requires tile_n a multiple of 4");
+        let cols_per_chunk = tile_n / 4;
+        let total_chunks = cta_m * cols_per_chunk;
+
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+        let loop_start = self.alloc_label("EPI_PLAIN");
+        let loop_end = self.alloc_label("EPI_PLAIN_DONE");
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_chunks).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
+
+        let lr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", lr, idx, cols_per_chunk).unwrap();
+        let lc_chunk = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", lc_chunk, idx, cols_per_chunk).unwrap();
+        let lc = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", lc, lc_chunk).unwrap();
+
+        let grow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, cta_m_start, lr).unwrap();
+        let gcol = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", gcol, tile_n_start, lc).unwrap();
+        let gcol_end = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 4;", gcol_end, gcol).unwrap();
+
+        let p_row = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_row, grow, m).unwrap();
+        let p_col = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.le.u32 {}, {}, {};", p_col, gcol_end, n).unwrap();
+        let p_ok = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_ok, p_row, p_col).unwrap();
+
+        // Shared-memory scratch tile read (local row/col, smem_c_stride).
+        let sidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, lr, smem_c_stride, lc).unwrap();
+        let sbyte = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", sbyte, sidx).unwrap();
+        let saddr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr, smem_c_base, sbyte).unwrap();
+        let s: Vec<String> = (0..4).map(|_| self.alloc_regf32()).collect();
+        writeln!(&mut self.ptx_buffer, "    @{} ld.shared.v4.f32 {{{}}}, [{}];", p_ok, s.join(","), saddr).unwrap();
+
+        // Global C write address (row-major, stride n).
+        let gidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", gidx, grow, n, gcol).unwrap();
+        let gbyte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", gbyte, gidx).unwrap();
+        let gaddr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr, c_g, gbyte).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    @{} st.global.v4.f32 [{}], {{{}}};", p_ok, gaddr, s.join(",")).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// Detects the 4-parameter (X, W_gate, W_up: GlobalMemory<F16>, Out:
+    /// GlobalMemory<F32>) kernel shape that dispatches
+    /// `emit_gemm_swiglu_kernel`: `Out = SiLU(X @ W_gate) * (X @ W_up)`,
+    /// the gate/up half of an LLM SwiGLU MLP block, fused into one launch.
+    /// Distinguished from `tile_gemm_operands`'s 4-param (A, B, Bias, C)
+    /// Bias+ReLU shape purely by type - Bias+ReLU's 3rd parameter is F32,
+    /// this shape's 3rd parameter (`W_up`) is F16 - so the two never
+    /// collide; see `verify_tile_gemm_kernel` in type_checker.rs for the
+    /// type-checked contract both shapes share.
+    /// `Y_SWIGLU_TILE=cta_m,cta_n,cta_k,warps_m,warps_n`, for sweeping this
+    /// kernel's tile on hardware. Returns `None` (keep the default) when
+    /// unset, malformed, or structurally impossible - a bad override should
+    /// fall back loudly, never emit a kernel that cannot be lowered.
+    fn swiglu_tile_override() -> Option<(u32, u32, u32, u32, u32)> {
+        let spec = std::env::var("Y_SWIGLU_TILE").ok()?;
+        let p: Vec<u32> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if p.len() != 5 {
+            eprintln!(
+                "[Y swiglu] ignoring malformed Y_SWIGLU_TILE='{}' \
+                 (want cta_m,cta_n,cta_k,warps_m,warps_n)",
+                spec
+            );
+            return None;
+        }
+        let (cta_m, cta_n, cta_k, wm, wn) = (p[0], p[1], p[2], p[3], p[4]);
+        if wm == 0 || wn == 0 || cta_m % (wm * 16) != 0 || cta_n % (wn * 16) != 0 || cta_k % 16 != 0 {
+            eprintln!("[Y swiglu] ignoring Y_SWIGLU_TILE='{}': tile does not split into 16x16 warp fragments", spec);
+            return None;
+        }
+        // Two accumulator arrays (gate, up) at 8 f32 registers per 16x16
+        // fragment. Past ~248 the kernel cannot fit its addressing registers
+        // under ptxas's 255 cap and starts spilling.
+        let acc_regs = (cta_m / wm / 16) * (cta_n / wn / 16) * 8 * 2;
+        if acc_regs > 224 {
+            eprintln!(
+                "[Y swiglu] ignoring Y_SWIGLU_TILE='{}': {} accumulator registers/thread \
+                 exceeds what fits alongside addressing under the 255 cap",
+                spec, acc_regs
+            );
+            return None;
+        }
+        Some((cta_m, cta_n, cta_k, wm, wn))
+    }
+
+    fn tile_gemm_swiglu_operands(&self, kernel: &KernelDecl) -> Option<(u32, u32, u32, String, String, String, String)> {
+        let tile = kernel.tile.as_ref()?;
+
+        fn as_positive_u32(e: &Expr) -> Option<u32> {
+            match e {
+                Expr::IntLit(v, _) if *v > 0 => u32::try_from(*v).ok(),
+                _ => None,
+            }
+        }
+        let m = as_positive_u32(&tile.block_m)?;
+        let n = as_positive_u32(&tile.block_n)?;
+        let k = as_positive_u32(tile.block_k.as_deref()?)?;
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+        if kernel.params.len() != 4
+            || !is_global_memory_of(&kernel.params[0].ty, "F16")
+            || !is_global_memory_of(&kernel.params[1].ty, "F16")
+            || !is_global_memory_of(&kernel.params[2].ty, "F16")
+            || !is_global_memory_of(&kernel.params[3].ty, "F32")
+        {
+            return None;
+        }
+
+        let x_reg = self.variables.get(&kernel.params[0].name)?.clone();
+        let wgate_reg = self.variables.get(&kernel.params[1].name)?.clone();
+        let wup_reg = self.variables.get(&kernel.params[2].name)?.clone();
+        let out_reg = self.variables.get(&kernel.params[3].name)?.clone();
+        Some((m, n, k, x_reg, wgate_reg, wup_reg, out_reg))
+    }
+
+    /// Emits a complete, self-contained fused Linear+SwiGLU GEMM kernel:
+    /// `Out = SiLU(X @ W_gate) * (X @ W_up)`, where `X` is `[M,K]`,
+    /// `W_gate`/`W_up` are `[K,N]`, `Out` is `[M,N]` - the gate/up
+    /// projections of an LLM MLP block, fused with the SwiGLU activation
+    /// so neither projection's `[M,N]` result is ever written to or read
+    /// back from DRAM (only `Out` is). Dispatched from a validated
+    /// kernel-level `@tile(M,N,K)` with the 4-param shape detected by
+    /// `tile_gemm_swiglu_operands`.
+    ///
+    /// Shares its warp/lane decomposition, grid swizzle, `ldmatrix`+
+    /// `mma.sync` compute core (`emit_gemm_compute_block`), and (as of
+    /// this session) `cp.async` multi-stage pipelining structure
+    /// (`emit_gemm_tile_load_async`/`emit_cp_async_commit`/
+    /// `emit_cp_async_wait`) with `emit_tensor_core_gemm_kernel` - see that
+    /// function's doc comment for the derivation and real-hardware
+    /// validation of those pieces, reused unchanged here; the pipelining
+    /// below is a direct extension of its N-stage prefetch/compute-overlap
+    /// algorithm to three tile streams (`X`, `W_gate`, `W_up`) instead of
+    /// two, not a new design. The `silu(x) = x / (1 + exp(-x))` epilogue
+    /// math (`ex2.approx.f32` for `exp`, `rcp.approx.f32` for the
+    /// reciprocal - PTX has no non-approx `ex2`) was validated standalone
+    /// against `torch.nn.functional.silu` on real sm_89 hardware before
+    /// this function was written: max abs error 3.8e-6, max relative error
+    /// 4.5e-7 over 2000 random `(gate, up)` pairs spanning +/-4 - see
+    /// `emit_gemm_swiglu_epilogue`'s doc comment.
+    ///
+    /// Scope, stated plainly (disclosed simplifications relative to
+    /// `emit_tensor_core_gemm_kernel`, not oversights):
+    /// - **Fixed, hardcoded CTA tile (128x128x32, 4x4 warps)** rather than
+    ///   `Autotuner::autotune`. Two independent accumulator sets (gate, up)
+    ///   already double live accumulator registers per thread versus the
+    ///   plain GEMM at the same CTA tile (`num_i * num_j * 8` f32 regs,
+    ///   twice over) - at the 128x256 CTA tile `Autotuner::autotune` picks
+    ///   for this project's M=N=K >= 2048 plain-GEMM benchmarks, that alone
+    ///   is 256 f32 accumulator registers/thread, over ptxas's 255-register
+    ///   hard cap before a single address/temp register is counted. The
+    ///   autotuner has no notion of a kernel needing 2x the accumulator
+    ///   budget (it scores one GEMM's occupancy), so trusting it here would
+    ///   silently pick register-infeasible tiles at exactly the sizes this
+    ///   pitch cares about. A fixed tile with `per_warp_m=per_warp_n=32`
+    ///   (`num_i=num_j=2` => 32 accumulator regs/array, 64 total)
+    ///   sidesteps that risk while still covering a 128x128 output region
+    ///   per CTA (4x4=16 warps). `cta_k` is 32, not the 64 an earlier
+    ///   version of this kernel used: a *third* smem-resident stream
+    ///   (`W_up`, on top of `X`/`W_gate`) means the K-loop's real per-stage
+    ///   footprint (`stage_a_bytes + 2*stage_b_bytes`) is 1.5x a plain
+    ///   GEMM's at the same tile - at `cta_k=64` this floors the achievable
+    ///   pipeline depth to a single stage on this project's dev GPU (no
+    ///   room for real overlap at all, defeating the point of adding
+    ///   `cp.async`); halving `cta_k` to 32 buys back enough smem headroom
+    ///   for genuine 3-stage pipelining (see `effective_stages` derivation
+    ///   below) at the cost of twice the K-loop trip count. Register
+    ///   pressure re-verified via `ptxas -v` after this change (still 0
+    ///   spills - `cta_k` does not affect accumulator count, only
+    ///   `k_substeps`, the compile-time-unrolled inner loop inside one
+    ///   `emit_gemm_compute_block` call).
+    /// - `emit_gemm_compute_block` is called twice per K-tile (once for
+    ///   `W_gate`, once for `W_up`), so `X`'s `ldmatrix.x4` fragment loads
+    ///   are issued twice per K-tile instead of once (each call
+    ///   independently reloads `X`'s fragments from shared memory) - real,
+    ///   disclosed instruction-count overhead, not a correctness issue
+    ///   (`ldmatrix` is a pure read). Not addressed by this session's
+    ///   pipelining work - a separate, still-open lever.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_gemm_swiglu_kernel(
+        &mut self,
+        m: u32,
+        n: u32,
+        k: u32,
+        x_ptr: &str,
+        wgate_ptr: &str,
+        wup_ptr: &str,
+        out_ptr: &str,
+        hw_profile: &HardwareProfile,
+        kernel_name: &str,
+    ) -> u32 {
+        // ---- fixed CTA tile - see doc comment for why this is not
+        // Autotuner::autotune'd like the plain/bias-relu GEMM kernels ----
+        //
+        // `Y_SWIGLU_TILE=cta_m,cta_n,cta_k,warps_m,warps_n` overrides it, so
+        // this tile can be swept on real hardware instead of argued about.
+        // It needs its own hook rather than reusing `Y_CTA_OVERRIDE`: that
+        // one feeds `Autotuner::autotune`, which this kernel deliberately
+        // does not call (its two accumulator arrays make the autotuner's
+        // single-GEMM occupancy model wrong here - see the doc comment).
+        //
+        // The register constraint the default respects: this kernel holds
+        // TWO f32 accumulator arrays (gate and up), each
+        // `num_i*num_j*8` registers, so a 128x128 tile over 2x2 warps would
+        // need 4*4*8*2 = 256 accumulator registers per thread - past ptxas's
+        // 255 cap before a single address register. Any override is checked
+        // against that below rather than trusted.
+        let (cta_m, cta_n, cta_k, warps_m, warps_n) = Self::swiglu_tile_override()
+            .unwrap_or((128, 128, 32, 4, 4));
+        let threads_per_cta = warps_m * warps_n * 32;
+
+        let per_warp_m = cta_m / warps_m;
+        let per_warp_n = cta_n / warps_n;
+        let num_i = per_warp_m / 16;
+        let num_j = per_warp_n / 16;
+        let k_substeps = cta_k / 16;
+        debug_assert_eq!(num_i * 16 * warps_m, cta_m, "cta_m must split evenly into 16-row warp fragments");
+        debug_assert_eq!(num_j * 16 * warps_n, cta_n, "cta_n must split evenly into 16-col warp fragments");
+        debug_assert_eq!(k_substeps * 16, cta_k, "cta_k must be a multiple of mma.sync's k16 dimension");
+        // Hard asserts, not `debug_assert!`s: unlike the plain F16 GEMM (which
+        // masks M/N tails and, since the K-tail fix, K tails too), this fused
+        // kernel has no tail path at all - a non-multiple shape here silently
+        // drops the remainder and returns a wrong result from the release
+        // binary. Fail the compile instead. See `emit_tensor_core_gemm_kernel`'s
+        // K-tail note for the measurement that motivated this.
+        assert_eq!(m % cta_m, 0, "@tile M={} must be a multiple of the fused SwiGLU kernel's fixed cta_m={}; this kernel has no M-tail path and would silently drop the remainder", m, cta_m);
+        assert_eq!(n % cta_n, 0, "@tile N={} must be a multiple of the fused SwiGLU kernel's fixed cta_n={}; this kernel has no N-tail path and would silently drop the remainder", n, cta_n);
+        assert_eq!(k % cta_k, 0, "@tile K={} must be a multiple of the fused SwiGLU kernel's fixed cta_k={}; this kernel has no K-tail path and would silently drop the remainder", k, cta_k);
+
+        let smem_a_stride = cta_k + 8;
+        let smem_b_stride = cta_n + 8;
+        let k_tiles = k / cta_k;
+
+        let stage_a_bytes = cta_m * smem_a_stride * 2;
+        let stage_b_bytes = cta_k * smem_b_stride * 2;
+        // One stage's worth of X + W_gate + W_up resident simultaneously -
+        // see doc comment for why a third stream (versus a plain GEMM's
+        // two) is what forced cta_k down to 32.
+        let per_stage_bytes = stage_a_bytes + stage_b_bytes * 2;
+
+        // ---- achievable pipeline depth - mirrors
+        // emit_tensor_core_gemm_kernel's own effective_stages derivation
+        // (same safety margin, same k_tiles clamp), requesting 4 stages and
+        // letting smem/k_tiles clamp it down rather than hand-picking a
+        // number - see that function's doc comment for the full
+        // reasoning. No Autotuner::autotune involved (this kernel doesn't
+        // use it - see doc comment), so the "requested" stage count is a
+        // fixed constant here, not a per-shape autotuned choice. ----
+        let requested_stages: u32 = 4;
+        let safe_smem_ceiling = hw_profile.max_smem_per_sm_bytes.saturating_sub(4096);
+        let max_stages_by_smem = (safe_smem_ceiling / per_stage_bytes).max(1);
+        let effective_stages = requested_stages.min(k_tiles).min(max_stages_by_smem).max(1);
+        let kloop_bytes = effective_stages * per_stage_bytes;
+
+        // Epilogue needs gate + up scratch tiles resident simultaneously,
+        // one per_warp_n-wide warp-column band at a time - same banding
+        // rationale as emit_tensor_core_gemm_kernel's fused Bias+ReLU
+        // epilogue (see its doc comment).
+        let smem_c_stride = per_warp_n + 4;
+        let smem_c_bytes_one = cta_m * smem_c_stride * 4;
+        let epilogue_bytes = smem_c_bytes_one * 2;
+
+        let total_dyn_smem_bytes = kloop_bytes.max(epilogue_bytes);
+
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [Y FUSED LINEAR+SWIGLU GEMM] M={} N={} K={} | CTA {}x{}x{} (fixed) | {}x{} warps | Out=SiLU(X@Wgate)*(X@Wup)", m, n, k, cta_m, cta_n, cta_k, warps_m, warps_n).unwrap();
+        if effective_stages >= 2 {
+            writeln!(&mut self.ptx_buffer, "    // {} pipeline stages (requested {}, clamped by k_tiles/smem); cp.async multi-stage pipelined. Dynamic shared memory required: {} bytes.", effective_stages, requested_stages, total_dyn_smem_bytes).unwrap();
+        } else {
+            writeln!(&mut self.ptx_buffer, "    // Only {} K-tile(s)/insufficient smem for pipelining; single-buffered synchronous staging. Dynamic shared memory required: {} bytes.", k_tiles, total_dyn_smem_bytes).unwrap();
+        }
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        let x_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", x_g, x_ptr).unwrap();
+        let wgate_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", wgate_g, wgate_ptr).unwrap();
+        let wup_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", wup_g, wup_ptr).unwrap();
+        let out_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", out_g, out_ptr).unwrap();
+
+        let (bid_m, bid_n) = self.emit_grid_swizzle_code(GEMM_SWIZZLE_GROUP_SIZE);
+        let cta_m_start = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", cta_m_start, bid_m, cta_m).unwrap();
+        let cta_n_start = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", cta_n_start, bid_n, cta_n).unwrap();
+
+        let tid = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+        let warp_id = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp_id, tid).unwrap();
+        let warp_m = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", warp_m, warp_id, warps_m).unwrap();
+        let warp_n = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", warp_n, warp_id, warps_m).unwrap();
+        let warp_row0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", warp_row0, warp_m, per_warp_m, cta_m_start).unwrap();
+        let warp_col0 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", warp_col0, warp_n, per_warp_n, cta_n_start).unwrap();
+        let warp_row0_local = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_row0_local, warp_m, per_warp_m).unwrap();
+        let warp_col0_local = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", warp_col0_local, warp_n, per_warp_n).unwrap();
+        // warp_row0/warp_col0 (grid-global) are computed for parity with
+        // emit_tensor_core_gemm_kernel's decomposition but are only used
+        // there by its non-banded epilogue path; this kernel's epilogue is
+        // always banded (see below), so silence the unused-variable lint
+        // rather than drop the shared derivation.
+        let _ = (&warp_row0, &warp_col0);
+
+        let lane = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 31;", lane, tid).unwrap();
+        let row_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 15;", row_off, lane).unwrap();
+        let col_bit_a_wide = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 16;", col_bit_a_wide, lane).unwrap();
+        let col_bit_a = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 1;", col_bit_a, col_bit_a_wide).unwrap();
+
+        let mut acc_gate: Vec<Vec<Vec<String>>> = Vec::with_capacity(num_i as usize);
+        let mut acc_up: Vec<Vec<Vec<String>>> = Vec::with_capacity(num_i as usize);
+        for _ in 0..num_i {
+            let mut row_gate = Vec::with_capacity(num_j as usize);
+            let mut row_up = Vec::with_capacity(num_j as usize);
+            for _ in 0..num_j {
+                let mut frag_gate = Vec::with_capacity(8);
+                let mut frag_up = Vec::with_capacity(8);
+                for _ in 0..8 {
+                    let rg = self.alloc_regf32();
+                    writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", rg).unwrap();
+                    frag_gate.push(rg);
+                    let ru = self.alloc_regf32();
+                    writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", ru).unwrap();
+                    frag_up.push(ru);
+                }
+                row_gate.push(frag_gate);
+                row_up.push(frag_up);
+            }
+            acc_gate.push(row_gate);
+            acc_up.push(row_up);
+        }
+
+        let smem_symbol = format!("smem_pipeline_{}", kernel_name);
+        self.pending_extern_decls.push(format!(".extern .shared .align 16 .b8 {}[];", smem_symbol));
+        let base = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", base, smem_symbol).unwrap();
+
+        if effective_stages < 2 {
+            // ---- Fallback: single-buffered synchronous path (load ->
+            // bar.sync -> compute -> bar.sync), reachable whenever
+            // `effective_stages` clamps down to 1 - see doc comment and
+            // `emit_tensor_core_gemm_kernel`'s own identical fallback for
+            // when this is real (not exercised by any shape this session's
+            // benchmark uses, all of which get 3 real pipeline stages at
+            // this kernel's fixed tile, but kept for the same K-too-small
+            // edge cases that fallback exists for). ----
+            let smem_a_base = base.clone();
+            let smem_bgate_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_bgate_base, base, stage_a_bytes).unwrap();
+            let smem_bup_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_bup_base, base, stage_a_bytes + stage_b_bytes).unwrap();
+
+            let k_iter = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+            let loop_start = self.alloc_label("SWIGLU_K_LOOP");
+            let loop_end = self.alloc_label("SWIGLU_K_DONE");
+            writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+            let exit_pred = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", exit_pred, k_iter, k_tiles).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} bra {};", exit_pred, loop_end).unwrap();
+            let k0 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", k0, k_iter, cta_k).unwrap();
+
+            self.emit_gemm_tile_load(
+                "SWX", &x_g, &cta_m_start, &k0, k, m, k, cta_m, cta_k, &smem_a_base, smem_a_stride, threads_per_cta,
+            );
+            self.emit_gemm_tile_load(
+                "SWG", &wgate_g, &k0, &cta_n_start, n, k, n, cta_k, cta_n, &smem_bgate_base, smem_b_stride, threads_per_cta,
+            );
+            self.emit_gemm_tile_load(
+                "SWU", &wup_g, &k0, &cta_n_start, n, k, n, cta_k, cta_n, &smem_bup_base, smem_b_stride, threads_per_cta,
+            );
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+            self.emit_gemm_compute_block(
+                &acc_gate, &warp_col0_local, &warp_row0_local, &smem_a_base, &smem_bgate_base,
+                smem_a_stride, smem_b_stride, &row_off, &col_bit_a, k_substeps, num_i, num_j,
+            );
+            self.emit_gemm_compute_block(
+                &acc_up, &warp_col0_local, &warp_row0_local, &smem_a_base, &smem_bup_base,
+                smem_a_stride, smem_b_stride, &row_off, &col_bit_a, k_substeps, num_i, num_j,
+            );
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+            writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+            writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+        } else {
+            // ---- N-stage cp.async pipelined path: direct extension of
+            // emit_tensor_core_gemm_kernel's own algorithm (see that
+            // function's doc comment for the read_stage/write_stage/
+            // next_tile derivation) to three smem-resident tile streams
+            // (X, W_gate, W_up) instead of two - X's region, then
+            // W_gate's, then W_up's, each n_stages*stage_bytes long,
+            // contiguous in the one combined dynamic buffer. ----
+            let n_stages = effective_stages;
+            let smem_bgate_region_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_bgate_region_base, base, n_stages * stage_a_bytes).unwrap();
+            let smem_bup_region_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_bup_region_base, smem_bgate_region_base, n_stages * stage_b_bytes).unwrap();
+
+            // ---- Prologue: prefetch stages 0..n_stages-2 (compile-time
+            // constant tile indices - always in-bounds since n_stages <=
+            // k_tiles by construction). ----
+            for s in 0..(n_stages - 1) {
+                let k0_s = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k0_s, s * cta_k).unwrap();
+                let a_stage_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", a_stage_base, base, s * stage_a_bytes).unwrap();
+                let bgate_stage_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", bgate_stage_base, smem_bgate_region_base, s * stage_b_bytes).unwrap();
+                let bup_stage_base = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", bup_stage_base, smem_bup_region_base, s * stage_b_bytes).unwrap();
+
+                self.emit_gemm_tile_load_async(
+                    &format!("SWPX{}", s), &x_g, &cta_m_start, &k0_s, k, m, k, cta_m, cta_k, &a_stage_base, smem_a_stride, threads_per_cta, None,
+                );
+                self.emit_gemm_tile_load_async(
+                    &format!("SWPG{}", s), &wgate_g, &k0_s, &cta_n_start, n, k, n, cta_k, cta_n, &bgate_stage_base, smem_b_stride, threads_per_cta, None,
+                );
+                self.emit_gemm_tile_load_async(
+                    &format!("SWPU{}", s), &wup_g, &k0_s, &cta_n_start, n, k, n, cta_k, cta_n, &bup_stage_base, smem_b_stride, threads_per_cta, None,
+                );
+                self.emit_cp_async_commit();
+            }
+            self.emit_cp_async_wait(n_stages - 2);
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+            let k_iter = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
+            let loop_start = self.alloc_label("SWIGLU_K_LOOP");
+            let loop_end = self.alloc_label("SWIGLU_K_DONE");
+            writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+            let exit_pred = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", exit_pred, k_iter, k_tiles).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} bra {};", exit_pred, loop_end).unwrap();
+
+            let read_stage = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", read_stage, k_iter, n_stages).unwrap();
+            let next_tile = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", next_tile, k_iter, n_stages - 1).unwrap();
+            let write_stage = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", write_stage, next_tile, n_stages).unwrap();
+            let p_tile_valid = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_tile_valid, next_tile, k_tiles).unwrap();
+            let k0_next = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", k0_next, next_tile, cta_k).unwrap();
+
+            let a_write_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", a_write_base, write_stage, stage_a_bytes, base).unwrap();
+            let bgate_write_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", bgate_write_base, write_stage, stage_b_bytes, smem_bgate_region_base).unwrap();
+            let bup_write_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", bup_write_base, write_stage, stage_b_bytes, smem_bup_region_base).unwrap();
+
+            // Issue the prefetch for `next_tile` (masked off via
+            // `p_tile_valid` if it doesn't exist), commit, then compute on
+            // `read_stage` (already confirmed ready) - overlaps this
+            // prefetch's async-copy-engine traffic with the tensor-core
+            // work below instead of waiting for it first.
+            self.emit_gemm_tile_load_async(
+                "SWX", &x_g, &cta_m_start, &k0_next, k, m, k, cta_m, cta_k, &a_write_base, smem_a_stride, threads_per_cta, Some(&p_tile_valid),
+            );
+            self.emit_gemm_tile_load_async(
+                "SWG", &wgate_g, &k0_next, &cta_n_start, n, k, n, cta_k, cta_n, &bgate_write_base, smem_b_stride, threads_per_cta, Some(&p_tile_valid),
+            );
+            self.emit_gemm_tile_load_async(
+                "SWU", &wup_g, &k0_next, &cta_n_start, n, k, n, cta_k, cta_n, &bup_write_base, smem_b_stride, threads_per_cta, Some(&p_tile_valid),
+            );
+            self.emit_cp_async_commit();
+
+            let a_read_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", a_read_base, read_stage, stage_a_bytes, base).unwrap();
+            let bgate_read_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", bgate_read_base, read_stage, stage_b_bytes, smem_bgate_region_base).unwrap();
+            let bup_read_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", bup_read_base, read_stage, stage_b_bytes, smem_bup_region_base).unwrap();
+
+            self.emit_gemm_compute_block(
+                &acc_gate, &warp_col0_local, &warp_row0_local, &a_read_base, &bgate_read_base,
+                smem_a_stride, smem_b_stride, &row_off, &col_bit_a, k_substeps, num_i, num_j,
+            );
+            self.emit_gemm_compute_block(
+                &acc_up, &warp_col0_local, &warp_row0_local, &a_read_base, &bup_read_base,
+                smem_a_stride, smem_b_stride, &row_off, &col_bit_a, k_substeps, num_i, num_j,
+            );
+
+            // Wait until group `k_iter+1` (the tile that will become
+            // read_stage next iteration) has landed, then make it visible
+            // block-wide - see emit_tensor_core_gemm_kernel's identical
+            // step for the full derivation of why this is safe for the
+            // next iteration's prefetch-write to reuse this iteration's
+            // read_stage slot.
+            self.emit_cp_async_wait(n_stages - 2);
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
+            writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+            writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+
+            // Drain any still-in-flight tail prefetch before the epilogue
+            // reuses this same dynamic shared buffer as scratch.
+            self.emit_cp_async_wait(0);
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+        }
+
+        // ---- Epilogue: SiLU(gate) * up, banded by warp-column - same
+        // rationale as emit_gemm_bias_relu_epilogue (see its doc comment) ----
+        let smem_gate_base = base.clone();
+        let smem_up_base = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_up_base, base, smem_c_bytes_one).unwrap();
+        let stride_c_smem_reg = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", stride_c_smem_reg, smem_c_stride).unwrap();
+        for n_slot in 0..warps_n {
+            let p_slot = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, {};", p_slot, warp_n, n_slot).unwrap();
+            for i in 0..num_i {
+                for j in 0..num_j {
+                    let c_row_local = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", c_row_local, warp_row0_local, i * 16).unwrap();
+                    let sidx = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, c_row_local, stride_c_smem_reg, j * 16).unwrap();
+                    let sbyte = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", sbyte, sidx).unwrap();
+
+                    let saddr_gate = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr_gate, smem_gate_base, sbyte).unwrap();
+                    let d_gate = acc_gate[i as usize][j as usize].join(",");
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    @{} wmma.store.d.sync.aligned.row.m16n16k16.shared.f32 [{}], {{{}}}, {};",
+                        p_slot, saddr_gate, d_gate, stride_c_smem_reg
+                    ).unwrap();
+
+                    let saddr_up = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr_up, smem_up_base, sbyte).unwrap();
+                    let d_up = acc_up[i as usize][j as usize].join(",");
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    @{} wmma.store.d.sync.aligned.row.m16n16k16.shared.f32 [{}], {{{}}}, {};",
+                        p_slot, saddr_up, d_up, stride_c_smem_reg
+                    ).unwrap();
+                }
+            }
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+            let cta_n_start_slot = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", cta_n_start_slot, cta_n_start, n_slot * per_warp_n).unwrap();
+            self.emit_gemm_swiglu_epilogue(
+                &smem_gate_base, &smem_up_base, smem_c_stride, &cta_m_start, &cta_n_start_slot, cta_m, per_warp_n, m, n, &out_g, threads_per_cta,
+            );
+            // Next slot's wmma.store reuses this same scratch buffer - must
+            // not begin until every thread is done reading this slot's data.
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+        }
+
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        threads_per_cta
+    }
+
+    /// Fused `silu(gate) * up` epilogue for `emit_gemm_swiglu_kernel`: reads
+    /// the just-computed gate/up CTA output tiles back out of shared memory
+    /// (each written there by a `wmma.store.d...shared.f32` pass over every
+    /// warp's accumulator fragments, then a CTA-wide `bar.sync` - both
+    /// emitted by the caller before this runs), computes
+    /// `silu(gate) * up` where `silu(x) = x * sigmoid(x) = x / (1 +
+    /// exp(-x))` via `ex2.approx.f32`/`rcp.approx.f32` (PTX has no
+    /// non-approx `ex2`), and stores the result to global `Out`.
+    ///
+    /// This exact instruction sequence (`neg.f32` -> `mul.f32` by
+    /// `log2(e)` -> `ex2.approx.f32` -> `add.f32` 1.0 -> `rcp.approx.f32`
+    /// -> two `mul.f32`) was validated standalone on real sm_89 hardware
+    /// before being wired in here: a single-thread probe kernel compared
+    /// against `torch.nn.functional.silu(gate) * up` over 2000 random
+    /// `(gate, up)` pairs (gate ~ N(0, 4), up ~ N(0, 2)) gave a max
+    /// absolute error of 3.8e-6 and max relative error of 4.5e-7 - far
+    /// inside FP16 tolerance, so the approximation is not a meaningful
+    /// correctness concern for this kernel's F32-accumulator, F16-input
+    /// use case.
+    ///
+    /// Scalar (not `float4`-vectorized like `emit_gemm_bias_relu_epilogue`)
+    /// - a real, disclosed simplification: a vectorized version would still
+    /// need `ex2.approx`/`rcp.approx` issued per-lane-of-4 (no vector form
+    /// of either instruction exists in PTX), so the only loss versus a
+    /// vectorized version is loop/address-math overhead, not activation
+    /// throughput.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_gemm_swiglu_epilogue(
+        &mut self,
+        smem_gate_base: &str,
+        smem_up_base: &str,
+        smem_c_stride: u32,
+        cta_m_start: &str,
+        tile_n_start: &str,
+        cta_m: u32,
+        tile_n: u32,
+        m: u32,
+        n: u32,
+        out_g: &str,
+        threads_per_cta: u32,
+    ) {
+        let total_chunks = cta_m * tile_n;
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", idx).unwrap();
+        let loop_start = self.alloc_label("EPI_SWIGLU");
+        let loop_end = self.alloc_label("EPI_SWIGLU_DONE");
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p_done, idx, total_chunks).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p_done, loop_end).unwrap();
+
+        let lr = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", lr, idx, tile_n).unwrap();
+        let lc = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", lc, idx, tile_n).unwrap();
+
+        let grow = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", grow, cta_m_start, lr).unwrap();
+        let gcol = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", gcol, tile_n_start, lc).unwrap();
+
+        let p_row = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_row, grow, m).unwrap();
+        let p_col = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_col, gcol, n).unwrap();
+        let p_ok = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_ok, p_row, p_col).unwrap();
+
+        let sidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", sidx, lr, smem_c_stride, lc).unwrap();
+        let sbyte = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", sbyte, sidx).unwrap();
+
+        let saddr_gate = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr_gate, smem_gate_base, sbyte).unwrap();
+        let gate_val = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    @{} ld.shared.f32 {}, [{}];", p_ok, gate_val, saddr_gate).unwrap();
+
+        let saddr_up = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", saddr_up, smem_up_base, sbyte).unwrap();
+        let up_val = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    @{} ld.shared.f32 {}, [{}];", p_ok, up_val, saddr_up).unwrap();
+
+        // silu(gate) = gate * sigmoid(gate) = gate / (1 + exp(-gate));
+        // exp(-gate) via ex2.approx.f32(-gate * log2(e)).
+        let neg_gate = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    neg.f32 {}, {};", neg_gate, gate_val).unwrap();
+        let scaled = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, 0f3FB8AA3B;", scaled, neg_gate).unwrap();
+        let exp_neg = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    ex2.approx.f32 {}, {};", exp_neg, scaled).unwrap();
+        let denom = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 0f3F800000;", denom, exp_neg).unwrap();
+        let sig = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    rcp.approx.f32 {}, {};", sig, denom).unwrap();
+        let silu = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", silu, gate_val, sig).unwrap();
+        let result = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", result, silu, up_val).unwrap();
+
+        let gidx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", gidx, grow, n, gcol).unwrap();
+        let gbyte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", gbyte, gidx).unwrap();
+        let gaddr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", gaddr, out_g, gbyte).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}], {};", p_ok, gaddr, result).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_cta).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+    }
+
+    /// Formats an f32 as a PTX hex float immediate (`0f<8 hex digits>`, the
+    /// IEEE-754 bit pattern) - used for every compile-time float constant
+    /// below rather than relying on PTX's decimal float-literal parsing,
+    /// which is not independently verified anywhere in this codebase (the
+    /// one place it appeared, `emit_vectorized_swiglu_fast`, was dead code
+    /// with its own unrelated bugs - see that function's doc comment).
+    fn f32_to_ptx_hex(f: f32) -> String {
+        format!("0f{:08X}", f.to_bits())
+    }
+
+    /// Emits a vectorized global-memory load of `n_words` (1, 2, or 4)
+    /// contiguous 32-bit words - `ld.global.u32` / `ld.global.v2.u32` /
+    /// `ld.global.v4.u32` - starting at `addr`, returning the allocated
+    /// registers. Each word holds two packed f16 values (element order:
+    /// low 16 bits first, then high 16 bits) - see `emit_unpack_f16_pairs`.
+    /// Store sibling: `emit_vec_store_u32`.
+    ///
+    /// This exact load-then-unpack sequence (and the pack-then-store
+    /// sequence below) was standalone-validated on real sm_89 hardware
+    /// before use in any real emitter - a tiny hand-written PTX probe (all
+    /// three widths, `out[i] = in[i]*2+1` against a torch fp16 reference,
+    /// bit-exact across 5 seeds) - per this codebase's established
+    /// PTX-validation discipline. See `emit_rmsnorm_residual_kernel` /
+    /// `emit_rope_kernel`, the two callers.
+    fn emit_vec_load_u32(&mut self, addr: &str, n_words: usize) -> Vec<String> {
+        let regs: Vec<String> = (0..n_words).map(|_| self.alloc_reg32()).collect();
+        match n_words {
+            1 => writeln!(&mut self.ptx_buffer, "    ld.global.u32 {}, [{}];", regs[0], addr).unwrap(),
+            2 => writeln!(&mut self.ptx_buffer, "    ld.global.v2.u32 {{{}}}, [{}];", regs.join(","), addr).unwrap(),
+            4 => writeln!(&mut self.ptx_buffer, "    ld.global.v4.u32 {{{}}}, [{}];", regs.join(","), addr).unwrap(),
+            _ => unreachable!("emit_vec_load_u32: n_words must be 1, 2, or 4"),
+        }
+        regs
+    }
+
+    /// Store sibling of `emit_vec_load_u32` - `words.len()` must be 1, 2, or 4.
+    fn emit_vec_store_u32(&mut self, addr: &str, words: &[String]) {
+        match words.len() {
+            1 => writeln!(&mut self.ptx_buffer, "    st.global.u32 [{}], {};", addr, words[0]).unwrap(),
+            2 => writeln!(&mut self.ptx_buffer, "    st.global.v2.u32 [{}], {{{}}};", addr, words.join(",")).unwrap(),
+            4 => writeln!(&mut self.ptx_buffer, "    st.global.v4.u32 [{}], {{{}}};", addr, words.join(",")).unwrap(),
+            _ => unreachable!("emit_vec_store_u32: words.len() must be 1, 2, or 4"),
+        }
+    }
+
+    /// Unpacks each 32-bit word in `words` (two packed f16 values, low
+    /// 16 bits then high 16 bits) into f32 registers via `cvt.f32.f16`
+    /// directly on the word for the low half, `shr.b32` + `cvt.f32.f16` for
+    /// the high half. Returns `2*words.len()` registers in element order
+    /// `[w0_lo, w0_hi, w1_lo, w1_hi, ...]`. Pack sibling: `emit_pack_f16_pairs`.
+    fn emit_unpack_f16_pairs(&mut self, words: &[String]) -> Vec<String> {
+        let mut out = Vec::with_capacity(words.len() * 2);
+        for w in words {
+            let lo = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    cvt.f32.f16 {}, {};", lo, w).unwrap();
+            let hi_bits = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    shr.b32 {}, {}, 16;", hi_bits, w).unwrap();
+            let hi = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    cvt.f32.f16 {}, {};", hi, hi_bits).unwrap();
+            out.push(lo);
+            out.push(hi);
+        }
+        out
+    }
+
+    /// Pack sibling of `emit_unpack_f16_pairs`: takes f32 values in element
+    /// order (`vals.len()` must be even) and returns `vals.len()/2` packed
+    /// 32-bit words, each pair rounded to f16 (`cvt.rn.f16.f32`) then
+    /// combined via `and.b32` (mask the low element to 16 bits) / `shl.b32`
+    /// (shift the high element up, which also discards any garbage above
+    /// its own low 16 bits - no mask needed on that side) / `or.b32`.
+    fn emit_pack_f16_pairs(&mut self, vals: &[String]) -> Vec<String> {
+        debug_assert_eq!(vals.len() % 2, 0, "emit_pack_f16_pairs requires an even number of values");
+        let mut out = Vec::with_capacity(vals.len() / 2);
+        for pair in vals.chunks(2) {
+            let lo_h = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    cvt.rn.f16.f32 {}, {};", lo_h, pair[0]).unwrap();
+            let lo_masked = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 0xFFFF;", lo_masked, lo_h).unwrap();
+            let hi_h = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    cvt.rn.f16.f32 {}, {};", hi_h, pair[1]).unwrap();
+            let hi_shifted = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, 16;", hi_shifted, hi_h).unwrap();
+            let packed = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    or.b32 {}, {}, {};", packed, lo_masked, hi_shifted).unwrap();
+            out.push(packed);
+        }
+        out
+    }
+
+    /// Parses a `<prefix>_<positive integer>` kernel name into the trailing
+    /// integer - the compile-time row-width (`hidden_dim`/`head_dim`) for
+    /// `emit_rmsnorm_residual_kernel`/`emit_rope_kernel` below. Unlike the
+    /// `@tile`d GEMM kernels, these have no compile-time M: row count is a
+    /// pure runtime grid dimension (one warp per row, entirely generic over
+    /// how many rows the launcher asks for), so encoding just the one
+    /// genuinely compile-time-needed integer in the kernel name - rather
+    /// than adding a second kernel-level attribute mechanism alongside
+    /// `@tile` for a single integer - is the deliberately minimal choice.
+    fn parse_trailing_dim(name: &str, prefix: &str) -> Option<u32> {
+        let rest = name.strip_prefix(prefix)?.strip_prefix('_')?;
+        rest.parse::<u32>().ok().filter(|&d| d > 0)
+    }
+
+    /// Detects the 5-parameter (X, Residual, Weight, Out, NewResidual: all
+    /// `GlobalMemory<F16>`) kernel shape, named `rmsnorm_residual_<hidden_dim>`,
+    /// that dispatches `emit_rmsnorm_residual_kernel`.
+    fn rmsnorm_residual_operands(&self, kernel: &KernelDecl) -> Option<(u32, String, String, String, String, String)> {
+        if kernel.tile.is_some() {
+            return None;
+        }
+        let hidden_dim = Self::parse_trailing_dim(&kernel.name, "rmsnorm_residual")?;
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+        if kernel.params.len() != 5 || !kernel.params.iter().all(|p| is_global_memory_of(&p.ty, "F16")) {
+            return None;
+        }
+
+        let x = self.variables.get(&kernel.params[0].name)?.clone();
+        let residual = self.variables.get(&kernel.params[1].name)?.clone();
+        let weight = self.variables.get(&kernel.params[2].name)?.clone();
+        let out = self.variables.get(&kernel.params[3].name)?.clone();
+        let new_residual = self.variables.get(&kernel.params[4].name)?.clone();
+        Some((hidden_dim, x, residual, weight, out, new_residual))
+    }
+
+    /// Emits a complete, self-contained fused "add & RMSNorm" kernel:
+    /// `num_warps` warps (`num_warps*32` threads) per row, `num_warps`
+    /// scaling with `hidden_dim` (see below) - not a fixed single warp
+    /// regardless of size, the original design's real occupancy blind spot.
+    /// Computes `h = X + Residual` (the updated residual stream for the
+    /// next transformer layer), then `Out = (h / rms(h)) * Weight` where
+    /// `rms(h) = sqrt(mean(h^2) + eps)` - the fused pattern real inference
+    /// engines use (e.g. vLLM/FlashInfer's `fused_add_rmsnorm`), writing
+    /// both `Out` and `h` (as `NewResidual`) from one launch.
+    ///
+    /// `hidden_dim` must be a multiple of 256 (`debug_assert`ed - 32 lanes x
+    /// 8 f16 elements/lane per vectorized group; true for every realistic
+    /// LLM hidden size: 2048, 3072, 4096, 5120, 7168, 8192, ...).
+    ///
+    /// **`num_warps`**: the largest of `{8, 4, 2, 1}` that divides
+    /// `hidden_dim/256` evenly (so every thread gets a whole number of
+    /// 8-wide vector groups, no remainder handling needed) - 8 warps (256
+    /// threads/row) at every hidden_dim in the realistic range (2048+),
+    /// falling back toward 1 warp only for tiny/edge-case sizes. Each
+    /// thread handles `hidden_dim / (num_warps*256)` groups of 8 contiguous
+    /// elements, strided by `num_warps*256` (thread `T`'s groups are `T`,
+    /// `T+num_warps*32`, ... in group units) so consecutive threads still
+    /// touch consecutive 16-byte chunks (fully coalesced, same principle as
+    /// the single-warp version, just spread over a whole block instead of
+    /// one warp) - one 128-bit `ld.global.v4.u32` / `st.global.v4.u32` per
+    /// tensor per group (`emit_vec_load_u32` / `emit_vec_store_u32` /
+    /// `emit_unpack_f16_pairs` / `emit_pack_f16_pairs` - see those doc
+    /// comments for the standalone hardware validation this went through
+    /// first).
+    ///
+    /// **Real block-level reduction, not just a single warp's**: each warp
+    /// folds its own partial `sum(h^2)` via the existing 5-step
+    /// `shfl.sync.bfly.b32` butterfly (`emit_warp_reduce_sum`, unchanged,
+    /// still validated standalone as before), then (when `num_warps>1`)
+    /// lane 0 of each warp writes its warp's total into a small
+    /// `.shared` scratch buffer (`smem_reduce`, `num_warps` floats),
+    /// `bar.sync 0` makes every warp's write visible block-wide, and every
+    /// thread then sums the `num_warps` slots (a tiny, fully-unrolled,
+    /// compile-time-bounded loop - never more than 8 adds) to get the
+    /// row's true total - a real cross-warp combine, not a rename of the
+    /// old single-warp path.
+    ///
+    /// **`h` is staged in `.shared` memory between the two passes, closing
+    /// the double-DRAM-read gap the vectorization pass alone left open**:
+    /// pass 1 computes `h = X + Residual`, folds `h^2` into this thread's
+    /// running sum AND writes `h` (as f32, not re-rounded to f16 - avoids
+    /// adding a precision step that wasn't in the original two-read design)
+    /// into `smem_h` (`hidden_dim` floats, e.g. 16KB at hidden_dim=4096 -
+    /// comfortably inside this GPU's ~100KB/SM shared memory budget); pass
+    /// 2 reads `h` back from `smem_h` instead of re-reading `X`/`Residual`
+    /// from DRAM a second time. Every thread only ever reads back the exact
+    /// `smem_h` locations it itself wrote in pass 1 (same `tid`-strided
+    /// index sequence in both passes), so no extra synchronization is
+    /// needed for that specifically; the `bar.sync 0` already required for
+    /// the cross-warp sum combine above happens to also cover it. `X`/
+    /// `Residual` are now each read from DRAM exactly once per row, not
+    /// twice - the double-read this function's doc comment flagged as open
+    /// after the vectorization pass is now actually closed, confirmed via
+    /// `benchmark_y_vs_flashinfer_results.md`'s re-measurement (vectorizing
+    /// alone left RMSNorm at 0.71-0.78x of FlashInfer; occupancy + this fix
+    /// were the next levers, not optional polish).
+    ///
+    /// `rsqrt.approx.f32` was validated standalone on real sm_89 hardware
+    /// before being wired in here (max relative error 1.2e-7 over 2000
+    /// random samples) - see `benchmark_y_rmsnorm_rope_results.md`.
+    /// `eps = 1e-5` (matching Llama's default) is a fixed compile-time
+    /// constant, not a runtime parameter.
+    ///
+    /// Returns `num_warps*32` (the real thread count this kernel now
+    /// expects per row/block) - callers (the PTX kernel launcher, and any
+    /// Python/host code choosing a launch's block size) MUST use this
+    /// value, not a hardcoded 32; the `.maxnreg` register-limit computation
+    /// downstream already does (see `block_size` in the caller).
+    fn emit_rmsnorm_residual_kernel(
+        &mut self,
+        hidden_dim: u32,
+        x_ptr: &str,
+        residual_ptr: &str,
+        weight_ptr: &str,
+        out_ptr: &str,
+        new_residual_ptr: &str,
+    ) -> u32 {
+        const WARP: u32 = 32;
+        const VEC: u32 = 8; // f16 elements per 128-bit vectorized group
+        debug_assert_eq!(
+            hidden_dim % (WARP * VEC),
+            0,
+            "hidden_dim must be a multiple of 256 (32 lanes x 8-wide vectorized f16 groups)"
+        );
+        let vec_groups = hidden_dim / VEC;
+        let num_warps: u32 = [8u32, 4, 2, 1]
+            .into_iter()
+            .find(|&w| vec_groups % (w * WARP) == 0)
+            .unwrap_or(1);
+        let threads_per_row = num_warps * WARP;
+
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [Y FUSED ADD+RMSNORM] hidden_dim={} | {} warps ({} threads) per row | 8-wide vectorized f16 | shared-mem h staging", hidden_dim, num_warps, threads_per_row).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    .shared .align 16 .b8 smem_h[{}];", hidden_dim * 4).unwrap();
+        let smem_h_base = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, smem_h;", smem_h_base).unwrap();
+        let smem_reduce_base = if num_warps > 1 {
+            writeln!(&mut self.ptx_buffer, "    .shared .align 4 .b8 smem_reduce[{}];", num_warps * 4).unwrap();
+            let base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, smem_reduce;", base).unwrap();
+            Some(base)
+        } else {
+            None
+        };
+
+        let x_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", x_g, x_ptr).unwrap();
+        let res_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", res_g, residual_ptr).unwrap();
+        let w_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", w_g, weight_ptr).unwrap();
+        let out_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", out_g, out_ptr).unwrap();
+        let newres_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", newres_g, new_residual_ptr).unwrap();
+
+        let row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", row).unwrap();
+        let tid = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+        let row_offset = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", row_offset, row, hidden_dim).unwrap();
+
+        // ---- Pass 1: accumulate this thread's partial sum(h^2), stage h into smem_h ----
+        // A real runtime loop (idx/running_sum updated in place via their
+        // own registers, branching back), not unrolled: an earlier fully-
+        // unrolled SCALAR version of this loop (hidden_dim=4096, 128
+        // iterations/thread, 202 registers/thread per `ptxas -v`) measured
+        // non-deterministic wrong output on real hardware - see
+        // benchmark_y_rmsnorm_rope_results.md for the full account. This
+        // loop (and its vectorized/multi-warp descendants) has been re-run
+        // through the same repeated-fixed-seed-launch determinism check
+        // every time its structure changed - see
+        // benchmark_y_vs_flashinfer_results.md.
+        let idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", idx, tid).unwrap();
+        let running_sum = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", running_sum).unwrap();
+        let loop1_start = self.alloc_label("RMSNORM_SUMSQ");
+        let loop1_end = self.alloc_label("RMSNORM_SUMSQ_DONE");
+        writeln!(&mut self.ptx_buffer, "    {}:", loop1_start).unwrap();
+        let p1_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p1_done, idx, vec_groups).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p1_done, loop1_end).unwrap();
+        {
+            let elem_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", elem_base, idx, VEC, row_offset).unwrap();
+            let byte_base = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 2;", byte_base, elem_base).unwrap();
+
+            let x_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", x_addr, x_g, byte_base).unwrap();
+            let x_words = self.emit_vec_load_u32(&x_addr, 4);
+            let x_f = self.emit_unpack_f16_pairs(&x_words);
+
+            let r_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", r_addr, res_g, byte_base).unwrap();
+            let r_words = self.emit_vec_load_u32(&r_addr, 4);
+            let r_f = self.emit_unpack_f16_pairs(&r_words);
+
+            // Accumulate in place (dest register == running_sum's own,
+            // fixed register - no new allocation): this loop body is
+            // emitted ONCE as static PTX text but executed repeatedly at
+            // runtime via the branch below, so `running_sum` must stay
+            // bound to the SAME physical register across dynamic
+            // iterations for the accumulation to actually carry over (see
+            // this function's doc comment history / benchmark_y_vs_
+            // flashinfer_results.md for the bug this caused when violated).
+            let mut h_vals = Vec::with_capacity(8);
+            for k in 0..8 {
+                let h = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", h, x_f[k], r_f[k]).unwrap();
+                let h_sq = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", h_sq, h, h).unwrap();
+                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", running_sum, running_sum, h_sq).unwrap();
+                h_vals.push(h);
+            }
+
+            // Stage h (f32, unrounded) into smem_h at this group's byte
+            // offset (idx*8*4 = idx*32) via two 128-bit vector stores -
+            // read back in pass 2 below instead of re-reading X/Residual.
+            let smem_off = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 32;", smem_off, idx).unwrap();
+            let smem_addr0 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_addr0, smem_h_base, smem_off).unwrap();
+            writeln!(&mut self.ptx_buffer, "    st.shared.v4.f32 [{}], {{{}, {}, {}, {}}};", smem_addr0, h_vals[0], h_vals[1], h_vals[2], h_vals[3]).unwrap();
+            let smem_addr1 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 16;", smem_addr1, smem_addr0).unwrap();
+            writeln!(&mut self.ptx_buffer, "    st.shared.v4.f32 [{}], {{{}, {}, {}, {}}};", smem_addr1, h_vals[4], h_vals[5], h_vals[6], h_vals[7]).unwrap();
+        }
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_row).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop1_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop1_end).unwrap();
+
+        // ---- per-warp reduction, then (if >1 warp) real cross-warp combine via smem ----
+        let warp_total = self.emit_warp_reduce_sum(&running_sum);
+        let total_sum_sq = if num_warps > 1 {
+            let smem_reduce_base = smem_reduce_base.as_deref().unwrap();
+            let warp_id = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp_id, tid).unwrap();
+            let lane = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 31;", lane, tid).unwrap();
+            let is_lane0 = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, 0;", is_lane0, lane).unwrap();
+            let reduce_off = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", reduce_off, warp_id).unwrap();
+            let reduce_addr = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", reduce_addr, smem_reduce_base, reduce_off).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", is_lane0, reduce_addr, warp_total).unwrap();
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+            let total = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", total).unwrap();
+            for w in 0..num_warps {
+                let slot_addr = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", slot_addr, smem_reduce_base, w * 4).unwrap();
+                let slot = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}];", slot, slot_addr).unwrap();
+                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", total, total, slot).unwrap();
+            }
+            total
+        } else {
+            warp_total
+        };
+
+        let mean_sq = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", mean_sq, total_sum_sq, Self::f32_to_ptx_hex(1.0 / hidden_dim as f32)).unwrap();
+        let mean_sq_eps = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", mean_sq_eps, mean_sq, Self::f32_to_ptx_hex(1e-5)).unwrap();
+        let inv_rms = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    rsqrt.approx.f32 {}, {};", inv_rms, mean_sq_eps).unwrap();
+
+        // ---- Pass 2: read h back from smem_h (NOT X/Residual again), scale by inv_rms * Weight, write Out + NewResidual ----
+        // Real runtime loop, same rationale as pass 1 above. Same idx
+        // stride as pass 1, so every thread reads back exactly the smem_h
+        // locations it itself wrote - no extra sync needed beyond the
+        // bar.sync already issued above for the cross-warp combine.
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", idx, tid).unwrap();
+        let loop2_start = self.alloc_label("RMSNORM_WRITE");
+        let loop2_end = self.alloc_label("RMSNORM_WRITE_DONE");
+        writeln!(&mut self.ptx_buffer, "    {}:", loop2_start).unwrap();
+        let p2_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", p2_done, idx, vec_groups).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", p2_done, loop2_end).unwrap();
+        {
+            let elem_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.u32 {}, {}, {}, {};", elem_base, idx, VEC, row_offset).unwrap();
+            let byte_base = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 2;", byte_base, elem_base).unwrap();
+
+            let smem_off = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 32;", smem_off, idx).unwrap();
+            let smem_addr0 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", smem_addr0, smem_h_base, smem_off).unwrap();
+            let h0 = self.alloc_regf32();
+            let h1 = self.alloc_regf32();
+            let h2 = self.alloc_regf32();
+            let h3 = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    ld.shared.v4.f32 {{{}, {}, {}, {}}}, [{}];", h0, h1, h2, h3, smem_addr0).unwrap();
+            let smem_addr1 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 16;", smem_addr1, smem_addr0).unwrap();
+            let h4 = self.alloc_regf32();
+            let h5 = self.alloc_regf32();
+            let h6 = self.alloc_regf32();
+            let h7 = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    ld.shared.v4.f32 {{{}, {}, {}, {}}}, [{}];", h4, h5, h6, h7, smem_addr1).unwrap();
+            let h_vals = vec![h0, h1, h2, h3, h4, h5, h6, h7];
+
+            // Weight is a single [hidden_dim] vector broadcast across every
+            // row (the standard RMSNorm gamma contract) - indexed by
+            // `idx*VEC` alone, NOT `elem_base` (which folds in
+            // `row_offset`); reusing `byte_base` here would have been a
+            // real bug (indexing past the end of a [hidden_dim]-sized
+            // buffer for every row after the first) - deliberately given
+            // its own byte offset instead, computed directly from `idx`
+            // without ever touching `row_offset`.
+            let w_byte_base = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, {};", w_byte_base, idx, VEC * 2).unwrap();
+            let w_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", w_addr, w_g, w_byte_base).unwrap();
+            let w_words = self.emit_vec_load_u32(&w_addr, 4);
+            let w_f = self.emit_unpack_f16_pairs(&w_words);
+
+            let mut scaled_vals = Vec::with_capacity(8);
+            for k in 0..8 {
+                let normed = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", normed, h_vals[k], inv_rms).unwrap();
+                let scaled = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", scaled, normed, w_f[k]).unwrap();
+                scaled_vals.push(scaled);
+            }
+
+            let out_words = self.emit_pack_f16_pairs(&scaled_vals);
+            let out_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", out_addr, out_g, byte_base).unwrap();
+            self.emit_vec_store_u32(&out_addr, &out_words);
+
+            let newres_words = self.emit_pack_f16_pairs(&h_vals);
+            let newres_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", newres_addr, newres_g, byte_base).unwrap();
+            self.emit_vec_store_u32(&newres_addr, &newres_words);
+        }
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", idx, idx, threads_per_row).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", loop2_start).unwrap();
+        writeln!(&mut self.ptx_buffer, "    {}:", loop2_end).unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        threads_per_row
+    }
+
+    /// Detects the 3-parameter (X: `GlobalMemory<F16>`, Positions:
+    /// `GlobalMemory<I32>`, Out: `GlobalMemory<F16>`) kernel shape, named
+    /// `rope_<head_dim>`, that dispatches `emit_rope_kernel`.
+    fn rope_operands(&self, kernel: &KernelDecl) -> Option<(u32, String, String, String)> {
+        if kernel.tile.is_some() {
+            return None;
+        }
+        let head_dim = Self::parse_trailing_dim(&kernel.name, "rope")?;
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+        if kernel.params.len() != 3
+            || !is_global_memory_of(&kernel.params[0].ty, "F16")
+            || !is_global_memory_of(&kernel.params[1].ty, "I32")
+            || !is_global_memory_of(&kernel.params[2].ty, "F16")
+        {
+            return None;
+        }
+
+        let x = self.variables.get(&kernel.params[0].name)?.clone();
+        let positions = self.variables.get(&kernel.params[1].name)?.clone();
+        let out = self.variables.get(&kernel.params[2].name)?.clone();
+        Some((head_dim, x, positions, out))
+    }
+
+    /// Emits a complete, self-contained Rotary Position Embedding (RoPE)
+    /// kernel: one warp (32 threads) per row, where a row is one token's
+    /// query or key vector of `head_dim` elements. Computes, for each pair
+    /// index `i` in `0..head_dim/2` (the **interleaved-pairs** convention -
+    /// pairs are `(2i, 2i+1)`, the original RoPE paper/GPT-NeoX layout, NOT
+    /// the "rotate-half"/split-in-two layout HuggingFace's Llama
+    /// implementation uses - a deliberate, disclosed choice of one
+    /// well-defined convention, matched exactly by this kernel's own
+    /// correctness reference rather than assumed compatible with a
+    /// specific model family):
+    /// `theta_i = pos * base^(-2i/head_dim)`, `base = 10000.0`, then
+    /// `out[2i]   = x[2i]*cos(theta_i) - x[2i+1]*sin(theta_i)`,
+    /// `out[2i+1] = x[2i]*sin(theta_i) + x[2i+1]*cos(theta_i)`.
+    ///
+    /// `theta_i` is computed entirely on-device from `pos` and `i`
+    /// (`base^y = 2^(y*log2(base))` via `ex2.approx.f32`, then
+    /// `sin.approx.f32`/`cos.approx.f32`) rather than reading a precomputed
+    /// cos/sin table - deliberately: a real "unfused" baseline has to
+    /// produce that table (or index into one) as a separate step, so
+    /// fusing the trig into this elementwise kernel removes that step
+    /// entirely rather than just avoiding a DRAM round-trip on it.
+    /// `ex2.approx.f32`/`sin.approx.f32`/`cos.approx.f32` were all
+    /// validated standalone against Python's `math.sin`/`cos` on real
+    /// sm_89 hardware before being wired in here (max absolute error
+    /// ~6e-6 over 2000 random angles in [-50, 50] radians) - see
+    /// `benchmark_y_rmsnorm_rope_results.md`.
+    ///
+    /// `head_dim` must be a multiple of 64 (`debug_assert`ed: needs
+    /// `head_dim/2` pairs to split evenly across 32 lanes, i.e. `head_dim`
+    /// a multiple of 64 - true for every common LLM head dim: 64, 128,
+    /// 256); each thread handles `head_dim / 64` pairs.
+    ///
+    /// **Blocked, not strided, pair-to-thread mapping, so pairs can be
+    /// vector-loaded**: lane `L` owns the contiguous run of pairs
+    /// `[L*pairs_per_thread, (L+1)*pairs_per_thread)`, not the old
+    /// `{L, L+32, L+64, ...}` stride. Every pair is still computed by
+    /// exactly one thread (any bijective lane/pair assignment is correct -
+    /// RoPE has no cross-lane dependency, unlike RMSNorm's reduction), and
+    /// warp-wide coalescing is preserved: for a fixed chunk index, lane
+    /// `L`'s bytes start exactly where lane `L-1`'s end, so the union
+    /// across the warp is still one contiguous span - the same shape as a
+    /// `float4`-style blocked-vectorized CUDA access, and the same
+    /// principle `emit_gemm_tile_load` already uses. The old strided
+    /// mapping could not be vector-loaded at all: consecutive `t` values
+    /// for one thread were `head_dim` bytes apart, not adjacent.
+    ///
+    /// Chunk width (in pairs; 1 pair = 1 packed 32-bit word) is the
+    /// largest of {4, 2, 1} dividing `pairs_per_thread` evenly - 128-bit
+    /// `ld/st.global.v4.u32` at head_dim=256 (4 pairs/thread), 64-bit `v2`
+    /// at head_dim=128 (2 pairs/thread), a single 32-bit word at
+    /// head_dim=64 (1 pair/thread, still a real win over the old scheme's
+    /// two separate 16-bit loads for that one pair). See
+    /// `emit_vec_load_u32`/`emit_unpack_f16_pairs`/`emit_pack_f16_pairs`/
+    /// `emit_vec_store_u32` for the shared, standalone-hardware-validated
+    /// pack/unpack primitives (also used by `emit_rmsnorm_residual_kernel`).
+    /// The per-chunk, per-pair body is still fully unrolled at Rust/compile
+    /// time (a small, fixed count for realistic head dims - never a real
+    /// PTX runtime loop), so - unlike RMSNorm's accumulator - there is no
+    /// loop-carried register to get wrong here; still re-verified with the
+    /// same real-hardware correctness + repeated-launch determinism checks
+    /// regardless, per this codebase's standing validation discipline.
+    fn emit_rope_kernel(
+        &mut self,
+        head_dim: u32,
+        x_ptr: &str,
+        positions_ptr: &str,
+        out_ptr: &str,
+    ) -> u32 {
+        const WARP: u32 = 32;
+        debug_assert_eq!(head_dim % (WARP * 2), 0, "head_dim must be a multiple of 64 (32 lanes x 2 elements/pair)");
+        let pairs_per_thread = head_dim / (WARP * 2);
+        let chunk_pairs: u32 = if pairs_per_thread % 4 == 0 {
+            4
+        } else if pairs_per_thread % 2 == 0 {
+            2
+        } else {
+            1
+        };
+        let num_chunks = pairs_per_thread / chunk_pairs;
+        // theta_i = pos * base^(-2i/head_dim) = pos * 2^(-2i/head_dim * log2(base));
+        // -2/head_dim * log2(10000.0) is compile-time-known (head_dim is),
+        // leaving one runtime multiply by i to get the ex2 exponent.
+        let exponent_scale = (-2.0 / head_dim as f32) * 10000.0f32.log2();
+
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        writeln!(&mut self.ptx_buffer, "    // [Y FUSED ROPE] head_dim={} | 1 warp (32 threads) per row | interleaved pairs, base=10000 | {}-pair vectorized blocks", head_dim, chunk_pairs).unwrap();
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+
+        let x_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", x_g, x_ptr).unwrap();
+        let pos_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", pos_g, positions_ptr).unwrap();
+        let out_g = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", out_g, out_ptr).unwrap();
+
+        let row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", row).unwrap();
+        let lane = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", lane).unwrap();
+        let row_offset = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", row_offset, row, head_dim).unwrap();
+
+        // pos = Positions[row] (I32, one scalar per row)
+        let pos_byte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 4;", pos_byte, row).unwrap();
+        let pos_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", pos_addr, pos_g, pos_byte).unwrap();
+        let pos_i = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    ld.global.u32 {}, [{}];", pos_i, pos_addr).unwrap();
+        let pos_f = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.s32 {}, {};", pos_f, pos_i).unwrap();
+
+        for c in 0..num_chunks {
+            // pair_i_start = lane*pairs_per_thread + c*chunk_pairs (this
+            // chunk's first pair index, owned entirely by this lane).
+            let pair_i_partial = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", pair_i_partial, lane, pairs_per_thread).unwrap();
+            let pair_i_start = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", pair_i_start, pair_i_partial, c * chunk_pairs).unwrap();
+
+            let elem_group_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 2;", elem_group_base, pair_i_start).unwrap();
+            let elem_global_base = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", elem_global_base, row_offset, elem_group_base).unwrap();
+            let byte_base = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    mul.wide.u32 {}, {}, 2;", byte_base, elem_global_base).unwrap();
+
+            let x_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", x_addr, x_g, byte_base).unwrap();
+            let x_words = self.emit_vec_load_u32(&x_addr, chunk_pairs as usize);
+            let x_vals = self.emit_unpack_f16_pairs(&x_words);
+
+            let mut out_vals = Vec::with_capacity(2 * chunk_pairs as usize);
+            for p in 0..chunk_pairs {
+                let pair_i = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", pair_i, pair_i_start, p).unwrap();
+
+                let x0_f = &x_vals[(2 * p) as usize];
+                let x1_f = &x_vals[(2 * p + 1) as usize];
+
+                // theta = pos * ex2.approx(i * exponent_scale)
+                let i_f = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.u32 {}, {};", i_f, pair_i).unwrap();
+                let exponent = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", exponent, i_f, Self::f32_to_ptx_hex(exponent_scale)).unwrap();
+                let base_pow = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    ex2.approx.f32 {}, {};", base_pow, exponent).unwrap();
+                let theta = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", theta, pos_f, base_pow).unwrap();
+
+                let sin_t = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    sin.approx.f32 {}, {};", sin_t, theta).unwrap();
+                let cos_t = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    cos.approx.f32 {}, {};", cos_t, theta).unwrap();
+
+                // out0 = x0*cos - x1*sin ; out1 = x0*sin + x1*cos
+                let x0_cos = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x0_cos, x0_f, cos_t).unwrap();
+                let x1_sin = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x1_sin, x1_f, sin_t).unwrap();
+                let out0 = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    sub.f32 {}, {}, {};", out0, x0_cos, x1_sin).unwrap();
+
+                let x0_sin = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x0_sin, x0_f, sin_t).unwrap();
+                let x1_cos = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x1_cos, x1_f, cos_t).unwrap();
+                let out1 = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", out1, x0_sin, x1_cos).unwrap();
+
+                out_vals.push(out0);
+                out_vals.push(out1);
+            }
+
+            let out_words = self.emit_pack_f16_pairs(&out_vals);
+            let out_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", out_addr, out_g, byte_base).unwrap();
+            self.emit_vec_store_u32(&out_addr, &out_words);
+        }
+
+        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
+        WARP
+    }
+
+    /// Default warps per CTA for `emit_paged_decode_attention_kernel`, used
+    /// when the kernel name does not declare one explicitly.
+    ///
+    /// The grid is `num_q_heads x num_seqs` CTAs, so at batch 1 with 32 heads
+    /// it is 32 CTAs against this GPU's 66 SMs - half the machine idle, with
+    /// a long serial dependency chain per token (load K -> warp-reduce ->
+    /// exp -> load V -> update). Warps inside the CTA are the only
+    /// parallelism left to cover that, and the effect is large and measured
+    /// (min-of-7 interleaved rounds, head_dim 128, 32 q heads, 8 kv heads):
+    ///
+    /// ```text
+    ///   case            8 warps   16 warps   32 warps    best
+    ///   b1  ctx 1024      43.26      23.92      14.77    32  (2.93x)
+    ///   b1  ctx 4096     165.88      87.48      49.94    32  (3.32x)
+    ///   b1  ctx 16384   1147.03     586.39     308.22    32  (3.72x)
+    ///   b4  ctx 4096     237.77     131.02     132.20    16  (1.81x)
+    ///   b8  ctx 1024      49.77      54.32      58.11     8
+    ///   b8  ctx 4096     306.12     314.73     316.36     8
+    ///   b32 ctx 1024     244.02     251.75     334.34     8  (32w is 1.37x worse)
+    ///   b32 ctx 4096    1046.89    1071.66    1332.68     8  (32w is 1.27x worse)
+    /// ```
+    ///
+    /// The optimum is entirely a function of how many CTAs the grid already
+    /// supplies (`num_q_heads * batch`) against the SM count - and batch is a
+    /// RUNTIME value, so no compile-time constant is right for every launch.
+    /// 32 is the default because this compiler targets consumer-GPU
+    /// inference, where decode runs at batch 1-4 and the win is 3x; a
+    /// batch-many serving deployment should declare 8 instead (see
+    /// `paged_decode_attention_operands` for the optional 5th name
+    /// dimension), where the cost of the wrong choice is at most 1.37x.
+    ///
+    /// Neither choice fixes the grid being too small at batch 1 outright -
+    /// that needs a split-K decode (partition the KV sequence across CTAs
+    /// plus a second reduction pass over the partial softmax states), which
+    /// is not implemented. See the kernel's doc comment.
+    const ATTN_DEFAULT_NUM_WARPS: u32 = 32;
+
+    /// Parses `<prefix>_<d0>_<d1>_..._<dn-1>` into its `n` trailing positive
+    /// integers.
+    ///
+    /// The multi-dimension sibling of `parse_trailing_dim`. Attention needs
+    /// four compile-time constants (head_dim, num_q_heads, num_kv_heads,
+    /// page_size) where RMSNorm/RoPE need one, and all four genuinely change
+    /// the generated code: head_dim sets the per-lane register footprint,
+    /// the head counts set the GQA mapping, page_size sets the
+    /// token->page/slot arithmetic. Encoding them in the name keeps the
+    /// grammar untouched, consistent with how those kernels already work.
+    /// Everything that does NOT change codegen - batch size, sequence
+    /// length, page-table stride - stays a runtime value.
+    fn parse_trailing_dims(name: &str, prefix: &str, min_n: usize, max_n: usize) -> Option<Vec<u32>> {
+        let rest = name.strip_prefix(prefix)?.strip_prefix('_')?;
+        let parts: Vec<&str> = rest.split('_').collect();
+        if parts.len() < min_n || parts.len() > max_n {
+            return None;
+        }
+        let dims: Vec<u32> = parts
+            .iter()
+            .filter_map(|p| p.parse::<u32>().ok().filter(|&d| d > 0))
+            .collect();
+        if dims.len() == parts.len() {
+            Some(dims)
+        } else {
+            None
+        }
+    }
+
+    /// Detects the 7-parameter paged decode-attention kernel shape, named
+    /// `paged_decode_attention_<head_dim>_<num_q_heads>_<num_kv_heads>_<page_size>`.
+    ///
+    /// Parameters, in declaration order:
+    ///   `Q`         `GlobalMemory<F16>`  `[num_seqs, num_q_heads, head_dim]`
+    ///   `KCache`    `GlobalMemory<F16>`  `[num_pages, page_size, num_kv_heads, head_dim]`
+    ///   `VCache`    `GlobalMemory<F16>`  same layout as `KCache`
+    ///   `PageTable` `GlobalMemory<I32>`  `[num_seqs, max_pages]`, logical page -> physical page
+    ///   `SeqLens`   `GlobalMemory<I32>`  `[num_seqs]`
+    ///   `Out`       `GlobalMemory<F16>`  `[num_seqs, num_q_heads, head_dim]`
+    ///   `MaxPages`  `I32` (scalar)       row stride of `PageTable`
+    ///
+    /// An optional 5th name dimension sets warps per CTA
+    /// (`..._<head_dim>_<num_q_heads>_<num_kv_heads>_<page_size>_<warps>`),
+    /// overriding `ATTN_DEFAULT_NUM_WARPS`. That constant's doc comment has
+    /// the measured table showing why the right value depends on batch size,
+    /// which is a runtime quantity - so a deployment that knows it serves
+    /// large batches can declare 8 while the batch-1 default stays 32.
+    fn paged_decode_attention_operands(
+        &self,
+        kernel: &KernelDecl,
+    ) -> Option<(u32, u32, u32, u32, u32, String, String, String, String, String, String, String)> {
+        if kernel.tile.is_some() {
+            return None;
+        }
+        let dims = Self::parse_trailing_dims(&kernel.name, "paged_decode_attention", 4, 5)?;
+        let (head_dim, num_q_heads, num_kv_heads, page_size) = (dims[0], dims[1], dims[2], dims[3]);
+        let num_warps = if dims.len() == 5 { dims[4] } else { Self::ATTN_DEFAULT_NUM_WARPS };
+        // A CTA is capped at 1024 threads, and the merge needs at least one warp.
+        if num_warps == 0 || num_warps > 32 {
+            return None;
+        }
+
+        // Constraints the codegen below genuinely relies on. Returning None
+        // (rather than asserting) means a kernel that violates them falls
+        // through to generic lowering with a type error, instead of silently
+        // emitting a kernel that computes the wrong thing.
+        if head_dim % 32 != 0 {
+            return None;
+        }
+        let elems_per_lane = head_dim / 32;
+        if !matches!(elems_per_lane, 2 | 4 | 8) {
+            return None; // head_dim 64 / 128 / 256: 1, 2 or 4 32-bit words per lane
+        }
+        if num_kv_heads == 0 || num_q_heads % num_kv_heads != 0 {
+            return None; // GQA requires q heads to be a whole multiple of kv heads
+        }
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+        fn is_scalar_i32(ty: &Type) -> bool {
+            matches!(ty, Type::Primitive(p, _) if p == "I32")
+        }
+        if kernel.params.len() != 7
+            || !is_global_memory_of(&kernel.params[0].ty, "F16")
+            || !is_global_memory_of(&kernel.params[1].ty, "F16")
+            || !is_global_memory_of(&kernel.params[2].ty, "F16")
+            || !is_global_memory_of(&kernel.params[3].ty, "I32")
+            || !is_global_memory_of(&kernel.params[4].ty, "I32")
+            || !is_global_memory_of(&kernel.params[5].ty, "F16")
+            || !is_scalar_i32(&kernel.params[6].ty)
+        {
+            return None;
+        }
+
+        let q = self.variables.get(&kernel.params[0].name)?.clone();
+        let kc = self.variables.get(&kernel.params[1].name)?.clone();
+        let vc = self.variables.get(&kernel.params[2].name)?.clone();
+        let pt = self.variables.get(&kernel.params[3].name)?.clone();
+        let sl = self.variables.get(&kernel.params[4].name)?.clone();
+        let out = self.variables.get(&kernel.params[5].name)?.clone();
+        let max_pages = self.variables.get(&kernel.params[6].name)?.clone();
+        Some((head_dim, num_q_heads, num_kv_heads, page_size, num_warps, q, kc, vc, pt, sl, out, max_pages))
+    }
+
+    /// Emits a complete, self-contained **paged decode attention** kernel:
+    /// one query token per (sequence, query head), attending over a
+    /// page-indexed KV cache, with FlashAttention-style online softmax so the
+    /// scores are never materialized.
+    ///
+    /// This is the decode (autoregressive, one new token) path, not prefill.
+    /// It is the shape that dominates LLM serving latency and the one a KV
+    /// cache exists for: every generated token re-reads the whole cache, so
+    /// the kernel is DRAM-bound and the win comes from touching each KV byte
+    /// exactly once, in one fused pass, rather than materializing an
+    /// `[1, seq_len]` score matrix and a separate softmax.
+    ///
+    /// **Grid/block contract** (the launcher must match exactly):
+    ///   grid  = `(num_q_heads, num_seqs, 1)`
+    ///   block = `(ATTN_NUM_WARPS * 32, 1, 1)`
+    /// Shared memory is statically declared, so no dynamic-smem opt-in.
+    ///
+    /// **Algorithm.** Lane `L` of every warp owns head-dimension elements
+    /// `[L*elems_per_lane, (L+1)*elems_per_lane)`, so a whole `head_dim` row
+    /// is one fully-coalesced vector load per warp (`head_dim=128` -> 4 f16
+    /// per lane -> `ld.global.v2.u32`, 256 contiguous bytes per warp). Each
+    /// warp strides the KV sequence by `ATTN_NUM_WARPS` and maintains its own
+    /// running `(m, l, acc)` softmax state:
+    ///
+    /// ```text
+    ///   score  = warp_reduce_sum(dot(Q, K_t))          // scale folded into Q
+    ///   m_new  = max(m, score)
+    ///   corr   = exp(m - m_new)
+    ///   p      = exp(score - m_new)
+    ///   l      = l*corr + p
+    ///   acc[j] = acc[j]*corr + p*V_t[j]
+    /// ```
+    ///
+    /// `m`, `l` and `acc[]` are LOOP-CARRIED across a real runtime loop, so
+    /// every write above targets those exact registers. Allocating a fresh
+    /// register per step - correct and idiomatic everywhere else in this
+    /// emitter - would make each iteration re-read the pre-loop value and
+    /// silently keep only the last token's contribution. This codebase has
+    /// shipped that exact bug before (see `emit_rmsnorm_residual_kernel`'s
+    /// history); it is the reason the accumulator updates below look
+    /// deliberately un-SSA.
+    ///
+    /// Because each warp holds a PARTIAL softmax state over a different
+    /// subset of tokens, the cross-warp combine is not a sum: it is a second
+    /// max-rescale-and-sum through shared memory (the standard
+    /// flash-decoding reduction).
+    ///
+    /// **Numerics.** `exp` is `ex2.approx.ftz.f32(x * log2 e)`. `.ftz` is
+    /// deliberate and safe here: the only values it flushes are
+    /// `exp(score - max)` for scores tens of orders below the running max,
+    /// i.e. weights that round to zero in the softmax anyway. The running max
+    /// starts at `-1e30` rather than `-inf` so that a warp which receives no
+    /// tokens (sequence shorter than the warp count) contributes
+    /// `exp(-1e30 - M) = 0` instead of `(-inf) - (-inf) = NaN`. A sequence
+    /// length of zero is handled by an explicit early store of zeros, because
+    /// there the merge would otherwise divide zero by zero.
+    ///
+    /// **Validated** on real sm_89 hardware before being written here, via a
+    /// standalone PTX generator driven against a PyTorch f32 reference across
+    /// 20 configurations - shuffled (never identity) page tables, ragged and
+    /// zero sequence lengths, partial final pages, GQA 1:1 through 8:1,
+    /// `head_dim` 64/128/256, `page_size` 1/16/32/64, 1..16 warps, and 4096-token
+    /// contexts - worst relative L2 error 2.11e-4 (the f16 storage floor),
+    /// plus 50 fixed-input launches confirming bit-level determinism across
+    /// the shared-memory merge.
+    ///
+    /// **Known limitation, not a bug**: the grid is `num_q_heads x num_seqs`.
+    /// At batch 1 with 32 heads that is 32 CTAs against 66 SMs, so half the
+    /// GPU idles regardless of how well the kernel itself performs. Fixing it
+    /// needs a split-K decode (partition the KV sequence across CTAs, then a
+    /// second reduction pass over the per-partition softmax states). Not
+    /// implemented; see this session's notes.
+    ///
+    /// Returns the CTA's real thread count for `emit_kernel`'s `.maxnreg`
+    /// computation.
+    fn emit_paged_decode_attention_kernel(
+        &mut self,
+        head_dim: u32,
+        num_q_heads: u32,
+        num_kv_heads: u32,
+        page_size: u32,
+        num_warps: u32,
+        q_ptr: &str,
+        k_ptr: &str,
+        v_ptr: &str,
+        pt_ptr: &str,
+        sl_ptr: &str,
+        out_ptr: &str,
+        max_pages_reg: &str,
+        kernel_name: &str,
+    ) -> u32 {
+        const LOG2E: f32 = std::f32::consts::LOG2_E;
+        /// Running-max sentinel for a warp that received no tokens. See the
+        /// doc comment: a true -inf makes the merge compute (-inf) - (-inf).
+        const NEG_BIG: f32 = -1.0e30;
+
+        let elems_per_lane = head_dim / 32;
+        let words_per_lane = (elems_per_lane / 2) as usize;
+        let gqa_ratio = num_q_heads / num_kv_heads;
+
+        writeln!(
+            &mut self.ptx_buffer,
+            "    // [Y PAGED DECODE ATTENTION] head_dim={} q_heads={} kv_heads={} (GQA {}:1) page_size={} | {} warps | online softmax, ex2.approx.ftz",
+            head_dim, num_q_heads, num_kv_heads, gqa_ratio, page_size, num_warps
+        )
+        .unwrap();
+
+        // Shared: [num_warps] m | [num_warps] l | [num_warps * head_dim] acc, all f32.
+        let smem = format!("smem_attn_{}", kernel_name);
+        let smem_bytes = (num_warps * 2 + num_warps * head_dim) * 4;
+        writeln!(&mut self.ptx_buffer, "    .shared .align 4 .b8 {}[{}];", smem, smem_bytes).unwrap();
+
+        let ctaid_x = self.alloc_reg32();
+        let ctaid_y = self.alloc_reg32();
+        let tid = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", ctaid_x).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.y;", ctaid_y).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+        let warp = self.alloc_reg32();
+        let lane = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp, tid).unwrap();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 31;", lane, tid).unwrap();
+
+        // Q and Out share one element offset: ((seq*NQH + head)*HD + lane*EPL).
+        let row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", row, ctaid_y, num_q_heads, ctaid_x).unwrap();
+        let elem = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", elem, row, head_dim).unwrap();
+        let elem_l = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", elem_l, lane, elems_per_lane, elem).unwrap();
+        let byte_off = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 2;", byte_off, elem_l).unwrap();
+        let out_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", out_addr, out_ptr, byte_off).unwrap();
+
+        // seq_len, with the explicit empty guard (see doc comment).
+        let sl_off = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 4;", sl_off, ctaid_y).unwrap();
+        let sl_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", sl_addr, sl_ptr, sl_off).unwrap();
+        let seq_len = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    ld.global.s32 {}, [{}];", seq_len, sl_addr).unwrap();
+        let p_empty = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.le.s32 {}, {}, 0;", p_empty, seq_len).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_ZERO_{};", p_empty, kernel_name).unwrap();
+
+        // kv_head = q_head / gqa_ratio
+        let kv_head = self.alloc_reg32();
+        if gqa_ratio == 1 {
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", kv_head, ctaid_x).unwrap();
+        } else if gqa_ratio.is_power_of_two() {
+            writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, {};", kv_head, ctaid_x, gqa_ratio.trailing_zeros()).unwrap();
+        } else {
+            writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", kv_head, ctaid_x, gqa_ratio).unwrap();
+        }
+
+        // Q is read once per CTA - fold 1/sqrt(head_dim) in here rather than
+        // scaling every score inside the loop.
+        let q_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", q_addr, q_ptr, byte_off).unwrap();
+        let q_words = self.emit_vec_load_u32(&q_addr, words_per_lane);
+        let q_raw = self.emit_unpack_f16_pairs(&q_words);
+        let scale = Self::f32_to_ptx_hex(1.0 / (head_dim as f32).sqrt());
+        let mut q_vals = Vec::with_capacity(q_raw.len());
+        for r in &q_raw {
+            let s = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", s, r, scale).unwrap();
+            q_vals.push(s);
+        }
+
+        // ---- loop-carried online-softmax state: these exact registers are
+        // rewritten in place every iteration (see doc comment) ----
+        let m_reg = self.alloc_regf32();
+        let l_reg = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", m_reg, Self::f32_to_ptx_hex(NEG_BIG)).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", l_reg).unwrap();
+        let mut acc = Vec::with_capacity(elems_per_lane as usize);
+        for _ in 0..elems_per_lane {
+            let a = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", a).unwrap();
+            acc.push(a);
+        }
+
+        let t_reg = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", t_reg, warp).unwrap();
+        writeln!(&mut self.ptx_buffer, "ATTN_LOOP_{}:", kernel_name).unwrap();
+        let p_done = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.s32 {}, {}, {};", p_done, t_reg, seq_len).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_LOOP_END_{};", p_done, kernel_name).unwrap();
+
+        // token -> (logical page, slot)
+        let page = self.alloc_reg32();
+        let slot = self.alloc_reg32();
+        if page_size.is_power_of_two() {
+            writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, {};", page, t_reg, page_size.trailing_zeros()).unwrap();
+            writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, {};", slot, t_reg, page_size - 1).unwrap();
+        } else {
+            writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", page, t_reg, page_size).unwrap();
+            writeln!(&mut self.ptx_buffer, "    rem.u32 {}, {}, {};", slot, t_reg, page_size).unwrap();
+        }
+
+        // page_table[seq, page] -> physical page
+        let pt_idx = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", pt_idx, ctaid_y, max_pages_reg, page).unwrap();
+        let pt_off = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 4;", pt_off, pt_idx).unwrap();
+        let pt_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", pt_addr, pt_ptr, pt_off).unwrap();
+        let phys = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    ld.global.s32 {}, [{}];", phys, pt_addr).unwrap();
+
+        // KV element index = ((phys*PS + slot)*NKVH + kv_head)*HD + lane*EPL.
+        // Computed in 64 bits: num_pages*page_size*num_kv_heads*head_dim
+        // overflows 32 bits for a realistically sized cache.
+        let kv_base = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, {};", kv_base, phys, page_size * num_kv_heads * head_dim).unwrap();
+        let s1 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", s1, slot, num_kv_heads * head_dim).unwrap();
+        let s2 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", s2, kv_head, head_dim, s1).unwrap();
+        let s3 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", s3, lane, elems_per_lane, s2).unwrap();
+        let kv_small = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 1;", kv_small, s3).unwrap();
+        let kv_idx = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", kv_idx, kv_base, kv_small).unwrap();
+        let kv_bytes = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 1;", kv_bytes, kv_idx).unwrap();
+
+        // score = warp_reduce_sum(dot(Q, K_t))
+        let k_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", k_addr, k_ptr, kv_bytes).unwrap();
+        let k_words = self.emit_vec_load_u32(&k_addr, words_per_lane);
+        let k_vals = self.emit_unpack_f16_pairs(&k_words);
+        let mut dot = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", dot, q_vals[0], k_vals[0]).unwrap();
+        for j in 1..elems_per_lane as usize {
+            let nx = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, q_vals[j], k_vals[j], dot).unwrap();
+            dot = nx;
+        }
+        let score = self.emit_warp_reduce_sum(&dot);
+
+        // online softmax update
+        writeln!(&mut self.ptx_buffer, "    // online softmax: rescale the running sum AND accumulator by exp(m_old - m_new)").unwrap();
+        let m_new = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, {};", m_new, m_reg, score).unwrap();
+        let corr = self.emit_exp_f32(&m_reg.clone(), &m_new, LOG2E);
+        let p_w = self.emit_exp_f32(&score, &m_new, LOG2E);
+        writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", l_reg, l_reg, corr, p_w).unwrap();
+
+        let v_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", v_addr, v_ptr, kv_bytes).unwrap();
+        let v_words = self.emit_vec_load_u32(&v_addr, words_per_lane);
+        let v_vals = self.emit_unpack_f16_pairs(&v_words);
+        for j in 0..elems_per_lane as usize {
+            let t = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", t, acc[j], corr).unwrap();
+            writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", acc[j], p_w, v_vals[j], t).unwrap();
+        }
+        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", m_reg, m_new).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", t_reg, t_reg, num_warps).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra ATTN_LOOP_{};", kernel_name).unwrap();
+        writeln!(&mut self.ptx_buffer, "ATTN_LOOP_END_{}:", kernel_name).unwrap();
+
+        // ---- cross-warp merge: each warp holds a PARTIAL softmax state, so
+        // this is a max-rescale-and-sum, not a plain sum ----
+        let smem_base = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", smem_base, smem).unwrap();
+        let p_lane0 = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.eq.s32 {}, {}, 0;", p_lane0, lane).unwrap();
+        let a_m = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, 4, {};", a_m, warp, smem_base).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", p_lane0, a_m, m_reg).unwrap();
+        let a_l = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", a_l, a_m, num_warps * 4).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", p_lane0, a_l, l_reg).unwrap();
+
+        let acc_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", acc_off, warp, head_dim).unwrap();
+        let acc_off2 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", acc_off2, lane, elems_per_lane, acc_off).unwrap();
+        let a_acc = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, 4, {};", a_acc, acc_off2, smem_base).unwrap();
+        let a_acc2 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", a_acc2, a_acc, num_warps * 8).unwrap();
+        for (j, a) in acc.iter().enumerate() {
+            writeln!(&mut self.ptx_buffer, "    st.shared.f32 [{}+{}], {};", a_acc2, j * 4, a).unwrap();
+        }
+        writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+        // Every thread recomputes the (identical) merge scalars: `num_warps`
+        // is compile-time, so this unrolls to a handful of shared loads -
+        // cheaper than a second barrier plus a broadcast.
+        let mut ms = Vec::with_capacity(num_warps as usize);
+        let mut ls = Vec::with_capacity(num_warps as usize);
+        for w in 0..num_warps {
+            let mm = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}+{}];", mm, smem_base, w * 4).unwrap();
+            ms.push(mm);
+            let ll = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}+{}];", ll, smem_base, num_warps * 4 + w * 4).unwrap();
+            ls.push(ll);
+        }
+        let mut m_all = ms[0].clone();
+        for w in 1..num_warps as usize {
+            let nx = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, {};", nx, m_all, ms[w]).unwrap();
+            m_all = nx;
+        }
+        let mut corrs = Vec::with_capacity(num_warps as usize);
+        for w in 0..num_warps as usize {
+            let c = self.emit_exp_f32(&ms[w], &m_all, LOG2E);
+            corrs.push(c);
+        }
+        let mut l_all = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", l_all, ls[0], corrs[0]).unwrap();
+        for w in 1..num_warps as usize {
+            let nx = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, ls[w], corrs[w], l_all).unwrap();
+            l_all = nx;
+        }
+
+        // Only warp 0 stores; every warp computed the same answer.
+        let p_not_w0 = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ne.s32 {}, {}, 0;", p_not_w0, warp).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_END_{};", p_not_w0, kernel_name).unwrap();
+
+        let merge_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", merge_off, lane, elems_per_lane * 4, num_warps * 8).unwrap();
+        let a_merge = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", a_merge, merge_off, smem_base).unwrap();
+        let mut out_vals = Vec::with_capacity(elems_per_lane as usize);
+        for j in 0..elems_per_lane as usize {
+            let mut tot: Option<String> = None;
+            for w in 0..num_warps as usize {
+                let t = self.alloc_regf32();
+                writeln!(
+                    &mut self.ptx_buffer,
+                    "    ld.shared.f32 {}, [{}+{}];",
+                    t,
+                    a_merge,
+                    w as u32 * head_dim * 4 + j as u32 * 4
+                )
+                .unwrap();
+                let nx = self.alloc_regf32();
+                match &tot {
+                    None => writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", nx, t, corrs[w]).unwrap(),
+                    Some(prev) => writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, t, corrs[w], prev).unwrap(),
+                }
+                tot = Some(nx);
+            }
+            let o = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    div.rn.f32 {}, {}, {};", o, tot.unwrap(), l_all).unwrap();
+            out_vals.push(o);
+        }
+        let out_words = self.emit_pack_f16_pairs(&out_vals);
+        self.emit_vec_store_u32(&out_addr, &out_words);
+        writeln!(&mut self.ptx_buffer, "    bra ATTN_END_{};", kernel_name).unwrap();
+
+        // seq_len == 0: emit an explicit zero row (see doc comment).
+        writeln!(&mut self.ptx_buffer, "ATTN_ZERO_{}:", kernel_name).unwrap();
+        let p_not_w0z = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.ne.s32 {}, {}, 0;", p_not_w0z, warp).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_END_{};", p_not_w0z, kernel_name).unwrap();
+        let mut zeros = Vec::with_capacity(words_per_lane);
+        for _ in 0..words_per_lane {
+            let z = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", z).unwrap();
+            zeros.push(z);
+        }
+        self.emit_vec_store_u32(&out_addr, &zeros);
+        writeln!(&mut self.ptx_buffer, "ATTN_END_{}:", kernel_name).unwrap();
+
+        num_warps * 32
+    }
+
+    /// `exp(a - b)` as `ex2.approx.ftz.f32((a - b) * log2 e)`.
+    ///
+    /// PTX has no native `exp`; `ex2.approx` is the hardware instruction and
+    /// the standard way every attention kernel computes softmax weights.
+    /// `.ftz` flushes denormal results to zero, which here only affects
+    /// weights already tens of orders of magnitude below the running max.
+    fn emit_exp_f32(&mut self, a: &str, b: &str, log2e: f32) -> String {
+        let d = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    sub.f32 {}, {}, {};", d, a, b).unwrap();
+        let ds = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", ds, d, Self::f32_to_ptx_hex(log2e)).unwrap();
+        let e = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    ex2.approx.ftz.f32 {}, {};", e, ds).unwrap();
+        e
     }
 
     /// Emits multi-warp hierarchical tile GEMM loop ($128 \times 128 \times 32$ CTA tile)
@@ -3903,6 +7452,173 @@ mod tests {
         assert!(!ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.global.f32"), "plain-GEMM direct-to-global epilogue should not run for the 4-param fused shape: {}", ptx);
     }
 
+    /// Dispatch regression guard for `tile_gemm_swiglu_operands`/
+    /// `emit_gemm_swiglu_kernel`: a 4-param (X, W_gate, W_up: F16, Out:
+    /// F32) `@tile`d kernel - W_up F16, NOT F32 like Bias+ReLU's 3rd
+    /// param - must take the fused Linear+SwiGLU epilogue path, not the
+    /// Bias+ReLU one (which requires a global `Bias` operand this shape
+    /// doesn't have) or the plain direct-to-global one.
+    #[test]
+    fn test_fused_swiglu_epilogue_dispatch() {
+        let src = r#"
+        @tile(256, 256, 256)
+        kernel fused_swiglu(X: GlobalMemory<F16>, Wgate: GlobalMemory<F16>, Wup: GlobalMemory<F16>, Out: GlobalMemory<F32>) {
+            let x: I32 = 0;
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(ptx.contains("Y FUSED LINEAR+SWIGLU GEMM"), "missing fused SwiGLU kernel header: {}", ptx);
+        assert!(ptx.contains("SWIGLU_K_LOOP"), "missing SwiGLU K-loop: {}", ptx);
+        assert!(ptx.contains("EPI_SWIGLU"), "missing SwiGLU epilogue loop: {}", ptx);
+        assert!(ptx.contains("ex2.approx.f32"), "missing ex2.approx.f32 sigmoid math in SwiGLU epilogue: {}", ptx);
+        assert!(ptx.contains("rcp.approx.f32"), "missing rcp.approx.f32 sigmoid math in SwiGLU epilogue: {}", ptx);
+        assert!(ptx.matches("ldmatrix.sync.aligned.m8n8.x4").count() >= 2, "expected A fragments to be loaded (at least) once per gate/up compute_block call: {}", ptx);
+        assert!(!ptx.contains("EPI_BIAS_RELU"), "SwiGLU shape must not dispatch the Bias+ReLU epilogue: {}", ptx);
+        assert!(!ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.global.f32"), "plain-GEMM direct-to-global epilogue should not run for the SwiGLU shape: {}", ptx);
+    }
+
+    /// `test_fused_swiglu_epilogue_dispatch` above uses
+    /// `HardwareProfile::default()`, which zeroes `max_smem_per_sm_bytes`
+    /// and so forces `emit_gemm_swiglu_kernel`'s own smem-ceiling math down
+    /// to the single-buffered `effective_stages < 2` fallback - it never
+    /// actually exercises the `cp.async` multi-stage pipelined path added
+    /// this session (same gotcha `test_fused_bias_relu_epilogue_dispatch`
+    /// already documented for the plain-GEMM kernel). This test uses a
+    /// real sm_89 (RTX 4070 Ti SUPER) hardware profile - see
+    /// `autotuner::tests::test_score_candidate_matches_y_tensor_core_gemm_session`
+    /// for the same numbers used elsewhere - specifically to confirm the
+    /// pipelined branch is reachable and structurally sound.
+    #[test]
+    fn test_fused_swiglu_pipelined_dispatch_with_real_hw_profile() {
+        let src = r#"
+        @tile(4096, 4096, 4096)
+        kernel fused_swiglu(X: GlobalMemory<F16>, Wgate: GlobalMemory<F16>, Wup: GlobalMemory<F16>, Out: GlobalMemory<F32>) {
+            let x: I32 = 0;
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile {
+            sm_count: 66,
+            warp_size: 32,
+            max_regs_per_thread: 255,
+            max_regs_per_sm: 65536,
+            max_warps_per_sm: 48,
+            max_threads_per_sm: 1536,
+            max_smem_per_sm_bytes: 102400,
+            ..crate::sentinel::HardwareProfile::default()
+        };
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(ptx.contains("pipeline stages"), "expected the multi-stage pipelined path, not the single-buffered fallback, with a real hw profile: {}", ptx);
+        assert!(ptx.contains("cp.async.cg.shared.global"), "missing cp.async issue in the pipelined K-loop: {}", ptx);
+        assert!(ptx.contains("cp.async.commit_group"), "missing cp.async.commit_group: {}", ptx);
+        assert!(ptx.contains("cp.async.wait_group"), "missing cp.async.wait_group: {}", ptx);
+        assert!(ptx.contains("SWPX0"), "missing prologue prefetch for X's first pipeline stage: {}", ptx);
+        assert!(ptx.contains("SWPG0"), "missing prologue prefetch for W_gate's first pipeline stage: {}", ptx);
+        assert!(ptx.contains("SWPU0"), "missing prologue prefetch for W_up's first pipeline stage: {}", ptx);
+        assert!(ptx.contains("SWIGLU_K_LOOP"), "missing SwiGLU K-loop: {}", ptx);
+        assert!(ptx.contains("EPI_SWIGLU"), "missing SwiGLU epilogue loop: {}", ptx);
+    }
+
+    /// A K that is not a multiple of the autotuned `cta_k` must still cover
+    /// ALL of K. Regression guard for a silent wrong-answer bug: `k_tiles`
+    /// used to be `k / cta_k`, which dropped the tail entirely - measured at
+    /// M=N=K=1000 as 8 dropped K elements and a relative L2 error of 9.1e-02
+    /// against a torch reference, with no diagnostic. M and N tails were
+    /// always masked correctly; only K was not. See
+    /// `emit_tensor_core_gemm_kernel`'s K-tail note.
+    ///
+    /// The loop bound is what this asserts on, because that is the actual
+    /// defect - the per-chunk zero-fill masking that makes the partial tile
+    /// contribute exact zeros was already present and unchanged.
+    #[test]
+    fn test_gemm_k_tail_is_covered_not_truncated() {
+        // K=1000 is a multiple of 8 (so A's 16-byte chunk masking can express
+        // the tail) but not of any candidate cta_k, so the last tile is
+        // partial for every tile the autotuner can pick.
+        let src = r#"
+        @tile(256, 256, 1000)
+        kernel ktail_gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+            let x: I32 = 0;
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        let cta_k: u32 = regex_lite_capture_cta_k(&ptx)
+            .unwrap_or_else(|| panic!("no tensor-core GEMM tile comment emitted: {}", ptx));
+        let expected = (1000 + cta_k - 1) / cta_k;
+        assert!(
+            cta_k == 0 || 1000 % cta_k != 0,
+            "this test is only meaningful when K is NOT a multiple of cta_k (got cta_k={})",
+            cta_k
+        );
+        assert!(
+            ptx.contains(&format!(", {};\n", expected))
+                || ptx.contains(&format!(", {};", expected)),
+            "K loop must run ceil(1000/{}) = {} tiles so the K tail is covered, not {} \
+             (truncating drops the tail and silently returns a wrong GEMM): {}",
+            cta_k,
+            expected,
+            1000 / cta_k,
+            ptx
+        );
+    }
+
+    /// A K that is not a multiple of 8 cannot be expressed by A's 16-byte
+    /// `cp.async` chunk masking, so it must FAIL THE COMPILE rather than
+    /// silently drop up to 7 K elements. This is the guard that the check is
+    /// a hard `assert!` and not a `debug_assert!` - the release binary is
+    /// what everything runs.
+    #[test]
+    #[should_panic(expected = "not a multiple of 8")]
+    fn test_gemm_k_not_multiple_of_8_is_rejected_not_silently_wrong() {
+        let src = r#"
+        @tile(256, 256, 1007)
+        kernel kodd_gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+            let x: I32 = 0;
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let _ = emitter.emit_program(&ast, &hw);
+    }
+
+    /// Pulls `cta_k` out of the `// [Y TENSOR CORE GEMM] ... | CTA MxNxK |`
+    /// comment the GEMM emitter writes. Kept here rather than pulling in a
+    /// regex dependency for one test.
+    fn regex_lite_capture_cta_k(ptx: &str) -> Option<u32> {
+        let marker = "| CTA ";
+        let start = ptx.find(marker)? + marker.len();
+        let rest = &ptx[start..];
+        let end = rest.find(' ')?;
+        rest[..end].split('x').nth(2)?.parse().ok()
+    }
+
     /// Plain 3-param `@tile` GEMM must still take the original direct-to-
     /// global epilogue path, unaffected by the 4-param fused shape added
     /// alongside it - regression guard for `tile_gemm_operands`.
@@ -3923,8 +7639,474 @@ mod tests {
         let mut emitter = PtxEmitter::new_with_profile(&hw);
         let ptx = emitter.emit_program(&ast, &hw);
 
-        assert!(ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.global.f32"), "plain GEMM must keep its direct-to-global epilogue: {}", ptx);
+        // Plain GEMM stages through shared memory (wmma.store.d...shared.f32
+        // + EPI_PLAIN, fine-grained masked copy to global) rather than a
+        // direct-to-global whole-fragment-masked store - see
+        // emit_gemm_plain_epilogue's doc comment for why the old direct
+        // path was a real correctness bug (silently all-zero output for any
+        // M < 16), not just a style difference from Bias+ReLU.
+        assert!(ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.shared.f32"), "plain GEMM must stage its epilogue through shared memory: {}", ptx);
+        assert!(ptx.contains("EPI_PLAIN"), "plain GEMM must emit the fine-grained-masked plain epilogue: {}", ptx);
+        assert!(!ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.global.f32"), "plain GEMM must no longer store directly to global (the M<16 bug's source): {}", ptx);
         assert!(!ptx.contains("EPI_BIAS_RELU"), "plain GEMM must not emit the fused bias+relu epilogue: {}", ptx);
+    }
+
+    /// Structural regression guard for `emit_gemm_compute_block`'s
+    /// hand-rolled `ldmatrix` + `mma.sync.m16n8k16` rewrite (see that
+    /// function's doc comment and project scratchpad's validate_mma.py for
+    /// the real-hardware validation this codegen is based on): the K-loop
+    /// compute core must use `ldmatrix`/`mma.sync` for A/B fragment
+    /// loading and multiply-accumulate, must NOT fall back to the old
+    /// `wmma.load`/`wmma.mma.m16n16k16` path for that, but MUST keep using
+    /// `wmma.store.d` for the epilogue (empirically confirmed to consume a
+    /// `mma.sync.m16n8k16`-produced accumulator identically on this
+    /// toolchain - see emit_gemm_compute_block's doc comment for why this
+    /// is an empirical fact, not an ISA guarantee).
+    #[test]
+    fn test_gemm_compute_block_uses_ldmatrix_mma_sync_not_wmma_load() {
+        let src = r#"
+        @tile(256, 256, 256)
+        kernel plain_gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+            let x: I32 = 0;
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(ptx.contains("ldmatrix.sync.aligned.m8n8.x4.shared.b16"), "missing ldmatrix.x4 A-fragment load: {}", ptx);
+        assert!(ptx.contains("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16"), "missing ldmatrix.x2.trans B-fragment load: {}", ptx);
+        assert!(ptx.contains("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"), "missing mma.sync.m16n8k16 multiply-accumulate: {}", ptx);
+        assert!(!ptx.contains("wmma.load.a.sync"), "A fragments should no longer come from wmma.load.a: {}", ptx);
+        assert!(!ptx.contains("wmma.load.b.sync"), "B fragments should no longer come from wmma.load.b: {}", ptx);
+        assert!(!ptx.contains("wmma.mma.sync.aligned.row.row.m16n16k16"), "compute should no longer use wmma.mma.m16n16k16: {}", ptx);
+        // Epilogue reuses wmma.store.d into shared memory (fine-grained
+        // masked copy to global from there - see emit_gemm_plain_epilogue's
+        // doc comment), not a direct-to-global wmma.store.d as this test
+        // originally asserted - that direct path was a real correctness
+        // bug (silently all-zero output for any M < 16), fixed since.
+        assert!(ptx.contains("wmma.store.d.sync.aligned.row.m16n16k16.shared.f32"), "epilogue must still reuse wmma.store.d (now into shared memory): {}", ptx);
+    }
+
+    /// Regression guard for the FP8 (e4m3) GEMM path, reached the same way
+    /// a real `--emit-ptx` CLI run reaches it (lexer -> parser ->
+    /// `emit_program`, NOT calling `emit_fp8_gemm_kernel` directly) - this
+    /// is a structural/textual check only; the real correctness and
+    /// hardware-assembly verification for this kernel was done via
+    /// `ptxas -arch=sm_89` and a `torch._scaled_mm` real-hardware
+    /// comparison (see investigation/results docs), not here - unlike this
+    /// codebase's OTHER, now-fixed FP8 dead code, this kernel IS reachable
+    /// from a real `.ysu` file through the real CLI (see
+    /// tests/gemm_fp8_256.ysu).
+    #[test]
+    fn test_fp8_gemm_kernel_reachable_and_uses_mma_sync_m16n8k32() {
+        let src = r#"
+        @tile(256, 256, 256)
+        kernel gemm_fp8_256(A: GlobalMemory<F32>, B: GlobalMemory<F32>, scale_a: F32, scale_b: F32, C: GlobalMemory<F32>) {
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let mut hw = crate::sentinel::HardwareProfile::default();
+        hw.sm_version = "sm_89".to_string();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(ptx.contains(".version 8.4"), "sm_89 FP8 mma.sync needs PTX ISA >=8.4 (see ptx_version_for_sm): {}", ptx);
+        assert!(ptx.contains("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32"), "missing the Ada-compatible FP8 mma instruction: {}", ptx);
+        assert!(ptx.contains("cvt.rn.satfinite.e4m3x2.f32"), "missing the fused on-the-fly quantization instruction: {}", ptx);
+        // M=N=256 selects the SMALL tier (m <= FP8_GEMM_SMALL_THRESHOLD) -
+        // see test_fp8_gemm_kernel_multiwarp_cta_tiling (LARGE tier,
+        // M=N=1024) and test_fp8_gemm_kernel_small_tile_selection (this
+        // same SMALL-tier shape, checked in more detail) below. Sizes are
+        // DOUBLE-buffered (session 4's software pipelining) - 2x
+        // FP8_GEMM_CTA_M_SMALL*FP8_GEMM_CTA_K = 2*4096 = 8192.
+        assert!(ptx.contains(".shared .align 4 .b8 smem_fp8_A_gemm_fp8_256[8192]"), "missing double-buffered A smem tile declaration: {}", ptx);
+        assert!(ptx.contains(".shared .align 4 .b8 smem_fp8_B_gemm_fp8_256[8192]"), "missing double-buffered B smem tile declaration: {}", ptx);
+        // Not ldmatrix - PTX ISA 8.5's ldmatrix has no 8-bit variant (see
+        // emit_fp8_gemm_kernel's doc comment).
+        assert!(!ptx.contains("ldmatrix"), "FP8 fragments must come from hand-computed ld.shared, not ldmatrix (unavailable for 8-bit types): {}", ptx);
+    }
+
+    /// Regression guard for the multi-warp CTA tiling rewrite's LARGE tier
+    /// specifically (see `emit_fp8_gemm_kernel`'s doc comment and
+    /// `FP8_GEMM_CTA_M_LARGE`'s doc comment for the design) - distinct from
+    /// `test_fp8_gemm_kernel_reachable_and_uses_mma_sync_m16n8k32` above,
+    /// which predates multi-warp tiling and only checks the kernel is
+    /// reachable at all. Uses M=N=K=1024 (> `FP8_GEMM_SMALL_THRESHOLD`) to
+    /// land on the LARGE tier specifically - see
+    /// `test_fp8_gemm_kernel_small_tile_selection` below for the SMALL
+    /// tier's analogous checks, and `test_fp8_gemm_kernel_tile_selection_boundary`
+    /// for the threshold itself. Checks the specific things that would
+    /// silently regress back to single-warp behavior: the launch-geometry
+    /// comment advertises 256 threads/8 warps (not 32/1), a `lane = tid.x &
+    /// 31` warp-relative mask is present (not just raw `%tid.x`, which was
+    /// correct ONLY when a CTA was exactly one warp), a `warp_id = tid.x >>
+    /// 5` decomposition exists, and the mma instruction appears exactly
+    /// `num_i * num_j * k_substeps` (2*8*2 = 32) times in the static PTX
+    /// text - the Rust-side `i`/`j`/`k_substep` loops are unrolled at
+    /// codegen time (only the `@tile`-driven K-TILE loop is a real PTX
+    /// runtime loop), so this count is independent of M/N/K (within a
+    /// tier) and would change if `num_i`/`num_j`/`k_substeps` regressed to
+    /// the single-warp kernel's implicit 1/1/1.
+    #[test]
+    fn test_fp8_gemm_kernel_multiwarp_cta_tiling() {
+        let src = r#"
+        @tile(1024, 1024, 1024)
+        kernel gemm_fp8_1024(A: GlobalMemory<F32>, B: GlobalMemory<F32>, scale_a: F32, scale_b: F32, C: GlobalMemory<F32>) {
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let mut hw = crate::sentinel::HardwareProfile::default();
+        hw.sm_version = "sm_89".to_string();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(
+            ptx.contains("CTA 128x128x64 (large) | 4x2 warps"),
+            "launch-geometry comment must advertise the LARGE multi-warp CTA shape at M=N=1024: {}", ptx
+        );
+        assert!(
+            ptx.contains("Launch grid required: (8, 8, 1) CTAs, block (256,1,1)"),
+            "at M=N=1024 with a 128x128 CTA tile the grid must be (8,8,1), block (256,1,1): {}", ptx
+        );
+        assert!(
+            ptx.lines().any(|l| l.trim_start().starts_with("and.b32") && l.trim_end().ends_with(", 31;")),
+            "must mask tid.x & 31 (one line, `and.b32 %rN, %rM, 31;`) for the warp-relative lane, not use raw %tid.x: {}", ptx
+        );
+        assert!(
+            ptx.lines().any(|l| l.trim_start().starts_with("shr.u32") && l.trim_end().ends_with(", 5;")),
+            "must derive warp_id = tid.x >> 5 (one line, `shr.u32 %rN, %rM, 5;`): {}", ptx
+        );
+
+        let mma_count = ptx.matches("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32").count();
+        assert_eq!(
+            mma_count, 32,
+            "expected num_i(2)*num_j(8)*k_substeps(2) = 32 static mma.sync.m16n8k32 occurrences (Rust-side i/j/k_substep loops are unrolled at codegen time - only the @tile K-tile loop is a real PTX runtime loop), got {}: {}",
+            mma_count, ptx
+        );
+
+        // Both bar.sync calls from the original single-warp kernel are
+        // still present and still load-bearing (now across 8 warps sharing
+        // one smem_a/smem_b pair, not 1 warp racing itself) - see doc
+        // comment's cross-warp-race discussion.
+        let bar_sync_count = ptx.matches("bar.sync 0;").count();
+        assert!(bar_sync_count >= 2, "expected at least 2 bar.sync 0 (before and after the compute block) per FP8 kernel: {}", ptx);
+    }
+
+    /// SMALL-tier analogue of `test_fp8_gemm_kernel_multiwarp_cta_tiling`
+    /// above (see that test's doc comment and `FP8_GEMM_CTA_M_LARGE`'s doc
+    /// comment for why this tier exists: a fixed 128x128 CTA tile measured
+    /// a real regression at M=N=256 on real hardware, see
+    /// `investigation_fp8_gemm_findings.md`'s "Session 3" section). M=N=256
+    /// is exactly at `FP8_GEMM_SMALL_THRESHOLD`, so this also confirms the
+    /// boundary is inclusive (`<=`, selecting SMALL) rather than exclusive.
+    #[test]
+    fn test_fp8_gemm_kernel_small_tile_selection() {
+        let src = r#"
+        @tile(256, 256, 256)
+        kernel gemm_fp8_256(A: GlobalMemory<F32>, B: GlobalMemory<F32>, scale_a: F32, scale_b: F32, C: GlobalMemory<F32>) {
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let mut hw = crate::sentinel::HardwareProfile::default();
+        hw.sm_version = "sm_89".to_string();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(
+            ptx.contains("CTA 64x64x64 (small) | 2x2 warps"),
+            "launch-geometry comment must advertise the SMALL multi-warp CTA shape at M=N=256: {}", ptx
+        );
+        assert!(
+            ptx.contains("Launch grid required: (4, 4, 1) CTAs, block (128,1,1)"),
+            "at M=N=256 with a 64x64 CTA tile the grid must be (4,4,1), block (128,1,1) - a real, disclosed improvement over the LARGE tier's (2,2,1) at this size: {}", ptx
+        );
+        assert!(
+            ptx.contains(".shared .align 4 .b8 smem_fp8_A_gemm_fp8_256[8192]"),
+            "SMALL tier A smem tile must be double-buffered (session 4): 2*FP8_GEMM_CTA_M_SMALL*FP8_GEMM_CTA_K = 2*64*64 = 8192: {}", ptx
+        );
+        assert!(
+            ptx.contains(".shared .align 4 .b8 smem_fp8_B_gemm_fp8_256[8192]"),
+            "SMALL tier B smem tile must be double-buffered (session 4): 2*FP8_GEMM_CTA_K*FP8_GEMM_CTA_N_SMALL = 2*64*64 = 8192: {}", ptx
+        );
+
+        // SMALL tier: num_i=2, num_j=4, k_substeps=2 -> 16 static mma
+        // occurrences (half the LARGE tier's 32, consistent with half the
+        // per-warp N-fragment count - see FP8_GEMM_CTA_M_LARGE's doc
+        // comment).
+        let mma_count = ptx.matches("mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32").count();
+        assert_eq!(
+            mma_count, 16,
+            "expected num_i(2)*num_j(4)*k_substeps(2) = 16 static mma.sync.m16n8k32 occurrences for the SMALL tier, got {}: {}",
+            mma_count, ptx
+        );
+    }
+
+    /// Confirms the SMALL/LARGE tier boundary is where
+    /// `FP8_GEMM_CTA_M_LARGE`'s doc comment says it is: crossing from
+    /// M=N=256 (SMALL, checked above) to M=N=257 (one past the threshold)
+    /// must flip to LARGE, not stay SMALL - a regression here would mean
+    /// `emit_fp8_gemm_kernel`'s `m <= FP8_GEMM_SMALL_THRESHOLD || n <=
+    /// FP8_GEMM_SMALL_THRESHOLD` condition silently changed to `<` or a
+    /// different threshold entirely.
+    #[test]
+    fn test_fp8_gemm_kernel_tile_selection_boundary() {
+        // FP8_GEMM_SMALL_THRESHOLD is 512 (raised from 256 in session 5 -
+        // see FP8_GEMM_CTA_M_LARGE's doc comment for the real-hardware A/B
+        // that motivated it), so 513 is the boundary case one past it.
+        let src = r#"
+        @tile(513, 513, 256)
+        kernel gemm_fp8_513(A: GlobalMemory<F32>, B: GlobalMemory<F32>, scale_a: F32, scale_b: F32, C: GlobalMemory<F32>) {
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(
+            ptx.contains("CTA 128x128x64 (large) | 4x2 warps"),
+            "M=N=513 is one past FP8_GEMM_SMALL_THRESHOLD (512) and must select the LARGE tier: {}", ptx
+        );
+    }
+
+    /// Regression guard for session 4's software double-buffered
+    /// pipelining (see `emit_fp8_gemm_kernel`'s doc comment, "Software
+    /// double-buffered pipelining" section, and
+    /// `investigation_fp8_gemm_findings.md`'s "Session 4" section). Uses
+    /// K=256 (k_tiles=4 at the LARGE tier's cta_k=64) specifically so BOTH
+    /// the prologue (stages k_iter=0 unconditionally) and the steady-state
+    /// loop (which prefetches k_iter=1..3 conditionally) appear in the
+    /// emitted text - a K=64 (k_tiles=1) kernel would exercise the
+    /// prologue but never the loop's real prefetch path.
+    #[test]
+    fn test_fp8_gemm_kernel_pipelined_double_buffering() {
+        let src = r#"
+        @tile(1024, 1024, 256)
+        kernel gemm_fp8_pipe(A: GlobalMemory<F32>, B: GlobalMemory<F32>, scale_a: F32, scale_b: F32, C: GlobalMemory<F32>) {
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        // Double-buffered: 2 * (128*64) = 16384 for A, 2 * (64*128) = 16384
+        // for B (LARGE tier) - not the single-buffered 8192 each.
+        assert!(
+            ptx.contains(".shared .align 4 .b8 smem_fp8_A_gemm_fp8_pipe[16384]"),
+            "A smem must be double-buffered (2x single-stage bytes): {}", ptx
+        );
+        assert!(
+            ptx.contains(".shared .align 4 .b8 smem_fp8_B_gemm_fp8_pipe[16384]"),
+            "B smem must be double-buffered (2x single-stage bytes): {}", ptx
+        );
+
+        // Exactly 2 static bar.sync occurrences: one after the prologue's
+        // unconditional stage of k_iter=0, one at the end of the steady-
+        // state loop body (the loop body is emitted ONCE as static text,
+        // executed k_tiles=4 times at runtime via the bra-loop - see
+        // test_fp8_gemm_kernel_multiwarp_cta_tiling's doc comment for why
+        // static occurrence count is independent of the runtime iteration
+        // count). Down from the pre-pipelining design's 2 bar.sync INSIDE
+        // the loop body alone (no separate prologue) - this exact count
+        // confirms the reduction to 1/iteration, not just "at least 2".
+        let bar_sync_count = ptx.matches("bar.sync 0;").count();
+        assert_eq!(
+            bar_sync_count, 2,
+            "expected exactly 2 static bar.sync 0 occurrences (1 prologue + 1 in the steady-state loop body, i.e. 1/iteration at runtime, down from the single-buffered design's 2/iteration), got {}: {}",
+            bar_sync_count, ptx
+        );
+
+        // The prefetch-suppression predicate: exactly one setp.lt.u32
+        // comparing against the compile-time k_tiles literal (4) - confirms
+        // the last-iteration skip logic is present, not just assumed from
+        // the Python validator.
+        let next_valid_setp_count = ptx.lines().filter(|l| l.trim_start().starts_with("setp.lt.u32") && l.trim_end().ends_with(", 4;")).count();
+        assert_eq!(
+            next_valid_setp_count, 1,
+            "expected exactly one `next_k_iter < k_tiles(4)` predicate computation, got {}: {}",
+            next_valid_setp_count, ptx
+        );
+
+        // and.pred count: 64 from the epilogue (num_i(2)*num_j(8)*4 = 64,
+        // unchanged by pipelining - see test_fp8_gemm_kernel_multiwarp_cta_tiling)
+        // + 6 new ones from AND-ing the prefetch-validity predicate into
+        // the quantize-stage boundary predicates: 1 in
+        // emit_fp8_quantize_stage_a's single p_ok, plus (since session 5's
+        // vectorized hybrid fast/slow B-stage - see
+        // emit_fp8_quantize_stage_b's doc comment) 1 in the FAST path's
+        // single combined p_fast + 4 in the SLOW path's p_ok0..p_ok3 (was
+        // 2, single-predicate-per-pair, before the quad/hybrid split) = 5
+        // for B - all inside those functions' own runtime thread-striding
+        // loops, so each appears exactly ONCE in the static text despite
+        // executing many times at runtime) = 70. Empirically confirmed
+        // against the real compiler output before being hardcoded here,
+        // not derived from this test alone.
+        let and_pred_count = ptx.matches("and.pred").count();
+        assert_eq!(
+            and_pred_count, 70,
+            "expected 70 and.pred occurrences (64 epilogue + 6 pipelining-predicate combination), got {}: {}",
+            and_pred_count, ptx
+        );
+    }
+
+    /// A malformed FP8-shaped kernel (wrong element type on A) must fall
+    /// through `tile_gemm_fp8_operands` to `None` (normal generic lowering)
+    /// rather than being silently miscompiled - `type_checker`'s own
+    /// `verify_tile_gemm_kernel` is what actually rejects this shape as a
+    /// hard compile error in the real CLI pipeline (checked separately,
+    /// this test only exercises `PtxEmitter` directly, which - like
+    /// `tile_gemm_operands` - re-validates rather than trusting the caller).
+    #[test]
+    fn test_fp8_gemm_operands_rejects_wrong_element_type() {
+        let src = r#"
+        @tile(64, 64, 64)
+        kernel bad_fp8(A: GlobalMemory<F16>, B: GlobalMemory<F32>, scale_a: F32, scale_b: F32, C: GlobalMemory<F32>) {
+        }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = crate::parser::Parser::new(tokens);
+        let ast = parser.parse_program().unwrap();
+
+        let hw = crate::sentinel::HardwareProfile::default();
+        let mut emitter = PtxEmitter::new_with_profile(&hw);
+        let ptx = emitter.emit_program(&ast, &hw);
+
+        assert!(!ptx.contains("mma.sync.aligned.m16n8k32"), "malformed FP8 shape must not dispatch to the FP8 GEMM path: {}", ptx);
+    }
+
+    /// Real, hardware-validated address formula for
+    /// `emit_gemm_compute_block`'s `ldmatrix.x4` (A) / `ldmatrix.x2.trans`
+    /// (B) reads (see that function's doc comment) - duplicated here
+    /// independently rather than calling into the emitter, so this test
+    /// can't pass by "testing a bug against an identical copy of itself".
+    fn ldmatrix_a_byte_addr(lane: u32, row_offset: u32, col_offset: u32, stride_elems: u32) -> u32 {
+        let group = lane >> 3;
+        let local_row = lane & 7;
+        let global_row = row_offset + local_row + ((group & 1) << 3);
+        let global_col0 = col_offset + ((group >> 1) << 3);
+        (global_row * stride_elems + global_col0) * 2
+    }
+
+    fn ldmatrix_b_byte_addr(lane: u32, row_offset: u32, col_offset: u32, stride_elems: u32) -> u32 {
+        let group = lane >> 3;
+        let local_row = lane & 7;
+        let global_k = row_offset + local_row + ((group & 1) << 3);
+        (global_k * stride_elems + col_offset) * 2
+    }
+
+    /// Bank-conflict check matching bank_conflict.rs's own methodology (32
+    /// banks x 4 bytes/bank; a 16-byte ldmatrix row-fetch spans 4
+    /// consecutive banks; conflict-free iff no bank is touched more than 4
+    /// times across all 32 lanes - the theoretical minimum for a 32-lane x
+    /// 16-byte access, since 32*16B = 512B = 4x the 128B/cycle all 32 banks
+    /// can jointly service, so "exactly 4 per bank" is the best achievable,
+    /// not just "no conflict"). Not reusing
+    /// `BankConflictProver::prove_ldmatrix_m8n8_x4` directly: that prover's
+    /// built-in row/col formula was written for a different (and, per
+    /// offline analysis, not hardware-confirmed) tiling convention than the
+    /// one `emit_gemm_compute_block` actually validated and uses - see
+    /// that function's doc comment.
+    fn max_bank_hits(byte_addrs: &[u32]) -> u32 {
+        let mut counts = [0u32; 32];
+        for &addr in byte_addrs {
+            for b in (0..16u32).step_by(4) {
+                let bank = ((addr + b) / 4) % 32;
+                counts[bank as usize] += 1;
+            }
+        }
+        *counts.iter().max().unwrap()
+    }
+
+    /// Regression guard for the "no XOR swizzle needed" finding (see
+    /// emit_gemm_compute_block's doc comment): sweeps every
+    /// warp/i/j/kk/N-half position `emit_gemm_compute_block` actually
+    /// issues, for every CTA shape `Autotuner::generate_candidates` can
+    /// select in the m/n > 512 regime this codegen targets plus one
+    /// smaller shape, and asserts the EXISTING `+8`-element padding (no
+    /// swizzle) stays bank-conflict-free. If this ever fails, it means
+    /// either the padding constant or `emit_gemm_compute_block`'s address
+    /// formula changed in a way that reopens the ncu-measured bank-conflict
+    /// regression this rewrite fixed - see project scratchpad's
+    /// swizzle_design.py for the exploration that produced these
+    /// parameters and benchmark docs for the real ncu confirmation.
+    #[test]
+    fn test_ldmatrix_addressing_bank_conflict_free_with_existing_padding() {
+        let configs: [(u32, u32, u32, u32, u32); 3] = [
+            (128, 256, 32, 4, 4), // M=N=K>=2048 shape (see benchmark_y_tensor_core_gemm_results.md)
+            (128, 128, 32, 4, 2), // M=N=K=1024 shape
+            (64, 64, 64, 2, 2),   // M=N=K=512 shape
+        ];
+        for (cta_m, cta_n, cta_k, warps_m, warps_n) in configs {
+            let per_warp_m = cta_m / warps_m;
+            let per_warp_n = cta_n / warps_n;
+            let num_i = per_warp_m / 16;
+            let num_j = per_warp_n / 16;
+            let k_substeps = cta_k / 16;
+            let a_stride = cta_k + 8; // matches emit_tensor_core_gemm_kernel's smem_a_stride
+            let b_stride = cta_n + 8; // matches emit_tensor_core_gemm_kernel's smem_b_stride
+
+            for warp_m in 0..warps_m {
+                for i in 0..num_i {
+                    for kk in 0..k_substeps {
+                        let addrs: Vec<u32> = (0..32u32)
+                            .map(|lane| ldmatrix_a_byte_addr(lane, warp_m * per_warp_m + i * 16, kk * 16, a_stride))
+                            .collect();
+                        let worst = max_bank_hits(&addrs);
+                        assert!(
+                            worst <= 4,
+                            "A ldmatrix.x4 bank conflict: cta={}x{}x{} warp_m={} i={} kk={} worst_bank_hits={}",
+                            cta_m, cta_n, cta_k, warp_m, i, kk, worst
+                        );
+                    }
+                }
+            }
+            for warp_n in 0..warps_n {
+                for j in 0..num_j {
+                    for kk in 0..k_substeps {
+                        for n_half in [0u32, 8u32] {
+                            let col_offset = warp_n * per_warp_n + j * 16 + n_half;
+                            let addrs: Vec<u32> = (0..32u32)
+                                .map(|lane| ldmatrix_b_byte_addr(lane, kk * 16, col_offset, b_stride))
+                                .collect();
+                            let worst = max_bank_hits(&addrs);
+                            assert!(
+                                worst <= 4,
+                                "B ldmatrix.trans bank conflict: cta={}x{}x{} warp_n={} j={} kk={} n_half={} worst_bank_hits={}",
+                                cta_m, cta_n, cta_k, warp_n, j, kk, n_half, worst
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -4028,3 +8210,151 @@ mod tests_3d {
     }
 }
 
+
+#[cfg(test)]
+mod tests_paged_decode_attention {
+    use super::*;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use crate::sentinel::HardwareProfile;
+
+    fn compile(name: &str) -> String {
+        let src = format!(
+            "kernel {}(Q: GlobalMemory<F16>, KCache: GlobalMemory<F16>, VCache: GlobalMemory<F16>, \
+             PageTable: GlobalMemory<I32>, SeqLens: GlobalMemory<I32>, Out: GlobalMemory<F16>, \
+             MaxPages: I32) {{\n}}\n\nfn main() {{\n}}\n",
+            name
+        );
+        let tokens = Lexer::new(&src).tokenize();
+        let ast = Parser::new(tokens).parse_program().expect("probe source should parse");
+        let hw = HardwareProfile::default();
+        PtxEmitter::new_with_profile(&hw).emit_program(&ast, &hw)
+    }
+
+    #[test]
+    fn dispatches_and_emits_the_online_softmax_core() {
+        let ptx = compile("paged_decode_attention_128_32_8_16");
+        assert!(ptx.contains("[Y PAGED DECODE ATTENTION]"), "attention dispatch did not fire: {}", ptx);
+        assert!(ptx.contains("GQA 4:1"), "GQA ratio not derived from the head counts: {}", ptx);
+        // `.ftz` is deliberate (see the kernel doc comment) - a plain
+        // `ex2.approx.f32` here would be a silent regression.
+        assert!(ptx.contains("ex2.approx.ftz.f32"), "softmax must use ex2.approx.ftz: {}", ptx);
+        // A real runtime loop over the KV sequence, not an unrolled one.
+        assert!(ptx.contains("ATTN_LOOP_paged_decode_attention_128_32_8_16:"), "missing KV loop: {}", ptx);
+        // The cross-warp partial-softmax merge.
+        assert!(ptx.contains("bar.sync 0;"), "missing cross-warp merge barrier: {}", ptx);
+        assert!(ptx.contains("shfl.sync.bfly.b32"), "missing warp reduction for the QK dot: {}", ptx);
+        // The scalar page-table stride really is a 32-bit param, not a pointer.
+        assert!(ptx.contains(".param .b32 MaxPages_6"), "MaxPages must be a scalar param: {}", ptx);
+    }
+
+    #[test]
+    fn warp_count_defaults_to_32_and_is_overridable_by_name() {
+        let default_ptx = compile("paged_decode_attention_128_32_8_16");
+        assert!(default_ptx.contains("| 32 warps |"), "default warp count should be 32: {}", default_ptx);
+
+        // Optional 5th name dimension - the batch-serving specialization.
+        let eight = compile("paged_decode_attention_128_32_8_16_8");
+        assert!(eight.contains("| 8 warps |"), "5th name dim should set the warp count: {}", eight);
+
+        // Shared memory scales with the warp count: [warps] m + [warps] l +
+        // [warps * head_dim] acc, 4 bytes each.
+        assert!(default_ptx.contains(&format!(".b8 smem_attn_paged_decode_attention_128_32_8_16[{}]", (32 * 2 + 32 * 128) * 4)));
+        assert!(eight.contains(&format!(".b8 smem_attn_paged_decode_attention_128_32_8_16_8[{}]", (8 * 2 + 8 * 128) * 4)));
+    }
+
+    #[test]
+    fn rejects_shapes_the_codegen_cannot_lower() {
+        // head_dim not a multiple of 32 (the warp width).
+        assert!(!compile("paged_decode_attention_100_32_8_16").contains("[Y PAGED DECODE ATTENTION]"));
+        // head_dim outside the supported 64/128/256 per-lane vector widths.
+        assert!(!compile("paged_decode_attention_512_32_8_16").contains("[Y PAGED DECODE ATTENTION]"));
+        // q heads not a whole multiple of kv heads - GQA mapping undefined.
+        assert!(!compile("paged_decode_attention_128_30_8_16").contains("[Y PAGED DECODE ATTENTION]"));
+        // more than 32 warps exceeds the 1024-thread CTA limit.
+        assert!(!compile("paged_decode_attention_128_32_8_16_64").contains("[Y PAGED DECODE ATTENTION]"));
+    }
+
+    /// Assembles the emitted PTX with the real `ptxas`.
+    ///
+    /// String-matching a PTX test proves only that the emitter wrote what the
+    /// test expected, not that any of it is a legal instruction - this repo
+    /// shipped a `wgmma...m64n64k64.s32.s4.s4` that exists on no hardware
+    /// precisely because its tests only string-matched. Skipped (not failed)
+    /// where `ptxas` is unavailable, so the suite still runs on a machine
+    /// without a CUDA toolkit.
+    #[test]
+    fn emitted_ptx_actually_assembles() {
+        use std::process::{Command, Stdio};
+        if Command::new("ptxas").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            eprintln!("ptxas not available - skipping the assembly gate");
+            return;
+        }
+        for name in [
+            "paged_decode_attention_128_32_8_16",
+            "paged_decode_attention_128_32_8_16_8",
+            "paged_decode_attention_64_16_16_32",
+            "paged_decode_attention_256_16_4_1",
+        ] {
+            let ptx = compile(name);
+            assert!(ptx.contains("[Y PAGED DECODE ATTENTION]"), "{} did not dispatch", name);
+            let dir = std::env::temp_dir().join(format!("y_attn_ptxas_{}", name));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("k.ptx");
+            std::fs::write(&path, &ptx).unwrap();
+            let out = Command::new("ptxas")
+                .args(["-arch=sm_89", "-O3"])
+                .arg(&path)
+                .args(["-o", "/dev/null"])
+                .output()
+                .expect("ptxas should run");
+            assert!(
+                out.status.success(),
+                "ptxas rejected {}:\n{}",
+                name,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_swiglu_tile_override {
+    use super::*;
+
+    /// The override exists to make this kernel's tile measurable on hardware.
+    /// A sweep of 13 tiles at M=N=K=2048/4096 confirmed the 128x128x32 4x4
+    /// default is the best of them (0.78-0.80x of the unfused cuBLAS path;
+    /// every 2x2-warp alternative is forced to a smaller CTA tile by the
+    /// double accumulator and lands at 0.48-0.62x), so the guard below is
+    /// what keeps a future sweep from silently emitting an infeasible kernel.
+    #[test]
+    fn override_guard_rejects_infeasible_tiles() {
+        // A 128x128 tile over 2x2 warps needs 4*4*8*2 = 256 accumulator
+        // registers per thread for the two (gate, up) arrays - past the cap.
+        // This is precisely why this kernel cannot use the 2x2 split that
+        // measured 1.44x faster in the plain GEMM.
+        std::env::set_var("Y_SWIGLU_TILE", "128,128,32,2,2");
+        assert_eq!(PtxEmitter::swiglu_tile_override(), None, "256 accumulator regs must be rejected");
+
+        // Not divisible into 16x16 warp fragments.
+        std::env::set_var("Y_SWIGLU_TILE", "128,120,32,4,4");
+        assert_eq!(PtxEmitter::swiglu_tile_override(), None);
+
+        // cta_k not a multiple of the mma k16 dimension.
+        std::env::set_var("Y_SWIGLU_TILE", "128,128,24,4,4");
+        assert_eq!(PtxEmitter::swiglu_tile_override(), None);
+
+        // Malformed.
+        std::env::set_var("Y_SWIGLU_TILE", "128,128");
+        assert_eq!(PtxEmitter::swiglu_tile_override(), None);
+
+        // A feasible tile passes: 128x128 over 4x2 warps is 2*4*8*2 = 128 regs.
+        std::env::set_var("Y_SWIGLU_TILE", "128,128,32,4,2");
+        assert_eq!(PtxEmitter::swiglu_tile_override(), Some((128, 128, 32, 4, 2)));
+
+        std::env::remove_var("Y_SWIGLU_TILE");
+        assert_eq!(PtxEmitter::swiglu_tile_override(), None, "unset must mean 'use the default'");
+    }
+}

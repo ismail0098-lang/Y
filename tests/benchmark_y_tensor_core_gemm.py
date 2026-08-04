@@ -15,14 +15,18 @@ each size, it shells out to `target/release/Y tests/gemm_f16_<N>.ysu
 same mechanism that file's Suite 3 already uses for real Y output), and
 times *that*.
 
-Timing discipline: median of REPEAT_RUNS independent process re-launches,
-each doing its own in-process warmup + N-iteration cuda-event average -
-matching src/bin/autotune_verify.rs's REPEAT_RUNS pattern, not a single
-in-process measurement. That file's doc comment records why this matters:
-two back-to-back runs of an IDENTICAL candidate, moments apart on the same
-GPU, produced opposite A/B verdicts (608% slower vs 66% faster) purely from
-GPU clock/power-state transitions across process launches. A single-sample
-number here would be exactly as untrustworthy.
+Timing discipline: median of REPEAT_RUNS independent process re-launches
+(matching src/bin/autotune_verify.rs's REPEAT_RUNS pattern), where each launch
+first ramps the GPU clock to steady state and then A/B-INTERLEAVES Y and cuBLAS
+so both are measured at the same clock. See the RAMP_SECONDS comment below.
+
+autotune_verify.rs's doc comment already recorded the underlying hazard: two
+back-to-back runs of an IDENTICAL candidate, moments apart on the same GPU,
+produced opposite A/B verdicts (608% slower vs 66% faster) purely from GPU
+clock/power-state transitions. Re-launching the process does not fix that - it
+averages over clock states instead of controlling for them, and does nothing
+about the ordering bias from timing all of Y before all of cuBLAS. Both are now
+controlled directly.
 
 Usage:
     python3 tests/benchmark_y_tensor_core_gemm.py               # full suite, all sizes, median-of-N, writes report
@@ -33,6 +37,7 @@ import os
 import sys
 import re
 import json
+import time
 import subprocess
 import statistics
 import argparse
@@ -41,6 +46,45 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__)) + "/.."
 Y_BIN = os.path.join(REPO_ROOT, "target/release/Y")
 ALL_SIZES = [256, 512, 1024, 2048, 4096, 8192, 16384]
 REPEAT_RUNS = 5  # matches src/bin/autotune_verify.rs's REPEAT_RUNS
+
+# --- GPU clock-ramp control (ported from benchmark_y_decode_gemm.py) ---
+#
+# Measured on this project's dev GPU: the SM clock idles at ~210 MHz and only
+# reaches ~2670 MHz after ~3s of sustained load - a 12.7x swing - and this box
+# has no permission to lock clocks (`nvidia-smi -lgc` -> "The current user does
+# not have permission to change clocks"). A 10-iteration warmup does not ramp
+# them, so a cold-started process measures a kernel at a fraction of the clock
+# a warm one does.
+#
+# This is not theoretical for THIS script: before this revision it reported the
+# same 256x256x256 Y kernel as "45.56us [7.12, 63.03]" - a 9x run-to-run spread
+# that made a real 1.14x autotuner improvement indistinguishable from noise.
+#
+# Two fixes, both required:
+#   1. RAMP_SECONDS of sustained dummy load before ANY timing, so measurement
+#      starts at steady-state clocks.
+#   2. A/B interleaving. This script used to time all of Y, then all of cuBLAS,
+#      so cuBLAS always ran on a hotter clock than Y - a systematic bias in
+#      cuBLAS's favour, not noise. They now alternate within a process and each
+#      side's median is taken over its own interleaved rounds.
+#
+# Note the existing REPEAT_RUNS process-relaunch discipline does NOT solve this
+# on its own: it averages over clock states rather than controlling for them,
+# and cannot remove the ordering bias at all.
+RAMP_SECONDS = 3.0
+INTERLEAVE_ROUNDS = 5
+
+
+def _sm_clock_mhz():
+    """Current SM clock, so a run can report what clock it was measured at."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=clocks.sm", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip().splitlines()[0]
+        return int(out)
+    except Exception:
+        return 0
 
 CTA_COMMENT_RE = re.compile(
     r"\[Y TENSOR CORE GEMM\] M=(\d+) N=(\d+) K=(\d+) \| CTA (\d+)x(\d+)x(\d+) \| (\d+)x(\d+) warps"
@@ -131,22 +175,51 @@ def run_once(size, cfg):
     if dyn_smem_bytes > 0:
         fn.max_dynamic_shared_size_bytes = dyn_smem_bytes
 
-    iters = iterations_for(size)
+    # Total iterations are split across INTERLEAVE_ROUNDS rounds, so the
+    # measured work per size stays comparable to the pre-interleave version.
+    iters = max(3, iterations_for(size) // INTERLEAVE_ROUNDS)
     # cfg arrives via JSON (env var, from the outer driver) - JSON has no
     # tuple type, and cupy's launch API rejects a plain list for `grid`.
     grid, threads = tuple(cfg["grid"]), cfg["threads"]
 
-    # ---- Y kernel: warmup + timed average ----
-    for _ in range(10):
-        fn(grid, (threads, 1, 1), (A_cp, B_cp, C_cp), shared_mem=dyn_smem_bytes)
-    cp.cuda.Device(0).synchronize()
-    y_start, y_end = cp.cuda.Event(), cp.cuda.Event()
-    y_start.record()
-    for _ in range(iters):
-        fn(grid, (threads, 1, 1), (A_cp, B_cp, C_cp), shared_mem=dyn_smem_bytes)
-    y_end.record()
-    y_end.synchronize()
-    y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iters) * 1000.0
+    def time_y():
+        cp.cuda.Device(0).synchronize()
+        ev0, ev1 = cp.cuda.Event(), cp.cuda.Event()
+        ev0.record()
+        for _ in range(iters):
+            fn(grid, (threads, 1, 1), (A_cp, B_cp, C_cp), shared_mem=dyn_smem_bytes)
+        ev1.record()
+        ev1.synchronize()
+        return (cp.cuda.get_elapsed_time(ev0, ev1) / iters) * 1000.0
+
+    def time_cublas():
+        torch.cuda.synchronize()
+        ev0 = torch.cuda.Event(enable_timing=True)
+        ev1 = torch.cuda.Event(enable_timing=True)
+        ev0.record()
+        for _ in range(iters):
+            _ = torch.matmul(A_torch, B_torch)
+        ev1.record()
+        torch.cuda.synchronize()
+        return (ev0.elapsed_time(ev1) / iters) * 1000.0
+
+    # ---- 1. ramp clocks to steady state on a throwaway workload ----
+    ramp = torch.randn(4096, 4096, dtype=torch.float16, device=device)
+    t0 = time.time()
+    while time.time() - t0 < RAMP_SECONDS:
+        for _ in range(20):
+            _ = ramp @ ramp
+        torch.cuda.synchronize()
+    del ramp
+    sm_mhz = _sm_clock_mhz()
+
+    # ---- 2. interleaved A/B timing so both sides see the same clock ----
+    y_rounds, c_rounds = [], []
+    for _ in range(INTERLEAVE_ROUNDS):
+        y_rounds.append(time_y())
+        c_rounds.append(time_cublas())
+    y_us = statistics.median(y_rounds)
+    cublas_us = statistics.median(c_rounds)
 
     # ---- correctness: fresh cuBLAS reference (C_cp aliases C_torch's storage) ----
     ref = torch.matmul(A_torch, B_torch).float()
@@ -158,22 +231,12 @@ def run_once(size, cfg):
     # constant - a real correctness bug produces errors orders of magnitude past this.
     correct = bool(torch.allclose(C_torch, ref, rtol=0.02, atol=max(0.75, 0.02 * ref_scale)))
 
-    # ---- cuBLAS: warmup + timed average, same process immediately after ----
-    torch.cuda.synchronize()
-    for _ in range(10):
-        _ = torch.matmul(A_torch, B_torch)
-    torch.cuda.synchronize()
-    start_evt = torch.cuda.Event(enable_timing=True)
-    end_evt = torch.cuda.Event(enable_timing=True)
-    start_evt.record()
-    for _ in range(iters):
-        _ = torch.matmul(A_torch, B_torch)
-    end_evt.record()
-    torch.cuda.synchronize()
-    cublas_us = (start_evt.elapsed_time(end_evt) / iters) * 1000.0
-
+    # (cuBLAS was already timed above, interleaved with Y - see the
+    # RAMP_SECONDS/INTERLEAVE_ROUNDS comment for why it is no longer measured
+    # in a separate block after all of Y's runs.)
     print(json.dumps({
         "size": size, "y_us": y_us, "cublas_us": cublas_us,
+        "y_rounds": y_rounds, "c_rounds": c_rounds, "sm_mhz": sm_mhz,
         "correct": correct, "max_abs_diff": max_abs_diff,
     }))
 
@@ -284,6 +347,49 @@ def main():
             "speedup number if the Y and cuBLAS ranges overlap - see the module docstring "
             "in tests/benchmark_y_tensor_core_gemm.py for why a single-sample number isn't "
             "trustworthy here.\n\n"
+        )
+        f.write(
+            "## Timing methodology (revised)\n\n"
+            "Each measuring process now ramps the GPU clock to steady state for "
+            f"{RAMP_SECONDS:.0f}s before timing anything, then A/B-interleaves Y and cuBLAS over "
+            f"{INTERLEAVE_ROUNDS} rounds so both are measured at the same clock. The previous "
+            "discipline (short warmup; all of Y timed, then all of cuBLAS) was contaminated "
+            "twice over: the SM clock on this dev GPU idles at ~210 MHz and needs ~3s of load "
+            "to reach ~2670 MHz (12.7x, and clocks cannot be locked on this box), and timing Y "
+            "first meant cuBLAS always inherited the hotter clock - a systematic bias, not "
+            "noise. It reported this same 256 kernel as `45.56us [7.12, 63.03]`, a 9x spread.\n\n"
+            "**What the harness fix changed, and what it did not.** The large sizes (2048 and "
+            "up) were unaffected - they re-measured at the same 0.75x/0.76x/0.77x reported "
+            "before it - because a single iteration there already runs for milliseconds and "
+            "ramps the clock itself inside the timed loop. Only the small, microsecond-scale "
+            "sizes were ever vulnerable, and those corrected **downward** (256/512/1024 came "
+            "in at 0.71x/0.59x/0.68x). Run-to-run ranges are now within a few percent at "
+            "every size.\n\n"
+            "## Autotuner: occupancy over tile size\n\n"
+            "The figures in the table above are *after* a subsequent `score_candidate` "
+            "rework, and are substantially better than that 0.75x-0.77x baseline at every "
+            "size from 1024 up.\n\n"
+            "`ncu` (once GPU performance counters were enabled) showed the old 128x256x32 "
+            "4x4 pick was not memory-bound in any direction - DRAM at 16.6% of peak, L1 at "
+            "20.4%, a shared-memory stall ratio of 0.74 - so the scorer's `compute_intensity` "
+            "term (reuse per byte staged) was optimising for a wall the kernel never hits, "
+            "and its `1.0 / ctas_per_sm` factor had no physical basis at all, since total "
+            "work is invariant to tile choice. Between them they rated the measured-best "
+            "config 3741 against 11809 for one 19% slower.\n\n"
+            "The real gap against cuBLAS was occupancy and barrier cost. cuBLAS runs "
+            "`ampere_fp16_s1688gemm_fp16_128x128_ldg8_f2f_stages_32x1_nn`: a 128x128 tile at "
+            "128 threads, 234 registers/thread, 2 blocks/SM. Y ran a bigger tile at 512 "
+            "threads, 1 block/SM, with a barrier-stall ratio of 6.27 against cuBLAS's 1.27. "
+            "Scoring compute-bound shapes on predicted utilisation instead - per-warp MMA "
+            "parallelism, resident CTAs per SM (gated on the grid actually supplying them), "
+            "and warps per CTA - moves the picks to 128x128x32 at 2 stages, which fits two "
+            "CTAs per SM. Measured effect at 4096: tensor-pipe utilisation 37.38% -> 44.61%, "
+            "barrier stalls 6.27 -> 0.37 (now below cuBLAS's), registers/thread 122 -> 194.\n\n"
+            "Skinny/decode shapes and small squares (min dimension below 1024) keep the older "
+            "reuse-based heuristic: the utilisation model assumes steady-state throughput over "
+            "many CTA waves, which neither satisfies. Every pick here was re-benchmarked per "
+            "size rather than trusted - forcing the utilisation model onto 256 picked a tile "
+            "that measured 6.08us against 5.11us for the legacy pick.\n\n"
         )
         f.write("| Matrix (M=N=K) | CTA Tile | cuBLAS us (median [range]) | Y us (median [range]) | Y vs cuBLAS | Correct |\n")
         f.write("|---|---|---|---|---|---|\n")

@@ -1,0 +1,45 @@
+// Paged decode attention, same shape as paged_decode_attention_128_32_8_16.ysu
+// (head_dim 128, 32 query heads, 8 KV heads, page_size 16) but declaring the
+// optional 5th name dimension: 8 WARPS PER CTA instead of the default 32.
+//
+// This is the BATCH-SERVING specialization. The default 32 warps is tuned for
+// batch-1 consumer decode, where the grid supplies only 32 CTAs and extra
+// warps are worth ~3.3x. Once the batch is large enough to fill the GPU on
+// its own (measured: batch 8 and above), those extra warps stop helping and
+// start costing - 32 warps measures 1.37x SLOWER than 8 at batch 32,
+// ctx 1024. See ATTN_DEFAULT_NUM_WARPS in ptx_emitter.rs for the full table.
+//
+// Batch size is a runtime value, so this choice cannot be made by the
+// compiler from the source alone; the deployment declares which regime it is
+// in and launches the matching kernel.
+//
+// Those four constants are compile-time because each one changes the
+// generated code (per-lane register footprint, GQA head mapping, and the
+// token -> page/slot arithmetic). Everything that does not - batch size,
+// sequence length, and the page-table row stride `MaxPages` - stays a
+// runtime value.
+//
+// Launch contract (see emit_paged_decode_attention_kernel):
+//   grid  = (num_q_heads, num_seqs, 1)
+//   block = (256, 1, 1)          // 8 warps
+//
+// Buffer layouts, row-major:
+//   Q         [num_seqs, 32, 128]              f16
+//   KCache    [num_pages, 16, 8, 128]          f16
+//   VCache    [num_pages, 16, 8, 128]          f16
+//   PageTable [num_seqs, MaxPages]             i32   logical -> physical page
+//   SeqLens   [num_seqs]                       i32
+//   Out       [num_seqs, 32, 128]              f16
+kernel paged_decode_attention_128_32_8_16_8(
+    Q: GlobalMemory<F16>,
+    KCache: GlobalMemory<F16>,
+    VCache: GlobalMemory<F16>,
+    PageTable: GlobalMemory<I32>,
+    SeqLens: GlobalMemory<I32>,
+    Out: GlobalMemory<F16>,
+    MaxPages: I32
+) {
+}
+
+fn main() {
+}

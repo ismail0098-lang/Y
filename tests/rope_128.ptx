@@ -1,0 +1,88 @@
+.version 7.8
+.target sm_89
+.address_size 64
+
+.visible .entry rope_128(
+    .param .u64 X_0,
+    .param .u64 Positions_1,
+    .param .u64 Out_2
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 75
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 128 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 33.33% (16 active blocks per SM)
+.maxnreg 128
+{
+    .reg .b32 %r<24>;
+    .reg .f32 %f<29>;
+    .reg .b64 %rd<11>;
+    .reg .pred %p<1>;
+
+    ld.param.u64 %rd0, [X_0];
+    ld.param.u64 %rd1, [Positions_1];
+    ld.param.u64 %rd2, [Out_2];
+    // ========================================================
+    // [Y FUSED ROPE] head_dim=128 | 1 warp (32 threads) per row | interleaved pairs, base=10000 | 2-pair vectorized blocks
+    // ========================================================
+    cvta.to.global.u64 %rd3, %rd0;
+    cvta.to.global.u64 %rd4, %rd1;
+    cvta.to.global.u64 %rd5, %rd2;
+    mov.u32 %r0, %ctaid.x;
+    mov.u32 %r1, %tid.x;
+    mul.lo.u32 %r2, %r0, 128;
+    mul.wide.u32 %rd6, %r0, 4;
+    add.s64 %rd7, %rd4, %rd6;
+    ld.global.u32 %r3, [%rd7];
+    cvt.rn.f32.s32 %f0, %r3;
+    mul.lo.u32 %r4, %r1, 2;
+    add.u32 %r5, %r4, 0;
+    mul.lo.u32 %r6, %r5, 2;
+    add.u32 %r7, %r2, %r6;
+    mul.wide.u32 %rd8, %r7, 2;
+    add.s64 %rd9, %rd3, %rd8;
+    ld.global.v2.u32 {%r8,%r9}, [%rd9];
+    cvt.f32.f16 %f1, %r8;
+    shr.b32 %r10, %r8, 16;
+    cvt.f32.f16 %f2, %r10;
+    cvt.f32.f16 %f3, %r9;
+    shr.b32 %r11, %r9, 16;
+    cvt.f32.f16 %f4, %r11;
+    add.u32 %r12, %r5, 0;
+    cvt.rn.f32.u32 %f5, %r12;
+    mul.f32 %f6, %f5, 0fBE549A78;
+    ex2.approx.f32 %f7, %f6;
+    mul.f32 %f8, %f0, %f7;
+    sin.approx.f32 %f9, %f8;
+    cos.approx.f32 %f10, %f8;
+    mul.f32 %f11, %f1, %f10;
+    mul.f32 %f12, %f2, %f9;
+    sub.f32 %f13, %f11, %f12;
+    mul.f32 %f14, %f1, %f9;
+    mul.f32 %f15, %f2, %f10;
+    add.f32 %f16, %f14, %f15;
+    add.u32 %r13, %r5, 1;
+    cvt.rn.f32.u32 %f17, %r13;
+    mul.f32 %f18, %f17, 0fBE549A78;
+    ex2.approx.f32 %f19, %f18;
+    mul.f32 %f20, %f0, %f19;
+    sin.approx.f32 %f21, %f20;
+    cos.approx.f32 %f22, %f20;
+    mul.f32 %f23, %f3, %f22;
+    mul.f32 %f24, %f4, %f21;
+    sub.f32 %f25, %f23, %f24;
+    mul.f32 %f26, %f3, %f21;
+    mul.f32 %f27, %f4, %f22;
+    add.f32 %f28, %f26, %f27;
+    cvt.rn.f16.f32 %r14, %f13;
+    and.b32 %r15, %r14, 0xFFFF;
+    cvt.rn.f16.f32 %r16, %f16;
+    shl.b32 %r17, %r16, 16;
+    or.b32 %r18, %r15, %r17;
+    cvt.rn.f16.f32 %r19, %f25;
+    and.b32 %r20, %r19, 0xFFFF;
+    cvt.rn.f16.f32 %r21, %f28;
+    shl.b32 %r22, %r21, 16;
+    or.b32 %r23, %r20, %r22;
+    add.s64 %rd10, %rd5, %rd8;
+    st.global.v2.u32 [%rd10], {%r18,%r23};
+    // ========================================================
+}

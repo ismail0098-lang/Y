@@ -1,0 +1,34 @@
+// Paged decode attention (FlashAttention-style online softmax over a
+// page-indexed KV cache), specialized for a 7B-class GQA configuration:
+//   head_dim = 128, 32 query heads, 8 KV heads (GQA 4:1), page_size = 16.
+//
+// Those four constants are compile-time because each one changes the
+// generated code (per-lane register footprint, GQA head mapping, and the
+// token -> page/slot arithmetic). Everything that does not - batch size,
+// sequence length, and the page-table row stride `MaxPages` - stays a
+// runtime value.
+//
+// Launch contract (see emit_paged_decode_attention_kernel):
+//   grid  = (num_q_heads, num_seqs, 1)
+//   block = (256, 1, 1)          // 8 warps
+//
+// Buffer layouts, row-major:
+//   Q         [num_seqs, 32, 128]              f16
+//   KCache    [num_pages, 16, 8, 128]          f16
+//   VCache    [num_pages, 16, 8, 128]          f16
+//   PageTable [num_seqs, MaxPages]             i32   logical -> physical page
+//   SeqLens   [num_seqs]                       i32
+//   Out       [num_seqs, 32, 128]              f16
+kernel paged_decode_attention_128_32_8_16(
+    Q: GlobalMemory<F16>,
+    KCache: GlobalMemory<F16>,
+    VCache: GlobalMemory<F16>,
+    PageTable: GlobalMemory<I32>,
+    SeqLens: GlobalMemory<I32>,
+    Out: GlobalMemory<F16>,
+    MaxPages: I32
+) {
+}
+
+fn main() {
+}

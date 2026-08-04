@@ -1,0 +1,10 @@
+// FP8 (e4m3) Tensor Core GEMM test at M=N=K=4096. A, B arrive as F32 and are
+// quantized to e4m3 on the fly (fused - see ptx_emitter::emit_fp8_gemm_kernel);
+// scale_a/scale_b are per-tensor dequant scales the launcher computes
+// (typically amax/448.0) and passes in as plain scalar params.
+@tile(4096, 4096, 4096)
+kernel gemm_fp8_4096(A: GlobalMemory<F32>, B: GlobalMemory<F32>, scale_a: F32, scale_b: F32, C: GlobalMemory<F32>) {
+}
+
+fn main() {
+}

@@ -1,0 +1,8 @@
+// Decode-shaped (skinny) GEMM: M=4 (small-batch autoregressive decode),
+// N=K=4096. See tests/gemm_f16_decode_m1.ysu's header comment.
+@tile(4, 4096, 4096)
+kernel gemm_f16_decode_m4(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+}
+
+fn main() {
+}

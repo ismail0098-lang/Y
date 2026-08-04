@@ -1,0 +1,10 @@
+// Fused Add+RMSNorm: h = X + Residual; Out = RMSNorm(h) * Weight; writes
+// both Out and h (as NewResidual, for the next transformer layer).
+// hidden_dim=4096 (a typical LLM hidden size), one warp per row - see
+// ptx_emitter's rmsnorm_residual_operands / emit_rmsnorm_residual_kernel.
+// No @tile: row count is a pure runtime grid dimension for this kernel.
+kernel rmsnorm_residual_4096(X: GlobalMemory<F16>, Residual: GlobalMemory<F16>, Weight: GlobalMemory<F16>, Out: GlobalMemory<F16>, NewResidual: GlobalMemory<F16>) {
+}
+
+fn main() {
+}

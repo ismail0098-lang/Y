@@ -22,6 +22,7 @@ functional.linear's own fused kernel is the ground truth here, matching what
 a real LLM inference consumer of this op would actually call).
 
 Timing discipline: median of REPEAT_RUNS independent process re-launches,
+
 each doing its own in-process warmup + N-iteration cuda-event average -
 same discipline as tests/benchmark_y_tensor_core_gemm.py (see that file's
 docstring for why a single in-process sample is not trustworthy here).
@@ -35,6 +36,7 @@ import os
 import sys
 import re
 import json
+import time
 import subprocess
 import statistics
 import argparse
@@ -43,6 +45,18 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__)) + "/.."
 Y_BIN = os.path.join(REPO_ROOT, "target/release/Y")
 ALL_SIZES = [512, 1024, 2048, 4096, 8192]
 REPEAT_RUNS = 5  # matches tests/benchmark_y_tensor_core_gemm.py
+
+# --- GPU clock-ramp control (ported from benchmark_y_decode_gemm.py) ---
+#
+# The SM clock on this project's dev GPU idles at ~210 MHz and needs ~3s of
+# sustained load to reach ~2670 MHz (12.7x), and clocks cannot be locked on
+# this box. A 10-iteration warmup does not ramp them, so a cold-started
+# process measures a kernel at a fraction of a warm one's clock. Timing all
+# of Y and then all of cuDNN also gave cuDNN the hotter clock every time - a
+# systematic bias, not noise. Both are now controlled: ramp first, then
+# A/B/C-interleave the three timed variants so all see the same clock.
+RAMP_SECONDS = 3.0
+INTERLEAVE_ROUNDS = 5
 
 CTA_COMMENT_RE = re.compile(
     r"\[Y TENSOR CORE GEMM\] M=(\d+) N=(\d+) K=(\d+) \| CTA (\d+)x(\d+)x(\d+) \| (\d+)x(\d+) warps"
@@ -126,80 +140,63 @@ def run_once(size, cfg):
     if dyn_smem_bytes > 0:
         fn.max_dynamic_shared_size_bytes = dyn_smem_bytes
 
-    iters = iterations_for(size)
+    # Total iterations split across INTERLEAVE_ROUNDS rounds so the measured
+    # work per size stays comparable to the pre-interleave version.
+    iters = max(3, iterations_for(size) // INTERLEAVE_ROUNDS)
     grid, threads = tuple(cfg["grid"]), cfg["threads"]
 
-    # ---- Y fused kernel: warmup + timed average ----
-    for _ in range(10):
-        fn(grid, (threads, 1, 1), (A_cp, B_cp, bias_cp, C_cp), shared_mem=dyn_smem_bytes)
-    cp.cuda.Device(0).synchronize()
-    y_start, y_end = cp.cuda.Event(), cp.cuda.Event()
-    y_start.record()
-    for _ in range(iters):
-        fn(grid, (threads, 1, 1), (A_cp, B_cp, bias_cp, C_cp), shared_mem=dyn_smem_bytes)
-    y_end.record()
-    y_end.synchronize()
-    y_us = (cp.cuda.get_elapsed_time(y_start, y_end) / iters) * 1000.0
+    A_fp32 = A_fp16.float()
+    linear_layer = torch.nn.Linear(K, N, bias=True, device=device)
+    linear_layer_fp16 = torch.nn.Linear(K, N, bias=True, device=device, dtype=torch.float16)
+    with torch.no_grad():
+        linear_layer.weight.copy_(B_fp16.t().float())
+        linear_layer.bias.copy_(bias_fp32)
+        linear_layer_fp16.weight.copy_(B_fp16.t())
+        linear_layer_fp16.bias.copy_(bias_fp32.to(torch.float16))
+
+    def time_y():
+        cp.cuda.Device(0).synchronize()
+        e0, e1 = cp.cuda.Event(), cp.cuda.Event()
+        e0.record()
+        for _ in range(iters):
+            fn(grid, (threads, 1, 1), (A_cp, B_cp, bias_cp, C_cp), shared_mem=dyn_smem_bytes)
+        e1.record(); e1.synchronize()
+        return (cp.cuda.get_elapsed_time(e0, e1) / iters) * 1000.0
+
+    def _time_torch(op):
+        torch.cuda.synchronize()
+        e0 = torch.cuda.Event(enable_timing=True); e1 = torch.cuda.Event(enable_timing=True)
+        e0.record()
+        for _ in range(iters):
+            _ = op()
+        e1.record(); torch.cuda.synchronize()
+        return (e0.elapsed_time(e1) / iters) * 1000.0
+
+    # ---- 1. ramp clocks to steady state on a throwaway workload ----
+    ramp = torch.randn(4096, 4096, dtype=torch.float16, device=device)
+    t0 = time.time()
+    while time.time() - t0 < RAMP_SECONDS:
+        for _ in range(20):
+            _ = ramp @ ramp
+        torch.cuda.synchronize()
+    del ramp
+
+    # ---- 2. interleaved timing so all three see the same clock ----
+    y_r, c32_r, c16_r = [], [], []
+    with torch.no_grad():
+        for _ in range(INTERLEAVE_ROUNDS):
+            y_r.append(time_y())
+            c32_r.append(_time_torch(lambda: torch.relu(linear_layer(A_fp32))))
+            c16_r.append(_time_torch(lambda: torch.relu(linear_layer_fp16(A_fp16))))
+    y_us = statistics.median(y_r)
+    cudnn_us = statistics.median(c32_r)
+    cudnn_fp16_us = statistics.median(c16_r)
 
     # ---- correctness: fresh functional.linear(A, B.T, bias) + relu reference ----
-    # nn.functional.linear computes x @ weight.T + bias; passing B.t() as
-    # `weight` (shape N,K) makes this compute A @ B + bias - the same math
-    # the kernel's own A(M,K) @ B(K,N) + bias(N,) contract uses. This is the
-    # real fused op a Linear+activation layer would call, not bias/relu
-    # bolted onto a separately-computed matmul.
     ref = torch.relu(torch.nn.functional.linear(A_fp16, B_fp16.t().contiguous(), bias_fp32.to(torch.float16)).float())
     max_abs_diff = (C_torch - ref).abs().max().item()
     ref_scale = ref.abs().max().item()
     correct = bool(torch.allclose(C_torch, ref, rtol=0.02, atol=max(0.75, 0.02 * ref_scale)))
-
-    # ---- cuDNN fused-linear: warmup + timed average, same process immediately after ----
-    # Matches benchmark_y_vs_cudnn_cublas.py Suite 2's cuDNN comparator: a
-    # real torch.nn.Linear (fp32 weights/activations - cuDNN's own fused
-    # linear+bias path) rather than a hand-assembled addmm+relu, so this is
-    # comparing against the same baseline that script's 1.16x-1.31x number
-    # came from, not a weaker stand-in.
-    A_fp32 = A_fp16.float()
-    linear_layer = torch.nn.Linear(K, N, bias=True, device=device)
-    with torch.no_grad():
-        linear_layer.weight.copy_(B_fp16.t().float())
-        linear_layer.bias.copy_(bias_fp32)
-        torch.cuda.synchronize()
-        for _ in range(10):
-            _ = torch.relu(linear_layer(A_fp32))
-        torch.cuda.synchronize()
-        start_evt = torch.cuda.Event(enable_timing=True)
-        end_evt = torch.cuda.Event(enable_timing=True)
-        start_evt.record()
-        for _ in range(iters):
-            _ = torch.relu(linear_layer(A_fp32))
-        end_evt.record()
-        torch.cuda.synchronize()
-        cudnn_us = (start_evt.elapsed_time(end_evt) / iters) * 1000.0
-
-    # ---- SECOND cuDNN measurement, FP16-in/FP16-weight this time - an
-    # apples-to-apples precision match against the Y kernel's own FP16
-    # operands (the comparison above uses FP32 A/weights, matching
-    # benchmark_y_vs_cudnn_cublas.py Suite 2's convention exactly, but FP32
-    # cuBLAS/cuDNN gemm is intrinsically much slower per-FLOP than FP16
-    # tensor-core gemm regardless of any kernel-fusion quality - so a big
-    # margin there conflates "fused epilogue wins" with "FP16 beats FP32".
-    # This one isolates the former.
-    linear_layer_fp16 = torch.nn.Linear(K, N, bias=True, device=device, dtype=torch.float16)
-    with torch.no_grad():
-        linear_layer_fp16.weight.copy_(B_fp16.t())
-        linear_layer_fp16.bias.copy_(bias_fp32.to(torch.float16))
-        torch.cuda.synchronize()
-        for _ in range(10):
-            _ = torch.relu(linear_layer_fp16(A_fp16))
-        torch.cuda.synchronize()
-        start_evt2 = torch.cuda.Event(enable_timing=True)
-        end_evt2 = torch.cuda.Event(enable_timing=True)
-        start_evt2.record()
-        for _ in range(iters):
-            _ = torch.relu(linear_layer_fp16(A_fp16))
-        end_evt2.record()
-        torch.cuda.synchronize()
-        cudnn_fp16_us = (start_evt2.elapsed_time(end_evt2) / iters) * 1000.0
 
     print(json.dumps({
         "size": size, "y_us": y_us, "cudnn_us": cudnn_us, "cudnn_fp16_us": cudnn_fp16_us,
