@@ -16,6 +16,8 @@ pub mod quantization_pass;
 pub mod coprocessor_scheduler;
 
 pub mod autotuner;
+pub mod cuda_runtime;
+pub mod empirical_autotune;
 pub mod c_api;
 pub mod rocm_emitter;
 pub mod layout_pass;

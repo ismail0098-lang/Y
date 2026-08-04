@@ -1,0 +1,11 @@
+// Decode-shaped (skinny) GEMM: M=1 (single-token autoregressive decode),
+// N=K=4096 (typical LLM hidden dim). Uses the EXISTING, already-validated
+// plain-GEMM path (emit_tensor_core_gemm_kernel / Autotuner::autotune) -
+// no new codegen, testing whether the existing tile search space handles
+// this shape sanely. See benchmark_y_decode_gemm_results.md.
+@tile(1, 4096, 4096)
+kernel gemm_f16_decode_m1(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+}
+
+fn main() {
+}

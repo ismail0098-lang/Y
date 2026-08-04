@@ -25,6 +25,8 @@ mod rt_core_emitter;
 mod quantization_pass;
 mod coprocessor_scheduler;
 mod autotuner;
+mod cuda_runtime;
+mod empirical_autotune;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
@@ -413,6 +415,30 @@ fn main() {
     let emit_cpu = args
         .iter()
         .any(|a| a == "--emit-cpu" || a == "--target=cpu");
+    // Empirical autotuning: compile every candidate tile, run it on the GPU
+    // that is actually present, correctness-check it, keep the fastest, and
+    // cache the answer per (M,N,K,precision,GPU) in `.ysu_hw_profile`.
+    //
+    // TAKING a measurement is opt-in: it costs seconds of real device time,
+    // and a compiler that silently starts benchmarking on the user's GPU
+    // during an ordinary build is a bad default - especially on a shared or
+    // headless machine, or one whose GPU is busy with the job the user
+    // actually cares about. READING a measurement someone already took on
+    // this machine is free and strictly better information than the analytic
+    // model, so that happens by default (see `Autotuner::autotune`).
+    //
+    //   --autotune         measure any shape not already cached, then cache it
+    //   --autotune-force   re-measure even if cached (after a codegen change)
+    //   --no-autotune      analytic model only, ignoring the cache - for
+    //                      reproducible codegen that must not depend on what
+    //                      is on this machine's disk. Wins over the others.
+    if args.iter().any(|a| a == "--no-autotune") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Analytic);
+    } else if args.iter().any(|a| a == "--autotune-force") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Remeasure);
+    } else if args.iter().any(|a| a == "--autotune") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Measure);
+    }
     let emit_r1cs = args
         .iter()
         .any(|a| a == "--emit-r1cs" || a == "--target=r1cs");
@@ -675,7 +701,20 @@ fn main() {
         log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
         println!("      -> Pass 1: Multi-Stage Asynchronous Software Pipelining Pass (cp.async multi-buffering)");
         println!("      -> Pass 2: Automated Grid Block Swizzling Pass (grouped-raster L2 locality, group size {})", ptx_emitter::GEMM_SWIZZLE_GROUP_SIZE);
-        println!("      -> Pass 3: JIT Dynamic Autotuning Pass (num_stages, num_warps search)");
+        println!(
+            "      -> Pass 3: JIT Dynamic Autotuning Pass (CTA tile / num_warps / num_stages search) [{}]",
+            match autotuner::tuning_mode() {
+                autotuner::TuningMode::Cached =>
+                    "cached measurements where available, else the analytic model; \
+                     pass --autotune to measure this GPU",
+                autotuner::TuningMode::Analytic =>
+                    "analytic model only (--no-autotune): cache ignored, nothing measured",
+                autotuner::TuningMode::Measure =>
+                    "measuring on-device, reusing any cached result for this shape",
+                autotuner::TuningMode::Remeasure =>
+                    "measuring on-device, ignoring any cached result",
+            }
+        );
         println!("      -> Pass 4: Automated Shared Memory Layout Permutation Pass (0-bank conflict XOR swizzling)");
 
         // Autotune diagnostics are printed per @tile'd kernel, using that
