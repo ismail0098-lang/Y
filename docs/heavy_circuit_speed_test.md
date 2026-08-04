@@ -269,6 +269,46 @@ The lesson is worth keeping: a benchmark circuit chosen for how large it can
 grow selected for exactly the operations Y was already good at, and hid three
 separate 100x defects in the arithmetic underneath.
 
+## 4d. Operator coverage and what each costs
+
+A field has no bits and no order, so most of these are not primitive
+operations - each is a bit decomposition plus a recomposition, and the
+decomposition is simultaneously the range proof that makes the result
+meaningful. Costs at `ZK_COMPARISON_BITS = 32`, pinned by
+`operator_costs_are_what_we_think`:
+
+| Operator | Constraints | How |
+|---|---|---|
+| `+`, `-` | 0 | linear combination, folded into the next multiply |
+| `*` | 1 | one R1CS constraint, by definition |
+| `==`, `!=` | 2 | is-zero gadget with an inverse witness |
+| `<`, `<=`, `>`, `>=` | 100 | two operand range checks + an (n+1)-bit difference |
+| `&`, `\|`, `^` | 98 | two decompositions + one AND per bit; recomposition is free |
+| `<<`, `>>` | 33 | one decomposition; constant shift amounts only |
+| `/`, `%` | 135 | quotient range check + `r < b` + one product |
+| `&&`, `\|\|` | 3 | booleanity on each operand + one product |
+
+Add one constraint for `main`'s output binding. Three things are worth knowing
+before using them:
+
+* **Values are unsigned 32-bit.** A negative `I32` is `p - |v|` in the field,
+  which fails its range check. That makes it *unprovable*, not wrong.
+* **Shift amounts must be compile-time constants.** A variable shift is a
+  multiplexer over all 32 possible amounts - a different gadget at a different
+  price, so it is refused rather than silently approximated.
+* **`/` is integer division.** It used to be *field* division (`x * y⁻¹ mod p`),
+  which agrees with integer division only when the divisor divides exactly:
+  `7 / 2` returned `(p+7)/2`, a 254-bit number, not `3`. Every other case was
+  silently wrong while still producing a valid proof.
+
+The last one has a trap worth spelling out, because the natural encoding of
+integer division is unsound. Constraining `q * b = a - r` with `r < b` is not
+enough: for `7 / 2` a prover can pick `r = 0` and `q = 7 * 2⁻¹ mod p`, an
+enormous field element. Both constraints hold and the circuit proves
+`7 % 2 == 0`. Range-checking `q` closes it - with `q, b < 2³²` the product
+stays under 2⁶⁴ and cannot wrap the modulus, so the field equation forces the
+integer one. `forged_quotient_is_rejected` pins exactly that attack.
+
 ## 5. Scope and limits
 
 * **The default unroll cap is 10,000 iterations**, overridable with

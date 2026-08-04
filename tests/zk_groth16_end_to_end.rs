@@ -278,6 +278,42 @@ fn groth16_proves_a_comparison_circuit() {
     );
 }
 
+/// A real proof over the integer and bitwise gadgets.
+///
+/// `tests/zk_integer_ops.rs` checks those operators against Rust's semantics
+/// using Y's own witness solver, which shares Y's field arithmetic and wire
+/// numbering with the emitter. This closes that loop the same way the rest of
+/// this file does: arkworks re-derives the constraint system independently, so
+/// a gadget that is self-consistently wrong still fails here.
+#[test]
+fn groth16_proves_an_integer_gadget_circuit() {
+    // 123 % 10 = 3, 123 / 10 = 12, (12 & 6) = 4, 4 | 3 = 7.
+    let src = "@unsafe\nfn main(x: I32, y: I32) -> I32 { return ((x / y) & 6) | (x % y); }\n";
+    let (circuit, witness) = compile(src, &[], &[123, 10]);
+    let c = YCircuit::new(circuit, witness);
+    let public = c.public_values();
+    assert_eq!(
+        *public.last().unwrap(),
+        ArkFr::from(7u64),
+        "((123/10) & 6) | (123%10) should be 7"
+    );
+
+    let mut rng = StdRng::seed_from_u64(0);
+    let (pk, vk) = Groth16::<Bn254>::circuit_specific_setup(c.clone(), &mut rng).expect("setup");
+    let proof = Groth16::<Bn254>::prove(&pk, c, &mut rng).expect("prove");
+    assert!(
+        Groth16::<Bn254>::verify(&vk, &public, &proof).expect("verify"),
+        "Groth16 could not verify a proof over the integer/bitwise gadgets"
+    );
+
+    let mut tampered = public.clone();
+    tampered[0] += ArkFr::from(1u64);
+    assert!(
+        !Groth16::<Bn254>::verify(&vk, &tampered, &proof).expect("verify"),
+        "integer gadget proof verified against a public output it does not match"
+    );
+}
+
 /// A witness that does not satisfy the constraints must be caught before it
 /// ever reaches a prover - and must not be provable into a verifying proof.
 #[test]
