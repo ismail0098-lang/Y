@@ -309,7 +309,42 @@ enormous field element. Both constraints hold and the circuit proves
 stays under 2⁶⁴ and cannot wrap the modulus, so the field equation forces the
 integer one. `forged_quotient_is_rejected` pins exactly that attack.
 
-## 4e. On-chain verifier
+## 4e. snarkjs interop — Y as a drop-in for circom
+
+Y writes its constraint system in iden3's binary format, and had done so since
+before anything could check the claim. It holds. The whole pipeline works:
+
+```bash
+Y circuit.ysu --target=r1cs --witness input.json     # 154x faster than circom
+snarkjs groth16 setup circuit.r1cs pot_final.ptau circuit.zkey
+snarkjs groth16 prove circuit.zkey circuit.wtns proof.json public.json
+snarkjs groth16 verify verification_key.json public.json proof.json
+# snarkJS: OK!
+```
+
+`snarkjs r1cs info` reads Y's output with the right wire, constraint and input
+counts; `groth16 setup` consumes it; and `snarkjs wtns check` accepts Y's
+witness. That is the adoption path — Y replaces circom inside a toolchain
+people already run, rather than asking them to adopt a private pipeline.
+
+`--witness input.json` solves the circuit and writes the `.wtns`. Inputs are
+matched **by name** against `fn main`'s parameters, and a missing or unknown key
+is an error: a file listing values in the wrong order would otherwise produce a
+valid proof of the wrong statement.
+
+**The bug this exposed is worth keeping in mind.** snarkjs requires a specific
+wire layout — `1`, outputs, public inputs, private inputs, intermediates —
+while Y allocates wires in whatever order the emitter needs. The `.r1cs` writer
+had always permuted its constraint terms into iden3 order; the first `.wtns`
+writer wrote the witness in Y's raw order. Both files were internally
+consistent, Y's own solver was perfectly happy, and `snarkjs wtns check`
+rejected the pair at constraint 1. Every check Y can run works in Y's own
+numbering, so nothing internal could see it. Both writers now share
+`snarkjs_wire_map`, and `r1cs_and_wtns_use_the_same_wire_order` re-derives
+satisfiability in the *other* numbering so the property is testable without
+snarkjs installed.
+
+## 4f. On-chain verifier
 
 A proof nobody can check is not worth producing. Y generates a deployable
 Groth16 verifier from a verifying key:

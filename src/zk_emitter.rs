@@ -2877,6 +2877,134 @@ impl ZkEmitter {
         }
     }
 
+    /// The circuit's private input names, in declaration order.
+    ///
+    /// `new_wire` appends `_<id>` to keep wire names unique, so the suffix is
+    /// stripped back off here. The order is the order `solve_r1cs_witness`
+    /// consumes its `priv_in` slice, which is what makes it safe to map a named
+    /// input file onto that slice.
+    pub fn private_input_names(&self) -> Vec<String> {
+        self.private_inputs
+            .iter()
+            .map(|w| {
+                let n = &self.variables[*w];
+                n.rsplit_once('_').map(|(head, _)| head.to_string()).unwrap_or_else(|| n.clone())
+            })
+            .collect()
+    }
+
+    /// Writes a `.wtns` witness file in iden3's format, the one snarkjs reads.
+    ///
+    /// Layout mirrors `.r1cs`: magic, version, section count, then
+    /// length-prefixed sections. Section 1 is the header (field size, prime,
+    /// witness count) and section 2 is the values, each little-endian and
+    /// padded to the field size.
+    ///
+    /// Without this, Y could emit a constraint system snarkjs accepts but never
+    /// a proof it could produce - `snarkjs groth16 prove` needs both files.
+    pub fn write_wtns_binary(
+        circuit: &Circuit,
+        witness: &[Fr],
+        output_path: &str,
+    ) -> std::io::Result<()> {
+        use std::io::Write as IoWrite;
+        let file = std::fs::File::create(output_path)?;
+        let mut writer = std::io::BufWriter::new(file);
+
+        writer.write_all(b"wtns")?;
+        writer.write_all(&2u32.to_le_bytes())?; // version
+        writer.write_all(&2u32.to_le_bytes())?; // nSections
+
+        let n8: u32 = 32;
+        let mut header = Vec::new();
+        header.write_all(&n8.to_le_bytes())?;
+        header.write_all(&Fr::modulus().to_bytes_le(n8 as usize))?;
+        header.write_all(&(witness.len() as u32).to_le_bytes())?;
+
+        writer.write_all(&1u32.to_le_bytes())?;
+        writer.write_all(&(header.len() as u64).to_le_bytes())?;
+        writer.write_all(&header)?;
+
+        // Permuted into the same order the .r1cs constraints were written in.
+        let (old_to_new, _, _, _) = Self::snarkjs_wire_map(circuit);
+        let mut permuted = vec![Fr::zero(); witness.len()];
+        for (old, new) in &old_to_new {
+            if *old < witness.len() && *new < permuted.len() {
+                permuted[*new] = witness[*old].clone();
+            }
+        }
+
+        let mut data = Vec::with_capacity(permuted.len() * n8 as usize);
+        for w in &permuted {
+            data.extend_from_slice(&w.0.to_bytes_le(n8 as usize));
+        }
+        writer.write_all(&2u32.to_le_bytes())?;
+        writer.write_all(&(data.len() as u64).to_le_bytes())?;
+        writer.write_all(&data)?;
+
+        writer.flush()
+    }
+
+    /// Y's wire numbering permuted into iden3's convention.
+    ///
+    /// snarkjs requires a specific layout - `1`, then outputs, public inputs,
+    /// private inputs, and finally intermediates - whereas Y allocates wires in
+    /// the order the emitter happens to need them (inputs first, the output
+    /// typically last). The `.r1cs` writer has always applied this permutation
+    /// to its constraint terms.
+    ///
+    /// It is shared with `write_wtns_binary` precisely because it must be. When
+    /// the witness was written in Y's raw order against constraints written in
+    /// iden3's, both files were internally consistent and `snarkjs wtns check`
+    /// rejected the pair at constraint 1. Y's own solver saw nothing wrong,
+    /// because it works entirely in Y's numbering. Two orderings, one of them
+    /// only ever exercised by an external tool.
+    ///
+    /// Returns the map plus the three counts the `.r1cs` header declares.
+    pub fn snarkjs_wire_map(circuit: &Circuit) -> (HashMap<usize, usize>, usize, usize, usize) {
+        let mut old_to_new = HashMap::new();
+        old_to_new.insert(0, 0); // the constant-1 wire
+        let mut next_new_id = 1;
+
+        for &w in &circuit.outputs {
+            old_to_new.entry(w).or_insert_with(|| {
+                let id = next_new_id;
+                next_new_id += 1;
+                id
+            });
+        }
+        let n_pub_out = next_new_id - 1;
+
+        for &w in &circuit.public_inputs {
+            old_to_new.entry(w).or_insert_with(|| {
+                let id = next_new_id;
+                next_new_id += 1;
+                id
+            });
+        }
+        let n_pub_in = next_new_id - 1 - n_pub_out;
+
+        for &w in &circuit.private_inputs {
+            old_to_new.entry(w).or_insert_with(|| {
+                let id = next_new_id;
+                next_new_id += 1;
+                id
+            });
+        }
+        let n_prv_in = next_new_id - 1 - n_pub_out - n_pub_in;
+
+        let mut aux_wires: Vec<usize> = (1..circuit.num_variables)
+            .filter(|w| !old_to_new.contains_key(w))
+            .collect();
+        aux_wires.sort();
+        for w in aux_wires {
+            old_to_new.insert(w, next_new_id);
+            next_new_id += 1;
+        }
+
+        (old_to_new, n_pub_out, n_pub_in, n_prv_in)
+    }
+
     pub fn write_r1cs_binary(&self, output_path: &str) -> std::io::Result<()> {
         use std::fs::File;
         use std::io::BufWriter;
@@ -2885,50 +3013,7 @@ impl ZkEmitter {
         let circuit = self.build_circuit();
 
         // 1. Determine the old-to-new wire mapping
-        let mut old_to_new = HashMap::new();
-        old_to_new.insert(0, 0); // Constant 1 is mapped to wire 0
-
-        let mut next_new_id = 1;
-
-        // Public outputs map next
-        for &w in &circuit.outputs {
-            if !old_to_new.contains_key(&w) {
-                old_to_new.insert(w, next_new_id);
-                next_new_id += 1;
-            }
-        }
-        let n_pub_out = next_new_id - 1;
-
-        // Public inputs map next
-        for &w in &circuit.public_inputs {
-            if !old_to_new.contains_key(&w) {
-                old_to_new.insert(w, next_new_id);
-                next_new_id += 1;
-            }
-        }
-        let n_pub_in = next_new_id - 1 - n_pub_out;
-
-        // Private inputs map next
-        for &w in &circuit.private_inputs {
-            if !old_to_new.contains_key(&w) {
-                old_to_new.insert(w, next_new_id);
-                next_new_id += 1;
-            }
-        }
-        let n_prv_in = next_new_id - 1 - n_pub_out - n_pub_in;
-
-        // Intermediate/Auxiliary wires map last
-        let mut aux_wires = Vec::new();
-        for w in 1..circuit.num_variables {
-            if !old_to_new.contains_key(&w) {
-                aux_wires.push(w);
-            }
-        }
-        aux_wires.sort();
-        for w in aux_wires {
-            old_to_new.insert(w, next_new_id);
-            next_new_id += 1;
-        }
+        let (old_to_new, n_pub_out, n_pub_in, n_prv_in) = Self::snarkjs_wire_map(&circuit);
 
         // 2. Write binary .r1cs file
         let file = File::create(output_path)?;
