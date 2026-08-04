@@ -1,0 +1,10 @@
+// Fused Linear+SwiGLU GEMM test at M=N=K=2048: Out = SiLU(X @ Wgate) * (X @ Wup),
+// the gate/up half of an LLM MLP block. 4-param @tile shape
+// (X, Wgate, Wup: F16, Out: F32) dispatches ptx_emitter's fused SwiGLU
+// epilogue - see tile_gemm_swiglu_operands / emit_gemm_swiglu_kernel.
+@tile(2048, 2048, 2048)
+kernel gemm_f16_swiglu_2048(X: GlobalMemory<F16>, Wgate: GlobalMemory<F16>, Wup: GlobalMemory<F16>, Out: GlobalMemory<F32>) {
+}
+
+fn main() {
+}

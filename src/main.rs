@@ -25,6 +25,8 @@ mod rt_core_emitter;
 mod quantization_pass;
 mod coprocessor_scheduler;
 mod autotuner;
+mod cuda_runtime;
+mod empirical_autotune;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
@@ -413,6 +415,30 @@ fn main() {
     let emit_cpu = args
         .iter()
         .any(|a| a == "--emit-cpu" || a == "--target=cpu");
+    // Empirical autotuning: compile every candidate tile, run it on the GPU
+    // that is actually present, correctness-check it, keep the fastest, and
+    // cache the answer per (M,N,K,precision,GPU) in `.ysu_hw_profile`.
+    //
+    // TAKING a measurement is opt-in: it costs seconds of real device time,
+    // and a compiler that silently starts benchmarking on the user's GPU
+    // during an ordinary build is a bad default - especially on a shared or
+    // headless machine, or one whose GPU is busy with the job the user
+    // actually cares about. READING a measurement someone already took on
+    // this machine is free and strictly better information than the analytic
+    // model, so that happens by default (see `Autotuner::autotune`).
+    //
+    //   --autotune         measure any shape not already cached, then cache it
+    //   --autotune-force   re-measure even if cached (after a codegen change)
+    //   --no-autotune      analytic model only, ignoring the cache - for
+    //                      reproducible codegen that must not depend on what
+    //                      is on this machine's disk. Wins over the others.
+    if args.iter().any(|a| a == "--no-autotune") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Analytic);
+    } else if args.iter().any(|a| a == "--autotune-force") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Remeasure);
+    } else if args.iter().any(|a| a == "--autotune") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Measure);
+    }
     let emit_r1cs = args
         .iter()
         .any(|a| a == "--emit-r1cs" || a == "--target=r1cs");
@@ -674,15 +700,57 @@ fn main() {
     } else if emit_ptx {
         log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
         println!("      -> Pass 1: Multi-Stage Asynchronous Software Pipelining Pass (cp.async multi-buffering)");
-        println!("      -> Pass 2: Automated Grid Block Swizzling Pass (8-tile Morton space-filling curve)");
-        println!("      -> Pass 3: JIT Dynamic Autotuning Pass (num_stages, num_warps search)");
+        println!("      -> Pass 2: Automated Grid Block Swizzling Pass (grouped-raster L2 locality, group size {})", ptx_emitter::GEMM_SWIZZLE_GROUP_SIZE);
+        println!(
+            "      -> Pass 3: JIT Dynamic Autotuning Pass (CTA tile / num_warps / num_stages search) [{}]",
+            match autotuner::tuning_mode() {
+                autotuner::TuningMode::Cached =>
+                    "cached measurements where available, else the analytic model; \
+                     pass --autotune to measure this GPU",
+                autotuner::TuningMode::Analytic =>
+                    "analytic model only (--no-autotune): cache ignored, nothing measured",
+                autotuner::TuningMode::Measure =>
+                    "measuring on-device, reusing any cached result for this shape",
+                autotuner::TuningMode::Remeasure =>
+                    "measuring on-device, ignoring any cached result",
+            }
+        );
         println!("      -> Pass 4: Automated Shared Memory Layout Permutation Pass (0-bank conflict XOR swizzling)");
 
-        let tuned_config = autotuner::Autotuner::autotune(1024, 1024, 1024, &hw_profile);
-        println!("         [JIT Autotuner Result] CTA Tile: {}x{}x{}, Warps: {}, Pipeline Stages: {}",
-            tuned_config.cta_m, tuned_config.cta_n, tuned_config.cta_k, tuned_config.num_warps, tuned_config.num_stages);
+        // Autotune diagnostics are printed per @tile'd kernel, using that
+        // kernel's own real compile-time M/N/K - not a single hardcoded
+        // 1024x1024x1024 guess regardless of what's actually in the source
+        // (the previous behavior here). A compile unit can hold multiple
+        // kernels, and for any @tile'd one, `emit_program` below now calls
+        // `Autotuner::autotune` itself with its real dimensions (see
+        // `ptx_emitter::emit_tensor_core_gemm_kernel`) - this block exists
+        // only to surface that same result to the CLI's own log output.
+        let mut printed_any_tune = false;
+        for item in &ast.items {
+            if let Item::Kernel(k) = item {
+                if let Some(t) = &k.tile {
+                    fn as_u32(e: &ast::Expr) -> Option<u32> {
+                        match e {
+                            ast::Expr::IntLit(v, _) if *v > 0 => u32::try_from(*v).ok(),
+                            _ => None,
+                        }
+                    }
+                    if let (Some(m), Some(n), Some(k_dim)) =
+                        (as_u32(&t.block_m), as_u32(&t.block_n), t.block_k.as_deref().and_then(as_u32))
+                    {
+                        let tuned_config = autotuner::Autotuner::autotune(m, n, k_dim, &hw_profile, autotuner::Precision::F16);
+                        println!("         [JIT Autotuner Result] `{}` (M={}, N={}, K={}): CTA Tile: {}x{}x{}, Warps: {}, Pipeline Stages: {}",
+                            k.name, m, n, k_dim, tuned_config.cta_m, tuned_config.cta_n, tuned_config.cta_k, tuned_config.num_warps, tuned_config.num_stages);
+                        printed_any_tune = true;
+                    }
+                }
+            }
+        }
+        if !printed_any_tune {
+            println!("         [JIT Autotuner] No @tile'd kernel in this source - nothing to autotune.");
+        }
 
-        let mut emitter = PtxEmitter::new();
+        let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
         let ptx_output = emitter.emit_program(&ast, &hw_profile);
         let write_path = if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);

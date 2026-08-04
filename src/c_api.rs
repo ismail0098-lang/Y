@@ -12,7 +12,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use crate::autotuner::Autotuner;
+use crate::autotuner::{Autotuner, Precision};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::ptx_emitter::PtxEmitter;
@@ -99,18 +99,23 @@ pub unsafe extern "C" fn y_compile_to_ptx(
 
 /// Generates candidate tile configurations in JSON format for dynamic autotuning.
 ///
+/// `is_fp8` must reflect the actual precision of the kernel being tuned for -
+/// it directly drives shared-memory/occupancy math (FP8 loads half the bytes
+/// per element of F16) and cannot be inferred from the tile shapes alone.
+///
 /// # Safety
 /// The returned pointer must be freed using `y_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn y_autotune_search_space_json(m: u32, n: u32, k: u32) -> *mut c_char {
-    let candidates = Autotuner::generate_candidates(m, n, k);
+pub unsafe extern "C" fn y_autotune_search_space_json(m: u32, n: u32, k: u32, is_fp8: bool) -> *mut c_char {
+    let precision = if is_fp8 { Precision::Fp8 } else { Precision::F16 };
+    let candidates = Autotuner::generate_candidates(m, n, k, precision);
 
     let json_items: Vec<String> = candidates
         .iter()
         .map(|c| {
             format!(
-                "{{\"cta_m\":{},\"cta_n\":{},\"cta_k\":{},\"warps_m\":{},\"warps_n\":{},\"num_stages\":{},\"num_warps\":{}}}",
-                c.cta_m, c.cta_n, c.cta_k, c.warps_m, c.warps_n, c.num_stages, c.num_warps
+                "{{\"cta_m\":{},\"cta_n\":{},\"cta_k\":{},\"warps_m\":{},\"warps_n\":{},\"num_stages\":{},\"num_warps\":{},\"is_fp8\":{}}}",
+                c.cta_m, c.cta_n, c.cta_k, c.warps_m, c.warps_n, c.num_stages, c.num_warps, is_fp8
             )
         })
         .collect();
@@ -169,12 +174,16 @@ pub unsafe extern "C" fn y_interpret_kernel(source_ptr: *const c_char, error_out
 
 /// Selects optimal autotuner configuration in JSON format.
 ///
+/// `is_fp8` must reflect the actual precision of the kernel being tuned for -
+/// see `y_autotune_search_space_json`.
+///
 /// # Safety
 /// The returned pointer must be freed using `y_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn y_autotune_select_config_json(m: u32, n: u32, k: u32) -> *mut c_char {
+pub unsafe extern "C" fn y_autotune_select_config_json(m: u32, n: u32, k: u32, is_fp8: bool) -> *mut c_char {
     let hw = crate::sentinel::HardwareProfile::default();
-    let config = Autotuner::autotune(m, n, k, &hw);
+    let precision = if is_fp8 { Precision::Fp8 } else { Precision::F16 };
+    let config = Autotuner::autotune(m, n, k, &hw, precision);
     let json_output = format!(
         "{{\"cta_m\":{},\"cta_n\":{},\"cta_k\":{},\"warps_m\":{},\"warps_n\":{},\"num_stages\":{},\"num_warps\":{}}}",
         config.cta_m, config.cta_n, config.cta_k, config.warps_m, config.warps_n, config.num_stages, config.num_warps

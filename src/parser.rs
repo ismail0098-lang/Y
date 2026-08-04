@@ -132,8 +132,26 @@ impl Parser {
             });
         }
 
+        // `@tile(M, N, K)` may also precede `kernel` (kernel-scoped meaning:
+        // see `KernelDecl::tile`'s doc comment), distinct from the existing
+        // `@tile` recognized further below as a `fn`-attribute. Since both
+        // share the same token, speculatively parse it here and only keep it
+        // if `kernel` actually follows; otherwise rewind so the unchanged
+        // fn-attribute path below parses it exactly as it did before.
+        let mut kernel_tile = None;
+        if self.check(TokenKind::AtTile) {
+            let save_pos = self.pos;
+            self.advance(); // consume '@tile'
+            let parsed_tile = self.parse_tile_attr()?;
+            if self.check(TokenKind::Kernel) {
+                kernel_tile = Some(parsed_tile);
+            } else {
+                self.pos = save_pos;
+            }
+        }
+
         if self.match_token(TokenKind::Kernel) {
-            let kernel = self.parse_kernel(requires)?;
+            let kernel = self.parse_kernel(requires, kernel_tile)?;
             Ok(Item::Kernel(kernel))
         } else if self.match_token(TokenKind::Struct) {
             let s = self.parse_struct_decl()?;
@@ -673,7 +691,32 @@ impl Parser {
 
     // ── Kernel ──────────────────────────────────────────────
 
-    fn parse_kernel(&mut self, requires: Vec<RequireAttr>) -> Result<KernelDecl, String> {
+    /// Parses `(M, N[, K])` after an already-consumed `@tile` token. Shared
+    /// by the kernel-scoped call site above and can be reused wherever else
+    /// `@tile(...)`'s argument list needs parsing.
+    fn parse_tile_attr(&mut self) -> Result<TileAttr, String> {
+        let start_tok = self.peek().clone();
+        self.expect(TokenKind::LParen, "'(' after @tile")?;
+        let block_m = Box::new(self.parse_expr()?);
+        self.expect(TokenKind::Comma, "',' in @tile")?;
+        let block_n = Box::new(self.parse_expr()?);
+        let mut block_k = None;
+        if self.match_token(TokenKind::Comma) {
+            block_k = Some(Box::new(self.parse_expr()?));
+        }
+        self.expect(TokenKind::RParen, "')' after @tile")?;
+        Ok(TileAttr {
+            block_m,
+            block_n,
+            block_k,
+            span: Span {
+                line: start_tok.line,
+                col: start_tok.col,
+            },
+        })
+    }
+
+    fn parse_kernel(&mut self, requires: Vec<RequireAttr>, tile: Option<TileAttr>) -> Result<KernelDecl, String> {
         let name_tok = self.peek().clone();
         let name = match &name_tok.kind {
             TokenKind::Ident(s) => {
@@ -746,6 +789,7 @@ impl Parser {
             name,
             params,
             body,
+            tile,
             span,
         })
     }
@@ -2213,6 +2257,64 @@ mod tests {
                 assert!(f.ret_ty.is_some());
             }
             _ => panic!("Expected Func"),
+        }
+    }
+
+    #[test]
+    fn test_parse_kernel_level_tile_directive() {
+        let src = "
+            @tile(4096, 4096, 4096)
+            kernel gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+                let x: I32 = 0;
+            }
+        ";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Kernel(k) => {
+                assert_eq!(k.name, "gemm");
+                assert_eq!(k.params.len(), 3);
+                let t = k.tile.as_ref().expect("expected kernel-level @tile to be captured");
+                assert!(matches!(*t.block_m, Expr::IntLit(4096, _)));
+                assert!(matches!(*t.block_n, Expr::IntLit(4096, _)));
+                assert!(matches!(t.block_k.as_deref(), Some(Expr::IntLit(4096, _))));
+            }
+            _ => panic!("Expected Kernel item"),
+        }
+    }
+
+    #[test]
+    fn test_parse_kernel_without_tile_leaves_tile_none() {
+        let src = "kernel plain(A: GlobalMemory<F32>) { let x: I32 = 0; }";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        match &prog.items[0] {
+            Item::Kernel(k) => assert!(k.tile.is_none()),
+            _ => panic!("Expected Kernel item"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fn_level_tile_directive_still_works() {
+        // Regression guard: kernel-level @tile speculative parse+rewind must
+        // not disturb the pre-existing fn-level @tile path (tests/tile_test.ysu).
+        let src = "
+            @tile(16, 16)
+            fn tiled_matmul() {
+                let mut sum: F32 = 0.0;
+            }
+        ";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        match &prog.items[0] {
+            Item::Func(f) => {
+                assert!(f.tile.is_some());
+            }
+            _ => panic!("Expected Func item"),
         }
     }
 

@@ -311,6 +311,10 @@ pub struct HardwareProfile {
     pub warp_size: u32,
     pub max_threads_per_sm: u32,
     pub max_warps_per_sm: u32,
+    // Max shared memory available per SM, in bytes (e.g. 102400 = 100KB on sm_89 Ada).
+    // Distinct from the classic 48KB (49152B) static/default-opt-in per-block limit
+    // that predates Volta's per-SM opt-in shared memory carveout.
+    pub max_smem_per_sm_bytes: u32,
     pub total_global_mem_mb: u64,
 
     // e.g. "Q32.32", "FP64"
@@ -491,6 +495,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             warp_size: parse_u32_field(&contents, "WARP_SIZE").unwrap_or(32),
             max_threads_per_sm: parse_u32_field(&contents, "MAX_THREADS_PER_SM").unwrap_or(1536),
             max_warps_per_sm: parse_u32_field(&contents, "MAX_WARPS_PER_SM").unwrap_or(48),
+            max_smem_per_sm_bytes: parse_u32_field(&contents, "MAX_SMEM_PER_SM_BYTES").unwrap_or(49152),
             total_global_mem_mb: parse_u64_field(&contents, "TOTAL_GLOBAL_MEM_MB").unwrap_or(0),
             drift_free_types,
             zero_drift_penalty_cycles: parse_u64_field(&contents, "ZERO_DRIFT_PENALTY")
@@ -541,6 +546,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         println!("    -> Loaded GPU Name: {}", profile.gpu_name);
         println!("    -> Loaded GPU Vendor: {}", profile.gpu_vendor);
         println!("    -> Loaded SM Version / Compute Capability: {} / {}", profile.sm_version, profile.compute_capability);
+        println!("    -> Loaded SM (Multiprocessor) Count: {}", profile.sm_count);
         println!(
             "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
             profile.fma_latency_cycles,
@@ -600,10 +606,11 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             profile.ldc_latency_cycles
         );
         println!(
-            "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}MB VRAM",
+            "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}KB smem/SM, {}MB VRAM",
             profile.max_regs_per_thread,
             profile.max_regs_per_sm,
             profile.warp_size,
+            profile.max_smem_per_sm_bytes / 1024,
             profile.total_global_mem_mb
         );
         println!("    -> Zero Drift Types: {:?}", profile.drift_free_types);
@@ -659,6 +666,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let mut gpu_vendor = "Unknown".to_string();
     let mut sm_version = "0.0".to_string();
     let mut compute_capability = "0.0".to_string();
+    let mut sm_count = 108u32;
     let mut fma_latency_cycles = 4.0;
     let mut imad_latency_cycles = 4.0;
     let mut thermal_latency_40c = 4.0;
@@ -699,6 +707,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let mut warp_size = 32u32;
     let mut max_threads_per_sm = 1536u32;
     let mut max_warps_per_sm = 48u32;
+    let mut max_smem_per_sm_bytes = 49152u32;
     let mut total_global_mem_mb = 0u64;
 
     let mut drift_free_types = Vec::new();
@@ -723,6 +732,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             compute_capability = parse_profile_value(&stdout, "COMPUTE_CAPABILITY")
                 .unwrap_or("0.0")
                 .to_string();
+            sm_count = parse_u32_field(&stdout, "SM_COUNT").unwrap_or(108);
             zero_drift_penalty_cycles = parse_u64_field(&stdout, "ZERO_DRIFT_PENALTY").unwrap_or(0);
 
             fma_latency_cycles = parse_f64_field(&stdout, "FMA_LATENCY_CYCLES").unwrap_or(4.0);
@@ -783,6 +793,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             warp_size = parse_u32_field(&stdout, "WARP_SIZE").unwrap_or(32);
             max_threads_per_sm = parse_u32_field(&stdout, "MAX_THREADS_PER_SM").unwrap_or(1536);
             max_warps_per_sm = parse_u32_field(&stdout, "MAX_WARPS_PER_SM").unwrap_or(48);
+            max_smem_per_sm_bytes = parse_u32_field(&stdout, "MAX_SMEM_PER_SM_BYTES").unwrap_or(49152);
             total_global_mem_mb = parse_u64_field(&stdout, "TOTAL_GLOBAL_MEM_MB").unwrap_or(0);
 
             let drift_types_str = parse_profile_value(&stdout, "DRIFT_FREE_TYPES").unwrap_or("");
@@ -813,7 +824,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         gpu_vendor,
         sm_version,
         compute_capability,
-        sm_count: 108,
+        sm_count,
         fma_latency_cycles,
         imad_latency_cycles,
         thermal_latency_40c,
@@ -854,6 +865,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         warp_size,
         max_threads_per_sm,
         max_warps_per_sm,
+        max_smem_per_sm_bytes,
         total_global_mem_mb,
         drift_free_types,
         zero_drift_penalty_cycles,
@@ -898,6 +910,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     println!("    -> CPU AVX-512 Instruction Throughput: {:.2} cycles per op", profile.avx512_throughput_cycles);
     println!("    -> CPU Thread Scheduling/Context Switch Handoff Cost: {} cycles", profile.thread_scheduling_cost_cycles);
     println!("    -> Detected GPU: {}", profile.gpu_name);
+    println!("    -> Detected SM (Multiprocessor) Count: {}", profile.sm_count);
     println!(
         "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
         profile.fma_latency_cycles, profile.imad_latency_cycles, profile.mufu_rcp_latency_cycles
@@ -957,10 +970,11 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         profile.ldc_latency_cycles
     );
     println!(
-        "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}MB VRAM",
+        "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}KB smem/SM, {}MB VRAM",
         profile.max_regs_per_thread,
         profile.max_regs_per_sm,
         profile.warp_size,
+        profile.max_smem_per_sm_bytes / 1024,
         profile.total_global_mem_mb
     );
     println!(
@@ -971,7 +985,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     println!("[*] Saving hardware topology to {}...", profile_path);
     let serialized = format!(
         "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nL2_CYCLES={}\nL3_CYCLES={}\nMEM_CYCLES={}\nAVX512_THROUGHPUT={}\nTHREAD_SCHEDULING_COST={}\nGPU_NAME={}\n\
-         GPU_VENDOR={}\nSM_VERSION={}\nCOMPUTE_CAPABILITY={}\n\
+         GPU_VENDOR={}\nSM_VERSION={}\nCOMPUTE_CAPABILITY={}\nSM_COUNT={}\n\
          FMA_LATENCY={}\nIMAD_LATENCY={}\nTHERMAL_LATENCY_40C={}\n\
          THERMAL_LATENCY_60C={}\nTHERMAL_LATENCY_80C={}\n\
          MUFU_RCP_LATENCY={}\nDFMA_LATENCY={}\nSMEM_LATENCY={}\n\
@@ -985,7 +999,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
          HFMA2_LATENCY={}\nBF16X2_FMA_LATENCY={}\nLOP3_LUT_LATENCY={}\n\
          DADD_LATENCY={}\nREDUX_SUM_LATENCY={}\nMEMBAR_GPU_LATENCY={}\nLDC_LATENCY={}\n\
          MAX_REGS_PER_THREAD={}\nMAX_REGS_PER_SM={}\nWARP_SIZE={}\n\
-         MAX_THREADS_PER_SM={}\nMAX_WARPS_PER_SM={}\nTOTAL_GLOBAL_MEM_MB={}\n\
+         MAX_THREADS_PER_SM={}\nMAX_WARPS_PER_SM={}\nMAX_SMEM_PER_SM_BYTES={}\nTOTAL_GLOBAL_MEM_MB={}\n\
          DRIFT_FREE_TYPES={}\nZERO_DRIFT_PENALTY={}\n\
          SMEM_NOCONFLICT_CYCLES={}\nSMEM_2WAY_CONFLICT_CYCLES={}\n\
          SMEM_4WAY_CONFLICT_CYCLES={}\nSMEM_BROADCAST_CYCLES={}\n\
@@ -1005,7 +1019,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         profile.has_avx, profile.has_avx512, profile.l2_line_size, profile.l1_latency_cycles,
         profile.l2_latency_cycles, profile.l3_latency_cycles, profile.mem_latency_cycles,
         profile.avx512_throughput_cycles, profile.thread_scheduling_cost_cycles,
-        profile.gpu_name, profile.gpu_vendor, profile.sm_version, profile.compute_capability,
+        profile.gpu_name, profile.gpu_vendor, profile.sm_version, profile.compute_capability, profile.sm_count,
         profile.fma_latency_cycles, profile.imad_latency_cycles,
         profile.thermal_latency_40c, profile.thermal_latency_60c, profile.thermal_latency_80c,
         profile.mufu_rcp_latency_cycles, profile.dfma_latency_cycles, profile.smem_latency_cycles,
@@ -1021,7 +1035,8 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         profile.dadd_latency_cycles, profile.redux_sum_latency_cycles,
         profile.membar_gpu_latency_cycles, profile.ldc_latency_cycles,
         profile.max_regs_per_thread, profile.max_regs_per_sm, profile.warp_size,
-        profile.max_threads_per_sm, profile.max_warps_per_sm, profile.total_global_mem_mb,
+        profile.max_threads_per_sm, profile.max_warps_per_sm, profile.max_smem_per_sm_bytes,
+        profile.total_global_mem_mb,
         profile.drift_free_types.join(","), profile.zero_drift_penalty_cycles,
         profile.smem_noconflict_cycles, profile.smem_2way_conflict_cycles,
         profile.smem_4way_conflict_cycles, profile.smem_broadcast_cycles,
