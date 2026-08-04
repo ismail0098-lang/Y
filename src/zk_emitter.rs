@@ -709,6 +709,15 @@ pub enum WitnessOp {
     InvOrZeroLc(LinearCombination),
     /// Bit `bit` of the linear combination's value, LSB-first.
     BitOfLc { lc: LinearCombination, bit: u32 },
+    /// Integer quotient `floor(a / b)`, or 0 when `b` is zero.
+    ///
+    /// Integer division is not field division and cannot be recovered from the
+    /// constraint `q * b = a - r`, which has two unknowns. The zero-divisor
+    /// case returns 0 only so the forward pass terminates; the accompanying
+    /// `r < b` check is unsatisfiable when `b = 0`, so no proof follows from it.
+    IntDivLc(LinearCombination, LinearCombination),
+    /// Integer remainder `a mod b`, or 0 when `b` is zero. See `IntDivLc`.
+    IntModLc(LinearCombination, LinearCombination),
     /// The product of two linear combinations.
     ///
     /// R1CS lets the `A` and `B` of a constraint be arbitrary linear
@@ -946,6 +955,18 @@ pub struct Circuit {
 /// silently wrong. See `emit_less_than`.
 pub const ZK_COMPARISON_BITS: u32 = 32;
 
+/// A linear combination's value as a `u64`, when it is a compile-time constant
+/// that fits in one. Used to constant-fold the integer gadgets, all of which
+/// are expensive enough that folding is worth a check.
+fn lc_u64(lc: &LinearCombination) -> Option<u64> {
+    let c = lc.is_constant()?;
+    match c.0.effective_len() {
+        1 => Some(c.0.digits[0] as u64),
+        2 => Some(c.0.digits[0] as u64 | ((c.0.digits[1] as u64) << 32)),
+        _ => None,
+    }
+}
+
 pub struct ZkEmitter {
     pub variables: Vec<String>,
     pub public_inputs: Vec<usize>,
@@ -1109,6 +1130,172 @@ impl ZkEmitter {
         // a < b  <=>  top bit clear  =>  out = 1 - top
         let mut out = LinearCombination::constant(Fr::one());
         out.add_term(top, Fr::from_u64(0).sub(&Fr::one()));
+        out
+    }
+
+    /// Force a boolean linear combination to be exactly 1.
+    fn constrain_true(&mut self, lc: &LinearCombination, span: &Span) {
+        self.add_constraint(Constraint {
+            a: lc.clone(),
+            b: LinearCombination::constant(Fr::one()),
+            c: LinearCombination::constant(Fr::one()),
+            span: Some(span.clone()),
+        });
+    }
+
+    /// Constrain a linear combination to be 0 or 1, and return it.
+    fn constrain_boolean(&mut self, lc: &LinearCombination, span: &Span) {
+        self.add_constraint(Constraint {
+            a: lc.clone(),
+            b: lc.clone(),
+            c: lc.clone(),
+            span: Some(span.clone()),
+        });
+    }
+
+    /// Integer `(quotient, remainder)` of `a / b`, both range-checked.
+    ///
+    /// The obvious encoding, `q * b = a - r` with `r < b`, is UNSOUND on its
+    /// own, and the hole is worth stating because it is invisible: field
+    /// division always succeeds. For `a = 7, b = 2` a prover can claim `r = 0`
+    /// and supply `q = 7 * 2^-1 mod p`, an enormous field element. The
+    /// constraint holds, `r < b` holds, and the circuit has proved
+    /// `7 mod 2 == 0`.
+    ///
+    /// Range-checking `q` closes it. With `q < 2^n` and `b < 2^n` the product
+    /// `q*b` is below `2^2n`, far under the modulus at `n = 32`, so the field
+    /// equation forces the integer one and `q` must be the true quotient.
+    ///
+    /// Division by zero is rejected rather than defined: `b = 0` collapses the
+    /// constraint to `r = a`, and `r < 0` is unsatisfiable. No proof exists,
+    /// which is the correct outcome for `x / 0`.
+    ///
+    /// Cost is about `4n + 8` constraints (~136 at n=32). Integer division is
+    /// genuinely expensive in R1CS - it is three range checks and a comparison.
+    fn emit_int_div_mod(
+        &mut self,
+        a: &LinearCombination,
+        b: &LinearCombination,
+        n_bits: u32,
+        span: &Span,
+    ) -> (LinearCombination, LinearCombination) {
+        let q = self.new_wire("intdiv_q");
+        let r = self.new_wire("intdiv_r");
+        self.witness_recipes
+            .insert(q, WitnessOp::IntDivLc(a.clone(), b.clone()));
+        self.witness_recipes
+            .insert(r, WitnessOp::IntModLc(a.clone(), b.clone()));
+        let q_lc = LinearCombination::variable(q);
+        let r_lc = LinearCombination::variable(r);
+
+        // q < 2^n. Without this the quotient can be any field element.
+        self.emit_num2bits(&q_lc, n_bits, span);
+
+        // q * b = a - r
+        let mut rhs = a.clone();
+        rhs.add_linear(&r_lc, Fr::from_u64(0).sub(&Fr::one()));
+        rhs.simplify();
+        self.add_constraint(Constraint {
+            a: q_lc.clone(),
+            b: b.clone(),
+            c: rhs,
+            span: Some(span.clone()),
+        });
+
+        // r < b, which also range-checks both r and b.
+        let lt = self.emit_less_than(&r_lc, b, n_bits, span);
+        self.constrain_true(&lt, span);
+
+        (q_lc, r_lc)
+    }
+
+    /// Bitwise op over `n_bits`, returned as a linear combination.
+    ///
+    /// Both operands are decomposed (which range-checks them), combined bit by
+    /// bit, and recomposed. The recomposition is free: it is a weighted sum, so
+    /// only the per-bit products cost constraints. About `3n + 2` total.
+    fn emit_bitwise(
+        &mut self,
+        a: &LinearCombination,
+        b: &LinearCombination,
+        op: &BinaryOp,
+        n_bits: u32,
+        span: &Span,
+    ) -> LinearCombination {
+        let a_bits = self.emit_num2bits(a, n_bits, span);
+        let b_bits = self.emit_num2bits(b, n_bits, span);
+
+        let neg_one = Fr::from_u64(0).sub(&Fr::one());
+        let neg_two = Fr::from_u64(0).sub(&Fr::from_u64(2));
+        let two = Fr::from_u64(2);
+
+        let mut out = LinearCombination::zero();
+        let mut coeff = Fr::one();
+        for i in 0..n_bits as usize {
+            let ai = LinearCombination::variable(a_bits[i]);
+            let bi = LinearCombination::variable(b_bits[i]);
+            // Every variant needs the AND of the two bits.
+            let and = self.emit_mul_lc(&ai, &bi, "bitop_and");
+
+            // AND -> ab;  OR -> a + b - ab;  XOR -> a + b - 2ab
+            let mut bit = match op {
+                BinaryOp::BitAnd => and,
+                BinaryOp::BitOr | BinaryOp::BitXor => {
+                    let mut t = ai;
+                    t.add_linear(&bi, Fr::one());
+                    let scale = if matches!(op, BinaryOp::BitOr) { neg_one.clone() } else { neg_two.clone() };
+                    t.add_linear(&and, scale);
+                    t
+                }
+                _ => unreachable!("emit_bitwise called with {:?}", op),
+            };
+            bit.simplify();
+            out.add_linear(&bit, coeff.clone());
+            coeff = coeff.mul(&two);
+        }
+        out.simplify();
+        out
+    }
+
+    /// Shift by a compile-time constant, truncated to `n_bits`.
+    ///
+    /// Only constant shift amounts are supported. A variable shift is a
+    /// multiplexer over every possible amount, which is a different gadget with
+    /// a very different cost; emitting something cheaper that only works for
+    /// the constant case would be a silent trap.
+    fn emit_shift(
+        &mut self,
+        a: &LinearCombination,
+        amount: u64,
+        left: bool,
+        n_bits: u32,
+        span: &Span,
+    ) -> LinearCombination {
+        let bits = self.emit_num2bits(a, n_bits, span);
+        let n = n_bits as u64;
+        let mut out = LinearCombination::zero();
+        if amount >= n {
+            // Everything shifted out. Still emit the decomposition above so the
+            // operand stays range-checked.
+            return out;
+        }
+        let two = Fr::from_u64(2);
+        for i in 0..n {
+            // Source bit for output position `i`.
+            let src = if left {
+                if i < amount { continue; } else { i - amount }
+            } else {
+                let s = i + amount;
+                if s >= n { continue; }
+                s
+            };
+            let mut coeff = Fr::one();
+            for _ in 0..i {
+                coeff = coeff.mul(&two);
+            }
+            out.add_term(bits[src as usize], coeff);
+        }
+        out.simplify();
         out
     }
 
@@ -2064,22 +2251,28 @@ impl ZkEmitter {
                         Ok(LinearCombination::variable(out_wire))
                     }
                     BinaryOp::Div => {
-                        // Division: left / right
-                        // Constant divisor: scale by inverse
-                        if let Some(rc) = right_lc.is_constant() {
-                            let inv_rc = rc.try_inv().map_err(|e| format!("Line {}: {}", span.line, e))?;
-                            return Ok(left_lc.scale(inv_rc));
+                        // INTEGER division, matching the `I32` the source says.
+                        //
+                        // This used to be FIELD division: `out * right = left`,
+                        // i.e. `left * right^-1 mod p`. For `7 / 2` that is
+                        // `(p+7)/2`, a 254-bit number - not 3. The two agree
+                        // only when the divisor divides the dividend exactly,
+                        // so every other case was silently wrong, and wrong in
+                        // a way that still produces a valid proof. It also has
+                        // to match `%`: with field division,
+                        // `(a/b)*b + a%b == a` fails.
+                        if let (Some(l), Some(r)) = (lc_u64(&left_lc), lc_u64(&right_lc)) {
+                            if r == 0 {
+                                return Err(format!(
+                                    "Circuit target error: division by zero. Line {}",
+                                    span.line
+                                ));
+                            }
+                            return Ok(LinearCombination::constant(Fr::from_u64(l / r)));
                         }
-
-                        // Dynamic divisor: w_out * right = left
-                        let out_wire = self.new_wire("div_tmp");
-                        self.add_constraint(Constraint {
-                            a: LinearCombination::variable(out_wire),
-                            b: right_lc,
-                            c: left_lc,
-                            span: Some(span.clone()),
-                        });
-                        Ok(LinearCombination::variable(out_wire))
+                        let (quot, _) =
+                            self.emit_int_div_mod(&left_lc, &right_lc, ZK_COMPARISON_BITS, span);
+                        Ok(quot)
                     }
                     BinaryOp::Eq => {
                         // Equality: left == right -> outputs 1 if equal, 0 if not
@@ -2193,7 +2386,76 @@ impl ZkEmitter {
                             Ok(lt)
                         }
                     }
-                    _ => Err(format!("Circuit target error: Operator {:?} is not natively supported in ZK field constraints. Line {}", op, span.line)),
+                    BinaryOp::Mod => {
+                        if let (Some(l), Some(r)) = (lc_u64(&left_lc), lc_u64(&right_lc)) {
+                            if r == 0 {
+                                return Err(format!(
+                                    "Circuit target error: `% 0` is not satisfiable. Line {}",
+                                    span.line
+                                ));
+                            }
+                            return Ok(LinearCombination::constant(Fr::from_u64(l % r)));
+                        }
+                        let (_, rem) =
+                            self.emit_int_div_mod(&left_lc, &right_lc, ZK_COMPARISON_BITS, span);
+                        Ok(rem)
+                    }
+                    BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                        if let (Some(l), Some(r)) = (lc_u64(&left_lc), lc_u64(&right_lc)) {
+                            let v = match op {
+                                BinaryOp::BitAnd => l & r,
+                                BinaryOp::BitOr => l | r,
+                                _ => l ^ r,
+                            };
+                            return Ok(LinearCombination::constant(Fr::from_u64(v)));
+                        }
+                        Ok(self.emit_bitwise(&left_lc, &right_lc, op, ZK_COMPARISON_BITS, span))
+                    }
+                    BinaryOp::Shl | BinaryOp::Shr => {
+                        // A variable shift amount is a multiplexer over every
+                        // possible amount - a different gadget at a different
+                        // price. Refusing is better than quietly emitting one.
+                        let amount = lc_u64(&right_lc).ok_or_else(|| {
+                            format!(
+                                "Circuit target error: the shift amount in `{:?}` must be a \
+                                 compile-time constant in ZK circuits; a variable shift needs a \
+                                 multiplexer over all {} possible amounts. Line {}",
+                                op, ZK_COMPARISON_BITS, span.line
+                            )
+                        })?;
+                        let left = matches!(op, BinaryOp::Shl);
+                        if let Some(l) = lc_u64(&left_lc) {
+                            let n = ZK_COMPARISON_BITS as u64;
+                            let mask = (1u64 << n) - 1;
+                            let v = if amount >= n {
+                                0
+                            } else if left {
+                                (l << amount) & mask
+                            } else {
+                                (l & mask) >> amount
+                            };
+                            return Ok(LinearCombination::constant(Fr::from_u64(v)));
+                        }
+                        Ok(self.emit_shift(&left_lc, amount, left, ZK_COMPARISON_BITS, span))
+                    }
+                    BinaryOp::And | BinaryOp::Or => {
+                        // Logical operators. Y's comparisons already return 0/1,
+                        // but an arbitrary I32 does not, so both operands are
+                        // constrained boolean - `5 && 3` must fail to prove
+                        // rather than produce whatever the field says.
+                        self.constrain_boolean(&left_lc, span);
+                        self.constrain_boolean(&right_lc, span);
+                        let and = self.emit_mul_lc(&left_lc, &right_lc, "logic_and");
+                        if matches!(op, BinaryOp::And) {
+                            return Ok(and);
+                        }
+                        // a || b  =  a + b - ab
+                        let mut out = left_lc;
+                        out.add_linear(&right_lc, Fr::one());
+                        out.add_linear(&and, Fr::from_u64(0).sub(&Fr::one()));
+                        out.simplify();
+                        Ok(out)
+                    }
                 }
             }
             Expr::Call { func, args, span } => {

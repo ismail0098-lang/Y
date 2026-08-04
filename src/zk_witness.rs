@@ -163,6 +163,22 @@ pub fn execute_host_witness_ir(
             WitnessOp::MulLc(a, b) => {
                 w[node_idx] = eval_lc(a, &w).mul(&eval_lc(b, &w));
             }
+            WitnessOp::IntDivLc(a, b) => {
+                let (bv, av) = (eval_lc(b, &w), eval_lc(a, &w));
+                w[node_idx] = if bv.0.is_zero() {
+                    Fr::zero()
+                } else {
+                    Fr(av.0.div_mod(&bv.0).0)
+                };
+            }
+            WitnessOp::IntModLc(a, b) => {
+                let (bv, av) = (eval_lc(b, &w), eval_lc(a, &w));
+                w[node_idx] = if bv.0.is_zero() {
+                    Fr::zero()
+                } else {
+                    Fr(av.0.div_mod(&bv.0).1)
+                };
+            }
         }
     }
 
@@ -216,7 +232,9 @@ pub fn solve_r1cs_witness(
         | WitnessOp::IsZeroLc(_)
         | WitnessOp::InvOrZeroLc(_)
         | WitnessOp::BitOfLc { .. }
-        | WitnessOp::MulLc(..) = op
+        | WitnessOp::MulLc(..)
+        | WitnessOp::IntDivLc(..)
+        | WitnessOp::IntModLc(..) = op
         {
             if node_idx < solved_mask.len() {
                 solved_mask[node_idx] = true;
