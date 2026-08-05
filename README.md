@@ -9,9 +9,10 @@ The project is under active, single-developer, ongoing development.
 What this project does
 
 Probes the actual hardware it's running on: cache latencies, AVX-512 throughput, GPU warp/tensor-core timings, and uses those measurements to make codegen decisions (e.g. choosing IMAD.WIDE over IMAD based on measured cycle cost).
-Enforces compile-time safety guarantees on marked code blocks: initialized-variable checks, loop invariants, bounds declarations, and a numerical-drift check for fixed-point accumulation.
+Enforces compile-time safety guarantees on marked code blocks: initialized-variable checks, Z3-discharged loop invariants (an invariant that cannot be checked fails the build), and bounds declarations.
 Compiles to five backends: LLVM IR (→ native binary via clang), NVIDIA PTX, portable C, direct x86-64, and a standalone ELF emitter.
-Includes an R1CS constraint generator for zero-knowledge circuits, benchmarked against Circom, Noir, and Leo.
+Removes floating-point reduction nondeterminism on request: `@ZeroDrift` accumulates in an exact fixed-point representation chosen by timing the candidates on the GPU actually present.
+Includes an R1CS constraint generator for zero-knowledge circuits, benchmarked against Circom, Noir, and Leo, interoperating with snarkjs end-to-end and generating deployable Groth16 Solidity verifiers.
 Runs a Hardware-Sentient Dual-Accelerator Scheduler: automatically fuses RT Core traversal and Tensor Core MMA pipelines, inserting sync barriers, vectorized FP32→FP16 quantization, and bank-conflict-free swizzled SMEM layouts — from a high-level description of the workload.
 Is partially self-hosting: most compiler phases (lexer, parser, type checker, LLVM emitter) have been rewritten in Y itself, alongside the original Rust implementation.
 
@@ -23,7 +24,7 @@ The complete specification and reference manuals for the Y programming language 
   - Compiler Architecture: LLVM IR, PTX, C, x86-64, ELF native emission.
   - 5 Advanced Compiler Optimization Passes: `AsyncPipeliningPass` (3-stage DMA), `SmemBankSwizzlePass` (Bitwise XOR swizzling), `EpilogueFusionPass` (Inline scale & activation fusion), `RegisterPressurePass` (Dynamic `.maxnreg 64`), `UnrollAndJamPass` (4x unrolling).
   - 3D Block Pointer Abstractions (`BlockPtr3D`): Strided 3D tensor volume accesses with zero-overhead 3-way predicate boundary protection.
-  - Zero-Knowledge Circuit Backend (R1CS): SSA linear-combination folding, static soundness analyzer (`error[Z0042]`), 1M-iteration witness satisfiability suite, and benchmark comparison vs Circom/Noir/Leo.
+  - Zero-Knowledge Circuit Backend (R1CS): SSA linear-combination folding, static soundness analyzer (`error[Z0042]`), 1M-iteration witness satisfiability suite, and benchmark comparison vs Circom/Noir/Leo. See [ZK backend](#zero-knowledge-backend-r1cs--groth16) below.
   - Hardware-Sentient Dual-Accelerator Scheduler: Fusing RT Core ray tracing & Tensor Core matrix multiplication.
   - Language Reference: Grammar, type system, hardware probes, attributes, memory spaces, and CUDA migration guide.
   - [Benchmarks & Empirical Evaluation](README_BENCHMARKS.md)
@@ -87,7 +88,13 @@ src/                       Rust bootstrap compiler
   avx_wrapper.rs           AVX/AVX-512 intrinsic wrappers
   llvm_emitter.rs          LLVM IR emission
   ptx_emitter.rs           NVIDIA PTX emission
-  c_emitter.rs             C transpiler backend
+  zero_drift.rs            @ZeroDrift accumulator selection + on-device measurement
+  zk_emitter.rs            R1CS circuit emission (BN254), --features zk
+  zk_witness.rs            Witness solver shared by the fuzzer and the proof tests
+  zk_poseidon_constants.rs circomlib Poseidon parameters (generated, do not edit)
+  zk_solidity.rs           Groth16 on-chain verifier generation
+  mini_json.rs             Dependency-free JSON reader for keys and circuit inputs
+  c_emitter.rs             C transpiler — NOT registered in lib.rs or main.rs; dead
   cpu_emitter.rs           Direct x86-64 emission
   native_emitter.rs        ELF binary emission (no external toolchain)
   ypm.rs                   Package manager
@@ -110,7 +117,7 @@ Compiler Pipeline
 source (.ysu)
   → lexer.rs        tokenize
   → parser.rs       build AST
-  → type_checker.rs safety-block checks, invariant/bounds verification, drift checks
+  → type_checker.rs safety-block checks, Z3-discharged invariants, bounds verification
   → backend select  based on hardware profile + source annotations
        → llvm_emitter.rs          → LLVM IR → clang → native binary
        → ptx_emitter.rs           → NVIDIA PTX
@@ -159,7 +166,101 @@ fn main() {
     }
 }
 
-Other directives: @bounds(min, max) for static index range checks, @ZeroDrift for verified drift-free fixed-point accumulation, @divergence(uniform) to assert non-divergent warp branches, @tile(M, N, K) to schedule tensor-core tile operations.
+Every `@invariant` is discharged by Z3. An invariant that **cannot** be checked — because no solver could be started — fails the build rather than passing quietly; `Y_ALLOW_UNVERIFIED_INVARIANTS=1` overrides that for machines without one, and says plainly that nothing was proved. The solver is looked for at `Y_Z3_PATH`, on `PATH`, and at `venv/bin/z3`, `.venv/bin/z3`, `z3/build/z3`, `$HOME/.local/bin/z3`; `pip install z3-solver` into the project venv is enough.
+
+Other directives: `@bounds(min, max)` for static index range checks, `@divergence(uniform)` to assert non-divergent warp branches, `@tile(M, N, K)` to schedule tensor-core tile operations.
+
+
+### `@ZeroDrift` — exact, order-independent accumulation
+
+Floating-point addition is not associative, so a reduction's result depends on the order the hardware happened to combine it in. On a GPU that order is decided by launch geometry, which means retuning a tile size can change the answer. `@ZeroDrift` removes the dependency by accumulating in an exact integer representation:
+
+```
+@bounds(min=0, max=1000)
+@ZeroDrift
+let acc: F32 = 0.0;
+
+acc += x;          // scaled once, then accumulated with exact integer adds
+```
+
+**Only integer and fixed-point arithmetic is drift-free.** `f64` is the same non-associative arithmetic with a longer mantissa — it drifts less and still drifts — so it is never selected, however fast it measures.
+
+**Which exact representation is chosen is measured, not assumed.** The compiler times a serially dependent accumulate chain per candidate on the GPU actually present, and caches the result per device in `.ysu_hw_profile`:
+
+```
+[*] Measured @ZeroDrift accumulate costs on NVIDIA GeForce RTX 4070 Ti SUPER
+      ->  KahanF32:      1455 ps/acc  not exact (never selected)
+      ->    Q16.16:      1790 ps/acc  exact
+      ->    Q32.32:      1922 ps/acc  exact
+      ->       I64:      2106 ps/acc  exact
+      ->       F64:     17726 ps/acc  not exact (never selected)
+      -> @ZeroDrift acc: F32 -> Q32.32 (measured 1922 ps/acc)
+```
+
+Exact fixed-point is ~9x cheaper here than reaching for higher precision, and the GeForce FP64 penalty lands exactly where it should. With no GPU there are no measurements, which is not an error — selection falls back to the narrowest sufficient representation, deterministically.
+
+Lowered by both the LLVM and PTX backends. Notes:
+
+- `+=` and `-=` only. Scaling a product would reintroduce rounding into the accumulation, which is the one thing this prevents.
+- A bare `F32` accumulator is **rejected**: nothing exact holds 3.4e38 at 2⁻²⁴. `@bounds(min, max)` states the real range and makes it satisfiable.
+- Both backends round half away from zero, so the same source compiled for CPU and GPU agrees.
+- Exactness is a property of the *accumulation*. Each term is still quantised once on the way in; what is guaranteed is that summing those terms is order-independent.
+
+Useful for bitwise-reproducible numerics (the problem Kulisch accumulators and ReproBLAS exist to solve), deterministic ML, monetary arithmetic, consensus systems that cannot tolerate node divergence, and kernel development where you want to retune tiling and still diff output byte-for-byte.
+
+`tests/zero_drift_end_to_end.rs` compiles a program with clang and **runs** it, summing the same 4001 terms in opposite orders and requiring bit-identical results — alongside a control asserting that sequence genuinely disagrees with itself in `f32`, so the result cannot be vacuous. The PTX path is gated on `ptxas` actually assembling the output.
+
+
+## Zero-Knowledge Backend (R1CS → Groth16)
+
+**Not in a default build.** Without `--features zk` the binary prints `The ZK Circuit Backend is not compiled into this binary` and **exits 0** — a silent no-op that reads as a fast successful run.
+
+```bash
+cargo build --release --features zk
+Y circuit.ysu --target=r1cs --witness input.json     # writes .r1cs, .sym, .wtns
+```
+
+### It plugs into the existing toolchain
+
+Y emits iden3-format `.r1cs` and `.wtns`, verified end to end against snarkjs:
+
+```bash
+Y circuit.ysu --target=r1cs --witness input.json
+snarkjs groth16 setup circuit.r1cs pot_final.ptau circuit.zkey
+snarkjs groth16 prove circuit.zkey circuit.wtns proof.json public.json
+snarkjs groth16 verify verification_key.json public.json proof.json
+# snarkJS: OK!
+```
+
+Circuit inputs are matched **by name** against `fn main`'s parameters — a file listing values in the wrong order would otherwise produce a valid proof of the wrong statement.
+
+### On-chain verifier
+
+```bash
+Y --emit-verifier verification_key.json -o Verifier.sol --name MyVerifier
+```
+
+Generates a Groth16 verifier calling the BN254 precompiles at `0x06`/`0x07`/`0x08`, with the same `verifyProof(uint[2], uint[2][2], uint[2], uint[N])` signature snarkjs emits, so its exported calldata and existing front-ends work unchanged. `tests/zk_solidity_verifier.rs` compiles the generated contract with `solc` and executes it on a real EVM via `revm` — an honest proof must be accepted and a tampered public input rejected. (The failure mode that matters — G2 coordinates in library order rather than the EVM's reversed order — produces a contract that compiles, deploys, burns full gas and rejects every valid proof, which no string-matching test could catch.)
+
+### Correctness
+
+`tests/zk_groth16_end_to_end.rs` proves Y's circuits through arkworks as an independent oracle, asserting an honest proof verifies, a tampered public input is rejected, a perturbed witness fails satisfiability, and that Y's modulus equals the true BN254 one.
+
+- **Poseidon is circomlib's**, verified against digests taken from circomlib's own `Poseidon(2)` template — 241 constraints vs circom's 243 non-linear + 274 linear. Only t=3 (two inputs) is supported; other arities and non-BN254 fields are refused rather than approximated.
+- **Comparisons cost ~100 constraints, by necessity.** A field has no order, so an ordering claim without a range proof is vacuous. `<`, `<=`, `>`, `>=` range-check both operands and decompose the difference.
+- **Bitwise, shift, `/` and `%`** are supported: `&`/`|`/`^` cost 98, `<<`/`>>` 33 (constant shift amounts only), `/` and `%` 135. `/` is integer division. Values are unsigned 32-bit — a negative operand fails its range check and is unprovable rather than wrong.
+
+### Performance
+
+| Constraints | emit | witness | setup | prove | verify | total |
+|---|---|---|---|---|---|---|
+| 10,000 | 0.01 s | 0.00 s | 0.04 s | 0.04 s | 0.002 s | **0.10 s** |
+| 100,000 | 0.16 s | 0.07 s | 0.33 s | 0.36 s | 0.002 s | **0.92 s** |
+| 1,000,000 | 1.77 s | 0.57 s | 2.80 s | 2.87 s | 0.002 s | **8.02 s** |
+
+arkworks (setup + prove) is ~71% of that total; Y has no prover of its own and performs no trusted setup. Compiling `Poseidon(2)`: **0.011 s vs circom's 0.104 s**.
+
+Full detail, including the measurement traps involved, in [docs/heavy_circuit_speed_test.md](docs/heavy_circuit_speed_test.md).
 
 
 Dual-Accelerator Co-Processing Pipeline

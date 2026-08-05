@@ -507,69 +507,12 @@ fn main() {
     println!("      -> 0 Bank Conflicts Detected.");
     println!("      -> Fragment Roles & Linear Obligations verified.");
 
-    // ────────────────────────────────────────────────────────
-    // Phase 3.5: Hardware Advisories (Zero Drift)
-    // ────────────────────────────────────────────────────────
-    let mut zero_drift_count = 0;
-    for item in &ast.items {
-        if let Item::Kernel(k) = item {
-            fn walk_block(b: &ast::Block, profile: &sentinel::HardwareProfile, count: &mut usize) {
-                for stmt in &b.stmts {
-                    match stmt {
-                        ast::Stmt::Let {
-                            zero_drift: Some(_),
-                            ty,
-                            ..
-                        } => {
-                            let type_name = match ty {
-                                Some(ast::Type::Ident(name, _)) => name.clone(),
-                                Some(ast::Type::Primitive(name, _)) => name.clone(),
-                                _ => "Unknown".to_string(),
-                            };
+    // NOTE: @ZeroDrift used to be reported here as a hardware "advisory" that
+    // printed what the annotation would cost and claimed the compiler would
+    // "insert a software compensation path" - while inserting nothing. It is a
+    // real lowering now, chosen per device, and the backends report what they
+    // actually selected. See src/zero_drift.rs.
 
-                            println!(
-                                "      \x1b[1;33m[Advisory]\x1b[0m @ZeroDrift requested on type: {}",
-                                type_name
-                            );
-                            if profile.drift_free_types.contains(&type_name) {
-                                println!("        -> Hardware target ({}) natively supports zero drift for {}.", profile.gpu_name, type_name);
-                                println!(
-                                    "        -> Performance tradeoff: +{} cycles penalty.",
-                                    profile.zero_drift_penalty_cycles
-                                );
-                            } else {
-                                println!("        -> \x1b[1;33mWARNING\x1b[0m: Target ({}) lacks native zero drift for {}.", profile.gpu_name, type_name);
-                                println!(
-                                    "        -> Compiler must insert software compensation path."
-                                );
-                            }
-                            *count += 1;
-                        }
-                        ast::Stmt::For { body, .. } => walk_block(body, profile, count),
-                        ast::Stmt::While { body, .. } => walk_block(body, profile, count),
-                        ast::Stmt::If {
-                            then_block,
-                            else_block,
-                            ..
-                        } => {
-                            walk_block(then_block, profile, count);
-                            if let Some(eb) = else_block {
-                                walk_block(eb, profile, count);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            walk_block(&k.body, &hw_profile, &mut zero_drift_count);
-        }
-    }
-    if zero_drift_count > 0 {
-        println!(
-            "      -> Processed {} @ZeroDrift annotations.",
-            zero_drift_count
-        );
-    }
 
     // ────────────────────────────────────────────────────────
     // Phase 4: Backend Emission
@@ -974,7 +917,17 @@ fn main() {
         }
 
         let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
+        emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ptx_output = emitter.emit_program(&ast, &hw_profile);
+        for line in &emitter.drift_report {
+            println!("      -> @ZeroDrift {}", line);
+        }
+        if !emitter.drift_errors.is_empty() {
+            for e in &emitter.drift_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
         let write_path = if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);
             let mut p = path.to_path_buf();

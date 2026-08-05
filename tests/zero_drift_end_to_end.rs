@@ -205,3 +205,68 @@ fn annotation_changes_the_generated_ir() {
         "the unannotated version should not be using a fixed-point accumulator"
     );
 }
+
+/// The PTX path must lower `@ZeroDrift` too, and the result must ASSEMBLE.
+///
+/// GPU kernels are where reduction-order nondeterminism actually bites - the
+/// summation order is decided by launch geometry, so retuning a tile can change
+/// the answer. String-matching the PTX would not be enough here: this repo has
+/// already shipped PTX containing instructions that exist on no hardware, and
+/// the gate that caught it was running `ptxas`. Skipped when `ptxas` is absent.
+#[test]
+fn ptx_zero_drift_lowers_and_assembles() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = std::env::temp_dir().join(format!("y_zdptx_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let ysu = dir.join("acc.ysu");
+    std::fs::write(
+        &ysu,
+        "@require(sm >= 89)\nkernel drift_acc(A: GlobalMemory<F32>, C: GlobalMemory<F32>) {\n\
+         \x20   @bounds(min=0, max=1000)\n    @ZeroDrift\n    let acc: F32 = 0.0;\n\
+         \x20   acc += 1.0;\n    acc += 0.25;\n    acc += 0.125;\n}\n",
+    )
+    .expect("write source");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&ysu)
+        .arg("--emit-ptx")
+        .current_dir(&repo)
+        .output()
+        .expect("run Y");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ptx_path = dir.join("acc.ptx");
+    let ptx = std::fs::read_to_string(&ptx_path).unwrap_or_else(|_| panic!("no PTX:\n{}", log));
+
+    // Exact integer accumulation, one `add.s64` per `+=`.
+    assert!(
+        ptx.contains("[Y ZERO DRIFT]"),
+        "the annotation left no trace in the PTX:\n{}",
+        ptx
+    );
+    assert_eq!(
+        ptx.matches("add.s64").count(),
+        3,
+        "expected one exact accumulate per `+=`:\n{}",
+        ptx
+    );
+    assert!(
+        !ptx.contains("add.f32 %f"),
+        "the accumulator must not fall back to float addition:\n{}",
+        ptx
+    );
+
+    // And it has to be real PTX.
+    let Ok(res) = Command::new("ptxas").arg("-arch=sm_89").arg(&ptx_path).arg("-o").arg("/dev/null").output() else {
+        eprintln!("skipping ptxas gate: ptxas not on PATH");
+        return;
+    };
+    assert!(
+        res.status.success(),
+        "emitted PTX does not assemble:\n{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+}
