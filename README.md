@@ -45,6 +45,8 @@ GPU Performance Benchmarks (NVIDIA RTX 4070 Ti SUPER)
 | **Fused AI Network Layers ($8192^3$)** | $55198.61 \ \mu s$ | **$46859.20 \ \mu s$** | **23.46 TFLOPS** | $19.92 \ \text{TFLOPS}$ | Fused Pipeline | **1.18x** |
 | **Dual-Accelerator Co-Processor** | $3.00 \ \mu s$ (OptiX) | **$1.81 \ \mu s$** | Co-Proc | Co-Proc | Hardware Overlap | **1.66x (39.8% Saved)** |
 
+THESE BENCHMARKS MIGHT BE WRONG! THEY ARE NOT VERIFIED!
+
 *Key Efficiency Win:* On standalone unfused $4096^3$ GEMM, Y Compiler reaches **74.7% of the GPU's absolute physical dense hardware peak TFLOPS** (65.85 TFLOPS out of 88.13 TFLOPS dense peak), delivering **+14.92 TFLOPS higher throughput than cuBLAS** (50.93 TFLOPS / 57.8% peak) via high-throughput $256 \times 128 \times 32$ CTA block tiling, double-buffered `ldmatrix` prefetching, and 4-stage `cp.async.cg` L1 cache bypass.
 
 *Medium GEMM ($2048^3$) Performance Note:* At $M=N=K=2048$, cuBLAS ($634.78 \ \mu s$) deploys an out-of-place split-K workspace reduction heuristic. Y ($807.97 \ \mu s$, 0.79x) intentionally avoids intermediate global VRAM allocation to guarantee zero-heap-spill execution, trading single-pass GEMM speed for zero memory fragmentation. For micro-tiles ($M,N \le 256 \to 1.28\text{x}$) and large matrices ($M,N \ge 4096 \to 1.29\text{x}$), Y's CTA block tiling fully saturates GPU SM wave concurrency.
