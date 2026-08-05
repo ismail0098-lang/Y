@@ -191,3 +191,120 @@ fn with_a_solver_false_invariants_are_caught_and_true_ones_pass() {
         out
     );
 }
+
+// ─────────────────────── soundness of the SMT encoding ───────────────────────
+//
+// The tests above establish that an invariant is checked at all. These
+// establish that the thing being checked is the actual program.
+//
+// The verifier translates the loop body into SMT-LIB. Every construct it does
+// not translate used to be skipped silently - `trace_body_statements` ended in
+// `_ => {}`, and `expr_to_smt` ended in `_ => "0"` with `_ => "+"` for unknown
+// operators. Dropping a statement's effects makes the preservation obligation
+// strictly EASIER, so the failure was in the unsound direction: it accepted
+// invariants that are false.
+
+/// Runs `src` with a solver available and returns the compiler's output.
+fn compile_with_solver(name: &str, src: &str) -> Option<String> {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let z3 = ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"]
+        .iter()
+        .map(|p| repo.join(p))
+        .find(|p| p.exists())
+        .or_else(|| {
+            std::env::var("PATH").ok().and_then(|paths| {
+                std::env::split_paths(&paths).map(|d| d.join("z3")).find(|p| p.exists())
+            })
+        })?;
+    let src_path = write_source(name, src);
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src_path)
+        .env("Y_Z3_PATH", &z3)
+        .env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS")
+        .current_dir(&repo)
+        .output()
+        .expect("run Y");
+    Some(format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+/// Wrapping a violation in a trivially-true `if` must not launder it.
+///
+/// This is the exact program that used to compile clean. `i = i - 100;` was
+/// correctly rejected, and `if i >= 0 { i = i - 100; }` - the same violation -
+/// reported "Compilation Successful!", because `Stmt::If` had no arm in the
+/// body tracer and the assignment was never modelled.
+///
+/// Branches are now havoc'd: every variable a branch might assign gets a fresh
+/// unconstrained value, which is a sound over-approximation and can only make
+/// preservation harder to prove.
+#[test]
+fn nested_if_cannot_hide_a_false_invariant() {
+    let hidden = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            if i >= 0 {\n                i = i - 100;\n            }\n        }\n    }\n}\n";
+    let plain = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            i = i - 100;\n        }\n    }\n}\n";
+
+    let Some(hidden_out) = compile_with_solver("hidden_violation", hidden) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    let plain_out = compile_with_solver("plain_violation", plain).expect("z3 was found above");
+
+    assert!(
+        !plain_out.contains("Compilation Successful"),
+        "the control must be rejected:\n{}",
+        plain_out
+    );
+    assert!(
+        !hidden_out.contains("Compilation Successful"),
+        "a false invariant was accepted because the violating assignment sat inside an `if`. \
+         The body tracer is skipping a construct instead of over-approximating it.\n{}",
+        hidden_out
+    );
+}
+
+/// A loop that only uses modelled constructs must still verify.
+///
+/// Rejecting everything unmodelled is sound but useless; this is the other half
+/// of the requirement. A call with no reference argument cannot write a tracked
+/// integer local, and a branch is havoc'd rather than refused, so ordinary loop
+/// bodies still pass.
+#[test]
+fn ordinary_loop_bodies_still_verify() {
+    let src = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            let y: I32 = 0;\n            if i >= 5 {\n                y = y + 1;\n            }\n            print_int(i);\n        }\n    }\n}\n";
+    let Some(out) = compile_with_solver("ordinary_body", src) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    assert!(
+        out.contains("Compilation Successful"),
+        "a true invariant over supported constructs must still verify:\n{}",
+        out
+    );
+}
+
+/// An operator with no sound encoding must be refused, not mistranslated.
+///
+/// `&`, `|`, `^`, `<<` and `>>` have no counterpart in the integer theory the
+/// verifier uses. They used to fall through to `_ => "+"`, so `x & y` was
+/// proven as `x + y` - a different function, not a coarser one.
+#[test]
+fn unencodable_operator_is_refused_not_mistranslated() {
+    let src = "fn main() {\n    @safe {\n        @invariant((i & 1) >= 0)\n        for i in 0..10 {\n            print_int(i);\n        }\n    }\n}\n";
+    let Some(out) = compile_with_solver("bitwise_invariant", src) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    assert!(
+        !out.contains("Compilation Successful"),
+        "an invariant using an operator with no sound encoding must be refused:\n{}",
+        out
+    );
+    assert!(
+        out.contains("no sound encoding"),
+        "the error should say why it cannot be encoded:\n{}",
+        out
+    );
+}
