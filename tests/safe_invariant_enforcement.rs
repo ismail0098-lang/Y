@@ -1,0 +1,310 @@
+//! `@invariant` inside `@safe` is a proof obligation, and an unverified one
+//! must fail the build.
+//!
+//! It did not used to. When the SMT solver could not be spawned, the type
+//! checker printed `[Warning] SMT Solver execution failed` to stdout and
+//! continued, so on any machine without z3 - the default - every invariant in
+//! every `@safe` block was accepted unchecked. This compiled cleanly and
+//! reported "Compilation Successful!":
+//!
+//! ```text
+//! @safe {
+//!     @invariant(i > 1000)     // never true for i in 0..10
+//!     for i in 0..10 { ... }
+//! }
+//! ```
+//!
+//! Two things made it hard to notice. The message went to stdout among a lot of
+//! other build chatter, and the search path for the solver was three entries
+//! long - so a machine with a perfectly good `venv/bin/z3` (this repo has one)
+//! reported it as missing and waved everything through.
+//!
+//! These tests drive the real `Y` binary as a subprocess rather than calling
+//! `TypeChecker` directly, because the behaviour under test depends on the
+//! environment and mutating `std::env` from a test races every other test in
+//! the process.
+//!
+//! Run with:  cargo test --test safe_invariant_enforcement
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// A `@safe` loop whose invariant is false: `i` ranges over `0..10`.
+const FALSE_INVARIANT: &str = r#"
+fn main() {
+    @safe {
+        let x: I32 = 0;
+        @invariant(i > 1000)
+        for i in 0..10 {
+            print_int(i);
+        }
+    }
+}
+"#;
+
+/// The same shape, with an invariant that actually holds.
+const TRUE_INVARIANT: &str = r#"
+fn main() {
+    @safe {
+        let x: I32 = 0;
+        @invariant(i >= 0)
+        for i in 0..10 {
+            print_int(i);
+        }
+    }
+}
+"#;
+
+fn write_source(name: &str, body: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("y_safe_{}_{}", std::process::id(), name));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join(format!("{}.ysu", name));
+    std::fs::write(&path, body).expect("write source");
+    path
+}
+
+/// Runs the compiler on `src`. `solver_visible` false strips the environment
+/// the solver could be found through.
+fn compile(src: &PathBuf, solver_visible: bool, allow_unverified: bool) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_Y"));
+    cmd.arg(src);
+    cmd.env_remove("Y_Z3_PATH");
+    cmd.env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS");
+    if !solver_visible {
+        // No `z3` on PATH, and no `$HOME/.local/bin/z3`. The relative
+        // candidates resolve against the working directory, so run somewhere
+        // that has no `venv/` or `z3/` in it.
+        cmd.env("PATH", "/nonexistent-path");
+        cmd.env("HOME", "/nonexistent-home");
+        cmd.current_dir(src.parent().expect("temp dir"));
+    }
+    if allow_unverified {
+        cmd.env("Y_ALLOW_UNVERIFIED_INVARIANTS", "1");
+    }
+    let out = cmd.output().expect("run Y");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// Without a solver, an invariant cannot be discharged - so the build fails.
+#[test]
+fn unverifiable_invariant_fails_the_build() {
+    let src = write_source("false_inv", FALSE_INVARIANT);
+    let out = compile(&src, false, false);
+    assert!(
+        out.contains("Could not verify invariant"),
+        "a @safe invariant that could not be checked must be an error, not a warning.\n{}",
+        out
+    );
+    assert!(
+        !out.contains("Compilation Successful"),
+        "compilation must not succeed with an undischarged proof obligation.\n{}",
+        out
+    );
+    // The message has to tell the user how to fix it, both ways.
+    assert!(out.contains("Y_Z3_PATH"), "error should mention Y_Z3_PATH:\n{}", out);
+    assert!(
+        out.contains("Y_ALLOW_UNVERIFIED_INVARIANTS"),
+        "error should name the opt-out:\n{}",
+        out
+    );
+}
+
+/// The escape hatch restores the old behaviour, loudly.
+#[test]
+fn opt_out_downgrades_to_a_warning() {
+    let src = write_source("optout", FALSE_INVARIANT);
+    let out = compile(&src, false, true);
+    assert!(
+        out.contains("was NOT verified"),
+        "opt-out should still say plainly that nothing was proved.\n{}",
+        out
+    );
+    assert!(
+        !out.contains("Could not verify invariant"),
+        "opt-out should not also raise the error.\n{}",
+        out
+    );
+}
+
+/// With a solver available, the checking is real in both directions.
+///
+/// Skipped when no z3 can be found, in the same spirit as the `ptxas` gate on
+/// the PTX emitter - but note this test is the only one that proves the
+/// verification does anything at all, so a CI without z3 is CI that is not
+/// testing `@safe`'s central claim.
+#[test]
+fn with_a_solver_false_invariants_are_caught_and_true_ones_pass() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let z3 = ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"]
+        .iter()
+        .map(|p| repo.join(p))
+        .find(|p| p.exists())
+        .or_else(|| {
+            std::env::var("PATH").ok().and_then(|paths| {
+                std::env::split_paths(&paths)
+                    .map(|d| d.join("z3"))
+                    .find(|p| p.exists())
+            })
+        });
+    let Some(z3) = z3 else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+
+    let bad = write_source("smt_false", FALSE_INVARIANT);
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&bad)
+        .env("Y_Z3_PATH", &z3)
+        .env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS")
+        .output()
+        .expect("run Y");
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.contains("SMT Safety Verification Failed"),
+        "z3 must reject `i > 1000` on a 0..10 loop.\n{}",
+        out
+    );
+
+    let good = write_source("smt_true", TRUE_INVARIANT);
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&good)
+        .env("Y_Z3_PATH", &z3)
+        .env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS")
+        .output()
+        .expect("run Y");
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.contains("SMT Safety Verification Failed"),
+        "`i >= 0` holds on a 0..10 loop and must be accepted.\n{}",
+        out
+    );
+}
+
+// ─────────────────────── soundness of the SMT encoding ───────────────────────
+//
+// The tests above establish that an invariant is checked at all. These
+// establish that the thing being checked is the actual program.
+//
+// The verifier translates the loop body into SMT-LIB. Every construct it does
+// not translate used to be skipped silently - `trace_body_statements` ended in
+// `_ => {}`, and `expr_to_smt` ended in `_ => "0"` with `_ => "+"` for unknown
+// operators. Dropping a statement's effects makes the preservation obligation
+// strictly EASIER, so the failure was in the unsound direction: it accepted
+// invariants that are false.
+
+/// Runs `src` with a solver available and returns the compiler's output.
+fn compile_with_solver(name: &str, src: &str) -> Option<String> {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let z3 = ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"]
+        .iter()
+        .map(|p| repo.join(p))
+        .find(|p| p.exists())
+        .or_else(|| {
+            std::env::var("PATH").ok().and_then(|paths| {
+                std::env::split_paths(&paths).map(|d| d.join("z3")).find(|p| p.exists())
+            })
+        })?;
+    let src_path = write_source(name, src);
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src_path)
+        .env("Y_Z3_PATH", &z3)
+        .env_remove("Y_ALLOW_UNVERIFIED_INVARIANTS")
+        .current_dir(&repo)
+        .output()
+        .expect("run Y");
+    Some(format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    ))
+}
+
+/// Wrapping a violation in a trivially-true `if` must not launder it.
+///
+/// This is the exact program that used to compile clean. `i = i - 100;` was
+/// correctly rejected, and `if i >= 0 { i = i - 100; }` - the same violation -
+/// reported "Compilation Successful!", because `Stmt::If` had no arm in the
+/// body tracer and the assignment was never modelled.
+///
+/// Branches are now havoc'd: every variable a branch might assign gets a fresh
+/// unconstrained value, which is a sound over-approximation and can only make
+/// preservation harder to prove.
+#[test]
+fn nested_if_cannot_hide_a_false_invariant() {
+    let hidden = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            if i >= 0 {\n                i = i - 100;\n            }\n        }\n    }\n}\n";
+    let plain = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            i = i - 100;\n        }\n    }\n}\n";
+
+    let Some(hidden_out) = compile_with_solver("hidden_violation", hidden) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    let plain_out = compile_with_solver("plain_violation", plain).expect("z3 was found above");
+
+    assert!(
+        !plain_out.contains("Compilation Successful"),
+        "the control must be rejected:\n{}",
+        plain_out
+    );
+    assert!(
+        !hidden_out.contains("Compilation Successful"),
+        "a false invariant was accepted because the violating assignment sat inside an `if`. \
+         The body tracer is skipping a construct instead of over-approximating it.\n{}",
+        hidden_out
+    );
+}
+
+/// A loop that only uses modelled constructs must still verify.
+///
+/// Rejecting everything unmodelled is sound but useless; this is the other half
+/// of the requirement. A call with no reference argument cannot write a tracked
+/// integer local, and a branch is havoc'd rather than refused, so ordinary loop
+/// bodies still pass.
+#[test]
+fn ordinary_loop_bodies_still_verify() {
+    let src = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            let y: I32 = 0;\n            if i >= 5 {\n                y = y + 1;\n            }\n            print_int(i);\n        }\n    }\n}\n";
+    let Some(out) = compile_with_solver("ordinary_body", src) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    assert!(
+        out.contains("Compilation Successful"),
+        "a true invariant over supported constructs must still verify:\n{}",
+        out
+    );
+}
+
+/// An operator with no sound encoding must be refused, not mistranslated.
+///
+/// `&`, `|`, `^`, `<<` and `>>` have no counterpart in the integer theory the
+/// verifier uses. They used to fall through to `_ => "+"`, so `x & y` was
+/// proven as `x + y` - a different function, not a coarser one.
+#[test]
+fn unencodable_operator_is_refused_not_mistranslated() {
+    let src = "fn main() {\n    @safe {\n        @invariant((i & 1) >= 0)\n        for i in 0..10 {\n            print_int(i);\n        }\n    }\n}\n";
+    let Some(out) = compile_with_solver("bitwise_invariant", src) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    assert!(
+        !out.contains("Compilation Successful"),
+        "an invariant using an operator with no sound encoding must be refused:\n{}",
+        out
+    );
+    assert!(
+        out.contains("no sound encoding"),
+        "the error should say why it cannot be encoded:\n{}",
+        out
+    );
+}
