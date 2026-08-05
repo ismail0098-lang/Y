@@ -27,9 +27,18 @@ mod coprocessor_scheduler;
 mod autotuner;
 mod cuda_runtime;
 mod empirical_autotune;
+mod zero_drift;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
+#[cfg(feature = "zk")]
+mod zk_poseidon_constants;
+#[cfg(feature = "zk")]
+mod mini_json;
+#[cfg(feature = "zk")]
+mod zk_solidity;
+#[cfg(feature = "zk")]
+mod zk_witness;
 
 use std::env;
 use std::fs;
@@ -68,12 +77,195 @@ macro_rules! log_step {
     };
 }
 
+/// `Y --emit-verifier <verification_key.json> [-o Verifier.sol] [--name N]`
+///
+/// Turns a Groth16 verifying key into a deployable Solidity contract. The key
+/// comes from a trusted setup, which Y does not perform - snarkjs
+/// (`snarkjs groth16 setup` then `snarkjs zkey export verificationkey`) and
+/// arkworks both produce a key this reads.
+#[cfg(feature = "zk")]
+fn emit_verifier_cli(args: &[String], pos: usize) {
+    let vkey_path = match args.get(pos + 1) {
+        Some(p) if !p.starts_with('-') => p.clone(),
+        _ => {
+            log_error!("--emit-verifier needs a verification key: Y --emit-verifier verification_key.json");
+            exit(1);
+        }
+    };
+    let out_path = args
+        .iter()
+        .position(|a| a == "-o" || a == "--output")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let name = args
+        .iter()
+        .position(|a| a == "--name")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "Groth16Verifier".to_string());
+
+    log_info!("Reading verifying key: {}", vkey_path);
+    let json = match fs::read_to_string(&vkey_path) {
+        Ok(j) => j,
+        Err(e) => {
+            log_error!("Failed to read {}: {}", vkey_path, e);
+            exit(1);
+        }
+    };
+    let vk = match zk_solidity::parse_snarkjs_vkey(&json) {
+        Ok(vk) => vk,
+        Err(e) => {
+            log_error!("{}", e);
+            exit(1);
+        }
+    };
+    log_info!(
+        "Groth16 / BN254, {} public input(s), {} IC points",
+        vk.num_public_inputs(),
+        vk.ic.len()
+    );
+
+    let sol = zk_solidity::emit_groth16_verifier(&vk, &name);
+    match out_path {
+        Some(p) => match fs::write(&p, &sol) {
+            Ok(()) => {
+                log_step!("done", "Wrote {} ({} bytes)", p, sol.len());
+            }
+            Err(e) => {
+                log_error!("Failed to write {}: {}", p, e);
+                exit(1);
+            }
+        },
+        None => print!("{}", sol),
+    }
+}
+
+/// Solves the circuit against a JSON input file and writes a `.wtns`.
+///
+/// Inputs are matched by NAME against `fn main`'s parameters, not by position:
+/// a file listing them in the wrong order would otherwise produce a valid proof
+/// of the wrong statement, which is exactly the class of error this backend
+/// cannot afford. Every parameter must be present and no unknown key is
+/// accepted.
+#[cfg(feature = "zk")]
+fn solve_and_write_witness(
+    emitter: &zk_emitter::ZkEmitter,
+    inputs_path: &str,
+    wtns_path: &str,
+) -> Result<usize, String> {
+    use zk_emitter::{BigUint, Fr};
+
+    let json = fs::read_to_string(inputs_path)
+        .map_err(|e| format!("Failed to read {}: {}", inputs_path, e))?;
+    let supplied = mini_json::parse_scalar_map(&json)?;
+
+    let names = emitter.private_input_names();
+    let mut ordered = Vec::with_capacity(names.len());
+    for name in &names {
+        let v = supplied
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| {
+                format!(
+                    "input {:?} is missing from {}; this circuit takes [{}]",
+                    name,
+                    inputs_path,
+                    names.join(", ")
+                )
+            })?;
+        ordered.push(Fr::from_biguint(BigUint::from_str(&v)));
+    }
+    for (k, _) in &supplied {
+        if !names.contains(k) {
+            return Err(format!(
+                "{} sets {:?}, which is not an input of this circuit; it takes [{}]",
+                inputs_path,
+                k,
+                names.join(", ")
+            ));
+        }
+    }
+
+    let circuit = emitter.build_circuit();
+    let ir = emitter.build_witness_ir();
+    let (witness, satisfied) =
+        zk_witness::solve_r1cs_witness(&circuit.constraints, &ir, circuit.num_variables, &[], &ordered);
+    if !satisfied {
+        return Err(format!(
+            "no satisfying witness exists for these inputs. A range check almost \
+             certainly failed: comparisons and the bitwise, shift and division \
+             gadgets treat values as unsigned {}-bit, so a negative or oversized \
+             input is unprovable by design.",
+            zk_emitter::ZK_COMPARISON_BITS
+        ));
+    }
+    zk_emitter::ZkEmitter::write_wtns_binary(&circuit, &witness, wtns_path)
+        .map_err(|e| format!("Failed to write {}: {}", wtns_path, e))?;
+    Ok(witness.len())
+}
+
+/// Measured accumulate costs for `@ZeroDrift`, cached in `.ysu_hw_profile`.
+///
+/// Measuring costs a couple of seconds of GPU time, so it happens once per
+/// device and is then read back. Without any measurement the selector still
+/// works - it falls back to the narrowest representation that fits, which is
+/// deterministic - so a machine with no GPU compiles fine, just less informed.
+fn load_or_measure_drift_costs(gpu_name: &str) -> zero_drift::CostTable {
+    const PROFILE: &str = ".ysu_hw_profile";
+
+    if let Ok(contents) = fs::read_to_string(PROFILE) {
+        let cached = zero_drift::parse_costs(&contents, gpu_name);
+        if !cached.is_empty() {
+            return cached;
+        }
+    }
+
+    let Some(costs) = zero_drift::measure_accumulate_costs() else {
+        return zero_drift::CostTable::new();
+    };
+
+    log_info!("Measured @ZeroDrift accumulate costs on {}", gpu_name);
+    let mut sorted: Vec<_> = costs.iter().collect();
+    sorted.sort_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (repr, ps) in &sorted {
+        println!(
+            "      -> {:>9}: {:>9.0} ps/acc  {}",
+            repr.name(),
+            ps,
+            if repr.is_exact() { "exact" } else { "not exact (never selected)" }
+        );
+    }
+
+    // Append rather than rewrite: this file also holds the sentinel probe and
+    // the autotuner's measurements.
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(PROFILE) {
+        let _ = writeln!(f, "{}", zero_drift::serialize_costs(&costs, gpu_name));
+    }
+    costs
+}
+
 fn main() {
     println!("========================================");
     println!("=== Y Compiler v1.0 ===");
     println!("========================================\n");
 
     let args: Vec<String> = env::args().collect();
+
+    // Verifier generation takes a verifying key, not a .ysu source, and touches
+    // none of the compilation pipeline - so handle it before the hardware probe
+    // rather than paying for a GPU probe to format a contract.
+    #[cfg(feature = "zk")]
+    if let Some(pos) = args.iter().position(|a| a == "--emit-verifier") {
+        emit_verifier_cli(&args, pos);
+        return;
+    }
+    #[cfg(not(feature = "zk"))]
+    if args.iter().any(|a| a == "--emit-verifier") {
+        log_error!("--emit-verifier requires a build with the ZK backend: cargo build --release --features zk");
+        exit(1);
+    }
 
     // Phase 0: Sentinel Hardware Probe
     let mut hw_profile = sentinel::check_or_probe_hardware();
@@ -315,69 +507,12 @@ fn main() {
     println!("      -> 0 Bank Conflicts Detected.");
     println!("      -> Fragment Roles & Linear Obligations verified.");
 
-    // ────────────────────────────────────────────────────────
-    // Phase 3.5: Hardware Advisories (Zero Drift)
-    // ────────────────────────────────────────────────────────
-    let mut zero_drift_count = 0;
-    for item in &ast.items {
-        if let Item::Kernel(k) = item {
-            fn walk_block(b: &ast::Block, profile: &sentinel::HardwareProfile, count: &mut usize) {
-                for stmt in &b.stmts {
-                    match stmt {
-                        ast::Stmt::Let {
-                            zero_drift: Some(_),
-                            ty,
-                            ..
-                        } => {
-                            let type_name = match ty {
-                                Some(ast::Type::Ident(name, _)) => name.clone(),
-                                Some(ast::Type::Primitive(name, _)) => name.clone(),
-                                _ => "Unknown".to_string(),
-                            };
+    // NOTE: @ZeroDrift used to be reported here as a hardware "advisory" that
+    // printed what the annotation would cost and claimed the compiler would
+    // "insert a software compensation path" - while inserting nothing. It is a
+    // real lowering now, chosen per device, and the backends report what they
+    // actually selected. See src/zero_drift.rs.
 
-                            println!(
-                                "      \x1b[1;33m[Advisory]\x1b[0m @ZeroDrift requested on type: {}",
-                                type_name
-                            );
-                            if profile.drift_free_types.contains(&type_name) {
-                                println!("        -> Hardware target ({}) natively supports zero drift for {}.", profile.gpu_name, type_name);
-                                println!(
-                                    "        -> Performance tradeoff: +{} cycles penalty.",
-                                    profile.zero_drift_penalty_cycles
-                                );
-                            } else {
-                                println!("        -> \x1b[1;33mWARNING\x1b[0m: Target ({}) lacks native zero drift for {}.", profile.gpu_name, type_name);
-                                println!(
-                                    "        -> Compiler must insert software compensation path."
-                                );
-                            }
-                            *count += 1;
-                        }
-                        ast::Stmt::For { body, .. } => walk_block(body, profile, count),
-                        ast::Stmt::While { body, .. } => walk_block(body, profile, count),
-                        ast::Stmt::If {
-                            then_block,
-                            else_block,
-                            ..
-                        } => {
-                            walk_block(then_block, profile, count);
-                            if let Some(eb) = else_block {
-                                walk_block(eb, profile, count);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            walk_block(&k.body, &hw_profile, &mut zero_drift_count);
-        }
-    }
-    if zero_drift_count > 0 {
-        println!(
-            "      -> Processed {} @ZeroDrift annotations.",
-            zero_drift_count
-        );
-    }
 
     // ────────────────────────────────────────────────────────
     // Phase 4: Backend Emission
@@ -648,6 +783,27 @@ fn main() {
                             // Also write human-readable constraints text to .r1cs.txt
                             let txt_path = format!("{}.r1cs.txt", prefix);
                             let _ = fs::write(&txt_path, &r1cs_text);
+
+                            // --witness inputs.json also solves the circuit and
+                            // writes a .wtns, which is what `snarkjs groth16
+                            // prove` needs alongside the .r1cs.
+                            if let Some(inputs_path) = args
+                                .iter()
+                                .position(|a| a == "--witness")
+                                .and_then(|i| args.get(i + 1))
+                            {
+                                let wtns_path = format!("{}.wtns", prefix);
+                                match solve_and_write_witness(&emitter, inputs_path, &wtns_path) {
+                                    Ok(n) => {
+                                        println!("      -> Solved {} witness values.", n);
+                                        println!("      -> Written witness to: {}", wtns_path);
+                                    }
+                                    Err(e) => {
+                                        log_error!("{}", e);
+                                        exit(1);
+                                    }
+                                }
+                            }
                             println!("      -> Written human-readable constraints to: {}", txt_path);
                         }
                         Err(e) => {
@@ -688,7 +844,17 @@ fn main() {
     } else if emit_llvm {
         log_step!("4/4", "Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
+        emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ll_output = emitter.emit_program(&ast, &hw_profile);
+        for line in &emitter.drift_report {
+            println!("      -> @ZeroDrift {}", line);
+        }
+        if !emitter.drift_errors.is_empty() {
+            for e in &emitter.drift_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
         match fs::write(&output_path, &ll_output) {
             Ok(_) => println!("      -> Written to: {}", output_path),
             Err(e) => {
@@ -751,7 +917,17 @@ fn main() {
         }
 
         let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
+        emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ptx_output = emitter.emit_program(&ast, &hw_profile);
+        for line in &emitter.drift_report {
+            println!("      -> @ZeroDrift {}", line);
+        }
+        if !emitter.drift_errors.is_empty() {
+            for e in &emitter.drift_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
         let write_path = if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);
             let mut p = path.to_path_buf();

@@ -1066,7 +1066,7 @@ impl TypeChecker {
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
+            match stmt {
             Stmt::Let {
                 name,
                 ty,
@@ -1961,20 +1961,37 @@ impl TypeChecker {
         }
     }
 
-    fn expr_to_smt(&self, expr: &Expr, versions: &HashMap<String, usize>) -> String {
+    /// Translates an expression into SMT-LIB, or reports that it cannot.
+    ///
+    /// **Every unhandled node returns `Err`.** That is the entire point, and it
+    /// is a reversal: this function used to end in `_ => "0".to_string()`, with
+    /// `_ => "+"` for unknown binary operators and `_ => opnd` for unknown unary
+    /// ones. So a call, an index, a member access or even a float literal was
+    /// handed to Z3 as the constant `0`; `x & y` was proven as `x + y`; and
+    /// `*p` was proven as `p`. Z3 then dutifully answered a question about a
+    /// different program, and the answer was reported as a verified invariant.
+    ///
+    /// A verifier that silently approximates is worse than no verifier, because
+    /// it produces the paperwork of a proof without the proof. If a construct
+    /// is not modelled, the only safe answer is to refuse to make a claim.
+    fn expr_to_smt(
+        &self,
+        expr: &Expr,
+        versions: &HashMap<String, usize>,
+    ) -> Result<String, String> {
         match expr {
-            Expr::IntLit(val, _) => val.to_string(),
-            Expr::BoolLit(val, _) => val.to_string(),
+            Expr::IntLit(val, _) => Ok(val.to_string()),
+            Expr::BoolLit(val, _) => Ok(val.to_string()),
             Expr::Ident(name, _) => {
                 if let Some(&ver) = versions.get(name) {
-                    format!("{}_{}", name, ver)
+                    Ok(format!("{}_{}", name, ver))
                 } else {
-                    format!("{}_0", name)
+                    Ok(format!("{}_0", name))
                 }
             }
             Expr::BinaryOp { left, op, right, .. } => {
-                let lhs = self.expr_to_smt(left, versions);
-                let rhs = self.expr_to_smt(right, versions);
+                let lhs = self.expr_to_smt(left, versions)?;
+                let rhs = self.expr_to_smt(right, versions)?;
                 let op_str = match op {
                     BinaryOp::Add => "+",
                     BinaryOp::Sub => "-",
@@ -1989,19 +2006,36 @@ impl TypeChecker {
                     BinaryOp::Ge => ">=",
                     BinaryOp::And => "and",
                     BinaryOp::Or => "or",
-                    _ => "+",
+                    // Bitwise and shift operators have no direct counterpart in
+                    // the integer theory used here. They used to fall through to
+                    // "+", which is not an approximation, it is a different
+                    // function.
+                    other => {
+                        return Err(format!(
+                            "the operator `{:?}` has no sound encoding in the integer theory \
+this verifier uses",
+                            other
+                        ))
+                    }
                 };
-                format!("({} {} {})", op_str, lhs, rhs)
+                Ok(format!("({} {} {})", op_str, lhs, rhs))
             }
             Expr::UnaryOp { op, operand, .. } => {
-                let opnd = self.expr_to_smt(operand, versions);
+                let opnd = self.expr_to_smt(operand, versions)?;
                 match op {
-                    UnaryOp::Neg => format!("(- {})", opnd),
-                    UnaryOp::Not => format!("(not {})", opnd),
-                    _ => opnd,
+                    UnaryOp::Neg => Ok(format!("(- {})", opnd)),
+                    UnaryOp::Not => Ok(format!("(not {})", opnd)),
+                    other => Err(format!(
+                        "the unary operator `{:?}` is not modelled (it used to be encoded as its \
+own operand, so `*p` was proven as `p`)",
+                        other
+                    )),
                 }
             }
-            _ => "0".to_string(),
+            other => Err(format!(
+                "`{}` is not modelled by the verifier",
+                expr_to_string(other)
+            )),
         }
     }
 
@@ -2028,13 +2062,13 @@ impl TypeChecker {
         versions: &mut HashMap<String, usize>,
         declarations: &mut Vec<String>,
         body_assertions: &mut Vec<String>,
-    ) {
+    ) -> Result<(), String> {
         for stmt in stmts {
             match stmt {
                 Stmt::Assign { target, value, .. } => {
                     if let Expr::Ident(name, _) = target {
                         if versions.contains_key(name) {
-                            let rhs_smt = self.expr_to_smt(value, versions);
+                            let rhs_smt = self.expr_to_smt(value, versions)?;
                             let current_ver = versions.get(name).cloned().unwrap_or(0);
                             let next_ver = current_ver + 1;
                             versions.insert(name.clone(), next_ver);
@@ -2049,7 +2083,7 @@ impl TypeChecker {
                 Stmt::CompoundAssign { target, op, value, .. } => {
                     if let Expr::Ident(name, _) = target {
                         if versions.contains_key(name) {
-                            let rhs_smt = self.expr_to_smt(value, versions);
+                            let rhs_smt = self.expr_to_smt(value, versions)?;
                             let current_ver = versions.get(name).cloned().unwrap_or(0);
                             let next_ver = current_ver + 1;
                             let op_str = match op {
@@ -2058,7 +2092,13 @@ impl TypeChecker {
                                 BinaryOp::Mul => "*",
                                 BinaryOp::Div => "div",
                                 BinaryOp::Mod => "mod",
-                                _ => "+",
+                                other => {
+                                    return Err(format!(
+                                        "`{:?}=` has no sound encoding in the integer theory this \
+verifier uses",
+                                        other
+                                    ))
+                                }
                             };
                             let expr_smt = format!("({} {}_{} {})", op_str, name, current_ver, rhs_smt);
                             versions.insert(name.clone(), next_ver);
@@ -2080,7 +2120,7 @@ impl TypeChecker {
                     }).unwrap_or(false);
                     if is_int {
                         let rhs_smt = if let Some(init_expr) = init {
-                            self.expr_to_smt(init_expr, versions)
+                            self.expr_to_smt(init_expr, versions)?
                         } else {
                             "0".to_string()
                         };
@@ -2093,14 +2133,233 @@ impl TypeChecker {
                     }
                 }
                 Stmt::SafeBlock(block, _) | Stmt::Chisel(block, _) | Stmt::GhostBlock(block, _) | Stmt::HintBlock { body: block, .. } => {
-                    self.trace_body_statements(&block.stmts, versions, declarations, body_assertions);
+                    self.trace_body_statements(&block.stmts, versions, declarations, body_assertions)?;
                 }
                 Stmt::ClockDomainBlock { body, .. } => {
-                    self.trace_body_statements(&body.stmts, versions, declarations, body_assertions);
+                    self.trace_body_statements(&body.stmts, versions, declarations, body_assertions)?;
                 }
+                // A branch is modelled by HAVOC: every variable it might assign
+                // gets a fresh, unconstrained version. That is a sound
+                // over-approximation - the invariant must then hold for any
+                // value the branch could have produced, which includes the real
+                // one - so it can only make preservation harder to prove, never
+                // easier. Skipping the branch entirely had the opposite effect,
+                // which is what made `if i >= 0 { i = i - 100; }` satisfy
+                // `@invariant(i >= 0)`.
+                Stmt::If { then_block, else_block, .. } => {
+                    let mut touched = std::collections::HashSet::new();
+                    Self::collect_assigned(&then_block.stmts, &mut touched);
+                    if let Some(eb) = else_block {
+                        Self::collect_assigned(&eb.stmts, &mut touched);
+                    }
+                    Self::havoc(&touched, versions, declarations);
+                }
+                // Nested loops likewise: whatever they assign becomes unknown.
+                Stmt::For { body, loop_var, .. } => {
+                    let mut touched = std::collections::HashSet::new();
+                    Self::collect_assigned(&body.stmts, &mut touched);
+                    touched.insert(loop_var.clone());
+                    Self::havoc(&touched, versions, declarations);
+                }
+                Stmt::While { body, .. } => {
+                    let mut touched = std::collections::HashSet::new();
+                    Self::collect_assigned(&body.stmts, &mut touched);
+                    Self::havoc(&touched, versions, declarations);
+                }
+                // A bare expression is almost always a call. Y has no way for a
+                // callee to write a caller's local integer unless the caller
+                // hands over a reference, so a call with no `&` cannot disturb
+                // the tracked variables - all of which are integer scalars.
+                // Anything that does take a reference is refused.
+                Stmt::Expr(e) => {
+                    if Self::takes_reference(e) {
+                        return Err(
+                            "the loop body passes a reference to a call, which could modify a \
+tracked variable in a way this verifier cannot see"
+                                .to_string(),
+                        );
+                    }
+                }
+                // Anything else is NOT modelled, and an unmodelled statement is
+                // rejected rather than skipped.
+                //
+                // This used to be `_ => {}`. Dropping a statement's effects
+                // makes the preservation check strictly easier, so it fails in
+                // the unsound direction: the identical violation was caught
+                // when written plainly and ACCEPTED when wrapped in a
+                // trivially-true `if`, because `Stmt::If` had no arm here.
+                // Guarded by `nested_if_cannot_hide_a_false_invariant`.
+                other => {
+                    return Err(format!(
+                        "the loop body contains a `{}` statement, which this verifier does not \
+model",
+                        Self::stmt_kind(other)
+                    ))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Names assigned anywhere in `stmts`, including nested blocks.
+    fn collect_assigned(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Assign { target, .. } | Stmt::CompoundAssign { target, .. } => {
+                    if let Expr::Ident(n, _) = target {
+                        out.insert(n.clone());
+                    }
+                }
+                Stmt::Let { name, .. } => {
+                    out.insert(name.clone());
+                }
+                Stmt::If { then_block, else_block, .. } => {
+                    Self::collect_assigned(&then_block.stmts, out);
+                    if let Some(eb) = else_block {
+                        Self::collect_assigned(&eb.stmts, out);
+                    }
+                }
+                Stmt::For { body, loop_var, .. } => {
+                    out.insert(loop_var.clone());
+                    Self::collect_assigned(&body.stmts, out);
+                }
+                Stmt::While { body, .. } => Self::collect_assigned(&body.stmts, out),
+                Stmt::SafeBlock(b, _)
+                | Stmt::Chisel(b, _)
+                | Stmt::GhostBlock(b, _)
+                | Stmt::HintBlock { body: b, .. } => Self::collect_assigned(&b.stmts, out),
+                Stmt::ClockDomainBlock { body, .. } => Self::collect_assigned(&body.stmts, out),
                 _ => {}
             }
         }
+    }
+
+    /// Gives each tracked name in `touched` a fresh unconstrained version.
+    fn havoc(
+        touched: &std::collections::HashSet<String>,
+        versions: &mut HashMap<String, usize>,
+        declarations: &mut Vec<String>,
+    ) {
+        for name in touched {
+            if let Some(cur) = versions.get(name).cloned() {
+                let next = cur + 1;
+                versions.insert(name.clone(), next);
+                declarations.push(format!("(declare-const {}_{} Int)", name, next));
+            }
+        }
+    }
+
+    /// Whether the expression takes a reference to anything.
+    fn takes_reference(expr: &Expr) -> bool {
+        match expr {
+            Expr::UnaryOp { op: UnaryOp::Ref, .. } => true,
+            Expr::UnaryOp { operand, .. } => Self::takes_reference(operand),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::takes_reference(left) || Self::takes_reference(right)
+            }
+            Expr::Call { func, args, .. } => {
+                Self::takes_reference(func) || args.iter().any(Self::takes_reference)
+            }
+            Expr::GenericCall { args, .. } => args.iter().any(Self::takes_reference),
+            Expr::Index { base, index, .. } => {
+                Self::takes_reference(base) || Self::takes_reference(index)
+            }
+            Expr::MemberAccess { base, .. } => Self::takes_reference(base),
+            _ => false,
+        }
+    }
+
+    /// A short name for a statement kind, for diagnostics.
+    fn stmt_kind(stmt: &Stmt) -> &'static str {
+    match stmt {
+            Stmt::Let { .. } => "let",
+            Stmt::Assign { .. } => "assignment",
+            Stmt::CompoundAssign { .. } => "compound assignment",
+            Stmt::If { .. } => "if",
+            Stmt::For { .. } => "nested for",
+            Stmt::While { .. } => "nested while",
+            Stmt::Return(..) => "return",
+            Stmt::Expr(..) => "expression",
+            Stmt::TypeAlias { .. } => "type alias",
+            Stmt::Chisel(..) => "chisel",
+            Stmt::SafeBlock(..) => "safe block",
+            Stmt::GhostBlock(..) => "ghost block",
+            _ => "unsupported",
+        }
+    }
+
+
+    /// Handles an SMT solver that could not be run at all.
+    ///
+    /// This FAILS THE BUILD by default, and that is a deliberate reversal. It
+    /// used to print `[Warning] SMT Solver execution failed` to stdout and
+    /// carry on, which meant that on any machine without z3 - the default -
+    /// every `@invariant` in every `@safe` block was accepted unchecked. A
+    /// deliberately false invariant like `@invariant(i > 1000)` on a `0..10`
+    /// loop compiled cleanly and reported "Compilation Successful!".
+    ///
+    /// An `@invariant` is a proof obligation, not a comment. A `@safe` block
+    /// whose obligations were never discharged guarantees nothing, and the
+    /// whole point of the annotation is that the guarantee is checkable. Being
+    /// unable to check it is a failure, not a detail - the same reasoning that
+    /// makes an out-of-range operand unprovable in the ZK backend rather than
+    /// silently accepted.
+    ///
+    /// `Y_ALLOW_UNVERIFIED_INVARIANTS=1` restores the old behaviour for anyone
+    /// who genuinely cannot install a solver. It is loud on purpose.
+    /// The verifier met a construct it does not model.
+    ///
+    /// Rejects, and says what it could not model. The alternative - skipping
+    /// the construct and asking Z3 anyway - answers a question about a
+    /// different program and reports the answer as a verified invariant. That
+    /// is how `if i >= 0 { i = i - 100; }` came to satisfy `@invariant(i >= 0)`
+    /// while the identical `i = i - 100;` was correctly rejected.
+    ///
+    /// The rule this encodes, for any future soundness-critical pass: an
+    /// unhandled AST node must reject, never be treated as identity or a no-op.
+    /// Silent approximation produces the paperwork of a proof without the proof.
+    fn smt_unmodellable(&mut self, line: usize, invariant: &Expr, what: &str) {
+        if std::env::var("Y_ALLOW_UNVERIFIED_INVARIANTS").is_ok() {
+            println!(
+                "[Warning] invariant `{}` was NOT verified: {}.",
+                expr_to_string(invariant),
+                what
+            );
+            return;
+        }
+        self.errors.push(format!(
+            "Line {}: [Strict Safety] Cannot verify invariant `{}`: {}.\n  The verifier refuses \
+to reason about a construct it does not model, because skipping it would make the proof \
+obligation strictly easier and could accept an invariant that is false.\n  Rewrite the loop \
+body using constructs the verifier supports, or set Y_ALLOW_UNVERIFIED_INVARIANTS=1 to compile \
+with this invariant UNVERIFIED.",
+            line,
+            expr_to_string(invariant),
+            what
+        ));
+    }
+
+    fn smt_unavailable(&mut self, line: usize, invariant: &Expr, phase: &str, err: &str) {
+        if std::env::var("Y_ALLOW_UNVERIFIED_INVARIANTS").is_ok() {
+            println!(
+                "[Warning] SMT solver unavailable; invariant `{}` was NOT verified ({} check). {}",
+                expr_to_string(invariant),
+                phase,
+                err
+            );
+            return;
+        }
+        self.errors.push(format!(
+            "Line {}: [Strict Safety] Could not verify invariant `{}` ({} check) because the \
+SMT solver could not be run.\n  {}\n  An @invariant is a proof obligation - accepting it \
+unchecked would make @safe guarantee nothing on this machine.\n  Install z3 (`pip install \
+z3-solver`, or your package manager) or set Y_Z3_PATH to its absolute path.\n  To compile \
+anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
+            line,
+            expr_to_string(invariant),
+            phase,
+            err
+        ));
     }
 
     fn verify_while_loop_invariant(&mut self, condition: &Expr, body: &Block, invariant: &Expr, span: &Span) {
@@ -2124,7 +2383,10 @@ impl TypeChecker {
         for var in &vars {
             versions_init.insert(var.clone(), 0);
         }
-        let inv_init_smt = self.expr_to_smt(invariant, &versions_init);
+        let inv_init_smt = match self.expr_to_smt(invariant, &versions_init) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
 
         decls_init.sort();
         decls_init.dedup();
@@ -2147,7 +2409,7 @@ impl TypeChecker {
                 }
             }
             Err(e) => {
-                println!("[Warning] SMT Solver execution failed: {}", e);
+                self.smt_unavailable(span.line, invariant, "initiation", &e);
             }
         }
 
@@ -2156,14 +2418,27 @@ impl TypeChecker {
         let mut preconditions_pres = Vec::new();
         self.generate_smt_decls_and_preconditions(&vars, &mut decls_pres, &mut preconditions_pres);
 
-        let inv_start_smt = self.expr_to_smt(invariant, &versions_init);
-        let cond_start_smt = self.expr_to_smt(condition, &versions_init);
+        let inv_start_smt = match self.expr_to_smt(invariant, &versions_init) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
+        let cond_start_smt = match self.expr_to_smt(condition, &versions_init) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
 
         let mut versions_pres = versions_init.clone();
         let mut body_assertions = Vec::new();
-        self.trace_body_statements(&body.stmts, &mut versions_pres, &mut decls_pres, &mut body_assertions);
+        if let Err(why) =
+            self.trace_body_statements(&body.stmts, &mut versions_pres, &mut decls_pres, &mut body_assertions)
+        {
+            return self.smt_unmodellable(span.line, invariant, &why);
+        }
 
-        let inv_end_smt = self.expr_to_smt(invariant, &versions_pres);
+        let inv_end_smt = match self.expr_to_smt(invariant, &versions_pres) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
 
         decls_pres.sort();
         decls_pres.dedup();
@@ -2188,7 +2463,7 @@ impl TypeChecker {
                 }
             }
             Err(e) => {
-                println!("[Warning] SMT Solver execution failed: {}", e);
+                self.smt_unavailable(span.line, invariant, "preservation", &e);
             }
         }
     }
@@ -2220,14 +2495,20 @@ impl TypeChecker {
         let mut preconditions_init = Vec::new();
         self.generate_smt_decls_and_preconditions(&vars, &mut decls_init, &mut preconditions_init);
 
-        let start_smt = self.expr_to_smt(start, &std::collections::HashMap::new());
+        let start_smt = match self.expr_to_smt(start, &std::collections::HashMap::new()) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
         preconditions_init.push(format!("(assert (= {}_{} {}))", loop_var, 0, start_smt));
 
         let mut versions_init = std::collections::HashMap::new();
         for var in &vars {
             versions_init.insert(var.clone(), 0);
         }
-        let inv_init_smt = self.expr_to_smt(invariant, &versions_init);
+        let inv_init_smt = match self.expr_to_smt(invariant, &versions_init) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
 
         decls_init.sort();
         decls_init.dedup();
@@ -2250,7 +2531,7 @@ impl TypeChecker {
                 }
             }
             Err(e) => {
-                println!("[Warning] SMT Solver execution failed: {}", e);
+                self.smt_unavailable(span.line, invariant, "initiation", &e);
             }
         }
 
@@ -2259,10 +2540,19 @@ impl TypeChecker {
         let mut preconditions_pres = Vec::new();
         self.generate_smt_decls_and_preconditions(&vars, &mut decls_pres, &mut preconditions_pres);
 
-        let inv_start_smt = self.expr_to_smt(invariant, &versions_init);
+        let inv_start_smt = match self.expr_to_smt(invariant, &versions_init) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
 
-        let loop_var_start_smt = self.expr_to_smt(start, &versions_init);
-        let loop_var_end_smt = self.expr_to_smt(end, &versions_init);
+        let loop_var_start_smt = match self.expr_to_smt(start, &versions_init) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
+        let loop_var_end_smt = match self.expr_to_smt(end, &versions_init) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
         let cond_start_smt = format!(
             "(and (>= {}_{} {}) (< {}_{} {}))",
             loop_var, 0, loop_var_start_smt, loop_var, 0, loop_var_end_smt
@@ -2270,7 +2560,11 @@ impl TypeChecker {
 
         let mut versions_pres = versions_init.clone();
         let mut body_assertions = Vec::new();
-        self.trace_body_statements(&body.stmts, &mut versions_pres, &mut decls_pres, &mut body_assertions);
+        if let Err(why) =
+            self.trace_body_statements(&body.stmts, &mut versions_pres, &mut decls_pres, &mut body_assertions)
+        {
+            return self.smt_unmodellable(span.line, invariant, &why);
+        }
 
         let current_loop_var_ver = versions_pres.get(loop_var).cloned().unwrap_or(0);
         let next_loop_var_ver = current_loop_var_ver + 1;
@@ -2278,7 +2572,10 @@ impl TypeChecker {
         decls_pres.push(format!("(declare-const {}_{} Int)", loop_var, next_loop_var_ver));
 
         let step_smt = if let Some(st) = step {
-            self.expr_to_smt(st, &versions_pres)
+            match self.expr_to_smt(st, &versions_pres) {
+                Ok(v) => v,
+                Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+            }
         } else {
             "1".to_string()
         };
@@ -2287,7 +2584,10 @@ impl TypeChecker {
             loop_var, next_loop_var_ver, loop_var, current_loop_var_ver, step_smt
         ));
 
-        let inv_end_smt = self.expr_to_smt(invariant, &versions_pres);
+        let inv_end_smt = match self.expr_to_smt(invariant, &versions_pres) {
+            Ok(v) => v,
+            Err(why) => return self.smt_unmodellable(span.line, invariant, &why),
+        };
 
         decls_pres.sort();
         decls_pres.dedup();
@@ -2312,43 +2612,66 @@ impl TypeChecker {
                 }
             }
             Err(e) => {
-                println!("[Warning] SMT Solver execution failed: {}", e);
+                self.smt_unavailable(span.line, invariant, "preservation", &e);
             }
         }
     }
 }
 
+/// Z3 binaries to try, in priority order.
+///
+/// `Y_Z3_PATH` wins when set, then bare `z3` from `PATH`. The rest exist
+/// because it is easy to have a perfectly good solver installed that the
+/// compiler cannot see: a `pip install z3-solver` inside a project virtualenv
+/// puts one in `venv/bin/z3`, which the old two-entry search missed - this
+/// repo had exactly that, while the type checker reported the solver as
+/// missing and waved every invariant through.
+fn z3_candidates() -> Vec<String> {
+    let mut v = Vec::new();
+    if let Ok(p) = std::env::var("Y_Z3_PATH") {
+        if !p.is_empty() {
+            v.push(p);
+        }
+    }
+    v.push("z3".to_string());
+    for p in [
+        "venv/bin/z3",
+        "./venv/bin/z3",
+        ".venv/bin/z3",
+        "./.venv/bin/z3",
+        "./z3/build/z3",
+        "z3/build/z3",
+    ] {
+        v.push(p.to_string());
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        v.push(format!("{}/.local/bin/z3", home));
+    }
+    v
+}
+
 fn run_z3(query: &str) -> Result<String, String> {
-    let z3_path = std::env::var("Y_Z3_PATH").unwrap_or_else(|_| "z3".to_string());
-    let mut child = Command::new(&z3_path)
-        .args(&["-smt2", "-in"])
-        .env("Z3_GPU_THRESHOLD", "2147483647")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .or_else(|_| {
-            Command::new("./z3/build/z3")
-                .args(&["-smt2", "-in"])
-                .env("Z3_GPU_THRESHOLD", "2147483647")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-        })
-        .or_else(|_| {
-            Command::new("z3/build/z3")
-                .args(&["-smt2", "-in"])
-                .env("Z3_GPU_THRESHOLD", "2147483647")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-        })
-        .map_err(|e| format!(
-            "Failed to spawn Z3 process: {}\n  Searched: '{}', './z3/build/z3', 'z3/build/z3'\n  hint: set Y_Z3_PATH to the absolute path of your z3 binary",
-            e, z3_path
-        ))?;
+    let candidates = z3_candidates();
+    let mut spawned = None;
+    for cand in &candidates {
+        let attempt = Command::new(cand)
+            .args(&["-smt2", "-in"])
+            .env("Z3_GPU_THRESHOLD", "2147483647")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        if let Ok(child) = attempt {
+            spawned = Some(child);
+            break;
+        }
+    }
+    let mut child = spawned.ok_or_else(|| {
+        format!(
+            "No Z3 binary could be started. Searched: {}",
+            candidates.join(", ")
+        )
+    })?;
 
     {
         let stdin = child.stdin.as_mut().ok_or("Failed to open stdin")?;
