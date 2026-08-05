@@ -200,17 +200,37 @@ impl CtaTileConfig {
 }
 
 /// Manages virtual registers and produces raw PTX strings.
+/// A literal's value, for reading `@bounds` at compile time.
+fn ptx_const_f64(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::IntLit(v, _) => Some(*v as f64),
+        Expr::FloatLit(v, _) => Some(*v),
+        Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => ptx_const_f64(operand).map(|v| -v),
+        _ => None,
+    }
+}
+
 pub struct PtxEmitter {
     pub ptx_buffer: String,
 
     // Virtual register counters to maintain uniqueness
     reg_u32_count: u32,
     reg_f32_count: u32,
+    reg_f64_count: u32,
     reg_u64_count: u32,
     reg_pred_count: u32,
     reg_b16_count: u32,
     label_count: u32,
     variables: std::collections::HashMap<String, String>,
+    /// `@ZeroDrift` accumulators: name -> (register holding the fixed-point
+    /// value, representation chosen for it).
+    zero_drift: std::collections::HashMap<String, (String, crate::zero_drift::DriftRepr)>,
+    /// Measured accumulate costs driving that choice.
+    drift_costs: crate::zero_drift::CostTable,
+    /// One line per `@ZeroDrift` binding.
+    pub drift_report: Vec<String>,
+    /// `@ZeroDrift` bindings that could not be honoured.
+    pub drift_errors: Vec<String>,
     /// The resolved SM target (e.g. "sm_80") for PTX header emission.
     sm_target: String,
     /// When true, emits .file and .loc directives for NCU profiling and debugging.
@@ -264,11 +284,16 @@ impl PtxEmitter {
             ptx_buffer: buffer,
             reg_u32_count: 0,
             reg_f32_count: 0,
+            reg_f64_count: 0,
             reg_u64_count: 0,
             reg_pred_count: 0,
             reg_b16_count: 0,
             label_count: 0,
             variables: std::collections::HashMap::new(),
+            zero_drift: std::collections::HashMap::new(),
+            drift_costs: crate::zero_drift::CostTable::new(),
+            drift_report: Vec::new(),
+            drift_errors: Vec::new(),
             sm_target: target,
             debug_info: false,
             pending_extern_decls: Vec::new(),
@@ -287,6 +312,103 @@ impl PtxEmitter {
         let name = format!("%f{}", self.reg_f32_count);
         self.reg_f32_count += 1;
         name
+    }
+
+    /// Allocates a new virtual double register (e.g. `%fd2`).
+    ///
+    /// Only `@ZeroDrift` conversions use these; the declaration is omitted
+    /// entirely when the count is zero so ordinary kernels are unchanged.
+    fn alloc_regf64(&mut self) -> String {
+        let name = format!("%fd{}", self.reg_f64_count);
+        self.reg_f64_count += 1;
+        name
+    }
+
+    /// Supplies measured accumulate costs so `@ZeroDrift` chooses on evidence.
+    pub fn set_drift_costs(&mut self, costs: crate::zero_drift::CostTable) {
+        self.drift_costs = costs;
+    }
+
+    /// A PTX double literal: `0d` plus the IEEE754 bit pattern.
+    fn ptx_f64(v: f64) -> String {
+        format!("0d{:016X}", v.to_bits())
+    }
+
+    /// Converts an `f32` register into `repr`'s integer domain, returning a
+    /// 64-bit register.
+    ///
+    /// Rounds half away from zero, spelled out with `setp`/`selp` rather than
+    /// using `cvt.rni` (round-to-nearest-even). That is deliberate: the LLVM
+    /// backend lowers the same annotation with `fcmp`/`select`, and if the two
+    /// backends rounded differently then the same Y source compiled for CPU and
+    /// GPU would disagree - which would defeat the point of an annotation whose
+    /// entire purpose is reproducibility.
+    fn emit_drift_to_fixed(&mut self, src: &str, repr: crate::zero_drift::DriftRepr) -> String {
+        let widened = self.alloc_regf64();
+        if src.starts_with("%f") && !src.starts_with("%fd") {
+            writeln!(&mut self.ptx_buffer, "    cvt.f64.f32 {}, {};", widened, src).unwrap();
+        } else {
+            writeln!(&mut self.ptx_buffer, "    cvt.rn.f64.s64 {}, {};", widened, src).unwrap();
+        }
+        let out = self.alloc_reg64();
+        if repr.frac_bits() == 0 {
+            writeln!(&mut self.ptx_buffer, "    cvt.rzi.s64.f64 {}, {};", out, widened).unwrap();
+            return out;
+        }
+        let scaled = self.alloc_regf64();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    mul.f64 {}, {}, {};",
+            scaled,
+            widened,
+            Self::ptx_f64(repr.scale())
+        )
+        .unwrap();
+        let neg = self.alloc_pred();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    setp.lt.f64 {}, {}, {};",
+            neg,
+            scaled,
+            Self::ptx_f64(0.0)
+        )
+        .unwrap();
+        let bias = self.alloc_regf64();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    selp.f64 {}, {}, {}, {};",
+            bias,
+            Self::ptx_f64(-0.5),
+            Self::ptx_f64(0.5),
+            neg
+        )
+        .unwrap();
+        let rounded = self.alloc_regf64();
+        writeln!(&mut self.ptx_buffer, "    add.f64 {}, {}, {};", rounded, scaled, bias).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvt.rzi.s64.f64 {}, {};", out, rounded).unwrap();
+        out
+    }
+
+    /// Converts a fixed-point accumulator back to an `f32` register.
+    fn emit_drift_from_fixed(&mut self, src: &str, repr: crate::zero_drift::DriftRepr) -> String {
+        let as_f64 = self.alloc_regf64();
+        writeln!(&mut self.ptx_buffer, "    cvt.rn.f64.s64 {}, {};", as_f64, src).unwrap();
+        let out = self.alloc_regf32();
+        if repr.frac_bits() == 0 {
+            writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.f64 {}, {};", out, as_f64).unwrap();
+            return out;
+        }
+        let unscaled = self.alloc_regf64();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    div.rn.f64 {}, {}, {};",
+            unscaled,
+            as_f64,
+            Self::ptx_f64(repr.scale())
+        )
+        .unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.f64 {}, {};", out, unscaled).unwrap();
+        out
     }
 
     /// Allocates a new virtual 64-bit register (e.g. `%rd4`)
@@ -520,6 +642,9 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "    .reg .f32 %f<{}>;", self.reg_f32_count.max(1)).unwrap();
         writeln!(&mut self.ptx_buffer, "    .reg .b64 %rd<{}>;", self.reg_u64_count.max(1)).unwrap();
         writeln!(&mut self.ptx_buffer, "    .reg .pred %p<{}>;", self.reg_pred_count.max(1)).unwrap();
+        if self.reg_f64_count > 0 {
+            writeln!(&mut self.ptx_buffer, "    .reg .f64 %fd<{}>;", self.reg_f64_count).unwrap();
+        }
         if self.reg_b16_count > 0 {
             writeln!(&mut self.ptx_buffer, "    .reg .b16 %h<{}>;", self.reg_b16_count).unwrap();
         }
@@ -603,6 +728,72 @@ impl PtxEmitter {
 
     fn emit_stmt(&mut self, stmt: &Stmt, hw_profile: &HardwareProfile) {
         match stmt {
+            // `@ZeroDrift`: the accumulator lives in a 64-bit integer register
+            // and every term is converted into its domain on the way in, so the
+            // running total is exact and independent of the order the terms
+            // arrived in - which on a GPU is decided by the launch geometry.
+            Stmt::Let { name, ty, init, zero_drift: Some(_), bounds, span, cache_policy, .. } => {
+                let ty_name = match ty {
+                    Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => n.clone(),
+                    _ => "F32".to_string(),
+                };
+                let range = bounds.as_ref().and_then(|b| {
+                    match (ptx_const_f64(&b.min), ptx_const_f64(&b.max)) {
+                        (Some(lo), Some(hi)) => Some((lo, hi)),
+                        _ => None,
+                    }
+                });
+                let req = crate::zero_drift::Requirement::for_type_with_bounds(&ty_name, range);
+                match crate::zero_drift::select_repr(&req, &self.drift_costs) {
+                    Some(decision) => {
+                        let repr = decision.repr;
+                        self.drift_report.push(format!(
+                            "{}: {} -> {} ({})",
+                            name,
+                            ty_name,
+                            repr.name(),
+                            match decision.cost_ps {
+                                Some(c) => format!("measured {:.0} ps/acc", c),
+                                None => "no device measurements, narrowest sufficient".into(),
+                            }
+                        ));
+                        writeln!(
+                            &mut self.ptx_buffer,
+                            "    // [Y ZERO DRIFT] {}: {} accumulated exactly as {}",
+                            name,
+                            ty_name,
+                            repr.name()
+                        )
+                        .unwrap();
+                        let acc = self.alloc_reg64();
+                        match init {
+                            Some(expr) => {
+                                let v = self.emit_expr(expr, cache_policy.as_ref(), hw_profile);
+                                if v.starts_with("%f") {
+                                    let fixed = self.emit_drift_to_fixed(&v, repr);
+                                    writeln!(&mut self.ptx_buffer, "    mov.u64 {}, {};", acc, fixed).unwrap();
+                                } else {
+                                    writeln!(&mut self.ptx_buffer, "    mov.u64 {}, 0;", acc).unwrap();
+                                }
+                            }
+                            None => {
+                                writeln!(&mut self.ptx_buffer, "    mov.u64 {}, 0;", acc).unwrap();
+                            }
+                        }
+                        self.zero_drift.insert(name.clone(), (acc.clone(), repr));
+                        self.variables.insert(name.clone(), acc);
+                    }
+                    None => {
+                        self.drift_errors.push(format!(
+                            "Line {}: @ZeroDrift on `{}: {}` cannot be honoured. No exact \
+representation holds that range at that resolution, and only exact (integer or fixed-point) \
+accumulation is drift-free. Add @bounds(min, max) to state the accumulator's real range, or \
+declare it as a Q format.",
+                            span.line, name, ty_name
+                        ));
+                    }
+                }
+            }
             Stmt::Let {
                 name,
                 init,
@@ -673,6 +864,29 @@ impl PtxEmitter {
                 .unwrap();
                 writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
                 writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+            }
+            // Accumulation into a `@ZeroDrift` binding. There is no general
+            // `CompoundAssign` arm in this emitter, so this handles only the
+            // drift-free case; anything else still falls through as before.
+            Stmt::CompoundAssign { target, op, value, span }
+                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
+            {
+                let name = match target {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let (acc, repr) = self.zero_drift[&name].clone();
+                if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
+                    self.drift_errors.push(format!(
+                        "Line {}: `{:?}=` is not exact on the @ZeroDrift accumulator `{}`. Only \
+`+=` and `-=` preserve drift-freedom.",
+                        span.line, op, name
+                    ));
+                }
+                let rhs = self.emit_expr(value, None, hw_profile);
+                let fixed = self.emit_drift_to_fixed(&rhs, repr);
+                let instr = if matches!(op, BinaryOp::Sub) { "sub.s64" } else { "add.s64" };
+                writeln!(&mut self.ptx_buffer, "    {} {}, {}, {};", instr, acc, acc, fixed).unwrap();
             }
             Stmt::Assign {
                 target, value, ..
@@ -827,6 +1041,11 @@ impl PtxEmitter {
                 reg
             }
             Expr::Ident(name, _) => {
+                // Reading a @ZeroDrift accumulator converts back out of its
+                // integer domain; the stored value stays exact.
+                if let Some((reg, repr)) = self.zero_drift.get(name).cloned() {
+                    return self.emit_drift_from_fixed(&reg, repr);
+                }
                 if let Some(reg) = self.variables.get(name) {
                     reg.clone()
                 } else {
