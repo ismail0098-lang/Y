@@ -27,6 +27,7 @@ mod coprocessor_scheduler;
 mod autotuner;
 mod cuda_runtime;
 mod empirical_autotune;
+mod zero_drift;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
@@ -202,6 +203,47 @@ fn solve_and_write_witness(
     zk_emitter::ZkEmitter::write_wtns_binary(&circuit, &witness, wtns_path)
         .map_err(|e| format!("Failed to write {}: {}", wtns_path, e))?;
     Ok(witness.len())
+}
+
+/// Measured accumulate costs for `@ZeroDrift`, cached in `.ysu_hw_profile`.
+///
+/// Measuring costs a couple of seconds of GPU time, so it happens once per
+/// device and is then read back. Without any measurement the selector still
+/// works - it falls back to the narrowest representation that fits, which is
+/// deterministic - so a machine with no GPU compiles fine, just less informed.
+fn load_or_measure_drift_costs(gpu_name: &str) -> zero_drift::CostTable {
+    const PROFILE: &str = ".ysu_hw_profile";
+
+    if let Ok(contents) = fs::read_to_string(PROFILE) {
+        let cached = zero_drift::parse_costs(&contents, gpu_name);
+        if !cached.is_empty() {
+            return cached;
+        }
+    }
+
+    let Some(costs) = zero_drift::measure_accumulate_costs() else {
+        return zero_drift::CostTable::new();
+    };
+
+    log_info!("Measured @ZeroDrift accumulate costs on {}", gpu_name);
+    let mut sorted: Vec<_> = costs.iter().collect();
+    sorted.sort_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (repr, ps) in &sorted {
+        println!(
+            "      -> {:>9}: {:>9.0} ps/acc  {}",
+            repr.name(),
+            ps,
+            if repr.is_exact() { "exact" } else { "not exact (never selected)" }
+        );
+    }
+
+    // Append rather than rewrite: this file also holds the sentinel probe and
+    // the autotuner's measurements.
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(PROFILE) {
+        let _ = writeln!(f, "{}", zero_drift::serialize_costs(&costs, gpu_name));
+    }
+    costs
 }
 
 fn main() {
@@ -859,7 +901,17 @@ fn main() {
     } else if emit_llvm {
         log_step!("4/4", "Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
+        emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ll_output = emitter.emit_program(&ast, &hw_profile);
+        for line in &emitter.drift_report {
+            println!("      -> @ZeroDrift {}", line);
+        }
+        if !emitter.drift_errors.is_empty() {
+            for e in &emitter.drift_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
         match fs::write(&output_path, &ll_output) {
             Ok(_) => println!("      -> Written to: {}", output_path),
             Err(e) => {
