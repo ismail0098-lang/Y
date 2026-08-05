@@ -119,6 +119,22 @@ impl DriftRepr {
         }
     }
 
+    /// The LLVM IR type the accumulator is stored in.
+    pub fn llvm_type(self) -> &'static str {
+        match self {
+            DriftRepr::FixedQ16_16 => "i32",
+            DriftRepr::FixedQ32_32 | DriftRepr::Int64 => "i64",
+            DriftRepr::Float64 => "double",
+            DriftRepr::KahanF32 => "float",
+        }
+    }
+
+    /// The multiplier taking a real value into this representation's integer
+    /// domain. `1.0` for the pure-integer representations.
+    pub fn scale(self) -> f64 {
+        (2f64).powi(self.frac_bits() as i32)
+    }
+
     /// The C type used to hold it.
     pub fn c_type(self) -> &'static str {
         match self {

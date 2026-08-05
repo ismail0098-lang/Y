@@ -28,6 +28,16 @@ use crate::ast::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
+/// A literal's value, for reading `@bounds` at compile time.
+fn const_f64_of(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::IntLit(v, _) => Some(*v as f64),
+        Expr::FloatLit(v, _) => Some(*v),
+        Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => const_f64_of(operand).map(|v| -v),
+        _ => None,
+    }
+}
+
 pub struct LlvmEmitter {
     pub output: String,
     /// String constants collected during emission, emitted at module scope
@@ -58,6 +68,16 @@ pub struct LlvmEmitter {
     block_terminated: bool,
     /// Store current cache policy during let bindings
     current_cache_policy: Option<String>,
+    /// Accumulators declared `@ZeroDrift`, with the exact representation chosen
+    /// for each. These are stored as integers; conversion happens on write and
+    /// on read, and the accumulation between is exact.
+    zero_drift: BTreeMap<String, crate::zero_drift::DriftRepr>,
+    /// Measured accumulate costs from the device, driving the choice.
+    drift_costs: crate::zero_drift::CostTable,
+    /// `@ZeroDrift` bindings that could not be honoured.
+    pub drift_errors: Vec<String>,
+    /// One line per `@ZeroDrift` binding: what was chosen, and on what basis.
+    pub drift_report: Vec<String>,
     /// Hint for the load() intrinsic: the declared LHS type of the current let
     current_load_hint: Option<String>,
     /// Track all function names called during emission
@@ -179,6 +199,10 @@ impl LlvmEmitter {
             enum_variants: BTreeMap::new(),
             block_terminated: false,
             current_cache_policy: None,
+            zero_drift: BTreeMap::new(),
+            drift_costs: crate::zero_drift::CostTable::new(),
+            drift_errors: Vec::new(),
+            drift_report: Vec::new(),
             current_load_hint: None,
             called_functions: Vec::new(),
             defined_functions: Vec::new(),
@@ -355,6 +379,81 @@ impl LlvmEmitter {
     /// Insert an LLVM conversion instruction when src_ty != dst_ty.
     /// Returns the new SSA name holding the converted value, or the
     /// original `val` if no conversion is needed.
+    /// Supplies measured accumulate costs so `@ZeroDrift` chooses on evidence.
+    /// Without this the selector falls back to narrowest-sufficient, which is
+    /// deterministic but not informed.
+    pub fn set_drift_costs(&mut self, costs: crate::zero_drift::CostTable) {
+        self.drift_costs = costs;
+    }
+
+    /// Converts a `double` into `repr`'s integer domain.
+    ///
+    /// Rounds half away from zero rather than truncating. Truncation is also
+    /// deterministic - so the accumulation would still be reorder-invariant -
+    /// but it biases every term toward zero, and a long reduction turns that
+    /// bias into a visible systematic error. The rounding is done with
+    /// `fcmp`/`select` rather than `llvm.round` so no intrinsic declaration is
+    /// needed.
+    fn emit_to_fixed(&mut self, val: &str, repr: crate::zero_drift::DriftRepr) -> String {
+        let ity = repr.llvm_type();
+        if repr.frac_bits() == 0 {
+            let out = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = fptosi double {} to {}", out, val, ity).unwrap();
+            return out;
+        }
+        let scaled = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = fmul double {}, {:.1}",
+            scaled,
+            val,
+            repr.scale()
+        )
+        .unwrap();
+        let is_neg = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = fcmp olt double {}, 0.0", is_neg, scaled).unwrap();
+        let bias = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = select i1 {}, double -5.000000e-01, double 5.000000e-01",
+            bias, is_neg
+        )
+        .unwrap();
+        let rounded = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = fadd double {}, {}", rounded, scaled, bias).unwrap();
+        let out = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = fptosi double {} to {}", out, rounded, ity).unwrap();
+        out
+    }
+
+    /// Converts a value out of `repr`'s integer domain back to `double`.
+    fn emit_from_fixed(&mut self, val: &str, repr: crate::zero_drift::DriftRepr) -> String {
+        let ity = repr.llvm_type();
+        let as_f = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = sitofp {} {} to double", as_f, ity, val).unwrap();
+        if repr.frac_bits() == 0 {
+            return as_f;
+        }
+        let out = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = fdiv double {}, {:.1}",
+            out,
+            as_f,
+            repr.scale()
+        )
+        .unwrap();
+        out
+    }
+
+    /// Emits an expression and coerces the result to `double`, which is the
+    /// domain every `@ZeroDrift` conversion works in.
+    fn emit_expr_as_double(&mut self, expr: &Expr) -> String {
+        let v = self.emit_expr(expr, None, None);
+        let t = self.infer_type(expr);
+        self.emit_coerce(&v, &t, "double")
+    }
+
     fn emit_coerce(&mut self, val: &str, src_ty: &str, dst_ty: &str) -> String {
         if src_ty == dst_ty {
             return val.to_string();
@@ -1102,6 +1201,66 @@ impl LlvmEmitter {
     fn emit_alloca_for_block(&mut self, block: &Block) {
         for stmt in &block.stmts {
             match stmt {
+                // `@ZeroDrift` accumulators live in an integer register, not a
+                // float one - that is the entire mechanism. The representation
+                // is chosen here, before the alloca, because the alloca's type
+                // is what everything downstream keys off.
+                Stmt::Let { name, ty, zero_drift: Some(_), bounds, span, .. }
+                    if !self.locals.contains_key(name) =>
+                {
+                    let ty_name = match ty {
+                        Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => n.clone(),
+                        _ => "F32".to_string(),
+                    };
+                    let range = bounds.as_ref().and_then(|b| {
+                        match (const_f64_of(&b.min), const_f64_of(&b.max)) {
+                            (Some(lo), Some(hi)) => Some((lo, hi)),
+                            _ => None,
+                        }
+                    });
+                    let req = crate::zero_drift::Requirement::for_type_with_bounds(&ty_name, range);
+                    match crate::zero_drift::select_repr(&req, &self.drift_costs) {
+                        Some(decision) => {
+                            self.drift_report.push(format!(
+                                "{}: {} -> {} ({})",
+                                name,
+                                ty_name,
+                                decision.repr.name(),
+                                match decision.cost_ps {
+                                    Some(c) => format!("measured {:.0} ps/acc", c),
+                                    None => "no device measurements, narrowest sufficient".into(),
+                                }
+                            ));
+                            self.locals.insert(name.clone(), decision.repr.llvm_type().to_string());
+                            self.locals_ast_type.insert(name.clone(), ty_name.clone());
+                            self.zero_drift.insert(name.clone(), decision.repr);
+                            writeln!(
+                                &mut self.output,
+                                "  %{} = alloca {}",
+                                name,
+                                decision.repr.llvm_type()
+                            )
+                            .unwrap();
+                        }
+                        None => {
+                            self.drift_errors.push(format!(
+                                "Line {}: @ZeroDrift on `{}: {}` cannot be honoured. No exact \
+representation holds that range at that resolution, and only exact (integer or fixed-point) \
+accumulation is drift-free - f64 is the same non-associative arithmetic with more mantissa. \
+Add @bounds(min, max) to state the accumulator's real range, or declare it as a Q format.",
+                                span.line, name, ty_name
+                            ));
+                            // Fall back to the declared type so the rest of the
+                            // function still emits; the error above fails the build.
+                            let ir_ty = match ty {
+                                Some(t) => self.emit_type(t),
+                                None => "double".into(),
+                            };
+                            self.locals.insert(name.clone(), ir_ty.clone());
+                            writeln!(&mut self.output, "  %{} = alloca {}", name, ir_ty).unwrap();
+                        }
+                    }
+                }
                 Stmt::Let { name, ty, init, .. } => {
                     if !self.locals.contains_key(name) {
                         let ir_ty = match ty {
@@ -1254,6 +1413,15 @@ impl LlvmEmitter {
 
     fn emit_stmt(&mut self, stmt: &Stmt, ret_type: &str) {
         match stmt {
+            Stmt::Let { name, init, .. } if self.zero_drift.contains_key(name) => {
+                let repr = self.zero_drift[name];
+                let as_double = match init {
+                    Some(e) => self.emit_expr_as_double(e),
+                    None => "0.0".to_string(),
+                };
+                let fixed = self.emit_to_fixed(&as_double, repr);
+                self.emit_store(&fixed, &format!("%{}", name), repr.llvm_type());
+            }
             Stmt::Let {
                 name,
                 init,
@@ -1582,6 +1750,43 @@ impl LlvmEmitter {
 
                 writeln!(&mut self.output, "{}:", end_lbl).unwrap();
                 self.block_terminated = false;
+            }
+            Stmt::CompoundAssign { target, op, value, span }
+                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
+            {
+                let name = match target {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let repr = self.zero_drift[&name];
+                // Only `+=` and `-=` are exact here. Scaling a product or a
+                // quotient would reintroduce rounding into the accumulation
+                // itself, which is the single thing @ZeroDrift exists to
+                // prevent, so it is refused rather than silently approximated.
+                if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
+                    self.drift_errors.push(format!(
+                        "Line {}: `{:?}=` is not exact on the @ZeroDrift accumulator `{}`. Only \
+`+=` and `-=` preserve drift-freedom.",
+                        span.line, op, name
+                    ));
+                }
+                // Each term is quantised once, deterministically; every
+                // addition after that is exact integer arithmetic, so the total
+                // does not depend on the order the terms arrived in.
+                let rhs_double = self.emit_expr_as_double(value);
+                let rhs_fixed = self.emit_to_fixed(&rhs_double, repr);
+                let ity = repr.llvm_type();
+                let addr = format!("%{}", name);
+                let loaded = self.emit_load(&addr, ity);
+                let result = self.fresh_tmp();
+                let instr = if matches!(op, BinaryOp::Sub) { "sub" } else { "add" };
+                writeln!(
+                    &mut self.output,
+                    "  {} = {} {} {}, {}",
+                    result, instr, ity, loaded, rhs_fixed
+                )
+                .unwrap();
+                self.emit_store(&result, &addr, ity);
             }
             Stmt::CompoundAssign {
                 target, op, value, ..
@@ -1957,6 +2162,13 @@ impl LlvmEmitter {
                     return tag.to_string();
                 }
 
+                // Reading a @ZeroDrift accumulator converts back out of its
+                // integer domain. The stored value stays exact; only this
+                // observation is a float, which is the type the source declared.
+                if let Some(repr) = self.zero_drift.get(name).copied() {
+                    let raw = self.emit_load(&format!("%{}", name), repr.llvm_type());
+                    return self.emit_from_fixed(&raw, repr);
+                }
                 let ty = self
                     .locals
                     .get(name)
@@ -2884,6 +3096,13 @@ impl LlvmEmitter {
             Expr::CharLit(_, _) => "i8".into(),
             Expr::StringLit(_, _) => "ptr".into(),
             Expr::Ident(name, _) => {
+                // A @ZeroDrift accumulator is STORED as an integer but READS as
+                // a double. Reporting the storage type here would make every
+                // downstream operation emit integer arithmetic against a value
+                // that arrives as a float.
+                if self.zero_drift.contains_key(name) {
+                    return "double".into();
+                }
                 if self.enum_variants.contains_key(name) {
                     return "i32".into();
                 }
