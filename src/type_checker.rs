@@ -1276,9 +1276,14 @@ impl TypeChecker {
                     self.update_interval(var, None);
                 }
 
+                // A `pipe.wait` inside this body awaits once per iteration; the
+                // tracker needs to know that to compare against where the
+                // matching `cp_async` was created.
+                self.linear_tracker.enter_loop();
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
+                self.linear_tracker.exit_loop();
 
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
@@ -1378,10 +1383,14 @@ impl TypeChecker {
                     self.check_uniformity(condition);
                 }
                 self.check_expr(condition);
+                // Both arms are conditional: a transfer awaited in either one is
+                // not awaited on the paths that take the other.
+                self.linear_tracker.enter_conditional();
                 self.check_block(then_block);
                 if let Some(eb) = else_block {
                     self.check_block(eb);
                 }
+                self.linear_tracker.exit_conditional();
             }
             Stmt::While {
                 condition, body, invariant, max_iterations, is_uniform_branch, ..
@@ -1410,7 +1419,15 @@ impl TypeChecker {
                 }
 
                 self.check_expr(condition);
+                // A while body is both conditional (it may run zero times) and a
+                // loop (it may run many). Entering both is not redundant: the
+                // zero-iteration case is what makes an await inside it unsound
+                // even when the copy is also inside.
+                self.linear_tracker.enter_loop();
+                self.linear_tracker.enter_conditional();
                 self.check_block(body);
+                self.linear_tracker.exit_conditional();
+                self.linear_tracker.exit_loop();
 
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
