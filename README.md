@@ -358,7 +358,20 @@ Empirical Head-to-Head: Y vs OpenAI Triton (NVIDIA RTX 4070 Ti SUPER)
 
 Dual-Accelerator Co-Processor: Y vs. Naive CUDA C++ (10,000 iterations, RTX 4070 Ti SUPER)
 
-The co-processor scheduler automatically overlaps RT Core traversal with Tensor Core MMA, inserts vectorized quantization, and eliminates shared-memory bank conflicts. All results are physically measured on device via CuPy JIT.
+The co-processor scheduler automatically overlaps RT Core traversal with Tensor Core MMA, inserts vectorized quantization, and eliminates shared-memory bank conflicts.
+
+> **Reproducibility caveat (please read before citing these numbers).** The table
+> below was recorded on the author's machine and **cannot currently be
+> regenerated**: `tests/benchmark_coprocessor_physical.py` compiles its *naive
+> CUDA baseline* through CuPy's NVRTC, and that fails against the bundled CUDA
+> headers (`mma.h` includes `crt/mma.h`, which is not shipped), so the run
+> aborts before producing timings. The Y side does compile and load. The same
+> harness also contains a clearly-labelled fallback that reports
+> "(SIMULATED VIA CYCLE-ACCURATE PROFILES)" from a hardcoded `naive_cycles =
+> 436.0` against the scheduler's own cycle estimate — those numbers are not the
+> ones below (436/215 ≈ 2.03, not 1.66), but the two paths are easy to confuse
+> when reading the output. Treat the speedups as unverified pending a working
+> baseline build.
 
 | Workload | RT/Tensor Topology | Naive CUDA C++ | Y Co-Processor | Speedup | Latency Saved |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -379,6 +392,19 @@ Note: the attention and db_index kernels share an identical IR node topology (1 
 Architectural Overlap Ceiling Note: The ~1.66x (39.8%) physical latency reduction across distinct topologies is dictated by Ada Lovelace's fixed hardware functional unit pipeline ratio between RT Core BVH ray-box intersection logic and Tensor Core MMA warp dispatch units. Because Y's co-processor scheduler fills async RT traversal bubbles with independent Tensor Core instructions until reaching the minimum synchronization barrier, the achievable hardware concurrency ceiling converges near ~40% latency reduction (1.66x speedup) whenever RT Core traversal dominates the kernel's critical path.
 
 Note on db_index recall: index construction and recall@k tradeoffs are workload-specific. This benchmark demonstrates traversal speedup via hardware BVH mapping, not index quality or search accuracy.
+
+**What is verified:** every `coprocessor_*.ysu` workload now emits a complete PTX
+module that real `ptxas` assembles for `sm_89`, gated by
+`tests/coprocessor_ptx_assembles.rs`. That was not previously true — the backend
+emitted only the scheduler's instruction stream, with no `.visible .entry` and no
+`.reg` declarations, and the benchmark harness hand-wrote the kernel envelope in
+Python (`wrap_ptx`) before handing it to CuPy. So the compiler's own output was
+unusable while the benchmark worked. The envelope is emitted by the compiler now.
+
+The same gate caught `coprocessor_nerf` asking for **131,584 bytes** of
+statically declared shared memory against a 48 KB per-CTA limit; the scheduler
+now refuses that at compile time with both numbers named, rather than emitting a
+module no GPU can load.
 
 ---
 
