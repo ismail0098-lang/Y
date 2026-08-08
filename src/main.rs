@@ -984,8 +984,8 @@ fn main() {
         for line in &emitter.drift_report {
             println!("      -> @ZeroDrift {}", line);
         }
-        if !emitter.drift_errors.is_empty() {
-            for e in &emitter.drift_errors {
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
                 log_error!("{}", e);
             }
             exit(1);
