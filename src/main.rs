@@ -28,6 +28,7 @@ mod autotuner;
 mod cuda_runtime;
 mod empirical_autotune;
 mod zero_drift;
+mod cpu_specializer;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
@@ -662,7 +663,13 @@ fn main() {
         }
 
         println!("      -> Phase C: Fused PTX Emission...");
-        let fused_ptx = scheduler.emit_fused_ptx(&ir_graph, &hw_profile);
+        let fused_ptx = match scheduler.emit_fused_ptx(&ir_graph, &hw_profile) {
+            Ok(p) => p,
+            Err(e) => {
+                log_error!("{}", e);
+                exit(1);
+            }
+        };
 
         let write_path = if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);
@@ -682,8 +689,41 @@ fn main() {
             "sm_80".to_string()
         };
 
+        // Emit a COMPLETE module, not an instruction stream.
+        //
+        // This used to write the scheduler's body directly under a `.version`
+        // header: no `.visible .entry`, no `.reg` declarations, and a `.shared`
+        // directive sitting at module scope inside the body. `ptxas` rejects
+        // that outright, so `--emit-coprocessor` produced a file no tool could
+        // consume - while printing "Dual-accelerator PTX generated
+        // successfully!". The only thing that knew how to finish the job was a
+        // `wrap_ptx` helper inside tests/benchmark_coprocessor_physical.py,
+        // which hand-wrote the entry point and register pools in Python.
+        //
+        // A compiler backend that emits half a kernel and relies on a benchmark
+        // script to complete it is not a backend. The envelope belongs here,
+        // and `coprocessor_ptx_assembles` now gates it on real `ptxas`.
+        //
+        // `.shared` declarations are hoisted out of the body because PTX
+        // requires them at module scope; the register pools are declared
+        // generously because the scheduler does not currently report its own
+        // high-water marks, and an over-declared virtual register costs nothing
+        // (ptxas allocates what is used).
+        let mut shared_decls = String::new();
+        let mut body = String::new();
+        for line in fused_ptx.lines() {
+            if line.trim_start().starts_with(".shared") {
+                shared_decls.push_str(line.trim_start());
+                shared_decls.push('\n');
+            } else {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+
+        let entry_name = "y_coprocessor_fused";
         let mut full_ptx = String::new();
-        full_ptx.push_str(".version 7.5\n");
+        full_ptx.push_str(".version 8.0\n");
         full_ptx.push_str(&format!(".target {}\n", target_sm));
         full_ptx.push_str(".address_size 64\n\n");
         full_ptx.push_str("// =======================================================\n");
@@ -692,7 +732,29 @@ fn main() {
         full_ptx.push_str(&format!("// RT Nodes: {} | Tensor Nodes: {} | Barriers: {}\n",
             rt_count, tensor_count, sched.sync_barriers.len()));
         full_ptx.push_str("// =======================================================\n\n");
-        full_ptx.push_str(&fused_ptx);
+        full_ptx.push_str(&shared_decls);
+        full_ptx.push('\n');
+        full_ptx.push_str(&format!(
+            ".visible .entry {}(\n    .param .u64 param_rt_A_ptr,\n    .param .u64 param_nns_query_ptr\n)\n{{\n",
+            entry_name
+        ));
+        for pool in ["%r", "%rt_r", "%qr"] {
+            full_ptx.push_str(&format!("    .reg .b32 {}<100>;\n", pool));
+        }
+        for pool in ["%f", "%rt_f", "%qf"] {
+            full_ptx.push_str(&format!("    .reg .f32 {}<100>;\n", pool));
+        }
+        for pool in ["%rd", "%rt_rd", "%qrd"] {
+            full_ptx.push_str(&format!("    .reg .b64 {}<100>;\n", pool));
+        }
+        for pool in ["%p", "%rt_p", "%qp"] {
+            full_ptx.push_str(&format!("    .reg .pred {}<100>;\n", pool));
+        }
+        full_ptx.push_str("    .reg .b64 rt_A_ptr;\n    .reg .b64 nns_query_ptr;\n\n");
+        full_ptx.push_str("    ld.param.u64 rt_A_ptr, [param_rt_A_ptr];\n");
+        full_ptx.push_str("    ld.param.u64 nns_query_ptr, [param_nns_query_ptr];\n\n");
+        full_ptx.push_str(&body);
+        full_ptx.push_str("\n    ret;\n}\n");
 
         match fs::write(&write_path, &full_ptx) {
             Ok(_) => {

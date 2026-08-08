@@ -1,4 +1,4 @@
-.version 7.5
+.version 8.0
 .target sm_89
 .address_size 64
 
@@ -7,6 +7,31 @@
 // Hardware: NVIDIA GeForce RTX 4070 Ti SUPER
 // RT Nodes: 1 | Tensor Nodes: 7 | Barriers: 1
 // =======================================================
+
+.shared .align 128 .b8 coprocessor_smem[10240];
+
+.visible .entry y_coprocessor_fused(
+    .param .u64 param_rt_A_ptr,
+    .param .u64 param_nns_query_ptr
+)
+{
+    .reg .b32 %r<100>;
+    .reg .b32 %rt_r<100>;
+    .reg .b32 %qr<100>;
+    .reg .f32 %f<100>;
+    .reg .f32 %rt_f<100>;
+    .reg .f32 %qf<100>;
+    .reg .b64 %rd<100>;
+    .reg .b64 %rt_rd<100>;
+    .reg .b64 %qrd<100>;
+    .reg .pred %p<100>;
+    .reg .pred %rt_p<100>;
+    .reg .pred %qp<100>;
+    .reg .b64 rt_A_ptr;
+    .reg .b64 nns_query_ptr;
+
+    ld.param.u64 rt_A_ptr, [param_rt_A_ptr];
+    ld.param.u64 nns_query_ptr, [param_nns_query_ptr];
 
     // +----------------------------------------------------------+
     // |  Y DUAL-ACCELERATOR CO-PROCESSING SCHEDULE              |
@@ -18,7 +43,6 @@
     // |  Overlap Savings:      145 cycles                      |
     // +----------------------------------------------------------+
 
-    .shared .align 128 .b8 coprocessor_smem[10240];
 
     // ===================================================
     // RT CORE CO-PROCESSING PIPELINE  (1 nodes)
@@ -216,3 +240,6 @@
     }
     // mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 - 42 cy on NVIDIA GeForce RTX 4070 Ti SUPER
     mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f0,%f1,%f2,%f3}, {%r0,%r1,%r2,%r3}, {%r4,%r5}, {%f0,%f1,%f2,%f3};
+
+    ret;
+}
