@@ -260,6 +260,35 @@ pub struct PtxEmitter {
     /// kernel's `.visible .entry` line - i.e. still module scope, and still
     /// textually before its only use.
     pending_extern_decls: Vec<String>,
+
+    /// Complete additional `.visible .entry` bodies queued by a kernel emitter
+    /// that needs more than one entry point to implement its shape, drained by
+    /// `emit_kernel` alongside `pending_extern_decls`.
+    ///
+    /// Only `emit_paged_decode_attention_kernel`'s split-K path uses this: a
+    /// flash-decoding kernel is inherently two launches (partial states, then
+    /// a combine over them), and the combine has to be a separate entry
+    /// because there is no device-wide barrier inside one. Each queued string
+    /// is a whole self-contained entry - signature, `.reg` declarations and
+    /// body - because register numbering is per-entry and the emitter's
+    /// counters are reset for it (see `emit_attention_split_reduce_entry`).
+    pending_module_items: Vec<String>,
+}
+
+/// Split-K ("flash decoding") configuration for
+/// `emit_paged_decode_attention_kernel`.
+///
+/// `Some` selects the split shape: the KV sequence is partitioned across
+/// `splits` CTAs in `%ctaid.z`, each writing an UNNORMALIZED partial softmax
+/// state `(m, l, acc)` to global scratch, which a second entry point
+/// (`<kernel>_reduce`) combines. `None` is the single-pass shape, where one
+/// CTA owns a whole sequence and writes `Out` directly.
+struct AttnSplit<'a> {
+    splits: u32,
+    /// `[num_seqs, num_q_heads, splits, head_dim]` f32 - the partial `acc`.
+    partial: &'a str,
+    /// `[num_seqs, num_q_heads, splits, 2]` f32 - the partial `(m, l)`.
+    meta: &'a str,
 }
 
 impl PtxEmitter {
@@ -307,6 +336,7 @@ impl PtxEmitter {
             sm_target: target,
             debug_info: false,
             pending_extern_decls: Vec::new(),
+            pending_module_items: Vec::new(),
         }
     }
 
@@ -569,11 +599,26 @@ impl PtxEmitter {
             Some(self.emit_rmsnorm_residual_kernel(hidden_dim, &x_ptr, &res_ptr, &w_ptr, &out_ptr, &newres_ptr))
         } else if let Some((head_dim, x_ptr, pos_ptr, out_ptr)) = self.rope_operands(kernel) {
             Some(self.emit_rope_kernel(head_dim, &x_ptr, &pos_ptr, &out_ptr))
+        } else if let Some((head_dim, nqh, nkvh, page_size, splits, warps, q, kc, vc, pt, sl, out, part, meta, max_pages)) =
+            self.paged_decode_attention_split_operands(kernel)
+        {
+            // Checked BEFORE the 7-parameter shape: the two name grammars do
+            // not overlap (`parse_trailing_dims` rejects the literal `split`
+            // component), but relying on that ordering-independence silently
+            // would be exactly the kind of near-miss dispatch gotcha #5 warns
+            // about, so the specific shape is tried first on purpose.
+            self.emit_attention_split_reduce_entry(head_dim, nqh, splits, kernel, &kernel.name);
+            Some(self.emit_paged_decode_attention_kernel(
+                head_dim, nqh, nkvh, page_size, warps, &q, &kc, &vc, &pt, &sl, &out, &max_pages,
+                Some(AttnSplit { splits, partial: &part, meta: &meta }),
+                &kernel.name,
+            ))
         } else if let Some((head_dim, nqh, nkvh, page_size, warps, q, kc, vc, pt, sl, out, max_pages)) =
             self.paged_decode_attention_operands(kernel)
         {
             Some(self.emit_paged_decode_attention_kernel(
                 head_dim, nqh, nkvh, page_size, warps, &q, &kc, &vc, &pt, &sl, &out, &max_pages,
+                None,
                 &kernel.name,
             ))
         } else {
@@ -590,6 +635,12 @@ impl PtxEmitter {
         // buffer now, before this kernel's own `.visible .entry` line.
         for decl in self.pending_extern_decls.drain(..) {
             writeln!(&mut self.ptx_buffer, "{}", decl).unwrap();
+        }
+        // Whole extra entry points queued by the body emitter (currently only
+        // the split-K attention combine). Same placement rule as above: module
+        // scope, textually before this kernel's own entry.
+        for item in std::mem::take(&mut self.pending_module_items) {
+            writeln!(&mut self.ptx_buffer, "{}", item).unwrap();
         }
 
         // Emit kernel signature to original self.ptx_buffer
@@ -6492,6 +6543,140 @@ declare it as a Q format.",
         Some((head_dim, num_q_heads, num_kv_heads, page_size, num_warps, q, kc, vc, pt, sl, out, max_pages))
     }
 
+    /// Default warps per CTA for the SPLIT-K attention shape, deliberately
+    /// lower than `ATTN_DEFAULT_NUM_WARPS`.
+    ///
+    /// Warps inside a CTA and splits across CTAs buy the same thing - more
+    /// concurrent token streams over one sequence - but splits spread over
+    /// SMs and warps do not. The 32-warp default of the single-pass kernel
+    /// exists only because that shape has no other way to get parallelism at
+    /// batch 1 (see `ATTN_DEFAULT_NUM_WARPS`); once `%ctaid.z` supplies it,
+    /// piling 32 warps onto one SM just lengthens the cross-warp combine,
+    /// which is `num_warps` shared-memory loads per output element and runs
+    /// `gqa_ratio` times.
+    const ATTN_SPLIT_DEFAULT_NUM_WARPS: u32 = 8;
+
+    /// Detects the 9-parameter **split-K paged decode attention** shape,
+    /// named `paged_decode_attention_split_<head_dim>_<num_q_heads>_<num_kv_heads>_<page_size>_<splits>[_<warps>]`.
+    ///
+    /// This is the flash-decoding form of the kernel
+    /// `paged_decode_attention_operands` detects, and it exists to fix the two
+    /// deficiencies that shape has against FlashInfer, both of which are
+    /// structural rather than a matter of instruction selection:
+    ///
+    /// 1. **The GQA re-read.** The single-pass grid is
+    ///    `num_q_heads x num_seqs`, so under GQA `g:1` the `g` CTAs sharing a
+    ///    KV head each stream the whole K/V cache for it - `g` times the
+    ///    necessary traffic. Here the grid is `num_kv_heads x num_seqs x
+    ///    splits` and one CTA carries all `g` query heads of its KV head, so
+    ///    each K/V byte is read exactly once and the `g` scores come out of
+    ///    one load.
+    /// 2. **No split-K.** With `num_q_heads x num_seqs` CTAs, batch 1 is 32
+    ///    CTAs against this GPU's 66 SMs whatever the kernel does internally.
+    ///    `%ctaid.z` partitions the KV sequence, so the CTA count no longer
+    ///    depends on batch size.
+    ///
+    /// Both changes are needed together: merging the GQA heads on its own
+    /// would DIVIDE the batch-1 CTA count by `g` (32 CTAs to 8), which is a
+    /// large regression, and it is only split-K that makes the merge
+    /// affordable.
+    ///
+    /// Parameters, in declaration order - the 7 of the single-pass shape plus
+    /// two scratch buffers, which is why this cannot be the same kernel:
+    ///   `Q`         `GlobalMemory<F16>`  `[num_seqs, num_q_heads, head_dim]`
+    ///   `KCache`    `GlobalMemory<F16>`  `[num_pages, page_size, num_kv_heads, head_dim]`
+    ///   `VCache`    `GlobalMemory<F16>`  same layout as `KCache`
+    ///   `PageTable` `GlobalMemory<I32>`  `[num_seqs, max_pages]`
+    ///   `SeqLens`   `GlobalMemory<I32>`  `[num_seqs]`
+    ///   `Out`       `GlobalMemory<F16>`  `[num_seqs, num_q_heads, head_dim]`
+    ///   `Partial`   `GlobalMemory<F32>`  `[num_seqs, num_q_heads, splits, head_dim]`
+    ///   `PartialMeta` `GlobalMemory<F32>` `[num_seqs, num_q_heads, splits, 2]`
+    ///   `MaxPages`  `I32` (scalar)       row stride of `PageTable`
+    ///
+    /// The two scratch buffers are f32 on purpose: they hold an unnormalized
+    /// running sum, whose magnitude is `l` (the softmax denominator) times a
+    /// V element, and rounding that to f16 before the combine would throw away
+    /// precision the single-pass kernel keeps in registers.
+    #[allow(clippy::type_complexity)]
+    fn paged_decode_attention_split_operands(
+        &self,
+        kernel: &KernelDecl,
+    ) -> Option<(u32, u32, u32, u32, u32, u32, String, String, String, String, String, String, String, String, String)> {
+        if kernel.tile.is_some() {
+            return None;
+        }
+        let dims = Self::parse_trailing_dims(&kernel.name, "paged_decode_attention_split", 5, 6)?;
+        let (head_dim, num_q_heads, num_kv_heads, page_size, splits) =
+            (dims[0], dims[1], dims[2], dims[3], dims[4]);
+        let num_warps = if dims.len() == 6 { dims[5] } else { Self::ATTN_SPLIT_DEFAULT_NUM_WARPS };
+        if num_warps == 0 || num_warps > 32 {
+            return None;
+        }
+        // The combine unrolls over splits and every partial state is live
+        // across it; past this the entry stops being a tail and starts being
+        // its own bandwidth problem.
+        if splits == 0 || splits > 64 {
+            return None;
+        }
+        if head_dim % 32 != 0 {
+            return None;
+        }
+        let elems_per_lane = head_dim / 32;
+        if !matches!(elems_per_lane, 2 | 4 | 8) {
+            return None;
+        }
+        if num_kv_heads == 0 || num_q_heads % num_kv_heads != 0 {
+            return None;
+        }
+        // One CTA carries every query head of its KV head, and each head costs
+        // `2 + 2*elems_per_lane` live f32 registers of softmax state before
+        // any temporaries. Past this the kernel spills and the merge stops
+        // being worth it - refuse rather than emit something slower than the
+        // shape it replaces.
+        if num_q_heads / num_kv_heads > 8 {
+            return None;
+        }
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+        fn is_scalar_i32(ty: &Type) -> bool {
+            matches!(ty, Type::Primitive(p, _) if p == "I32")
+        }
+        if kernel.params.len() != 9
+            || !is_global_memory_of(&kernel.params[0].ty, "F16")
+            || !is_global_memory_of(&kernel.params[1].ty, "F16")
+            || !is_global_memory_of(&kernel.params[2].ty, "F16")
+            || !is_global_memory_of(&kernel.params[3].ty, "I32")
+            || !is_global_memory_of(&kernel.params[4].ty, "I32")
+            || !is_global_memory_of(&kernel.params[5].ty, "F16")
+            || !is_global_memory_of(&kernel.params[6].ty, "F32")
+            || !is_global_memory_of(&kernel.params[7].ty, "F32")
+            || !is_scalar_i32(&kernel.params[8].ty)
+        {
+            return None;
+        }
+
+        let q = self.variables.get(&kernel.params[0].name)?.clone();
+        let kc = self.variables.get(&kernel.params[1].name)?.clone();
+        let vc = self.variables.get(&kernel.params[2].name)?.clone();
+        let pt = self.variables.get(&kernel.params[3].name)?.clone();
+        let sl = self.variables.get(&kernel.params[4].name)?.clone();
+        let out = self.variables.get(&kernel.params[5].name)?.clone();
+        let part = self.variables.get(&kernel.params[6].name)?.clone();
+        let meta = self.variables.get(&kernel.params[7].name)?.clone();
+        let max_pages = self.variables.get(&kernel.params[8].name)?.clone();
+        Some((
+            head_dim, num_q_heads, num_kv_heads, page_size, splits, num_warps,
+            q, kc, vc, pt, sl, out, part, meta, max_pages,
+        ))
+    }
+
     /// Emits a complete, self-contained **paged decode attention** kernel:
     /// one query token per (sequence, query head), attending over a
     /// page-indexed KV cache, with FlashAttention-style online softmax so the
@@ -6558,12 +6743,20 @@ declare it as a Q format.",
     /// plus 50 fixed-input launches confirming bit-level determinism across
     /// the shared-memory merge.
     ///
-    /// **Known limitation, not a bug**: the grid is `num_q_heads x num_seqs`.
-    /// At batch 1 with 32 heads that is 32 CTAs against 66 SMs, so half the
-    /// GPU idles regardless of how well the kernel itself performs. Fixing it
-    /// needs a split-K decode (partition the KV sequence across CTAs, then a
-    /// second reduction pass over the per-partition softmax states). Not
-    /// implemented; see this session's notes.
+    /// **Two shapes, selected by `split`.** With `split == None` the grid is
+    /// `num_q_heads x num_seqs` and one CTA owns a whole sequence for one
+    /// query head - simple, but at batch 1 with 32 heads that is 32 CTAs
+    /// against 66 SMs (half the GPU idle), and under GQA `g:1` the `g` CTAs
+    /// sharing a KV head each stream that KV head's whole cache, so DRAM sees
+    /// `g` times the necessary traffic.
+    ///
+    /// With `split == Some(..)` both of those go away together: the grid
+    /// becomes `num_kv_heads x num_seqs x splits`, one CTA carries every query
+    /// head of its KV head (so a token's K and V are loaded once and feed
+    /// `gqa_ratio` scores), and `%ctaid.z` partitions the KV sequence so the
+    /// CTA count stops depending on batch size. The price is that the result
+    /// is a per-split partial state in global scratch, combined by a second
+    /// entry point - see `emit_attention_split_reduce_entry`.
     ///
     /// Returns the CTA's real thread count for `emit_kernel`'s `.maxnreg`
     /// computation.
@@ -6581,6 +6774,7 @@ declare it as a Q format.",
         sl_ptr: &str,
         out_ptr: &str,
         max_pages_reg: &str,
+        split: Option<AttnSplit<'_>>,
         kernel_name: &str,
     ) -> u32 {
         const LOG2E: f32 = std::f32::consts::LOG2_E;
@@ -6591,12 +6785,24 @@ declare it as a Q format.",
         let elems_per_lane = head_dim / 32;
         let words_per_lane = (elems_per_lane / 2) as usize;
         let gqa_ratio = num_q_heads / num_kv_heads;
+        // Under split-K a CTA owns a KV head and therefore EVERY query head
+        // that shares it - that is what makes each K/V byte a single read
+        // instead of `gqa_ratio` of them. Without split-K the grid is one CTA
+        // per query head and this is 1.
+        let heads_per_cta = if split.is_some() { gqa_ratio } else { 1 } as usize;
 
-        writeln!(
-            &mut self.ptx_buffer,
-            "    // [Y PAGED DECODE ATTENTION] head_dim={} q_heads={} kv_heads={} (GQA {}:1) page_size={} | {} warps | online softmax, ex2.approx.ftz",
-            head_dim, num_q_heads, num_kv_heads, gqa_ratio, page_size, num_warps
-        )
+        match &split {
+            None => writeln!(
+                &mut self.ptx_buffer,
+                "    // [Y PAGED DECODE ATTENTION] head_dim={} q_heads={} kv_heads={} (GQA {}:1) page_size={} | {} warps | online softmax, ex2.approx.ftz",
+                head_dim, num_q_heads, num_kv_heads, gqa_ratio, page_size, num_warps
+            ),
+            Some(s) => writeln!(
+                &mut self.ptx_buffer,
+                "    // [Y PAGED DECODE ATTENTION] head_dim={} q_heads={} kv_heads={} (GQA {}:1) page_size={} | {} warps | {} splits, {} q heads/CTA | online softmax, ex2.approx.ftz",
+                head_dim, num_q_heads, num_kv_heads, gqa_ratio, page_size, num_warps, s.splits, heads_per_cta
+            ),
+        }
         .unwrap();
 
         // Shared: [num_warps] m | [num_warps] l | [num_warps * head_dim] acc, all f32.
@@ -6615,13 +6821,41 @@ declare it as a Q format.",
         writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp, tid).unwrap();
         writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 31;", lane, tid).unwrap();
 
-        // Q and Out share one element offset: ((seq*NQH + head)*HD + lane*EPL).
+        // `%ctaid.x` means different things in the two shapes: the query head
+        // in the single-pass grid, the KV head in the split grid (where the
+        // CTA then covers query heads `[kv*gqa, (kv+1)*gqa)`).
+        let kv_head = self.alloc_reg32();
+        let q_head_base = self.alloc_reg32();
+        if split.is_some() {
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", kv_head, ctaid_x).unwrap();
+            if gqa_ratio == 1 {
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", q_head_base, ctaid_x).unwrap();
+            } else {
+                writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", q_head_base, ctaid_x, gqa_ratio).unwrap();
+            }
+        } else {
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", q_head_base, ctaid_x).unwrap();
+            // kv_head = q_head / gqa_ratio
+            if gqa_ratio == 1 {
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", kv_head, ctaid_x).unwrap();
+            } else if gqa_ratio.is_power_of_two() {
+                writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, {};", kv_head, ctaid_x, gqa_ratio.trailing_zeros()).unwrap();
+            } else {
+                writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", kv_head, ctaid_x, gqa_ratio).unwrap();
+            }
+        }
+
+        // Q and Out share one element offset: ((seq*NQH + head0)*HD + lane*EPL).
+        // Head `h` of this CTA is a constant `h*head_dim` elements further on,
+        // so every extra head costs an immediate, not another address chain.
         let row = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", row, ctaid_y, num_q_heads, ctaid_x).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", row, ctaid_y, num_q_heads, q_head_base).unwrap();
+        let lane_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", lane_off, lane, elems_per_lane).unwrap();
         let elem = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", elem, row, head_dim).unwrap();
         let elem_l = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", elem_l, lane, elems_per_lane, elem).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", elem_l, elem, lane_off).unwrap();
         let byte_off = self.alloc_reg64();
         writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 2;", byte_off, elem_l).unwrap();
         let out_addr = self.alloc_reg64();
@@ -6638,48 +6872,86 @@ declare it as a Q format.",
         writeln!(&mut self.ptx_buffer, "    setp.le.s32 {}, {}, 0;", p_empty, seq_len).unwrap();
         writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_ZERO_{};", p_empty, kernel_name).unwrap();
 
-        // kv_head = q_head / gqa_ratio
-        let kv_head = self.alloc_reg32();
-        if gqa_ratio == 1 {
-            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", kv_head, ctaid_x).unwrap();
-        } else if gqa_ratio.is_power_of_two() {
-            writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, {};", kv_head, ctaid_x, gqa_ratio.trailing_zeros()).unwrap();
-        } else {
-            writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", kv_head, ctaid_x, gqa_ratio).unwrap();
-        }
-
-        // Q is read once per CTA - fold 1/sqrt(head_dim) in here rather than
-        // scaling every score inside the loop.
-        let q_addr = self.alloc_reg64();
-        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", q_addr, q_ptr, byte_off).unwrap();
-        let q_words = self.emit_vec_load_u32(&q_addr, words_per_lane);
-        let q_raw = self.emit_unpack_f16_pairs(&q_words);
+        // Q is read once per CTA, per head - fold 1/sqrt(head_dim) in here
+        // rather than scaling every score inside the loop.
         let scale = Self::f32_to_ptx_hex(1.0 / (head_dim as f32).sqrt());
-        let mut q_vals = Vec::with_capacity(q_raw.len());
-        for r in &q_raw {
-            let s = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", s, r, scale).unwrap();
-            q_vals.push(s);
+        let mut q_vals: Vec<Vec<String>> = Vec::with_capacity(heads_per_cta);
+        for h in 0..heads_per_cta {
+            let q_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", q_addr, q_ptr, byte_off).unwrap();
+            if h > 0 {
+                writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", q_addr, q_addr, h as u32 * head_dim * 2).unwrap();
+            }
+            let q_words = self.emit_vec_load_u32(&q_addr, words_per_lane);
+            let q_raw = self.emit_unpack_f16_pairs(&q_words);
+            let mut scaled = Vec::with_capacity(q_raw.len());
+            for r in &q_raw {
+                let s = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", s, r, scale).unwrap();
+                scaled.push(s);
+            }
+            q_vals.push(scaled);
         }
 
-        // ---- loop-carried online-softmax state: these exact registers are
-        // rewritten in place every iteration (see doc comment) ----
-        let m_reg = self.alloc_regf32();
-        let l_reg = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", m_reg, Self::f32_to_ptx_hex(NEG_BIG)).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", l_reg).unwrap();
-        let mut acc = Vec::with_capacity(elems_per_lane as usize);
-        for _ in 0..elems_per_lane {
-            let a = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", a).unwrap();
-            acc.push(a);
+        // ---- loop-carried online-softmax state, one set per query head this
+        // CTA owns: these exact registers are rewritten in place every
+        // iteration (see doc comment) ----
+        let mut m_regs = Vec::with_capacity(heads_per_cta);
+        let mut l_regs = Vec::with_capacity(heads_per_cta);
+        let mut accs: Vec<Vec<String>> = Vec::with_capacity(heads_per_cta);
+        for _ in 0..heads_per_cta {
+            let m_reg = self.alloc_regf32();
+            let l_reg = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", m_reg, Self::f32_to_ptx_hex(NEG_BIG)).unwrap();
+            writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", l_reg).unwrap();
+            m_regs.push(m_reg);
+            l_regs.push(l_reg);
+            let mut acc = Vec::with_capacity(elems_per_lane as usize);
+            for _ in 0..elems_per_lane {
+                let a = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", a).unwrap();
+                acc.push(a);
+            }
+            accs.push(acc);
         }
 
-        let t_reg = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", t_reg, warp).unwrap();
+        // Token range for this CTA. Single-pass: the whole sequence. Split-K:
+        // `[z*chunk, min((z+1)*chunk, seq_len))` with `chunk = ceil(seq_len /
+        // splits)`, so split 0 is non-empty whenever `seq_len > 0` and a
+        // trailing split that got nothing exits the loop immediately, leaving
+        // the `(-1e30, 0, 0)` identity state for the combine to absorb.
+        let (t_reg, t_end) = if let Some(s) = &split {
+            let ctaid_z = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.z;", ctaid_z).unwrap();
+            let chunk = self.alloc_reg32();
+            if s.splits == 1 {
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", chunk, seq_len).unwrap();
+            } else {
+                let up = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", up, seq_len, s.splits - 1).unwrap();
+                if s.splits.is_power_of_two() {
+                    writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, {};", chunk, up, s.splits.trailing_zeros()).unwrap();
+                } else {
+                    writeln!(&mut self.ptx_buffer, "    div.u32 {}, {}, {};", chunk, up, s.splits).unwrap();
+                }
+            }
+            let t_start = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", t_start, ctaid_z, chunk).unwrap();
+            let t_hi = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", t_hi, t_start, chunk).unwrap();
+            let t_end = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    min.s32 {}, {}, {};", t_end, t_hi, seq_len).unwrap();
+            let t_reg = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", t_reg, t_start, warp).unwrap();
+            (t_reg, t_end)
+        } else {
+            let t_reg = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", t_reg, warp).unwrap();
+            (t_reg, seq_len.clone())
+        };
         writeln!(&mut self.ptx_buffer, "ATTN_LOOP_{}:", kernel_name).unwrap();
         let p_done = self.alloc_pred();
-        writeln!(&mut self.ptx_buffer, "    setp.ge.s32 {}, {}, {};", p_done, t_reg, seq_len).unwrap();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.s32 {}, {}, {};", p_done, t_reg, t_end).unwrap();
         writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_LOOP_END_{};", p_done, kernel_name).unwrap();
 
         // token -> (logical page, slot)
@@ -6721,142 +6993,453 @@ declare it as a Q format.",
         let kv_bytes = self.alloc_reg64();
         writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 1;", kv_bytes, kv_idx).unwrap();
 
-        // score = warp_reduce_sum(dot(Q, K_t))
+        // K and V for this token are issued back to back and then shared by
+        // every query head this CTA owns. Issuing both loads before any of the
+        // dependent arithmetic is the point of the whole shape: one token's
+        // K/V now feeds `heads_per_cta` scores instead of being re-read by
+        // `gqa_ratio` separate CTAs.
         let k_addr = self.alloc_reg64();
         writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", k_addr, k_ptr, kv_bytes).unwrap();
         let k_words = self.emit_vec_load_u32(&k_addr, words_per_lane);
-        let k_vals = self.emit_unpack_f16_pairs(&k_words);
-        let mut dot = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", dot, q_vals[0], k_vals[0]).unwrap();
-        for j in 1..elems_per_lane as usize {
-            let nx = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, q_vals[j], k_vals[j], dot).unwrap();
-            dot = nx;
-        }
-        let score = self.emit_warp_reduce_sum(&dot);
-
-        // online softmax update
-        writeln!(&mut self.ptx_buffer, "    // online softmax: rescale the running sum AND accumulator by exp(m_old - m_new)").unwrap();
-        let m_new = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, {};", m_new, m_reg, score).unwrap();
-        let corr = self.emit_exp_f32(&m_reg.clone(), &m_new, LOG2E);
-        let p_w = self.emit_exp_f32(&score, &m_new, LOG2E);
-        writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", l_reg, l_reg, corr, p_w).unwrap();
-
         let v_addr = self.alloc_reg64();
         writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", v_addr, v_ptr, kv_bytes).unwrap();
         let v_words = self.emit_vec_load_u32(&v_addr, words_per_lane);
+        let k_vals = self.emit_unpack_f16_pairs(&k_words);
         let v_vals = self.emit_unpack_f16_pairs(&v_words);
-        for j in 0..elems_per_lane as usize {
-            let t = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", t, acc[j], corr).unwrap();
-            writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", acc[j], p_w, v_vals[j], t).unwrap();
+
+        for h in 0..heads_per_cta {
+            // score = warp_reduce_sum(dot(Q_h, K_t))
+            let mut dot = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", dot, q_vals[h][0], k_vals[0]).unwrap();
+            for j in 1..elems_per_lane as usize {
+                let nx = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, q_vals[h][j], k_vals[j], dot).unwrap();
+                dot = nx;
+            }
+            let score = self.emit_warp_reduce_sum(&dot);
+
+            // online softmax update
+            writeln!(&mut self.ptx_buffer, "    // online softmax: rescale the running sum AND accumulator by exp(m_old - m_new)").unwrap();
+            let m_reg = m_regs[h].clone();
+            let l_reg = l_regs[h].clone();
+            let m_new = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, {};", m_new, m_reg, score).unwrap();
+            let corr = self.emit_exp_f32(&m_reg, &m_new, LOG2E);
+            let p_w = self.emit_exp_f32(&score, &m_new, LOG2E);
+            writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", l_reg, l_reg, corr, p_w).unwrap();
+            for j in 0..elems_per_lane as usize {
+                let a = accs[h][j].clone();
+                let t = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", t, a, corr).unwrap();
+                writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", a, p_w, v_vals[j], t).unwrap();
+            }
+            writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", m_reg, m_new).unwrap();
         }
-        writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", m_reg, m_new).unwrap();
         writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", t_reg, t_reg, num_warps).unwrap();
         writeln!(&mut self.ptx_buffer, "    bra ATTN_LOOP_{};", kernel_name).unwrap();
         writeln!(&mut self.ptx_buffer, "ATTN_LOOP_END_{}:", kernel_name).unwrap();
 
         // ---- cross-warp merge: each warp holds a PARTIAL softmax state, so
         // this is a max-rescale-and-sum, not a plain sum ----
+        //
+        // With more than one query head per CTA the heads go through the SAME
+        // shared buffer one at a time, separated by barriers, rather than each
+        // getting its own slice. `num_warps*(2 + head_dim)*4` bytes is already
+        // 16,640 at 32 warps and head_dim 128; multiplying that by a GQA ratio
+        // of 4 would ask for 66,560 and blow the 48 KB static shared-memory
+        // limit, which ptxas reports as a link-time failure rather than
+        // anything traceable back to the GQA merge.
         let smem_base = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", smem_base, smem).unwrap();
         let p_lane0 = self.alloc_pred();
         writeln!(&mut self.ptx_buffer, "    setp.eq.s32 {}, {}, 0;", p_lane0, lane).unwrap();
         let a_m = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, 4, {};", a_m, warp, smem_base).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", p_lane0, a_m, m_reg).unwrap();
         let a_l = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", a_l, a_m, num_warps * 4).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", p_lane0, a_l, l_reg).unwrap();
-
         let acc_off = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", acc_off, warp, head_dim).unwrap();
         let acc_off2 = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", acc_off2, lane, elems_per_lane, acc_off).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", acc_off2, acc_off, lane_off).unwrap();
         let a_acc = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, 4, {};", a_acc, acc_off2, smem_base).unwrap();
         let a_acc2 = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", a_acc2, a_acc, num_warps * 8).unwrap();
-        for (j, a) in acc.iter().enumerate() {
-            writeln!(&mut self.ptx_buffer, "    st.shared.f32 [{}+{}], {};", a_acc2, j * 4, a).unwrap();
-        }
-        writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
-
-        // Every thread recomputes the (identical) merge scalars: `num_warps`
-        // is compile-time, so this unrolls to a handful of shared loads -
-        // cheaper than a second barrier plus a broadcast.
-        let mut ms = Vec::with_capacity(num_warps as usize);
-        let mut ls = Vec::with_capacity(num_warps as usize);
-        for w in 0..num_warps {
-            let mm = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}+{}];", mm, smem_base, w * 4).unwrap();
-            ms.push(mm);
-            let ll = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}+{}];", ll, smem_base, num_warps * 4 + w * 4).unwrap();
-            ls.push(ll);
-        }
-        let mut m_all = ms[0].clone();
-        for w in 1..num_warps as usize {
-            let nx = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, {};", nx, m_all, ms[w]).unwrap();
-            m_all = nx;
-        }
-        let mut corrs = Vec::with_capacity(num_warps as usize);
-        for w in 0..num_warps as usize {
-            let c = self.emit_exp_f32(&ms[w], &m_all, LOG2E);
-            corrs.push(c);
-        }
-        let mut l_all = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", l_all, ls[0], corrs[0]).unwrap();
-        for w in 1..num_warps as usize {
-            let nx = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, ls[w], corrs[w], l_all).unwrap();
-            l_all = nx;
-        }
-
-        // Only warp 0 stores; every warp computed the same answer.
-        let p_not_w0 = self.alloc_pred();
-        writeln!(&mut self.ptx_buffer, "    setp.ne.s32 {}, {}, 0;", p_not_w0, warp).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_END_{};", p_not_w0, kernel_name).unwrap();
-
         let merge_off = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", merge_off, lane, elems_per_lane * 4, num_warps * 8).unwrap();
         let a_merge = self.alloc_reg32();
         writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", a_merge, merge_off, smem_base).unwrap();
-        let mut out_vals = Vec::with_capacity(elems_per_lane as usize);
-        for j in 0..elems_per_lane as usize {
-            let mut tot: Option<String> = None;
-            for w in 0..num_warps as usize {
-                let t = self.alloc_regf32();
-                writeln!(
-                    &mut self.ptx_buffer,
-                    "    ld.shared.f32 {}, [{}+{}];",
-                    t,
-                    a_merge,
-                    w as u32 * head_dim * 4 + j as u32 * 4
-                )
-                .unwrap();
-                let nx = self.alloc_regf32();
-                match &tot {
-                    None => writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", nx, t, corrs[w]).unwrap(),
-                    Some(prev) => writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, t, corrs[w], prev).unwrap(),
-                }
-                tot = Some(nx);
+
+        // Split-K destination addresses: `Partial[seq, head, split, :]` and
+        // `PartialMeta[seq, head, split, {m,l}]`, head 0 of this CTA. Head `h`
+        // is a constant `splits*head_dim` elements further on, same trick as
+        // Q/Out above.
+        let (part_addr, meta_addr) = if let Some(s) = &split {
+            let ctaid_z2 = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.z;", ctaid_z2).unwrap();
+            let rs = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", rs, row, s.splits, ctaid_z2).unwrap();
+            let pe = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", pe, rs, head_dim, lane_off).unwrap();
+            let pb = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 4;", pb, pe).unwrap();
+            let pa = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", pa, s.partial, pb).unwrap();
+            let me = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, 2;", me, rs).unwrap();
+            let mb = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 4;", mb, me).unwrap();
+            let ma = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", ma, s.meta, mb).unwrap();
+            (Some(pa), Some(ma))
+        } else {
+            (None, None)
+        };
+
+        for h in 0..heads_per_cta {
+            if h > 0 {
+                // The previous head's readers must be done before this head's
+                // writers reuse the same buffer.
+                writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
             }
+            writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", p_lane0, a_m, m_regs[h]).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", p_lane0, a_l, l_regs[h]).unwrap();
+            for j in 0..elems_per_lane as usize {
+                writeln!(&mut self.ptx_buffer, "    st.shared.f32 [{}+{}], {};", a_acc2, j * 4, accs[h][j]).unwrap();
+            }
+            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+
+            // Only warp 0 finishes this head. The others jump straight to the
+            // label below - which is placed BEFORE the next head's `bar.sync`,
+            // so the branch reconverges before any barrier.
+            let p_not_w0 = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.ne.s32 {}, {}, 0;", p_not_w0, warp).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_MERGED_{}_{};", p_not_w0, kernel_name, h).unwrap();
+
+            // The merge scalars: `num_warps` is compile-time, so this unrolls
+            // to a handful of shared loads.
+            let mut ms = Vec::with_capacity(num_warps as usize);
+            let mut ls = Vec::with_capacity(num_warps as usize);
+            for w in 0..num_warps {
+                let mm = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}+{}];", mm, smem_base, w * 4).unwrap();
+                ms.push(mm);
+                let ll = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}+{}];", ll, smem_base, num_warps * 4 + w * 4).unwrap();
+                ls.push(ll);
+            }
+            let mut m_all = ms[0].clone();
+            for w in 1..num_warps as usize {
+                let nx = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, {};", nx, m_all, ms[w]).unwrap();
+                m_all = nx;
+            }
+            let mut corrs = Vec::with_capacity(num_warps as usize);
+            for w in 0..num_warps as usize {
+                let c = self.emit_exp_f32(&ms[w], &m_all, LOG2E);
+                corrs.push(c);
+            }
+            let mut l_all = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", l_all, ls[0], corrs[0]).unwrap();
+            for w in 1..num_warps as usize {
+                let nx = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, ls[w], corrs[w], l_all).unwrap();
+                l_all = nx;
+            }
+
+            let mut totals = Vec::with_capacity(elems_per_lane as usize);
+            for j in 0..elems_per_lane as usize {
+                let mut tot: Option<String> = None;
+                for w in 0..num_warps as usize {
+                    let t = self.alloc_regf32();
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    ld.shared.f32 {}, [{}+{}];",
+                        t,
+                        a_merge,
+                        w as u32 * head_dim * 4 + j as u32 * 4
+                    )
+                    .unwrap();
+                    let nx = self.alloc_regf32();
+                    match &tot {
+                        None => writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", nx, t, corrs[w]).unwrap(),
+                        Some(prev) => writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, t, corrs[w], prev).unwrap(),
+                    }
+                    tot = Some(nx);
+                }
+                totals.push(tot.unwrap());
+            }
+
+            match (&part_addr, &meta_addr) {
+                // Split-K: store the UNNORMALIZED state. Dividing by `l_all`
+                // here would be wrong - this CTA saw only its slice of the
+                // sequence, and the combine has to rescale by the global max
+                // before it can normalize.
+                (Some(pa), Some(ma)) => {
+                    let s = split.as_ref().unwrap();
+                    let byte_h = h as u32 * s.splits * head_dim * 4;
+                    self.emit_vec_store_f32(pa, byte_h, &totals);
+                    let meta_h = h as u32 * s.splits * 2 * 4;
+                    writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}+{}], {};", p_lane0, ma, meta_h, m_all).unwrap();
+                    writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}+{}], {};", p_lane0, ma, meta_h + 4, l_all).unwrap();
+                }
+                _ => {
+                    let mut out_vals = Vec::with_capacity(elems_per_lane as usize);
+                    for t in &totals {
+                        let o = self.alloc_regf32();
+                        writeln!(&mut self.ptx_buffer, "    div.rn.f32 {}, {}, {};", o, t, l_all).unwrap();
+                        out_vals.push(o);
+                    }
+                    let out_words = self.emit_pack_f16_pairs(&out_vals);
+                    self.emit_vec_store_u32(&out_addr, &out_words);
+                }
+            }
+            writeln!(&mut self.ptx_buffer, "ATTN_MERGED_{}_{}:", kernel_name, h).unwrap();
+        }
+        writeln!(&mut self.ptx_buffer, "    bra ATTN_END_{};", kernel_name).unwrap();
+
+        // seq_len == 0. The single-pass kernel owns `Out` and so must zero it
+        // itself; the split kernel does not write `Out` at all, and its
+        // combine entry has the same guard.
+        writeln!(&mut self.ptx_buffer, "ATTN_ZERO_{}:", kernel_name).unwrap();
+        if split.is_none() {
+            let p_not_w0z = self.alloc_pred();
+            writeln!(&mut self.ptx_buffer, "    setp.ne.s32 {}, {}, 0;", p_not_w0z, warp).unwrap();
+            writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_END_{};", p_not_w0z, kernel_name).unwrap();
+            let mut zeros = Vec::with_capacity(words_per_lane);
+            for _ in 0..words_per_lane {
+                let z = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", z).unwrap();
+                zeros.push(z);
+            }
+            self.emit_vec_store_u32(&out_addr, &zeros);
+        }
+        writeln!(&mut self.ptx_buffer, "ATTN_END_{}:", kernel_name).unwrap();
+
+        num_warps * 32
+    }
+
+    /// `st.global` of `vals` f32 registers at `addr + base_off`, vectorized
+    /// into `v4`/`v2`/scalar chunks.
+    ///
+    /// Split-K partials are the only f32 global traffic this emitter writes,
+    /// and they are written once per CTA against a KV stream read every
+    /// token - so this is not on the critical path, but a scalar store per
+    /// element would still cost 4 transactions per lane where 1 does.
+    fn emit_vec_store_f32(&mut self, addr: &str, base_off: u32, vals: &[String]) {
+        let mut i = 0usize;
+        while i < vals.len() {
+            let n = if vals.len() - i >= 4 { 4 } else if vals.len() - i >= 2 { 2 } else { 1 };
+            let off = base_off + (i as u32) * 4;
+            match n {
+                4 => writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [{}+{}], {{{}}};", addr, off, vals[i..i + 4].join(",")).unwrap(),
+                2 => writeln!(&mut self.ptx_buffer, "    st.global.v2.f32 [{}+{}], {{{}}};", addr, off, vals[i..i + 2].join(",")).unwrap(),
+                _ => writeln!(&mut self.ptx_buffer, "    st.global.f32 [{}+{}], {};", addr, off, vals[i]).unwrap(),
+            }
+            i += n;
+        }
+    }
+
+    /// Load sibling of `emit_vec_store_f32_pred`, unpredicated.
+    fn emit_vec_load_f32(&mut self, addr: &str, base_off: u32, n_vals: usize) -> Vec<String> {
+        let mut out = Vec::with_capacity(n_vals);
+        let mut i = 0usize;
+        while i < n_vals {
+            let n = if n_vals - i >= 4 { 4 } else if n_vals - i >= 2 { 2 } else { 1 };
+            let regs: Vec<String> = (0..n).map(|_| self.alloc_regf32()).collect();
+            let off = base_off + (i as u32) * 4;
+            match n {
+                4 => writeln!(&mut self.ptx_buffer, "    ld.global.v4.f32 {{{}}}, [{}+{}];", regs.join(","), addr, off).unwrap(),
+                2 => writeln!(&mut self.ptx_buffer, "    ld.global.v2.f32 {{{}}}, [{}+{}];", regs.join(","), addr, off).unwrap(),
+                _ => writeln!(&mut self.ptx_buffer, "    ld.global.f32 {}, [{}+{}];", regs[0], addr, off).unwrap(),
+            }
+            out.extend(regs);
+            i += n;
+        }
+        out
+    }
+
+
+    /// Emits `<kernel_name>_reduce`, the second entry point of the split-K
+    /// attention shape: it combines the `splits` partial softmax states one
+    /// CTA of the main kernel each produced into the final `Out` row.
+    ///
+    /// **Launch contract**: grid `(num_q_heads, num_seqs, 1)`, block
+    /// `(32, 1, 1)` - one warp per output row, lane `L` owning head-dimension
+    /// elements `[L*epl, (L+1)*epl)` exactly as the main kernel does, so the
+    /// f32 partials are read back in the same lane order they were written.
+    /// It takes the SAME nine parameters as the main kernel (it ignores Q,
+    /// KCache, VCache, PageTable and MaxPages) so a host can launch both with
+    /// one argument tuple.
+    ///
+    /// The combine is the same max-rescale-and-sum as the cross-warp merge,
+    /// one level up:
+    ///
+    /// ```text
+    ///   M      = max_s m_s
+    ///   c_s    = exp(m_s - M)
+    ///   L      = sum_s l_s * c_s
+    ///   out[j] = (sum_s acc_s[j] * c_s) / L
+    /// ```
+    ///
+    /// A split that received no tokens stored `(m, l, acc) = (-1e30, 0, 0)`,
+    /// which is the identity of that fold - so no emptiness test is needed
+    /// per split. `seq_len == 0` IS special-cased, because then every split is
+    /// empty, `L` is zero and the division would produce NaN; that case stores
+    /// an explicit zero row, matching the single-pass kernel's guarantee.
+    ///
+    /// This entry is emitted into `pending_module_items` rather than into the
+    /// live buffer: register numbering is per-entry, so the counters are saved,
+    /// zeroed for this body and restored, and the entry is assembled complete
+    /// with its own `.reg` declarations.
+    fn emit_attention_split_reduce_entry(
+        &mut self,
+        head_dim: u32,
+        num_q_heads: u32,
+        splits: u32,
+        kernel: &KernelDecl,
+        kernel_name: &str,
+    ) {
+        const LOG2E: f32 = std::f32::consts::LOG2_E;
+        let elems_per_lane = head_dim / 32;
+        let words_per_lane = (elems_per_lane / 2) as usize;
+
+        // Save the enclosing kernel's register state; this body gets its own.
+        let saved = (
+            std::mem::take(&mut self.ptx_buffer),
+            self.reg_u32_count,
+            self.reg_f32_count,
+            self.reg_u64_count,
+            self.reg_pred_count,
+            self.reg_b16_count,
+        );
+        self.reg_u32_count = 0;
+        self.reg_f32_count = 0;
+        self.reg_u64_count = 0;
+        self.reg_pred_count = 0;
+        self.reg_b16_count = 0;
+
+        let mut ptrs = Vec::with_capacity(kernel.params.len());
+        for (i, param) in kernel.params.iter().enumerate() {
+            match &param.ty {
+                Type::Generic { base, .. } if base == "GlobalMemory" => {
+                    let r = self.alloc_reg64();
+                    writeln!(&mut self.ptx_buffer, "    ld.param.u64 {}, [{}_{}];", r, param.name, i).unwrap();
+                    ptrs.push(r);
+                }
+                _ => {
+                    let r = self.alloc_reg32();
+                    writeln!(&mut self.ptx_buffer, "    ld.param.u32 {}, [{}_{}];", r, param.name, i).unwrap();
+                    ptrs.push(r);
+                }
+            }
+        }
+        let (sl_ptr, out_ptr, part_ptr, meta_ptr) =
+            (ptrs[4].clone(), ptrs[5].clone(), ptrs[6].clone(), ptrs[7].clone());
+
+        writeln!(
+            &mut self.ptx_buffer,
+            "    // [Y PAGED DECODE ATTENTION COMBINE] head_dim={} q_heads={} | {} splits",
+            head_dim, num_q_heads, splits
+        )
+        .unwrap();
+
+        let q_head = self.alloc_reg32();
+        let seq = self.alloc_reg32();
+        let lane = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", q_head).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.y;", seq).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", lane).unwrap();
+        let row = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", row, seq, num_q_heads, q_head).unwrap();
+        let lane_off = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", lane_off, lane, elems_per_lane).unwrap();
+        let out_elem = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", out_elem, row, head_dim, lane_off).unwrap();
+        let out_byte = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 2;", out_byte, out_elem).unwrap();
+        let out_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", out_addr, out_ptr, out_byte).unwrap();
+
+        let sl_off = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 4;", sl_off, seq).unwrap();
+        let sl_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", sl_addr, sl_ptr, sl_off).unwrap();
+        let seq_len = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    ld.global.s32 {}, [{}];", seq_len, sl_addr).unwrap();
+        let p_empty = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.le.s32 {}, {}, 0;", p_empty, seq_len).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra ATTNRED_ZERO_{};", p_empty, kernel_name).unwrap();
+
+        let rs = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", rs, row, splits).unwrap();
+        let me = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, 2;", me, rs).unwrap();
+        let mb = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 4;", mb, me).unwrap();
+        let meta_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", meta_addr, meta_ptr, mb).unwrap();
+        let pe = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mad.lo.s32 {}, {}, {}, {};", pe, rs, head_dim, lane_off).unwrap();
+        let pb = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.wide.s32 {}, {}, 4;", pb, pe).unwrap();
+        let part_addr = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    add.s64 {}, {}, {};", part_addr, part_ptr, pb).unwrap();
+
+        let mut ms = Vec::with_capacity(splits as usize);
+        let mut ls = Vec::with_capacity(splits as usize);
+        for sp in 0..splits {
+            let pair = self.emit_vec_load_f32(&meta_addr, sp * 8, 2);
+            ms.push(pair[0].clone());
+            ls.push(pair[1].clone());
+        }
+        let mut m_all = ms[0].clone();
+        for sp in 1..splits as usize {
+            let nx = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    max.f32 {}, {}, {};", nx, m_all, ms[sp]).unwrap();
+            m_all = nx;
+        }
+        let mut corrs = Vec::with_capacity(splits as usize);
+        for sp in 0..splits as usize {
+            let c = self.emit_exp_f32(&ms[sp], &m_all, LOG2E);
+            corrs.push(c);
+        }
+        let mut l_all = self.alloc_regf32();
+        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", l_all, ls[0], corrs[0]).unwrap();
+        for sp in 1..splits as usize {
+            let nx = self.alloc_regf32();
+            writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, ls[sp], corrs[sp], l_all).unwrap();
+            l_all = nx;
+        }
+
+        // One split's worth of `acc` is live at a time - accumulate as it is
+        // read rather than loading all `splits` vectors first.
+        let mut totals: Vec<String> = Vec::new();
+        for sp in 0..splits as usize {
+            let vals = self.emit_vec_load_f32(&part_addr, sp as u32 * head_dim * 4, elems_per_lane as usize);
+            let mut next = Vec::with_capacity(elems_per_lane as usize);
+            for (j, v) in vals.iter().enumerate() {
+                let nx = self.alloc_regf32();
+                if sp == 0 {
+                    writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", nx, v, corrs[sp]).unwrap();
+                } else {
+                    writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", nx, v, corrs[sp], totals[j]).unwrap();
+                }
+                next.push(nx);
+            }
+            totals = next;
+        }
+        let mut out_vals = Vec::with_capacity(elems_per_lane as usize);
+        for t in &totals {
             let o = self.alloc_regf32();
-            writeln!(&mut self.ptx_buffer, "    div.rn.f32 {}, {}, {};", o, tot.unwrap(), l_all).unwrap();
+            writeln!(&mut self.ptx_buffer, "    div.rn.f32 {}, {}, {};", o, t, l_all).unwrap();
             out_vals.push(o);
         }
         let out_words = self.emit_pack_f16_pairs(&out_vals);
         self.emit_vec_store_u32(&out_addr, &out_words);
-        writeln!(&mut self.ptx_buffer, "    bra ATTN_END_{};", kernel_name).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra ATTNRED_END_{};", kernel_name).unwrap();
 
-        // seq_len == 0: emit an explicit zero row (see doc comment).
-        writeln!(&mut self.ptx_buffer, "ATTN_ZERO_{}:", kernel_name).unwrap();
-        let p_not_w0z = self.alloc_pred();
-        writeln!(&mut self.ptx_buffer, "    setp.ne.s32 {}, {}, 0;", p_not_w0z, warp).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} bra ATTN_END_{};", p_not_w0z, kernel_name).unwrap();
+        writeln!(&mut self.ptx_buffer, "ATTNRED_ZERO_{}:", kernel_name).unwrap();
         let mut zeros = Vec::with_capacity(words_per_lane);
         for _ in 0..words_per_lane {
             let z = self.alloc_reg32();
@@ -6864,9 +7447,38 @@ declare it as a Q format.",
             zeros.push(z);
         }
         self.emit_vec_store_u32(&out_addr, &zeros);
-        writeln!(&mut self.ptx_buffer, "ATTN_END_{}:", kernel_name).unwrap();
+        writeln!(&mut self.ptx_buffer, "ATTNRED_END_{}:", kernel_name).unwrap();
 
-        num_warps * 32
+        let body = std::mem::replace(&mut self.ptx_buffer, saved.0);
+        let mut entry = String::new();
+        writeln!(&mut entry, ".visible .entry {}_reduce(", kernel_name).unwrap();
+        for (i, param) in kernel.params.iter().enumerate() {
+            let ptx_type = match &param.ty {
+                Type::Generic { base, .. } if base == "GlobalMemory" => ".param .u64",
+                _ => ".param .b32",
+            };
+            write!(&mut entry, "    {} {}_{}", ptx_type, param.name, i).unwrap();
+            if i + 1 < kernel.params.len() {
+                writeln!(&mut entry, ",").unwrap();
+            } else {
+                writeln!(&mut entry).unwrap();
+            }
+        }
+        writeln!(&mut entry, ")").unwrap();
+        writeln!(&mut entry, "{{").unwrap();
+        writeln!(&mut entry, "    .reg .b32 %r<{}>;", self.reg_u32_count.max(1)).unwrap();
+        writeln!(&mut entry, "    .reg .f32 %f<{}>;", self.reg_f32_count.max(1)).unwrap();
+        writeln!(&mut entry, "    .reg .b64 %rd<{}>;", self.reg_u64_count.max(1)).unwrap();
+        writeln!(&mut entry, "    .reg .pred %p<{}>;", self.reg_pred_count.max(1)).unwrap();
+        entry.push_str(&body);
+        writeln!(&mut entry, "}}").unwrap();
+        self.pending_module_items.push(entry);
+
+        self.reg_u32_count = saved.1;
+        self.reg_f32_count = saved.2;
+        self.reg_u64_count = saved.3;
+        self.reg_pred_count = saved.4;
+        self.reg_b16_count = saved.5;
     }
 
     /// `exp(a - b)` as `ex2.approx.ftz.f32((a - b) * log2 e)`.
@@ -8258,8 +8870,74 @@ mod tests_paged_decode_attention {
         assert!(eight.contains(&format!(".b8 smem_attn_paged_decode_attention_128_32_8_16_8[{}]", (8 * 2 + 8 * 128) * 4)));
     }
 
+    /// The nine-parameter split-K shape. Same probe mechanism as `compile`,
+    /// with the two f32 scratch buffers.
+    fn compile_split(name: &str) -> String {
+        let src = format!(
+            "kernel {}(Q: GlobalMemory<F16>, KCache: GlobalMemory<F16>, VCache: GlobalMemory<F16>, \
+             PageTable: GlobalMemory<I32>, SeqLens: GlobalMemory<I32>, Out: GlobalMemory<F16>, \
+             Partial: GlobalMemory<F32>, PartialMeta: GlobalMemory<F32>, \
+             MaxPages: I32) {{\n}}\n\nfn main() {{\n}}\n",
+            name
+        );
+        let tokens = Lexer::new(&src).tokenize();
+        let ast = Parser::new(tokens).parse_program().expect("probe source should parse");
+        let hw = HardwareProfile::default();
+        PtxEmitter::new_with_profile(&hw).emit_program(&ast, &hw)
+    }
+
+    #[test]
+    fn split_shape_merges_gqa_heads_and_emits_both_entries() {
+        let ptx = compile_split("paged_decode_attention_split_128_32_8_16_16_8");
+        assert!(ptx.contains("[Y PAGED DECODE ATTENTION]"), "split dispatch did not fire: {}", ptx);
+        assert!(ptx.contains("16 splits, 4 q heads/CTA"),
+                "split kernel must carry all 4 GQA-sharing query heads in one CTA: {}", ptx);
+
+        // Two entry points, and the combine really is a separate one - there
+        // is no device-wide barrier inside a kernel, so a single entry could
+        // not do this.
+        assert!(ptx.contains(".visible .entry paged_decode_attention_split_128_32_8_16_16_8("),
+                "missing main entry: {}", ptx);
+        assert!(ptx.contains(".visible .entry paged_decode_attention_split_128_32_8_16_16_8_reduce("),
+                "missing combine entry: {}", ptx);
+        assert!(ptx.contains("[Y PAGED DECODE ATTENTION COMBINE]"), "combine body not emitted: {}", ptx);
+
+        // %ctaid.z is what partitions the sequence; without it this is the
+        // single-pass kernel with extra buffers.
+        assert!(ptx.contains("%ctaid.z"), "split kernel must index the KV sequence by %ctaid.z: {}", ptx);
+
+        // The whole point of the merge: ONE K load and ONE V load per token,
+        // feeding four scores. Four `ld.global.v2.u32` in the loop body would
+        // mean the GQA re-read came back.
+        let body = ptx.split("ATTN_LOOP_paged_decode_attention_split_128_32_8_16_16_8:").nth(1)
+            .and_then(|s| s.split("ATTN_LOOP_END_paged_decode_attention_split_128_32_8_16_16_8:").next())
+            .expect("loop body");
+        assert_eq!(body.matches("ld.global.v2.u32").count(), 2,
+                   "expected exactly one K and one V vector load per token: {}", body);
+        assert_eq!(body.matches("ex2.approx.ftz.f32").count(), 8,
+                   "expected two exp per head for four heads: {}", body);
+
+        // Shared memory does NOT scale with the head count - the heads go
+        // through one buffer sequentially, or a GQA-4 kernel at 32 warps would
+        // ask for 66,560 bytes against the 48 KB static limit.
+        assert!(ptx.contains(&format!(".b8 smem_attn_paged_decode_attention_split_128_32_8_16_16_8[{}]",
+                                      (8 * 2 + 8 * 128) * 4)),
+                "shared memory must be sized per warp, not per (warp, head): {}", ptx);
+    }
+
     #[test]
     fn rejects_shapes_the_codegen_cannot_lower() {
+        // The split shape needs its two scratch buffers: the 7-parameter
+        // signature must NOT dispatch to it.
+        assert!(!compile("paged_decode_attention_split_128_32_8_16_16_8").contains("[Y PAGED DECODE ATTENTION]"));
+        // ... and the 9-parameter signature must not dispatch to the
+        // single-pass shape, which would ignore two of its arguments.
+        assert!(!compile_split("paged_decode_attention_128_32_8_16").contains("[Y PAGED DECODE ATTENTION]"));
+        // A GQA ratio past 8 makes one CTA carry too much softmax state.
+        assert!(!compile_split("paged_decode_attention_split_128_32_2_16_16_8").contains("[Y PAGED DECODE ATTENTION]"));
+        // Split count out of range.
+        assert!(!compile_split("paged_decode_attention_split_128_32_8_16_128_8").contains("[Y PAGED DECODE ATTENTION]"));
+
         // head_dim not a multiple of 32 (the warp width).
         assert!(!compile("paged_decode_attention_100_32_8_16").contains("[Y PAGED DECODE ATTENTION]"));
         // head_dim outside the supported 64/128/256 per-lane vector widths.
@@ -8285,13 +8963,19 @@ mod tests_paged_decode_attention {
             eprintln!("ptxas not available - skipping the assembly gate");
             return;
         }
-        for name in [
-            "paged_decode_attention_128_32_8_16",
-            "paged_decode_attention_128_32_8_16_8",
-            "paged_decode_attention_64_16_16_32",
-            "paged_decode_attention_256_16_4_1",
+        for (name, split) in [
+            ("paged_decode_attention_128_32_8_16", false),
+            ("paged_decode_attention_128_32_8_16_8", false),
+            ("paged_decode_attention_64_16_16_32", false),
+            ("paged_decode_attention_256_16_4_1", false),
+            // The split shape, including the two entries in one module and
+            // the head_dim 64 / 256 vector widths on the f32 partial path.
+            ("paged_decode_attention_split_128_32_8_16_16_8", true),
+            ("paged_decode_attention_split_128_32_8_16_4_8", true),
+            ("paged_decode_attention_split_64_16_16_32_8", true),
+            ("paged_decode_attention_split_256_16_4_1_8_4", true),
         ] {
-            let ptx = compile(name);
+            let ptx = if split { compile_split(name) } else { compile(name) };
             assert!(ptx.contains("[Y PAGED DECODE ATTENTION]"), "{} did not dispatch", name);
             let dir = std::env::temp_dir().join(format!("y_attn_ptxas_{}", name));
             std::fs::create_dir_all(&dir).unwrap();

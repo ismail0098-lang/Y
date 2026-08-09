@@ -1,0 +1,62 @@
+// Split-K ("flash decoding") paged decode attention, specialized for the same
+// 7B-class GQA configuration as tests/paged_decode_attention_128_32_8_16.ysu:
+//   head_dim = 128, 32 query heads, 8 KV heads (GQA 4:1), page_size = 16,
+//   16 sequence splits, 8 warps per CTA.
+//
+// It differs from that kernel in exactly the two ways the README named as the
+// reasons it loses to FlashInfer, and both had to change together:
+//
+//   * one CTA covers ALL FOUR query heads that share a KV head, so a token's
+//     K and V are read once instead of four times;
+//   * the KV sequence is partitioned across `splits` CTAs in %ctaid.z, so the
+//     CTA count no longer collapses to `num_q_heads * batch` - which is 32
+//     CTAs on a 66-SM GPU at batch 1, and would be 8 if the heads were merged
+//     without this.
+//
+// 16 splits with 8 warps is the batch-1 configuration; the same shape at 4
+// splits is in paged_decode_attention_split_128_32_8_16_4_8.ysu for
+// batch-many serving. Neither is right for both - see the measured table on
+// ATTN_SPLIT_DEFAULT_NUM_WARPS - because the CTA count that saturates the GPU
+// depends on the batch size, which is a runtime value.
+//
+// Launch contract (see emit_paged_decode_attention_kernel and
+// emit_attention_split_reduce_entry):
+//   paged_decode_attention_split_128_32_8_16_16_8
+//     grid  = (8, num_seqs, 16)      // (num_kv_heads, num_seqs, splits)
+//     block = (256, 1, 1)            // 8 warps
+//   paged_decode_attention_split_128_32_8_16_16_8_reduce
+//     grid  = (32, num_seqs, 1)      // (num_q_heads, num_seqs, 1)
+//     block = (32, 1, 1)             // one warp per output row
+// Both entries take this same parameter list, so one argument tuple launches
+// both, and Out is not valid until the second one has run.
+//
+// Buffer layouts, row-major:
+//   Q           [num_seqs, 32, 128]              f16
+//   KCache      [num_pages, 16, 8, 128]          f16
+//   VCache      [num_pages, 16, 8, 128]          f16
+//   PageTable   [num_seqs, MaxPages]             i32   logical -> physical page
+//   SeqLens     [num_seqs]                       i32
+//   Out         [num_seqs, 32, 128]              f16
+//   Partial     [num_seqs, 32, 16, 128]          f32   per-split acc (scratch)
+//   PartialMeta [num_seqs, 32, 16, 2]            f32   per-split (m, l)
+//
+// The scratch buffers are f32 because they hold an UNNORMALIZED running sum -
+// rounding it to f16 before the combine would throw away precision the
+// single-pass kernel keeps in registers. Neither needs zeroing: every split
+// of a non-empty sequence writes its slice, and for an empty one the combine
+// stores a zero row without reading them.
+kernel paged_decode_attention_split_128_32_8_16_16_8(
+    Q: GlobalMemory<F16>,
+    KCache: GlobalMemory<F16>,
+    VCache: GlobalMemory<F16>,
+    PageTable: GlobalMemory<I32>,
+    SeqLens: GlobalMemory<I32>,
+    Out: GlobalMemory<F16>,
+    Partial: GlobalMemory<F32>,
+    PartialMeta: GlobalMemory<F32>,
+    MaxPages: I32
+) {
+}
+
+fn main() {
+}
