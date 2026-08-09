@@ -1,0 +1,188 @@
+# The circom front end
+
+`Y foo.circom --target=r1cs` compiles circom 2.x source through Y's R1CS back
+end. `-l <dir>` adds an include search path (circom's own flag);
+`--witness inputs.json` also solves and writes the `.wtns`.
+
+## Why this exists
+
+Y's advantage is a compiler back end, and a back end nobody can reach is not a
+product. No team rewrites an audited circuit in a new language for a build-speed
+win — the circuit *is* the audited artifact. So the front end has to be the
+language they already have.
+
+Everything downstream of constraint construction is shared with Y's own
+language: the CSE pass, the snarkjs wire map, the `.r1cs`/`.wtns`/`.sym`
+writers, and the witness solver. Only the front half is new
+(`circom_lexer.rs`, `circom_ast.rs`, `circom_parser.rs`, `circom_lower.rs`).
+
+## Status: correct, at parity on compile time, and emitting a smaller circuit
+
+**Correctness is established against a published vector.** circomlib's
+`Poseidon(2)`, compiled from unmodified circomlib source through this front end,
+produces circomlib's own four pinned digests — and agrees with Y's *native*
+`poseidon_hash` on the same inputs. Two independent paths through this compiler,
+one answer. `tests/circom_frontend.rs`.
+
+Structural metadata matches circom exactly on every circuit tested: output
+count, public input count, private input count. That is what a verifier and a
+`.wtns` are indexed by.
+
+**Compile time, best of three:**
+
+| | circom | Y | |
+|---|---|---|---|
+| `Poseidon(2)` | 0.102 s | 0.076 s | Y 1.34x |
+| 200-hash Poseidon chain | 0.662 s | 0.693 s | Y 0.96x |
+| 1000-hash Poseidon chain | 3.236 s | 3.304 s | Y 0.98x |
+
+**Circuit size, from the same source:**
+
+| circuit | circom | Y | |
+|---|---|---|---|
+| `Multiplier2` | 1 | 1 | |
+| `SumSquares(4)` | 7 | 5 | |
+| `Poseidon(2)` | 517 | 286 | 1.81x fewer |
+| 200-hash chain | 103,400 | 55,608 | 1.86x fewer |
+| 1000-hash chain | 517,000 | 278,008 | 1.86x fewer |
+
+Non-zero terms land within 7% of circom's (200-hash chain: 383k for circom,
+410k for Y), so the smaller constraint count is not bought by densifying the
+matrices — which is the way this optimisation usually goes wrong.
+
+Read the compile-time column as parity, not as a win: 0.96x and 0.98x are inside
+the noise of "the same". The size column is the real result, and it is worth
+more, because constraint count is paid again by every prover run rather than
+once at build time. Measured on a 20-hash chain through arkworks Groth16
+(`what_the_reduction_buys_at_proving_time`, `--ignored`):
+
+```
+unreduced    14963 constraints    15365 wires    51872 nnz   setup 0.048 s   prove 0.062 s
+reduced       5568 constraints    15365 wires    35765 nnz   setup 0.028 s   prove 0.044 s
+```
+
+1.7x on setup and 1.4x on prove. Not the 2.7x the constraint count alone
+suggests, and the reason is in the middle column: **the wire count does not
+move.** The pass deletes constraints and leaves the eliminated wires in the
+variable table, because removing them means renumbering every wire in the
+circuit — and Groth16's cost scales with wires as well as constraints. Compacting
+them is the next lever, and it is the one with a real trap in it: every consumer
+of a wire id has to be renumbered together, which is the failure that made
+`optimize_circuit` produce unprovable circuits once already (CLAUDE.md gotcha #8).
+
+### How it got here
+
+The first version of this front end emitted **765 constraints for `Poseidon(2)`
+against circom's 517**, and ran a 200-hash chain at **0.59x** — slower. circom's
+default `--O2` substitutes linear constraints away and Y's `optimize_circuit`
+only did common-subexpression elimination on identical `(A, B)` pairs, so every
+`out <== in` in the source survived as a constraint of its own.
+
+`substitute_linear_constraints` closes that. Four things mattered, in descending
+order of size, and only the first was the algorithm:
+
+1. **`Fr::inv` in the inner loop.** The pivot's coefficient is inverted to solve
+   `k * L = c_w * w` for `w`. Inversion is Fermat's little theorem — a 254-bit
+   exponentiation, ~380 Montgomery multiplies, ~6 µs — and it was called once per
+   candidate constraint. That was **0.45 s of the pass's 0.55 s**, to divide by a
+   coefficient that `<==` always leaves as exactly 1.
+2. **Chained definitions need back-substitution, not deferral.** The first
+   version refused to eliminate a wire that an earlier expression already read,
+   and left it for the next iteration of the fixpoint. A Poseidon permutation is
+   a chain of linear layers, so that peeled one level per round and hit the
+   10-round safety cap having swept every constraint and every witness recipe ten
+   times. Pushing the new definition back into the expressions that depend on it
+   (`uses[w]`) finishes the whole chain in one round.
+3. **circomlib rebuilds its constant tables per instantiation.** `POSEIDON_C(t)`
+   returns a 195-element array of literals and `Poseidon(2)` calls it once per
+   instantiation; a 200-hash chain evaluated it 200 times, and `call_function`
+   deep-cloned the function's body AST each time to do it. circom `function`s
+   cannot touch signals, so they are pure over compile-time values and their
+   results cache. (This is the same disease `emit_poseidon` had on the native
+   path — see CLAUDE.md gotcha #8 — found again in a different place.)
+4. **`LinearCombination::simplify` built a `HashMap` per call**, and the CSE pass
+   allocated a `Vec` per distinct product to hold its hash bucket. Both are gone;
+   `simplify` sorts and merges in place, and the CSE table is open-addressed
+   `u32` indices.
+
+Y's headline numbers against circom (2.6x on a Poseidon chain, 154x on the
+polynomial circuit) were measured on Y's **own** `.ysu` front end, where
+`emit_poseidon` folds linear combinations as it builds them. They still should
+not be quoted for circom input — the numbers for that are the tables above.
+
+The pass costs Y's own front end 1.5% (0.905 s → 0.919 s on a 1000-hash native
+chain) and finds nothing there, which is the expected result and is why its
+scratch arrays are allocated on the first elimination rather than up front.
+
+## Supported subset
+
+Templates and template parameters; `function`s including ones returning constant
+arrays; `component` declarations, component arrays, and subcomponent signal
+access (`c.out`, `c.out[i]`); `signal input`/`output`/intermediate, including
+multi-dimensional arrays; `var` with arrays and inline array literals; `for`,
+`while`, `if`/`else` over compile-time values; `include` with search paths and
+cycle-safe single parsing; all of `<==`, `==>`, `<--`, `-->`, `===`, `=` and the
+compound assignments; `**`, `\` (integer division) and `/` (field division) kept
+distinct; `assert` and `log`.
+
+## Refused, by name
+
+The rule from CLAUDE.md applies with extra force here: **a front end that
+quietly ignores a construct emits a circuit with fewer constraints than the
+source describes, which still proves — just something weaker than the author
+wrote.** Nothing downstream records the difference.
+
+- **Non-quadratic expressions** (`a * b * c`, `a / b` with a signal divisor, a
+  signal raised above degree 2) — refused with circom's own word for it.
+- **Branching on a signal's value** (`if (a)`, `a ? b : c` with a signal
+  condition) — the branch decides which constraints exist. The message points at
+  the multiplexer idiom.
+- **Comparison, boolean and bitwise operators over signals** — these are gadgets,
+  not operators. The message names `comparators.circom` / `bitify.circom`.
+- **Signal-dependent array indices** — needs an explicit multiplexer.
+- **`bus` declarations** (circom 2.1.5+) — flattening one silently would change
+  the signal layout a verifier expects.
+- **Signal tags** (`signal input {binary} x`) — a tag is a claim other templates
+  may rely on to skip a check, so ignoring it can drop a real constraint.
+- **`custom` templates** — PLONKish custom gates; Y emits R1CS only, and
+  compiling one as an ordinary template would drop the gate it stands for.
+- **`assert` over signal values** — it is a constraint on the witness; write it
+  as `===` so it is explicit.
+
+## Three bugs this work exposed in the existing back end
+
+- **`WitnessIRGraph::topological_order` was the identity** — `(0..num_signals)` —
+  while being named as if it were a dependency order, and the witness solver
+  ignored it and walked by wire index instead. That is correct only when a
+  recipe never references a higher-numbered wire, which is a property of Y's own
+  emitter (it allocates a wire at the moment it defines it) and **not** of
+  circom, where `signal output out;` is conventionally declared at the top of a
+  template and assigned at the bottom. The forward pass read those wires as
+  zero and the witness silently failed to satisfy its own circuit. It is a real
+  Kahn sort now, with the positional input assignment split into its own pass
+  so reordering cannot disturb it.
+- **New `WitnessOp` variants must be added to `solve_r1cs_witness`'s
+  "already solved" set**, exactly as CLAUDE.md warns. `MulAddLc` and `DivLc`
+  were added for this front end (`a*b + c` fused into one constraint, and the
+  field division that `<--` exists for), and omitting them there makes
+  back-propagation refuse to fire on anything referencing them.
+
+- **`build_witness_ir`'s `mul_by_output` scan ignored coefficients.** It matches
+  a constraint with one term on each side and reconstructs the wire as
+  `WitnessOp::Mul(a, b)` — a product of two *wires*, with nowhere to carry a
+  scale factor. So `2a * b = t` was reconstructed as `a * b`. It was survivable
+  only by accident: the wrong value fails the forward pass's satisfiability
+  check, which forfeits the fast exit and sends the whole circuit through the
+  back-propagation sweep to rediscover it. All three coefficients must now be 1,
+  and anything else falls through to `lc_by_output`, which keeps them.
+
+## Known gaps
+
+- **Input JSON does not accept arrays.** `mini_json::parse_scalar_map` is
+  scalar-only, but circom inputs are routinely `{"in": ["1", "2"]}`. The
+  `--witness` path therefore works only for scalar inputs today.
+- **Eliminated wires are not compacted away**, so Y's wire count is well above
+  circom's (200-hash chain: 153,605 against ~103,000) and Groth16 pays for it.
+  See the proving measurement above.
+- `include` resolution is path-based only; there is no package/`node_modules`
+  lookup.

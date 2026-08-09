@@ -35,18 +35,14 @@ use revm::{Context, ExecuteCommitEvm, MainBuilder, MainContext};
 use y::lexer::Lexer;
 use y::parser::Parser;
 use y::type_checker::TypeChecker;
-use y::zk_emitter::{BigUint, Circuit, Fr, LinearCombination, ZkEmitter};
+use y::zk_emitter::{Circuit, Fr, LinearCombination, ZkEmitter};
 use y::zk_solidity::{emit_groth16_verifier, Groth16VerifyingKey};
 use y::zk_witness::solve_r1cs_witness;
 
 // ─────────────────────────── Y -> arkworks ───────────────────────────
 
 fn to_ark(v: &Fr) -> ArkFr {
-    let mut bytes = Vec::with_capacity(v.0.digits.len() * 4);
-    for d in &v.0.digits {
-        bytes.extend_from_slice(&d.to_le_bytes());
-    }
-    ArkFr::from_le_bytes_mod_order(&bytes)
+    ArkFr::from_le_bytes_mod_order(&v.to_bytes_le(32))
 }
 
 fn ark_lc(lc: &LinearCombination, vars: &[Variable]) -> ArkLc<ArkFr> {
@@ -95,7 +91,7 @@ fn compile(source: &str, priv_in: &[u64]) -> YCircuit {
     let circuit = emitter.build_circuit();
     let ir = emitter.build_witness_ir();
 
-    let privs: Vec<Fr> = priv_in.iter().map(|v| Fr(BigUint::from_u64(*v))).collect();
+    let privs: Vec<Fr> = priv_in.iter().map(|v| Fr::from_u64(*v)).collect();
     let (witness, ok) =
         solve_r1cs_witness(&circuit.constraints, &ir, circuit.num_variables, &[], &privs);
     assert!(ok, "witness does not satisfy the circuit");
