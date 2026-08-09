@@ -18,7 +18,7 @@
 use y::lexer::Lexer;
 use y::parser::Parser;
 use y::type_checker::TypeChecker;
-use y::zk_emitter::{BigUint, Fr, ZkEmitter};
+use y::zk_emitter::{Fr, ZkEmitter};
 use y::zk_witness::{check_r1cs_satisfiability, solve_r1cs_witness};
 
 /// Compiles `fn main(x, y) -> I32 { return <expr>; }` and evaluates it.
@@ -44,13 +44,13 @@ fn eval(expr: &str, x: u64, y: u64) -> Option<String> {
         &ir,
         circuit.num_variables,
         &[],
-        &[Fr(BigUint::from_u64(x)), Fr(BigUint::from_u64(y))],
+        &[Fr::from_u64(x), Fr::from_u64(y)],
     );
     if !satisfied || check_r1cs_satisfiability(&circuit.constraints, &witness).is_err() {
         return None;
     }
     let out = *circuit.outputs.first().expect("output wire");
-    Some(witness[out].0.to_decimal_string())
+    Some(witness[out].to_decimal_string())
 }
 
 fn assert_eval(expr: &str, x: u64, y: u64, expected: u64) {
@@ -228,7 +228,7 @@ fn forged_quotient_is_rejected() {
         &ir,
         circuit.num_variables,
         &[],
-        &[Fr(BigUint::from_u64(7)), Fr(BigUint::from_u64(2))],
+        &[Fr::from_u64(7), Fr::from_u64(2)],
     );
     assert!(ok, "honest witness should solve");
 
@@ -243,8 +243,8 @@ fn forged_quotient_is_rejected() {
         .iter()
         .position(|n| n.starts_with("intdiv_r"))
         .expect("remainder wire");
-    assert_eq!(witness[q].0.to_decimal_string(), "3", "honest quotient");
-    assert_eq!(witness[r].0.to_decimal_string(), "1", "honest remainder");
+    assert_eq!(witness[q].to_decimal_string(), "3", "honest quotient");
+    assert_eq!(witness[r].to_decimal_string(), "1", "honest remainder");
 
     // r = 0, q = 7 * inv(2): satisfies `q*b = a - r` over the field.
     witness[r] = Fr::zero();

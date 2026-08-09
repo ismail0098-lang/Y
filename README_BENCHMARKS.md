@@ -1,5 +1,30 @@
 # Y ZK Compiler Backend: Benchmark Suite
 
+> ## Corrections, 2026-08-09
+>
+> Several figures below were wrong and have been struck through rather than
+> quietly edited, so the record of what was claimed stays visible.
+>
+> - **Every Leo row is invalid.** Leo 4.2.0 cannot compile these circuits at
+>   all: `leo build` on `leo/dot_product` (100k) fails with *"program is
+>   14322372 bytes, exceeding the maximum allowed size of 512000 bytes"*, and
+>   `leo/heavy_circuit` (1M) fails the same way. Reproduced on this box. The
+>   timings previously reported for Leo at 100k and 1M cannot have come from a
+>   successful build of these circuits.
+> - **The RT + Tensor Core co-processor table (Suite 3) does not measure RT or
+>   Tensor Core work.** Disassembling the compiled SASS shows the kernel reduces
+>   to nine instructions with zero RT instructions, zero `HMMA` and zero global
+>   memory traffic; the "sequential baseline" it is compared against is a CUDA
+>   busy-loop tuned to cost about what the RT trace was estimated to cost. See
+>   `investigation_rt_tensor_coprocessor_findings.md`.
+> - **Y's own numbers are stale and now understate it**, because the emitter was
+>   rewritten since: 1M constraints is **0.90 s / 0.37 GB** (was 1.706 s /
+>   1.04 GB) and 31M is **36.1 s / 11.4 GB** (was 105.28 s / 30.65 GB).
+> - **The 31M row's competitor figures were estimates presented as results.**
+>   Circom, Noir and Leo were not run at that size. Their "OOM (estimated ~N GB)"
+>   entries are extrapolations, not measurements.
+> - Current, dated figures with methodology are in [README.md](README.md).
+
 This directory contains the benchmark suite used to validate the performance, structural correctness, and Circom-equivalence of the Y-lang Zero-Knowledge (ZK) Rank-1 Constraint System (R1CS) compiler backend.
 
 ---
@@ -89,9 +114,9 @@ This directory contains the benchmark suite used to validate the performance, st
   ```
 * **Constraints**: **1,000,000 constraints**.
 * **Compilation Resources (Constraint Generation, Release Binary)**:
-  * **Y-lang**: **`1.706 seconds`** | Peak Memory: **`1.04 GB`** (RSS) (148.8x speedup)
+  * **Y-lang**: ~~`1.706 seconds` | 1.04 GB~~ -> **re-measured 2026-08-09: `0.895 s` | 0.37 GB (278x vs Circom)**
   * **Noir**: **`13.069 seconds`** | Peak Memory: **`1.25 GB`** (RSS) (19.4x speedup)
-  * **Leo**: **`41.52 seconds`** | Peak Memory: **`10.81 GB`** (RSS) (6.2x speedup)
+  * ~~**Leo**: `41.52 seconds` | 10.81 GB (6.2x speedup)~~ - **INVALID: Leo cannot compile this circuit (512 KB program-size limit).**
   * **Circom**: **`253.936 seconds`** | Peak Memory: **`2.39 GB`** (RSS)
 
 ---
@@ -140,9 +165,9 @@ This directory contains the benchmark suite used to validate the performance, st
   ```
 * **Constraints**: **100,000 constraints**.
 * **Compilation Resources (Constraint Generation, Release Binary)**:
-  * **Y-lang**: **`0.285 seconds`** | Peak Memory: **`152.8 MB`** (RSS) (53.6x speedup vs Circom)
+  * **Y-lang**: ~~`0.285 seconds`~~ -> **re-measured 2026-08-09: `3.19 s` | 0.05 GB (4.3x vs Circom's 13.88 s).** The old figure is not reproducible; this circuit accumulates a dense linear combination and Y is super-linear on it. See README.md.
   * **Noir**: **`2.261 seconds`** | Peak Memory: **`393.74 MB`** (RSS) (6.3x speedup)
-  * **Leo**: **`13.83 seconds`** | Peak Memory: **`3.08 GB`** (RSS) (1.05x speedup)
+  * ~~**Leo**: `13.83 seconds` | 3.08 GB (1.05x speedup)~~ - **INVALID: Leo cannot compile this circuit (512 KB program-size limit).**
   * **Circom**: **`15.28 seconds`** | Peak Memory: **`1.05 GB`** (RSS)
 
 ---
@@ -186,10 +211,8 @@ This directory contains the benchmark suite used to validate the performance, st
   ```
 * **Constraints**: **31,000,000 constraints**.
 * **Compilation Resources (Constraint Generation)**:
-  * **Y-lang**: **`105.28 seconds`** | Peak Memory: **`30.65 GB`** (RSS) — *Generates a valid 3.7 GB `.r1cs` binary file under 2 minutes.*
-  * **Circom**: **OOM** (Estimated **~74 GB of RAM** and over **2.2 hours**).
-  * **Leo**: **OOM** (Estimated **~335 GB of RAM**).
-  * **Noir**: **OOM / Swap Latency** (Estimated **~39 GB of RAM**).
+  * **Y-lang**: ~~`105.28 seconds` | 30.65 GB~~ -> **re-measured 2026-08-09: `36.1 s` | 11.4 GB peak, 3.97 GB `.r1cs`.**
+  * **Circom / Leo / Noir: not run at this size.** The figures previously given here were extrapolations from smaller sizes, not measurements, and are removed.
 
 ---
 
@@ -294,6 +317,11 @@ node verify_benchmarks.js
 | **8192x8192** | 75040.95 | 97139.67 | **65208.83** | **1.15x** | **1.49x** |
 
 ### Suite 3: Dual-Accelerator Pipeline (RT Core + Tensor Core Overlap)
+
+> **This suite does not measure what it says.** The compiled kernel performs no
+> RT Core and no Tensor Core work - SASS-confirmed, nine instructions, zero
+> `HMMA`. Retained only as a record of what was claimed. See
+> `investigation_rt_tensor_coprocessor_findings.md`.
 
 | Workload Topology | Sequential Baseline ($\mu s$) | Y Co-Processor Pipeline ($\mu s$) | Hardware Speedup | Latency Reduction |
 |---|---|---|---|---|

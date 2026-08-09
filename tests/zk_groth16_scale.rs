@@ -28,15 +28,11 @@ use std::time::Instant;
 use y::lexer::Lexer;
 use y::parser::Parser;
 use y::type_checker::TypeChecker;
-use y::zk_emitter::{BigUint, Circuit, Fr, LinearCombination, ZkEmitter};
+use y::zk_emitter::{Circuit, Fr, LinearCombination, ZkEmitter};
 use y::zk_witness::{solve_r1cs_witness, execute_host_witness_ir, check_r1cs_satisfiability};
 
 fn to_ark(v: &Fr) -> ArkFr {
-    let mut bytes = Vec::with_capacity(v.0.digits.len() * 4);
-    for d in &v.0.digits {
-        bytes.extend_from_slice(&d.to_le_bytes());
-    }
-    ArkFr::from_le_bytes_mod_order(&bytes)
+    ArkFr::from_le_bytes_mod_order(&v.to_bytes_le(32))
 }
 
 fn ark_lc(lc: &LinearCombination, vars: &[Variable]) -> ArkLc<ArkFr> {
@@ -98,7 +94,7 @@ fn run(n: u32) {
 
     // split the two halves so we can see which one costs
     let t = Instant::now();
-    let fwd = execute_host_witness_ir(&witness_ir, &[], &[Fr(BigUint::from_u64(3)), Fr(BigUint::from_u64(2))]).unwrap();
+    let fwd = execute_host_witness_ir(&witness_ir, &[], &[Fr::from_u64(3), Fr::from_u64(2)]).unwrap();
     let fwd_s = t.elapsed().as_secs_f64();
     let t2 = Instant::now();
     let fwd_ok = check_r1cs_satisfiability(&circuit.constraints, &fwd).is_ok();
@@ -111,7 +107,7 @@ fn run(n: u32) {
         &witness_ir,
         circuit.num_variables,
         &[],
-        &[Fr(BigUint::from_u64(3)), Fr(BigUint::from_u64(2))],
+        &[Fr::from_u64(3), Fr::from_u64(2)],
     );
     let witness_s = t.elapsed().as_secs_f64();
     assert!(ok, "witness does not satisfy the circuit");

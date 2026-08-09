@@ -52,6 +52,12 @@ pub struct LlvmEmitter {
     locals_ast_type: BTreeMap<String, String>,
     /// Track what struct type a pointer local variable points to
     pointee_types: BTreeMap<String, String>,
+    /// Element LLVM type behind a `GlobalMemory<T>` / `SharedMemory<T>` binding.
+    /// `ast_type_to_string` folds `Generic { base, args }` down to `base`, so the
+    /// `T` is not recoverable from `locals_ast_type` — the block-pointer
+    /// intrinsics need it to pick a load/store type, and guessing gives the
+    /// silent-wrong-answer failure the `_ =>` rule exists to prevent.
+    mem_elem_types: BTreeMap<String, String>,
     /// Map function names to their LLVM parameter types and return type
     functions: BTreeMap<String, (Vec<String>, String)>,
     /// Track struct fields: StructName -> Vec<(FieldName, IRType)>
@@ -74,8 +80,11 @@ pub struct LlvmEmitter {
     zero_drift: BTreeMap<String, crate::zero_drift::DriftRepr>,
     /// Measured accumulate costs from the device, driving the choice.
     drift_costs: crate::zero_drift::CostTable,
-    /// `@ZeroDrift` bindings that could not be honoured.
-    pub drift_errors: Vec<String>,
+    /// Constructs this backend refuses to emit: `@ZeroDrift` bindings it
+    /// cannot honour, and block-pointer intrinsics whose shape or element
+    /// type it cannot determine. Emitting something plausible instead is the
+    /// silent-wrong-answer failure the repo's design rule forbids.
+    pub emit_errors: Vec<String>,
     /// One line per `@ZeroDrift` binding: what was chosen, and on what basis.
     pub drift_report: Vec<String>,
     /// Hint for the load() intrinsic: the declared LHS type of the current let
@@ -88,6 +97,42 @@ pub struct LlvmEmitter {
     in_ptx_emit: bool,
     /// Stack of labels to jump to for break statements
     loop_exit_stack: Vec<String>,
+    /// Set when a kernel was replaced by the packed AVX-512 GEMM, so the
+    /// supporting module (packing routines, micro-kernel, driver) is emitted.
+    needs_gemm_module: bool,
+}
+
+/// Entry-block stack slot that masked-off block-pointer stores are redirected
+/// into. Declared in every kernel and function; it is a dead alloca whose
+/// address never escapes, so it costs nothing when unused.
+const Y_OOB_SINK: &str = "%.y_oob_sink";
+
+/// LLVM element type behind a `GlobalMemory<T>` / `SharedMemory<T>` parameter.
+/// Returns `None` for anything else, so callers can refuse rather than guess.
+fn memory_element_llvm_type(ty: &Type) -> Option<String> {
+    let Type::Generic { base, args, .. } = ty else {
+        return None;
+    };
+    if base != "GlobalMemory" && base != "SharedMemory" {
+        return None;
+    }
+    let GenericArg::Type(inner) = args.first()? else {
+        return None;
+    };
+    let name = match inner {
+        Type::Primitive(n, _) | Type::Ident(n, _) => n.as_str(),
+        _ => return None,
+    };
+    match name {
+        "F16" | "f16" | "half" => Some("half".into()),
+        "F32" | "f32" | "float" => Some("float".into()),
+        "F64" | "f64" | "double" => Some("double".into()),
+        "I8" | "i8" | "u8" => Some("i8".into()),
+        "I16" | "i16" | "u16" => Some("i16".into()),
+        "I32" | "i32" | "u32" => Some("i32".into()),
+        "I64" | "i64" | "u64" | "usize" => Some("i64".into()),
+        _ => None,
+    }
 }
 
 fn ast_type_to_string(ty: &Type) -> String {
@@ -191,6 +236,7 @@ impl LlvmEmitter {
             locals: BTreeMap::new(),
             locals_ast_type: BTreeMap::new(),
             pointee_types: BTreeMap::new(),
+            mem_elem_types: BTreeMap::new(),
             functions,
             structs: BTreeMap::new(),
             ast_structs: HashMap::new(),
@@ -201,13 +247,14 @@ impl LlvmEmitter {
             current_cache_policy: None,
             zero_drift: BTreeMap::new(),
             drift_costs: crate::zero_drift::CostTable::new(),
-            drift_errors: Vec::new(),
+            emit_errors: Vec::new(),
             drift_report: Vec::new(),
             current_load_hint: None,
             called_functions: Vec::new(),
             defined_functions: Vec::new(),
             in_ptx_emit: false,
             loop_exit_stack: Vec::new(),
+            needs_gemm_module: false,
         }
     }
 
@@ -1083,10 +1130,50 @@ impl LlvmEmitter {
             }
         }
 
+        if self.needs_gemm_module {
+            self.wln("");
+            let m = crate::cpu_gemm::emit_kernel_module();
+            self.output.push_str(&m);
+        }
+
         // Nontemporal metadata definition
         self.wln("!0 = !{i32 1}");
 
         self.output.clone()
+    }
+
+    /// `(triple, datalayout mangling spec)` for the machine Y is running on.
+    /// Y's LLVM backend compiles for the host, so the host is the target.
+    fn host_triple() -> (&'static str, &'static str) {
+        if cfg!(target_os = "windows") {
+            ("x86_64-pc-windows-msvc", "m:w")
+        } else if cfg!(target_os = "macos") {
+            ("x86_64-apple-darwin", "m:o")
+        } else {
+            ("x86_64-unknown-linux-gnu", "m:e")
+        }
+    }
+
+    /// `(target-cpu, target-features)` for the host.
+    ///
+    /// AVX-512 used to mean `skylake-avx512` unconditionally. On an AMD Zen 4/5
+    /// that is a correct but pessimistic model — wrong port counts, wrong
+    /// latencies, and it hides `avx512_bf16` / `avx512vnni`, which those parts
+    /// have and Skylake-X does not. The vendor comes from CPUID, so this stays
+    /// a probe rather than an assumption.
+    fn host_cpu_attrs(profile: &crate::sentinel::HardwareProfile) -> (String, String) {
+        if !profile.has_avx512 {
+            return if profile.has_avx {
+                ("haswell".into(), "+avx2,+avx,+fma".into())
+            } else {
+                ("x86-64".into(), String::new())
+            };
+        }
+        let base = "+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+fma";
+        match crate::sentinel::host_x86_uarch() {
+            Some(uarch) => (uarch, format!("{},+avx512vnni,+avx512bf16", base)),
+            None => ("skylake-avx512".into(), base.into()),
+        }
     }
 
     fn emit_prelude(&mut self, profile: &crate::sentinel::HardwareProfile) {
@@ -1098,19 +1185,26 @@ impl LlvmEmitter {
         ));
         self.wln("; ================================================");
         self.wln("");
-        self.wln("target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"");
-        self.wln("target triple = \"x86_64-pc-windows-msvc\"");
+        // The triple and datalayout used to be hardcoded to Windows/MSVC
+        // (`m:w` mangling) regardless of host, so every Linux and macOS build
+        // handed clang a module describing a platform it was not compiling for.
+        let (triple, mangling) = Self::host_triple();
+        self.wln(&format!(
+            "target datalayout = \"e-{}-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\"",
+            mangling
+        ));
+        self.wln(&format!("target triple = \"{}\"", triple));
         self.wln("");
 
         // Dynamically inject LLVM function attributes based on Sentinel Probe
-        if profile.has_avx512 {
-            self.wln("attributes #0 = { \"target-cpu\"=\"skylake-avx512\" \"target-features\"=\"+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl\" }");
-        } else if profile.has_avx {
-            self.wln(
-                "attributes #0 = { \"target-cpu\"=\"haswell\" \"target-features\"=\"+avx2,+avx\" }",
-            );
+        let (cpu, features) = Self::host_cpu_attrs(profile);
+        if features.is_empty() {
+            self.wln(&format!("attributes #0 = {{ \"target-cpu\"=\"{}\" }}", cpu));
         } else {
-            self.wln("attributes #0 = { \"target-cpu\"=\"x86-64\" }");
+            self.wln(&format!(
+                "attributes #0 = {{ \"target-cpu\"=\"{}\" \"target-features\"=\"{}\" }}",
+                cpu, features
+            ));
         }
         self.wln("");
     }
@@ -1165,9 +1259,14 @@ impl LlvmEmitter {
             if let Some(pty) = self.get_pointee_type(&p.ty) {
                 self.pointee_types.insert(p.name.clone(), pty);
             }
+            if let Some(ety) = memory_element_llvm_type(&p.ty) {
+                self.mem_elem_types.insert(p.name.clone(), ety);
+            }
             writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
             self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
         }
+
+        writeln!(&mut self.output, "  {} = alloca [8 x i8], align 8", Y_OOB_SINK).unwrap();
 
         // Forward declare all lets in entry block to avoid loop stack growth
         self.emit_alloca_for_block(&f.body);
@@ -1243,7 +1342,7 @@ impl LlvmEmitter {
                             .unwrap();
                         }
                         None => {
-                            self.drift_errors.push(format!(
+                            self.emit_errors.push(format!(
                                 "Line {}: @ZeroDrift on `{}: {}` cannot be honoured. No exact \
 representation holds that range at that resolution, and only exact (integer or fixed-point) \
 accumulation is drift-free - f64 is the same non-associative arithmetic with more mantissa. \
@@ -1377,8 +1476,25 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
             if let Some(pty) = self.get_pointee_type(&p.ty) {
                 self.pointee_types.insert(p.name.clone(), pty);
             }
+            if let Some(ety) = memory_element_llvm_type(&p.ty) {
+                self.mem_elem_types.insert(p.name.clone(), ety);
+            }
             writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
             self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
+        }
+
+        writeln!(&mut self.output, "  {} = alloca [8 x i8], align 8", Y_OOB_SINK).unwrap();
+
+        // A kernel whose whole body is the canonical matmul nest is replaced by
+        // the packed AVX-512 kernel. The recogniser is strict and the scalar
+        // lowering below is correct, so a near-miss costs speed, not an answer.
+        if let Some(shape) = self.try_emit_gemm_kernel(k) {
+            self.needs_gemm_module = true;
+            writeln!(&mut self.output, "  ; [Y CPU GEMM] {:?}", shape).unwrap();
+            self.wln("  ret void");
+            self.wln("}");
+            self.wln("");
+            return;
         }
 
         self.emit_alloca_for_block(&k.body);
@@ -1389,6 +1505,58 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         }
         self.wln("}");
         self.wln("");
+    }
+
+    /// If `k`'s body is the canonical `C = A * B` nest over `F32` buffers,
+    /// emit a call to the packed AVX-512 kernel and report the shape.
+    ///
+    /// The element-type check is not a formality: the recogniser matches on
+    /// loop structure, which is identical for `F64` or `F16` buffers, and the
+    /// emitted kernel is `<16 x float>` throughout. Running it over a `F64`
+    /// buffer would reinterpret the data rather than fail.
+    fn try_emit_gemm_kernel(&mut self, k: &KernelDecl) -> Option<crate::cpu_gemm::GemmShape> {
+        let shape = crate::cpu_gemm::recognize_gemm(&k.body)?;
+        for buf in [&shape.a, &shape.b, &shape.c] {
+            if self.mem_elem_types.get(buf).map(String::as_str) != Some("float") {
+                return None;
+            }
+        }
+
+        // The extents arrive as i32 parameters; the kernel indexes in i64.
+        let mut ext = Vec::new();
+        for name in [&shape.m, &shape.n, &shape.k] {
+            let ty = self.locals.get(name)?.clone();
+            let tmp = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load {}, ptr %{}", tmp, ty, name).unwrap();
+            ext.push(if ty == "i64" {
+                tmp
+            } else {
+                let w = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = sext {} {} to i64", w, ty, tmp).unwrap();
+                w
+            });
+        }
+
+        let mut ptrs = Vec::new();
+        for name in [&shape.a, &shape.b, &shape.c] {
+            let tmp = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load ptr, ptr %{}", tmp, name).unwrap();
+            ptrs.push(tmp);
+        }
+
+        writeln!(
+            &mut self.output,
+            "  call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {})",
+            crate::cpu_gemm::KERNEL_NAME,
+            ptrs[0],
+            ptrs[1],
+            ptrs[2],
+            ext[0],
+            ext[1],
+            ext[2]
+        )
+        .unwrap();
+        Some(shape)
     }
 
     fn emit_impl(&mut self, imp: &ImplBlock) {
@@ -1764,7 +1932,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 // itself, which is the single thing @ZeroDrift exists to
                 // prevent, so it is refused rather than silently approximated.
                 if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
-                    self.drift_errors.push(format!(
+                    self.emit_errors.push(format!(
                         "Line {}: `{:?}=` is not exact on the @ZeroDrift accumulator `{}`. Only \
 `+=` and `-=` preserve drift-freedom.",
                         span.line, op, name
@@ -2350,6 +2518,17 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
             }
             Expr::Call { func, args, .. } => {
                 let func_name = self.emit_call_target(func);
+
+                // Block-pointer intrinsics lower to native address arithmetic.
+                // Routing them through the generic call path instead declared
+                // them `i32 (...)`, which truncated the 64-bit base pointer and
+                // then `sitofp`'d a float bit pattern — wrong answers, not just
+                // slow ones. It also planted an opaque call in the innermost
+                // loop, which blocks every loop and vector transform LLVM has.
+                if let Some(v) = self.try_emit_block_ptr_intrinsic(&func_name, args) {
+                    return v;
+                }
+
                 self.called_functions.push(func_name.clone());
 
                 if (func_name.starts_with("String_")
@@ -2909,6 +3088,200 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         }
     }
 
+    /// Element type for the buffer `expr` names, or `None` if it is not a
+    /// `GlobalMemory<T>` / `SharedMemory<T>` binding we tracked.
+    fn block_ptr_elem_ty(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(name, _) => self.mem_elem_types.get(name).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Emit `val` widened to i64, for address arithmetic and bounds tests.
+    ///
+    /// A 32-bit index is sign-extended, so a negative index becomes a large
+    /// unsigned value and fails the `ult` bound test — matching the PTX
+    /// backend's `setp.lt.u32`. Keeping the two backends agreeing on
+    /// out-of-range behaviour is the point; a CPU run that silently accepted
+    /// what the GPU masks off would be a portability trap.
+    fn emit_as_i64(&mut self, e: &Expr) -> String {
+        let v = self.emit_expr(e, None, None);
+        let t = self.infer_type(e);
+        if t == "i64" {
+            v
+        } else {
+            self.emit_coerce(&v, &t, "i64")
+        }
+    }
+
+    /// Lowers the `block_ptr2d_*` / `block_ptr3d_*` family to GEP + typed
+    /// load/store. Returns `None` for anything that is not one of them, so the
+    /// caller falls through to the ordinary call path.
+    fn try_emit_block_ptr_intrinsic(&mut self, name: &str, args: &[Expr]) -> Option<String> {
+        let (is_load, dims) = match name {
+            "block_ptr2d_load" | "make_block_ptr2d" => (true, 2usize),
+            "block_ptr2d_store" => (false, 2),
+            "block_ptr3d_load" => (true, 3),
+            "block_ptr3d_store" => (false, 3),
+            _ => return None,
+        };
+
+        // 2D: (base, row, col, stride, max_r, max_c [, val])
+        // 3D: (base, d0, d1, d2, s0, s1, D0, D1, D2 [, val])
+        let want = if dims == 2 { 6 } else { 9 } + if is_load { 0 } else { 1 };
+        if args.len() != want {
+            self.emit_errors.push(format!(
+                "`{}` takes {} arguments, got {}. Refusing rather than \
+                 guessing an address — a wrong stride here is a silent \
+                 wrong answer, not a crash.",
+                name,
+                want,
+                args.len()
+            ));
+            return Some("0".into());
+        }
+
+        let Some(elem_ty) = self.block_ptr_elem_ty(&args[0]) else {
+            self.emit_errors.push(format!(
+                "`{}` needs its first argument to be a `GlobalMemory<T>` or \
+                 `SharedMemory<T>` binding so the element type is known. \
+                 Refusing rather than assuming F32.",
+                name
+            ));
+            return Some("0".into());
+        };
+
+        let base = self.emit_expr(&args[0], None, None);
+
+        // Linear element offset, and the in-bounds predicate, per dimension.
+        // 2D: off = row*stride + col
+        // 3D: off = d0*s0 + d1*s1 + d2
+        let (idx_lo, idx_hi, stride_lo, stride_hi) = if dims == 2 {
+            (1, 3, 3, 4)
+        } else {
+            (1, 4, 4, 6)
+        };
+        let idxs: Vec<String> = (idx_lo..idx_hi)
+            .map(|i| self.emit_as_i64(&args[i]))
+            .collect();
+        let strides: Vec<String> = (stride_lo..stride_hi)
+            .map(|i| self.emit_as_i64(&args[i]))
+            .collect();
+        let bounds: Vec<String> = (want - dims - usize::from(!is_load)
+            ..want - usize::from(!is_load))
+            .map(|i| self.emit_as_i64(&args[i]))
+            .collect();
+
+        // offset = sum(idx[i] * stride[i]) + idx[last]
+        let mut off = String::new();
+        for (i, s) in strides.iter().enumerate() {
+            let m = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = mul nsw i64 {}, {}", m, idxs[i], s).unwrap();
+            if off.is_empty() {
+                off = m;
+            } else {
+                let a = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = add nsw i64 {}, {}", a, off, m).unwrap();
+                off = a;
+            }
+        }
+        let last = idxs.last().unwrap().clone();
+        let off = if off.is_empty() {
+            last
+        } else {
+            let a = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = add nsw i64 {}, {}", a, off, last).unwrap();
+            a
+        };
+
+        // Bounds predicate: every index unsigned-less-than its extent.
+        let mut ok = String::new();
+        for (i, b) in bounds.iter().enumerate() {
+            let c = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = icmp ult i64 {}, {}", c, idxs[i], b).unwrap();
+            if ok.is_empty() {
+                ok = c;
+            } else {
+                let a = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = and i1 {}, {}", a, ok, c).unwrap();
+                ok = a;
+            }
+        }
+
+        if is_load {
+            // Redirect an out-of-range load to element 0 so the access is
+            // always defined, then select the masked result. Selecting the
+            // offset rather than branching keeps the loop vectorizable.
+            let soff = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {} = select i1 {}, i64 {}, i64 0",
+                soff, ok, off
+            )
+            .unwrap();
+            let p = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {} = getelementptr inbounds {}, ptr {}, i64 {}",
+                p, elem_ty, base, soff
+            )
+            .unwrap();
+            let raw = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load {}, ptr {}", raw, elem_ty, p).unwrap();
+            let zero = if elem_ty.starts_with('f') || elem_ty == "double" || elem_ty == "half" {
+                "0.0"
+            } else {
+                "0"
+            };
+            let out = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {} = select i1 {}, {} {}, {} {}",
+                out, ok, elem_ty, raw, elem_ty, zero
+            )
+            .unwrap();
+            return Some(out);
+        }
+
+        // Store: an out-of-range write must not land anywhere real, so the
+        // *pointer* is selected rather than the offset.
+        let val_expr = &args[want - 1];
+        let val = self.emit_expr(val_expr, None, None);
+        let val_ty = self.infer_type(val_expr);
+        let val = if val_ty == elem_ty {
+            val
+        } else {
+            self.emit_coerce(&val, &val_ty, &elem_ty)
+        };
+        let p = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = getelementptr inbounds {}, ptr {}, i64 {}",
+            p, elem_ty, base, off
+        )
+        .unwrap();
+        // An out-of-range write is redirected into a dead stack slot rather
+        // than branched around, so the loop stays vectorizable. The slot's
+        // address never escapes, so LLVM folds both it and the select away
+        // whenever it can prove the index is in range — the common case inside
+        // `for i in 0..M` with `max_r = M`.
+        let sink = Y_OOB_SINK;
+        let dst = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = select i1 {}, ptr {}, ptr {}",
+            dst, ok, p, sink
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  store {} {}, ptr {}",
+            elem_ty, val, dst
+        )
+        .unwrap();
+        Some("0".into())
+    }
+
     fn emit_call_target(&self, func: &Expr) -> String {
         match func {
             Expr::Ident(name, _) => {
@@ -3124,6 +3497,23 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 if self.enum_variants.contains_key(&func_name) {
                     let enum_name = func_name.split('_').next().unwrap();
                     return format!("%{}", enum_name);
+                }
+                // A block-pointer load yields the buffer's element type. Falling
+                // through to the `i32` default here is what put a `sitofp` on
+                // an f32 *bit pattern* — an integer conversion of a value that
+                // was already the right type, producing garbage silently.
+                if let Expr::Call { args, .. } = expr {
+                    if matches!(
+                        func_name.as_str(),
+                        "block_ptr2d_load" | "make_block_ptr2d" | "block_ptr3d_load"
+                    ) {
+                        if let Some(t) = args.first().and_then(|a| self.block_ptr_elem_ty(a)) {
+                            return t;
+                        }
+                    }
+                    if matches!(func_name.as_str(), "block_ptr2d_store" | "block_ptr3d_store") {
+                        return "void".into();
+                    }
                 }
                 match func_name.as_str() {
                     "load" => {

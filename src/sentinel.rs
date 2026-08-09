@@ -48,6 +48,56 @@ fn probe_cpu_features(out_buffer: &mut [u32; 4]) {
     }
 }
 
+/// LLVM `target-cpu` name for the host microarchitecture, or `None` when it is
+/// not one we can name confidently.
+///
+/// Only AVX-512-capable parts are distinguished, because that is the only place
+/// the choice currently changes anything: naming an AMD Zen part instead of
+/// `skylake-avx512` gets the right port model and unlocks `avx512_bf16` /
+/// `avx512vnni`, which Skylake-X does not have.
+///
+/// Returning `None` rather than guessing matters — an unknown CPU named as a
+/// specific one would have LLVM schedule for the wrong machine, and on a part
+/// that lacked an assumed feature it would emit instructions that fault.
+pub fn host_x86_uarch() -> Option<String> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::__cpuid;
+
+        // Vendor string from CPUID leaf 0, as EBX:EDX:ECX.
+        let v = unsafe { __cpuid(0) };
+        let mut vendor = [0u8; 12];
+        vendor[0..4].copy_from_slice(&v.ebx.to_le_bytes());
+        vendor[4..8].copy_from_slice(&v.edx.to_le_bytes());
+        vendor[8..12].copy_from_slice(&v.ecx.to_le_bytes());
+        if &vendor != b"AuthenticAMD" {
+            return None;
+        }
+
+        // Family = base + extended, per AMD's encoding.
+        let f = unsafe { __cpuid(1) };
+        let base_family = (f.eax >> 8) & 0xF;
+        let ext_family = (f.eax >> 20) & 0xFF;
+        let family = if base_family == 0xF {
+            base_family + ext_family
+        } else {
+            base_family
+        };
+
+        // Zen 4 is family 0x19, Zen 5 family 0x1A; both have full AVX-512.
+        // Anything newer is named as the newest we know rather than guessed at.
+        match family {
+            0x19 => Some("znver4".to_string()),
+            f if f >= 0x1A => Some("znver5".to_string()),
+            _ => None,
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        None
+    }
+}
+
 fn measure_cache_latency(size_bytes: usize) -> u64 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1058,3 +1108,22 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
 
     profile
 }
+
+/// Probes host CPU cache capacities and ISA vector widths to produce a CpuHardwareProfile.
+pub fn probe_cpu_hardware_profile() -> crate::cpu_specializer::CpuHardwareProfile {
+    let mut out_buffer = [0u32; 4];
+    probe_cpu_features(&mut out_buffer);
+
+    let has_avx512 = (out_buffer[2] & (1 << 16)) != 0;
+    let simd_w = if has_avx512 { 16 } else { 8 };
+
+    crate::cpu_specializer::CpuHardwareProfile {
+        l1d_bytes: 32 * 1024,
+        l2_bytes: 512 * 1024,
+        l3_bytes: 16 * 1024 * 1024,
+        simd_vector_width_floats: simd_w,
+        supports_avx512_masking: has_avx512,
+        logical_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8),
+    }
+}
+

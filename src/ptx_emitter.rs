@@ -265,8 +265,18 @@ pub struct PtxEmitter {
     drift_costs: crate::zero_drift::CostTable,
     /// One line per `@ZeroDrift` binding.
     pub drift_report: Vec<String>,
-    /// `@ZeroDrift` bindings that could not be honoured.
-    pub drift_errors: Vec<String>,
+    /// Anything the emitter was asked to lower and could not lower correctly -
+    /// a `@ZeroDrift` binding it cannot honour, an intrinsic whose PTX form it
+    /// does not know how to construct. `main` fails the build on a non-empty
+    /// vector rather than writing the file.
+    ///
+    /// This exists because the alternative was worse than a missing feature.
+    /// `tma_load` and `wgmma_async` used to emit a plausible-looking
+    /// instruction with the wrong operand shape, and the compiler printed
+    /// "PTX Assembly generated successfully!" over PTX that `ptxas` rejects
+    /// outright - a build that looks green and produces a file no GPU can
+    /// load. Refusing names the gap; guessing hides it.
+    pub emit_errors: Vec<String>,
     /// The resolved SM target (e.g. "sm_80") for PTX header emission.
     sm_target: String,
     /// When true, emits .file and .loc directives for NCU profiling and debugging.
@@ -329,7 +339,7 @@ impl PtxEmitter {
             zero_drift: std::collections::HashMap::new(),
             drift_costs: crate::zero_drift::CostTable::new(),
             drift_report: Vec::new(),
-            drift_errors: Vec::new(),
+            emit_errors: Vec::new(),
             sm_target: target,
             debug_info: false,
             pending_extern_decls: Vec::new(),
@@ -459,6 +469,39 @@ impl PtxEmitter {
         let name = format!("%p{}", self.reg_pred_count);
         self.reg_pred_count += 1;
         name
+    }
+
+    /// Records that `name` is a recognised intrinsic the backend cannot lower
+    /// to correct PTX, and why. The build fails; no `.ptx` is written.
+    ///
+    /// This is the PTX backend's instance of the repo-wide rule that a
+    /// soundness- or correctness-critical pass must refuse an input it cannot
+    /// handle rather than substitute something adjacent. The failure mode it
+    /// replaces is specific and was live: an intrinsic wrote an instruction
+    /// with the right mnemonic and the wrong operand shape, `ptxas` rejected
+    /// the file, and nothing in the compiler noticed because nothing in the
+    /// compiler ran `ptxas`. Emitting a comment and carrying on would be the
+    /// same bug with a different spelling - the caller asked for a copy or a
+    /// matrix multiply, and silently not doing it produces a kernel that
+    /// computes garbage instead of one that fails to build.
+    fn unsupported_intrinsic(&mut self, name: &str, reason: &str) {
+        self.emit_errors.push(format!(
+            "[PTX] `{}(...)` cannot be lowered for target {}: {}.",
+            name, self.sm_target, reason
+        ));
+    }
+
+    /// The value of `e` if it is a non-negative integer literal.
+    ///
+    /// Deliberately does not fold arithmetic: the callers use this for operands
+    /// PTX encodes as immediates, where "I could not prove this is a constant"
+    /// must lead to a refusal, and a half-hearted folder makes the refusal
+    /// depend on how the user happened to spell the expression.
+    fn const_u32_of(e: &Expr) -> Option<u32> {
+        match e {
+            Expr::IntLit(v, _) if *v >= 0 => u32::try_from(*v).ok(),
+            _ => None,
+        }
     }
 
     /// Allocates a new virtual 16-bit register (e.g. `%h1`) - needed for
@@ -820,7 +863,7 @@ impl PtxEmitter {
                         self.variables.insert(name.clone(), acc);
                     }
                     None => {
-                        self.drift_errors.push(format!(
+                        self.emit_errors.push(format!(
                             "Line {}: @ZeroDrift on `{}: {}` cannot be honoured. No exact \
 representation holds that range at that resolution, and only exact (integer or fixed-point) \
 accumulation is drift-free. Add @bounds(min, max) to state the accumulator's real range, or \
@@ -913,7 +956,7 @@ declare it as a Q format.",
                 };
                 let (acc, repr) = self.zero_drift[&name].clone();
                 if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
-                    self.drift_errors.push(format!(
+                    self.emit_errors.push(format!(
                         "Line {}: `{:?}=` is not exact on the @ZeroDrift accumulator `{}`. Only \
 `+=` and `-=` preserve drift-freedom.",
                         span.line, op, name
@@ -1208,7 +1251,41 @@ declare it as a Q format.",
                         if fname == "cp_async" && args.len() >= 2 {
                             let src_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
                             let dest_reg = self.emit_expr(&args[1], cache_policy, hw_profile);
-                            writeln!(&mut self.ptx_buffer, "    cp.async.cg.shared.global [{}], [{}], 16;", dest_reg, src_reg).unwrap();
+                            // The byte count used to be hardcoded to 16 and the
+                            // third argument discarded, so `cp_async(dst, src, 4)`
+                            // copied 16 bytes and overran the destination by 12.
+                            // cp.async supports exactly 4, 8 and 16; anything else
+                            // is refused rather than rounded to something legal.
+                            let bytes = match args.get(2).and_then(Self::const_u32_of) {
+                                None if args.len() < 3 => 16,
+                                Some(n @ (4 | 8 | 16)) => n,
+                                Some(n) => {
+                                    self.unsupported_intrinsic(
+                                        "cp_async",
+                                        &format!(
+                                            "cp.async transfers exactly 4, 8 or 16 bytes; {} was requested",
+                                            n
+                                        ),
+                                    );
+                                    16
+                                }
+                                None => {
+                                    self.unsupported_intrinsic(
+                                        "cp_async",
+                                        "the byte count must be a compile-time constant of 4, 8 or 16 \
+                                         - cp.async encodes it as an immediate, so a runtime value \
+                                         cannot be lowered",
+                                    );
+                                    16
+                                }
+                            };
+                            writeln!(&mut self.ptx_buffer, "    cp.async.cg.shared.global [{}], [{}], {};", dest_reg, src_reg, bytes).unwrap();
+                            // Without a commit_group the copy belongs to no group,
+                            // so the `cp.async.wait_group` that `pipe.wait` emits
+                            // waits on nothing and returns immediately. Committing
+                            // here makes the token the linear tracker hands out
+                            // correspond to a real group.
+                            self.emit_cp_async_commit();
                             "".into()
                         } else if fname == "vec_add_v4" || fname == "vector_add_v4" || fname == "vec_add_unrolled4" {
                             let a_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
@@ -1299,8 +1376,16 @@ declare it as a Q format.",
                             let warp_id = self.alloc_reg32();
                             let pred_first_lane = self.alloc_pred();
 
-                            writeln!(&mut self.ptx_buffer, "    and.b32 {}, %tid.x, 31;", lane_id).unwrap();
-                            writeln!(&mut self.ptx_buffer, "    shr.u32 {}, %tid.x, 5;", warp_id).unwrap();
+                            // `%tid.x` is a special register: PTX allows it as the
+                            // source of a `mov` and nowhere else. Feeding it
+                            // straight into `and`/`shr`/`cvt`/`setp` - as this
+                            // whole block used to - is rejected by ptxas with
+                            // "Special register argument not allowed for
+                            // instruction 'and'". Materialise it once.
+                            let tid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 31;", lane_id, tid).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp_id, tid).unwrap();
                             writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, 0;", pred_first_lane, lane_id).unwrap();
 
                             let warp_id_u64 = self.alloc_reg64();
@@ -1309,7 +1394,7 @@ declare it as a Q format.",
 
                             writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", warp_id_u64, warp_id).unwrap();
                             writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", smem_offset, warp_id_u64).unwrap();
-                            writeln!(&mut self.ptx_buffer, "    cvta.to.shared.u64 {}, smem_reduce;", smem_addr).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mov.u64 {}, smem_reduce;", smem_addr).unwrap();
                             writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", smem_addr, smem_addr, smem_offset).unwrap();
                             writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", pred_first_lane, smem_addr, warp_sum).unwrap();
                             writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
@@ -1321,11 +1406,11 @@ declare it as a Q format.",
                             let pred_warp0_threads = self.alloc_pred();
                             let val_warp_sum = self.alloc_regf32();
 
-                            writeln!(&mut self.ptx_buffer, "    cvta.to.shared.u64 {}, smem_reduce;", smem_base).unwrap();
-                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, %tid.x;", tid_u64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mov.u64 {}, smem_reduce;", smem_base).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", tid_u64, tid).unwrap();
                             writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 2;", tid_offset, tid_u64).unwrap();
                             writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", smem_read_addr, smem_base, tid_offset).unwrap();
-                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, %tid.x, 8;", pred_warp0_threads).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, 8;", pred_warp0_threads, tid).unwrap();
                             writeln!(&mut self.ptx_buffer, "    @{} ld.shared.f32 {}, [{}];", pred_warp0_threads, val_warp_sum, smem_read_addr).unwrap();
                             writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", pred_warp0_threads, val_warp_sum).unwrap();
 
@@ -1334,13 +1419,13 @@ declare it as a Q format.",
                             let inv_rms = self.alloc_regf32();
                             let mean = self.alloc_regf32();
                             let pred_tid0 = self.alloc_pred();
-                            writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, %tid.x, 0;", pred_tid0).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, 0;", pred_tid0, tid).unwrap();
                             writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, 0.0009765625;", mean, block_sum).unwrap();
                             writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 0.00001;", mean, mean).unwrap();
                             writeln!(&mut self.ptx_buffer, "    rsqrt.approx.f32 {}, {};", inv_rms, mean).unwrap();
 
                             let smem_root = self.alloc_reg64();
-                            writeln!(&mut self.ptx_buffer, "    cvta.to.shared.u64 {}, smem_reduce;", smem_root).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mov.u64 {}, smem_reduce;", smem_root).unwrap();
                             writeln!(&mut self.ptx_buffer, "    @{} st.shared.f32 [{}], {};", pred_tid0, smem_root, inv_rms).unwrap();
                             writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
                             writeln!(&mut self.ptx_buffer, "    ld.shared.f32 {}, [{}];", inv_rms, smem_root).unwrap();
@@ -1479,17 +1564,46 @@ declare it as a Q format.",
                             let src_val = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%f0".to_string() };
                             self.emit_warp_reduce_max(&src_val)
                         } else if fname == "cp_async_bulk" || fname == "tma_load" || fname == "tma_load_2d" {
-                            let src_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
-                            let dest_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
-                            writeln!(&mut self.ptx_buffer, "    // [HOPPER TMA BULK TENSOR COPY]").unwrap();
-                            writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [{}], [{}];", dest_reg, src_reg).unwrap();
+                            // Refused rather than approximated. A TMA bulk tensor
+                            // copy is `cp.async.bulk.tensor.<N>d.shared::cluster.global
+                            // .tile.mbarrier::complete_tx::bytes [dst], [map, {coords}],
+                            // [mbar]` - it needs a tensor map built host-side by
+                            // `cuTensorMapEncodeTiled` and passed in as a
+                            // `.grid_constant .param .align 64 .b8 map[128]`, an
+                            // mbarrier to complete against, and one coordinate per
+                            // tensor dimension. `tma_load(src, dst)` supplies none
+                            // of those, so there is no correct instruction to emit
+                            // from it. The two-operand form this used to write is
+                            // rejected by ptxas ("Arguments mismatch for instruction
+                            // 'cp.async.bulk.tensor'") on every target including
+                            // sm_90a - it was never loadable on any GPU.
+                            self.unsupported_intrinsic(
+                                fname,
+                                "a TMA bulk tensor copy needs a host-built tensor map \
+                                 (cuTensorMapEncodeTiled) passed as a .grid_constant param, \
+                                 an mbarrier to complete against, and per-dimension \
+                                 coordinates; none of these are expressible in Y yet. \
+                                 Use cp_async(dst, src, bytes) for the sm_80-style \
+                                 cp.async.cg path",
+                            );
                             "".into()
                         } else if fname == "wgmma_async" || fname == "wgmma_mma_async" {
-                            writeln!(&mut self.ptx_buffer, "    // [HOPPER WGMMA WARP GROUP MATRIX MULTIPLY]").unwrap();
-                            writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
-                            writeln!(&mut self.ptx_buffer, "    wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 {{%f0, %f1, %f2, %f3}}, %r0, %r1;").unwrap();
-                            writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
-                            writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
+                            // Same reasoning. `wgmma.mma_async` takes 64-bit shared
+                            // memory *matrix descriptors* for A and B (or a register
+                            // fragment for A), an accumulator vector sized by the
+                            // shape, and four immediate operands (scale-D, imm-scale-A,
+                            // imm-scale-B, and the transpose flags). The form emitted
+                            // here passed two 32-bit registers and ignored its
+                            // arguments entirely, referencing %f0..%f3 whether or not
+                            // the register pool was that large.
+                            self.unsupported_intrinsic(
+                                fname,
+                                "wgmma.mma_async needs 64-bit shared-memory matrix \
+                                 descriptors, a shape-sized accumulator vector and four \
+                                 immediate operands, none of which this intrinsic \
+                                 accepts; it also requires sm_90a. Use mma_sync(...) for \
+                                 the sm_80/sm_89 tensor-core path",
+                            );
                             "".into()
                         } else if fname == "mbarrier_init" && args.len() >= 2 {
                             let bar_ptr = self.emit_expr(&args[0], cache_policy, hw_profile);
@@ -1880,6 +1994,44 @@ declare it as a Q format.",
                             "".into()
                         }
                     }
+                    // `pipe.wait(token)` - a Call whose callee is a MemberAccess.
+                    //
+                    // This used to fall into the catch-all below and emit
+                    // nothing at all. The bare `pipe.wait` form (no argument
+                    // list) was handled by the `Expr::MemberAccess` arm further
+                    // down, so the intrinsic looked implemented; the form
+                    // everyone actually writes - and the only form
+                    // `linear_tracker` accepts, since it requires the token be
+                    // passed to something - silently vanished.
+                    //
+                    // The consequence is worse than a missing instruction.
+                    // `linear_tracker` exists to guarantee an async copy is
+                    // awaited exactly once, and the type checker refuses the
+                    // program if it is not. Dropping the await in the backend
+                    // means the guarantee is enforced in the front end and
+                    // discarded in the back end: the kernel reads the
+                    // destination while `cp.async` is still in flight, which is
+                    // a data race that shows up as intermittently wrong numbers.
+                    Expr::MemberAccess { member, .. } if member == "wait" => {
+                        self.emit_cp_async_wait(0);
+                        "".into()
+                    }
+                    Expr::MemberAccess { member, .. } if member == "commit" => {
+                        self.emit_cp_async_commit();
+                        "".into()
+                    }
+                    // Anything else with a member callee is not something this
+                    // backend knows how to lower. Per the repo-wide rule, say so
+                    // rather than emit an empty string and let the caller
+                    // believe the call happened.
+                    Expr::MemberAccess { member, .. } => {
+                        let m = member.clone();
+                        self.unsupported_intrinsic(
+                            &format!("<expr>.{}", m),
+                            "no PTX lowering exists for this method call",
+                        );
+                        "".into()
+                    }
                     _ => "".into()
                 }
             }
@@ -1989,10 +2141,10 @@ declare it as a Q format.",
 
             match &graph.nodes[s_idx] {
                 WitnessOp::Const(val) => {
-                    let d0 = val.digits.get(0).cloned().unwrap_or(0) as u64 | ((val.digits.get(1).cloned().unwrap_or(0) as u64) << 32);
-                    let d1 = val.digits.get(2).cloned().unwrap_or(0) as u64 | ((val.digits.get(3).cloned().unwrap_or(0) as u64) << 32);
-                    let d2 = val.digits.get(4).cloned().unwrap_or(0) as u64 | ((val.digits.get(5).cloned().unwrap_or(0) as u64) << 32);
-                    let d3 = val.digits.get(6).cloned().unwrap_or(0) as u64 | ((val.digits.get(7).cloned().unwrap_or(0) as u64) << 32);
+                    // Canonical limbs, not the stored Montgomery ones: this is
+                    // a literal for the witness generator, which works in
+                    // ordinary residues.
+                    let [d0, d1, d2, d3] = val.to_limbs();
 
                     writeln!(&mut buffer, "    mov.u64 %s{}_0, 0x{:x};", s_idx, d0).unwrap();
                     writeln!(&mut buffer, "    mov.u64 %s{}_1, 0x{:x};", s_idx, d1).unwrap();
@@ -6985,197 +7137,60 @@ declare it as a Q format.",
         warp_sum
     }
 
-    /// 3. Automatic Hopper TMA Descriptor Generation (`sm_90a`).
-
-    pub fn emit_tma_descriptor_gen(&mut self, desc_name: &str, tensor_name: &str, dim_m: u32, dim_n: u32) {
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [AUTOMATIC HOPPER TMA TENSOR DESCRIPTOR GENERATION (sm_90a)]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Descriptor: {} -> Tensor: {} (Shape: {}x{})", desc_name, tensor_name, dim_m, dim_n).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    .global .align 128 .b8 {}[128];", desc_name).unwrap();
-    }
-
-    /// Emits Hopper Bulk Tensor Copy via TMA.
-    pub fn emit_tma_bulk_load(&mut self, dest_smem: &str, desc_name: &str, coord_x: &str, coord_y: &str) {
-        writeln!(&mut self.ptx_buffer, "    // [HOPPER TMA BULK TENSOR STREAMING]").unwrap();
-        writeln!(
-            &mut self.ptx_buffer,
-            "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [{}], [{}], {{{}, {}}};",
-            dest_smem, desc_name, coord_x, coord_y
-        )
-        .unwrap();
-        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.wait_group 0;").unwrap();
-    }
-
-    /// 4. 3+ Stage Asynchronous Pipelining backed by Hopper `mbarrier` transaction counters.
-    pub fn emit_mbarrier_3stage_pipelined_loop(&mut self, num_stages: u32, k_total: u32, tile_k: u32) {
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [3+ STAGE ASYNCHRONOUS PIPELINING WITH mbarrier COUNTERS]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Stages: {}, Total K: {}, Tile K: {}", num_stages, k_total, tile_k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    .shared .align 8 .b64 mbar[{}];", num_stages).unwrap();
-
-        // Init mbarriers
-        for s in 0..num_stages {
-            writeln!(&mut self.ptx_buffer, "    mbarrier.init.shared.b64 [mbar + {}], 128;", s * 8).unwrap();
-        }
-
-        // Prologue
-        for s in 0..(num_stages - 1) {
-            writeln!(&mut self.ptx_buffer, "    mbarrier.arrive.expect_tx.shared.b64 %rd0, [mbar + {}], 4096;", s * 8).unwrap();
-            writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_stage{}], [tma_desc_A];", s).unwrap();
-        }
-
-        let loop_start = self.alloc_label("MBARRIER_LOOP_START");
-        let loop_end = self.alloc_label("MBARRIER_LOOP_END");
-        let k_iter = self.alloc_reg32();
-        let k_limit = self.alloc_reg32();
-
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k_total / tile_k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
-
-        let stage_fetch = (num_stages - 1) as usize;
-        writeln!(&mut self.ptx_buffer, "    // Fetch stage k+{} backed by mbarrier", stage_fetch).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mbarrier.arrive.expect_tx.shared.b64 %rd0, [mbar + {}], 4096;", stage_fetch * 8).unwrap();
-        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_stage{}], [tma_desc_A];", stage_fetch).unwrap();
-
-        // Wait stage 0 mbarrier
-        let pred = self.alloc_pred();
-        writeln!(&mut self.ptx_buffer, "    mbarrier.try_wait.parity.shared.b64 {}, [mbar], 0;", pred).unwrap();
-
-        // Compute stage 0
-        writeln!(&mut self.ptx_buffer, "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{%f0,%f1}}, {{%r0,%r1}}, {{%r2,%r3}}, {{%f0,%f1}};").unwrap();
-
-        // Loop branch
-        let loop_pred = self.alloc_pred();
-        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
-        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", loop_pred, k_iter, k_limit).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} bra {};", loop_pred, loop_start).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
-    }
-
-    /// 5. Hopper Warp-Group Matrix Multiply (`wgmma.mma_async`).
-    /// Operates across 128 threads simultaneously (4 warps = 1 warp group).
-    pub fn emit_wgmma_warp_group_gemm(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, k_total: u32) {
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [HOPPER WARP-GROUP MATRIX MULTIPLY - wgmma.mma_async]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Tile Layout: {}x{}x{}, Total K: {}, 128 Threads (1 Warp Group)", cta_m, cta_n, cta_k, k_total).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
-
-        let k_iter = self.alloc_reg32();
-        let k_limit = self.alloc_reg32();
-        let loop_start = self.alloc_label("WGMMA_LOOP_START");
-        let loop_end = self.alloc_label("WGMMA_LOOP_END");
-
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k_total / cta_k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
-
-        // 128-thread warp-group WGMMA tensor core operation
-        writeln!(
-            &mut self.ptx_buffer,
-            "    wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 {{%f0,%f1,%f2,%f3,%f4,%f5,%f6,%f7,%f8,%f9,%f10,%f11,%f12,%f13,%f14,%f15}}, desc_A, desc_B, 1, 1, 0, 0;"
-        )
-        .unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
-
-        let pred = self.alloc_pred();
-        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
-        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, k_iter, k_limit).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} bra {};", pred, loop_start).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
-    }
-
-    /// 5.1 Hopper Warp-Group FP8 Matrix Multiply (`wgmma.mma_async.sync.aligned.m64n64k32.f32.e4m3.e4m3`).
-    pub fn emit_wgmma_fp8_gemm(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, k_total: u32) {
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [HOPPER FP8 WARP-GROUP MATRIX MULTIPLY - e4m3fn]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Tile Layout: {}x{}x{}, Total K: {}, 128 Threads (FP8 Tensor Core)", cta_m, cta_n, cta_k, k_total).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Optimization: 3-Stage Async TMA Pipelining + 128B Swizzle + Fused Scale Vector Writeback").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
-
-        let k_iter = self.alloc_reg32();
-        let k_limit = self.alloc_reg32();
-        let loop_start = self.alloc_label("WGMMA_FP8_PIPELINED_LOOP_START");
-        let loop_end = self.alloc_label("WGMMA_FP8_PIPELINED_LOOP_END");
-
-        writeln!(&mut self.ptx_buffer, "    // [3-STAGE ASYNC TMA PREFETCH INITIATION]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_A_stage0], [desc_A], {{%r0, %r1}};").unwrap();
-        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_B_stage0], [desc_B], {{%r0, %r1}};").unwrap();
-        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_A_stage1], [desc_A], {{%r0, %r1}};").unwrap();
-        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_B_stage1], [desc_B], {{%r0, %r1}};").unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k_total / cta_k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
-
-        writeln!(
-            &mut self.ptx_buffer,
-            "    wgmma.mma_async.sync.aligned.m64n64k32.f32.e4m3.e4m3 {{%f0,%f1,%f2,%f3,%f4,%f5,%f6,%f7,%f8,%f9,%f10,%f11,%f12,%f13,%f14,%f15}}, desc_A, desc_B, 1, 1, 0, 0;"
-        ).unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [OVERLAP MEMORY READS WITH TENSOR CORE MATH - WAIT GROUP 1]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 1;").unwrap();
-
-        let pred = self.alloc_pred();
-        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
-        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, k_iter, k_limit).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} bra {};", pred, loop_start).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [FUSED FP8 SCALE MULTIPLY & 128-BIT VECTOR STORE - st.global.v4.f32]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 %f0, %f0, %scale_ab;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 %f1, %f1, %scale_ab;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 %f2, %f2, %scale_ab;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 %f3, %f3, %scale_ab;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [%rd0], {{%f0, %f1, %f2, %f3}};").unwrap();
-    }
-
-
-
-    /// 5.2 Hopper Warp-Group INT4 Matrix Multiply (`wgmma.mma_async.sync.aligned.m64n64k64.s32.s4.s4`).
-    pub fn emit_wgmma_int4_gemm(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, k_total: u32) {
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [HOPPER INT4 WARP-GROUP MATRIX MULTIPLY - s4/u4]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Tile Layout: {}x{}x{}, Total K: {}, 128 Threads (INT4 Sub-Byte Tensor Core)", cta_m, cta_n, cta_k, k_total).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
-
-        let k_iter = self.alloc_reg32();
-        let k_limit = self.alloc_reg32();
-        let loop_start = self.alloc_label("WGMMA_INT4_LOOP_START");
-        let loop_end = self.alloc_label("WGMMA_INT4_LOOP_END");
-
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", k_iter).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", k_limit, k_total / cta_k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
-
-        writeln!(
-            &mut self.ptx_buffer,
-            "    wgmma.mma_async.sync.aligned.m64n64k64.s32.s4.s4 {{%r0,%r1,%r2,%r3,%r4,%r5,%r6,%r7}}, desc_A, desc_B, 1, 1, 0, 0;"
-        ).unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
-
-        let pred = self.alloc_pred();
-        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, 1;", k_iter, k_iter).unwrap();
-        writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", pred, k_iter, k_limit).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} bra {};", pred, loop_start).unwrap();
-        writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
-    }
+    // ────────────────────────────────────────────────────────────
+    // Removed: the Hopper TMA / WGMMA "feature" emitters.
+    //
+    // Seventeen `pub fn emit_*` methods used to live here - TMA descriptor
+    // generation and bulk loads, multicast loads, 3-stage mbarrier pipelines,
+    // warp-specialized producer/consumer pipelines, four WGMMA GEMM variants
+    // (f16, fp8, fp8 dual-accumulator, int4), a fused MatMul+RMSNorm+SwiGLU
+    // kernel, 2:4 sparse MMA, LOP3 int4 dequantization, FP8 scaling MMA, an
+    // "adaptive" FP8 GEMM, L2 eviction-policy load/store, launch-bounds
+    // directives and a vectorized SwiGLU.
+    //
+    // Every one of them was dead - reachable from no backend path, and from
+    // nothing outside this file except six in-file string-matching tests and
+    // two in `tests/test_high_priority_features.rs`. And every one of them
+    // that was probed emitted PTX that `ptxas` rejects, at its own target
+    // architecture, not merely at the wrong one:
+    //
+    //   wgmma_warp_group_gemm  sm_90a  Arguments mismatch for 'wgmma.mma_async'
+    //   wgmma_fp8_gemm         sm_90a  Arguments mismatch for 'cp.async.bulk.tensor'
+    //   wgmma_int4_gemm        sm_90a  Unexpected instruction types for 'wgmma.mma_async'
+    //   wgmma_fp8_dual_acc     sm_90a  Arguments mismatch for 'wgmma.mma_async'
+    //   tma_bulk_load          sm_90a  Arguments mismatch for 'cp.async.bulk.tensor'
+    //   tma_multicast          sm_90a  Illegal modifier '.multicast'
+    //   mbarrier_3stage        sm_90a  Arguments mismatch for 'cp.async.bulk.tensor'
+    //   warp_specialized       sm_90a  Illegal operand to 'mbarrier.arrive.expect_tx'
+    //   fused_matmul_rmsnorm   sm_89   Argument vector size mismatch for 'mma'
+    //   fast_int4_dequant_lop3 sm_89   Arguments mismatch for 'lop3'
+    //   sparse_24_mma          sm_89   Arguments mismatch for 'mma'
+    //   l2_eviction (one arm)  sm_89   '.level::eviction_priority' syntax expected
+    //   fp8_scaling_mma        sm_89   Arguments mismatch for 'mul'
+    //   launch_bounds          sm_89   Parsing error near '.maxnreg'
+    //   fp8_adaptive_gemm      sm_89   Parsing error near '.maxnreg'
+    //   vectorized_swiglu_fast sm_89   Parsing error near '{'  (a `{{{{` format typo)
+    //
+    // The tests passed throughout, because they asserted that a substring
+    // appeared in the buffer. `test_wgmma_int4_ptx_emission` in particular
+    // pinned `wgmma...s32.s4.s4` - the instruction gotcha #7 already records
+    // as existing on no hardware - and turned it into a regression guard.
+    //
+    // This is deleted rather than fixed because fixing it is not a repair job.
+    // A working TMA path needs host-side `cuTensorMapEncodeTiled` descriptors
+    // plumbed through kernel parameters as `.grid_constant`, mbarrier
+    // completion, and shared-memory matrix descriptors for WGMMA - a feature
+    // to be designed, with hardware to test it on, not a typo to correct. What
+    // was here was the shape of that feature with none of its substance, and
+    // keeping it would keep the claim alive. `emit_expr`'s `tma_load` and
+    // `wgmma_async` intrinsics now refuse with a diagnostic naming exactly
+    // what is missing - see `unsupported_intrinsic`.
+    //
+    // The real, reachable tensor-core path is unaffected: `emit_fp8_gemm_kernel`
+    // and `emit_tensor_core_gemm_kernel` use `mma.sync` and are covered by the
+    // ptxas gate in `tests_paged_decode_attention` and
+    // `tests/ptx_intrinsics_assemble.rs`.
+    // ────────────────────────────────────────────────────────────
 
     /// Emits Thread Block Cluster dimensions directive (.cluster_dimensions x, y, z) for Hopper/Blackwell.
     pub fn emit_cluster_dimensions(&mut self, x: u32, y: u32, z: u32) {
@@ -7183,79 +7198,8 @@ declare it as a Q format.",
         writeln!(&mut self.ptx_buffer, "    .cluster_dimensions {}, {}, {};", x, y, z).unwrap();
     }
 
-    /// Emits Hopper TMA Multicast Bulk Tensor Load directly to Shared Memory of Cluster CTAs.
-    pub fn emit_tma_multicast_bulk_load(&mut self, dest_smem: &str, desc_name: &str, coord_x: &str, coord_y: &str, cluster_mask: &str) {
-        writeln!(&mut self.ptx_buffer, "    // [HOPPER TMA MULTICAST BROADCAST TO CLUSTER DSMEM]").unwrap();
-        writeln!(
-            &mut self.ptx_buffer,
-            "    cp.async.bulk.tensor.multicast.shared::cluster.global.mbarrier::complete_tx::bytes [{}], [{}], {{{}, {}}}, {};",
-            dest_smem, desc_name, coord_x, coord_y, cluster_mask
-        )
-        .unwrap();
-        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.wait_group 0;").unwrap();
-    }
 
-    /// Emits Warp-Specialized Producer/Consumer Pipeline (Warp 0 = TMA Producer, Warps 1..3 = WGMMA Consumer).
-    pub fn emit_warp_specialized_producer_consumer_pipeline(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, k_total: u32) {
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [WARP-SPECIALIZED PRODUCER/CONSUMER PIPELINE]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Warp 0: TMA Producer (<=16 regs) | Warps 1..3: Consumer WGMMA (96 Threads)").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Tile: {}x{}x{}, Total K: {}", cta_m, cta_n, cta_k, k_total).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
 
-        let tid_reg = self.alloc_reg32();
-        let warp_id_reg = self.alloc_reg32();
-        let is_producer = self.alloc_pred();
-        let producer_label = self.alloc_label("PRODUCER_LOOP");
-        let consumer_label = self.alloc_label("CONSUMER_WARPGROUP_LOOP");
-        let end_label = self.alloc_label("WARP_SPEC_END");
-
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid_reg).unwrap();
-        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 5;", warp_id_reg, tid_reg).unwrap();
-        writeln!(&mut self.ptx_buffer, "    setp.eq.u32 {}, {}, 0;", is_producer, warp_id_reg).unwrap();
-        writeln!(&mut self.ptx_buffer, "    @{} bra {};", is_producer, producer_label).unwrap();
-        writeln!(&mut self.ptx_buffer, "    bra {};", consumer_label).unwrap();
-
-        // Producer Warp Branch (Warp 0)
-        writeln!(&mut self.ptx_buffer, "    {}:", producer_label).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [PRODUCER WARP 0: ISSUING TMA LOADS & ADVANCING MBARRIER]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mbarrier.arrive.expect_tx.shared.b64 %rd0, [mbar], 4096;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [smem_A], [desc_A], {{%r0, %r1}};").unwrap();
-        writeln!(&mut self.ptx_buffer, "    bra {};", end_label).unwrap();
-
-        // Consumer Warpgroup Branch (Warps 1..3)
-        writeln!(&mut self.ptx_buffer, "    {}:", consumer_label).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [CONSUMER WARPGROUP 1..3: RUNNING CONTINUOUS WGMMA COMPUTATION]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mbarrier.try_wait.parity.shared.b64 %p0, [mbar], 0;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
-        writeln!(
-            &mut self.ptx_buffer,
-            "    wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16 {{%f0,%f1,%f2,%f3,%f4,%f5,%f6,%f7}}, desc_A, desc_B, 1, 1, 0, 0;"
-        ).unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    {}:", end_label).unwrap();
-    }
-
-    /// Emits Hopper FP8 (E4M3 / E5M2) Dual-Accumulator WGMMA Pipeline (`wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3`).
-    pub fn emit_wgmma_fp8_dual_accumulator_gemm(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, scale_a: &str, scale_b: &str) {
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [HOPPER NATIVE FP8 E4M3 DUAL-ACCUMULATOR WGMMA PIPELINE]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Dimensions: M={}, N={}, K={} FP8 (e4m3fn)", cta_m, cta_n, cta_k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Scales: A={}, B={}", scale_a, scale_b).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    wgmma.fence.sync.aligned;").unwrap();
-        writeln!(
-            &mut self.ptx_buffer,
-            "    wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 {{%f0,%f1,%f2,%f3,%f4,%f5,%f6,%f7,%f8,%f9,%f10,%f11,%f12,%f13,%f14,%f15}}, desc_A, desc_B, {}, {}, 0, 0;",
-            scale_a, scale_b
-        )
-        .unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.commit_group.sync.aligned;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    wgmma.wait_group.sync.aligned 0;").unwrap();
-    }
 
     /// N-D Broadcasting lowering helper for broadcast_to(src, target_shape).
     pub fn emit_broadcast_to(&mut self, src_reg: &str, src_shape: &[u32], target_shape: &[u32]) -> String {
@@ -7274,125 +7218,13 @@ declare it as a Q format.",
     }
 
 
-    /// 6. Emits unified fused GPU kernel (MatMul + RMSNorm + SwiGLU).
-    /// Eliminates intermediate DRAM/L2 roundtrips.
-    pub fn emit_fused_matmul_rmsnorm_swiglu(&mut self, m: u32, n: u32, k: u32) {
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // [AUTOMATED OPERATOR FUSION KERNEL - MatMul + RMSNorm + SwiGLU]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Dimensions: M={}, N={}, K={} (Fused single launch)", m, n, k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
 
-        // Step 1: MatMul compute via mma.sync or wgmma
-        writeln!(&mut self.ptx_buffer, "    // Stage 1: Linear Projection GEMM").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{%f0,%f1}}, {{%r0,%r1}}, {{%r2,%r3}}, {{%f0,%f1}};").unwrap();
 
-        // Step 2: RMSNorm via warp butterfly shuffle reduction inside registers
-        writeln!(&mut self.ptx_buffer, "    // Stage 2: RMSNorm Variance Reduction via Warp Butterfly Shuffle").unwrap();
-        let val_sq = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, %f0, %f0;", val_sq).unwrap();
-        let red_sq = self.emit_warp_reduce_sum(&val_sq);
-        let inv_rms = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    rsqrt.approx.f32 {}, {};", inv_rms, red_sq).unwrap();
-        let norm_val = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, %f0, {};", norm_val, inv_rms).unwrap();
 
-        // Step 3: SwiGLU activation (Swish(x) * y) in register space
-        writeln!(&mut self.ptx_buffer, "    // Stage 3: SwiGLU In-Register Activation").unwrap();
-        let neg_norm = self.alloc_regf32();
-        let exp_val = self.alloc_regf32();
-        let sig_denom = self.alloc_regf32();
-        let sig_val = self.alloc_regf32();
-        let swish = self.alloc_regf32();
-        let final_out = self.alloc_regf32();
 
-        writeln!(&mut self.ptx_buffer, "    neg.f32 {}, {};", neg_norm, norm_val).unwrap();
-        writeln!(&mut self.ptx_buffer, "    ex2.approx.f32 {}, {};", exp_val, neg_norm).unwrap();
-        writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, 1.0;", sig_denom, exp_val).unwrap();
-        writeln!(&mut self.ptx_buffer, "    rcp.approx.f32 {}, {};", sig_val, sig_denom).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", swish, norm_val, sig_val).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, %f1;", final_out, swish).unwrap();
 
-        // Step 4: Write final fused result to global memory using 128-bit store
-        writeln!(&mut self.ptx_buffer, "    // Stage 4: 128-Bit SIMD Store directly to DRAM").unwrap();
-        writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [%rd0], {{{}, {}, {}, {}}};", final_out, final_out, final_out, final_out).unwrap();
-    }
 
-    /// Fast Bit Manipulation (lop3.b32 / prmt.b32) for zero-overhead INT4 / INT2 Dequantization.
-    pub fn emit_fast_int4_dequant_lop3(&mut self, packed_reg: &str, scale_reg: &str, zero_reg: &str) -> String {
-        let out_f16 = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    // [FAST SUB-BYTE INT4 DEQUANTIZATION via LOP3/PRMT]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    lop3.b32 %r_masked, {}, 0x0F0F0F0F, 0, 0x80;", packed_reg).unwrap();
-        writeln!(&mut self.ptx_buffer, "    prmt.b32 %r_unpacked, %r_masked, 0, 0x3210;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    sub.s32 %r_sub, %r_unpacked, {};", zero_reg).unwrap();
-        writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.s32 %f_val, %r_sub;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, %f_val, {};", out_f16, scale_reg).unwrap();
-        out_f16
-    }
 
-    /// FP8 Tensor Core Scaling Factor & Accumulation Control (e4m3fn / e5m2).
-    pub fn emit_fp8_scaling_mma(&mut self, cta_m: u32, cta_n: u32, cta_k: u32, scale_a: &str, scale_b: &str) {
-        writeln!(&mut self.ptx_buffer, "    // [FP8 TENSOR CORE MATRIX MULTIPLY WITH SCALE PROPAGATION]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Dimensions: M={}, N={}, K={} FP8 (e4m3fn)", cta_m, cta_n, cta_k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 %f_total_scale, {}, {};", scale_a, scale_b).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 %f_acc, %r_a, %r_b, %f_acc;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 %f_acc, %f_acc, %f_total_scale;").unwrap();
-    }
-
-    /// 2:4 Structured Sparse Tensor Core MMA (`mma.sp.sync.aligned.m16n8k32`).
-    pub fn emit_sparse_24_mma(&mut self, cta_m: u32, cta_n: u32, cta_k: u32) {
-        writeln!(&mut self.ptx_buffer, "    // [NVIDIA 2:4 STRUCTURED SPARSE TENSOR CORE MMA]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Dimensions: M={}, N={}, K={} (2:4 Sparsity Enabled)", cta_m, cta_n, cta_k).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 %f_acc, %r_a_sparse, %r_b, %f_acc, %r_metadata, 0x0;").unwrap();
-    }
-
-    /// Emits PTX launch bounds directives (.maxnreg, .minnctapersm) for occupancy tuning.
-    pub fn emit_launch_bounds_directives(&mut self, max_registers: u32, min_ctas_per_sm: u32) {
-        writeln!(&mut self.ptx_buffer, "    .maxnreg {}", max_registers).unwrap();
-        writeln!(&mut self.ptx_buffer, "    .minnctapersm {}", min_ctas_per_sm).unwrap();
-    }
-
-    /// Emits L2 Cache Eviction control operators (.nc, .evict_first, .wt).
-    pub fn emit_l2_cache_eviction_load_store(&mut self, dst_reg: &str, src_ptr: &str, cache_policy: &str) {
-        match cache_policy {
-            "non_coherent" => writeln!(&mut self.ptx_buffer, "    ld.global.nc.f32 {}, [{}];", dst_reg, src_ptr).unwrap(),
-            "evict_first" => writeln!(&mut self.ptx_buffer, "    ld.global.evict_first.f32 {}, [{}];", dst_reg, src_ptr).unwrap(),
-            "write_through" => writeln!(&mut self.ptx_buffer, "    st.global.wt.f32 [{}], {};", src_ptr, dst_reg).unwrap(),
-            _ => writeln!(&mut self.ptx_buffer, "    ld.global.f32 {}, [{}];", dst_reg, src_ptr).unwrap(),
-        }
-    }
-
-    /// Adaptive FP8 GEMM Engine: Selects optimal small vs. large matrix multiplication execution path.
-    pub fn emit_fp8_adaptive_gemm(&mut self, m: u32, n: u32, k: u32, scale_a: &str, scale_b: &str) {
-        if m <= 512 || n <= 512 {
-            // Low-latency launch config for small matrix multiplication (64x64x32 CTA tile, 4 warps)
-            writeln!(&mut self.ptx_buffer, "    // [ADAPTIVE FP8 GEMM - SMALL MATRIX LOW-LATENCY PATH]").unwrap();
-            writeln!(&mut self.ptx_buffer, "    // CTA Tile: 64x64x32 | Warps: 4 (2x2) | Wave Occupancy: High").unwrap();
-            self.emit_launch_bounds_directives(64, 4);
-            self.emit_fp8_scaling_mma(64, 64, 32, scale_a, scale_b);
-        } else {
-            // High-throughput launch config for large matrix multiplication (128x128x64 CTA tile, 8 warps, 3-stage async pipelining)
-            writeln!(&mut self.ptx_buffer, "    // [ADAPTIVE FP8 GEMM - LARGE MATRIX HIGH-THROUGHPUT PATH]").unwrap();
-            writeln!(&mut self.ptx_buffer, "    // CTA Tile: 128x128x64 | Warps: 8 (4x2) | 3-Stage Async Pipeline | L2 Swizzle").unwrap();
-            self.emit_grid_swizzle_code(8);
-            self.emit_launch_bounds_directives(128, 2);
-            self.emit_mbarrier_3stage_pipelined_loop(3, k, 64);
-            self.emit_fp8_scaling_mma(128, 128, 64, scale_a, scale_b);
-        }
-    }
-
-    /// Fused Vectorized Fast Math SwiGLU Activation Engine (128-bit SIMD + fast inline PTX sigmoid math).
-    pub fn emit_vectorized_swiglu_fast(&mut self, in_x_ptr: &str, in_y_ptr: &str, out_ptr: &str, num_vectors: usize) {
-        writeln!(&mut self.ptx_buffer, "    // [FUSED VECTORIZED SWIGLU ACTIVATION - FAST INLINE MATH]").unwrap();
-        writeln!(&mut self.ptx_buffer, "    // Vector Count: {} 128-bit 4-packs (100K+ elements)", num_vectors).unwrap();
-        writeln!(&mut self.ptx_buffer, "    ld.global.v4.f32 {{{{%f0, %f1, %f2, %f3}}}}, [{}];", in_x_ptr).unwrap();
-        writeln!(&mut self.ptx_buffer, "    ld.global.v4.f32 {{{{%f4, %f5, %f6, %f7}}}}, [{}];", in_y_ptr).unwrap();
-
-        // Fast inline sigmoid math: sigma(x) = 1 / (1 + exp(-x)) using ex2.approx and rcp.approx
-        writeln!(&mut self.ptx_buffer, "    neg.f32 %f8, %f0; mul.f32 %f8, %f8, 1.44269504; ex2.approx.f32 %f8, %f8; add.f32 %f8, %f8, 1.0; rcp.approx.f32 %f8, %f8;").unwrap();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 %f9, %f0, %f8; mul.f32 %f9, %f9, %f4;").unwrap();
-
-        writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [{}], {{{{%f9, %f9, %f9, %f9}}}};", out_ptr).unwrap();
-    }
 }
 
 
@@ -7539,62 +7371,6 @@ mod tests {
         assert!(emitter.ptx_buffer.contains("WARP-LEVEL SHUFFLE REDUCTION SUM"));
         assert!(emitter.ptx_buffer.contains("shfl.sync.bfly.b32"));
         assert!(!res.is_empty());
-    }
-
-    #[test]
-    fn test_hopper_tma_descriptor_generation() {
-        let mut emitter = PtxEmitter::new();
-        emitter.emit_tma_descriptor_gen("tma_desc_A", "MatrixA", 128, 128);
-        emitter.emit_tma_bulk_load("smem_A", "tma_desc_A", "%r0", "%r1");
-        assert!(emitter.ptx_buffer.contains(".global .align 128 .b8 tma_desc_A[128];"));
-        assert!(emitter.ptx_buffer.contains("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group"));
-    }
-
-    #[test]
-    fn test_mbarrier_3stage_async_pipelining() {
-        let mut emitter = PtxEmitter::new();
-        emitter.emit_mbarrier_3stage_pipelined_loop(3, 1024, 32);
-        assert!(emitter.ptx_buffer.contains("3+ STAGE ASYNCHRONOUS PIPELINING WITH mbarrier COUNTERS"));
-        assert!(emitter.ptx_buffer.contains("mbarrier.init.shared.b64"));
-        assert!(emitter.ptx_buffer.contains("mbarrier.arrive.expect_tx.shared.b64"));
-        assert!(emitter.ptx_buffer.contains("mbarrier.try_wait.parity.shared.b64"));
-    }
-
-    #[test]
-    fn test_hopper_wgmma_warp_group() {
-        let mut emitter = PtxEmitter::new();
-        emitter.emit_wgmma_warp_group_gemm(64, 64, 16, 512);
-        assert!(emitter.ptx_buffer.contains("HOPPER WARP-GROUP MATRIX MULTIPLY - wgmma.mma_async"));
-        assert!(emitter.ptx_buffer.contains("wgmma.fence.sync.aligned;"));
-        assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16"));
-        assert!(emitter.ptx_buffer.contains("wgmma.commit_group.sync.aligned;"));
-        assert!(emitter.ptx_buffer.contains("wgmma.wait_group.sync.aligned 0;"));
-    }
-
-    #[test]
-    fn test_tma_multicast_cluster() {
-        let mut emitter = PtxEmitter::new();
-        emitter.emit_cluster_dimensions(2, 1, 1);
-        emitter.emit_tma_multicast_bulk_load("smem_A", "desc_A", "%r0", "%r1", "0x3");
-        assert!(emitter.ptx_buffer.contains(".cluster_dimensions 2, 1, 1;"));
-        assert!(emitter.ptx_buffer.contains("cp.async.bulk.tensor.multicast.shared::cluster.global.mbarrier::complete_tx::bytes"));
-    }
-
-    #[test]
-    fn test_warp_specialized_producer_consumer_pipeline() {
-        let mut emitter = PtxEmitter::new();
-        emitter.emit_warp_specialized_producer_consumer_pipeline(128, 128, 32, 1024);
-        assert!(emitter.ptx_buffer.contains("WARP-SPECIALIZED PRODUCER/CONSUMER PIPELINE"));
-        assert!(emitter.ptx_buffer.contains("Warp 0: TMA Producer"));
-        assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16"));
-    }
-
-    #[test]
-    fn test_wgmma_fp8_dual_accumulator() {
-        let mut emitter = PtxEmitter::new();
-        emitter.emit_wgmma_fp8_dual_accumulator_gemm(64, 128, 32, "%f_sa", "%f_sb");
-        assert!(emitter.ptx_buffer.contains("HOPPER NATIVE FP8 E4M3 DUAL-ACCUMULATOR WGMMA PIPELINE"));
-        assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3"));
     }
 
     #[test]

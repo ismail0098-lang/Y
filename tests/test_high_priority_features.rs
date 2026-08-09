@@ -10,28 +10,6 @@ use y::type_checker::TypeChecker;
 use y::cpu_emitter::CpuEmitter;
 
 #[test]
-fn test_wgmma_fp8_ptx_emission() {
-    let mut hw = HardwareProfile::default();
-    hw.sm_version = "sm_90a".to_string();
-    let mut emitter = PtxEmitter::new_with_profile(&hw);
-    emitter.emit_wgmma_fp8_gemm(64, 64, 32, 512);
-
-    assert!(emitter.ptx_buffer.contains("HOPPER FP8 WARP-GROUP MATRIX MULTIPLY - e4m3fn"));
-    assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n64k32.f32.e4m3.e4m3"));
-}
-
-#[test]
-fn test_wgmma_int4_ptx_emission() {
-    let mut hw = HardwareProfile::default();
-    hw.sm_version = "sm_90a".to_string();
-    let mut emitter = PtxEmitter::new_with_profile(&hw);
-    emitter.emit_wgmma_int4_gemm(64, 64, 64, 1024);
-
-    assert!(emitter.ptx_buffer.contains("HOPPER INT4 WARP-GROUP MATRIX MULTIPLY - s4/u4"));
-    assert!(emitter.ptx_buffer.contains("wgmma.mma_async.sync.aligned.m64n64k64.s32.s4.s4"));
-}
-
-#[test]
 fn test_nd_broadcasting_emission() {
     let hw = HardwareProfile::default();
     let mut emitter = PtxEmitter::new_with_profile(&hw);
