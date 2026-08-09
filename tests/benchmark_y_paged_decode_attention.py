@@ -115,18 +115,21 @@ def sm_clock_mhz():
         return 0
 
 
-def ysu_path(hd, nqh, nkvh, ps, warps=None):
-    stem = "paged_decode_attention_%d_%d_%d_%d" % (hd, nqh, nkvh, ps)
+def ysu_path(hd, nqh, nkvh, ps, warps=None, splits=None):
+    if splits is None:
+        stem = "paged_decode_attention_%d_%d_%d_%d" % (hd, nqh, nkvh, ps)
+    else:
+        stem = "paged_decode_attention_split_%d_%d_%d_%d_%d" % (hd, nqh, nkvh, ps, splits)
     if warps is not None:
         stem += "_%d" % warps
     return os.path.join(REPO_ROOT, "tests", stem + ".ysu")
 
 
-def compile_kernel(hd, nqh, nkvh, ps, warps=None):
+def compile_kernel(hd, nqh, nkvh, ps, warps=None, splits=None):
     """Invokes the real Y CLI, then reads the launch geometry back out of the
     emitter's own PTX comment so the launch cannot silently disagree with
     what the kernel was compiled for."""
-    src = ysu_path(hd, nqh, nkvh, ps, warps)
+    src = ysu_path(hd, nqh, nkvh, ps, warps, splits)
     if not os.path.exists(src):
         raise FileNotFoundError(src)
     res = subprocess.run([Y_BIN, src, "--emit-ptx"], capture_output=True, text=True)
@@ -190,6 +193,38 @@ def make_y_runner(ptx, name, threads, q, kc, vc, pt, sl, max_pages, out):
 
     def run():
         fn(grid, block, args)
+    return run
+
+
+def make_y_split_runner(ptx, name, threads, splits, nkvh,
+                        q, kc, vc, pt, sl, max_pages, out):
+    """Drives the split-K shape: the partial-state kernel over
+    (num_kv_heads, num_seqs, splits), then the combine over
+    (num_q_heads, num_seqs).
+
+    BOTH launches are inside the timed region, and the scratch buffers are
+    allocated once outside it. That is the honest accounting: the second
+    launch is a real cost of this shape (~3us of launch latency on top of a
+    kernel that at batch 1 runs in ~10), and a comparison that timed only the
+    first would be measuring a kernel that has not produced `Out` yet.
+    """
+    mod = cp.RawModule(path=ptx)
+    fn = mod.get_function(name)
+    fn_red = mod.get_function(name + "_reduce")
+    ns, nqh = q.shape[0], q.shape[1]
+    hd = q.shape[2]
+    partial = cp.empty((ns, nqh, splits, hd), dtype=cp.float32)
+    meta = cp.empty((ns, nqh, splits, 2), dtype=cp.float32)
+    args = (cp.asarray(q), cp.asarray(kc), cp.asarray(vc),
+            cp.asarray(pt), cp.asarray(sl), cp.asarray(out),
+            partial, meta, np.int32(max_pages))
+    grid = (nkvh, ns, splits)
+    block = (threads, 1, 1)
+    grid_red = (nqh, ns, 1)
+
+    def run():
+        fn(grid, block, args)
+        fn_red(grid_red, (32, 1, 1), args)
     return run
 
 
@@ -291,6 +326,11 @@ CORRECTNESS_CASES = [
     ("ragged batch incl. zero",         [0, 1, 7, 63, 64, 65, 200, 33],    512),
     ("long context 4096",               [4096],                            512),
     ("long ragged batch",               [1000, 4095, 2, 2048],             512),
+    # The shapes the performance table below actually times. Without these the
+    # correctness set and the timed set do not intersect above batch 4, and a
+    # kernel can be verified on shapes nobody measures.
+    ("timed shape: b8 ctx 1024",        [1024] * 8,                       1024),
+    ("timed shape: b32 ctx 1024",       [1024] * 32,                      4096),
 ]
 
 PERF_CASES = [
@@ -304,6 +344,13 @@ PERF_CASES = [
 ]
 
 HD, NQH, NKVH, PS = 128, 32, 8, 16
+# Two split-K configurations, for the same reason the single-pass kernel is
+# measured at both 32 and 8 warps: the CTA count that fills the GPU depends on
+# the batch, and the batch is a runtime value. 16 splits is the batch-1
+# configuration, 4 the batch-many one. Correctness is checked on the first.
+SPLIT_WARPS = 8
+SPLITS_SMALL_BATCH = 16
+SPLITS_LARGE_BATCH = 4
 
 
 def main():
@@ -321,36 +368,55 @@ def main():
     print("[*] Compiled: %s  (%d threads/CTA)" % (os.path.relpath(ptx, REPO_ROOT), threads))
     ptx8, name8, threads8 = compile_kernel(HD, NQH, NKVH, PS, 8)
     print("[*] Compiled: %s  (%d threads/CTA)" % (os.path.relpath(ptx8, REPO_ROOT), threads8))
+    ptxs, names, threadss = compile_kernel(HD, NQH, NKVH, PS, SPLIT_WARPS, SPLITS_SMALL_BATCH)
+    print("[*] Compiled: %s  (%d threads/CTA, %d splits, %d q heads/CTA)"
+          % (os.path.relpath(ptxs, REPO_ROOT), threadss, SPLITS_SMALL_BATCH, NQH // NKVH))
+    ptxl, namel, threadsl = compile_kernel(HD, NQH, NKVH, PS, SPLIT_WARPS, SPLITS_LARGE_BATCH)
+    print("[*] Compiled: %s  (%d threads/CTA, %d splits, %d q heads/CTA)"
+          % (os.path.relpath(ptxl, REPO_ROOT), threadsl, SPLITS_LARGE_BATCH, NQH // NKVH))
     print()
 
     # ---------------- correctness ----------------
+    # Both shapes are checked against the same reference. The split kernel is
+    # the one that can be wrong in new ways - a partial state that is empty,
+    # a combine that rescales by the wrong max - so the ragged and short cases
+    # matter more for it than for the single-pass kernel, and the split count
+    # (16) deliberately exceeds several of the sequence lengths below.
     print("Correctness (vs PyTorch f32 reference walking the same shuffled page table)")
     print("-" * 100)
-    print("%-32s | %-10s | %-12s | %s" % ("case", "seqs", "rel L2", "verdict"))
+    print("%-32s | %-6s | %-14s | %-14s | %s"
+          % ("case", "seqs", "rel L2 (1-pass)", "rel L2 (split)", "verdict"))
     print("-" * 100)
     worst, fails = 0.0, 0
     for label, lens, npg in CORRECTNESS_CASES:
         q, kc, vc, pt, sl, mp = make_inputs(HD, NQH, NKVH, PS, lens, npg)
-        out = torch.zeros(len(lens), NQH, HD, dtype=torch.float16, device=DEV)
-        make_y_runner(ptx, name, threads, q, kc, vc, pt, sl, mp, out)()
-        cp.cuda.Device(0).synchronize()
         ref = reference(q, kc, vc, pt, sl, HD, NQH, NKVH, PS)
-        got = out.float()
-
-        bad = None
-        if not torch.isfinite(got).all():
-            bad = "NaN/Inf in output"
-        for s, L in enumerate(lens):
-            if L <= 0 and got[s].abs().max().item() != 0.0:
-                bad = "seq_len=0 row %d not zeroed" % s
-        err = 0.0 if ref.norm().item() == 0 else ((got - ref).norm() / ref.norm()).item()
-        worst = max(worst, err)
-        ok = bad is None and err <= TOL_REL_L2
+        errs, bad = [], None
+        for tag, runner_factory in (
+            ("1-pass", lambda o: make_y_runner(ptx, name, threads, q, kc, vc, pt, sl, mp, o)),
+            ("split", lambda o: make_y_split_runner(ptxs, names, threadss, SPLITS_SMALL_BATCH,
+                                                    NKVH, q, kc, vc, pt, sl, mp, o)),
+        ):
+            out = torch.zeros(len(lens), NQH, HD, dtype=torch.float16, device=DEV)
+            runner_factory(out)()
+            cp.cuda.Device(0).synchronize()
+            got = out.float()
+            if not torch.isfinite(got).all():
+                bad = "%s: NaN/Inf in output" % tag
+            for s, L in enumerate(lens):
+                if L <= 0 and got[s].abs().max().item() != 0.0:
+                    bad = "%s: seq_len=0 row %d not zeroed" % (tag, s)
+            err = 0.0 if ref.norm().item() == 0 else ((got - ref).norm() / ref.norm()).item()
+            errs.append(err)
+            worst = max(worst, err)
+        ok = bad is None and max(errs) <= TOL_REL_L2
         if not ok:
             fails += 1
-        print("%-32s | %-10d | %-12.2e | %s" % (label, len(lens), err, bad or ("OK" if ok else "FAIL")))
+        print("%-32s | %-6d | %-14.2e | %-14.2e | %s"
+              % (label, len(lens), errs[0], errs[1], bad or ("OK" if ok else "FAIL")))
     print("-" * 100)
-    print("worst relative L2 = %.2e over %d cases, %d failures\n" % (worst, len(CORRECTNESS_CASES), fails))
+    print("worst relative L2 = %.2e over %d cases x 2 shapes, %d failures\n"
+          % (worst, len(CORRECTNESS_CASES), fails))
 
     if args.correctness_only:
         return 1 if fails else 0
@@ -367,43 +433,59 @@ def main():
     ramp()
     print("[*] SM clock after ramp: %d MHz" % sm_clock_mhz())
     print("-" * 100)
-    print("%-20s | %-16s | %-18s | %-18s | %-9s | %s"
-          % ("case", "FlashInfer us", "Y 32w us (min)", "Y 8w us (min)", "best vs FI", "KV GB/s"))
-    print("-" * 100)
+    print("%-20s | %-9s | %-9s | %-9s | %-10s | %-10s | %-9s | %s"
+          % ("case", "FI us", "1pass 32w", "1pass 8w",
+             "split %2dx" % SPLITS_SMALL_BATCH, "split %2dx" % SPLITS_LARGE_BATCH,
+             "best vs FI", "KV GB/s"))
+    print("-" * 118)
 
+    rows = []
     for label, batch, ctx in PERF_CASES:
         lens = [ctx] * batch
         npages_needed = batch * ((ctx + PS - 1) // PS)
         num_pages = max(512, npages_needed * 2)
         q, kc, vc, pt, sl, mp = make_inputs(HD, NQH, NKVH, PS, lens, num_pages)
-        out = torch.zeros(batch, NQH, HD, dtype=torch.float16, device=DEV)
-        out8 = torch.zeros(batch, NQH, HD, dtype=torch.float16, device=DEV)
-        y_run = make_y_runner(ptx, name, threads, q, kc, vc, pt, sl, mp, out)
-        y8_run = make_y_runner(ptx8, name8, threads8, q, kc, vc, pt, sl, mp, out8)
+        outs_buf = [torch.zeros(batch, NQH, HD, dtype=torch.float16, device=DEV)
+                    for _ in range(4)]
+        y_run = make_y_runner(ptx, name, threads, q, kc, vc, pt, sl, mp, outs_buf[0])
+        y8_run = make_y_runner(ptx8, name8, threads8, q, kc, vc, pt, sl, mp, outs_buf[1])
+        ys_run = make_y_split_runner(ptxs, names, threadss, SPLITS_SMALL_BATCH, NKVH,
+                                     q, kc, vc, pt, sl, mp, outs_buf[2])
+        yl_run = make_y_split_runner(ptxl, namel, threadsl, SPLITS_LARGE_BATCH, NKVH,
+                                     q, kc, vc, pt, sl, mp, outs_buf[3])
         fi_run = make_flashinfer_runner(flashinfer, kc, vc, pt, sl, q, HD, NQH, NKVH, PS)
 
-        (fi_best, fi_med), (y_best, y_med), (y8_best, y8_med) = time_interleaved(
-            [fi_run, y_run, y8_run])
+        (fi_best, _), (y_best, _), (y8_best, _), (ys_best, ys_med), (yl_best, _) = \
+            time_interleaved([fi_run, y_run, y8_run, ys_run, yl_run])
 
-        # Bytes the kernel actually moves: K and V for every cached token and
-        # KV head, re-read once per query head sharing that KV head (GQA).
-        # Reporting only the UNIQUE footprint would understate traffic by the
-        # GQA ratio and make an L2-served run look like it beat DRAM peak.
+        # The KV cache footprint the kernel MUST touch: K and V for every
+        # cached token and KV head. The single-pass shape re-reads it once per
+        # query head sharing a KV head (x4 here); the split-K shape does not,
+        # which is the entire point of it - so the rate below is quoted on the
+        # UNIQUE bytes, and a figure above DRAM peak means L2 served it.
         unique = batch * ctx * NKVH * HD * 2 * 2
-        kv_bytes = unique * (NQH // NKVH)
-        best_y = min(y_best, y8_best)
-        gbs = kv_bytes / (best_y * 1e-6) / 1e9
-        print("%-20s | %-16s | %-18s | %-18s | %-9s | %.0f"
-              % (label,
-                 "%.2f" % fi_best,
-                 "%.2f (med %.1f)" % (y_best, y_med),
-                 "%.2f (med %.1f)" % (y8_best, y8_med),
-                 "%.2fx" % (fi_best / best_y),
-                 gbs))
+        best_1pass = min(y_best, y8_best)
+        best_split = min(ys_best, yl_best)
+        rows.append((label, fi_best, best_1pass, best_split, ys_best))
+        print("%-20s | %9.2f | %9.2f | %9.2f | %10.2f | %10.2f | %-9s | %.0f"
+              % (label, fi_best, y_best, y8_best, ys_best, yl_best,
+                 "%.2fx" % (fi_best / best_split),
+                 unique / (best_split * 1e-6) / 1e9))
 
-    print("-" * 100)
-    print("[*] DRAM peak on this card is ~672 GB/s; an effective rate above that")
-    print("    means the KV cache was served from L2, not memory.")
+    print("-" * 118)
+    print("[*] DRAM peak on this card is ~672 GB/s. The KV GB/s column is over the")
+    print("    bytes the split-K kernel is obliged to read exactly once; above peak")
+    print("    means the cache fit in L2.")
+    print()
+    print("Summary (x vs FlashInfer, >1 is Y faster). The split-K columns are the")
+    print("two configurations above; batch size is a runtime value, so a deployment")
+    print("picks one - `fixed 16` is what a single compiled binary would ship.")
+    print("%-20s | %-12s | %-12s | %-12s | %s"
+          % ("case", "1-pass best", "split fixed16", "split best", "split/1-pass"))
+    for label, fi_b, one_b, sp_b, fixed_b in rows:
+        print("%-20s | %-12s | %-12s | %-12s | %s"
+              % (label, "%.2fx" % (fi_b / one_b), "%.2fx" % (fi_b / fixed_b),
+                 "%.2fx" % (fi_b / sp_b), "%.2fx" % (one_b / sp_b)))
     return 1 if fails else 0
 
 
