@@ -1,0 +1,36 @@
+// The batch-many serving configuration of the split-K paged decode attention
+// kernel: same shape as paged_decode_attention_split_128_32_8_16_16_8.ysu (see
+// that file for the full launch contract and buffer layouts) at 4 sequence
+// splits instead of 16.
+//
+// Why two files: the grid is (num_kv_heads, num_seqs, splits), so the CTA
+// count already scales with the batch. At batch 1 that is 8*splits CTAs and
+// the GPU needs a large split count to fill 66 SMs; at batch 32 it is
+// 256*splits and a large split count only adds combine work and shortens each
+// CTA's token run. Measured on an RTX 4070 Ti SUPER, minimum of 7 interleaved
+// rounds, microseconds:
+//
+//   case           4 splits   8 splits   16 splits   32 splits   (8 warps)
+//   b1  ctx 1024       13.1        8.9         8.1         9.0
+//   b1  ctx 4096       40.7       22.8        17.0        17.2
+//   b8  ctx 1024       28.0       27.4        30.3        36.2
+//   b32 ctx 1024      198.1      199.5       210.8       238.6
+//   b32 ctx 4096      864.4      852.0       865.1       896.0
+//
+// Batch size is a runtime value, so no compile-time constant is right for
+// every launch - the same reasoning as ATTN_DEFAULT_NUM_WARPS, one level up.
+kernel paged_decode_attention_split_128_32_8_16_4_8(
+    Q: GlobalMemory<F16>,
+    KCache: GlobalMemory<F16>,
+    VCache: GlobalMemory<F16>,
+    PageTable: GlobalMemory<I32>,
+    SeqLens: GlobalMemory<I32>,
+    Out: GlobalMemory<F16>,
+    Partial: GlobalMemory<F32>,
+    PartialMeta: GlobalMemory<F32>,
+    MaxPages: I32
+) {
+}
+
+fn main() {
+}
