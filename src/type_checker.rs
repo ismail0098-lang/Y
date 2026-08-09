@@ -125,6 +125,8 @@ pub struct TypeChecker {
     // Static Under-Constrained Analyzer (@zk_safe) fields
     pub zk_safe_stack: Vec<bool>,
     pub zk_allow_unconstrained_stack: Vec<bool>,
+    /// Set by `set_zk_target` when compiling to R1CS. See that method.
+    zk_target: bool,
 }
 
 fn reset_thread_locals() {
@@ -147,7 +149,20 @@ impl TypeChecker {
             structs: HashMap::new(),
             zk_safe_stack: vec![false],
             zk_allow_unconstrained_stack: vec![false],
+            zk_target: false,
         }
+    }
+
+    /// Whether the R1CS backend is the compilation target.
+    ///
+    /// Only `error[Z0010]` depends on this, and it must: a `while` loop with no
+    /// static bound genuinely cannot be lowered to a fixed constraint system,
+    /// but it is ordinary code for every other backend. The check used to fire
+    /// unconditionally, so **every** un-annotated `while` in the language was
+    /// rejected with a message naming a mode that was not active - including in
+    /// `tests/hello.ysu`, the first example in the README.
+    pub fn set_zk_target(&mut self, on: bool) {
+        self.zk_target = on;
     }
 
     pub fn push_scope(&mut self) {
@@ -1395,8 +1410,11 @@ impl TypeChecker {
             Stmt::While {
                 condition, body, invariant, max_iterations, is_uniform_branch, ..
             } => {
-                if max_iterations.is_none() {
-                    // Static error Z0010 check for dynamic un-annotated while loops in ZK mode
+                if self.zk_target && max_iterations.is_none() {
+                    // A `while` with no static bound cannot be unrolled into a
+                    // fixed constraint system. That is true of R1CS and of
+                    // nothing else, so the check is gated on the target rather
+                    // than applied to the whole language.
                     self.errors.push(format!(
                         "Line {}: error[Z0010]: dynamic 'while' loop prohibited in ZK circuit mode\n  hint: annotate loop with '@max_iterations(N)' where N is a compile-time constant integer",
                         condition.span().line

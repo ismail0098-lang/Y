@@ -18,7 +18,7 @@
 use y::lexer::Lexer;
 use y::parser::Parser;
 use y::type_checker::TypeChecker;
-use y::zk_emitter::{BigUint, Fr, ZkEmitter};
+use y::zk_emitter::{Fr, ZkEmitter};
 use y::zk_witness::{check_r1cs_satisfiability, solve_r1cs_witness};
 
 /// Compiles `poseidon_hash(a, b)` and returns (digest, constraint count).
@@ -39,13 +39,13 @@ fn poseidon_of(a: u64, b: u64) -> (String, usize) {
         &witness_ir,
         circuit.num_variables,
         &[],
-        &[Fr(BigUint::from_u64(a)), Fr(BigUint::from_u64(b))],
+        &[Fr::from_u64(a), Fr::from_u64(b)],
     );
     assert!(satisfied, "poseidon witness does not satisfy its own circuit");
     check_r1cs_satisfiability(&circuit.constraints, &witness).expect("satisfiability");
 
     let out_wire = *circuit.outputs.first().expect("circuit has an output");
-    (witness[out_wire].0.to_decimal_string(), circuit.constraints.len())
+    (witness[out_wire].to_decimal_string(), circuit.constraints.len())
 }
 
 /// The interop gate.

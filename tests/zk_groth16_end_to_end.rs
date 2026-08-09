@@ -27,7 +27,7 @@ use ark_std::rand::{rngs::StdRng, SeedableRng};
 use y::lexer::Lexer;
 use y::parser::Parser;
 use y::type_checker::TypeChecker;
-use y::zk_emitter::{BigUint, Circuit, Fr, LinearCombination, ZkEmitter};
+use y::zk_emitter::{Circuit, Fr, LinearCombination, ZkEmitter};
 use y::zk_witness::{check_r1cs_satisfiability, solve_r1cs_witness};
 
 /// Y's `Fr` -> arkworks' `Fr`.
@@ -37,11 +37,7 @@ use y::zk_witness::{check_r1cs_satisfiability, solve_r1cs_witness};
 /// rather than a decimal string keeps this independent of Y's formatting code -
 /// a bug in `to_decimal_string` must not be able to hide a bug in the field.
 fn to_ark(v: &Fr) -> ArkFr {
-    let mut bytes = Vec::with_capacity(v.0.digits.len() * 4);
-    for d in &v.0.digits {
-        bytes.extend_from_slice(&d.to_le_bytes());
-    }
-    ArkFr::from_le_bytes_mod_order(&bytes)
+    ArkFr::from_le_bytes_mod_order(&v.to_bytes_le(32))
 }
 
 fn ark_lc(lc: &LinearCombination, vars: &[Variable]) -> ArkLc<ArkFr> {
@@ -63,8 +59,8 @@ fn compile(source: &str, pub_in: &[u64], priv_in: &[u64]) -> (Circuit, Vec<Fr>) 
     let circuit = emitter.build_circuit();
     let witness_ir = emitter.build_witness_ir();
 
-    let pubs: Vec<Fr> = pub_in.iter().map(|v| Fr(BigUint::from_u64(*v))).collect();
-    let privs: Vec<Fr> = priv_in.iter().map(|v| Fr(BigUint::from_u64(*v))).collect();
+    let pubs: Vec<Fr> = pub_in.iter().map(|v| Fr::from_u64(*v)).collect();
+    let privs: Vec<Fr> = priv_in.iter().map(|v| Fr::from_u64(*v)).collect();
 
     let (witness, satisfied) = solve_r1cs_witness(
         &circuit.constraints,

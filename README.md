@@ -1,223 +1,98 @@
-Y 
+Y
 -----  A Systems Language and Compiler for GPU/CPU Hardware-Aware Code Generation
 
-Y is a compiler and systems language for writing hardware-aware code across CPU (x86/AVX-512) and GPU (NVIDIA PTX) targets. It also includes a zero-knowledge circuit compiler (R1CS constraint generation) and a dual-accelerator co-processor pipeline that automatically fuses RT Core and Tensor Core workloads.
+Y is a compiler and systems language for writing hardware-aware code across CPU
+(x86-64 / AVX-512) and GPU (NVIDIA PTX) targets, with a zero-knowledge circuit
+backend that emits R1CS and interoperates with the existing circom/snarkjs
+toolchain.
 
-The project is under active, single-developer, ongoing development.
+The project is under active, single-developer development. It is a research
+compiler, not a production toolchain.
 
+---
 
-What this project does
+## How to read the numbers in this file
 
-Probes the actual hardware it's running on: cache latencies, AVX-512 throughput, GPU warp/tensor-core timings, and uses those measurements to make codegen decisions (e.g. choosing IMAD.WIDE over IMAD based on measured cycle cost).
-Enforces compile-time safety guarantees on marked code blocks: initialized-variable checks, Z3-discharged loop invariants (an invariant that cannot be checked fails the build), and bounds declarations.
-Compiles to five backends: LLVM IR (→ native binary via clang), NVIDIA PTX, portable C, direct x86-64, and a standalone ELF emitter.
-Removes floating-point reduction nondeterminism on request: `@ZeroDrift` accumulates in an exact fixed-point representation chosen by timing the candidates on the GPU actually present.
-Includes an R1CS constraint generator for zero-knowledge circuits, benchmarked against Circom, Noir, and Leo, interoperating with snarkjs end-to-end and generating deployable Groth16 Solidity verifiers.
-Runs a Hardware-Sentient Dual-Accelerator Scheduler: automatically fuses RT Core traversal and Tensor Core MMA pipelines, inserting sync barriers, vectorized FP32→FP16 quantization, and bank-conflict-free swizzled SMEM layouts — from a high-level description of the workload.
-Is partially self-hosting: most compiler phases (lexer, parser, type checker, LLVM emitter) have been rewritten in Y itself, alongside the original Rust implementation.
+Every benchmark here was run on one machine — AMD Ryzen 9 9950X, NVIDIA RTX 4070
+Ti SUPER (Ada Lovelace, sm_89), 48 GB DDR5-6000 — and **none of it has been
+independently reproduced on other hardware.** Where a result is a tie, it says
+tie. Where Y loses, the loss is in the table rather than in a footnote.
 
-Documentation & Manuals
+Two conventions worth stating up front, because both were learned the hard way
+here:
 
-The complete specification and reference manuals for the Y programming language are available in the repository:
+- **A ratio between 0.9 and 1.1 is a tie**, not a win. This box's run-to-run
+  spread is ±8% on CPU GEMM and a few percent on GPU kernels, so anything inside
+  that band is reported as parity.
+- **The GPU clock idles at ~210 MHz and needs ~3 s of load to reach ~2670 MHz.**
+  Timing one implementation fully and then the other gives the second one a
+  hotter clock — a systematic bias, not noise. GPU comparisons here ramp the
+  clock first and then A/B-interleave.
 
-  - [Y Language Definitive Specification & Reference Manual](docs/y_language_documentation.md)
-  - Compiler Architecture: LLVM IR, PTX, C, x86-64, ELF native emission.
-  - 5 Advanced Compiler Optimization Passes: `AsyncPipeliningPass` (3-stage DMA), `SmemBankSwizzlePass` (Bitwise XOR swizzling), `EpilogueFusionPass` (Inline scale & activation fusion), `RegisterPressurePass` (Dynamic `.maxnreg 64`), `UnrollAndJamPass` (4x unrolling).
-  - 3D Block Pointer Abstractions (`BlockPtr3D`): Strided 3D tensor volume accesses with zero-overhead 3-way predicate boundary protection.
-  - Zero-Knowledge Circuit Backend (R1CS): SSA linear-combination folding, static soundness analyzer (`error[Z0042]`), 1M-iteration witness satisfiability suite, and benchmark comparison vs Circom/Noir/Leo. See [ZK backend](#zero-knowledge-backend-r1cs--groth16) below.
-  - Hardware-Sentient Dual-Accelerator Scheduler: Fusing RT Core ray tracing & Tensor Core matrix multiplication.
-  - Language Reference: Grammar, type system, hardware probes, attributes, memory spaces, and CUDA migration guide.
-  - [Benchmarks & Empirical Evaluation](README_BENCHMARKS.md)
+Provenance is given per section. A number with a date attached was measured on
+that date and has not been re-run since.
 
-GPU Performance Benchmarks (NVIDIA RTX 4070 Ti SUPER)
+---
 
-### Theoretical Hardware Limits vs. Empirical TFLOPS
-- **Hardware GPU**: NVIDIA GeForce RTX 4070 Ti SUPER (Ada Lovelace, SM 8.9)
-- **CUDA Cores / Tensor Cores**: 66 SMs | 8,448 CUDA Cores | 264 4th-Gen Tensor Cores
-- **Theoretical Peak FP16 Tensor Core Performance (Dense, Non-Sparse)**: **88.13 TFLOPS** (at 2.61 GHz Base-Boost Clock; max OC range up to 121.5 TFLOPS; 176.26 TFLOPS with 2:4 Structured Sparsity)
+## What is real, and what is not
 
-| Benchmark Workload ($M \times N \times K$) | cuBLAS Latency ($\mu s$) | Y Compiler Latency ($\mu s$) | Y TFLOPS | cuBLAS TFLOPS | % of Dense Hardware Peak | Speedup vs cuBLAS |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Micro GEMM ($256 \times 256 \times 256$)** | $12.19 \ \mu s$ | **$9.49 \ \mu s$** | **3.54 TFLOPS** | $2.76 \ \text{TFLOPS}$ | 4.0% (Latency-Bound) | **1.28x** |
-| **Medium GEMM ($2048 \times 2048 \times 2048$)** | $634.78 \ \mu s$ | **$807.97 \ \mu s$** | **21.26 TFLOPS** | $27.06 \ \text{TFLOPS}$ | 24.1% | 0.79x |
-| **Standalone Unfused GEMM ($4096^3$)** | $2699.24 \ \mu s$ | **$2087.06 \ \mu s$** | **65.85 TFLOPS** | $50.93 \ \text{TFLOPS}$ | **74.7% of Dense Peak** | **1.29x** |
-| **Fused AI Network Layers ($4096^3$)** | $6696.12 \ \mu s$ | **$5453.91 \ \mu s$** | **25.19 TFLOPS** | $20.52 \ \text{TFLOPS}$ | Fused Pipeline | **1.23x** |
-| **Fused AI Network Layers ($8192^3$)** | $55198.61 \ \mu s$ | **$46859.20 \ \mu s$** | **23.46 TFLOPS** | $19.92 \ \text{TFLOPS}$ | Fused Pipeline | **1.18x** |
-| **Dual-Accelerator Co-Processor** | $3.00 \ \mu s$ (OptiX) | **$1.81 \ \mu s$** | Co-Proc | Co-Proc | Hardware Overlap | **1.66x (39.8% Saved)** |
+This section exists because an earlier version of this README claimed things the
+repository's own investigation documents contradict.
 
-*Key Efficiency Win:* On standalone unfused $4096^3$ GEMM, Y Compiler reaches **74.7% of the GPU's absolute physical dense hardware peak TFLOPS** (65.85 TFLOPS out of 88.13 TFLOPS dense peak), delivering **+14.92 TFLOPS higher throughput than cuBLAS** (50.93 TFLOPS / 57.8% peak) via high-throughput $256 \times 128 \times 32$ CTA block tiling, double-buffered `ldmatrix` prefetching, and 4-stage `cp.async.cg` L1 cache bypass.
+**Real, measured, and reproducible from this repo:**
 
-*Medium GEMM ($2048^3$) Performance Note:* At $M=N=K=2048$, cuBLAS ($634.78 \ \mu s$) deploys an out-of-place split-K workspace reduction heuristic. Y ($807.97 \ \mu s$, 0.79x) intentionally avoids intermediate global VRAM allocation to guarantee zero-heap-spill execution, trading single-pass GEMM speed for zero memory fragmentation. For micro-tiles ($M,N \le 256 \to 1.28\text{x}$) and large matrices ($M,N \ge 4096 \to 1.29\text{x}$), Y's CTA block tiling fully saturates GPU SM wave concurrency.
+- R1CS / zero-knowledge circuit compilation, including a circom front end that
+  compiles unmodified circomlib.
+- FP16 tensor-core GEMM and fused GEMM+bias+ReLU on NVIDIA PTX.
+- Fused RMSNorm+residual and RoPE kernels.
+- A multi-threaded AVX-512 CPU GEMM.
+- `@safe` blocks with Z3-discharged loop invariants, `@ZeroDrift` exact
+  accumulation, and linear tracking of async memory tokens.
 
-### VRAM Physical Memory Bandwidth Saturation (663 GB/s — 98.7% of Theoretical Limit)
-- **Theoretical VRAM Bus Bandwidth Limit**:
-  $$\frac{256 \text{ bits} \times 21 \text{ Gbps}}{8} = \mathbf{672 \text{ GB/s}}$$
-- **Y Measured Elementwise Memory Bandwidth**: **663 GB/s (98.7% of Physical Hardware Ceiling)**
-- **cuBLAS / PyTorch Memory Bandwidth**: **520 GB/s (77.3% of Physical Hardware Ceiling)**
-- **Bandwidth Gain vs cuBLAS / PyTorch**: **1.28x Higher Memory Throughput (+143 GB/s Bus Saturation)**
-- **Optimization Mechanism**: Memory-bound elementwise and normalization kernels (RMSNorm, SwiGLU, LayerNorm, Vector Add) generate 128-bit SIMD vector loads (`ld.global.v4` / `uint4`) and 128-bit SIMD vector stores (`st.global.v4` / `uint4`), saturating 98.7% of the physical GDDR6X VRAM memory bus compared to PyTorch's 32-bit unvectorized memory access patterns.
+**Not real, and previously presented as if it were:**
 
-### Cold JIT Compilation Overhead (Native Rust PTX Emitter vs Python JIT Frameworks)
-- **Y Compiler Cold JIT Latency**: **0.078 ms** (Direct Rust PTX generation & CUDA Driver API load)
-- **OpenAI Triton / PyTorch Inductor Cold JIT Latency**: **~50.00 ms** (Python AST parsing, C++ wrapper generation, nvcc/ptxas subprocess invocation)
-- **Cold Launch Advantage**: **~640x faster cold kernel instantiation**, making Y ideal for dynamic LLM prompt shapes and real-time interactive workloads.
+- **The "Dual-Accelerator RT + Tensor Core Co-Processor" is a scheduling
+  simulation, not a capability.** The dependency graph, the slot assignment and
+  the cost model are real code with real tests — but the per-node cycle costs
+  are hardcoded constants, not measurements, and there is no public PTX
+  instruction for BVH/ray-tracing hardware, so `rt_core_emitter.rs` cannot
+  invoke an RT Core by construction. Disassembling the compiled SASS shows the
+  whole kernel reduces to nine instructions: write a constant to shared memory
+  twice, pack it to FP16, exit. **Zero RT instructions, zero `HMMA`, zero global
+  memory traffic.** The "1.66x / 39.8% latency saved" figures this README used
+  to headline were produced by comparing that against a CUDA busy-loop tuned to
+  cost about what the RT trace was estimated to cost. Full write-up, including
+  how it was confirmed on hardware:
+  [investigation_rt_tensor_coprocessor_findings.md](investigation_rt_tensor_coprocessor_findings.md).
+  The scheduler is kept as a design artifact; do not read its output as a
+  measurement.
+- **There are not five working backends.** LLVM IR (the default), NVIDIA PTX,
+  direct x86-64 and a standalone ELF emitter work. The C transpiler was removed
+  — `--emit-c` says so and exits.
+- **Leo did not compile the ZK benchmark circuits.** Earlier tables reported
+  timings for Leo at 100k and 1M constraints. Leo 4.2.0 refuses both: the
+  compiled program exceeds its 512,000-byte limit (`leo build` on
+  `leo/dot_product` errors at 14,322,372 bytes). Those rows have been removed
+  rather than corrected.
+- **Hopper TMA / WGMMA support never existed.** Sixteen of nineteen `emit_*`
+  methods in that family produced PTX that `ptxas` rejects at their own target
+  architecture. They were deleted rather than fixed. `mma.sync` — the path the
+  working GEMM kernels use — was never affected.
 
-### Co-Processor Timeline & Spatial Index Traversal Notes
-- **Static Cycle Model vs Runtime Physical Latency**: While `coprocessor_attention.ysu` and `coprocessor_db_index.ysu` share an identical static IR dependency graph baseline (348 cycles), physical runtime latencies ($1.83 \ \mu s$ for Sparse Token Attention vs $2.67 \ \mu s$ for Vector DB Index) reflect hardware BVH tree traversal depth scaling as spatial dimensionality and bounding volume node density increase. Both achieve a consistent **1.66x hardware speedup (39.8% latency saved)** over sequential execution.
-
-
-
-Status
-
-Bootstrap compiler (src/, Rust): stable; this is what actually runs today.
-Self-hosted compiler (self_hosted/, written in Y): in progress, not yet the default build path.
-Author-built with LLM assistance for implementation; architecture and design decisions are the author's own.
-
-
-Project Layout
-
-src/                       Rust bootstrap compiler
-  main.rs                  CLI entry point, pipeline orchestration
-  lexer.rs                 Tokenizer — @-directives, GPU intrinsics
-  parser.rs                Recursive-descent parser, arena-allocated AST
-  ast.rs                   AST node definitions
-  type_checker.rs          Semantic analysis, safety-block enforcement, linear tracker
-  bank_conflict.rs         Shared-memory bank-conflict prover
-  linear_tracker.rs        Tracks that async memory tokens are consumed exactly once
-  sentinel.rs              Hardware probe (CPU + GPU microbenchmarks)
-  avx_wrapper.rs           AVX/AVX-512 intrinsic wrappers
-  llvm_emitter.rs          LLVM IR emission
-  ptx_emitter.rs           NVIDIA PTX emission
-  zero_drift.rs            @ZeroDrift accumulator selection + on-device measurement
-  zk_emitter.rs            R1CS circuit emission (BN254), --features zk
-  zk_witness.rs            Witness solver shared by the fuzzer and the proof tests
-  zk_poseidon_constants.rs circomlib Poseidon parameters (generated, do not edit)
-  zk_solidity.rs           Groth16 on-chain verifier generation
-  mini_json.rs             Dependency-free JSON reader for keys and circuit inputs
-  c_emitter.rs             C transpiler — NOT registered in lib.rs or main.rs; dead
-  cpu_emitter.rs           Direct x86-64 emission
-  native_emitter.rs        ELF binary emission (no external toolchain)
-  ypm.rs                   Package manager
-  ysu_gpu_probe.rs         External GPU microbenchmark binary
-  ir_grapher.rs            IR dependency graph for RT/Tensor Core node analysis
-  coprocessor_scheduler.rs Hardware-Sentient co-processor scheduler (sync barriers, SMEM budget)
-  quantization_pass.rs     Vectorized FP32→FP16 quantization pass (cvt.rn.f16x2.f32)
-  rt_core_emitter.rs       RT Core PTX emitter with unified coprocessor_smem offset mapping
-
-self_hosted/          Y compiler components rewritten in Y (.ysu)
-tests/                Test programs and co-processor workloads (.ysu, .coprocessor.ptx, .wrapped.ptx)
-algorithms/           Reference algorithm implementations (Y + C)
-c_src/                C/C++ host bindings, CUDA wrappers
-docs/                 Language specification and design notes
-scripts/              Build automation
-
-
-Compiler Pipeline
-
-source (.ysu)
-  → lexer.rs        tokenize
-  → parser.rs       build AST
-  → type_checker.rs safety-block checks, Z3-discharged invariants, bounds verification
-  → backend select  based on hardware profile + source annotations
-       → llvm_emitter.rs          → LLVM IR → clang → native binary
-       → ptx_emitter.rs           → NVIDIA PTX
-       → c_emitter.rs             → portable C
-       → cpu_emitter.rs           → x86-64 machine code
-       → native_emitter.rs        → ELF binary
-       → coprocessor_scheduler.rs → fused RT+Tensor Core PTX (--emit-coprocessor)
-
-
-Hardware Probing
-
-On first run, the compiler measures the host machine and caches the result to .ysu_hw_profile:
-
-CPU: AVX/AVX-512 support, L1/L2/L3/RAM latency (via pointer-chasing cache sweep), AVX-512 throughput, thread-handoff cost.
-GPU (via external CUDA probe binary): FMA/IMAD/transcendental latencies, shared-memory bank-conflict cycles, tensor-core latencies (F16/TF32), warp-shuffle cost, global memory latency at multiple strides, RT Core traversal latency.
-
-Example profile output:
-
-AVX = true
-AVX512 = true
-L1_CYCLES = 4
-L2_CYCLES = 12
-L3_CYCLES = 40
-MEM_CYCLES = 120
-GPU_NAME = NVIDIA GeForce RTX 4070 Ti SUPER
-FMA_LATENCY = 4.54
-SMEM_LATENCY = 28.03
-TENSOR_F16_LATENCY = 42.14
-WARP_SIZE = 32
-
-Subsequent runs load the cached profile instead of re-probing.
-
-
-Safety Directives
-
-Code inside @safe { } blocks must initialize all variables, cannot dereference raw pointers, and every loop requires an @invariant. @unsafe { } opts back into raw pointer access. chisel { } allows direct register/memory-bus access.
-
-fn main() {
-    @safe {
-        let x: I32 = 10;
-
-        @invariant(x >= 0)
-        while x > 0 {
-            x = x - 1;
-        }
-    }
-}
-
-Every `@invariant` is discharged by Z3. An invariant that **cannot** be checked — because no solver could be started — fails the build rather than passing quietly; `Y_ALLOW_UNVERIFIED_INVARIANTS=1` overrides that for machines without one, and says plainly that nothing was proved. The solver is looked for at `Y_Z3_PATH`, on `PATH`, and at `venv/bin/z3`, `.venv/bin/z3`, `z3/build/z3`, `$HOME/.local/bin/z3`; `pip install z3-solver` into the project venv is enough.
-
-Other directives: `@bounds(min, max)` for static index range checks, `@divergence(uniform)` to assert non-divergent warp branches, `@tile(M, N, K)` to schedule tensor-core tile operations.
-
-
-### `@ZeroDrift` — exact, order-independent accumulation
-
-Floating-point addition is not associative, so a reduction's result depends on the order the hardware happened to combine it in. On a GPU that order is decided by launch geometry, which means retuning a tile size can change the answer. `@ZeroDrift` removes the dependency by accumulating in an exact integer representation:
-
-```
-@bounds(min=0, max=1000)
-@ZeroDrift
-let acc: F32 = 0.0;
-
-acc += x;          // scaled once, then accumulated with exact integer adds
-```
-
-**Only integer and fixed-point arithmetic is drift-free.** `f64` is the same non-associative arithmetic with a longer mantissa — it drifts less and still drifts — so it is never selected, however fast it measures.
-
-**Which exact representation is chosen is measured, not assumed.** The compiler times a serially dependent accumulate chain per candidate on the GPU actually present, and caches the result per device in `.ysu_hw_profile`:
-
-```
-[*] Measured @ZeroDrift accumulate costs on NVIDIA GeForce RTX 4070 Ti SUPER
-      ->  KahanF32:      1455 ps/acc  not exact (never selected)
-      ->    Q16.16:      1790 ps/acc  exact
-      ->    Q32.32:      1922 ps/acc  exact
-      ->       I64:      2106 ps/acc  exact
-      ->       F64:     17726 ps/acc  not exact (never selected)
-      -> @ZeroDrift acc: F32 -> Q32.32 (measured 1922 ps/acc)
-```
-
-Exact fixed-point is ~9x cheaper here than reaching for higher precision, and the GeForce FP64 penalty lands exactly where it should. With no GPU there are no measurements, which is not an error — selection falls back to the narrowest sufficient representation, deterministically.
-
-Lowered by both the LLVM and PTX backends. Notes:
-
-- `+=` and `-=` only. Scaling a product would reintroduce rounding into the accumulation, which is the one thing this prevents.
-- A bare `F32` accumulator is **rejected**: nothing exact holds 3.4e38 at 2⁻²⁴. `@bounds(min, max)` states the real range and makes it satisfiable.
-- Both backends round half away from zero, so the same source compiled for CPU and GPU agrees.
-- Exactness is a property of the *accumulation*. Each term is still quantised once on the way in; what is guaranteed is that summing those terms is order-independent.
-
-Useful for bitwise-reproducible numerics (the problem Kulisch accumulators and ReproBLAS exist to solve), deterministic ML, monetary arithmetic, consensus systems that cannot tolerate node divergence, and kernel development where you want to retune tiling and still diff output byte-for-byte.
-
-`tests/zero_drift_end_to_end.rs` compiles a program with clang and **runs** it, summing the same 4001 terms in opposite orders and requiring bit-identical results — alongside a control asserting that sequence genuinely disagrees with itself in `f32`, so the result cannot be vacuous. The PTX path is gated on `ptxas` actually assembling the output.
-
+---
 
 ## Zero-Knowledge Backend (R1CS → Groth16)
 
-**Not in a default build.** Without `--features zk` the binary prints `The ZK Circuit Backend is not compiled into this binary` and **exits 0** — a silent no-op that reads as a fast successful run.
+This is the most complete part of the project.
+
+**Not in a default build.** Without `--features zk` the binary prints `The ZK
+Circuit Backend is not compiled into this binary` and **exits 0** — a silent
+no-op that reads as a fast successful run.
 
 ```bash
 cargo build --release --features zk
-Y circuit.ysu --target=r1cs --witness input.json     # writes .r1cs, .sym, .wtns
+Y circuit.ysu   --target=r1cs --witness input.json   # Y's own language
+Y circuit.circom --target=r1cs -l path/to/circomlib  # circom 2.x
 ```
 
 ### It plugs into the existing toolchain
@@ -232,7 +107,148 @@ snarkjs groth16 verify verification_key.json public.json proof.json
 # snarkJS: OK!
 ```
 
-Circuit inputs are matched **by name** against `fn main`'s parameters — a file listing values in the wrong order would otherwise produce a valid proof of the wrong statement.
+Circuit inputs are matched **by name** against `fn main`'s parameters — a file
+listing values in the wrong order would otherwise produce a valid proof of the
+wrong statement.
+
+### circom front end
+
+`Y foo.circom --target=r1cs` compiles circom 2.x through the same back end.
+Everything downstream of constraint construction is shared with Y's own
+language.
+
+Its acceptance test is not "does it parse": circomlib's `Poseidon(2)`, compiled
+from unmodified circomlib source, produces circomlib's own four published
+digests **and** agrees with Y's native `poseidon_hash` on the same inputs — two
+independent paths through the compiler, one answer. Output, public-input and
+private-input counts match circom exactly on every circuit tested.
+
+Measured 2026-08-09, best of three, same circom source through both compilers:
+
+| | circom 2.2.3 | Y | |
+|---|---|---|---|
+| `Poseidon(2)` | 0.102 s | 0.076 s | 1.34x |
+| 200-hash Poseidon chain | 0.662 s | 0.693 s | **0.96x — a tie** |
+| 1000-hash Poseidon chain | 3.236 s | 3.304 s | **0.98x — a tie** |
+
+**Compile time is a tie. The circuit size is not:**
+
+| | circom | Y | |
+|---|---|---|---|
+| `Poseidon(2)` | 517 | 286 | 1.81x fewer constraints |
+| 200-hash chain | 103,400 | 55,608 | 1.86x fewer |
+| 1000-hash chain | 517,000 | 278,008 | 1.86x fewer |
+
+Non-zero matrix terms land within 7% of circom's, so the smaller constraint
+count is not bought by densifying the matrices — which is how this optimisation
+usually goes wrong.
+
+What that is worth downstream, measured through arkworks Groth16 on a 20-hash
+chain rather than assumed:
+
+```
+unreduced   14963 constraints   15365 wires   51872 nnz   setup 0.048s   prove 0.062s
+reduced      5568 constraints   15365 wires   35765 nnz   setup 0.028s   prove 0.044s
+```
+
+**1.7x on setup, 1.4x on prove** — not the 2.7x the constraint count alone
+suggests, because the wire count does not move: the pass deletes constraints and
+leaves the eliminated wires in the variable table, and Groth16 pays for wires
+too. Compacting them is not done.
+
+Detail, subset, and the constructs that are refused by name:
+[docs/circom_frontend.md](docs/circom_frontend.md).
+
+### Compile speed on Y's own language
+
+The two benchmark circuits are an unrolled polynomial (`temp = temp * y`) and an
+iterative dot product (`sum += a * b`). The harness **aborts the comparison
+unless both compilers report the same non-linear constraint count**, because
+comparing compile speed across tools that built different circuits is
+meaningless.
+
+Measured 2026-08-09, minimum of three runs (`tests/benchmark_zk_vs_circom.py`):
+
+| circuit | N | Y | circom | speedup |
+|---|---|---|---|---|
+| polynomial | 10,000 | 0.008 s | 0.132 s | 16.5x |
+| polynomial | 100,000 | 0.087 s | 3.53 s | 40.5x |
+| polynomial | 1,000,000 | 0.895 s | 249.04 s | **278x** |
+| dot product | 10,000 | 0.038 s | 0.509 s | 13.5x |
+| dot product | 100,000 | 3.19 s | 13.88 s | 4.3x |
+| dot product | 1,000,000 | **476 s** | not yet measured | — |
+
+**Read the two circuits separately — the gap between them is the whole story,
+and it is not flattering.** The polynomial circuit's linear combinations are one
+or two terms wide; the dot product accumulates a dense one. On the polynomial
+circuit Y is linear and circom is strongly super-linear, which is where 278x
+comes from. **On the dot product Y is the super-linear one**: 10k → 100k costs
+85x for 10x the size, and 100k → 1M costs another 149x, ending at 476 seconds.
+Roughly O(N²·²).
+
+So the honest summary is that Y's constraint emission is fast when linear
+combinations stay narrow and degrades badly when they do not — an accumulator
+touched once per iteration is the shape that triggers it. **The 278x is the
+polynomial number and should never be quoted as "Y's speed".** This is a known
+open problem, not a measurement artifact; the in-place accumulator update and
+`is_simplified` propagation described in
+[docs/heavy_circuit_speed_test.md](docs/heavy_circuit_speed_test.md) reduce the
+constant but do not change the exponent.
+
+**Memory is the binding constraint on this backend, not time.** Peak RSS,
+polynomial circuit, measured 2026-08-09:
+
+| Constraints | time | peak RSS | `.r1cs` on disk |
+|---|---|---|---|
+| 1,000,000 | 0.90 s | 0.37 GB | 0.13 GB |
+| 31,000,000 | 36.1 s | 11.4 GB | 3.97 GB |
+
+Cost is linear in both. **But per-constraint memory is a property of the
+circuit, not of the compiler**: this circuit's linear combinations are 1–2 terms
+wide (0.37 KB/constraint), where a Poseidon chain's are ~28 (1.42 KB/constraint).
+On a 48 GB box that is ~105M constraints of the former and ~32M of the latter.
+Quote the dense number. Circom, Noir and Leo were not run at 31M — earlier
+tables here reported estimates for them at that size as if measured, and those
+have been removed.
+
+### Proving cost, end to end
+
+`cargo test --release --features zk --test zk_groth16_scale -- --ignored`,
+measured 2026-08-09. Y has no prover of its own and performs no trusted setup —
+setup and prove are arkworks, reached through Y's R1CS.
+
+| Constraints | emit | witness | setup | prove | verify | total |
+|---|---|---|---|---|---|---|
+| 10,000 | 0.01 s | 0.00 s | 0.04 s | 0.05 s | 0.002 s | **0.11 s** |
+| 100,000 | 0.12 s | 0.01 s | 0.40 s | 0.36 s | 0.002 s | **0.89 s** |
+| 1,000,000 | 1.25 s | 0.09 s | 2.83 s | 2.99 s | 0.002 s | **7.17 s** |
+
+arkworks is **81%** of that total. The remaining headroom is in a prover Y does
+not have, so "Y compiles circuits 278x faster than circom" and "Y produces
+proofs faster" are different claims and only the first is supported.
+
+### Correctness
+
+`tests/zk_groth16_end_to_end.rs` proves Y's circuits through arkworks as an
+independent oracle: an honest proof must verify, a tampered public input must be
+rejected, a perturbed witness must fail satisfiability, and Y's modulus must
+equal the true BN254 one. String-matching an emitted `.r1cs` cannot catch a
+wrong field or a mis-numbered wire; this can.
+
+- **Poseidon is circomlib's**, pinned against digests taken from circomlib's own
+  `Poseidon(2)` — 241 constraints against circom's 243 non-linear + 274 linear.
+  Only t=3 (two inputs) is supported; other arities and non-BN254 fields are
+  refused rather than approximated.
+- **Comparisons cost ~101 constraints, by necessity.** A field has no order, so
+  an ordering claim without a range proof is vacuous. `<`, `<=`, `>`, `>=`
+  range-check both operands and decompose the difference.
+- **Bitwise, shift, `/` and `%`** are supported: `&`/`|`/`^` cost 98, `<<`/`>>`
+  33 (constant shift amounts only — a variable shift is a 32-way multiplexer, so
+  it is refused rather than approximated), `/` and `%` 135. `/` is integer
+  division. Values are unsigned 32-bit; a negative operand fails its range check
+  and is unprovable rather than wrong.
+- **`@zk_target(scheme = "plonkish")` is refused.** It used to parse, print
+  `Proof Scheme: Plonkish` into the artifact header, and emit R1CS anyway.
 
 ### On-chain verifier
 
@@ -240,255 +256,361 @@ Circuit inputs are matched **by name** against `fn main`'s parameters — a file
 Y --emit-verifier verification_key.json -o Verifier.sol --name MyVerifier
 ```
 
-Generates a Groth16 verifier calling the BN254 precompiles at `0x06`/`0x07`/`0x08`, with the same `verifyProof(uint[2], uint[2][2], uint[2], uint[N])` signature snarkjs emits, so its exported calldata and existing front-ends work unchanged. `tests/zk_solidity_verifier.rs` compiles the generated contract with `solc` and executes it on a real EVM via `revm` — an honest proof must be accepted and a tampered public input rejected. (The failure mode that matters — G2 coordinates in library order rather than the EVM's reversed order — produces a contract that compiles, deploys, burns full gas and rejects every valid proof, which no string-matching test could catch.)
+Generates a Groth16 verifier calling the BN254 precompiles at
+`0x06`/`0x07`/`0x08`, with the same
+`verifyProof(uint[2], uint[2][2], uint[2], uint[N])` signature snarkjs emits, so
+its exported calldata and existing front-ends work unchanged.
+`tests/zk_solidity_verifier.rs` compiles the contract with `solc` and executes it
+on a real EVM via `revm`. (The failure mode that matters — G2 coordinates in
+library order rather than the EVM precompile's reversed order — produces a
+contract that compiles, deploys, burns the full gas of a pairing check and
+rejects every valid proof. No string-matching test can catch that.)
 
-### Correctness
+---
 
-`tests/zk_groth16_end_to_end.rs` proves Y's circuits through arkworks as an independent oracle, asserting an honest proof verifies, a tampered public input is rejected, a perturbed witness fails satisfiability, and that Y's modulus equals the true BN254 one.
+## GPU: NVIDIA PTX backend
 
-- **Poseidon is circomlib's**, verified against digests taken from circomlib's own `Poseidon(2)` template — 241 constraints vs circom's 243 non-linear + 274 linear. Only t=3 (two inputs) is supported; other arities and non-BN254 fields are refused rather than approximated.
-- **Comparisons cost ~100 constraints, by necessity.** A field has no order, so an ordering claim without a range proof is vacuous. `<`, `<=`, `>`, `>=` range-check both operands and decompose the difference.
-- **Bitwise, shift, `/` and `%`** are supported: `&`/`|`/`^` cost 98, `<<`/`>>` 33 (constant shift amounts only), `/` and `%` 135. `/` is integer division. Values are unsigned 32-bit — a negative operand fails its range check and is unprovable rather than wrong.
+Hardware: RTX 4070 Ti SUPER, 66 SMs. Theoretical dense FP16 tensor-core peak at
+the 2.61 GHz boost clock is **88.1 TFLOPS**.
 
-### Performance
+### Square FP16 GEMM vs cuBLAS
 
-| Constraints | emit | witness | setup | prove | verify | total |
+Measured from `target/release/Y tests/gemm_f16_<N>.ysu --emit-ptx` — the
+compiler's own output, not a hand-written CUDA reference. Interleaved A/B,
+ranked by minimum, correctness-checked every run.
+
+| M=N=K | 256 | 512 | 1024 | 2048 | 4096 | 8192 |
 |---|---|---|---|---|---|---|
-| 10,000 | 0.01 s | 0.00 s | 0.04 s | 0.04 s | 0.002 s | **0.10 s** |
-| 100,000 | 0.16 s | 0.07 s | 0.33 s | 0.36 s | 0.002 s | **0.92 s** |
-| 1,000,000 | 1.77 s | 0.57 s | 2.80 s | 2.87 s | 0.002 s | **8.02 s** |
+| **Y vs cuBLAS** | 1.12x | 0.84x | 0.89x | 0.93x | 0.93x | 0.94x |
+| **Y TFLOPS** | 11.1 | 38.2 | 69.8 | 79.5 | 79.1 | 81.6 |
 
-arkworks (setup + prove) is ~71% of that total; Y has no prover of its own and performs no trusted setup. Compiling `Poseidon(2)`: **0.011 s vs circom's 0.104 s**.
+**Y is behind cuBLAS at every size above 256, by 6–16%.** 256 reads 1.12–1.23x
+across runs and 4096 reads 0.93–0.94x; both are at the edge of what a
+3 µs kernel reproduces to, but the ordering is stable. This is a large
+improvement on the 0.61–0.94x the same benchmark measured before the mainloop
+work (`ptxas` could not unroll the `cp.async` staging loops because their trip
+count depended on `%tid.x`, costing ~22 SASS instructions per 16-byte copy), and
+it is still a loss.
 
-Full detail, including the measurement traps involved, in [docs/heavy_circuit_speed_test.md](docs/heavy_circuit_speed_test.md).
+### Fused GEMM + bias + ReLU vs cuDNN
 
+Precision-matched — the cuDNN baseline is fed the same FP16 operands the Y
+kernel consumes. (An FP32 `torch.nn.Linear` baseline shows 2.9–3.4x, but that
+conflates "the fused epilogue is good" with "FP16 beats FP32".)
 
-Dual-Accelerator Co-Processing Pipeline
+| M=N=K | 512 | 1024 | 2048 | 4096 | 8192 |
+|---|---|---|---|---|---|
+| **Y vs cuDNN FP16** | 1.07x | tie | tie | tie | 1.08x |
 
-The compiler includes a Hardware-Sentient Scheduler (--emit-coprocessor) that automatically fuses RT Core and Tensor Core workloads within a single GPU kernel.
+Epilogue fusion is where fusion pays. The general rule this established, after
+measuring it the other way: **fusions that only remove work win; mainloop
+fusions that add accumulator pressure force a worse tile and tend to net zero.**
+Fused SwiGLU measures **1.00x against Y's own unfused two-GEMM path** — its two
+FP32 accumulator arrays cost 8 registers each per tile element, so a 128x128 tile
+over 2x2 warps would need 256 registers/thread against ptxas's 255 cap, pinning
+it to the 4x4 split that measures 52.5 against 75.8 TFLOPS in the plain GEMM.
 
-The problem it solves
+### RMSNorm and RoPE vs FlashInfer
 
-On modern NVIDIA GPUs (Ampere, Ada Lovelace), RT Cores and Tensor Cores are useful together but hard to combine by hand. They are:
+Compared against FlashInfer's hand-tuned production kernels (what vLLM and
+SGLang actually use), same math and same convention — not against eager PyTorch.
 
-- Asymmetric in timing: RT traversal is asynchronous and non-deterministic (latency depends on BVH depth); Tensor Core ops are synchronous, lock-step warp instructions.
-- Mismatched in precision: RT Cores output FP32; Tensor Cores need packed FP16/BF16 fragments.
-- Costly to hand off between: staging through shared memory requires manually placed bar.sync fences, bank-conflict-aware swizzle layouts, and vectorized cvt.rn.f16x2.f32 packing.
+| kernel | rows | result |
+|---|---|---|
+| Fused Add+RMSNorm (hidden=4096) | 128 / 1024 / 8192 | parity at every size |
+| Fused RoPE (head_dim=128) | 128 | 1.85x |
+| Fused RoPE (head_dim=128) | 1024 | 1.92x |
+| Fused RoPE (head_dim=128) | 8192 | tie |
 
-What Y does automatically
+RoPE wins in 8 of 9 (head_dim, rows) combinations across head_dim 64/128/256.
 
-- Builds an IR dependency graph (ir_grapher.rs) identifying RT Core and Tensor Core nodes, cross-pipeline data edges, and the critical path through the kernel.
-- Schedules the co-processor timeline (coprocessor_scheduler.rs): allocates a single unified coprocessor_smem shared-memory budget, places sync barriers at minimum-cost cut points, and overlaps RT traversal latency with independent scalar instructions.
-- Injects a vectorized quantization pass (quantization_pass.rs): emits cvt.rn.f16x2.f32 loops that pack FP32 RT outputs into half2 Tensor Core inputs, using bank-conflict-free swizzled address layouts.
-- Emits fused PTX (rt_core_emitter.rs): all RT scratch and output writes are aliased directly to the scheduler's coprocessor_smem offset, eliminating the double-allocation bug that causes CUDA_ERROR_INVALID_PTX at large dimensions.
+### Where the GPU backend loses
 
-Writing a co-processor workload in Y
+| workload | baseline | result |
+|---|---|---|
+| **FP8 (e4m3) GEMM** | `torch._scaled_mm` | **0.16–0.26x — 4–6x slower** |
+| Paged decode attention | FlashInfer | **1.3–3.7x slower** |
+| Decode-shaped GEMM (M=4–8) | cuBLAS | at the DRAM roofline; tied |
 
-The developer writes a high-level description. The compiler handles the rest:
+FP8 is the largest gap and is not being chased: this is Ada, not Hopper, and the
+kernel is instruction-bound in its quantize-and-stage step. Paged decode
+attention re-reads K/V per query head under GQA and has no split-K.
 
-# tests/coprocessor_attention.ysu  — RT-routed sparse attention
-@unsafe
-fn main() {
-    # RT Core: BVH-accelerated K-Nearest Neighbor (128D, k=8)
-    let nns_res: I32 = rt_nearest_neighbor(128, 8);
+### Memory bandwidth
 
-    # Tensor Core: MMA projection on routed vectors
-    # sync barrier, FP32->FP16 quantization, and swizzled ldmatrix are injected automatically
-    let acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
-    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(nns_res);
-    let frag_B: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(nns_res);
-    let frag_C: Fragment<MMA_m16n8k16, C, F32> = ldmatrix(nns_res);
-    acc = mma_sync(frag_A, frag_B, frag_C);
-}
+Y's elementwise and normalization kernels emit 128-bit vector loads and stores
+(`ld.global.v4` / `st.global.v4`), measuring **663 GB/s against this card's
+672 GB/s theoretical GDDR6X ceiling — 98.7%.** PyTorch's unvectorized 32-bit
+access pattern on the same kernels measures 520 GB/s (77.3%).
 
-The equivalent CUDA C++ kernel requires 160+ lines: manual OptixRayQuery traversal, shared-memory staging, bar.sync fences, explicit cvt.rn.f16x2.f32 packing, and wmma:: fragment loads.
+*Measured earlier in the project's history; not re-run for this revision.*
 
-Compile with:
+### Cold compilation latency
 
-cargo run -- tests/coprocessor_attention.ysu --emit-coprocessor
+Y emits PTX directly from Rust and loads it through the CUDA Driver API:
+**0.078 ms**, against ~50 ms for Triton / PyTorch Inductor, which parse Python,
+generate a C++ wrapper and shell out to `nvcc`/`ptxas`. This is a compile-time
+comparison, not a kernel-speed one — it matters for dynamic LLM prompt shapes
+where a new kernel is needed per shape, and for nothing else.
 
+*Measured earlier in the project's history; not re-run for this revision.*
 
-Building
+### PTX is gated on assembling, not on string matching
 
-Requires: Rust toolchain, clang, optionally nvcc for the GPU probe.
-
-cargo build --release
-./target/release/Y
-
-# Compile a Y program
-cargo run -- tests/hello.ysu           # LLVM backend (default)
-cargo run -- tests/train_spec.ysu --llvm
-cargo run -- tests/hello.ysu --c
-cargo run -- tests/test_drift.ysu      # PTX for kernel files
-
-# Compile a co-processor kernel
-cargo run -- tests/coprocessor_attention.ysu --emit-coprocessor
-cargo run -- tests/coprocessor_db_index.ysu --emit-coprocessor
-
-
-Benchmarks
-
-All benchmarks were run on a single development machine (AMD Ryzen 9 9950X, NVIDIA RTX 4070 Ti SUPER, 48GB DDR5-6000). They have not been independently reproduced on other hardware. Verification scripts (verify_r1cs.py, verify_heavy.py, verify_dot_product.py) are included so results can be checked against the generated circuit files.
-
----
-
-GPU kernel: Y-emitted PTX vs. PyTorch
-
-1024-step F32 accumulation kernel, 1000 launches averaged (tests/benchmark.py):
-
-| Implementation            | Avg time/launch |
-| :--- | :--- |
-| PyTorch Eager             | 2,579.23 µs |
-| PyTorch Compiled (Triton) | 13.40 µs |
-| Y-emitted PTX             | 1.98 µs |
+`tests/ptx_intrinsics_assemble.rs` compiles a probe `.ysu` per intrinsic through
+the real binary and runs `ptxas`. Adding that gate is what found the sixteen dead
+Hopper intrinsics, a `.maxnreg 0` bug that made **every** kernel compiled without
+a probed hardware profile structurally invalid, and two live user-callable
+intrinsics (`tma_load`, `wgmma_async`) that printed "PTX Assembly generated
+successfully!", exited 0, and wrote a file `ptxas` rejects with five distinct
+errors. Both now refuse and fail the build. Prefer extending this gate to adding
+another substring assertion.
 
 ---
 
-Empirical Head-to-Head: Y vs OpenAI Triton (NVIDIA RTX 4070 Ti SUPER)
+## CPU: AVX-512 GEMM
 
-| Workload | Y Engine | OpenAI Triton | PyTorch CUDA | Advantage |
-| :--- | :---: | :---: | :---: | :--- |
-| **SwiGLU Activation (100K)** | **3.95 µs** | 5.84 µs | 5.01 µs | **1.48x FASTER vs Triton** |
-| **RMSNorm (128x1024)** | **4.99 µs** | 5.36 µs | 15.72 µs | **1.07x FASTER vs Triton** |
-| **Block Scan (100K)** | **4.24 µs** | 4.20 µs | 4.55 µs | **Beats PyTorch CUDA (4.55µs)** |
-| **Cold JIT Compilation** | **0.078 ms** | ~50.0 ms | N/A | **~640x FASTER JIT Compilation** |
+A multi-threaded f32 GEMM emitted through the LLVM backend, against OpenBLAS
+built for the same ISA (`TARGET=SKYLAKEX`). All-core clock 5.09 GHz, so AVX-512
+peak is 5212 GF. Every shape gated on relative L2 error < 1e-5.
 
+**Geomean 0.97 on 16 threads, 1.27 single-threaded. Y is ahead on half the
+shapes and behind on the other half**, and which half is the useful signal:
 
----
+| class | shapes | Y vs OpenBLAS |
+|---|---|---|
+| GEMV / skinny / flat-K / rank-k | `1×8192×8192`, `17×4096×4096`, `4096×4096×8` | **1.3–1.9x** |
+| Small square | `256³`, `250³` | tie |
+| Large square | `1024³`, `2048³` | **0.79–0.94x** |
+| Decode (M=4–8) | `8×4096×4096` | **0.30x** |
+| Tiny | `48³` | **0.43x** |
 
-Dual-Accelerator Co-Processor: Y vs. Naive CUDA C++ (10,000 iterations, RTX 4070 Ti SUPER)
+The skinny and rank-k class is what the work was aimed at and the advantage
+survived every harness correction. Large square and decode are real losses:
+`2048³` is 0.79x on 16 threads, and decode is a partitioning problem — the same
+shape single-threaded is 1.80x, which says the kernel is fine and the split is
+not.
 
-The co-processor scheduler automatically overlaps RT Core traversal with Tensor Core MMA, inserts vectorized quantization, and eliminates shared-memory bank conflicts.
+> **Six independent biases were found in the harness that produced the first
+> version of these numbers, and all six favoured Y.** Both libraries timed in
+> one process (OpenBLAS's idle threads spin before parking, so whichever ran
+> second was measured against a busy machine); thread count driven through
+> `openblas_set_num_threads()` on a libgomp build; all 18 shapes in one process,
+> depressing later ones. The reported figures are after those fixes. Detail:
+> [docs/cpu_gemm_tuning.md](docs/cpu_gemm_tuning.md).
 
-> **Reproducibility caveat (please read before citing these numbers).** The table
-> below was recorded on the author's machine and **cannot currently be
-> regenerated**: `tests/benchmark_coprocessor_physical.py` compiles its *naive
-> CUDA baseline* through CuPy's NVRTC, and that fails against the bundled CUDA
-> headers (`mma.h` includes `crt/mma.h`, which is not shipped), so the run
-> aborts before producing timings. The Y side does compile and load. The same
-> harness also contains a clearly-labelled fallback that reports
-> "(SIMULATED VIA CYCLE-ACCURATE PROFILES)" from a hardcoded `naive_cycles =
-> 436.0` against the scheduler's own cycle estimate — those numbers are not the
-> ones below (436/215 ≈ 2.03, not 1.66), but the two paths are easy to confuse
-> when reading the output. Treat the speedups as unverified pending a working
-> baseline build.
+### CPU lock-free queue vs C++
 
-| Workload | RT/Tensor Topology | Naive CUDA C++ | Y Co-Processor | Speedup | Latency Saved |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Sparse Token Attention** | 1 RT + 5 TC + 1 barrier | $3.03 \ \mu s$ | **$1.83 \ \mu s$** | **1.66x** | **39.8%** |
-| **Dense Multi-Pipe (`coprocessor_large`)** | 2 RT + 8 TC + 1 barrier | $3.00 \ \mu s$ | **$1.81 \ \mu s$** | **1.66x** | **39.8%** |
-| **Vector DB Index Search** | 1 RT + 5 TC + 1 barrier | $4.44 \ \mu s$ | **$2.67 \ \mu s$** | **1.66x** | **39.8%** |
-
-Static scheduling summary (--emit-coprocessor output):
-
-| Kernel | Parallel Cycles | Overlap Savings | SMEM Budget |
-| :--- | :---: | :---: | :---: |
-| `coprocessor_attention.ysu` | 215 cycles | 133 cycles | 8,704 bytes |
-| `coprocessor_large.ysu` | 287 cycles | 145 cycles | 10,240 bytes |
-| `coprocessor_db_index.ysu` | 215 cycles | 133 cycles | 33,280 bytes |
-
-Note: the attention and db_index kernels share an identical IR node topology (1 RT node, 5 Tensor nodes, 1 barrier), so the static scheduler produces identical cycle estimates (348 sequential cycles -> 215 parallel cycles, 133 overlap cycles saved). Their physical latencies differ ($1.83 \ \mu s$ vs. $2.67 \ \mu s$) because the RT traversal cost scales with search dimensionality and neighbor count (128D/k=8 vs. 256D/k=16).
-
-Architectural Overlap Ceiling Note: The ~1.66x (39.8%) physical latency reduction across distinct topologies is dictated by Ada Lovelace's fixed hardware functional unit pipeline ratio between RT Core BVH ray-box intersection logic and Tensor Core MMA warp dispatch units. Because Y's co-processor scheduler fills async RT traversal bubbles with independent Tensor Core instructions until reaching the minimum synchronization barrier, the achievable hardware concurrency ceiling converges near ~40% latency reduction (1.66x speedup) whenever RT Core traversal dominates the kernel's critical path.
-
-Note on db_index recall: index construction and recall@k tradeoffs are workload-specific. This benchmark demonstrates traversal speedup via hardware BVH mapping, not index quality or search accuracy.
-
-**What is verified:** every `coprocessor_*.ysu` workload now emits a complete PTX
-module that real `ptxas` assembles for `sm_89`, gated by
-`tests/coprocessor_ptx_assembles.rs`. That was not previously true — the backend
-emitted only the scheduler's instruction stream, with no `.visible .entry` and no
-`.reg` declarations, and the benchmark harness hand-wrote the kernel envelope in
-Python (`wrap_ptx`) before handing it to CuPy. So the compiler's own output was
-unusable while the benchmark worked. The envelope is emitted by the compiler now.
-
-The same gate caught `coprocessor_nerf` asking for **131,584 bytes** of
-statically declared shared memory against a 48 KB per-CTA limit; the scheduler
-now refuses that at compile time with both numbers named, rather than emitting a
-module no GPU can load.
-
----
-
-CPU lock-free queue: Y vs. C++
-
-20M push/pop ops, SPSC ring buffer, capacity 1024:
+20M push/pop, SPSC ring buffer, capacity 1024 (measured earlier in the project's
+history and not re-run since):
 
 | Implementation | Time | Throughput |
-| :--- | :---: | :---: |
-| Mutex std::queue (baseline) | 1.460s | 13.70 MOps/s |
-| C++ SPSC, unaligned | 0.089s | 225.22 MOps/s |
-| C++ SPSC, cache-line aligned | 0.062s | 321.37 MOps/s |
-| Y-compiled SPSC | 0.066s | 301.39 MOps/s |
+|---|---|---|
+| Mutex `std::queue` | 1.460 s | 13.70 MOps/s |
+| C++ SPSC, unaligned | 0.089 s | 225.22 MOps/s |
+| C++ SPSC, cache-line aligned | 0.062 s | 321.37 MOps/s |
+| Y-compiled SPSC | 0.066 s | 301.39 MOps/s |
 
-Y comes within 6% of hand-tuned, cache-line-aligned C++ without manual alignment tuning — the compiler derived the correct alignment from the measured L2 cache line size and the source's @align/@atomic annotations.
+Within 6% of hand-tuned aligned C++ without manual alignment tuning — the
+compiler derived the alignment from the measured L2 cache line size.
 
 ---
 
-R1CS constraint generation: Y vs. Circom, Noir, Leo
+## Safety and verification
 
-To ensure a fair, rigorous, and apples-to-apples comparison, every tool is pinned to its fastest/most optimized official compilation mode (e.g., using `--c --O2` for Circom to compile to native C++ witness generators with full constraint simplifications, rather than defaulting to the slower WASM paths). Measurements report the sample mean ± standard deviation across 3 runs. Peak memory is captured as Resident Set Size (RSS) using `getrusage(RUSAGE_CHILDREN)`.
+These are the features the compiler refuses to compile without, and each one is
+here because the previous version of it silently passed.
 
-1,000,000 constraints (heavy_circuit):
+### `@safe` blocks and Z3-discharged invariants
 
-| Compiler | Command / Flags | Time (mean ± stddev) | Peak Memory (mean ± stddev) |
-| :--- | :--- | :---: | :---: |
-| **Y** | `Y heavy_circuit.ysu --target=r1cs` | **1.530s ± 0.024s** | **1073.94 MB ± 0.80 MB** |
-| Noir (Nargo) | `nargo compile --force` | 11.36s | 1.25 GB |
-| Leo | `leo build` | 41.52s | 10.81 GB |
-| Circom | `circom heavy_circuit.circom --r1cs --c --sym --O2` | 244.674s ± 1.756s | 2389.76 MB ± 1.06 MB |
+Code inside `@safe { }` must initialize all variables, cannot dereference raw
+pointers, and requires an `@invariant` on every loop.
 
-*Constraint-Count Parity:* The 1M constraint circuit produces exactly 1,000,001 constraints in Y-lang and 1,000,000 non-linear constraints in Circom, ensuring compilers solve the exact same mathematical scale.
+```
+fn main() {
+    @safe {
+        let x: I32 = 10;
 
-1,000,000 non-linear constraints with heavy linear variables (linear_heavy):
+        @invariant(x >= 0)
+        while x > 0 {
+            x = x - 1;
+        }
+    }
+}
+```
 
-| Compiler | Command / Flags | Time | Peak Memory | Status / Result |
-| :--- | :--- | :---: | :---: | :--- |
-| **Y** | `Y linear_heavy.ysu --target=r1cs` | **140.05s** | **1.66 GB** | **Completed (1,000,001 constraints, 1,000,004 wires)** |
-| Circom (--O1) | `circom linear_heavy.circom --r1cs --c --sym --O1` | 1500.12s | 4.82 GB | Completed *(Bloated: 6M constraints, 6M wires)* |
-| Circom (--O2) | `circom linear_heavy.circom --r1cs --c --sym --O2` | — | — | Did Not Complete (Terminated after a 2-hour cutoff limit) |
+Every `@invariant` is discharged by Z3. **An invariant that cannot be checked
+now fails the build.** This is a deliberate reversal: the four solver call sites
+used to print a warning and continue, so on any machine without z3 — the default
+— every invariant was accepted unchecked, and `@invariant(i > 1000)` on a `0..10`
+loop compiled cleanly and printed "Compilation Successful!".
+`Y_ALLOW_UNVERIFIED_INVARIANTS=1` restores the old behaviour loudly. The solver
+is looked for at `Y_Z3_PATH`, on `PATH`, and at `venv/bin/z3`, `.venv/bin/z3`,
+`z3/build/z3`, `$HOME/.local/bin/z3`.
 
-*Important Run & Comparison Details:*
-* **Single Run**: Given the substantial execution times (25 minutes for `--O1` and a 2-hour cutoff limit for `--O2`), these metrics represent a single benchmark run, distinguishing them from the statistically replicated multi-run averages reported at smaller scales.
-* **Target Comparison**: Because Circom with `--O2` did not complete within the 2-hour cutoff limit, **there is no optimized Circom baseline to compare against at this scale**. Y-lang's **140.05s / 1.66 GB** run (which outputs a fully optimized **1M constraint** circuit) is compared directly against Circom `--O1`'s **unoptimized, bloated 6,000,000 constraint circuit** (its only completed output). This highlights that at this scale, Circom cannot produce a prover-optimized circuit in a reasonable execution window.
+The SMT encoding itself was unsound until recently. `trace_body_statements`
+ended in `_ => {}`, so a statement it did not model was skipped — and dropping a
+body's effects makes the preservation obligation strictly *easier*. The
+identical violation was rejected when written plainly (`i = i - 100;`) and
+**accepted** when wrapped in a trivially-true `if`. Branches are havoc'd now, and
+unmodellable constructs are refused by name.
 
-*Constraint Optimization Analysis:* To produce an optimized, prover-friendly circuit (1M non-linear constraints and no linear constraints), Circom must run its `--O2` Gaussian elimination pass, which failed to complete within the 2-hour cutoff limit. If run under `--O1` to avoid the timeout, Circom compiles in 25 minutes but outputs a bloated 6,000,000-constraint circuit. Y-lang's single-pass SSA tracking performs linear folding on the fly during AST compilation, directly emitting the optimized 1,000,001 constraint system in 140 seconds (a **10.7x speedup** against Circom `--O1` while delivering a **6x smaller** constraint system).
+### `@ZeroDrift` — exact, order-independent accumulation
 
-100,000 constraints (dot_product):
+Floating-point addition is not associative, so a reduction's result depends on
+the order the hardware happened to combine it in. On a GPU that order is decided
+by launch geometry, which means retuning a tile size can change the answer.
 
-| Compiler | Command / Flags | Time (mean ± stddev) | Peak memory (mean ± stddev) |
-| :--- | :--- | :---: | :---: |
-| **Y** | `Y dot_product.ysu --target=r1cs` | **3.667s ± 0.005s** | **154.89 MB ± 0.37 MB** |
-| Noir (Nargo) | `nargo compile --force` | 2.31s | 393.74 MB |
-| Leo | `leo build` | 13.83s | 3.08 GB |
-| Circom | `circom dot_product.circom --r1cs --c --sym --O2` | 14.769s ± 0.036s | 1175.38 MB ± 0.58 MB |
+```
+@bounds(min=0, max=1000)
+@ZeroDrift
+let acc: F32 = 0.0;
 
-*Constraint-Count Parity:* The 100k constraint circuit produces 100,001 constraints in Y-lang and 100,000 non-linear constraints in Circom.
+acc += x;          // scaled once, then accumulated with exact integer adds
+```
 
-Noir compiles faster on this flatter constraint graph; Y uses less memory across the board.
+**Only integer and fixed-point arithmetic is drift-free.** `f64` is the same
+non-associative arithmetic with a longer mantissa — it drifts less and still
+drifts — so it is never selected, however fast it measures.
 
-31,000,000 constraints (heavy_31m.ysu):
+**Which representation is chosen is measured, not assumed.** The compiler times a
+serially dependent accumulate chain per candidate on the GPU actually present:
 
-| Compiler | Command / Flags | Time | Peak memory | Status |
-| :--- | :--- | :---: | :---: | :--- |
-| **Y** | `Y heavy_31m.ysu --target=r1cs` | **105.28s** | **30.65 GB** | **Completed** |
-| Noir | `nargo compile --force` | — | — | Did Not Complete (OOM) |
-| Leo | `leo build` | — | — | Did Not Complete (OOM) |
-| Circom | `circom heavy_31m.circom --r1cs --c --sym --O2` | — | — | Did Not Complete (Terminated after a 2-hour cutoff limit) |
+```
+      ->  KahanF32:      1455 ps/acc  not exact (never selected)
+      ->    Q16.16:      1790 ps/acc  exact
+      ->    Q32.32:      1922 ps/acc  exact
+      ->       I64:      2106 ps/acc  exact
+      ->       F64:     17726 ps/acc  not exact (never selected)
+      -> @ZeroDrift acc: F32 -> Q32.32 (measured 1922 ps/acc)
+```
 
-*Scaling Curve & Simplification Analysis:*
-* **Asymptotic Scalability**: At 100k constraints (`dot_product`), Y-lang achieves a **53.6x speedup** (`0.285s` vs `15.280s`) and **7.71x memory reduction** (`152.8 MB` vs `1178.1 MB`) against Circom. At 1M constraints (`heavy_circuit`), Y-lang achieves a **148.8x speedup** (`1.706s` vs `253.936s`) and **2.96x memory reduction** (`1038.5 MB` vs `3073.1 MB`). This growth in speedup (from 53.6x to 148.8x) validates Y's superior asymptotic scaling, arising from localized single-pass constraint deduplication and in-place SSA updates instead of global simplification passes.
-* **The Role of `--O2` Simplification**: In the 100k constraint `dot_product` benchmark, compiling Circom with default `--O1` output includes 100,000 non-linear constraints, 300,000 linear constraints, and 400,003 wires. Specifying `--O2` triggers Circom's iterative Gaussian elimination pass to solve and substitute these linear relations, successfully reducing the circuit to 100,000 non-linear constraints, 0 linear constraints, and 100,003 wires (matching Y-lang's direct output of 100,001 constraints and 100,004 wires). However, this reduction incurs a compile-time penalty.
-* **Inherent Compiler Speed Advantage**: In the 1M constraint `heavy_circuit` benchmark, every loop constraint is a non-linear multiplication of two variables (`temp[i] * y`), leaving 0 linear constraints to solve. Running Circom under `--O1` yields the same constraint count as `--O2` (1M non-linear constraints, 1M+3 wires) but takes **247.3s**, while `--O2` takes **253.9s**. This proves that Circom's compilation latency is dominated by front-end parsing, template execution, symbol lookup, and file writing rather than just simplification time, showing that Y's 148.8x speedup (1.706s) is a native compiler architecture win.
-* **Superlinear Scaling Limits of Gaussian Elimination**: In the 1M constraint `linear_heavy` benchmark (which contains 5,000,000 linear relations), Circom with `--O2` did not complete within the 2-hour cutoff limit. Per Circom's official documentation, the `--O2` optimizer applies Gaussian elimination repeatedly in "rounds" until no further linear constraints containing private signals can be found. In circuits with large numbers of interconnected linear signals, this iterative substitution solver can scale superlinearly (approaching $O(N^3)$ complexity), leading to CPU/RAM bottlenecks. In contrast, Y-lang's single-pass SSA tracker performs linear folding on the fly during AST compilation, directly outputting the optimized 1,000,001 constraints circuit in **140.05s** (1.66 GB RSS).
-* **Direct Optimization via SSA**: Y-lang's parser and single-pass SSA tracker automatically perform linear-combination folding on the fly. Y directly emits the optimized constraint size without requiring a separate post-processing simplification phase, delivering both fast compilation and minimal proving size.
+Exact fixed-point is ~9x cheaper here than reaching for higher precision, and the
+GeForce FP64 penalty lands exactly where it should.
 
-Noir, Leo, and Circom figures at this scale are estimated from their memory-scaling behavior at smaller sizes, not measured directly, since none completed on the test machine.
+`tests/zero_drift_end_to_end.rs` compiles a program with clang and **runs it**,
+summing the same 4001 terms in opposite orders and requiring bit-identical
+results — alongside a control asserting that sequence genuinely disagrees with
+itself in `f32`, so the result cannot be vacuous.
 
-Why Y uses less memory at scale: in-place accumulator updates avoid O(N) vector copies on loop-scoped reassignment, linear-combination addition is checked in O(1) when inputs are already flat, and constraint deduplication uses an order-independent hash map.
+`@ZeroDrift` used to do literally nothing: it lexed, parsed, was counted, was
+printed as an advisory, and was read by no backend. Output was byte-identical
+with and without it.
 
+### Linear tracking of async tokens
 
-Self-Hosting
+Async memory tokens must be consumed exactly once. "Exactly once" is a claim
+about *executions*, and the tracker used to check source lines — so
+`if n { pipe.wait(t); }` (awaited on one path of two) and
+`for i in 0..4 { pipe.wait(t); }` (one copy, four awaits) both compiled clean.
+The tracker now records conditional and loop nesting depth at creation and
+compares it at consumption. `tests/linear_tracker_enforcement.rs` is 10 tests,
+6 negative and 4 positive — rejecting every `pipe.wait` under a loop would be
+sound and would also ban the shape every real pipelined kernel is built from.
 
-Most compiler phases are duplicated in native Y under self_hosted/, alongside their Rust originals in src/. The Rust implementation is the stable reference; the Y implementation is the long-term target once it can compile itself end-to-end.
+### A design rule the repository enforces
 
+**In any pass whose output is a correctness claim, an unhandled AST node is a
+hard error — never a silent identity, no-op, or "close enough" substitution.**
+This is written down because the same bug was found eight times: a `_ =>` arm
+that guessed instead of refusing. A pass that silently approximates produces the
+paperwork of a proof without the proof, and the build goes green. The full table
+of the eight instances is in [../CLAUDE.md](../CLAUDE.md).
+
+---
+
+## Building
+
+Requires: Rust toolchain, clang. Optionally: `nvcc` for the GPU probe, `z3` for
+invariant checking, `ptxas` for the PTX assembly gate, `solc` + Node for the
+Solidity verifier test.
+
+```bash
+cargo build --release
+cargo build --release --features zk     # ZK backend is NOT in a default build
+
+# Compile a Y program
+./target/release/Y tests/hello.ysu                     # LLVM -> native binary
+./target/release/Y tests/hello.ysu --emit-llvm         # LLVM IR
+./target/release/Y tests/gemm_f16_4096.ysu --emit-ptx  # NVIDIA PTX
+./target/release/Y tests/hello.ysu --emit-native       # standalone ELF
+
+# ZK
+./target/release/Y circuit.ysu    --target=r1cs --witness input.json
+./target/release/Y circuit.circom --target=r1cs -l circomlib/circuits
+
+cargo test --release                    # 31 test binaries
+cargo test --release --features zk      # 31 test binaries, ZK included
+```
+
+Empirical GEMM autotuning for `@tile`d kernels measures candidates on the real
+GPU and caches per (M, N, K, precision, GPU) in `.ysu_hw_profile`. A cold shape
+costs ~4 s (~100 s at M=N=K=16384). The cache **cannot** detect that codegen
+itself changed — re-tune with `--autotune-force` after editing a kernel or the
+compiler will keep emitting a tile chosen for the old one.
+
+---
+
+## Hardware probing
+
+On first run the compiler measures the host and caches to `.ysu_hw_profile`:
+CPU cache latencies via pointer-chasing, AVX-512 throughput, thread-handoff
+cost; and via an external CUDA probe, FMA/IMAD/transcendental latencies,
+shared-memory bank-conflict cycles, tensor-core latencies, warp-shuffle cost and
+global memory latency at several strides. Delete the file to force a re-probe
+after a driver, GPU or CPU-governor change — note that this also discards
+autotuning measured on the old configuration, which is the intent.
+
+---
+
+## Project layout
+
+```
+src/                       Rust bootstrap compiler
+  lexer.rs parser.rs ast.rs        front end
+  type_checker.rs                  safety blocks, Z3 invariants, interval arithmetic
+  linear_tracker.rs                async token single-consumption
+  sentinel.rs ysu_gpu_probe.rs     hardware probe
+  autotuner.rs empirical_autotune.rs cuda_runtime.rs
+  bank_conflict.rs                 shared-memory swizzle solver
+  llvm_emitter.rs                  LLVM IR (default backend)
+  ptx_emitter.rs                   NVIDIA PTX
+  cpu_emitter.rs cpu_gemm.rs       x86-64 / AVX-512 GEMM
+  native_emitter.rs                standalone ELF
+  zero_drift.rs                    @ZeroDrift representation selection
+  zk_field.rs                      BN254 Fr, Montgomery form
+  zk_emitter.rs zk_witness.rs      R1CS emission and witness solving
+  zk_poseidon_constants.rs         circomlib parameters (GENERATED — do not edit)
+  zk_solidity.rs                   Groth16 on-chain verifier
+  circom_{lexer,ast,parser,lower}.rs   circom 2.x front end
+  ir_grapher.rs coprocessor_scheduler.rs rt_core_emitter.rs
+                                   scheduling simulation — see "What is real"
+
+self_hosted/    compiler phases rewritten in Y (.ysu); not the default build path
+tests/          test programs, benchmarks, PTX assembly gates
+circomlib/      vendored circomlib (upstream 2.0.5)
+docs/           language spec and design notes
+```
+
+---
+
+## Status
+
+The Rust bootstrap compiler in `src/` is the stable reference and is what runs
+today. The self-hosted compiler in `self_hosted/` is in progress and is not the
+default build path.
+
+Author-built with LLM assistance for implementation; architecture and design
+decisions are the author's own.
+
+Further reading:
+
+- [Y Language Specification & Reference Manual](docs/y_language_documentation.md)
+- [ZK compile-speed detail and measurement traps](docs/heavy_circuit_speed_test.md)
+- [circom front end](docs/circom_frontend.md)
+- [ZK emit profiling](docs/zk_emit_profile.md)
+- [CPU GEMM tuning, and the harness biases](docs/cpu_gemm_tuning.md)
+- [RT/Tensor co-processor: why it is scaffolding](investigation_rt_tensor_coprocessor_findings.md)
+- [Benchmarks index](README_BENCHMARKS.md)
 
 Author: Umut Korkmaz (YSU)

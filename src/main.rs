@@ -29,6 +29,7 @@ mod cuda_runtime;
 mod empirical_autotune;
 mod zero_drift;
 mod cpu_specializer;
+mod cpu_gemm;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
@@ -37,9 +38,119 @@ mod zk_poseidon_constants;
 #[cfg(feature = "zk")]
 mod mini_json;
 #[cfg(feature = "zk")]
+mod circom_lexer;
+#[cfg(feature = "zk")]
+mod circom_ast;
+#[cfg(feature = "zk")]
+mod circom_parser;
+#[cfg(feature = "zk")]
+mod circom_lower;
+#[cfg(feature = "zk")]
+mod zk_field;
+#[cfg(feature = "zk")]
 mod zk_solidity;
 #[cfg(feature = "zk")]
 mod zk_witness;
+
+/// Resident and peak memory, for the `Y_ZK_TIMING` phase report.
+///
+/// Memory, not time, is what bounds the circuit sizes Y is meant to reach that
+/// other compilers cannot: cost is roughly linear per constraint, so the box's
+/// RAM sets a hard ceiling on circuit size. A user who hits it needs to know
+/// which phase peaked, and a "circuits too big for circom" claim needs the
+/// number it depends on to be visible rather than folklore.
+///
+/// Linux-only (`/proc/self/status`); silently contributes nothing elsewhere.
+#[cfg(feature = "zk")]
+mod zk_mem {
+    pub fn report() -> String {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+                return String::new();
+            };
+            let field = |k: &str| -> Option<f64> {
+                status
+                    .lines()
+                    .find(|l| l.starts_with(k))?
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse::<f64>()
+                    .ok()
+                    .map(|kb| kb / 1024.0 / 1024.0)
+            };
+            match (field("VmRSS:"), field("VmHWM:")) {
+                (Some(rss), Some(peak)) => {
+                    format!("   rss {:>6.2} GB   peak {:>6.2} GB", rss, peak)
+                }
+                _ => String::new(),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            String::new()
+        }
+    }
+}
+
+/// Counting allocator, reported by `Y_ZK_TIMING=1`.
+///
+/// Here because the ZK emitter's cost turned out NOT to be where the obvious
+/// reasoning put it. A Poseidon circuit is pure field arithmetic, so the natural
+/// conclusion is that it is bound by the cost of a field multiply — but
+/// measured, the 4.12 M multiplies plus 7.81 M adds in a 1000-hash chain
+/// accounted for only ~1.8 s of an 8.6 s emit. The other 81% was **356 million
+/// allocations**, because `Fr` was a heap `Vec<u32>` and every element cloned,
+/// moved into a HashMap or returned by value hit the allocator.
+///
+/// `Fr` is a stack `[u64; 4]` now (`zk_field.rs`) and that is down to 7.4 M, so
+/// this counter has done its job — it stays because it is the only instrument
+/// that could have found the answer, and the same question will be asked again.
+///
+/// A relaxed atomic increment per allocation is a few nanoseconds and does not
+/// distort the ratio it exists to measure.
+#[cfg(feature = "alloc-stats")]
+mod counting_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub static ALLOCS: AtomicU64 = AtomicU64::new(0);
+    pub static BYTES: AtomicU64 = AtomicU64::new(0);
+
+    pub struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            ALLOCS.fetch_add(1, Relaxed);
+            BYTES.fetch_add(l.size() as u64, Relaxed);
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+            ALLOCS.fetch_add(1, Relaxed);
+            BYTES.fetch_add(new as u64, Relaxed);
+            unsafe { System.realloc(p, l, new) }
+        }
+    }
+
+    pub fn counts() -> (u64, u64) {
+        (ALLOCS.load(Relaxed), BYTES.load(Relaxed))
+    }
+}
+
+#[cfg(feature = "alloc-stats")]
+#[global_allocator]
+static ALLOC: counting_alloc::Counting = counting_alloc::Counting;
+
+/// `(0, 0)` when the counting allocator is not compiled in.
+#[cfg(not(feature = "alloc-stats"))]
+mod counting_alloc {
+    pub fn counts() -> (u64, u64) {
+        (0, 0)
+    }
+}
 
 use std::env;
 use std::fs;
@@ -188,10 +299,13 @@ fn solve_and_write_witness(
         }
     }
 
-    let circuit = emitter.build_circuit();
+    // Borrowed, not `build_circuit()`: cloning the constraint list to hand it to
+    // a read-only consumer is the largest single allocation the ZK pipeline can
+    // make, and memory is what bounds circuit size here.
+    let circuit = emitter.view();
     let ir = emitter.build_witness_ir();
     let (witness, satisfied) =
-        zk_witness::solve_r1cs_witness(&circuit.constraints, &ir, circuit.num_variables, &[], &ordered);
+        zk_witness::solve_r1cs_witness(circuit.constraints, &ir, circuit.num_variables, &[], &ordered);
     if !satisfied {
         return Err(format!(
             "no satisfying witness exists for these inputs. A range check almost \
@@ -201,9 +315,120 @@ fn solve_and_write_witness(
             zk_emitter::ZK_COMPARISON_BITS
         ));
     }
-    zk_emitter::ZkEmitter::write_wtns_binary(&circuit, &witness, wtns_path)
+    zk_emitter::ZkEmitter::write_wtns_binary_view(circuit, &witness, wtns_path)
         .map_err(|e| format!("Failed to write {}: {}", wtns_path, e))?;
     Ok(witness.len())
+}
+
+/// Compile a circom circuit through Y's R1CS back end.
+///
+/// The whole point of the front end: a team's existing, audited `.circom`
+/// source compiles here with no rewrite, and everything downstream of
+/// constraint construction is the same code Y's own language uses.
+///
+/// `-l <dir>` adds an include search path, matching circom's own flag.
+#[cfg(feature = "zk")]
+fn compile_circom(path: &str, args: &[String]) {
+    use std::path::PathBuf;
+
+    let mut search_paths: Vec<PathBuf> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-l" || args[i] == "--link" {
+            if let Some(dir) = args.get(i + 1) {
+                search_paths.push(PathBuf::from(dir));
+            }
+            i += 1;
+        } else if let Some(dir) = args[i].strip_prefix("-l") {
+            if !dir.is_empty() {
+                search_paths.push(PathBuf::from(dir));
+            }
+        }
+        i += 1;
+    }
+
+    let output_path = args
+        .iter()
+        .position(|a| a == "-o" || a == "--output")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut p = PathBuf::from(path);
+            p.set_extension("r1cs");
+            p.to_string_lossy().to_string()
+        });
+
+    log_info!("Reading circom source: {}", path);
+    log_step!("1/2", "Parsing and lowering circom to R1CS...");
+
+    let timing = std::env::var("Y_ZK_TIMING").is_ok();
+    let t0 = std::time::Instant::now();
+
+    let emitter = match circom_lower::compile_file(std::path::Path::new(path), &search_paths) {
+        Ok(e) => e,
+        Err(e) => {
+            log_error!("circom compilation failed:");
+            eprintln!("    {}", e);
+            exit(1);
+        }
+    };
+    if timing {
+        eprintln!(
+            "[Y ZK TIMING] {:<22} {:>8.3} s{}",
+            "circom lower",
+            t0.elapsed().as_secs_f64(),
+            zk_mem::report()
+        );
+    }
+
+    let circuit = emitter.view();
+    println!(
+        "      -> {} constraints, {} wires, {} public input(s), {} private input(s), {} output(s)",
+        circuit.constraints.len(),
+        circuit.num_variables,
+        circuit.public_inputs.len(),
+        circuit.private_inputs.len(),
+        circuit.outputs.len()
+    );
+
+    log_step!("2/2", "Writing R1CS...");
+    let t1 = std::time::Instant::now();
+    if let Err(e) = emitter.write_r1cs_binary(&output_path) {
+        log_error!("failed to write {}: {}", output_path, e);
+        exit(1);
+    }
+    if timing {
+        eprintln!(
+            "[Y ZK TIMING] {:<22} {:>8.3} s{}",
+            "write_r1cs_binary",
+            t1.elapsed().as_secs_f64(),
+            zk_mem::report()
+        );
+    }
+    println!("      -> Written to: {}", output_path);
+
+    // `--witness inputs.json` also solves and writes the `.wtns`, so the whole
+    // prove path is available without a second tool.
+    if let Some(i) = args.iter().position(|a| a == "--witness") {
+        if let Some(inputs) = args.get(i + 1) {
+            let mut wtns = PathBuf::from(&output_path);
+            wtns.set_extension("wtns");
+            let wtns = wtns.to_string_lossy().to_string();
+            match solve_and_write_witness(&emitter, inputs, &wtns) {
+                Ok(n) => {
+                    println!("      -> Solved {} witness values.", n);
+                    println!("      -> Written witness to: {}", wtns);
+                }
+                Err(e) => {
+                    log_error!("witness generation failed:");
+                    eprintln!("    {}", e);
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
 }
 
 /// Measured accumulate costs for `@ZeroDrift`, cached in `.ysu_hw_profile`.
@@ -296,6 +521,19 @@ fn main() {
                 source_file = Some(args[i].clone());
             }
             i += 1;
+        }
+    }
+
+    // A `.circom` file is a different language and does not go through Y's
+    // lexer, parser or type checker at all - only the R1CS back end is shared.
+    // Dispatching on the extension here rather than deeper down keeps that
+    // separation honest: there is no point at which circom source is pretended
+    // to be Y source.
+    #[cfg(feature = "zk")]
+    if let Some(ref f) = source_file {
+        if std::path::Path::new(f).extension().and_then(|e| e.to_str()) == Some("circom") {
+            compile_circom(f, &args);
+            return;
         }
     }
 
@@ -485,6 +723,9 @@ fn main() {
     // ────────────────────────────────────────────────────────
     log_step!("3/4", "Running Semantic Type-Checker...");
     let mut type_checker = TypeChecker::new();
+    type_checker.set_zk_target(
+        args.iter().any(|a| a == "--emit-r1cs" || a == "--target=r1cs"),
+    );
     type_checker.check_program(&ast);
 
     if !type_checker.errors.is_empty() {
@@ -827,11 +1068,53 @@ fn main() {
         #[cfg(feature = "zk")]
         {
             log_step!("4/4", "Emitting Rank-1 Constraint System (R1CS)...");
+
+            // `Y_ZK_TIMING=1` prints a per-phase breakdown. The ZK path is a
+            // single-threaded pipeline of four phases with very different
+            // costs depending on the circuit, and the totals alone are
+            // misleading: the polynomial benchmark spends almost everything in
+            // `emit_program`, while a Poseidon circuit's linear combinations
+            // are ~28 terms wide instead of 1-2 and shift the weight to the
+            // writers. Tuning against the totals of one circuit is how
+            // `to_decimal_string` came to dominate ZK compilation unnoticed.
+            let timing = std::env::var("Y_ZK_TIMING").is_ok();
+            macro_rules! phase {
+                ($label:expr, $body:expr) => {{
+                    let t0 = std::time::Instant::now();
+                    let r = $body;
+                    if timing {
+                        eprintln!(
+                            "[Y ZK TIMING] {:<22} {:>8.3} s{}",
+                            $label,
+                            t0.elapsed().as_secs_f64(),
+                            zk_mem::report()
+                        );
+                    }
+                    r
+                }};
+            }
+
+            let alloc0 = counting_alloc::counts();
             let mut emitter = zk_emitter::ZkEmitter::new();
-            match emitter.emit_program(&ast) {
+            let emitted = phase!("emit_program", emitter.emit_program(&ast));
+            if timing {
+                let a1 = counting_alloc::counts();
+                if a1.0 > alloc0.0 {
+                    eprintln!(
+                        "[Y ZK TIMING] {:<22} {:>12} allocs, {:>9.2} GB",
+                        "emit allocations",
+                        a1.0 - alloc0.0,
+                        (a1.1 - alloc0.1) as f64 / 1e9
+                    );
+                } else {
+                    eprintln!("[Y ZK TIMING] emit allocations       (build with --features alloc-stats)");
+                }
+            }
+            match emitted {
                 Ok(r1cs_text) => {
                     // Write binary R1CS format directly to output_path
-                    match emitter.write_r1cs_binary(&output_path) {
+                    let written = phase!("write_r1cs_binary", emitter.write_r1cs_binary(&output_path));
+                    match written {
                         Ok(_) => {
                             println!("      -> R1CS binary target compiled successfully.");
                             println!("      -> Written to: {}", output_path);
@@ -844,7 +1127,15 @@ fn main() {
 
                             // Also write human-readable constraints text to .r1cs.txt
                             let txt_path = format!("{}.r1cs.txt", prefix);
-                            let _ = fs::write(&txt_path, &r1cs_text);
+                            phase!("write_r1cs_txt", { let _ = fs::write(&txt_path, &r1cs_text); });
+
+                            if timing {
+                                let (muls, adds) = zk_emitter::field_op_counts();
+                                eprintln!(
+                                    "[Y ZK TIMING] {:<22} {:>12} muls, {:>12} adds",
+                                    "field ops", muls, adds
+                                );
+                            }
 
                             // --witness inputs.json also solves the circuit and
                             // writes a .wtns, which is what `snarkjs groth16
@@ -911,8 +1202,8 @@ fn main() {
         for line in &emitter.drift_report {
             println!("      -> @ZeroDrift {}", line);
         }
-        if !emitter.drift_errors.is_empty() {
-            for e in &emitter.drift_errors {
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
                 log_error!("{}", e);
             }
             exit(1);
@@ -1019,6 +1310,16 @@ fn main() {
         log_step!("4/4", "Compiling via LLVM IR Backend...");
         let mut emitter = LlvmEmitter::new();
         let ll_output = emitter.emit_program(&ast, &hw_profile);
+
+        // This path did not check the emitter's errors at all, so a construct
+        // the backend refused still produced a binary and exited 0 — the same
+        // "green build, wrong program" shape the PTX backend was fixed for.
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
 
         let ll_path = format!("{}.tmp.ll", &output_path);
         match fs::write(&ll_path, &ll_output) {

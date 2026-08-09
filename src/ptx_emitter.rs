@@ -2105,10 +2105,10 @@ declare it as a Q format.",
 
             match &graph.nodes[s_idx] {
                 WitnessOp::Const(val) => {
-                    let d0 = val.digits.get(0).cloned().unwrap_or(0) as u64 | ((val.digits.get(1).cloned().unwrap_or(0) as u64) << 32);
-                    let d1 = val.digits.get(2).cloned().unwrap_or(0) as u64 | ((val.digits.get(3).cloned().unwrap_or(0) as u64) << 32);
-                    let d2 = val.digits.get(4).cloned().unwrap_or(0) as u64 | ((val.digits.get(5).cloned().unwrap_or(0) as u64) << 32);
-                    let d3 = val.digits.get(6).cloned().unwrap_or(0) as u64 | ((val.digits.get(7).cloned().unwrap_or(0) as u64) << 32);
+                    // Canonical limbs, not the stored Montgomery ones: this is
+                    // a literal for the witness generator, which works in
+                    // ordinary residues.
+                    let [d0, d1, d2, d3] = val.to_limbs();
 
                     writeln!(&mut buffer, "    mov.u64 %s{}_0, 0x{:x};", s_idx, d0).unwrap();
                     writeln!(&mut buffer, "    mov.u64 %s{}_1, 0x{:x};", s_idx, d1).unwrap();
