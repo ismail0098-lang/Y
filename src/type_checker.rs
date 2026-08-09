@@ -125,6 +125,8 @@ pub struct TypeChecker {
     // Static Under-Constrained Analyzer (@zk_safe) fields
     pub zk_safe_stack: Vec<bool>,
     pub zk_allow_unconstrained_stack: Vec<bool>,
+    /// Set by `set_zk_target` when compiling to R1CS. See that method.
+    zk_target: bool,
 }
 
 fn reset_thread_locals() {
@@ -147,7 +149,20 @@ impl TypeChecker {
             structs: HashMap::new(),
             zk_safe_stack: vec![false],
             zk_allow_unconstrained_stack: vec![false],
+            zk_target: false,
         }
+    }
+
+    /// Whether the R1CS backend is the compilation target.
+    ///
+    /// Only `error[Z0010]` depends on this, and it must: a `while` loop with no
+    /// static bound genuinely cannot be lowered to a fixed constraint system,
+    /// but it is ordinary code for every other backend. The check used to fire
+    /// unconditionally, so **every** un-annotated `while` in the language was
+    /// rejected with a message naming a mode that was not active - including in
+    /// `tests/hello.ysu`, the first example in the README.
+    pub fn set_zk_target(&mut self, on: bool) {
+        self.zk_target = on;
     }
 
     pub fn push_scope(&mut self) {
@@ -1242,14 +1257,33 @@ impl TypeChecker {
 
                 let start_val = self.eval_interval(start).map(|i| i.min);
                 let end_val = self.eval_interval(end).map(|i| i.max);
+                let bounds_are_known = matches!((start_val, end_val), (Some(_), Some(_)));
                 if let (Some(s_min), Some(e_max)) = (start_val, end_val) {
                     self.insert_interval(loop_var.clone(), Interval { min: s_min, max: e_max - 1 });
                 } else {
-                    self.insert_interval(loop_var.clone(), Interval { min: 0, max: 999999 });
+                    // The loop bounds are not statically known, so the loop
+                    // variable has NO provable range and must not be given one.
+                    //
+                    // This used to fabricate `Interval { min: 0, max: 999999 }`,
+                    // which asserts two facts it has not proved. The `max` half
+                    // was harmless in practice because 999999 trips the overflow
+                    // check for any normal array - but the `min` half claimed the
+                    // index is non-negative, and nothing had established that.
+                    // `for i in n..3` over a 2,000,000-element array therefore
+                    // compiled clean with `n` an unconstrained parameter: the
+                    // fabricated max slipped under the array size and the
+                    // fabricated min waved the negative check through.
+                    //
+                    // Removing the interval makes the index unprovable instead,
+                    // which is the honest answer and is what
+                    // `mark_explicitly_bounded` below must NOT override.
+                    self.update_interval(&loop_var, None);
                 }
 
                 self.insert_var(loop_var.clone(), SemanticType::Primitive("I32".into()));
-                self.mark_explicitly_bounded(loop_var.clone());
+                if bounds_are_known {
+                    self.mark_explicitly_bounded(loop_var.clone());
+                }
 
                 let mut assigned_vars = std::collections::HashSet::new();
                 self.collect_assigned_vars_in_block(body, &mut assigned_vars);
@@ -1257,9 +1291,14 @@ impl TypeChecker {
                     self.update_interval(var, None);
                 }
 
+                // A `pipe.wait` inside this body awaits once per iteration; the
+                // tracker needs to know that to compare against where the
+                // matching `cp_async` was created.
+                self.linear_tracker.enter_loop();
                 for s in &body.stmts {
                     self.check_stmt(s);
                 }
+                self.linear_tracker.exit_loop();
 
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
@@ -1359,16 +1398,23 @@ impl TypeChecker {
                     self.check_uniformity(condition);
                 }
                 self.check_expr(condition);
+                // Both arms are conditional: a transfer awaited in either one is
+                // not awaited on the paths that take the other.
+                self.linear_tracker.enter_conditional();
                 self.check_block(then_block);
                 if let Some(eb) = else_block {
                     self.check_block(eb);
                 }
+                self.linear_tracker.exit_conditional();
             }
             Stmt::While {
                 condition, body, invariant, max_iterations, is_uniform_branch, ..
             } => {
-                if max_iterations.is_none() {
-                    // Static error Z0010 check for dynamic un-annotated while loops in ZK mode
+                if self.zk_target && max_iterations.is_none() {
+                    // A `while` with no static bound cannot be unrolled into a
+                    // fixed constraint system. That is true of R1CS and of
+                    // nothing else, so the check is gated on the target rather
+                    // than applied to the whole language.
                     self.errors.push(format!(
                         "Line {}: error[Z0010]: dynamic 'while' loop prohibited in ZK circuit mode\n  hint: annotate loop with '@max_iterations(N)' where N is a compile-time constant integer",
                         condition.span().line
@@ -1391,7 +1437,15 @@ impl TypeChecker {
                 }
 
                 self.check_expr(condition);
+                // A while body is both conditional (it may run zero times) and a
+                // loop (it may run many). Entering both is not redundant: the
+                // zero-iteration case is what makes an await inside it unsound
+                // even when the copy is also inside.
+                self.linear_tracker.enter_loop();
+                self.linear_tracker.enter_conditional();
                 self.check_block(body);
+                self.linear_tracker.exit_conditional();
+                self.linear_tracker.exit_loop();
 
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
@@ -2068,7 +2122,19 @@ own operand, so `*p` was proven as `p`)",
                 Stmt::Assign { target, value, .. } => {
                     if let Expr::Ident(name, _) = target {
                         if versions.contains_key(name) {
-                            let rhs_smt = self.expr_to_smt(value, versions)?;
+                            // An unmodellable right-hand side does not need to be
+                            // refused - it needs to be UNKNOWN. Giving the target a
+                            // fresh unconstrained version says exactly that, and is
+                            // the same sound over-approximation used for branches:
+                            // the invariant must then hold whatever the expression
+                            // produced. Refusing here would reject `let v = arr[i];`
+                            // in an otherwise perfectly checkable loop.
+                            let Ok(rhs_smt) = self.expr_to_smt(value, versions) else {
+                                let mut one = std::collections::HashSet::new();
+                                one.insert(name.clone());
+                                Self::havoc(&one, versions, declarations);
+                                continue;
+                            };
                             let current_ver = versions.get(name).cloned().unwrap_or(0);
                             let next_ver = current_ver + 1;
                             versions.insert(name.clone(), next_ver);
@@ -2083,7 +2149,12 @@ own operand, so `*p` was proven as `p`)",
                 Stmt::CompoundAssign { target, op, value, .. } => {
                     if let Expr::Ident(name, _) = target {
                         if versions.contains_key(name) {
-                            let rhs_smt = self.expr_to_smt(value, versions)?;
+                            let Ok(rhs_smt) = self.expr_to_smt(value, versions) else {
+                                let mut one = std::collections::HashSet::new();
+                                one.insert(name.clone());
+                                Self::havoc(&one, versions, declarations);
+                                continue;
+                            };
                             let current_ver = versions.get(name).cloned().unwrap_or(0);
                             let next_ver = current_ver + 1;
                             let op_str = match op {
@@ -2092,12 +2163,13 @@ own operand, so `*p` was proven as `p`)",
                                 BinaryOp::Mul => "*",
                                 BinaryOp::Div => "div",
                                 BinaryOp::Mod => "mod",
-                                other => {
-                                    return Err(format!(
-                                        "`{:?}=` has no sound encoding in the integer theory this \
-verifier uses",
-                                        other
-                                    ))
+                                _ => {
+                                    // `x &= y` and friends: the result is not
+                                    // expressible, so the variable becomes unknown.
+                                    let mut one = std::collections::HashSet::new();
+                                    one.insert(name.clone());
+                                    Self::havoc(&one, versions, declarations);
+                                    continue;
                                 }
                             };
                             let expr_smt = format!("({} {}_{} {})", op_str, name, current_ver, rhs_smt);
@@ -2120,7 +2192,17 @@ verifier uses",
                     }).unwrap_or(false);
                     if is_int {
                         let rhs_smt = if let Some(init_expr) = init {
-                            self.expr_to_smt(init_expr, versions)?
+                            match self.expr_to_smt(init_expr, versions) {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    // Bound to something we cannot express, so the
+                                    // new variable is simply unknown.
+                                    versions.insert(name.clone(), 0);
+                                    declarations
+                                        .push(format!("(declare-const {}_{} Int)", name, 0));
+                                    continue;
+                                }
+                            }
                         } else {
                             "0".to_string()
                         };

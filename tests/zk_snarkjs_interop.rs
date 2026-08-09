@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use y::lexer::Lexer;
 use y::parser::Parser;
 use y::type_checker::TypeChecker;
-use y::zk_emitter::{BigUint, Constraint, Fr, LinearCombination, ZkEmitter};
+use y::zk_emitter::{Constraint, Fr, LinearCombination, ZkEmitter};
 use y::zk_witness::{check_r1cs_satisfiability, solve_r1cs_witness};
 
 fn remap(lc: &LinearCombination, map: &HashMap<usize, usize>) -> LinearCombination {
@@ -75,7 +75,7 @@ fn r1cs_and_wtns_use_the_same_wire_order() {
         let circuit = emitter.build_circuit();
         let ir = emitter.build_witness_ir();
 
-        let privs: Vec<Fr> = inputs.iter().map(|v| Fr(BigUint::from_u64(*v))).collect();
+        let privs: Vec<Fr> = inputs.iter().map(|v| Fr::from_u64(*v)).collect();
         let (witness, ok) =
             solve_r1cs_witness(&circuit.constraints, &ir, circuit.num_variables, &[], &privs);
         assert!(ok, "witness does not satisfy the circuit in Y's own numbering");

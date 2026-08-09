@@ -13,545 +13,23 @@ use crate::zk_poseidon_constants::{
     POSEIDON_C_T3, POSEIDON_M_T3, POSEIDON_P_T3, POSEIDON_S_T3, POSEIDON_T3_ROUNDS_F,
     POSEIDON_T3_ROUNDS_P,
 };
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+use std::rc::Rc;
 
 // ────────────────────────────────────────────────────────
-// 1. BigUint and BN254 Fr Field Arithmetic
+// 1. Field arithmetic
 // ────────────────────────────────────────────────────────
+//
+// `BigUint` and `Fr` live in `zk_field.rs`. `Fr` is a `Copy` `[u64; 4]` in
+// Montgomery form, not a heap `BigUint` - see that file's header for why, and
+// `docs/zk_emit_profile.md` for the measurement that forced it. Re-exported
+// here because `y::zk_emitter::{BigUint, Fr}` is the path every caller and test
+// already uses.
 
-#[derive(Clone, PartialEq, Eq, Debug, Hash)]
-pub struct BigUint {
-    // Digits in little-endian order, base 2^32
-    pub digits: Vec<u32>,
-}
+pub use crate::zk_field::{active_modulus, field_op_counts, set_active_modulus, BigUint, Fr};
 
-impl PartialOrd for BigUint {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for BigUint {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let lhs_len = self.effective_len();
-        let rhs_len = other.effective_len();
-        if lhs_len != rhs_len {
-            return lhs_len.cmp(&rhs_len);
-        }
-        for i in (0..lhs_len).rev() {
-            let d1 = self.digits.get(i).copied().unwrap_or(0);
-            let d2 = other.digits.get(i).copied().unwrap_or(0);
-            if d1 != d2 {
-                return d1.cmp(&d2);
-            }
-        }
-        std::cmp::Ordering::Equal
-    }
-}
-
-impl BigUint {
-    pub fn zero() -> Self {
-        Self { digits: vec![0] }
-    }
-
-    pub fn one() -> Self {
-        Self { digits: vec![1] }
-    }
-
-    pub fn is_zero(&self) -> bool {
-        self.digits.iter().all(|&d| d == 0)
-    }
-
-    pub fn from_u64(mut val: u64) -> Self {
-        let mut digits = Vec::new();
-        if val == 0 {
-            digits.push(0);
-        } else {
-            while val > 0 {
-                digits.push((val & 0xffffffff) as u32);
-                val >>= 32;
-            }
-        }
-        Self { digits }
-    }
-
-    pub fn trim(&mut self) {
-        while self.digits.len() > 1 && *self.digits.last().unwrap() == 0 {
-            self.digits.pop();
-        }
-    }
-
-    pub fn effective_len(&self) -> usize {
-        let mut len = self.digits.len();
-        while len > 1 && self.digits[len - 1] == 0 {
-            len -= 1;
-        }
-        len
-    }
-
-    pub fn add(&self, other: &Self) -> Self {
-        let mut digits = Vec::new();
-        let mut carry = 0u64;
-        let len = std::cmp::max(self.digits.len(), other.digits.len());
-        for i in 0..len {
-            let d1 = self.digits.get(i).cloned().unwrap_or(0) as u64;
-            let d2 = other.digits.get(i).cloned().unwrap_or(0) as u64;
-            let sum = d1 + d2 + carry;
-            digits.push((sum & 0xffffffff) as u32);
-            carry = sum >> 32;
-        }
-        if carry > 0 {
-            digits.push(carry as u32);
-        }
-        let mut res = Self { digits };
-        res.trim();
-        res
-    }
-
-    pub fn sub(&self, other: &Self) -> Self {
-        if self < other {
-            let mod_val = ACTIVE_MODULUS.with(|m| m.borrow().clone());
-            if !mod_val.is_zero() {
-                let mut padded = self.clone();
-                while padded < *other {
-                    padded = padded.add(&mod_val);
-                }
-                let diff = padded.sub(other);
-                let (_, rem) = diff.div_mod(&mod_val);
-                return rem;
-            }
-        }
-        let mut digits = Vec::new();
-        let mut borrow = 0i64;
-        let len = std::cmp::max(self.digits.len(), other.digits.len());
-        for i in 0..len {
-            let d1 = self.digits.get(i).cloned().unwrap_or(0) as i64;
-            let d2 = other.digits.get(i).cloned().unwrap_or(0) as i64;
-            let diff = d1 - d2 - borrow;
-            if diff < 0 {
-                digits.push((diff + 0x100000000) as u32);
-                borrow = 1;
-            } else {
-                digits.push(diff as u32);
-                borrow = 0;
-            }
-        }
-        if borrow > 0 {
-            panic!("BigUint subtraction underflow");
-        }
-        let mut res = Self { digits };
-        res.trim();
-        res
-    }
-
-    pub fn mul(&self, other: &Self) -> Self {
-        if self.is_zero() || other.is_zero() {
-            return Self::zero();
-        }
-        let mut digits = vec![0u32; self.digits.len() + other.digits.len()];
-        for i in 0..self.digits.len() {
-            let mut carry = 0u64;
-            for j in 0..other.digits.len() {
-                let prod = (self.digits[i] as u64) * (other.digits[j] as u64) + (digits[i + j] as u64) + carry;
-                digits[i + j] = (prod & 0xffffffff) as u32;
-                carry = prod >> 32;
-            }
-            if carry > 0 {
-                digits[i + other.digits.len()] += carry as u32;
-            }
-        }
-        let mut res = Self { digits };
-        res.trim();
-        res
-    }
-
-    /// `self / (2^32)^n` - drop the `n` least significant limbs.
-    pub fn shr_limbs(&self, n: usize) -> Self {
-        if n >= self.digits.len() {
-            return Self::zero();
-        }
-        let mut res = Self { digits: self.digits[n..].to_vec() };
-        res.trim();
-        res
-    }
-
-    /// `self mod (2^32)^n` - keep the `n` least significant limbs.
-    pub fn low_limbs(&self, n: usize) -> Self {
-        let take = n.min(self.digits.len());
-        let mut res = Self { digits: self.digits[..take].to_vec() };
-        if res.digits.is_empty() {
-            res.digits.push(0);
-        }
-        res.trim();
-        res
-    }
-
-    pub fn bit_len(&self) -> usize {
-        if self.is_zero() {
-            return 0;
-        }
-        let last_idx = self.digits.len() - 1;
-        let last_digit = self.digits[last_idx];
-        let bits_in_last = 32 - last_digit.leading_zeros() as usize;
-        last_idx * 32 + bits_in_last
-    }
-
-    pub fn get_bit(&self, bit_idx: usize) -> bool {
-        let digit_idx = bit_idx / 32;
-        let shift = bit_idx % 32;
-        if digit_idx >= self.digits.len() {
-            false
-        } else {
-            ((self.digits[digit_idx] >> shift) & 1) == 1
-        }
-    }
-
-    pub fn set_bit(&mut self, bit_idx: usize, val: bool) {
-        let digit_idx = bit_idx / 32;
-        let shift = bit_idx % 32;
-        while self.digits.len() <= digit_idx {
-            self.digits.push(0);
-        }
-        if val {
-            self.digits[digit_idx] |= 1 << shift;
-        } else {
-            self.digits[digit_idx] &= !(1 << shift);
-        }
-        self.trim();
-    }
-
-    pub fn shl1(&self) -> Self {
-        let mut digits = Vec::new();
-        let mut carry = 0u32;
-        for &d in &self.digits {
-            digits.push((d << 1) | carry);
-            carry = d >> 31;
-        }
-        if carry > 0 {
-            digits.push(carry);
-        }
-        let mut res = Self { digits };
-        res.trim();
-        res
-    }
-
-    pub fn div_mod(&self, other: &Self) -> (Self, Self) {
-        if other.is_zero() {
-            panic!("Division by zero");
-        }
-        let mut quotient = Self::zero();
-        let mut remainder = Self::zero();
-        for i in (0..self.bit_len()).rev() {
-            remainder = remainder.shl1();
-            if self.get_bit(i) {
-                remainder.set_bit(0, true);
-            }
-            if remainder >= *other {
-                remainder = remainder.sub(other);
-                quotient.set_bit(i, true);
-            }
-        }
-        (quotient, remainder)
-    }
-
-    pub fn from_str(s: &str) -> Self {
-        let mut res = Self::zero();
-        let ten = Self::from_u64(10);
-        for c in s.chars() {
-            if let Some(digit) = c.to_digit(10) {
-                res = res.mul(&ten).add(&Self::from_u64(digit as u64));
-            }
-        }
-        res
-    }
-
-    /// Parse a hex literal, with or without a `0x` prefix.
-    ///
-    /// Separate from `from_str` on purpose. `from_str` reads DECIMAL and
-    /// silently skips any character that is not a decimal digit, so feeding it
-    /// `"0xee9a"` returns 0*10+... over just the `0` and `9` - a wrong number,
-    /// no error. The Poseidon constants are hex, and a silently mis-parsed
-    /// round constant is a hash that matches nothing.
-    pub fn from_hex_str(s: &str) -> Result<Self, String> {
-        let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
-        if body.is_empty() {
-            return Err(format!("empty hex literal: {:?}", s));
-        }
-        let mut res = Self::zero();
-        let sixteen = Self::from_u64(16);
-        for c in body.chars() {
-            let digit = c
-                .to_digit(16)
-                .ok_or_else(|| format!("invalid hex digit {:?} in {:?}", c, s))?;
-            res = res.mul(&sixteen).add(&Self::from_u64(digit as u64));
-        }
-        Ok(res)
-    }
-
-    /// Divide by a single 32-bit digit, returning quotient and remainder.
-    ///
-    /// One pass of 64-bit divides, versus `div_mod`'s bit-at-a-time loop.
-    pub fn div_rem_small(&self, d: u32) -> (Self, u32) {
-        debug_assert!(d != 0, "division by zero");
-        let mut q = vec![0u32; self.digits.len()];
-        let mut rem: u64 = 0;
-        for i in (0..self.digits.len()).rev() {
-            let cur = (rem << 32) | self.digits[i] as u64;
-            q[i] = (cur / d as u64) as u32;
-            rem = cur % d as u64;
-        }
-        let mut res = Self { digits: q };
-        res.trim();
-        (res, rem as u32)
-    }
-
-    /// Decimal rendering, 9 digits at a time.
-    ///
-    /// This used to peel one digit per iteration via `div_mod(10)`, and
-    /// `div_mod` is a bit-by-bit long division - so each digit cost ~254
-    /// allocating loop iterations, and a full 254-bit value cost ~20,000. That
-    /// made *printing* the R1CS the single most expensive phase of ZK
-    /// compilation: emitting one 241-constraint Poseidon spent 0.007s building
-    /// the circuit and 1.3s formatting it. It stayed hidden because the
-    /// polynomial benchmark circuit's coefficients are 0, 1 and 2, which are
-    /// one iteration each; only dense constants like Poseidon's round keys
-    /// expose it.
-    pub fn to_decimal_string(&self) -> String {
-        if self.is_zero() {
-            return "0".to_string();
-        }
-        // 10^9 is the largest power of ten fitting in a u32.
-        let mut temp = self.clone();
-        let mut chunks = Vec::new();
-        while !temp.is_zero() {
-            let (q, r) = temp.div_rem_small(1_000_000_000);
-            temp = q;
-            chunks.push(r);
-        }
-        let mut s = chunks.last().unwrap().to_string();
-        for chunk in chunks.iter().rev().skip(1) {
-            s.push_str(&format!("{:09}", chunk));
-        }
-        s
-    }
-
-    pub fn to_bytes_le(&self, byte_len: usize) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(byte_len);
-        for &digit in &self.digits {
-            bytes.extend_from_slice(&digit.to_le_bytes());
-        }
-        bytes.resize(byte_len, 0);
-        bytes
-    }
-}
-
-
-use std::cell::RefCell;
-
-thread_local! {
-    pub static ACTIVE_MODULUS: RefCell<BigUint> = RefCell::new(BigUint::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495617"));
-}
-
-thread_local! {
-    /// `(modulus, mu, k)` for the Barrett reduction below, recomputed only when
-    /// the active field changes.
-    static BARRETT: RefCell<Option<(BigUint, BigUint, usize)>> = const { RefCell::new(None) };
-}
-
-/// `x mod p` for any `x < b^(2k)`, where `b = 2^32` and `k` is `p`'s limb count.
-///
-/// Replaces a bit-by-bit long division that was costing the ZK backend
-/// everything. `BigUint::div_mod` walks one bit at a time, and each step does a
-/// shift, a compare and possibly a subtract - all allocating - so reducing a
-/// 512-bit product ran 512 such rounds. A single `Fr::mul` measured **26 us**.
-/// For scale, a competent BN254 multiply is tens of nanoseconds, and the
-/// polynomial benchmark circuit only looked fast because its linear
-/// combinations are one or two terms wide and it therefore barely multiplies.
-/// Anything with dense constant coefficients - Poseidon above all - hit this
-/// directly: one 241-constraint hash took 1.4s to emit, 13x slower than circom
-/// compiling the same circuit.
-///
-/// Barrett needs no division at all: with `mu = floor(b^(2k) / p)` precomputed
-/// once, an estimate of the quotient is two multiplications away, and the
-/// estimate is never more than two off.
-///
-/// The correction loop is `while`, not `if`, deliberately. The standard bound
-/// says at most two subtractions are needed for `x < b^(2k)`; looping costs
-/// nothing when the bound holds and stays correct if it ever does not, which is
-/// the right trade for code the soundness of every proof rests on.
-pub fn barrett_reduce(x: &BigUint, p: &BigUint) -> BigUint {
-    if x < p {
-        let mut r = x.clone();
-        r.trim();
-        return r;
-    }
-
-    let (mu, k) = BARRETT.with(|cell| {
-        let mut cell = cell.borrow_mut();
-        if let Some((m, mu, k)) = cell.as_ref() {
-            if m == p {
-                return (mu.clone(), *k);
-            }
-        }
-        // mu = floor(b^(2k) / p). Uses the slow path exactly once per field.
-        let k = p.effective_len();
-        let mut num = BigUint { digits: vec![0u32; 2 * k + 1] };
-        num.digits[2 * k] = 1;
-        let (mu, _) = num.div_mod(p);
-        *cell = Some((p.clone(), mu.clone(), k));
-        (mu, k)
-    });
-
-    // q3 = floor(floor(x / b^(k-1)) * mu / b^(k+1))
-    let q1 = x.shr_limbs(k - 1);
-    let q3 = q1.mul(&mu).shr_limbs(k + 1);
-
-    // r = (x - q3*p) mod b^(k+1); the modulus keeps the subtraction in range.
-    let r1 = x.low_limbs(k + 1);
-    let r2 = q3.mul(p).low_limbs(k + 1);
-
-    let mut r = if r1 >= r2 {
-        r1.sub(&r2)
-    } else {
-        // Borrow b^(k+1) rather than going signed.
-        let mut base = BigUint { digits: vec![0u32; k + 2] };
-        base.digits[k + 1] = 1;
-        r1.add(&base).sub(&r2)
-    };
-
-    while r >= *p {
-        r = r.sub(p);
-    }
-    r.trim();
-    r
-}
-
-#[derive(Clone, PartialEq, Eq, Debug, Hash)]
-pub struct Fr(pub BigUint);
-
-impl Fr {
-    pub fn modulus() -> BigUint {
-        ACTIVE_MODULUS.with(|m| m.borrow().clone())
-    }
-
-    #[inline(always)]
-    pub fn with_modulus<R, F: FnOnce(&BigUint) -> R>(f: F) -> R {
-        ACTIVE_MODULUS.with(|m| f(&m.borrow()))
-    }
-
-    pub fn zero() -> Self {
-        Fr(BigUint::zero())
-    }
-
-    pub fn one() -> Self {
-        Fr(BigUint::one())
-    }
-
-    pub fn from_u64(val: u64) -> Self {
-        Self::with_modulus(|m| {
-            let bi = BigUint::from_u64(val);
-            let (_, r) = bi.div_mod(m);
-            Fr(r)
-        })
-    }
-
-    pub fn from_biguint(bi: BigUint) -> Self {
-        Self::with_modulus(|m| {
-            let (_, r) = bi.div_mod(m);
-            Fr(r)
-        })
-    }
-
-    pub fn add(&self, other: &Self) -> Self {
-        Self::with_modulus(|modulus| {
-            let sum = self.0.add(&other.0);
-            if &sum >= modulus {
-                Fr(sum.sub(modulus))
-            } else {
-                Fr(sum)
-            }
-        })
-    }
-
-    pub fn sub(&self, other: &Self) -> Self {
-        Self::with_modulus(|modulus| {
-            if self.0 >= other.0 {
-                Fr(self.0.sub(&other.0))
-            } else {
-                Fr(self.0.add(modulus).sub(&other.0))
-            }
-        })
-    }
-
-    pub fn mul(&self, other: &Self) -> Self {
-        Self::with_modulus(|modulus| Fr(barrett_reduce(&self.0.mul(&other.0), modulus)))
-    }
-
-    pub fn try_inv(&self) -> Result<Self, String> {
-        if self.0.is_zero() {
-            return Err("error[Z0040]: division by zero: finite field element zero has no modular inverse during host witness generation in @hint block".to_string());
-        }
-        Ok(self.inv())
-    }
-
-    pub fn inv(&self) -> Self {
-        if self.0.is_zero() {
-            panic!("Zero has no modular inverse");
-        }
-        Self::with_modulus(|p| {
-            let mut t = BigUint::zero();
-            let mut newt = BigUint::one();
-            let mut r = p.clone();
-            let mut newr = self.0.clone();
-
-            let mut t_neg = false;
-            let mut newt_neg = false;
-
-            while !newr.is_zero() {
-                let (quotient, remainder) = r.div_mod(&newr);
-                r = newr;
-                newr = remainder;
-
-                let prod = quotient.mul(&newt);
-                let next_t;
-                let next_t_neg;
-
-                if t_neg == newt_neg {
-                    if t >= prod {
-                        next_t = t.sub(&prod);
-                        next_t_neg = t_neg;
-                    } else {
-                        next_t = prod.sub(&t);
-                        next_t_neg = !t_neg;
-                    }
-                } else {
-                    next_t = t.add(&prod);
-                    next_t_neg = t_neg;
-                }
-
-                t = newt;
-                t_neg = newt_neg;
-                newt = next_t;
-                newt_neg = next_t_neg;
-            }
-
-            if r > BigUint::one() {
-                panic!("Modular inverse does not exist (GCD != 1 — modulus may not be prime)");
-            }
-
-            if t_neg {
-                Fr(p.sub(&t))
-            } else {
-                Fr(t)
-            }
-        })
-    }
-
-    pub fn to_string(&self) -> String {
-        self.0.to_decimal_string()
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScalarField {
@@ -598,9 +76,19 @@ impl FieldConfig {
                 254,
                 31,
             ),
+            // Vesta's base field, `q` in the Pasta parameters, matching the
+            // Pallas entry above (its base field `p`).
+            //
+            // This constant was WRONG until measured: it read
+            // ...941600134020817490249052636161, which is COMPOSITE - a
+            // corrupted transcription sharing only the leading
+            // `0x40000000000000000000000000000000224698fc09` with the real
+            // value. Circuits emitted against it were over a ring, not a
+            // field. `FieldParams::new` now refuses a composite modulus, and
+            // `all_supported_moduli_are_montgomery_ready` pins all four.
             ScalarField::Vesta => (
                 "vesta",
-                "28948022309329048855892746252171976963363056481941600134020817490249052636161",
+                "28948022309329048855892746252171976963363056481941647379679742748393362948097",
                 254,
                 31,
             ),
@@ -608,11 +96,8 @@ impl FieldConfig {
         let p = BigUint::from_str(p_str);
 
         // Temporarily set active modulus so elements are reduced properly
-        let prev_modulus = ACTIVE_MODULUS.with(|m| {
-            let prev = m.borrow().clone();
-            *m.borrow_mut() = p.clone();
-            prev
-        });
+        let prev_modulus = active_modulus();
+        set_active_modulus(&p);
 
         // Generate deterministic MDS matrix (Cauchy matrix)
         let mut mds = vec![vec![Fr::zero(); 3]; 3];
@@ -637,9 +122,7 @@ impl FieldConfig {
         }
 
         // Restore previous modulus
-        ACTIVE_MODULUS.with(|m| {
-            *m.borrow_mut() = prev_modulus;
-        });
+        set_active_modulus(&prev_modulus);
 
         FieldConfig {
             name: name.to_string(),
@@ -675,7 +158,7 @@ pub enum HintOp {
 
 #[derive(Clone, Debug)]
 pub enum WitnessOp {
-    Const(BigUint),
+    Const(Fr),
     LoadInput { input_idx: usize, is_public: bool },
     Add(SignalId, SignalId),
     Sub(SignalId, SignalId),
@@ -718,6 +201,22 @@ pub enum WitnessOp {
     IntDivLc(LinearCombination, LinearCombination),
     /// Integer remainder `a mod b`, or 0 when `b` is zero. See `IntDivLc`.
     IntModLc(LinearCombination, LinearCombination),
+    /// `a * b + c`, all three linear combinations.
+    ///
+    /// R1CS lets one constraint carry `A * B = C` with arbitrary linear
+    /// combinations on every side, so `out <== a*b + c` is ONE constraint
+    /// (`a * b = out - c`). Reconstructing `out` from that constraint alone is
+    /// impossible - it has two unknowns - so the recipe carries the fused form.
+    /// Without it the circom front end would have to spend a second constraint
+    /// materialising `a*b` into its own wire, which is exactly the kind of
+    /// gratuitous size difference that makes a drop-in replacement not one.
+    MulAddLc(LinearCombination, LinearCombination, LinearCombination),
+    /// Field division `a * b^-1`, or 0 when `b` is 0.
+    ///
+    /// Only ever reached from circom's `<--`, which assigns a witness value and
+    /// deliberately emits NO constraint. That is the operator's whole purpose
+    /// and also its danger; see `AssignOp::SignalOnly`.
+    DivLc(LinearCombination, LinearCombination),
     /// The product of two linear combinations.
     ///
     /// R1CS lets the `A` and `B` of a constraint be arbitrary linear
@@ -768,7 +267,7 @@ impl LinearCombination {
     }
 
     pub fn constant(val: Fr) -> Self {
-        if val.0.is_zero() {
+        if val.is_zero() {
             Self::zero()
         } else {
             Self { terms: vec![(0, val)], is_simplified: true }
@@ -780,21 +279,21 @@ impl LinearCombination {
     }
 
     pub fn add_constant(&mut self, val: Fr) {
-        if !val.0.is_zero() {
+        if !val.is_zero() {
             self.terms.push((0, val));
             self.is_simplified = false;
         }
     }
 
     pub fn add_term(&mut self, wire_id: usize, val: Fr) {
-        if !val.0.is_zero() {
+        if !val.is_zero() {
             self.terms.push((wire_id, val));
             self.is_simplified = false;
         }
     }
 
     pub fn add_linear(&mut self, other: &Self, scale: Fr) {
-        if scale.0.is_zero() || other.terms.is_empty() {
+        if scale.is_zero() || other.terms.is_empty() {
             return;
         }
         let can_keep_simplified = self.terms.is_empty() && other.is_simplified;
@@ -805,7 +304,7 @@ impl LinearCombination {
     }
 
     pub fn scale(&self, factor: Fr) -> Self {
-        if factor.0.is_zero() {
+        if factor.is_zero() {
             return Self::zero();
         }
         let terms = self.terms.iter().map(|(w, c)| (*w, c.mul(&factor))).collect();
@@ -817,7 +316,7 @@ impl LinearCombination {
             return;
         }
         if self.terms.len() <= 1 {
-            if self.terms.len() == 1 && self.terms[0].1.0.is_zero() {
+            if self.terms.len() == 1 && self.terms[0].1.is_zero() {
                 self.terms.clear();
             }
             self.is_simplified = true;
@@ -833,22 +332,33 @@ impl LinearCombination {
             }
         }
         if already_simple {
-            let has_zeros = self.terms.iter().any(|(_, coeff)| coeff.0.is_zero());
+            let has_zeros = self.terms.iter().any(|(_, coeff)| coeff.is_zero());
             if !has_zeros {
                 self.is_simplified = true;
                 return; // Already sorted, distinct, and non-zero
             }
         }
 
-        let mut merged: HashMap<usize, Fr> = HashMap::new();
-        for (wire, coeff) in &self.terms {
-            let entry = merged.entry(*wire).or_insert_with(Fr::zero);
-            *entry = entry.add(coeff);
+        // Sort and merge in place. This was a `HashMap<usize, Fr>` built and
+        // torn down per call, which is two allocations plus a hash per term for
+        // a job that is a sort over a handful of `(u32, [u64;4])` pairs - and
+        // the sort was there anyway, because the output has to come out ordered.
+        // `substitute_linear_constraints` rebuilds a linear combination for
+        // every term it rewrites, so this is on the hottest path in the ZK
+        // front end.
+        self.terms.sort_unstable_by_key(|t| t.0);
+        let mut w = 0;
+        for r in 0..self.terms.len() {
+            if w > 0 && self.terms[w - 1].0 == self.terms[r].0 {
+                let add = self.terms[r].1;
+                self.terms[w - 1].1 = self.terms[w - 1].1.add(&add);
+            } else {
+                self.terms[w] = self.terms[r];
+                w += 1;
+            }
         }
-        self.terms = merged.into_iter()
-            .filter(|(_, coeff)| !coeff.0.is_zero())
-            .collect();
-        self.terms.sort_by_key(|t| t.0);
+        self.terms.truncate(w);
+        self.terms.retain(|(_, coeff)| !coeff.is_zero());
         self.is_simplified = true;
     }
 
@@ -860,7 +370,7 @@ impl LinearCombination {
         // A linear combination is not a constant if it contains any variable wire (id > 0)
         let mut has_variables = false;
         for (wire, coeff) in &self.terms {
-            if *wire != 0 && !coeff.0.is_zero() {
+            if *wire != 0 && !coeff.is_zero() {
                 has_variables = true;
                 break;
             }
@@ -895,7 +405,7 @@ impl LinearCombination {
             } else {
                 var_names.get(wire).cloned().unwrap_or_else(|| format!("w_{}", wire))
             };
-            if coeff.0 == BigUint::one() {
+            if *coeff == Fr::one() {
                 s.push_str(&name);
             } else {
                 s.push_str(&format!("{} * {}", coeff.to_string(), name));
@@ -943,6 +453,37 @@ pub struct Circuit {
     pub constraints: Vec<Constraint>,
 }
 
+/// A borrowed circuit, for consumers that only read it.
+///
+/// `build_circuit` deep-clones every `Constraint`, and the constraint list is by
+/// far the largest thing the emitter holds - on a dense circuit it is ~1 KB per
+/// constraint of `LinearCombination` terms. Handing that clone to the `.r1cs`
+/// writer doubled peak memory for the duration of the write, on the exact path
+/// that is supposed to be Y's advantage at circuit sizes other compilers cannot
+/// reach. Owning `Circuit` stays for callers that genuinely need it.
+#[derive(Copy, Clone, Debug)]
+pub struct CircuitView<'a> {
+    pub num_variables: usize,
+    pub variables: &'a [String],
+    pub public_inputs: &'a [usize],
+    pub private_inputs: &'a [usize],
+    pub outputs: &'a [usize],
+    pub constraints: &'a [Constraint],
+}
+
+impl Circuit {
+    pub fn view(&self) -> CircuitView<'_> {
+        CircuitView {
+            num_variables: self.num_variables,
+            variables: &self.variables,
+            public_inputs: &self.public_inputs,
+            private_inputs: &self.private_inputs,
+            outputs: &self.outputs,
+            constraints: &self.constraints,
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────
 // 3. Lowering and Optimization Pass
 // ────────────────────────────────────────────────────────
@@ -959,12 +500,298 @@ pub const ZK_COMPARISON_BITS: u32 = 32;
 /// that fits in one. Used to constant-fold the integer gadgets, all of which
 /// are expensive enough that folding is worth a check.
 fn lc_u64(lc: &LinearCombination) -> Option<u64> {
-    let c = lc.is_constant()?;
-    match c.0.effective_len() {
-        1 => Some(c.0.digits[0] as u64),
-        2 => Some(c.0.digits[0] as u64 | ((c.0.digits[1] as u64) << 32)),
-        _ => None,
+    lc.is_constant()?.to_u64()
+}
+
+/// A cheap 64-bit mixer for hash-table bucketing.
+///
+/// Not cryptographic, and does not need to be: every bucket hit in
+/// `optimize_circuit` is confirmed by a full `LinearCombination` equality, so a
+/// collision costs one comparison and never a wrong answer. The pass previously
+/// used `DefaultHasher` (SipHash) over the derived `Hash`, which meant hashing
+/// ~2.2 KB of term data per constraint through a keyed permutation - about half
+/// a gigabyte, and a large share of the pass, to compute a bucket index.
+#[inline(always)]
+fn fx_mix(hash: u64, word: u64) -> u64 {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+    (hash.rotate_left(5) ^ word).wrapping_mul(SEED)
+}
+
+fn hash_lc(lc: &LinearCombination) -> u64 {
+    let mut h = fx_mix(0, lc.terms.len() as u64);
+    for (wire, coeff) in &lc.terms {
+        h = fx_mix(h, *wire as u64);
+        for limb in coeff.mont_limbs() {
+            h = fx_mix(h, limb);
+        }
     }
+    h
+}
+
+/// Point every term at its replacement wire, re-simplifying if anything moved.
+///
+/// `subst` is a DENSE map indexed by wire id, identity where nothing changed.
+///
+/// Simplification is required, not cosmetic: two distinct wires can collapse
+/// onto the same one, and the resulting duplicate terms must be summed (they may
+/// even cancel to zero).
+fn replace_wires_in_lc(lc: &mut LinearCombination, subst: &[usize]) {
+    let mut changed = false;
+    for term in &mut lc.terms {
+        if let Some(&new_w) = subst.get(term.0) {
+            if new_w != term.0 {
+                term.0 = new_w;
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        lc.is_simplified = false;
+        lc.simplify();
+    }
+}
+
+// How many extra terms `substitute_linear_constraints` may create per wire it
+// eliminates; `None` disables the pass.
+//
+// Thread-local rather than a global or a process-wide `env::set_var`, so that
+// `zk_linear_substitution.rs` can compile the same circuit with and without the
+// pass and compare the two without racing the rest of the suite.
+// `Y_ZK_LINSUB_BUDGET=off|<n>` seeds it per thread.
+thread_local! {
+    static LINSUB_BUDGET: std::cell::Cell<Option<usize>> =
+        std::cell::Cell::new(linsub_budget_from_env());
+}
+
+fn linsub_budget_from_env() -> Option<usize> {
+    const DEFAULT: usize = 16;
+    match std::env::var("Y_ZK_LINSUB_BUDGET") {
+        Err(_) => Some(DEFAULT),
+        Ok(v) if v.eq_ignore_ascii_case("off") => None,
+        Ok(v) => v.trim().parse().ok().or(Some(DEFAULT)),
+    }
+}
+
+/// Set the fill-in budget for this thread. `None` turns the pass off entirely,
+/// which is only useful as a differential baseline - the reduced circuit and the
+/// unreduced one must accept exactly the same witnesses.
+pub fn set_linsub_budget(budget: Option<usize>) {
+    LINSUB_BUDGET.with(|b| b.set(budget));
+}
+
+fn linsub_fill_budget() -> Option<usize> {
+    LINSUB_BUDGET.with(|b| b.get())
+}
+
+/// Replace each eliminated wire by its defining expression.
+///
+/// `sub_idx` is dense and indexed by wire id, `u32::MAX` where nothing changed,
+/// for the reason given on `replace_wires_in_lc`: this runs once per term over
+/// the whole circuit, and a hash probe for an overwhelmingly likely miss is the
+/// cost of the pass.
+fn substitute_lc(lc: &mut LinearCombination, sub_idx: &[u32], exprs: &[LinearCombination]) {
+    let hit = lc
+        .terms
+        .iter()
+        .any(|(w, _)| matches!(sub_idx.get(*w), Some(&i) if i != u32::MAX));
+    if !hit {
+        return;
+    }
+    let mut out = LinearCombination::zero();
+    for (w, coeff) in &lc.terms {
+        match sub_idx.get(*w).copied() {
+            Some(i) if i != u32::MAX => out.add_linear(&exprs[i as usize], *coeff),
+            _ => out.add_term(*w, *coeff),
+        }
+    }
+    out.simplify();
+    *lc = out;
+}
+
+/// Replace a single wire by an expression, in place. Returns whether the wire
+/// was there at all.
+fn substitute_one(lc: &mut LinearCombination, wire: usize, expr: &LinearCombination) -> bool {
+    let Some(pos) = lc.terms.iter().position(|(w, _)| *w == wire) else {
+        return false;
+    };
+    let coeff = lc.terms[pos].1;
+    lc.terms.swap_remove(pos);
+    lc.add_linear(expr, coeff);
+    lc.is_simplified = false;
+    lc.simplify();
+    true
+}
+
+/// Rewrite the linear combinations a recipe holds.
+///
+/// Exhaustive, no `_ =>` arm, exactly as in `remap_witness_op`. The `SignalId`
+/// variants are no-ops here and that is safe only because
+/// `substitute_linear_constraints` refuses to eliminate any wire one of them
+/// mentions - if that guard is ever removed, these arms become silent
+/// corruption rather than a compile error, so the two must be read together.
+fn substitute_witness_op(op: &mut WitnessOp, sub_idx: &[u32], exprs: &[LinearCombination]) {
+    match op {
+        WitnessOp::Const(_)
+        | WitnessOp::Unknown
+        | WitnessOp::LoadInput { .. }
+        | WitnessOp::Add(..)
+        | WitnessOp::Sub(..)
+        | WitnessOp::Mul(..)
+        | WitnessOp::Div(..)
+        | WitnessOp::Inv(..)
+        | WitnessOp::AssertEq(..)
+        | WitnessOp::HintBlock { .. } => {}
+        WitnessOp::IsZeroLc(lc) | WitnessOp::InvOrZeroLc(lc) | WitnessOp::BitOfLc { lc, .. } => {
+            substitute_lc(lc, sub_idx, exprs)
+        }
+        WitnessOp::IntDivLc(a, b)
+        | WitnessOp::IntModLc(a, b)
+        | WitnessOp::MulLc(a, b)
+        | WitnessOp::DivLc(a, b) => {
+            substitute_lc(a, sub_idx, exprs);
+            substitute_lc(b, sub_idx, exprs);
+        }
+        WitnessOp::MulAddLc(a, b, c) => {
+            substitute_lc(a, sub_idx, exprs);
+            substitute_lc(b, sub_idx, exprs);
+            substitute_lc(c, sub_idx, exprs);
+        }
+    }
+}
+
+/// `A * B = C` where all three are constants and the identity holds.
+///
+/// Only ever used to DROP a constraint, so it must be conservative in one
+/// direction only: a constraint it misclassifies as vacuous is a constraint
+/// deleted from the statement being proved.
+fn constraint_is_vacuous(c: &Constraint) -> bool {
+    match (c.a.is_constant(), c.b.is_constant(), c.c.is_constant()) {
+        (Some(a), Some(b), Some(cc)) => a.mul(&b) == cc,
+        // `0 * <anything> = 0` holds whatever the other side is.
+        (Some(a), _, Some(cc)) if a.is_zero() && cc.is_zero() => true,
+        (_, Some(b), Some(cc)) if b.is_zero() && cc.is_zero() => true,
+        _ => false,
+    }
+}
+
+#[inline]
+fn replace_signal(s: &mut SignalId, subst: &[usize]) {
+    if let Some(&new_w) = subst.get(s.0) {
+        s.0 = new_w;
+    }
+}
+
+/// Rewrite every wire a `WitnessOp` refers to.
+///
+/// Matched exhaustively ON PURPOSE - no `_ =>` arm. A recipe that quietly keeps
+/// a stale wire evaluates it as zero and makes a satisfiable circuit
+/// unwitnessable, with nothing but `satisfied = false` to show for it. Adding a
+/// variant must be a compile error here, not a silent omission. This is the same
+/// rule CLAUDE.md states for unhandled AST nodes in soundness-critical passes.
+fn remap_witness_op(op: &mut WitnessOp, subst: &[usize]) {
+    match op {
+        WitnessOp::Const(_) | WitnessOp::Unknown => {}
+        // `input_idx` indexes the caller's input slice, not the wire table;
+        // `execute_host_witness_ir` consumes those positionally.
+        WitnessOp::LoadInput { .. } => {}
+        WitnessOp::Add(a, b)
+        | WitnessOp::Sub(a, b)
+        | WitnessOp::Mul(a, b)
+        | WitnessOp::Div(a, b)
+        | WitnessOp::AssertEq(a, b) => {
+            replace_signal(a, subst);
+            replace_signal(b, subst);
+        }
+        WitnessOp::Inv(a) => replace_signal(a, subst),
+        WitnessOp::HintBlock { inputs, outputs, ops } => {
+            for s in inputs.iter_mut().chain(outputs.iter_mut()) {
+                replace_signal(s, subst);
+            }
+            for hop in ops {
+                match hop {
+                    HintOp::NonDeterministicInv { src, dst } | HintOp::AssignExpr { dst, src } => {
+                        replace_signal(src, subst);
+                        replace_signal(dst, subst);
+                    }
+                    HintOp::BitDecompose { src, dst_bits } => {
+                        replace_signal(src, subst);
+                        for b in dst_bits {
+                            replace_signal(b, subst);
+                        }
+                    }
+                }
+            }
+        }
+        WitnessOp::IsZeroLc(lc) | WitnessOp::InvOrZeroLc(lc) | WitnessOp::BitOfLc { lc, .. } => {
+            replace_wires_in_lc(lc, subst)
+        }
+        WitnessOp::IntDivLc(a, b)
+        | WitnessOp::IntModLc(a, b)
+        | WitnessOp::MulLc(a, b)
+        | WitnessOp::DivLc(a, b) => {
+            replace_wires_in_lc(a, subst);
+            replace_wires_in_lc(b, subst);
+        }
+        WitnessOp::MulAddLc(a, b, c) => {
+            replace_wires_in_lc(a, subst);
+            replace_wires_in_lc(b, subst);
+            replace_wires_in_lc(c, subst);
+        }
+    }
+}
+
+/// circomlib's t=3 Poseidon parameters, parsed once.
+///
+/// The tables in `zk_poseidon_constants.rs` are hex STRINGS - 144 of them, 64
+/// digits each - and `emit_poseidon` used to parse every one on every call.
+/// `BigUint::from_hex_str` is a mul-and-add per digit and each step allocates,
+/// so a single `poseidon_hash(a, b)` spent ~37,000 allocations reconstructing
+/// values that are compile-time constants. On a 1000-hash chain that was ~40%
+/// of everything the emitter allocated.
+///
+/// Keyed on the active modulus because `Fr` is stored in Montgomery form, which
+/// is defined relative to it: reusing a cache entry across a field switch would
+/// silently reinterpret every constant. `emit_poseidon` independently refuses
+/// any field but BN254, so in practice the key never changes - it is here so
+/// that fact does not have to be re-derived if that ever loosens.
+pub struct PoseidonT3Params {
+    pub c: Vec<Fr>,
+    pub s_sparse: Vec<Fr>,
+    pub m: [[Fr; 3]; 3],
+    pub p: [[Fr; 3]; 3],
+}
+
+thread_local! {
+    static POSEIDON_T3_CACHE: RefCell<Option<(BigUint, Rc<PoseidonT3Params>)>> =
+        const { RefCell::new(None) };
+}
+
+fn poseidon_t3_params() -> Result<Rc<PoseidonT3Params>, String> {
+    let modulus = active_modulus();
+    if let Some(hit) = POSEIDON_T3_CACHE.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .filter(|(m, _)| *m == modulus)
+            .map(|(_, p)| Rc::clone(p))
+    }) {
+        return Ok(hit);
+    }
+
+    let hex = |s: &str| -> Result<Fr, String> { BigUint::from_hex_str(s).map(Fr::from_biguint) };
+    let c: Vec<Fr> = POSEIDON_C_T3.iter().map(|s| hex(s)).collect::<Result<_, _>>()?;
+    let s_sparse: Vec<Fr> = POSEIDON_S_T3.iter().map(|s| hex(s)).collect::<Result<_, _>>()?;
+    let mut m = [[Fr::zero(); 3]; 3];
+    let mut p = [[Fr::zero(); 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            m[i][j] = hex(POSEIDON_M_T3[i][j])?;
+            p[i][j] = hex(POSEIDON_P_T3[i][j])?;
+        }
+    }
+
+    let params = Rc::new(PoseidonT3Params { c, s_sparse, m, p });
+    POSEIDON_T3_CACHE.with(|cell| *cell.borrow_mut() = Some((modulus, Rc::clone(&params))));
+    Ok(params)
 }
 
 pub struct ZkEmitter {
@@ -1368,7 +1195,7 @@ impl ZkEmitter {
         let mut nodes = Vec::with_capacity(num_signals);
         let mut signal_names = HashMap::new();
 
-        nodes.push(WitnessOp::Const(BigUint::one()));
+        nodes.push(WitnessOp::Const(Fr::one()));
         signal_names.insert(0, "const_1".to_string());
 
         // Index the `a*b = c` constraints by their single output wire, ONCE.
@@ -1381,9 +1208,25 @@ impl ZkEmitter {
         // so this one function was the entire super-linear term in the pipeline.
         // `or_insert` keeps the FIRST matching constraint, preserving the
         // original "break on first match" semantics exactly.
+        //
+        // All three coefficients must be 1. `WitnessOp::Mul` multiplies two
+        // WIRES and has nowhere to carry a scale factor, so `2a * b = t` would
+        // be reconstructed as `a * b` - the wrong value, with no error. It was
+        // survivable only because such a wire then fails the forward pass's
+        // satisfiability check and gets rediscovered by the back-propagation
+        // sweep, which is the 0.4-seconds-for-one-wire path described below.
+        // Wires that fail this test fall through to `lc_by_output`, which keeps
+        // the coefficients.
+        let one = Fr::one();
         let mut mul_by_output: HashMap<usize, (usize, usize)> = HashMap::new();
         for c in &self.constraints {
-            if c.c.terms.len() == 1 && c.a.terms.len() == 1 && c.b.terms.len() == 1 {
+            if c.c.terms.len() == 1
+                && c.a.terms.len() == 1
+                && c.b.terms.len() == 1
+                && c.a.terms[0].1 == one
+                && c.b.terms[0].1 == one
+                && c.c.terms[0].1 == one
+            {
                 mul_by_output
                     .entry(c.c.terms[0].0)
                     .or_insert((c.a.terms[0].0, c.b.terms[0].0));
@@ -1405,19 +1248,26 @@ impl ZkEmitter {
         //
         // Only wires the first scan missed are entered here, so the common case
         // (a million tiny `a*b=c` constraints) does not pay to clone any linear
-        // combinations. The `w < out` guard keeps the recipe evaluable in wire
-        // order: a constraint whose `A` or `B` mentions its own output cannot
-        // be used to define it, and would otherwise read a zero and look solved.
+        // combinations.
+        //
+        // The guard is that the constraint must not mention its own output: a
+        // recipe that reads the wire it defines reads a zero and looks solved.
+        // It used to be the stronger `every wire < out`, which was how recipes
+        // stayed evaluable back when the solver walked in wire-index order. It
+        // does not any more - `topological_order` is a real Kahn sort - and the
+        // stronger form excludes circom entirely, where `signal output out;` is
+        // declared at the top of a template and assigned at the bottom, so its
+        // constraint always references higher-numbered wires.
         let mut lc_by_output: HashMap<usize, (LinearCombination, LinearCombination)> = HashMap::new();
         for c in &self.constraints {
-            if c.c.terms.len() != 1 || c.c.terms[0].1 != Fr::one() {
+            if c.c.terms.len() != 1 || c.c.terms[0].1 != one {
                 continue;
             }
             let out = c.c.terms[0].0;
             if out == 0 || mul_by_output.contains_key(&out) || lc_by_output.contains_key(&out) {
                 continue;
             }
-            if c.a.terms.iter().chain(c.b.terms.iter()).all(|(w, _)| *w < out) {
+            if c.a.terms.iter().chain(c.b.terms.iter()).all(|(w, _)| *w != out) {
                 lc_by_output.insert(out, (c.a.clone(), c.b.clone()));
             }
         }
@@ -1439,7 +1289,7 @@ impl ZkEmitter {
             }
         }
 
-        let topological_order = (0..num_signals).map(SignalId).collect();
+        let topological_order = Self::topological_order(&nodes);
 
         WitnessIRGraph {
             field: FieldType::Bn254,
@@ -1450,6 +1300,98 @@ impl ZkEmitter {
             signal_names,
             topological_order,
         }
+    }
+
+    /// Every wire a recipe reads.
+    ///
+    /// Exhaustive on purpose. A variant missing from here is not a compile
+    /// error but a *silent* one: its dependencies look empty, the sort places
+    /// it before the wires it needs, and it evaluates them as zero.
+    fn witness_op_deps(op: &WitnessOp, out: &mut Vec<usize>) {
+        let mut lc = |l: &LinearCombination| out.extend(l.terms.iter().map(|(w, _)| *w));
+        match op {
+            WitnessOp::Const(_) | WitnessOp::Unknown | WitnessOp::LoadInput { .. } => {}
+            WitnessOp::Add(a, b)
+            | WitnessOp::Sub(a, b)
+            | WitnessOp::Mul(a, b)
+            | WitnessOp::Div(a, b)
+            | WitnessOp::AssertEq(a, b) => {
+                out.push(a.0);
+                out.push(b.0);
+            }
+            WitnessOp::Inv(a) => out.push(a.0),
+            WitnessOp::HintBlock { inputs, .. } => out.extend(inputs.iter().map(|s| s.0)),
+            WitnessOp::IsZeroLc(l) | WitnessOp::InvOrZeroLc(l) | WitnessOp::BitOfLc { lc: l, .. } => lc(l),
+            WitnessOp::IntDivLc(a, b)
+            | WitnessOp::IntModLc(a, b)
+            | WitnessOp::MulLc(a, b)
+            | WitnessOp::DivLc(a, b) => {
+                lc(a);
+                lc(b);
+            }
+            WitnessOp::MulAddLc(a, b, c) => {
+                lc(a);
+                lc(b);
+                lc(c);
+            }
+        }
+    }
+
+    /// A real dependency order for the forward witness pass.
+    ///
+    /// This field was `(0..num_signals)` — the identity — while being called
+    /// `topological_order`, and the solver ignored it and walked by wire index
+    /// instead. That works only when every recipe happens to reference
+    /// lower-numbered wires, which is true of Y's own emitter because it
+    /// allocates a wire at the moment it defines it. It is NOT true of circom,
+    /// where `signal output out;` is conventionally declared at the top of a
+    /// template and assigned at the bottom: `out`'s recipe then reads wires
+    /// numbered above it, the forward pass evaluates them as zero, and the
+    /// witness silently fails to satisfy the circuit it came from.
+    ///
+    /// Kahn's algorithm; anything left in a cycle keeps index order and is left
+    /// for the back-propagation sweep, which is what handles it today anyway.
+    fn topological_order(nodes: &[WitnessOp]) -> Vec<SignalId> {
+        let n = nodes.len();
+        let mut deps: Vec<Vec<usize>> = Vec::with_capacity(n);
+        let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut indegree = vec![0usize; n];
+        let mut scratch = Vec::new();
+
+        for (i, op) in nodes.iter().enumerate() {
+            scratch.clear();
+            Self::witness_op_deps(op, &mut scratch);
+            scratch.retain(|w| *w != i && *w < n);
+            scratch.sort_unstable();
+            scratch.dedup();
+            indegree[i] = scratch.len();
+            for &d in &scratch {
+                dependents[d].push(i);
+            }
+            deps.push(scratch.clone());
+        }
+
+        let mut ready: Vec<usize> = (0..n).filter(|i| indegree[*i] == 0).collect();
+        ready.reverse(); // pop() yields ascending index, keeping output stable
+        let mut order = Vec::with_capacity(n);
+        let mut emitted = vec![false; n];
+        while let Some(i) = ready.pop() {
+            order.push(SignalId(i));
+            emitted[i] = true;
+            for &d in &dependents[i] {
+                indegree[d] -= 1;
+                if indegree[d] == 0 {
+                    ready.push(d);
+                }
+            }
+        }
+        // Cyclic remainder, in index order.
+        for i in 0..n {
+            if !emitted[i] {
+                order.push(SignalId(i));
+            }
+        }
+        order
     }
 
     // ────────────────────────────────────────────────────────
@@ -1490,13 +1432,37 @@ impl ZkEmitter {
             }
         }
 
+        // `scheme = "plonkish"` used to be accepted, stored, printed in the
+        // `.r1cs.txt` header as `Proof Scheme: Plonkish`, and then IGNORED - the
+        // emitter has exactly one arithmetization and produced R1CS regardless.
+        // A user selecting a PLONKish backend got a clean compile, a success
+        // message, a header claiming they had one, and an R1CS file.
+        //
+        // Refusing is the fix, not a stopgap. This repo has been here before
+        // with `@ZeroDrift` (lexed, counted, printed, read by no backend) and
+        // with the Hopper intrinsics that assembled to nothing: a named gap
+        // costs a user five minutes, a silently-wrong artifact costs them
+        // however long it takes to suspect the compiler. For a proof system it
+        // is worse than that - the file would go to a PLONKish prover that
+        // cannot read it, or worse, be assumed to carry PLONKish's soundness
+        // properties.
+        if matches!(active_scheme, ProofScheme::Plonkish) {
+            return Err(
+                "Circuit target error: `scheme = \"plonkish\"` is not implemented. Y emits \
+                 Rank-1 Constraint Systems only.\n  \
+                 hint: remove the `scheme` argument, or set `scheme = \"r1cs\"`, and prove with \
+                 a Groth16 backend (snarkjs and arkworks both read Y's .r1cs/.wtns).\n  \
+                 note: this previously compiled and emitted R1CS while reporting `Proof Scheme: \
+                 Plonkish`. If you have artifacts produced that way, they are R1CS."
+                    .to_string(),
+            );
+        }
+
         // Apply selected target configuration
         self.active_field = active_field;
         self.active_scheme = active_scheme;
         let config = FieldConfig::get(self.active_field);
-        ACTIVE_MODULUS.with(|m| {
-            *m.borrow_mut() = config.p.clone();
-        });
+        set_active_modulus(&config.p);
 
         // Collect all functions inside the flattened items list
         let mut target_func: Option<&FuncDecl> = None;
@@ -1516,11 +1482,93 @@ impl ZkEmitter {
             None => return Err("No entry function 'main' or 'circuit' found for ZK Circuit target.".to_string()),
         };
 
+        // `emit_program` used to be one opaque 92% of ZK compile time, which is
+        // not a number anyone can act on. These two sub-phases are the split
+        // that matters: building the constraints, versus the CSE pass over them.
+        // Since the field arithmetic was fixed the second one is the larger of
+        // the two (1.22 s against 0.60 s on a 1000-hash Poseidon chain), and
+        // nothing would have said so without this line.
+        let t_start = std::time::Instant::now();
+
         // Note: we must pass &flat_items here so all nested functions/structs are in scope
         self.emit_circuit_entry(f, &flat_items)?;
+        let t_emitted = std::time::Instant::now();
 
         // Run optimization pass: dead-wire elimination & constraint reduction
         self.optimize_circuit();
+
+        // `Y_ZK_COMPOSITION=1` breaks the emitter's live memory down by owner.
+        //
+        // Memory, not time, is the ceiling on circuit size here, and a peak-RSS
+        // number alone says nothing about what to fix. This is what found the
+        // `emit_mul_lc` duplication: `witness_recipes` was holding 1096 bytes
+        // per constraint against the constraints' own 1135 - a second verbatim
+        // copy of every Poseidon S-box's operands - which no amount of staring
+        // at a total would have revealed. Cheap enough to leave in: one pass
+        // over the constraints, only when the variable is set.
+        if std::env::var("Y_ZK_COMPOSITION").is_ok() {
+            let (mut len, mut cap, mut n_lc) = (0usize, 0usize, 0usize);
+            for c in &self.constraints {
+                for lc in [&c.a, &c.b, &c.c] {
+                    len += lc.terms.len();
+                    cap += lc.terms.capacity();
+                    n_lc += 1;
+                }
+            }
+            let (mut recipe_cap, mut recipe_lcs) = (0usize, 0usize);
+            for op in self.witness_recipes.values() {
+                let mut acc = |lc: &LinearCombination| {
+                    recipe_cap += lc.terms.capacity();
+                    recipe_lcs += 1;
+                };
+                match op {
+                    WitnessOp::IsZeroLc(l) | WitnessOp::InvOrZeroLc(l) | WitnessOp::BitOfLc { lc: l, .. } => acc(l),
+                    WitnessOp::IntDivLc(a, b)
+                    | WitnessOp::IntModLc(a, b)
+                    | WitnessOp::MulLc(a, b)
+                    | WitnessOp::DivLc(a, b) => {
+                        acc(a);
+                        acc(b);
+                    }
+                    WitnessOp::MulAddLc(a, b, c) => {
+                        acc(a);
+                        acc(b);
+                        acc(c);
+                    }
+                    _ => {}
+                }
+            }
+            let nc = self.constraints.len().max(1) as f64;
+            let term = std::mem::size_of::<(usize, Fr)>() as f64;
+            eprintln!("[Y ZK COMPOSITION] {} constraints, {} linear combinations", self.constraints.len(), n_lc);
+            eprintln!(
+                "  constraint terms    {:>10} used / {:>10} allocated ({:.1}% slack)   {:>7.0} B/constraint",
+                len, cap, 100.0 * (cap - len) as f64 / len.max(1) as f64, cap as f64 * term / nc
+            );
+            eprintln!(
+                "  Constraint structs                                                    {:>7.0} B/constraint",
+                std::mem::size_of::<Constraint>() as f64
+            );
+            eprintln!(
+                "  witness_recipes     {:>10} recipes, {:>8} LCs                   {:>7.0} B/constraint",
+                self.witness_recipes.len(), recipe_lcs, recipe_cap as f64 * term / nc
+            );
+            eprintln!(
+                "  variable names      {:>10} wires                                  {:>7.0} B/constraint",
+                self.variables.len(),
+                self.variables.iter().map(|v| v.capacity() + std::mem::size_of::<String>()).sum::<usize>() as f64 / nc
+            );
+        }
+        if std::env::var("Y_ZK_TIMING").is_ok() {
+            eprintln!(
+                "[Y ZK TIMING]   emit_circuit_entry   {:>8.3} s",
+                (t_emitted - t_start).as_secs_f64()
+            );
+            eprintln!(
+                "[Y ZK TIMING]   optimize_circuit     {:>8.3} s",
+                t_emitted.elapsed().as_secs_f64()
+            );
+        }
 
         // Format R1CS Output
         let mut out = String::new();
@@ -1662,13 +1710,13 @@ impl ZkEmitter {
                     // Let's get the max value as a constant u64 or BigUint
                     let max_lc = self.emit_expr(&bounds_attr.max, items)?;
                     if let Some(max_fr) = max_lc.is_constant() {
-                        let max_val = max_fr.0;
-                        let bit_len = max_val.bit_len();
+                        let bit_len = max_fr.bit_len();
                         
                         // We decompose lc into bit_len bits:
                         // lc = sum_{i=0}^{bit_len-1} b_i * 2^i
                         // and for each b_i, b_i * b_i = b_i
                         let mut sum_lc = LinearCombination::zero();
+                        let mut pow2 = Fr::one();
                         for i in 0..bit_len {
                             let bit_var = self.new_wire(&format!("{}_bit_{}", name, i));
                             let bit_lc = LinearCombination::variable(bit_var);
@@ -1680,11 +1728,8 @@ impl ZkEmitter {
                                 span: Some(bounds_attr.span.clone()),
                             });
                             
-                            let mut factor = BigUint::one();
-                            for _ in 0..i {
-                                factor = factor.mul(&BigUint::from_u64(2));
-                            }
-                            sum_lc.add_term(bit_var, Fr::from_biguint(factor));
+                            sum_lc.add_term(bit_var, pow2);
+                            pow2 = pow2.double();
                         }
                         
                         // Constrain: sum_lc = lc
@@ -1696,10 +1741,11 @@ impl ZkEmitter {
                         });
 
                         // Also decompose (max_val - lc) into bit_len bits to ensure lc <= max_val!
-                        let mut diff_lc = LinearCombination::constant(Fr::from_biguint(max_val.clone()));
+                        let mut diff_lc = LinearCombination::constant(max_fr);
                         diff_lc.add_linear(&lc, Fr::from_u64(0).sub(&Fr::one()));
                         
                         let mut diff_sum_lc = LinearCombination::zero();
+                        let mut pow2 = Fr::one();
                         for i in 0..bit_len {
                             let bit_var = self.new_wire(&format!("{}_diff_bit_{}", name, i));
                             let bit_lc = LinearCombination::variable(bit_var);
@@ -1711,11 +1757,8 @@ impl ZkEmitter {
                                 span: Some(bounds_attr.span.clone()),
                             });
                             
-                            let mut factor = BigUint::one();
-                            for _ in 0..i {
-                                factor = factor.mul(&BigUint::from_u64(2));
-                            }
-                            diff_sum_lc.add_term(bit_var, Fr::from_biguint(factor));
+                            diff_sum_lc.add_term(bit_var, pow2);
+                            pow2 = pow2.double();
                         }
                         
                         // Constrain: diff_sum_lc = diff_lc
@@ -1868,8 +1911,6 @@ impl ZkEmitter {
                 };
 
                 let mut current = start_const;
-                let step_bi = step_val.0;
-                let end_bi = end_const.0;
 
                 let mut unroll_count: usize = 0;
                 // Soft guard against a typo'd bound turning into an OOM, NOT a
@@ -1886,7 +1927,7 @@ impl ZkEmitter {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(10_000);
 
-                while current.0 < end_bi {
+                while current < end_const {
                     unroll_count += 1;
                     if unroll_count > max_unroll_limit {
                         return Err(format!(
@@ -1905,7 +1946,7 @@ impl ZkEmitter {
                     }
 
                     self.exit_scope();
-                    current = Fr(current.0.add(&step_bi));
+                    current = current.add(&step_val);
                 }
             }
             Stmt::If {
@@ -1920,7 +1961,7 @@ impl ZkEmitter {
                 
                 if let Some(c) = cond_lc.is_constant() {
                     // Static branch pruning: evaluate only the active branch
-                    if !c.0.is_zero() {
+                    if !c.is_zero() {
                         return self.emit_block(then_block, items);
                     } else if let Some(eb) = else_block {
                         return self.emit_block(eb, items);
@@ -2071,7 +2112,7 @@ impl ZkEmitter {
                 // If condition is a compile-time constant (e.g. static index bounds i < N),
                 // execute iterations directly without emitting active-mask wires or SSA phi-nodes.
                 if let Some(const_val) = initial_cond_lc.is_constant() {
-                    if const_val.0.is_zero() {
+                    if const_val.is_zero() {
                         return Ok(None); // Statically false condition, zero iterations
                     }
                     
@@ -2080,7 +2121,7 @@ impl ZkEmitter {
                         self.emit_block(body, items)?;
                         let next_cond_lc = self.emit_expr(condition, items)?;
                         if let Some(next_c) = next_cond_lc.is_constant() {
-                            if next_c.0.is_zero() {
+                            if next_c.is_zero() {
                                 break;
                             }
                         } else {
@@ -2286,7 +2327,7 @@ impl ZkEmitter {
                         d.add_linear(&right_lc, Fr::from_u64(0).sub(&Fr::one()));
 
                         if let Some(dc) = d.is_constant() {
-                            let eq_val = if dc.0.is_zero() { Fr::one() } else { Fr::zero() };
+                            let eq_val = if dc.is_zero() { Fr::one() } else { Fr::zero() };
                             return Ok(LinearCombination::constant(eq_val));
                         }
 
@@ -2341,10 +2382,10 @@ impl ZkEmitter {
                     BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
                         if let (Some(lc), Some(rc)) = (left_lc.is_constant(), right_lc.is_constant()) {
                             let is_true = match op {
-                                BinaryOp::Lt => lc.0 < rc.0,
-                                BinaryOp::Le => lc.0 <= rc.0,
-                                BinaryOp::Gt => lc.0 > rc.0,
-                                BinaryOp::Ge => lc.0 >= rc.0,
+                                BinaryOp::Lt => lc < rc,
+                                BinaryOp::Le => lc <= rc,
+                                BinaryOp::Gt => lc > rc,
+                                BinaryOp::Ge => lc >= rc,
                                 _ => unreachable!(),
                             };
                             let val = if is_true { Fr::one() } else { Fr::zero() };
@@ -2535,7 +2576,7 @@ impl ZkEmitter {
                 };
 
                 // Look up in scopes for bindings
-                let index_val = index_const.0.to_decimal_string();
+                let index_val = index_const.to_decimal_string();
                 let indexed_name = format!("{}_{}", base_name, index_val);
                 
                 if let Some(c) = self.lookup_const(&indexed_name) {
@@ -2551,14 +2592,29 @@ impl ZkEmitter {
         }
     }
 
-    /// One R1CS constraint `a * b = w` for a fresh wire `w`, with a witness
-    /// recipe so the forward pass can compute it.
+    /// One R1CS constraint `a * b = w` for a fresh wire `w`.
     ///
-    /// The recipe is the point. R1CS allows `a` and `b` to be arbitrary linear
-    /// combinations, which is what makes Poseidon cheap - `(x + C)^2` needs no
-    /// wire for `x + C`. But `build_witness_ir`'s reconstruction scan only
-    /// recognises single-term sides, so without the explicit recipe every one
-    /// of these wires falls to back-propagation.
+    /// R1CS allows `a` and `b` to be arbitrary linear combinations, which is
+    /// what makes Poseidon cheap - `(x + C)^2` needs no wire for `x + C`.
+    ///
+    /// This used to ALSO store `WitnessOp::MulLc(a.clone(), b.clone())` in
+    /// `witness_recipes`, because `build_witness_ir`'s reconstruction scan once
+    /// recognised only single-term sides. It has a second-chance scan for
+    /// exactly this shape now (`lc_by_output`), so the recipe was a verbatim
+    /// second copy of `a` and `b` - measured at **1096 bytes per constraint**
+    /// on a Poseidon circuit, against 1135 for the constraints themselves. It
+    /// nearly doubled the emitter's live memory, on every compile, including the
+    /// ones that never generate a witness.
+    ///
+    /// The reconstruction is exact for this shape and its guard is satisfied by
+    /// construction: `wire` is freshly allocated, so every wire `a` or `b`
+    /// mentions is necessarily smaller, which is what `lc_by_output`'s
+    /// `all(|(w, _)| *w < out)` check requires. `optimize_circuit` only ever
+    /// rewrites a wire to a smaller one, so that stays true afterwards.
+    ///
+    /// Memory is the binding constraint on the circuit sizes this compiler
+    /// exists to reach - not storing the same linear combination twice is worth
+    /// more than saving a scan that only runs when a witness is requested.
     fn emit_mul_lc(
         &mut self,
         a: &LinearCombination,
@@ -2572,8 +2628,6 @@ impl ZkEmitter {
             c: LinearCombination::variable(wire),
             span: None,
         });
-        self.witness_recipes
-            .insert(wire, WitnessOp::MulLc(a.clone(), b.clone()));
         LinearCombination::variable(wire)
     }
 
@@ -2639,19 +2693,8 @@ impl ZkEmitter {
             ));
         }
 
-        let hex = |s: &str| -> Result<Fr, String> {
-            BigUint::from_hex_str(s).map(Fr::from_biguint)
-        };
-        let c: Vec<Fr> = POSEIDON_C_T3.iter().map(|s| hex(s)).collect::<Result<_, _>>()?;
-        let s_sparse: Vec<Fr> = POSEIDON_S_T3.iter().map(|s| hex(s)).collect::<Result<_, _>>()?;
-        let mut m = [[Fr::zero(), Fr::zero(), Fr::zero()], [Fr::zero(), Fr::zero(), Fr::zero()], [Fr::zero(), Fr::zero(), Fr::zero()]];
-        let mut p = m.clone();
-        for i in 0..T {
-            for j in 0..T {
-                m[i][j] = hex(POSEIDON_M_T3[i][j])?;
-                p[i][j] = hex(POSEIDON_P_T3[i][j])?;
-            }
-        }
+        let params = poseidon_t3_params()?;
+        let PoseidonT3Params { c, s_sparse, m, p } = &*params;
 
         let r_f = POSEIDON_T3_ROUNDS_F;
         let r_p = POSEIDON_T3_ROUNDS_P;
@@ -2664,7 +2707,7 @@ impl ZkEmitter {
             let mut out = vec![LinearCombination::zero(); T];
             for i in 0..T {
                 for (j, s) in state.iter().enumerate().take(T) {
-                    out[i].add_linear(s, mat[j][i].clone());
+                    out[i].add_linear(s, mat[j][i]);
                 }
                 out[i].simplify();
             }
@@ -2680,7 +2723,7 @@ impl ZkEmitter {
 
         // Ark(t, C, 0)
         for (j, s) in state.iter_mut().enumerate() {
-            s.add_constant(c[j].clone());
+            s.add_constant(c[j]);
         }
 
         // First half of the full rounds, all but the last.
@@ -2688,9 +2731,9 @@ impl ZkEmitter {
             let sig: Vec<_> = state.iter().map(|x| self.emit_poseidon_sbox(&x.clone())).collect::<Vec<_>>();
             let mut arked = sig;
             for (j, s) in arked.iter_mut().enumerate() {
-                s.add_constant(c[(r + 1) * T + j].clone());
+                s.add_constant(c[(r + 1) * T + j]);
             }
-            state = mix(&arked, &m);
+            state = mix(&arked, m);
         }
 
         // Last full round of the first half mixes with P, the change of basis
@@ -2699,9 +2742,9 @@ impl ZkEmitter {
             let sig: Vec<_> = state.iter().map(|x| self.emit_poseidon_sbox(&x.clone())).collect::<Vec<_>>();
             let mut arked = sig;
             for (j, s) in arked.iter_mut().enumerate() {
-                s.add_constant(c[half_f * T + j].clone());
+                s.add_constant(c[half_f * T + j]);
             }
-            state = mix(&arked, &p);
+            state = mix(&arked, p);
         }
 
         // Partial rounds: S-box on lane 0 only, mixed by the sparse matrices.
@@ -2709,16 +2752,16 @@ impl ZkEmitter {
         for r in 0..r_p {
             let mut inp = state.clone();
             inp[0] = self.emit_poseidon_sbox(&state[0]);
-            inp[0].add_constant(c[(half_f + 1) * T + r].clone());
+            inp[0].add_constant(c[(half_f + 1) * T + r]);
 
             let mut out = vec![LinearCombination::zero(); T];
             for (i, s) in inp.iter().enumerate().take(T) {
-                out[0].add_linear(s, s_sparse[width * r + i].clone());
+                out[0].add_linear(s, s_sparse[width * r + i]);
             }
             out[0].simplify();
             for j in 1..T {
                 out[j] = inp[j].clone();
-                out[j].add_linear(&inp[0], s_sparse[width * r + T + j - 1].clone());
+                out[j].add_linear(&inp[0], s_sparse[width * r + T + j - 1]);
                 out[j].simplify();
             }
             state = out;
@@ -2729,16 +2772,16 @@ impl ZkEmitter {
             let sig: Vec<_> = state.iter().map(|x| self.emit_poseidon_sbox(&x.clone())).collect::<Vec<_>>();
             let mut arked = sig;
             for (j, s) in arked.iter_mut().enumerate() {
-                s.add_constant(c[(half_f + 1) * T + r_p + r * T + j].clone());
+                s.add_constant(c[(half_f + 1) * T + r_p + r * T + j]);
             }
-            state = mix(&arked, &m);
+            state = mix(&arked, m);
         }
 
         // Final round has no Ark; MixLast takes column 0 only.
         let sig: Vec<_> = state.iter().map(|x| self.emit_poseidon_sbox(&x.clone())).collect::<Vec<_>>();
         let mut out = LinearCombination::zero();
         for (j, s) in sig.iter().enumerate().take(T) {
-            out.add_linear(s, m[j][0].clone());
+            out.add_linear(s, m[j][0]);
         }
         out.simplify();
         Ok(out)
@@ -2771,93 +2814,44 @@ impl ZkEmitter {
             c.c.simplify();
         }
 
+        // Membership sets, not the `Vec::contains` linear scans this used to do.
+        // The predicate runs once per constraint, so a circuit with many inputs
+        // paid O(constraints * inputs) for a question that is O(1).
+        let boundary: HashSet<usize> = self
+            .public_inputs
+            .iter()
+            .chain(self.private_inputs.iter())
+            .chain(self.outputs.iter())
+            .copied()
+            .collect();
+
         let mut iteration = 0;
         loop {
-            let mut replacements = HashMap::new();
-            let mut seen: HashMap<u64, Vec<(LinearCombination, LinearCombination, usize)>> = HashMap::new();
-            let mut duplicate_indices = HashSet::new();
-
-            for (idx, c) in self.constraints.iter().enumerate() {
-                // We only optimize constraints where C is a single intermediate wire: w_j
-                // A wire is intermediate if it is not 0, not in public/private inputs, and not in outputs.
-                if c.c.terms.len() == 1 {
-                    let (wire_j, coeff) = (c.c.terms[0].0, &c.c.terms[0].1);
-                    if coeff.0 == BigUint::one()
-                        && wire_j != 0
-                        && !self.public_inputs.contains(&wire_j)
-                        && !self.private_inputs.contains(&wire_j)
-                        && !self.outputs.contains(&wire_j)
-                    {
-                        // Compute commutative hash for (A, B) using symmetric addition of individual hashes
-                        use std::hash::{Hash, Hasher};
-                        use std::collections::hash_map::DefaultHasher;
-
-                        let hash_a = {
-                            let mut s = DefaultHasher::new();
-                            c.a.hash(&mut s);
-                            s.finish()
-                        };
-                        let hash_b = {
-                            let mut s = DefaultHasher::new();
-                            c.b.hash(&mut s);
-                            s.finish()
-                        };
-                        let combined_hash = hash_a.wrapping_add(hash_b);
-
-                        let mut found_wire = None;
-                        if let Some(candidates) = seen.get(&combined_hash) {
-                            for (seen_a, seen_b, seen_wire) in candidates {
-                                if (c.a == *seen_a && c.b == *seen_b) || (c.a == *seen_b && c.b == *seen_a) {
-                                    found_wire = Some(*seen_wire);
-                                    break;
-                                }
-                            }
-                        }
-
-                        if let Some(wire_i) = found_wire {
-                            replacements.insert(wire_j, wire_i);
-                            duplicate_indices.insert(idx);
-                        } else {
-                            seen.entry(combined_hash)
-                                .or_insert_with(Vec::new)
-                                .push((c.a.clone(), c.b.clone(), wire_j));
-                        }
-                    }
-                }
+            // Two independent reductions, run to a shared fixpoint because each
+            // exposes work for the other: substituting a linear constraint away
+            // rewrites the `A` and `B` of its consumers, which is what makes two
+            // products compare equal; and merging two products renames a wire,
+            // which can make a linear constraint eliminable.
+            let t = std::time::Instant::now();
+            let substituted = self.substitute_linear_constraints(&boundary);
+            let t_sub = t.elapsed();
+            let after_sub = self.constraints.len();
+            let t = std::time::Instant::now();
+            let deduplicated = self.dedup_identical_products(&boundary);
+            if std::env::var_os("Y_ZK_TIMING").is_some() {
+                eprintln!(
+                    "[Y ZK TIMING]     opt round {}: linsub {:>7.3} s -> {:>8} | cse {:>7.3} s -> {:>8}",
+                    iteration,
+                    t_sub.as_secs_f64(),
+                    after_sub,
+                    t.elapsed().as_secs_f64(),
+                    self.constraints.len()
+                );
             }
-
-            if replacements.is_empty() {
+            let _ = (substituted, deduplicated);
+            if !substituted && !deduplicated {
                 break;
             }
-
-            // Apply replacements to all remaining constraints
-            let mut new_constraints = Vec::new();
-            for (idx, mut c) in self.constraints.drain(..).enumerate() {
-                if duplicate_indices.contains(&idx) {
-                    continue; // Remove the duplicate constraint
-                }
-
-                // Helper to replace wires in a linear combination
-                let replace_lc = |lc: &mut LinearCombination, reps: &HashMap<usize, usize>| {
-                    let mut changed = false;
-                    for term in &mut lc.terms {
-                        if let Some(&new_w) = reps.get(&term.0) {
-                            term.0 = new_w;
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        lc.is_simplified = false;
-                        lc.simplify();
-                    }
-                };
-
-                replace_lc(&mut c.a, &replacements);
-                replace_lc(&mut c.b, &replacements);
-                replace_lc(&mut c.c, &replacements);
-                new_constraints.push(c);
-            }
-            self.constraints = new_constraints;
             iteration += 1;
             if iteration > 10 {
                 break; // Safety limit
@@ -2865,6 +2859,501 @@ impl ZkEmitter {
         }
     }
 
+    /// Common-subexpression elimination: two constraints with the same `A` and
+    /// `B` computing two different intermediate wires become one.
+    ///
+    /// Returns whether anything changed.
+    fn dedup_identical_products(&mut self, boundary: &HashSet<usize>) -> bool {
+        let mut any = false;
+        let mut iteration = 0;
+        loop {
+            let mut replacements: HashMap<usize, usize> = HashMap::new();
+            // Buckets hold constraint INDICES. They used to hold clones of `A`
+            // and `B`, which is two ~1 KB `Vec` allocations per constraint to
+            // duplicate data already sitting in `self.constraints` - 480,000 of
+            // them on a 1000-hash Poseidon chain, purely so a hash collision
+            // could be resolved.
+            //
+            // And the buckets themselves are gone now: an open-addressed table
+            // of `u32` indices with linear probing allocates once for the whole
+            // pass instead of once per distinct product, and a miss - which is
+            // the overwhelmingly common case - is a single array read rather
+            // than a `HashMap` lookup that has to construct an empty `Vec` on
+            // insert. Collisions are still resolved by full equality, so the
+            // table's only job is to keep the comparisons rare.
+            let cap = (self.constraints.len() * 2).next_power_of_two().max(16);
+            let mask = cap - 1;
+            let mut seen: Vec<u32> = vec![u32::MAX; cap];
+            let mut duplicate_indices: Vec<bool> = vec![false; self.constraints.len()];
+
+            for (idx, c) in self.constraints.iter().enumerate() {
+                // We only optimize constraints where C is a single intermediate wire: w_j
+                // A wire is intermediate if it is not 0, not in public/private inputs, and not in outputs.
+                if c.c.terms.len() != 1 {
+                    continue;
+                }
+                let (wire_j, coeff) = (c.c.terms[0].0, c.c.terms[0].1);
+                if coeff != Fr::one() || wire_j == 0 || boundary.contains(&wire_j) {
+                    continue;
+                }
+
+                // Commutative in (A, B), so `a*b` and `b*a` land together.
+                let combined_hash = hash_lc(&c.a).wrapping_add(hash_lc(&c.b));
+
+                // `fx_mix`'s multiply leaves its entropy in the high bits, and
+                // the table indexes with the low ones.
+                let mut slot = ((combined_hash ^ (combined_hash >> 29)) as usize) & mask;
+                let mut found_wire = None;
+                loop {
+                    let entry = seen[slot];
+                    if entry == u32::MAX {
+                        break;
+                    }
+                    let s = &self.constraints[entry as usize];
+                    if (c.a == s.a && c.b == s.b) || (c.a == s.b && c.b == s.a) {
+                        found_wire = Some(s.c.terms[0].0);
+                        break;
+                    }
+                    slot = (slot + 1) & mask;
+                }
+
+                if let Some(wire_i) = found_wire {
+                    replacements.insert(wire_j, wire_i);
+                    duplicate_indices[idx] = true;
+                } else {
+                    seen[slot] = idx as u32;
+                }
+            }
+
+            if replacements.is_empty() {
+                break;
+            }
+            any = true;
+
+            // Wire ids are dense, so the substitution is an array lookup, not a
+            // hash. This runs once per TERM - about 7 M times per iteration on a
+            // 1000-hash Poseidon chain, four iterations deep - and a `HashMap`
+            // probe for what is overwhelmingly a miss was most of the pass.
+            let mut subst: Vec<usize> = (0..self.next_var_id).collect();
+            for (&old_w, &new_w) in &replacements {
+                if old_w < subst.len() {
+                    subst[old_w] = new_w;
+                }
+            }
+
+            // Drop the duplicates in place rather than moving every surviving
+            // constraint into a freshly grown second vector each iteration.
+            let mut idx = 0;
+            self.constraints.retain(|_| {
+                let keep = !duplicate_indices[idx];
+                idx += 1;
+                keep
+            });
+            for c in &mut self.constraints {
+                replace_wires_in_lc(&mut c.a, &subst);
+                replace_wires_in_lc(&mut c.b, &subst);
+                replace_wires_in_lc(&mut c.c, &subst);
+            }
+
+            // The witness recipes reference wires too, and this is not optional.
+            //
+            // A gadget's recipe carries a `LinearCombination` captured at EMIT
+            // time (`emit_num2bits` keeps the value it decomposes,
+            // `emit_int_div_mod` keeps its dividend and divisor, the is-zero
+            // gadget keeps its difference). Rewriting the constraints without
+            // rewriting those left every such recipe reading a wire this pass
+            // had just deleted, which the forward pass then evaluates as ZERO.
+            //
+            // The result was not a wrong proof - it was NO proof: `let a = x*y;
+            // let b = x*y; return a == b;` compiled to a satisfiable circuit
+            // that `solve_r1cs_witness` could not solve, and reported only as
+            // `satisfied = false`. Every gadget was affected (`<`, `<=`, `==`,
+            // `/`, `%`, `&`, `|`, `^`, shifts), and only when the operand
+            // happened to be a common subexpression - so the failure looked like
+            // "this particular circuit is unprovable", not like a compiler bug.
+            // `tests/zk_cse_gadget_wires.rs` pins it, controls included.
+            self.remap_witness_recipes(&replacements, &subst);
+
+            iteration += 1;
+            if iteration > 10 {
+                break; // Safety limit
+            }
+        }
+        any
+    }
+
+    /// Rewrite every wire reference held by a witness recipe.
+    ///
+    /// Called from `optimize_circuit` on each fixpoint iteration, so chained
+    /// replacements compose. Replacements only ever point a later wire at an
+    /// earlier one, so this cannot make a recipe forward-reference.
+    fn remap_witness_recipes(&mut self, reps: &HashMap<usize, usize>, subst: &[usize]) {
+        for op in self.witness_recipes.values_mut() {
+            remap_witness_op(op, subst);
+        }
+
+        // A recipe attached to an eliminated wire belongs to the survivor. The
+        // two are provably equal - identical `A` and `B` is exactly why the pass
+        // merged them - so `or_insert` keeping the survivor's own recipe when it
+        // has one is not a choice between two answers.
+        let moved: Vec<(usize, WitnessOp)> = reps
+            .iter()
+            .filter_map(|(old, new)| self.witness_recipes.get(old).map(|op| (*new, op.clone())))
+            .collect();
+        for (new, op) in moved {
+            self.witness_recipes.entry(new).or_insert(op);
+        }
+    }
+
+    /// Eliminate intermediate wires that a *linear* constraint already defines.
+    ///
+    /// This is circom's `--O1`/`--O2` linear substitution, and the reason it
+    /// exists here is measurable: `Poseidon(2)` compiled through Y's circom
+    /// front end was **765 constraints against circom's 517**, because every
+    /// `out <== in` in the source survived as a constraint of its own. That is
+    /// 48% more work for whatever proves the circuit afterwards, and it made a
+    /// 200-hash chain slower in Y than in circom despite a back end that is
+    /// otherwise several times faster.
+    ///
+    /// # Why it is sound
+    ///
+    /// A constraint of the form `k * L = c_w * w`, where `k` is a constant and
+    /// `w` an intermediate wire appearing nowhere else in that constraint,
+    /// *defines* `w`: it is satisfiable iff `w = k * L / c_w`. Substituting that
+    /// expression for `w` everywhere and deleting the constraint yields an
+    /// equisatisfiable system, because `w` is existentially quantified — it is
+    /// neither an input nor an output, so no verifier ever sees it. Any solution
+    /// of the reduced system extends to one of the original by computing `w`;
+    /// any solution of the original restricts to one of the reduced.
+    ///
+    /// That argument is why the boundary check is not a nicety. Eliminating a
+    /// public input or an output would change the *statement*, not just its
+    /// encoding.
+    ///
+    /// # Why the pivot must be `C`'s single term
+    ///
+    /// Deleting a constraint removes it from `build_witness_ir`'s reconstruction
+    /// scan as well. That scan derives a wire's value from the constraint whose
+    /// `C` is that wire alone — so if the pivot is any *other* wire in the
+    /// constraint, the wire in `C` can silently lose its only definition and the
+    /// witness pass leaves it unsolved. Pivoting on exactly the wire the scan
+    /// would have used means this pass takes over a definition rather than
+    /// destroying one, and it hands that wire an explicit recipe in exchange.
+    ///
+    /// Returns whether anything changed.
+    fn substitute_linear_constraints(&mut self, boundary: &HashSet<usize>) -> bool {
+        let Some(budget) = linsub_fill_budget() else {
+            return false;
+        };
+
+        // Wires a recipe refers to by `SignalId` cannot be rewritten into a
+        // linear combination - there is nowhere to put one. Rather than teach
+        // every such variant an impossible trick, they are excluded from
+        // elimination outright: both the wire the recipe computes and every
+        // wire it reads. `HintBlock` additionally computes several wires at
+        // once, so taking over one of its outputs would orphan the others.
+        //
+        // Matched exhaustively with no `_ =>` arm, for the reason in
+        // `remap_witness_op`: a new variant must be a compile error here, not a
+        // wire quietly rewritten into something its recipe cannot express.
+        let mut opaque: HashSet<usize> = HashSet::new();
+        for (wire, op) in &self.witness_recipes {
+            match op {
+                WitnessOp::Const(_)
+                | WitnessOp::Unknown
+                | WitnessOp::LoadInput { .. }
+                | WitnessOp::IsZeroLc(_)
+                | WitnessOp::InvOrZeroLc(_)
+                | WitnessOp::BitOfLc { .. }
+                | WitnessOp::IntDivLc(..)
+                | WitnessOp::IntModLc(..)
+                | WitnessOp::MulLc(..)
+                | WitnessOp::DivLc(..)
+                | WitnessOp::MulAddLc(..) => {}
+                WitnessOp::Add(a, b)
+                | WitnessOp::Sub(a, b)
+                | WitnessOp::Mul(a, b)
+                | WitnessOp::Div(a, b)
+                | WitnessOp::AssertEq(a, b) => {
+                    opaque.extend([*wire, a.0, b.0]);
+                }
+                WitnessOp::Inv(a) => {
+                    opaque.extend([*wire, a.0]);
+                }
+                WitnessOp::HintBlock { inputs, outputs, ops } => {
+                    opaque.insert(*wire);
+                    opaque.extend(inputs.iter().chain(outputs.iter()).map(|s| s.0));
+                    for hop in ops {
+                        match hop {
+                            HintOp::NonDeterministicInv { src, dst }
+                            | HintOp::AssignExpr { dst, src } => {
+                                opaque.extend([src.0, dst.0]);
+                            }
+                            HintOp::BitDecompose { src, dst_bits } => {
+                                opaque.insert(src.0);
+                                opaque.extend(dst_bits.iter().map(|s| s.0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // How many times each wire is mentioned, for the fill-in estimate.
+        // Built on demand: a circuit with no eliminable constraint at all - Y's
+        // own front end, every round after the first - should not pay a full
+        // scan of every term to discover that.
+        let mut occ: Vec<u32> = Vec::new();
+
+const NONE: u32 = u32::MAX;
+        let mut sub_idx: Vec<u32> = vec![NONE; self.next_var_id];
+        let mut exprs: Vec<LinearCombination> = Vec::new();
+        let mut eliminated: Vec<usize> = Vec::new();
+        // Which expressions read each wire, so that eliminating a wire an
+        // earlier expression depends on can be pushed back into it immediately.
+        //
+        // The first version of this pass instead *pinned* those wires - refused
+        // to eliminate them for the rest of the round - and left the rest to the
+        // next iteration of the fixpoint. That is correct but quadratic in the
+        // wrong place: a Poseidon permutation is a chain of linear layers, so
+        // each round could only peel one level off it, and the pass hit the
+        // 10-iteration safety cap having done a full sweep over every constraint
+        // and every witness recipe ten times. Back-substitution finishes the
+        // whole chain in one.
+        // Allocated on the first elimination, not up front. Y's own front end
+        // folds linear combinations as it builds them, so this pass finds
+        // nothing there and would otherwise charge it 18 MB of zeroed `Vec`
+        // headers per round for the privilege.
+        let mut uses: Vec<Vec<u32>> = Vec::new();
+        let mut drop_constraint: Vec<bool> = vec![false; self.constraints.len()];
+
+for i in 0..self.constraints.len() {
+            let c = &self.constraints[i];
+            if c.c.terms.len() != 1 {
+                continue;
+            }
+            let (w, coeff_w) = (c.c.terms[0].0, c.c.terms[0].1);
+            if w == 0 || w >= sub_idx.len() || sub_idx[w] != NONE {
+                continue;
+            }
+
+            // `A * B` must be linear, i.e. one side is a bare constant. Tested
+            // before the two set lookups because it is a couple of array reads
+            // against a hash, and on a circuit built from `a * b` products it
+            // rejects almost everything.
+            let (k, lin) = if let Some(k) = c.a.is_constant() {
+                (k, &c.b)
+            } else if let Some(k) = c.b.is_constant() {
+                (k, &c.a)
+            } else {
+                continue;
+            };
+            if boundary.contains(&w) || opaque.contains(&w) {
+                continue;
+            }
+            if k.is_zero() {
+                // `0 = c_w * w` pins `w` to zero; that is a definition, but the
+                // dedicated `Const` recipe path below expects a real expression
+                // and this shape is rare enough not to special-case.
+                continue;
+            }
+            // The pivot must not appear on the product side as well - then the
+            // constraint does not define it in the shape the witness scan reads,
+            // and the coefficient arithmetic below would be wrong.
+            if lin.terms.iter().any(|(t, _)| *t == w) {
+                continue;
+            }
+
+            // w = k * lin / coeff_w, with any wire eliminated earlier in this
+            // round already resolved so the expression never dangles.
+            //
+            // `Fr::inv` is Fermat's little theorem - a 254-bit exponentiation,
+            // ~380 Montgomery multiplies, ~6 us. Calling it once per candidate
+            // constraint was *the* cost of this pass: 0.45 s of its 0.55 s on a
+            // 200-hash chain, for a coefficient that a `<==` always leaves as
+            // exactly 1. The identity checks below are not micro-optimisation,
+            // they are the difference between the pass paying for itself and not.
+            let one = Fr::one();
+            let scale = if coeff_w == one { k } else { k.mul(&coeff_w.inv()) };
+            let unit = scale == one;
+            let mut expr = LinearCombination::zero();
+            for (t, tc) in &lin.terms {
+                let c2 = if unit { *tc } else { tc.mul(&scale) };
+                match sub_idx.get(*t).copied() {
+                    Some(idx) if idx != NONE => expr.add_linear(&exprs[idx as usize], c2),
+                    _ => expr.add_term(*t, c2),
+                }
+            }
+            expr.simplify();
+            // Load-bearing, not defensive. `w2 * 1 = w1` followed by
+            // `w1 * 1 = w2` states the same equality twice; having eliminated
+            // `w1` as `w2`, resolving the second constraint yields `w2 = w2`.
+            // Recording that would give `w2` a recipe that reads itself, which
+            // the witness pass cannot evaluate and Kahn's sort would report as a
+            // cycle. Keeping the second constraint instead costs one constraint
+            // and is always correct.
+            if expr.terms.iter().any(|(t, _)| *t == w) {
+                continue;
+            }
+
+            // Fill-in guard. Replacing `w` by an n-term expression at each of
+            // its remaining uses adds roughly `(uses-1)*(n-1)` terms. Unbounded,
+            // this densifies things like a 32-bit recomposition into every
+            // constraint that touches one of its bits - correct, and much slower
+            // to prove. The overwhelmingly common case, `out <== in`, has n = 1
+            // and costs nothing.
+            if occ.is_empty() {
+                occ = vec![0; self.next_var_id];
+                for c in &self.constraints {
+                    for lc in [&c.a, &c.b, &c.c] {
+                        for (t, _) in &lc.terms {
+                            if *t != 0 && *t < occ.len() {
+                                occ[*t] += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            let sites = occ[w] as usize + uses.get(w).map_or(0, Vec::len);
+            let added = sites.saturating_sub(1) * expr.terms.len().saturating_sub(1);
+            if added > budget {
+                continue;
+            }
+
+            if uses.is_empty() {
+                uses = vec![Vec::new(); self.next_var_id];
+            }
+            let idx = exprs.len() as u32;
+            for (t, _) in &expr.terms {
+                if *t != 0 {
+                    uses[*t].push(idx);
+                }
+            }
+            exprs.push(expr);
+            sub_idx[w] = idx;
+            eliminated.push(w);
+            drop_constraint[i] = true;
+
+            // Push the new definition back into the expressions that were
+            // written in terms of `w`. Those are exactly `uses[w]`, so this is
+            // targeted rather than a re-scan, and it keeps the invariant every
+            // step below relies on: no stored expression ever mentions a wire
+            // that has been eliminated.
+            let dependents = std::mem::take(&mut uses[w]);
+            for j in dependents {
+                let (before, rest) = exprs.split_at_mut(idx as usize);
+                let (target, source) = (&mut before[j as usize], &rest[0]);
+                if !substitute_one(target, w, source) {
+                    continue;
+                }
+                for (t, _) in &source.terms {
+                    if *t != 0 {
+                        uses[*t].push(j);
+                    }
+                }
+            }
+        }
+
+        if eliminated.is_empty() {
+            return false;
+        }
+
+let mut idx = 0;
+        self.constraints.retain(|_| {
+            let keep = !drop_constraint[idx];
+            idx += 1;
+            keep
+        });
+for c in &mut self.constraints {
+            substitute_lc(&mut c.a, &sub_idx, &exprs);
+            substitute_lc(&mut c.b, &sub_idx, &exprs);
+            substitute_lc(&mut c.c, &sub_idx, &exprs);
+        }
+        // Same obligation as `remap_witness_recipes`: the recipes hold linear
+        // combinations captured at emit time, and a recipe still reading an
+        // eliminated wire evaluates it as zero.
+        //
+        // An eliminated wire's own recipe is skipped because it is overwritten
+        // below - and on circom input that is most of them, since every `<==`
+        // leaves a recipe behind and this pass exists to eliminate exactly those
+        // wires.
+for (wire, op) in self.witness_recipes.iter_mut() {
+            if sub_idx.get(*wire).copied().unwrap_or(NONE) != NONE {
+                continue;
+            }
+            substitute_witness_op(op, &sub_idx, &exprs);
+        }
+
+        // The eliminated wires stay in the variable table - dropping them would
+        // renumber every wire - but they still need a value, because the `.wtns`
+        // has a slot for each. Their recipes are the expression the deleted
+        // constraint asserted, so the witness a caller gets is the same one the
+        // unoptimised circuit would have produced, which is what lets
+        // `zk_linear_substitution.rs` compare the two directly.
+        //
+        // Written after the substitution loop above, since they are already
+        // expressed in surviving wires.
+let one = LinearCombination::constant(Fr::one());
+        for (n, w) in eliminated.iter().enumerate() {
+            // Moved, not cloned: `exprs` has served its purpose by this point,
+            // and cloning here is one allocation per eliminated wire - about
+            // 94,000 of them on a 200-hash chain.
+            let expr = std::mem::replace(&mut exprs[n], LinearCombination::zero());
+            self.witness_recipes.insert(*w, WitnessOp::MulLc(expr, one.clone()));
+        }
+
+        // Substitution can turn a constraint into `0 * x = 0`. Those are
+        // vacuous and go; a constraint that reduces to a NON-zero constant
+        // identity is unsatisfiable and stays, because deleting it would turn an
+        // impossible circuit into a provable one.
+self.constraints.retain(|c| !constraint_is_vacuous(c));
+        true
+    }
+
+
+    // ---- builder API ----
+    //
+    // Exposed for front ends that are not Y's own AST walker - the circom front
+    // end drives these directly. Everything after constraint construction (the
+    // CSE pass, the snarkjs wire map, the `.r1cs`/`.wtns`/`.sym` writers, the
+    // witness solver) is language-agnostic and is the part worth reusing.
+
+    /// Allocate a fresh wire. `name` appears in the `.sym` file.
+    pub fn alloc_wire(&mut self, name: &str) -> usize {
+        self.new_wire(name)
+    }
+
+    /// Append a constraint `a * b = c`.
+    pub fn push_constraint(&mut self, a: LinearCombination, b: LinearCombination, c: LinearCombination) {
+        self.add_constraint(Constraint { a, b, c, span: None });
+    }
+
+    /// Record how the witness pass should compute `wire`.
+    ///
+    /// Required whenever the defining constraint has more than one unknown -
+    /// which is every gadget, and every `a*b + c` fused into one constraint.
+    pub fn set_witness_recipe(&mut self, wire: usize, op: WitnessOp) {
+        self.witness_recipes.insert(wire, op);
+    }
+
+    /// Run the constraint-reduction pass. Front ends call this once, after
+    /// emitting everything.
+    pub fn run_optimizer(&mut self) {
+        self.optimize_circuit();
+    }
+
+    /// The emitter's own circuit, borrowed. Identical content to
+    /// `build_circuit()`, without duplicating the constraint list.
+    pub fn view(&self) -> CircuitView<'_> {
+        CircuitView {
+            num_variables: self.next_var_id,
+            variables: &self.variables,
+            public_inputs: &self.public_inputs,
+            private_inputs: &self.private_inputs,
+            outputs: &self.outputs,
+            constraints: &self.constraints,
+        }
+    }
 
     pub fn build_circuit(&self) -> Circuit {
         Circuit {
@@ -2907,6 +3396,14 @@ impl ZkEmitter {
         witness: &[Fr],
         output_path: &str,
     ) -> std::io::Result<()> {
+        Self::write_wtns_binary_view(circuit.view(), witness, output_path)
+    }
+
+    pub fn write_wtns_binary_view(
+        circuit: CircuitView<'_>,
+        witness: &[Fr],
+        output_path: &str,
+    ) -> std::io::Result<()> {
         use std::io::Write as IoWrite;
         let file = std::fs::File::create(output_path)?;
         let mut writer = std::io::BufWriter::new(file);
@@ -2926,7 +3423,7 @@ impl ZkEmitter {
         writer.write_all(&header)?;
 
         // Permuted into the same order the .r1cs constraints were written in.
-        let (old_to_new, _, _, _) = Self::snarkjs_wire_map(circuit);
+        let (old_to_new, _, _, _) = Self::snarkjs_wire_map_view(circuit);
         let mut permuted = vec![Fr::zero(); witness.len()];
         for (old, new) in &old_to_new {
             if *old < witness.len() && *new < permuted.len() {
@@ -2936,7 +3433,7 @@ impl ZkEmitter {
 
         let mut data = Vec::with_capacity(permuted.len() * n8 as usize);
         for w in &permuted {
-            data.extend_from_slice(&w.0.to_bytes_le(n8 as usize));
+            data.extend_from_slice(&w.to_bytes_le(n8 as usize));
         }
         writer.write_all(&2u32.to_le_bytes())?;
         writer.write_all(&(data.len() as u64).to_le_bytes())?;
@@ -2962,11 +3459,15 @@ impl ZkEmitter {
     ///
     /// Returns the map plus the three counts the `.r1cs` header declares.
     pub fn snarkjs_wire_map(circuit: &Circuit) -> (HashMap<usize, usize>, usize, usize, usize) {
+        Self::snarkjs_wire_map_view(circuit.view())
+    }
+
+    pub fn snarkjs_wire_map_view(circuit: CircuitView<'_>) -> (HashMap<usize, usize>, usize, usize, usize) {
         let mut old_to_new = HashMap::new();
         old_to_new.insert(0, 0); // the constant-1 wire
         let mut next_new_id = 1;
 
-        for &w in &circuit.outputs {
+        for &w in circuit.outputs {
             old_to_new.entry(w).or_insert_with(|| {
                 let id = next_new_id;
                 next_new_id += 1;
@@ -2975,7 +3476,7 @@ impl ZkEmitter {
         }
         let n_pub_out = next_new_id - 1;
 
-        for &w in &circuit.public_inputs {
+        for &w in circuit.public_inputs {
             old_to_new.entry(w).or_insert_with(|| {
                 let id = next_new_id;
                 next_new_id += 1;
@@ -2984,7 +3485,7 @@ impl ZkEmitter {
         }
         let n_pub_in = next_new_id - 1 - n_pub_out;
 
-        for &w in &circuit.private_inputs {
+        for &w in circuit.private_inputs {
             old_to_new.entry(w).or_insert_with(|| {
                 let id = next_new_id;
                 next_new_id += 1;
@@ -3010,16 +3511,16 @@ impl ZkEmitter {
         use std::io::BufWriter;
         use std::io::Write;
 
-        let circuit = self.build_circuit();
+        let circuit = self.view();
 
         // 1. Determine the old-to-new wire mapping
-        let (old_to_new, n_pub_out, n_pub_in, n_prv_in) = Self::snarkjs_wire_map(&circuit);
+        let (old_to_new, n_pub_out, n_pub_in, n_prv_in) = Self::snarkjs_wire_map_view(circuit);
 
         // 2. Write binary .r1cs file
         let file = File::create(output_path)?;
         let mut writer = BufWriter::new(file);
         let encoder = R1csEncoder::new();
-        encoder.encode_to_stream(&circuit, &old_to_new, n_pub_out, n_pub_in, n_prv_in, &mut writer)?;
+        encoder.encode_to_stream(circuit, &old_to_new, n_pub_out, n_pub_in, n_prv_in, &mut writer)?;
 
         // 3. Write symbols (.sym) file
         let sym_path = format!("{}.sym", output_path.strip_suffix(".r1cs").unwrap_or(output_path));
@@ -3050,7 +3551,7 @@ impl R1csEncoder {
 
     pub fn encode_to_stream<W: std::io::Write>(
         &self,
-        circuit: &Circuit,
+        circuit: CircuitView<'_>,
         old_to_new: &HashMap<usize, usize>,
         n_pub_out: usize,
         n_pub_in: usize,
@@ -3089,28 +3590,66 @@ impl R1csEncoder {
         self.write_section(writer, 1, &header_buf)?;
 
         // --- 2. CONSTRAINTS SECTION ---
-        let mut constraints_buf = Vec::new();
-        for c in &circuit.constraints {
-            for lc in &[&c.a, &c.b, &c.c] {
-                let mut remapped_terms: Vec<(u32, Vec<u8>)> = Vec::new();
-                for &(old_wire, ref coeff) in &lc.terms {
-                    let new_wire = *old_to_new.get(&old_wire).unwrap_or(&0) as u32;
-                    let coeff_bytes = coeff.0.to_bytes_le(32);
-                    remapped_terms.push((new_wire, coeff_bytes));
-                }
+        //
+        // Streamed, not buffered. This used to build the entire section in a
+        // `Vec<u8>` before writing a byte of it - on a dense circuit that is
+        // ~36 bytes per term held in memory on top of the constraints
+        // themselves, and it grows by doubling, so the transient peak is worse
+        // again. The section length the format wants up front is arithmetic, not
+        // something that has to be discovered by serialising first.
+        let section_len: u64 = circuit
+            .constraints
+            .iter()
+            .map(|c| {
+                let terms = c.a.terms.len() + c.b.terms.len() + c.c.terms.len();
+                // 3 x u32 term-count prefix, then (u32 wire + 32-byte coeff)
+                3 * 4 + terms * (4 + 32)
+            })
+            .sum::<usize>() as u64;
+
+        writer.write_all(&2u32.to_le_bytes())?;
+        writer.write_all(&section_len.to_le_bytes())?;
+
+        // Reused across every linear combination, so the remapping scratch
+        // allocates once for the whole file rather than once per LC, and the
+        // coefficient never gets a `Vec` of its own at all.
+        let mut remapped: Vec<(u32, Fr)> = Vec::new();
+        let mut coeff_bytes = [0u8; 32];
+        let mut written: u64 = 0;
+
+        for c in circuit.constraints {
+            for lc in [&c.a, &c.b, &c.c] {
+                remapped.clear();
+                remapped.extend(lc.terms.iter().map(|&(old_wire, coeff)| {
+                    (*old_to_new.get(&old_wire).unwrap_or(&0) as u32, coeff)
+                }));
                 // Sort by new wire ID ascending
-                remapped_terms.sort_by_key(|t| t.0);
+                remapped.sort_by_key(|t| t.0);
 
-                let n_terms = remapped_terms.len() as u32;
-                constraints_buf.write_all(&n_terms.to_le_bytes())?;
-
-                for (wire_id, val_bytes) in remapped_terms {
-                    constraints_buf.write_all(&wire_id.to_le_bytes())?;
-                    constraints_buf.write_all(&val_bytes)?;
+                writer.write_all(&(remapped.len() as u32).to_le_bytes())?;
+                written += 4;
+                for (wire_id, coeff) in &remapped {
+                    coeff.write_bytes_le(&mut coeff_bytes);
+                    writer.write_all(&wire_id.to_le_bytes())?;
+                    writer.write_all(&coeff_bytes)?;
+                    written += 36;
                 }
             }
         }
-        self.write_section(writer, 2, &constraints_buf)?;
+
+        // The length was declared before the body was written, so a mismatch
+        // would produce a structurally corrupt `.r1cs` that snarkjs reads as
+        // garbage from the next section onward rather than rejecting outright.
+        debug_assert_eq!(written, section_len, "declared .r1cs section length does not match what was written");
+        if written != section_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "internal error: .r1cs constraints section declared {} bytes but wrote {}",
+                    section_len, written
+                ),
+            ));
+        }
 
         // --- 3. WIRE TO LABEL MAP SECTION ---
         let mut map_buf = Vec::new();
@@ -3182,9 +3721,7 @@ mod tests {
     fn test_configurable_fields() {
         for f in &[ScalarField::Bn254, ScalarField::Bls12_381, ScalarField::Pallas, ScalarField::Vesta] {
             let config = FieldConfig::get(*f);
-            ACTIVE_MODULUS.with(|m| {
-                *m.borrow_mut() = config.p.clone();
-            });
+            set_active_modulus(&config.p);
             
             let zero = Fr::from_u64(0);
             let one = Fr::from_u64(1);
@@ -3365,7 +3902,7 @@ mod tests {
         let a = BigUint::from_u64(5);
         let b = BigUint::from_u64(10);
         let res = a.sub(&b);
-        let p = ACTIVE_MODULUS.with(|m| m.borrow().clone());
+        let p = active_modulus();
         let expected = p.sub(&BigUint::from_u64(5));
         assert_eq!(res, expected);
     }

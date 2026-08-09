@@ -392,9 +392,16 @@ last step of the chain — the one that makes a proof worth anything.
   `Y_ZK_MAX_UNROLL`. It is a soft guard against a typo'd loop bound becoming an
   OOM, not a structural limit - nothing in R1CS or the emitter breaks above it.
   The table above was measured with it raised. Y's cost is linear at roughly
-  **1.8 µs and 0.96 GB of RAM per million constraints**, so RAM is the real
-  ceiling: 31M constraints compiles in 70.7 s at 29.8 GB peak (a 3.7 GB
-  `.r1cs`), and ~45M is the limit of a 46 GB machine.
+  **1.8 µs per million constraints**. RAM is the real ceiling — but the memory
+  figure quoted here was **0.96 GB per million, and that is the POLYNOMIAL
+  circuit's number, not a general one.** Its linear combinations are one or two
+  terms wide; a real circuit's are ~28, and it costs proportionally more.
+  Re-measured (see `zk_emit_profile.md`), peak RSS is **0.44 KB/constraint on
+  this circuit and 1.42 KB/constraint on a Poseidon chain** — so a 46 GB box
+  holds ~105M of the former but only ~32M of the latter. Before the writer and
+  `witness_recipes` fixes the dense figure was 4.84 KB/constraint, i.e. a ~9.5M
+  ceiling: the "circuits too big for circom" claim was running out of memory at
+  roughly the sizes it was meant to be about. Quote the dense number.
 * **An earlier revision of this document reported 133x at 1,000,000 constraints.
   That claim was TRUE.** It was unreproducible only because the 10,000
   iteration cap was added afterwards, which made the circuit refuse to compile

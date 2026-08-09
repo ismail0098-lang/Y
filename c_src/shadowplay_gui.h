@@ -26,7 +26,7 @@ static int x11_error_handler(Display* d, XErrorEvent* e) {
     return 0;
 }
 
-extern void cleanup_shadowplay_gui(void);
+static inline void cleanup_shadowplay_gui(void);
 static void draw_ui(void);
 
 static int x11_io_error_handler(Display* d) {

@@ -73,6 +73,12 @@ pub struct CoprocessorSchedule {
 }
 
 /// The scheduler that produces overlapping RT+Tensor execution plans.
+/// Largest statically declared `.shared` array PTX permits per CTA.
+///
+/// Not the same as the per-SM shared memory a device reports: anything above
+/// this needs dynamic shared memory and a host-side opt-in.
+pub const MAX_STATIC_SMEM_BYTES: u32 = 48 * 1024;
+
 pub struct CoprocessorScheduler {
     pub schedule: CoprocessorSchedule,
 }
@@ -214,7 +220,7 @@ impl CoprocessorScheduler {
         &self,
         graph: &IrGraph,
         hw: &HardwareProfile,
-    ) -> String {
+    ) -> Result<String, String> {
         let mut out = String::new();
 
         writeln!(&mut out, "    // +----------------------------------------------------------+").unwrap();
@@ -228,7 +234,25 @@ impl CoprocessorScheduler {
         writeln!(&mut out, "    // +----------------------------------------------------------+").unwrap();
         writeln!(&mut out).unwrap();
 
-        // Allocate shared memory for cross-pipeline data transfer
+        // Allocate shared memory for cross-pipeline data transfer.
+        //
+        // A statically declared `.shared` array is capped at 48 KB per CTA on
+        // every architecture through Hopper - the larger per-SM figures (100 KB
+        // on Ada) are only reachable through DYNAMIC shared memory plus an
+        // explicit `cudaFuncSetAttribute` opt-in from the host. The scheduler
+        // sums its transfer buffers without consulting that limit, so a big
+        // enough workload silently emitted an array no GPU can allocate:
+        // `coprocessor_nerf` asked for 131,584 bytes and ptxas rejected the
+        // module outright. Failing here, by name and with both numbers, beats
+        // shipping PTX that dies at load time.
+        if self.schedule.total_smem_bytes > MAX_STATIC_SMEM_BYTES {
+            return Err(format!(
+                "co-processor schedule needs {} bytes of shared memory, but a statically \
+declared .shared array is limited to {} bytes per CTA. Reduce the staged tile sizes, or split \
+the pipeline so less data crosses the RT/Tensor boundary at once.",
+                self.schedule.total_smem_bytes, MAX_STATIC_SMEM_BYTES
+            ));
+        }
         if self.schedule.total_smem_bytes > 0 {
             writeln!(
                 &mut out,
@@ -405,7 +429,7 @@ impl CoprocessorScheduler {
             }
         }
 
-        out
+        Ok(out)
     }
 
     fn emit_mma_sync(
@@ -565,7 +589,7 @@ mod tests {
         assert_eq!(scheduler.schedule.tensor_slots.len(), 1);
         assert!(scheduler.schedule.overlap_savings_cycles > 0.0);
 
-        let ptx = scheduler.emit_fused_ptx(&graph, &hw);
+        let ptx = scheduler.emit_fused_ptx(&graph, &hw).expect("schedule fits in shared memory");
         assert!(ptx.contains("Y DUAL-ACCELERATOR CO-PROCESSING SCHEDULE"));
         assert!(ptx.contains("mma.sync.aligned.m16n16k16"));
     }

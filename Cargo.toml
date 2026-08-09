@@ -49,4 +49,8 @@ revm = "42.0.1"
 [features]
 default = []
 zk = []
+# Counting global allocator, reported by `Y_ZK_TIMING=1`. Costs ~3.4 ns per
+# allocation, which on an allocation-bound path is ~14% -- so it is opt-in and
+# must not be used to quote absolute timings, only ratios.
+alloc-stats = []
 

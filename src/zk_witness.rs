@@ -58,29 +58,44 @@ pub fn execute_host_witness_ir(
         w[0] = Fr::one();
     }
 
+    // Inputs are consumed POSITIONALLY, so they must be assigned in wire order
+    // regardless of what order the rest is evaluated in. Doing this in a
+    // separate pass is what makes the topological walk below safe to reorder.
     let mut pub_idx = 0;
     let mut priv_idx = 0;
-
     for (node_idx, op) in ir.nodes.iter().enumerate() {
         if node_idx == 0 {
             continue;
         }
+        if let WitnessOp::LoadInput { is_public, .. } = op {
+            if *is_public {
+                if pub_idx < public_inputs.len() {
+                    w[node_idx] = public_inputs[pub_idx];
+                    pub_idx += 1;
+                }
+            } else if priv_idx < private_inputs.len() {
+                w[node_idx] = private_inputs[priv_idx];
+                priv_idx += 1;
+            }
+        }
+    }
+
+    // Everything else in dependency order. Walking by wire index instead only
+    // works when a recipe never references a higher-numbered wire, which is a
+    // property of Y's own emitter and not of circom's.
+    for sig in &ir.topological_order {
+        let node_idx = sig.0;
+        if node_idx == 0 || node_idx >= ir.nodes.len() {
+            continue;
+        }
+        let op = &ir.nodes[node_idx];
 
         match op {
             WitnessOp::Const(val) => {
-                w[node_idx] = Fr(val.clone());
+                w[node_idx] = *val;
             }
-            WitnessOp::LoadInput { is_public, .. } => {
-                if *is_public {
-                    if pub_idx < public_inputs.len() {
-                        w[node_idx] = public_inputs[pub_idx].clone();
-                        pub_idx += 1;
-                    }
-                } else if priv_idx < private_inputs.len() {
-                    w[node_idx] = private_inputs[priv_idx].clone();
-                    priv_idx += 1;
-                }
-            }
+            // handled in the positional pre-pass above
+            WitnessOp::LoadInput { .. } => {}
             WitnessOp::Add(SignalId(a), SignalId(b)) => {
                 if *a < w.len() && *b < w.len() {
                     w[node_idx] = w[*a].add(&w[*b]);
@@ -122,7 +137,7 @@ pub fn execute_host_witness_ir(
                         }
                         HintOp::BitDecompose { src: SignalId(s), dst_bits } => {
                             if *s < w.len() {
-                                let val_is_zero = w[*s].0.is_zero();
+                                let val_is_zero = w[*s].is_zero();
                                 for dst in dst_bits {
                                     if dst.0 < w.len() {
                                         w[dst.0] = if val_is_zero { Fr::zero() } else { Fr::one() };
@@ -147,36 +162,47 @@ pub fn execute_host_witness_ir(
             // unknowns, so back-propagation alone can never pin them.
             WitnessOp::IsZeroLc(lc) => {
                 let v = eval_lc(lc, &w);
-                w[node_idx] = if v.0.is_zero() { Fr::one() } else { Fr::zero() };
+                w[node_idx] = if v.is_zero() { Fr::one() } else { Fr::zero() };
             }
             WitnessOp::InvOrZeroLc(lc) => {
                 let v = eval_lc(lc, &w);
-                w[node_idx] = if v.0.is_zero() { Fr::zero() } else { v.inv() };
+                w[node_idx] = if v.is_zero() { Fr::zero() } else { v.inv() };
             }
             // Deliberately leaves the wire at zero and UNSOLVED, so the
             // back-propagation pass owns it. See `WitnessOp::Unknown`.
             WitnessOp::Unknown => {}
             WitnessOp::BitOfLc { lc, bit } => {
                 let v = eval_lc(lc, &w);
-                w[node_idx] = if v.0.get_bit(*bit as usize) { Fr::one() } else { Fr::zero() };
+                w[node_idx] = if v.get_bit(*bit as usize) { Fr::one() } else { Fr::zero() };
             }
             WitnessOp::MulLc(a, b) => {
                 w[node_idx] = eval_lc(a, &w).mul(&eval_lc(b, &w));
             }
-            WitnessOp::IntDivLc(a, b) => {
-                let (bv, av) = (eval_lc(b, &w), eval_lc(a, &w));
-                w[node_idx] = if bv.0.is_zero() {
+            WitnessOp::MulAddLc(a, b, c) => {
+                w[node_idx] = eval_lc(a, &w).mul(&eval_lc(b, &w)).add(&eval_lc(c, &w));
+            }
+            WitnessOp::DivLc(a, b) => {
+                let bv = eval_lc(b, &w);
+                w[node_idx] = if bv.is_zero() {
                     Fr::zero()
                 } else {
-                    Fr(av.0.div_mod(&bv.0).0)
+                    eval_lc(a, &w).mul(&bv.inv())
+                };
+            }
+            WitnessOp::IntDivLc(a, b) => {
+                let (bv, av) = (eval_lc(b, &w), eval_lc(a, &w));
+                w[node_idx] = if bv.is_zero() {
+                    Fr::zero()
+                } else {
+                    av.int_div_rem(&bv).0
                 };
             }
             WitnessOp::IntModLc(a, b) => {
                 let (bv, av) = (eval_lc(b, &w), eval_lc(a, &w));
-                w[node_idx] = if bv.0.is_zero() {
+                w[node_idx] = if bv.is_zero() {
                     Fr::zero()
                 } else {
-                    Fr(av.0.div_mod(&bv.0).1)
+                    av.int_div_rem(&bv).1
                 };
             }
         }
@@ -233,6 +259,8 @@ pub fn solve_r1cs_witness(
         | WitnessOp::InvOrZeroLc(_)
         | WitnessOp::BitOfLc { .. }
         | WitnessOp::MulLc(..)
+        | WitnessOp::MulAddLc(..)
+        | WitnessOp::DivLc(..)
         | WitnessOp::IntDivLc(..)
         | WitnessOp::IntModLc(..) = op
         {
@@ -282,7 +310,7 @@ pub fn solve_r1cs_witness(
             if known(&c.a, &solved_mask) && known(&c.b, &solved_mask) {
                 let target = eval_lc(&c.a, &w).mul(&eval_lc(&c.b, &w));
                 if let Some((wire, coeff)) = sole_unknown(&c.c, &solved_mask) {
-                    if coeff.0 != Fr::zero().0 {
+                    if !coeff.is_zero() {
                         let rem = target.sub(&known_sum(&c.c, wire, &w));
                         w[wire] = div_by(&rem, &coeff);
                         solved_mask[wire] = true;
@@ -295,12 +323,12 @@ pub fn solve_r1cs_witness(
             for (num, den, target_lc) in [(&c.c, &c.b, &c.a), (&c.c, &c.a, &c.b)] {
                 if known(den, &solved_mask) && known(num, &solved_mask) {
                     let den_val = eval_lc(den, &w);
-                    if den_val.0 == Fr::zero().0 {
+                    if den_val.is_zero() {
                         continue;
                     }
                     let target = div_by(&eval_lc(num, &w), &den_val);
                     if let Some((wire, coeff)) = sole_unknown(target_lc, &solved_mask) {
-                        if coeff.0 != Fr::zero().0 {
+                        if !coeff.is_zero() {
                             let rem = target.sub(&known_sum(target_lc, wire, &w));
                             w[wire] = div_by(&rem, &coeff);
                             solved_mask[wire] = true;

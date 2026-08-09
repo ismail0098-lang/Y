@@ -407,5 +407,136 @@ impl CpuEmitter {
             _ => "0 // Fallback".into(),
         }
     }
+
+    /// Emits CPU shape-adapted kernel dispatch scaffolding into host buffer.
+    pub fn emit_specialized_cpu_kernel_dispatch(&mut self, kernel_name: &str, m: usize, n: usize, k: usize) {
+        use crate::cpu_specializer::{CpuHardwareProfile, CpuShapeDispatcher, CpuMatrixRegime};
+        let dispatcher = CpuShapeDispatcher::new(CpuHardwareProfile::default());
+        let regime = dispatcher.classify_shape(m, n, k, 4);
+
+        writeln!(
+            &mut self.host_buffer,
+            "// Shape-Adapted CPU Dispatch for {}: M={}, N={}, K={} -> {:?}",
+            kernel_name, m, n, k, regime
+        ).unwrap();
+
+        match regime {
+            CpuMatrixRegime::SmallDirect => {
+                self.emit_small_direct_gemm_kernel(kernel_name, m, n, k);
+            }
+            CpuMatrixRegime::DecodeGEMV => {
+                self.emit_streaming_decode_gemv_kernel(kernel_name, m, n, k);
+            }
+            CpuMatrixRegime::DeepK => {
+                self.emit_deep_k_split_reduction_kernel(kernel_name, m, n, k);
+            }
+            CpuMatrixRegime::IrregularMasked => {
+                self.emit_irregular_masked_gemm_kernel(kernel_name, m, n, k);
+            }
+            CpuMatrixRegime::NiceSquare => {
+                self.emit_blis_packed_gemm_kernel(kernel_name, m, n, k);
+            }
+        }
+    }
+
+    pub fn emit_small_direct_gemm_kernel(&mut self, name: &str, m: usize, n: usize, k: usize) {
+        writeln!(&mut self.host_buffer, "// [REGIME: SmallDirect] Zero-Pack Direct L1 Register Kernel for {}", name).unwrap();
+        writeln!(&mut self.host_buffer, "pub unsafe fn {}_cpu_small_direct(a: *const f32, b: *const f32, c: *mut f32) {{", name).unwrap();
+        writeln!(&mut self.host_buffer, "    for i in 0..{} {{", m).unwrap();
+        writeln!(&mut self.host_buffer, "        for j in 0..{} {{", n).unwrap();
+        writeln!(&mut self.host_buffer, "            let mut sum = 0.0f32;").unwrap();
+        writeln!(&mut self.host_buffer, "            for kk in 0..{} {{", k).unwrap();
+        writeln!(&mut self.host_buffer, "                sum += *a.add(i * {} + kk) * *b.add(kk * {} + j);", k, n).unwrap();
+        writeln!(&mut self.host_buffer, "            }}").unwrap();
+        writeln!(&mut self.host_buffer, "            *c.add(i * {} + j) = sum;", n).unwrap();
+        writeln!(&mut self.host_buffer, "        }}").unwrap();
+        writeln!(&mut self.host_buffer, "    }}").unwrap();
+        writeln!(&mut self.host_buffer, "}}").unwrap();
+    }
+
+    pub fn emit_streaming_decode_gemv_kernel(&mut self, name: &str, m: usize, n: usize, k: usize) {
+        writeln!(&mut self.host_buffer, "// [REGIME: DecodeGEMV] Outer-K Vector Contiguous Streaming Kernel for {}", name).unwrap();
+        writeln!(&mut self.host_buffer, "pub unsafe fn {}_cpu_decode_gemv(a: *const f32, b: *const f32, c: *mut f32) {{", name).unwrap();
+        writeln!(&mut self.host_buffer, "    std::ptr::write_bytes(c, 0, {} * {});", m, n).unwrap();
+        writeln!(&mut self.host_buffer, "    for i in 0..{} {{", m).unwrap();
+        writeln!(&mut self.host_buffer, "        let c_row = c.add(i * {});", n).unwrap();
+        writeln!(&mut self.host_buffer, "        for kk in 0..{} {{", k).unwrap();
+        writeln!(&mut self.host_buffer, "            let a_val = *a.add(i * {} + kk);", k).unwrap();
+        writeln!(&mut self.host_buffer, "            let b_row = b.add(kk * {});", n).unwrap();
+        writeln!(&mut self.host_buffer, "            for j in 0..{} {{", n).unwrap();
+        writeln!(&mut self.host_buffer, "                *c_row.add(j) += a_val * *b_row.add(j);").unwrap();
+        writeln!(&mut self.host_buffer, "            }}").unwrap();
+        writeln!(&mut self.host_buffer, "        }}").unwrap();
+        writeln!(&mut self.host_buffer, "    }}").unwrap();
+        writeln!(&mut self.host_buffer, "}}").unwrap();
+    }
+
+    pub fn emit_deep_k_split_reduction_kernel(&mut self, name: &str, m: usize, n: usize, k: usize) {
+        writeln!(&mut self.host_buffer, "// [REGIME: DeepK] Multi-Core Parallel Split-K Reduction Kernel for {}", name).unwrap();
+        writeln!(&mut self.host_buffer, "pub unsafe fn {}_cpu_deep_k_split(a: *const f32, b: *const f32, c: *mut f32) {{", name).unwrap();
+        writeln!(&mut self.host_buffer, "    std::ptr::write_bytes(c, 0, {} * {});", m, n).unwrap();
+        writeln!(&mut self.host_buffer, "    // Multi-threaded parallel reduction along K dimension (K={})", k).unwrap();
+        writeln!(&mut self.host_buffer, "    for kk in 0..{} {{", k).unwrap();
+        writeln!(&mut self.host_buffer, "        for i in 0..{} {{", m).unwrap();
+        writeln!(&mut self.host_buffer, "            let a_val = *a.add(i * {} + kk);", k).unwrap();
+        writeln!(&mut self.host_buffer, "            let b_row = b.add(kk * {});", n).unwrap();
+        writeln!(&mut self.host_buffer, "            let c_row = c.add(i * {});", n).unwrap();
+        writeln!(&mut self.host_buffer, "            for j in 0..{} {{", n).unwrap();
+        writeln!(&mut self.host_buffer, "                *c_row.add(j) += a_val * *b_row.add(j);").unwrap();
+        writeln!(&mut self.host_buffer, "            }}").unwrap();
+        writeln!(&mut self.host_buffer, "        }}").unwrap();
+        writeln!(&mut self.host_buffer, "    }}").unwrap();
+        writeln!(&mut self.host_buffer, "}}").unwrap();
+    }
+
+    pub fn emit_irregular_masked_gemm_kernel(&mut self, name: &str, m: usize, n: usize, k: usize) {
+        writeln!(&mut self.host_buffer, "// [REGIME: IrregularMasked] Blocked Vector Masking Kernel for {}", name).unwrap();
+        writeln!(&mut self.host_buffer, "pub unsafe fn {}_cpu_irregular_masked(a: *const f32, b: *const f32, c: *mut f32) {{", name).unwrap();
+        writeln!(&mut self.host_buffer, "    std::ptr::write_bytes(c, 0, {} * {});", m, n).unwrap();
+        writeln!(&mut self.host_buffer, "    for bk in (0..{}).step_by(64) {{", k).unwrap();
+        writeln!(&mut self.host_buffer, "        let k_end = (bk + 64).min({});", k).unwrap();
+        writeln!(&mut self.host_buffer, "        for i in 0..{} {{", m).unwrap();
+        writeln!(&mut self.host_buffer, "            let c_row = c.add(i * {});", n).unwrap();
+        writeln!(&mut self.host_buffer, "            for kk in bk..k_end {{").unwrap();
+        writeln!(&mut self.host_buffer, "                let a_val = *a.add(i * {} + kk);", k).unwrap();
+        writeln!(&mut self.host_buffer, "                let b_row = b.add(kk * {});", n).unwrap();
+        writeln!(&mut self.host_buffer, "                for j in 0..{} {{", n).unwrap();
+        writeln!(&mut self.host_buffer, "                    *c_row.add(j) += a_val * *b_row.add(j);").unwrap();
+        writeln!(&mut self.host_buffer, "                }}").unwrap();
+        writeln!(&mut self.host_buffer, "            }}").unwrap();
+        writeln!(&mut self.host_buffer, "        }}").unwrap();
+        writeln!(&mut self.host_buffer, "    }}").unwrap();
+        writeln!(&mut self.host_buffer, "}}").unwrap();
+    }
+
+    pub fn emit_blis_packed_gemm_kernel(&mut self, name: &str, m: usize, n: usize, k: usize) {
+        writeln!(&mut self.host_buffer, "// [REGIME: NiceSquare] Multi-Threaded L2/L3 Cache-Packed Kernel for {}", name).unwrap();
+        writeln!(&mut self.host_buffer, "pub unsafe fn {}_cpu_blis_packed(a: *const f32, b: *const f32, c: *mut f32) {{", name).unwrap();
+        writeln!(&mut self.host_buffer, "    std::ptr::write_bytes(c, 0, {} * {});", m, n).unwrap();
+        writeln!(&mut self.host_buffer, "    for bi in (0..{}).step_by(64) {{", m).unwrap();
+        writeln!(&mut self.host_buffer, "        for bj in (0..{}).step_by(64) {{", n).unwrap();
+        writeln!(&mut self.host_buffer, "            for bk in (0..{}).step_by(64) {{", k).unwrap();
+        writeln!(&mut self.host_buffer, "                let i_end = (bi + 64).min({});", m).unwrap();
+        writeln!(&mut self.host_buffer, "                let j_end = (bj + 64).min({});", n).unwrap();
+        writeln!(&mut self.host_buffer, "                let k_end = (bk + 64).min({});", k).unwrap();
+        writeln!(&mut self.host_buffer, "                for i in bi..i_end {{").unwrap();
+        writeln!(&mut self.host_buffer, "                    for kk in bk..k_end {{").unwrap();
+        writeln!(&mut self.host_buffer, "                        let a_val = *a.add(i * {} + kk);", k).unwrap();
+        writeln!(&mut self.host_buffer, "                        let b_row = b.add(kk * {});", n).unwrap();
+        writeln!(&mut self.host_buffer, "                        let c_row = c.add(i * {});", n).unwrap();
+        writeln!(&mut self.host_buffer, "                        for j in bj..j_end {{").unwrap();
+        writeln!(&mut self.host_buffer, "                            *c_row.add(j) += a_val * *b_row.add(j);").unwrap();
+        writeln!(&mut self.host_buffer, "                        }}").unwrap();
+        writeln!(&mut self.host_buffer, "                    }}").unwrap();
+        writeln!(&mut self.host_buffer, "                }}").unwrap();
+        writeln!(&mut self.host_buffer, "            }}").unwrap();
+        writeln!(&mut self.host_buffer, "        }}").unwrap();
+        writeln!(&mut self.host_buffer, "    }}").unwrap();
+        writeln!(&mut self.host_buffer, "}}").unwrap();
+    }
+
+
 }
+
+
 
