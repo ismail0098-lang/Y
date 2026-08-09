@@ -176,22 +176,37 @@ Measured 2026-08-09, minimum of three runs (`tests/benchmark_zk_vs_circom.py`):
 | polynomial | 1,000,000 | 0.895 s | 249.04 s | **278x** |
 | dot product | 10,000 | 0.038 s | 0.509 s | 13.5x |
 | dot product | 100,000 | 3.19 s | 13.88 s | 4.3x |
-| dot product | 1,000,000 | **476 s** | not yet measured | — |
+| dot product | 1,000,000 | 476.2 s | 983.2 s | **2.06x** |
 
 **Read the two circuits separately — the gap between them is the whole story,
-and it is not flattering.** The polynomial circuit's linear combinations are one
-or two terms wide; the dot product accumulates a dense one. On the polynomial
-circuit Y is linear and circom is strongly super-linear, which is where 278x
-comes from. **On the dot product Y is the super-linear one**: 10k → 100k costs
-85x for 10x the size, and 100k → 1M costs another 149x, ending at 476 seconds.
-Roughly O(N²·²).
+and only half of it is flattering.**
 
-So the honest summary is that Y's constraint emission is fast when linear
-combinations stay narrow and degrades badly when they do not — an accumulator
-touched once per iteration is the shape that triggers it. **The 278x is the
-polynomial number and should never be quoted as "Y's speed".** This is a known
-open problem, not a measurement artifact; the in-place accumulator update and
-`is_simplified` propagation described in
+The polynomial circuit's linear combinations are one or two terms wide, and both
+tools emit the same thing: circom reports 1,000,000 non-linear and **0 linear**
+constraints against Y's 1,000,001. Same artifact, and Y is 278x faster building
+it. That is the clean comparison.
+
+The dot product accumulates a dense linear combination, and there **Y is the
+super-linear one**: 10k → 100k costs 85x for 10x the size, and 100k → 1M costs
+another 149x, ending at 476 seconds. Roughly O(N²·²). Y still wins the wall
+clock — 2.06x — but the margin collapses from 278x to 2x, and it collapses
+because of Y, not because circom got faster.
+
+Two qualifiers on that 2.06x, in both directions:
+
+- **In Y's favour:** the artifacts are not the same size. On this circuit circom
+  emits 1,000,000 non-linear **plus 3,000,000 linear** constraints; Y emits
+  1,000,001 total. Y's R1CS is 4x smaller and correspondingly cheaper to prove.
+- **Against Y:** the benchmark harness's fairness gate compares *non-linear*
+  counts only, so it passes this pair. A same-total-constraints comparison would
+  be less favourable to Y on time.
+
+So: Y's constraint emission is fast when linear combinations stay narrow and
+degrades badly when they do not — an accumulator touched once per iteration is
+the shape that triggers it. **The 278x is the polynomial number and should never
+be quoted as "Y's speed".** This is a known open problem, not a measurement
+artifact; the in-place accumulator update and `is_simplified` propagation
+described in
 [docs/heavy_circuit_speed_test.md](docs/heavy_circuit_speed_test.md) reduce the
 constant but do not change the exponent.
 
