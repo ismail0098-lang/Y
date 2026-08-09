@@ -339,17 +339,83 @@ SGLang actually use), same math and same convention — not against eager PyTorc
 
 RoPE wins in 8 of 9 (head_dim, rows) combinations across head_dim 64/128/256.
 
+### Paged decode attention vs FlashInfer
+
+head_dim 128, 32 query heads, 8 KV heads (GQA 4:1), page_size 16, against
+FlashInfer's `BatchDecodeWithPagedKVCacheWrapper` on the same shuffled page
+table and the same NHD KV layout. Ramped clocks, A/B interleaved, minimum of 7
+rounds. `python3 tests/benchmark_y_paged_decode_attention.py`.
+
+| case | FlashInfer | Y single-pass | Y split-K | split-K vs FI |
+|---|---|---|---|---|
+| batch 1, ctx 1024 | 8.4 µs | 12.6 µs | **8.0 µs** | **1.06x** |
+| batch 1, ctx 4096 | 13.7 µs | 43.0 µs | 16.9 µs | 0.81x |
+| batch 8, ctx 1024 | 22.1 µs | 48.1 µs | 29.2 µs | 0.76x |
+| batch 8, ctx 4096 | 189.5 µs | 226.6 µs | 201.9 µs | 0.94x |
+| batch 32, ctx 1024 | 197.1 µs | 246.1 µs | 211.6 µs | 0.93x |
+| batch 32, ctx 4096 | 886.3 µs | 995.9 µs | 861.5 µs | tie (1.03x) |
+
+One run, not a best-of. Y's columns reproduce to ~1% across runs; FlashInfer's
+batch-32/ctx-4096 figure moved between 825 and 886 µs over three runs, which is
+the whole of that row's 0.97–1.03x — read it as a tie, not as a win.
+
+**This was 1.3–3.7x slower and is now 0.76–1.06x**, i.e. between 1.3x slower and
+6% faster depending on the shape. The two causes this README used to name were
+both real, and neither could be fixed alone:
+
+* **The GQA re-read.** The single-pass grid is `num_q_heads x num_seqs`, so the
+  four CTAs sharing a KV head each streamed that head's whole cache — four
+  times the necessary DRAM traffic. The split-K kernel's grid is
+  `num_kv_heads x num_seqs x splits` and one CTA carries all four query heads,
+  so a token's K and V are loaded once and feed four scores.
+* **No split-K.** With `num_q_heads x num_seqs` CTAs, batch 1 is 32 CTAs against
+  66 SMs whatever the kernel does internally. `%ctaid.z` now partitions the KV
+  sequence, so the CTA count stops depending on batch size.
+
+Merging the GQA heads *without* split-K would have made batch 1 worse, not
+better — 8 CTAs instead of 32. That is why the fix is one kernel shape rather
+than two independent changes, and why the split kernel is a second entry point
+(`..._reduce`, a max-rescale-and-sum over the per-split partial softmax states)
+rather than an option on the existing one: it needs two f32 scratch buffers and
+a device-wide barrier that does not exist inside a kernel. Both launches are
+inside the timed region above.
+
+Two things this does not claim. The split count is compile-time (16 for batch 1,
+4 for batch-many — `paged_decode_attention_split_128_32_8_16_<splits>_<warps>`)
+and its optimum depends on batch size, which is a runtime value; a single
+compiled binary shipping only the 16-split kernel measures **0.72–1.06x**
+instead of 0.76–1.06x. And at batch 32 / ctx 4096 the kernel moves 623 GB/s of
+the KV bytes it is obliged to read, against this card's 672 GB/s DRAM
+ceiling — 93% of the roofline, with FlashInfer between 90% and 97% across runs.
+There is nothing left to win there; the remaining gap is entirely in the
+L2-resident shapes.
+
+The single-pass kernel got 1.12–1.43x faster on the way, and **not** for the
+reason that sounds likely. Hoisting the V load above the QK warp reduction is
+worth 1.04–1.38x on its own: `exp` and five dependent `shfl` sat between that
+load's issue and its use, so its latency was exposed rather than overlapped.
+Restricting the cross-warp merge to warp 0 — instead of having all 32 warps
+compute an answer 31 of them discard — measured **0.83–1.10x in isolation**,
+a wash: it removes work but lengthens the live ranges around the branch, and
+`ptxas`'s register count went *up* (54 → 64 at 32 warps, 34 → 52 at 8). It is
+kept because it is what makes the multi-head epilogue affordable, not because
+it was a speedup.
+
 ### Where the GPU backend loses
 
 | workload | baseline | result |
 |---|---|---|
 | **FP8 (e4m3) GEMM** | `torch._scaled_mm` | **0.16–0.26x — 4–6x slower** |
-| Paged decode attention | FlashInfer | **1.3–3.7x slower** |
+| Paged decode attention, L2-resident | FlashInfer | 0.76–0.81x |
 | Decode-shaped GEMM (M=4–8) | cuBLAS | at the DRAM roofline; tied |
 
 FP8 is the largest gap and is not being chased: this is Ada, not Hopper, and the
 kernel is instruction-bound in its quantize-and-stage step. Paged decode
-attention re-reads K/V per query head under GQA and has no split-K.
+attention is now at the DRAM roofline when the KV cache does not fit in L2, and
+loses by up to 1.3x when it does. What binds it there has not been measured; the
+suspect is the per-token instruction count — one 32-lane butterfly reduction per
+query head, so four per token, which the GQA merge amortized the *loads* over
+but not the reductions.
 
 ### Memory bandwidth
 
