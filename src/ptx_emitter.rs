@@ -514,6 +514,55 @@ impl PtxEmitter {
     /// same bug with a different spelling - the caller asked for a copy or a
     /// matrix multiply, and silently not doing it produces a kernel that
     /// computes garbage instead of one that fails to build.
+    /// Refuse `GlobalMemory<Int>` kernel parameters, because this backend has no
+    /// integer datapath and silently computes them in floating point.
+    ///
+    /// **This is a wrong-answer bug, not a missing feature.** A kernel declared
+    /// `GlobalMemory<U32>` with `let s: U32 = a + b;` compiled clean, assembled
+    /// clean under `ptxas -arch=sm_89`, printed success, and emitted
+    /// `ld.global.f32` / `add.f32` / `st.global.f32`. Every value above 2^24 is
+    /// then silently rounded, and a 254-bit field limb is destroyed outright.
+    /// `U32`, `U64`, `I32` and `I64` all behaved identically.
+    ///
+    /// The cause is that the tile intrinsics (`block_ptr2d_load`, `block_tile_*`
+    /// and friends) are hardcoded to f32 — there are ~557 literal `f32` sites in
+    /// this file and no element-type plumbing to thread anything else through.
+    /// So this is a real feature to build, not a typo to fix, and per the rule
+    /// in CLAUDE.md gotcha #7 the interim behaviour must be a refusal rather
+    /// than a plausible-looking wrong kernel.
+    ///
+    /// **This is the blocker for GPU field arithmetic** (BN254 Montgomery
+    /// mul/add for NTT and MSM), which needs `mul.wide.u32`, integer add/shift/
+    /// and, and typed global loads. Writing it in Y is not possible until the
+    /// integer datapath exists.
+    fn reject_integer_element_types(&mut self, kernel: &KernelDecl) {
+        fn int_name(t: &str) -> bool {
+            matches!(t, "U8" | "U16" | "U32" | "U64" | "I8" | "I16" | "I64")
+        }
+        for param in &kernel.params {
+            if let Type::Generic { base, args, .. } = &param.ty {
+                if base != "GlobalMemory" && base != "SharedMemory" && base != "L2Memory" {
+                    continue;
+                }
+                for a in args {
+                    let GenericArg::Type(Type::Primitive(name, _) | Type::Ident(name, _)) = a else {
+                        continue;
+                    };
+                    if int_name(name) {
+                        self.emit_errors.push(format!(
+                            "[PTX] `{}: {}<{}>` cannot be lowered: this backend has no integer \
+                             datapath. Integer element types were previously compiled as f32 \
+                             (`ld.global.f32` / `add.f32`), which silently rounds every value \
+                             above 2^24 and destroys a field limb outright. Use F32/F16, or \
+                             implement typed integer loads and arithmetic in ptx_emitter.rs.",
+                            param.name, base, name
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     fn unsupported_intrinsic(&mut self, name: &str, reason: &str) {
         self.emit_errors.push(format!(
             "[PTX] `{}(...)` cannot be lowered for target {}: {}.",
@@ -583,6 +632,7 @@ impl PtxEmitter {
     }
 
     fn emit_kernel(&mut self, kernel: &KernelDecl, hw_profile: &HardwareProfile) {
+        self.reject_integer_element_types(kernel);
         // Clear variables mapping for fresh compilation unit
         self.variables.clear();
 

@@ -1,5 +1,5 @@
-.version 7.0
-.target sm_80
+.version 8.4
+.target sm_89
 .address_size 64
 
 .visible .entry naive_gemm_f32(
