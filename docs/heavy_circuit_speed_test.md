@@ -108,11 +108,26 @@ linear. Measured on the polynomial circuit, `Y_ZK_MAX_UNROLL=2000000`:
 
 | Tool | Wall | Peak RSS | Artifact | vs Y |
 |---|---|---|---|---|
-| **Y** | **1.60 s** | 0.99 GB | R1CS, 1,000,001 constraints | 1x |
-| Noir (`nargo compile`) | 12.08 s | 1.20 GB | ACIR, 1,000,000 opcodes | 7.6x slower |
-| Circom | 245.59 s | 2.33 GB | R1CS, 1,000,000 constraints | **154x slower** |
+| **Y** | **0.94 s** | 0.37 GB | R1CS, 1,000,001 constraints | 1x |
+| Noir (`nargo compile`) | 12.08 s | 1.20 GB | ACIR, 1,000,000 opcodes | 13x slower |
+| Circom | 245.59 s | 2.33 GB | R1CS, 1,000,000 constraints | **261x slower** |
 | Leo (`leo build`) | — | — | Aleo instructions | **cannot compile** |
 | SP1 | — | — | RISC-V zkVM | not comparable |
+
+**Y's row was 1.60 s / 0.99 GB until 2026-08-10, and only Y's row moved.** That
+is the Montgomery `Fr` and allocator work in
+[zk_emit_profile.md](zk_emit_profile.md), not a change in method — the other
+tools were not re-run, and their numbers are the same measurements as before. So
+the ratios in the last column moved with it: Circom 154x → 261x, Noir 7.6x → 13x.
+Re-measured 2026-08-10, minimum of three on an idle box.
+
+Do not expect this table and the README's to agree to three digits: the README
+reports 0.895 s vs circom 249.04 s (**278x**) from
+`tests/benchmark_zk_vs_circom.py`, which times the subprocess directly, where
+these are shell-timed and carry ~30 ms of launch overhead. Both are minimum-of-N
+on the same box and the pair differs by less than the run-to-run spread. **The
+honest reading of either is "a bit over 250x on this circuit", and the third
+digit is noise.**
 
 Two caveats that matter for reading this table honestly:
 
@@ -136,14 +151,34 @@ Two caveats that matter for reading this table honestly:
   | **17,000** | **0.89 s** | **493.13 KB** | last size that builds |
   | 18,000 | — | 535,968 B | `Error [ECLI0377055]: exceeding the maximum allowed size` |
 
-  Head-to-head at 17,000, Leo's own ceiling (minimum of 3 runs each):
+  Head-to-head at 17,000, Leo's own ceiling. Re-measured as a matched set
+  2026-08-10 — all four tools in one session on an idle box, `perf_counter`
+  around the subprocess, build directories deleted between reps, minimum of 5
+  (3 for Leo). Fairness gate checked: circom reports 17,000 non-linear / 0
+  linear against Y's 17,001, and the two `.r1cs` files are 2,176,136 and
+  2,176,264 bytes.
 
-  | Tool | Wall | vs Y |
-  |---|---|---|
-  | **Y** | **0.0071 s** | 1x |
-  | Noir | 0.107 s | 15x slower |
-  | Circom | 0.264 s | 37x slower |
-  | Leo | 0.890 s | **125x slower** |
+  | Tool | Wall | vs Y | previously recorded |
+  |---|---|---|---|
+  | **Y** | **0.0170 s** | 1x | 0.0071 s |
+  | Noir 1.0.0-beta.22 | 0.2125 s | 12.5x slower | 0.107 s |
+  | Circom 2.2.3 | 0.2678 s | 15.8x slower | 0.264 s |
+  | Leo | 0.9099 s | **53.5x slower** | 0.890 s |
+
+  **Circom and Leo reproduced to within 1.5%; Y and Noir did not, and the
+  ordering is unchanged but the margins shrank.** The last column is the earlier
+  revision's numbers, kept visible rather than overwritten. Noir's is
+  unattributable because that measurement did not record a `nargo` version and
+  this one is beta.22. Y's has a candidate: `Y_ZK_TIMING=1` at this size reports
+  **emit 0.009 s and `write_r1cs_binary` 0.014 s**, so more than half of Y's wall
+  clock here is writing a 2.1 MB file to btrfs, not emitting constraints. 0.0071 s
+  is suspiciously close to the emit half alone.
+
+  **Which is the real caveat on this table: at 17,000 constraints the benchmark
+  is substantially an I/O measurement, for every tool on it.** It exists because
+  it is the only size where all four are comparable — that is Leo's ceiling, not
+  a size anyone chose — so read it as evidence about Leo's cap and about the
+  ordering, and read the 1M table above for constraint-emission throughput.
 
   So Leo is not merely capped - it is the slowest tool tested, at the one size
   where all four are directly comparable. Note that `leo/heavy_circuit/` in this
@@ -154,6 +189,50 @@ Two caveats that matter for reading this table honestly:
   per-program constraint-emission step to time. The comparable number would be
   proving throughput (cycles/second), which is not what this benchmark
   measures.
+
+### At 10,000,000 constraints — circom does not finish
+
+Measured 2026-08-10 on an otherwise idle box (`top` idle ≥93% before each run),
+polynomial circuit, `Y_ZK_MAX_UNROLL=40000000`. Circom was run under
+`systemd-run --user --scope -p MemoryMax=40G` with a **one-hour wall-clock cap**,
+so that a run which is merely slow cannot be confused with one that is stuck:
+
+| Tool | Wall | Peak RSS | Artifact | vs Y |
+|---|---|---|---|---|
+| **Y** | **10.47 s** (min of 3) | 3.60 GB | R1CS, 10,000,001 constraints, 1.19 GB | 1x |
+| Circom | **killed at 3,612 s, incomplete** | 3.53 GB at kill | — | **>345x slower** |
+
+**`>345x` is the measurement; it is not the answer.** The run was terminated by
+the cap, so the only defensible statement is a lower bound, and that is what the
+table and the README report. What the *true* ratio is can be projected from
+circom's own scaling on this circuit — 3.50 s at 100k, 26.77 s at 316k, 245.69 s
+at 1M, i.e. **O(N^1.9)** — which puts 10M at roughly 5.4 hours and the ratio near
+1,800x. That projection is written here, once, as context. It is deliberately
+absent from the README and from the table above, because these benchmarks have a
+specific history of estimates being promoted to measurements: the README's
+circom/Noir/Leo rows at 31M were removed for exactly that, and §5 below records
+the 133x claim that was true but unreproducible.
+
+The shape of the two curves is the actual result, and it does not depend on
+finishing the run. Y is linear over the whole measured range — 0.087 s at 100k,
+0.895 s at 1M, 10.47 s at 10M, within 17% of a straight line across two decades —
+while circom costs 7.65x for 3.16x the work at every step. So the gap widens with
+size rather than converging, and the interesting question at 10M stops being
+speed: circom's memory is linear at ~2.3 KB/constraint, so finishing would have
+needed ~23 GB against Y's measured 3.60 GB.
+
+Two limits on this comparison, stated because they cut against Y:
+
+* **The fairness gate could not run.** `tests/benchmark_zk_vs_circom.py` aborts
+  unless both tools report the same non-linear constraint count, and circom
+  emitted no count because it never got that far. The two sources are the same
+  template scaled up, and the gate passed on the identical pair at 1M (circom
+  1,000,000 non-linear / 0 linear vs Y's 1,000,001), which is the reason to
+  believe the 10M pair too — but it is inference, not the check.
+* **This is the narrow circuit.** The dot product, whose linear combinations are
+  dense, is the shape where Y is the super-linear one and the margin collapses to
+  2.06x at 1M. Nothing here was run at 10M for it, and given O(N^2.2) it would
+  not finish inside an hour either.
 
 ---
 
@@ -178,6 +257,23 @@ roll your own:
   Y read **0.694 s instead of 0.014 s** — a 48x error on a benchmark that has
   nothing to do with the GPU.
 
+`SIZES` stops at 10,000, so the 1M and 10M rows above are run by hand. The 10M
+pair, for reproduction:
+
+```bash
+# Y — minimum of three, repo root as cwd (see the trap above)
+Y_ZK_MAX_UNROLL=40000000 ./target/release/Y poly10m.ysu --target=r1cs
+
+# circom — capped, so "slow" and "stuck" stay distinguishable
+systemd-run --user --scope -p MemoryMax=40G circom poly10m.circom --r1cs -o out/
+```
+
+Cap the circom side with a wall clock you decide *before* starting, and sample
+`/proc/<pid>/status` `VmHWM` for peak RSS rather than trusting a final number the
+process never got to print. One trap, which cost a shell here: a bracketing
+kill pattern like `pkill -f 'peak=0; while true'` matches the shell that is
+running it. Put the sampler in a file and kill it by pidfile.
+
 ---
 
 ## 4b. End-to-end proving cost (compile is the smallest part)
@@ -186,16 +282,28 @@ Compile time is one of four stages and the cheapest. Measured with
 `cargo test --release --features zk --test zk_groth16_scale -- --ignored --nocapture`
 (Y emits + witnesses; arkworks does setup/prove/verify — Y has no prover):
 
-| Constraints | emit | witness | setup | prove | verify | **total** |
-|---|---|---|---|---|---|---|
-| 10,000 | 0.01 s | 0.00 s | 0.04 s | 0.04 s | 0.002 s | **0.10 s** |
-| 25,000 | 0.03 s | 0.02 s | 0.09 s | 0.10 s | 0.002 s | **0.24 s** |
-| 50,000 | 0.07 s | 0.03 s | 0.18 s | 0.19 s | 0.002 s | **0.46 s** |
-| 100,000 | 0.16 s | 0.07 s | 0.33 s | 0.36 s | 0.002 s | **0.92 s** |
-| 1,000,000 | 1.77 s | 0.57 s | 2.80 s | 2.87 s | 0.002 s | **8.02 s** |
+| Constraints | emit | witness | setup | prove | verify | **total** | peak RSS |
+|---|---|---|---|---|---|---|---|
+| 10,000 | 0.01 s | 0.00 s | 0.04 s | 0.05 s | 0.002 s | **0.11 s** | |
+| 100,000 | 0.12 s | 0.01 s | 0.40 s | 0.36 s | 0.002 s | **0.89 s** | |
+| 1,000,000 | 1.25 s | 0.09 s | 2.83 s | 2.99 s | 0.002 s | **7.17 s** | |
+| 10,000,000 | 11.70 s | 0.92 s | 30.73 s | 39.90 s | 0.002 s | **83.25 s** | 31.8 GB |
+| 31,000,000 | 40.35 s | 2.83 s | **OOM** | — | — | — | >40 GB |
 
-Every stage is linear, and **arkworks is now 71% of the total** — Y's own two
-stages are 2.34 s of the 8.02 s at 1M. Five fixes got it there, all in Y's code:
+This is the same table the README carries, and the 25,000/50,000 rows were
+dropped from it; the 10M and 31M rows were added 2026-08-10. **31M cannot be
+proved on this machine** — under `systemd-run -p MemoryMax=40G -p
+MemorySwapMax=0` it reaches the cap and is OOM-killed 56 s in, still inside
+`circuit_specific_setup`. Emit and witness, the half Y owns, finish in 43 s. The
+wall is Groth16's proving key, which is a property of the prover and the curve.
+
+Every stage is linear, and **arkworks is 81% of the 1M total and 85% of the 10M
+one** — its share grows with size, so the remaining headroom is in a prover Y
+does not have.
+
+The five fixes below got Y's own two stages there, and this table read
+`1.77 s / 0.57 s / 8.02 s` at 1M (arkworks 71%) before the Montgomery `Fr` work
+in [zk_emit_profile.md](zk_emit_profile.md) landed on top of them:
 
 * **`build_witness_ir` was O(V·C)**, scanning every constraint for every
   variable. It now indexes the `a*b = c` constraints by output wire in one
@@ -262,8 +370,9 @@ instead of allocating a signal for it.
 **This circuit is why §4b's numbers moved.** Before those fixes, one Poseidon
 took **3.04 s** end to end (1.41 s emit, 1.63 s witness) — that is, Y was
 **13.5x slower than circom** on the workload real circuits are made of, while
-simultaneously being 154x faster on the benchmark at the top of this page. It
-is now 0.016 s, a 190x improvement, and faster than circom on both.
+simultaneously being 154x faster on the benchmark at the top of this page (that
+lead is 261x now — the same fixes moved both). It is now 0.016 s, a 190x
+improvement, and faster than circom on both.
 
 The lesson is worth keeping: a benchmark circuit chosen for how large it can
 grow selected for exactly the operations Y was already good at, and hid three
@@ -315,7 +424,7 @@ Y writes its constraint system in iden3's binary format, and had done so since
 before anything could check the claim. It holds. The whole pipeline works:
 
 ```bash
-Y circuit.ysu --target=r1cs --witness input.json     # 154x faster than circom
+Y circuit.ysu --target=r1cs --witness input.json     # 261x faster on the polynomial circuit
 snarkjs groth16 setup circuit.r1cs pot_final.ptau circuit.zkey
 snarkjs groth16 prove circuit.zkey circuit.wtns proof.json public.json
 snarkjs groth16 verify verification_key.json public.json proof.json
@@ -392,7 +501,9 @@ last step of the chain — the one that makes a proof worth anything.
   `Y_ZK_MAX_UNROLL`. It is a soft guard against a typo'd loop bound becoming an
   OOM, not a structural limit - nothing in R1CS or the emitter breaks above it.
   The table above was measured with it raised. Y's cost is linear at roughly
-  **1.8 µs per million constraints**. RAM is the real ceiling — but the memory
+  **1 µs per constraint** on this circuit (0.9 µs/constraint at 1M, 1.05 at 10M —
+  the old figure here said "1.8 µs per million", which is off by six orders of
+  magnitude and was a units slip, not a measurement). RAM is the real ceiling — but the memory
   figure quoted here was **0.96 GB per million, and that is the POLYNOMIAL
   circuit's number, not a general one.** Its linear combinations are one or two
   terms wide; a real circuit's are ~28, and it costs proportionally more.
@@ -407,7 +518,9 @@ last step of the chain — the one that makes a proof worth anything.
   iteration cap was added afterwards, which made the circuit refuse to compile
   and made the number look fabricated. Re-measured with the cap lifted: Y
   1.60 s vs Circom 245.59 s, i.e. **154x** - the original figure was, if
-  anything, conservative. What genuinely was missing is the harness: the two
+  anything, conservative. (That 1.60 s is itself now historical: the Montgomery
+  `Fr` work took it to 0.94 s and the ratio to 261x. See the 1M table in §3.)
+  What genuinely was missing is the harness: the two
   scripts that revision told you to run (`run_speed_test.js`,
   `run_dot_product_benchmark.js`) are not in the repository, which is why
   `tests/benchmark_zk_vs_circom.py` now exists.

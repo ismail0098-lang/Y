@@ -143,6 +143,52 @@ fn run(n: u32) {
     );
 }
 
+/// Emit + witness only, for sizes past what a Groth16 prover fits in RAM.
+///
+/// This is not a lesser version of `run` — it is the honest half. Y owns emit
+/// and witness; setup and prove are arkworks, and their memory is a property of
+/// Groth16 (a proving key holds `num_variables` G1 points for each of `a`,
+/// `b_g1` and `l`, the same count of G2 points for `b_g2`, and a domain-sized
+/// `h`). Reporting a 31M row with those columns blank is the measurement;
+/// estimating them would be the thing this file exists to avoid.
+fn emit_only(n: u32) {
+    std::env::set_var("Y_ZK_MAX_UNROLL", "40000000");
+    let src = format!(
+        "@unsafe\nfn main(x: I32, y: I32) -> I32 {{\n    let mut temp = x;\n    for i in 0..{} {{\n        temp = temp * y;\n    }}\n    return temp;\n}}\n",
+        n
+    );
+
+    let t = Instant::now();
+    let tokens = Lexer::new(&src).tokenize();
+    let program = Parser::new(tokens).parse_program().expect("parse");
+    TypeChecker::new().check_program(&program);
+    let mut emitter = ZkEmitter::new();
+    emitter.emit_program(&program).expect("lower");
+    let circuit = emitter.build_circuit();
+    let witness_ir = emitter.build_witness_ir();
+    let emit_s = t.elapsed().as_secs_f64();
+
+    let t = Instant::now();
+    let (witness, ok) = solve_r1cs_witness(
+        &circuit.constraints,
+        &witness_ir,
+        circuit.num_variables,
+        &[],
+        &[Fr::from_u64(3), Fr::from_u64(2)],
+    );
+    let witness_s = t.elapsed().as_secs_f64();
+    assert!(ok, "witness does not satisfy the circuit");
+
+    println!(
+        "RESULT n={} constraints={} emit={:.2}s witness={:.2}s setup=OOM prove=OOM \
+         (Groth16 setup exceeds 40 GB at this size; see the module comment)",
+        n,
+        circuit.constraints.len(),
+        emit_s,
+        witness_s
+    );
+}
+
 #[test]
 #[ignore]
 fn groth16_scale_10k() {
@@ -171,4 +217,45 @@ fn groth16_scale_100k() {
 #[ignore]
 fn groth16_scale_1m() {
     run(1_000_000);
+}
+
+// The two sizes above 1M exist because the memory table in the README goes to
+// 31M and this one stopped at 1M, which invited the reader to assume the prove
+// path scales the same way. It does not: emitting 31M constraints is ~11 GB,
+// but arkworks' Groth16 SETUP at that size needs the proving key
+// (~num_variables G1 points for each of `a`, `b_g1`, `l`, `num_variables` G2
+// points for `b_g2`, and a domain-sized `h`) plus arkworks' own copy of the
+// constraint system plus the `clone()` this harness hands it. That is tens of
+// GB on top of the emit, and it is a property of Groth16 and the prover, not of
+// Y.
+//
+// **Run these under a memory cap**, or the OOM killer picks whatever else is on
+// the box:
+//
+// ```bash
+// systemd-run --user --scope -p MemoryMax=32G \
+//   cargo test --release --features zk --test zk_groth16_scale \
+//   -- --ignored --nocapture groth16_scale_31m
+// ```
+#[test]
+#[ignore]
+fn groth16_scale_10m() {
+    run(10_000_000);
+}
+
+/// 31M is **emit + witness only, because the prove path does not fit in 46 GB.**
+///
+/// Measured, not assumed: under `systemd-run -p MemoryMax=40G -p
+/// MemorySwapMax=0`, this size reaches 40 GB and is OOM-killed 56 s in, still
+/// inside `circuit_specific_setup`. For scale, the 10M row above completes and
+/// peaks at **31.8 GB** — so the prover's memory is roughly 3 GB per million
+/// constraints on this circuit and 31M needs on the order of 100 GB.
+///
+/// Y's own half is comfortable at this size; arkworks' is not. That is the
+/// distinction the README's prove-path table exists to draw, and blanking the
+/// two prover columns is the result rather than a gap in it.
+#[test]
+#[ignore]
+fn groth16_scale_31m() {
+    emit_only(31_000_000);
 }
