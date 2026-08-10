@@ -141,26 +141,33 @@ wrote.** Nothing downstream records the difference.
 - **Comparison, boolean and bitwise operators over signals** — these are gadgets,
   not operators. The message names `comparators.circom` / `bitify.circom`.
 
-  > **This refusal is applied to `<--` right-hand sides too, and there it is
-  > wrong — it makes circomlib's own `bitify.circom` uncompilable.** `Num2Bits`
-  > computes its witness with `out[i] <-- (in >> i) & 1` and then constrains the
-  > result with `out[i] * (out[i] - 1) === 0` and `lc1 === in`. The shift is
-  > never an R1CS expression; `<--` exists precisely to compute a value the
-  > constraints will check afterwards, so refusing it for having "no R1CS form"
-  > applies the constraint value model where the witness model belongs. The
-  > diagnostic compounds it by pointing the user at `bitify.circom`, which is
-  > the file that just failed to compile.
+  > **It is NOT applied to `<--` right-hand sides — that was a bug, fixed
+  > 2026-08-11, and it had made circomlib's own `bitify.circom`
+  > uncompilable.** `Num2Bits` computes its witness with
+  > `out[i] <-- (in >> i) & 1` and then constrains it with
+  > `out[i] * (out[i] - 1) === 0` and the recomposition `lc1 === in`. The shift
+  > is never an R1CS expression; `<--` exists precisely to compute a value the
+  > constraints check afterwards, so refusing it for having "no R1CS form"
+  > applied the constraint value model where the witness model belongs. The
+  > diagnostic compounded it by naming `bitify.circom`, which was the file that
+  > had just failed to compile.
   >
-  > Consequence, measured 2026-08-11: `Poseidon(2)`, a depth-20 Poseidon Merkle
-  > inclusion proof and a 200-hash chain all compile from unmodified circomlib,
-  > but **`Num2Bits`, `comparators.circom` and `aliascheck.circom` do not**, and
-  > nor does anything depending on them — range checks and comparisons, which is
-  > most real circuits. `<--` itself is supported (`out <-- in + 1` compiles);
-  > it is only the value model applied to its RHS that is too strict.
+  > `<--` right-hand sides now go through `witness_only_recipe`, which
+  > recognises `(e >> k) & 1` and `e & 1` (with `k` compile-time) as
+  > `WitnessOp::BitOfLc` before falling back to the ordinary value model — so an
+  > unrecognised construct is still refused by name. `Num2Bits`,
+  > `comparators.circom` and `aliascheck.circom` compile from unmodified
+  > circomlib: a 200-wide `Num2Bits(64)` range check is 13,013 constraints
+  > against circom's 13,200, and 300 `LessThan(32)` comparisons are 10,220
+  > against 11,100.
   >
-  > The fix is to evaluate a `<--` RHS through the witness IR, where Y already
-  > has the operations (`WitnessOp::BitOfLc` and friends) and where an
-  > unconstrained hint is already tracked (`unconstrained_hint_vars`). Not done.
+  > Guarded by three tests in `tests/circom_frontend.rs` that assert **values,
+  > not just satisfiability**. That distinction matters here: `Num2Bits`'s own
+  > recomposition constraint already makes a wrong bit unsatisfiable, so a
+  > satisfiability-only test would pass on a decomposition that is
+  > big-endian — every bit individually valid, the whole thing in the wrong
+  > order. `num2bits_bits_are_lsb_first` reads bit 3 back and compares it to
+  > `(x >> 3) & 1`.
 - **Signal-dependent array indices** — needs an explicit multiplexer.
 - **`bus` declarations** (circom 2.1.5+) — flattening one silently would change
   the signal layout a verifier expects.

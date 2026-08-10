@@ -492,6 +492,19 @@ impl<'a> Lowerer<'a> {
             }
             AssignOp::SignalConstrain | AssignOp::SignalOnly => {
                 let wire = self.resolve_signal_wire(lhs, f, pos)?;
+                if let AssignOp::SignalOnly = op {
+                    // `<--` must NOT be evaluated through the constraint value
+                    // model. Doing so is what made circomlib's own
+                    // `bitify.circom` uncompilable: `Num2Bits` writes
+                    // `out[i] <-- (in >> i) & 1`, and a shift over a signal was
+                    // refused for having "no R1CS form" - which is true, and
+                    // irrelevant, because a `<--` right-hand side never becomes
+                    // a constraint. It is a witness computation, checked
+                    // afterwards by the `===` the author writes.
+                    let recipe = self.witness_only_recipe(rhs, f, pos)?;
+                    self.emitter.set_witness_recipe(wire, recipe);
+                    return Ok(());
+                }
                 let v = self.eval_expr(rhs, f)?;
                 let target = LinearCombination::variable(wire);
 
@@ -528,18 +541,10 @@ impl<'a> Lowerer<'a> {
                             }
                         }
                     }
-                    AssignOp::SignalOnly => {
-                        // `<--` assigns a witness value and emits NO constraint.
-                        // Preserving that exactly is the point: turning it into
-                        // `<==` would silently ADD a constraint the author chose
-                        // not to write, and refusing to record the value would
-                        // make the circuit unwitnessable. Soundness of a circuit
-                        // using `<--` rests on a matching `===` that the author
-                        // is responsible for.
-                        let recipe = self.witness_only_recipe(rhs, &v, f, pos)?;
-                        self.emitter.set_witness_recipe(wire, recipe);
-                    }
-                    AssignOp::Var => unreachable!(),
+                    // `<--` returned above: it emits NO constraint, and turning
+                    // it into `<==` would silently add one the author chose not
+                    // to write.
+                    AssignOp::SignalOnly | AssignOp::Var => unreachable!(),
                 }
                 Ok(())
             }
@@ -554,10 +559,45 @@ impl<'a> Lowerer<'a> {
     fn witness_only_recipe(
         &mut self,
         rhs: &Expr,
-        v: &Val,
         f: &mut Frame,
         _pos: Pos,
     ) -> LResult<WitnessOp> {
+        // Bit extraction: `(e >> k) & 1` and `e & 1`, with `k` compile-time.
+        //
+        // This is `Num2Bits`, and through it `Bits2Num`, `comparators.circom`,
+        // `aliascheck.circom` and every range check and comparison built on
+        // them - i.e. most of a real circuit. The shift has no R1CS form and
+        // does not need one; `out[i]` is constrained afterwards by
+        // `out[i] * (out[i] - 1) === 0` and the recomposition `lc1 === in`,
+        // both of which this front end already emits.
+        if let Expr::Binary(BinOp::BitAnd, masked, mask, _) = rhs {
+            if let Ok(Val::Const(m)) = self.eval_expr(mask, f) {
+                if m == Fr::one() {
+                    let (base, bit) = match &**masked {
+                        Expr::Binary(BinOp::Shr, b, k, _) => {
+                            let kv = self.eval_expr(k, f)?;
+                            match kv {
+                                Val::Const(c) => match c.to_u64() {
+                                    // A shift wider than the field is not a bit
+                                    // of anything; fall through and let the
+                                    // ordinary path refuse it by name.
+                                    Some(n) if n < 256 => (&**b, n as u32),
+                                    _ => (rhs, u32::MAX),
+                                },
+                                _ => (rhs, u32::MAX),
+                            }
+                        }
+                        other => (other, 0),
+                    };
+                    if bit != u32::MAX {
+                        if let Some(lc) = self.eval_expr(base, f)?.lc() {
+                            return Ok(WitnessOp::BitOfLc { lc, bit });
+                        }
+                    }
+                }
+            }
+        }
+
         // `x <-- a / b` with a signal divisor is the canonical use.
         if let Expr::Binary(BinOp::Div, a, b, _) = rhs {
             let va = self.eval_expr(a, f)?;
@@ -580,7 +620,10 @@ impl<'a> Lowerer<'a> {
                 return Ok(WitnessOp::IntModLc(la, lb));
             }
         }
-        match v {
+        // Anything else still goes through the ordinary value model, so an
+        // unrecognised construct is refused by name rather than guessed at.
+        let v = self.eval_expr(rhs, f)?;
+        match &v {
             Val::Const(_) | Val::Lin(_) => Ok(WitnessOp::MulLc(
                 v.lc().unwrap(),
                 LinearCombination::constant(Fr::one()),
