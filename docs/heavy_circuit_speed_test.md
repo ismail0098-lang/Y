@@ -155,6 +155,50 @@ Two caveats that matter for reading this table honestly:
   proving throughput (cycles/second), which is not what this benchmark
   measures.
 
+### At 10,000,000 constraints — circom does not finish
+
+Measured 2026-08-10 on an otherwise idle box (`top` idle ≥93% before each run),
+polynomial circuit, `Y_ZK_MAX_UNROLL=40000000`. Circom was run under
+`systemd-run --user --scope -p MemoryMax=40G` with a **one-hour wall-clock cap**,
+so that a run which is merely slow cannot be confused with one that is stuck:
+
+| Tool | Wall | Peak RSS | Artifact | vs Y |
+|---|---|---|---|---|
+| **Y** | **10.47 s** (min of 3) | 3.60 GB | R1CS, 10,000,001 constraints, 1.19 GB | 1x |
+| Circom | **killed at 3,612 s, incomplete** | 3.53 GB at kill | — | **>345x slower** |
+
+**`>345x` is the measurement; it is not the answer.** The run was terminated by
+the cap, so the only defensible statement is a lower bound, and that is what the
+table and the README report. What the *true* ratio is can be projected from
+circom's own scaling on this circuit — 3.50 s at 100k, 26.77 s at 316k, 245.69 s
+at 1M, i.e. **O(N^1.9)** — which puts 10M at roughly 5.4 hours and the ratio near
+1,800x. That projection is written here, once, as context. It is deliberately
+absent from the README and from the table above, because these benchmarks have a
+specific history of estimates being promoted to measurements: the README's
+circom/Noir/Leo rows at 31M were removed for exactly that, and §5 below records
+the 133x claim that was true but unreproducible.
+
+The shape of the two curves is the actual result, and it does not depend on
+finishing the run. Y is linear over the whole measured range — 0.087 s at 100k,
+0.895 s at 1M, 10.47 s at 10M, within 17% of a straight line across two decades —
+while circom costs 7.65x for 3.16x the work at every step. So the gap widens with
+size rather than converging, and the interesting question at 10M stops being
+speed: circom's memory is linear at ~2.3 KB/constraint, so finishing would have
+needed ~23 GB against Y's measured 3.60 GB.
+
+Two limits on this comparison, stated because they cut against Y:
+
+* **The fairness gate could not run.** `tests/benchmark_zk_vs_circom.py` aborts
+  unless both tools report the same non-linear constraint count, and circom
+  emitted no count because it never got that far. The two sources are the same
+  template scaled up, and the gate passed on the identical pair at 1M (circom
+  1,000,000 non-linear / 0 linear vs Y's 1,000,001), which is the reason to
+  believe the 10M pair too — but it is inference, not the check.
+* **This is the narrow circuit.** The dot product, whose linear combinations are
+  dense, is the shape where Y is the super-linear one and the margin collapses to
+  2.06x at 1M. Nothing here was run at 10M for it, and given O(N^2.2) it would
+  not finish inside an hour either.
+
 ---
 
 ## 4. Running the Benchmarks
@@ -177,6 +221,23 @@ roll your own:
   re-runs the full GPU hardware probe. Measuring from the wrong directory made
   Y read **0.694 s instead of 0.014 s** — a 48x error on a benchmark that has
   nothing to do with the GPU.
+
+`SIZES` stops at 10,000, so the 1M and 10M rows above are run by hand. The 10M
+pair, for reproduction:
+
+```bash
+# Y — minimum of three, repo root as cwd (see the trap above)
+Y_ZK_MAX_UNROLL=40000000 ./target/release/Y poly10m.ysu --target=r1cs
+
+# circom — capped, so "slow" and "stuck" stay distinguishable
+systemd-run --user --scope -p MemoryMax=40G circom poly10m.circom --r1cs -o out/
+```
+
+Cap the circom side with a wall clock you decide *before* starting, and sample
+`/proc/<pid>/status` `VmHWM` for peak RSS rather than trusting a final number the
+process never got to print. One trap, which cost a shell here: a bracketing
+kill pattern like `pkill -f 'peak=0; while true'` matches the shell that is
+running it. Put the sampler in a file and kill it by pidfile.
 
 ---
 
@@ -392,7 +453,9 @@ last step of the chain — the one that makes a proof worth anything.
   `Y_ZK_MAX_UNROLL`. It is a soft guard against a typo'd loop bound becoming an
   OOM, not a structural limit - nothing in R1CS or the emitter breaks above it.
   The table above was measured with it raised. Y's cost is linear at roughly
-  **1.8 µs per million constraints**. RAM is the real ceiling — but the memory
+  **1 µs per constraint** on this circuit (0.9 µs/constraint at 1M, 1.05 at 10M —
+  the old figure here said "1.8 µs per million", which is off by six orders of
+  magnitude and was a units slip, not a measurement). RAM is the real ceiling — but the memory
   figure quoted here was **0.96 GB per million, and that is the POLYNOMIAL
   circuit's number, not a general one.** Its linear combinations are one or two
   terms wide; a real circuit's are ~28, and it costs proportionally more.
