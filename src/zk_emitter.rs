@@ -439,6 +439,21 @@ impl LinearCombination {
             && self.terms.iter().all(|(_, c)| !c.is_zero())
     }
 
+    /// Scale in place. `scale` allocates a fresh `Vec`; the circom front end
+    /// scales values it already owns and immediately drops the original.
+    pub fn scale_assign(&mut self, factor: Fr) {
+        if factor.is_zero() {
+            self.terms.clear();
+            self.is_simplified = true;
+            return;
+        }
+        for (_, c) in self.terms.iter_mut() {
+            *c = c.mul(&factor);
+        }
+        // Ordering is untouched and a non-zero factor cannot zero a coefficient
+        // in a field, so the invariant survives verbatim.
+    }
+
     pub fn scale(&self, factor: Fr) -> Self {
         if factor.is_zero() {
             return Self::zero();

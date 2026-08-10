@@ -41,9 +41,25 @@ The top rows moved on 2026-08-11 because a **fixed** ~5.5-million-allocation
 cost was removed from hex-literal lexing — merely `include`-ing
 `poseidon.circom` (24,958 lines of hex) had cost 0.094 s before a single
 constraint existed. A constant dominates a small circuit and vanishes into a
-large one, so the chains are unchanged and still ties. Their cost is per-hash
-lowering, at roughly **135 allocations per constraint against the native
-emitter's 12** — that is the next lever, not this one.
+large one, so the chains are unchanged and still ties.
+
+**The chains' cost is not a hot spot, and one attempt to find one failed.**
+Lowering allocates ~137 times per constraint on a Poseidon chain against the
+native emitter's 12, which looks like a defect with a location. It does not have
+one: the same measurement on a *trivial* circom circuit (an unrolled dot
+product, no hashes) is **78 allocations per constraint**, so most of it is the
+baseline cost of evaluating an expression and storing a constraint, not anything
+Poseidon does. Removing the obvious copies — `Val::lc()` cloning a
+`LinearCombination` that the arithmetic helpers were about to drop, and
+`scale` allocating a fresh vector for a value already owned — removed **3%** of
+the allocations and measured **0.99–1.04x**, i.e. nothing. Those changes are
+kept because they are strictly less work and the emitted `.r1cs` is
+byte-identical, but they are **not** a speedup and should not be quoted as one.
+
+Getting the chains off parity means changing how a constraint is represented
+(the three `Vec`-backed linear combinations per constraint, and the `Val`
+churn around them), not deleting another clone. That is a design change, and it
+is not done.
 
 **Circuit size, from the same source:**
 
