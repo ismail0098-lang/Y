@@ -593,6 +593,20 @@ pub const WORK_PER_THREAD: usize = 4 << 20;
 /// is re-read.
 pub const SHARE_B_WORK: usize = 2 << 30;
 
+/// Depth of K below which the small-M path is not worth splitting along K.
+///
+/// The split costs one `M x N` zero-fill and one `nthr`-deep reduction per
+/// call, both independent of K, so it only pays once the K-band each thread
+/// gets is long enough to amortise them. `flatK 4096x4096x8` is the shape this
+/// protects: K = 8 there, and every thread would reduce the whole of C to
+/// avoid re-reading a B that is only 128 KB in the first place.
+pub const KSPLIT_MIN_K: usize = 512;
+
+/// Shortest K-band worth giving a thread. Caps the thread count when K is
+/// modest, rather than handing out slivers whose reduction costs more than the
+/// accumulation they saved.
+pub const KSPLIT_MIN_BAND: usize = 128;
+
 const SCRATCH: &str = "@__y_gemm_scratch";
 const SCRATCH_CAP: &str = "@__y_gemm_scratch_threads";
 const NTHREADS_CACHE: &str = "@__y_gemm_nthreads";
@@ -632,7 +646,7 @@ pub fn emit_globals() -> String {
     let _ = writeln!(&mut s, "; --- Y CPU GEMM: shared state ---");
     let _ = writeln!(
         &mut s,
-        "%y_gemm_task = type {{ ptr, ptr, ptr, i64, i64, i64, i64, i64, i64, i64, ptr, i64, i64, i64 }}"
+        "%y_gemm_task = type {{ ptr, ptr, ptr, i64, i64, i64, i64, i64, i64, i64, ptr, i64, i64, i64, i64, i64, i64 }}"
     );
     let _ = writeln!(
         &mut s,
@@ -1087,6 +1101,56 @@ pub const SM_MR: usize = 8;
 /// optimum, not a knife edge.
 pub const SM_MAX_M: usize = 8;
 
+/// K-steps the small-M kernel folds into one pass over its C strip.
+///
+/// The inner loop's cost is not the FMAs, it is the read-modify-write of C:
+/// one B vector drives `mw` C loads, `mw` FMAs and `mw` stores, so the load and
+/// store ports run out long before the FMA pipes do. Holding C in a register
+/// across `SM_PU` consecutive K-steps divides that traffic by `SM_PU` while the
+/// FMA count stays the same.
+///
+/// **4, and the register-pressure argument for a smaller value is wrong.** The
+/// A broadcasts are `SM_MR * SM_PU` values live across the j loop, so 8x4 is 32
+/// vectors and cannot fit alongside B and the accumulator — LLVM spills. It is
+/// still faster, because a spilled broadcast reloads from L1 while the C
+/// traffic it removes was missing L1 entirely. Measured against `SM_PU = 2`,
+/// three interleaved launches, best of each:
+///
+/// | shape | 1 thread | 16 threads |
+/// |---|---|---|
+/// | decode 8x4096x4096 | **1.19x** | **1.18x** |
+/// | decode 4x4096x4096 | **1.41x** | **1.26x** |
+/// | gemv 1x4096x4096 | 0.98x | 0.98x |
+/// | gemv 1x8192x8192 | 0.98x | 1.00x |
+///
+/// An earlier revision of this comment claimed 4 measured *worse* (207 against
+/// 568 GFLOPS). That was two different probe variants compared across two runs
+/// — one padded, one not — on a shape whose 64 MB B sits exactly on this part's
+/// 64 MB L3, where probe absolutes move 2x between runs of an identical
+/// protocol. **Sweep this through the real emitter and the real harness, never
+/// through the probe.**
+///
+/// 8 is not better: it wins on `decode 8` (1.06x / 1.14x, inside the spread)
+/// and loses `decode 4` outright — see `SM_PU_MIN_ROWS` for why that is the
+/// gate rather than the depth.
+pub const SM_PU: usize = 4;
+
+/// Live rows below which the K-unroll is skipped entirely.
+///
+/// **Deliberately NOT `SM_PU`.** Tying the two together is what made
+/// `SM_PU = 8` look catastrophic on `decode 4x4096x4096` — 0.47x at one thread
+/// — because a 4-row shape then failed `mspan >= 8` and fell all the way to the
+/// un-unrolled loop. The measurement was of the gate, not of the depth, and
+/// reading it as "8 is too deep" would have been the wrong conclusion.
+///
+/// 2 is where the unroll starts paying: at one live row there is no C traffic
+/// to divide (a `1 x N` strip is L1-resident already) while the `SM_MR * SM_PU`
+/// broadcast block is emitted regardless, and `gemv 1x4096x4096` measured
+/// 31.2 GFLOPS ungated against 27.4 unrolled. M = 2 and M = 3 are not covered
+/// by any benchmark shape; they take the unrolled path on the strength of
+/// M = 4, and correctness for them is pinned by `tests/cpu_gemm_threaded.rs`.
+pub const SM_PU_MIN_ROWS: usize = 2;
+
 /// Small-M kernel: `k` outer, `j` inner.
 ///
 /// The packed path is wrong for a near-GEMM shape for two compounding reasons:
@@ -1095,10 +1159,16 @@ pub const SM_MAX_M: usize = 8;
 /// once in perfect linear order — it is the large operand and the shape is
 /// bandwidth-bound — while C, only `M * N` with M small, stays resident in
 /// cache across the whole K loop and absorbs the repeated accumulation.
+///
+/// `ldc` is C's row stride and `n` remains B's, because they are no longer the
+/// same buffer: under the K-split each thread accumulates into a private
+/// `M x N` panel and only the reduction writes the caller's C. `[k0, k1)` is
+/// this thread's band of K; the single-threaded and N-split callers pass
+/// `0, K`.
 fn emit_small_m() -> String {
     let mut b = IrBuilder::new();
-    let (a, bb, c, _m, n, k, m0, m1, n0, n1) = (
-        "%A", "%B", "%C", "%M", "%N", "%K", "%m0", "%m1", "%n0", "%n1",
+    let (a, bb, c, _m, n, k, ldc, m0, m1, n0, n1, k0, k1) = (
+        "%A", "%B", "%C", "%M", "%N", "%K", "%ldc", "%m0", "%m1", "%n0", "%n1", "%k0", "%k1",
     );
 
     // C is accumulated into across all of K, so this thread's slice of it
@@ -1109,7 +1179,7 @@ fn emit_small_m() -> String {
     b.w(&format!("{} = shl i64 {}, 2", zb, zw));
     let zl = b.loop_begin("sm.z", m0, m1, "1");
     let zi = b.iv(&zl);
-    let zro = b.mul(&zi, n);
+    let zro = b.mul(&zi, ldc);
     let zoff = b.add(&zro, n0);
     let zp = b.gep("float", c, &zoff);
     b.w(&format!(
@@ -1118,153 +1188,323 @@ fn emit_small_m() -> String {
     ));
     b.loop_end(zl);
 
-    let il = b.loop_begin("sm.i", m0, m1, &SM_MR.to_string());
-    let i0 = b.iv(&il);
-    let rm = b.sub(m1, &i0);
-    let mw = b.imin(&rm, &SM_MR.to_string());
-
-    let pl = b.loop_begin("sm.p", "0", k, "1");
-    let p = b.iv(&pl);
-
-    // Broadcast this K-step's A column once, outside the j loop.
-    let mut av = Vec::new();
-    for i in 0..SM_MR {
-        let ic = i.to_string();
-        let live = b.t();
-        b.w(&format!("{} = icmp slt i64 {}, {}", live, ic, mw));
-        let row = b.add(&i0, &ic);
-        let ro = b.mul(&row, k);
-        let off = b.add(&ro, &p);
-        // Rows past mw read element 0 and are then zeroed, so they contribute
-        // nothing and the load stays in bounds.
-        let soff = b.t();
-        b.w(&format!("{} = select i1 {}, i64 {}, i64 0", soff, live, off));
-        let q = b.gep("float", a, &soff);
-        let raw = b.t();
-        b.w(&format!("{} = load float, ptr {}, align 4", raw, q));
-        let val = b.t();
-        b.w(&format!(
-            "{} = select i1 {}, float {}, float 0.0",
-            val, live, raw
-        ));
-        av.push(splat(&mut b, &val));
-    }
-
-    let brow_off = b.mul(&p, n);
-    let brow = b.gep("float", bb, &brow_off);
-    let crow_base = b.mul(&i0, n);
-
     // Full 16-wide columns, then a masked tail. Keeping the mask out of the
-    // main j loop matters: it runs M*K*N/16 times.
+    // main j loop matters: it runs M*K*N/16 times. Loop-invariant in i and p,
+    // so it is computed once here rather than per K-step.
     let span = b.sub(n1, n0);
     let span_full = b.t();
     b.w(&format!("{} = and i64 {}, -16", span_full, span));
     let n_full = b.add(n0, &span_full);
 
-    for (masked, tag) in [(false, "sm.j"), (true, "sm.t")] {
-        let (start, end, step) = if masked {
-            (n_full.clone(), n1.to_string(), "16".to_string())
-        } else {
-            (n0.to_string(), n_full.clone(), "16".to_string())
-        };
-        let jl = b.loop_begin(tag, &start, &end, &step);
-        let j = b.iv(&jl);
+    // Split [k0, k1) into a run of whole SM_PU groups and a scalar remainder.
+    let kspan = b.sub(k1, k0);
+    let kwhole = b.t();
+    b.w(&format!(
+        "{} = and i64 {}, -{}",
+        kwhole, kspan, SM_PU
+    ));
 
-        let bq = b.gep("float", &brow, &j);
-        let bvv = b.t();
-        let mask = if masked {
-            let rem = b.sub(n1, &j);
-            let mk = lane_mask(&mut b, &rem);
-            b.w(&format!(
-                "{} = call <16 x float> @llvm.masked.load.v16f32.p0(ptr {}, i32 4, \
-                 <16 x i1> {}, <16 x float> zeroinitializer)",
-                bvv, bq, mk
-            ));
-            Some(mk)
-        } else {
-            b.w(&format!("{} = load <16 x float>, ptr {}, align 4", bvv, bq));
-            None
-        };
+    // At one live row the unroll is a pure loss and it was measured as one:
+    // `gemv 1x4096x4096` single-threaded measured 31.2 GFLOPS un-unrolled
+    // against 27.4 unrolled (best of three interleaved launches, same session).
+    // What the unroll buys is divided C traffic, and a `1 x N` strip of C is
+    // L1-resident already, so there is nothing to divide — while the cost, an
+    // `SM_MR * SM_PU` block of A broadcasts, is emitted regardless.
+    //
+    // Gated on the row span, computed ABOVE the i loop rather than on `mw`
+    // inside it. `mw` is defined inside the i loop, and deriving the loop
+    // bounds below from it stops LLVM unswitching the per-row `i < mw`
+    // branches out of the j loop, where they would run once per row per 16
+    // columns. See `SM_PU_MIN_ROWS` for why the threshold is not `SM_PU`.
+    let mspan = b.sub(m1, m0);
+    let use_pu = b.t();
+    b.w(&format!("{} = icmp sge i64 {}, {}", use_pu, mspan, SM_PU_MIN_ROWS));
+    let kmain = b.add(k0, &kwhole);
 
-        for i in 0..SM_MR {
-            let ic = i.to_string();
-            let live = b.t();
-            b.w(&format!("{} = icmp slt i64 {}, {}", live, ic, mw));
-            let do_l = b.l("sm.do");
-            let sk_l = b.l("sm.sk");
-            b.w(&format!("br i1 {}, label %{}, label %{}", live, do_l, sk_l));
-            b.out.push_str(&format!("{}:\n", do_l));
+    let yes_l = b.l("sm.pu.yes");
+    let no_l = b.l("sm.pu.no");
+    let end_l = b.l("sm.pu.end");
+    b.w(&format!("br i1 {}, label %{}, label %{}", use_pu, yes_l, no_l));
 
-            let ro = b.mul(&ic, n);
-            let co = b.add(&crow_base, &ro);
-            let co2 = b.add(&co, &j);
-            let cq = b.gep("float", c, &co2);
-            let cur = b.t();
-            let nv = b.t();
-            match &mask {
-                Some(mk) => {
-                    b.w(&format!(
+    // Two whole loop nests rather than one nest with a selected `kmain`.
+    //
+    // `kmain` is the unrolled loop's exit bound and the remainder loop's entry
+    // bound. Choosing it with a `select` hides from LLVM that the two ranges
+    // partition `[k0, k1)` and that the remainder is short, so the remainder
+    // stops being peeled and the shared nest is compiled for a general trip
+    // count. Branching here instead keeps both bounds affine in `k0`/`k1`, at
+    // the cost of duplicating a function that is out-of-line anyway.
+    //
+    // Measured at `SM_PU = 2`, best of three launches in one session:
+    // `decode 8x4096x4096` single-threaded 69.4 GFLOPS with the bound affine
+    // against 59.8 with the `select`. Caveat on that figure: the arms were not
+    // order-alternated, and it has NOT been re-measured since `SM_PU` moved to
+    // 4. The structural reason stands either way; treat the 14% as indicative.
+    for (tag, passes) in [
+        (
+            yes_l.as_str(),
+            vec![
+                (SM_PU, "sm.pu", k0.to_string(), kmain.clone()),
+                (1usize, "sm.p1", kmain.clone(), k1.to_string()),
+            ],
+        ),
+        (
+            no_l.as_str(),
+            vec![(1usize, "sm.s1", k0.to_string(), k1.to_string())],
+        ),
+    ] {
+    b.out.push_str(&format!("{}:\n", tag));
+    let il = b.loop_begin("sm.i", m0, m1, &SM_MR.to_string());
+    let i0 = b.iv(&il);
+    let rm = b.sub(m1, &i0);
+    let mw = b.imin(&rm, &SM_MR.to_string());
+    let crow_base = b.mul(&i0, ldc);
+
+    for (nu, ptag, pstart, pend) in passes {
+        let pl = b.loop_begin(ptag, &pstart, &pend, &nu.to_string());
+        let p = b.iv(&pl);
+
+        // Broadcast this group's A columns once, outside the j loop.
+        let mut av: Vec<Vec<String>> = Vec::new();
+        let mut brow: Vec<String> = Vec::new();
+        for u in 0..nu {
+            let pu_ = b.add(&p, &u.to_string());
+            let mut row_av = Vec::new();
+            for i in 0..SM_MR {
+                let ic = i.to_string();
+                let live = b.t();
+                b.w(&format!("{} = icmp slt i64 {}, {}", live, ic, mw));
+                let row = b.add(&i0, &ic);
+                let ro = b.mul(&row, k);
+                let off = b.add(&ro, &pu_);
+                // Rows past mw read element 0 and are then zeroed, so they
+                // contribute nothing and the load stays in bounds.
+                let soff = b.t();
+                b.w(&format!("{} = select i1 {}, i64 {}, i64 0", soff, live, off));
+                let q = b.gep("float", a, &soff);
+                let raw = b.t();
+                b.w(&format!("{} = load float, ptr {}, align 4", raw, q));
+                let val = b.t();
+                b.w(&format!(
+                    "{} = select i1 {}, float {}, float 0.0",
+                    val, live, raw
+                ));
+                row_av.push(splat(&mut b, &val));
+            }
+            av.push(row_av);
+            let brow_off = b.mul(&pu_, n);
+            brow.push(b.gep("float", bb, &brow_off));
+        }
+
+        for (masked, tag) in [(false, "sm.j"), (true, "sm.t")] {
+            let (start, end) = if masked {
+                (n_full.clone(), n1.to_string())
+            } else {
+                (n0.to_string(), n_full.clone())
+            };
+            let jl = b.loop_begin(tag, &start, &end, "16");
+            let j = b.iv(&jl);
+
+            let mask = if masked {
+                let rem = b.sub(n1, &j);
+                Some(lane_mask(&mut b, &rem))
+            } else {
+                None
+            };
+            let mut bvv = Vec::new();
+            for u in 0..nu {
+                let bq = b.gep("float", &brow[u], &j);
+                let v = b.t();
+                match &mask {
+                    Some(mk) => b.w(&format!(
                         "{} = call <16 x float> @llvm.masked.load.v16f32.p0(ptr {}, i32 4, \
                          <16 x i1> {}, <16 x float> zeroinitializer)",
-                        cur, cq, mk
-                    ));
+                        v, bq, mk
+                    )),
+                    None => b.w(&format!("{} = load <16 x float>, ptr {}, align 4", v, bq)),
+                }
+                bvv.push(v);
+            }
+
+            for i in 0..SM_MR {
+                let ic = i.to_string();
+                let live = b.t();
+                b.w(&format!("{} = icmp slt i64 {}, {}", live, ic, mw));
+                let do_l = b.l("sm.do");
+                let sk_l = b.l("sm.sk");
+                b.w(&format!("br i1 {}, label %{}, label %{}", live, do_l, sk_l));
+                b.out.push_str(&format!("{}:\n", do_l));
+
+                let ro = b.mul(&ic, ldc);
+                let co = b.add(&crow_base, &ro);
+                let co2 = b.add(&co, &j);
+                let cq = b.gep("float", c, &co2);
+                let mut acc = b.t();
+                match &mask {
+                    Some(mk) => b.w(&format!(
+                        "{} = call <16 x float> @llvm.masked.load.v16f32.p0(ptr {}, i32 4, \
+                         <16 x i1> {}, <16 x float> zeroinitializer)",
+                        acc, cq, mk
+                    )),
+                    None => b.w(&format!("{} = load <16 x float>, ptr {}, align 4", acc, cq)),
+                }
+                // The whole point of the unroll: C is loaded once and stored
+                // once for `nu` K-steps instead of once for each.
+                for u in 0..nu {
+                    let nv = b.t();
                     b.w(&format!(
                         "{} = call <16 x float> @llvm.fmuladd.v16f32(<16 x float> {}, \
                          <16 x float> {}, <16 x float> {})",
-                        nv, av[i], bvv, cur
+                        nv, av[u][i], bvv[u], acc
                     ));
-                    b.w(&format!(
+                    acc = nv;
+                }
+                match &mask {
+                    Some(mk) => b.w(&format!(
                         "call void @llvm.masked.store.v16f32.p0(<16 x float> {}, ptr {}, \
                          i32 4, <16 x i1> {})",
-                        nv, cq, mk
-                    ));
+                        acc, cq, mk
+                    )),
+                    None => b.w(&format!("store <16 x float> {}, ptr {}, align 4", acc, cq)),
                 }
-                None => {
-                    b.w(&format!(
-                        "{} = load <16 x float>, ptr {}, align 4",
-                        cur, cq
-                    ));
-                    b.w(&format!(
-                        "{} = call <16 x float> @llvm.fmuladd.v16f32(<16 x float> {}, \
-                         <16 x float> {}, <16 x float> {})",
-                        nv, av[i], bvv, cur
-                    ));
-                    b.w(&format!("store <16 x float> {}, ptr {}, align 4", nv, cq));
-                }
+                b.w(&format!("br label %{}", sk_l));
+                b.out.push_str(&format!("{}:\n", sk_l));
             }
-            b.w(&format!("br label %{}", sk_l));
-            b.out.push_str(&format!("{}:\n", sk_l));
+            b.loop_end(jl);
         }
-        b.loop_end(jl);
-    }
 
-    b.loop_end(pl);
+        b.loop_end(pl);
+    }
     b.loop_end(il);
+    b.w(&format!("br label %{}", end_l));
+    }
+    b.out.push_str(&format!("{}:\n", end_l));
 
     b.finish(&format!(
         "define internal void @__y_gemm_small_m(ptr noalias {}, ptr noalias {}, \
-         ptr {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
-        a, bb, c, _m, n, k, m0, m1, n0, n1
+         ptr {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, \
+         i64 {}, i64 {})",
+        a, bb, c, _m, n, k, ldc, m0, m1, n0, n1, k0, k1
+    ))
+}
+
+/// `__y_gemm_small_reduce` — sum the per-thread K-band panels into C.
+///
+/// Each of `nthr` threads has accumulated a private `M x N` panel at
+/// `base + t*SCRATCH_FLOATS`; this sums them into `C[m0..m1) x [n0..n1)`. The
+/// caller partitions the columns, so every thread reduces its own band and no
+/// two threads write the same cache line.
+fn emit_small_reduce() -> String {
+    let mut b = IrBuilder::new();
+    let (base, c, n, m0, m1, n0, n1, nthr) =
+        ("%base", "%C", "%N", "%m0", "%m1", "%n0", "%n1", "%nthr");
+
+    let span = b.sub(n1, n0);
+    let span_full = b.t();
+    b.w(&format!("{} = and i64 {}, -16", span_full, span));
+    let n_full = b.add(n0, &span_full);
+    b.entry_alloca("%sr.acc", "<16 x float>", 64);
+
+    let il = b.loop_begin("sr.i", m0, m1, "1");
+    let i = b.iv(&il);
+    let roff = b.mul(&i, n);
+
+    for (masked, tag) in [(false, "sr.j"), (true, "sr.t")] {
+        let (start, end) = if masked {
+            (n_full.clone(), n1.to_string())
+        } else {
+            (n0.to_string(), n_full.clone())
+        };
+        let jl = b.loop_begin(tag, &start, &end, "16");
+        let j = b.iv(&jl);
+        let mask = if masked {
+            let rem = b.sub(n1, &j);
+            Some(lane_mask(&mut b, &rem))
+        } else {
+            None
+        };
+        let coff = b.add(&roff, &j);
+
+        // acc = sum over t of base[t*SCRATCH_FLOATS + i*N + j]
+        b.w("store <16 x float> zeroinitializer, ptr %sr.acc, align 64");
+        let tl = b.loop_begin("sr.t2", "0", nthr, "1");
+        let t = b.iv(&tl);
+        let toff = b.mul(&t, &SCRATCH_FLOATS.to_string());
+        let tbase = b.gep("float", base, &toff);
+        let sp = b.gep("float", &tbase, &coff);
+        let v = b.t();
+        match &mask {
+            Some(mk) => b.w(&format!(
+                "{} = call <16 x float> @llvm.masked.load.v16f32.p0(ptr {}, i32 4, \
+                 <16 x i1> {}, <16 x float> zeroinitializer)",
+                v, sp, mk
+            )),
+            None => b.w(&format!("{} = load <16 x float>, ptr {}, align 4", v, sp)),
+        }
+        let cur = b.t();
+        b.w(&format!(
+            "{} = load <16 x float>, ptr %sr.acc, align 64",
+            cur
+        ));
+        let sum = b.t();
+        b.w(&format!(
+            "{} = fadd <16 x float> {}, {}",
+            sum, cur, v
+        ));
+        b.w(&format!("store <16 x float> {}, ptr %sr.acc, align 64", sum));
+        b.loop_end(tl);
+
+        let fin = b.t();
+        b.w(&format!(
+            "{} = load <16 x float>, ptr %sr.acc, align 64",
+            fin
+        ));
+        let cq = b.gep("float", c, &coff);
+        match &mask {
+            Some(mk) => b.w(&format!(
+                "call void @llvm.masked.store.v16f32.p0(<16 x float> {}, ptr {}, \
+                 i32 4, <16 x i1> {})",
+                fin, cq, mk
+            )),
+            None => b.w(&format!("store <16 x float> {}, ptr {}, align 4", fin, cq)),
+        }
+        b.loop_end(jl);
+    }
+    b.loop_end(il);
+
+    b.finish(&format!(
+        "define internal void @__y_gemm_small_reduce(ptr noalias {}, ptr {}, i64 {}, \
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+        base, c, n, m0, m1, n0, n1, nthr
     ))
 }
 
 /// The blocked driver: the five-deep BLIS loop nest around the micro-kernel.
 fn emit_driver() -> String {
     let mut b = IrBuilder::new();
-    let (a, bb, c, m, n, k, m0, m1, n0, n1, scratch, tid, nthr, shared) = (
+    let (a, bb, c, m, n, k, m0, m1, n0, n1, scratch, tid, nthr, shared, k0, k1, ksplit) = (
         "%A", "%B", "%C", "%M", "%N", "%K", "%m0", "%m1", "%n0", "%n1", "%scratch",
-        "%tid", "%nthr", "%shared",
+        "%tid", "%nthr", "%shared", "%k0", "%k1", "%ksplit",
     );
 
     // Nothing to do, and — importantly — no barrier to enter. A pool slot past
     // the active thread count must return before the cooperative section, or
     // it would be counted in a barrier it was never sized into.
+    // Under the K-split `[n0, n1)` is this thread's band of the REDUCTION, not
+    // of the work, and it is allowed to be empty — the thread still has a K-band
+    // to accumulate and, decisively, still has to arrive at the barrier. Only
+    // `m0 >= m1` marks a slot as unused there, which is how `emit_entry`
+    // switches a pool slot past the active thread count off.
     let empty_m = b.t();
     b.w(&format!("{} = icmp sge i64 {}, {}", empty_m, m0, m1));
     let empty_n = b.t();
     b.w(&format!("{} = icmp sge i64 {}, {}", empty_n, n0, n1));
+    let not_ks = b.t();
+    b.w(&format!("{} = icmp eq i64 {}, 0", not_ks, ksplit));
+    let empty_n2 = b.t();
+    b.w(&format!("{} = and i1 {}, {}", empty_n2, empty_n, not_ks));
     let empty = b.t();
-    b.w(&format!("{} = or i1 {}, {}", empty, empty_m, empty_n));
+    b.w(&format!("{} = or i1 {}, {}", empty, empty_m, empty_n2));
     let done_l = b.l("g.empty");
     let go_l = b.l("g.go");
     b.w(&format!("br i1 {}, label %{}, label %{}", empty, done_l, go_l));
@@ -1302,12 +1542,63 @@ fn emit_driver() -> String {
         small, sm_l, big_l
     ));
     b.out.push_str(&format!("{}:\n", sm_l));
+    // Two ways to run the small-M kernel, and which one is used is decided by
+    // `emit_entry` (it owns the partition and the barrier width).
+    //
+    //   ksplit = 0  this thread owns columns [n0, n1) of the real C and sweeps
+    //               all of K.
+    //   ksplit = 1  this thread owns K-band [k0, k1), accumulates a private
+    //               M x N panel in its scratch, and after a barrier reduces
+    //               columns [n0, n1) of C across every thread's panel.
+    //
+    // The K-split exists because the N-split starves the memory system on this
+    // kernel: with `p` outer and `j` inner, a thread given 1/16th of the
+    // columns reads a 1 KB slice of every 16 KB row of B, so it touches all
+    // 64 MB of B's address span to consume 4 MB of it and the prefetcher can
+    // never stream. A K-band is contiguous.
+    //
+    // Isolated in a standalone probe (identical inner loop, only the partition
+    // differing) on 8x4096x4096 at 16 threads, three runs: N-split 62/74/66
+    // GFLOPS against K-split 405/427/371. **Read the ratio, not the values** —
+    // B is 64 MB against this part's 64 MB L3, so the probe's absolutes move
+    // ~2x between runs of an identical protocol. End to end through the real
+    // harness the shape goes 128.7 -> 584.2 GFLOPS, but that figure also
+    // contains the K-unroll.
+    let ks = b.t();
+    b.w(&format!("{} = icmp ne i64 {}, 0", ks, ksplit));
+    let ksp_l = b.l("g.ksplit");
+    let nsp_l = b.l("g.nsplit");
+    b.w(&format!("br i1 {}, label %{}, label %{}", ks, ksp_l, nsp_l));
+
+    b.out.push_str(&format!("{}:\n", nsp_l));
     b.w(&format!(
         "call void @__y_gemm_small_m(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-         i64 {}, i64 {}, i64 {}, i64 {})",
-        a, bb, c, m, n, k, m0, m1, n0, n1
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 0, i64 {})",
+        a, bb, c, m, n, k, n, m0, m1, n0, n1, k
     ));
     b.w("ret void");
+
+    b.out.push_str(&format!("{}:\n", ksp_l));
+    // Private panel: the thread's own packing scratch, which this path does not
+    // otherwise use. `emit_entry` has already checked `M*N <= SCRATCH_FLOATS`.
+    b.w(&format!(
+        "call void @__y_gemm_small_m(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
+         i64 {}, i64 0, i64 {}, i64 0, i64 {}, i64 {}, i64 {})",
+        a, bb, scratch, m, n, k, n, m, n, k0, k1
+    ));
+    b.w(&format!(
+        "call i32 @pthread_barrier_wait(ptr {})",
+        POOL_BARRIER
+    ));
+    let sbase = b.t();
+    b.w(&format!("{} = load ptr, ptr {}, align 8", sbase, SCRATCH));
+    b.w(&format!(
+        "call void @__y_gemm_small_reduce(ptr {}, ptr {}, i64 {}, i64 0, i64 {}, \
+         i64 {}, i64 {}, i64 {})",
+        sbase, c, n, m, n0, n1, nthr
+    ));
+    b.w("ret void");
+
     b.out.push_str(&format!("{}:\n", big_l));
 
     let jcl = b.loop_begin("g.jc", n0, n1, &tl().nc.to_string());
@@ -1455,8 +1746,8 @@ fn emit_driver() -> String {
     b.finish(&format!(
         "define internal void @__y_gemm_run(ptr noalias {}, ptr noalias {}, ptr {}, \
          i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, ptr noalias {}, \
-         i64 {}, i64 {}, i64 {})",
-        a, bb, c, m, n, k, m0, m1, n0, n1, scratch, tid, nthr, shared
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k, m0, m1, n0, n1, scratch, tid, nthr, shared, k0, k1, ksplit
     ))
 }
 
@@ -1482,6 +1773,9 @@ fn emit_worker() -> String {
         ("tid", "i64", 11),
         ("nthr", "i64", 12),
         ("shared", "i64", 13),
+        ("k0", "i64", 14),
+        ("k1", "i64", 15),
+        ("ksplit", "i64", 16),
     ];
     let mut vals = Vec::new();
     for (_, ty, idx) in names {
@@ -1497,9 +1791,10 @@ fn emit_worker() -> String {
 
     b.w(&format!(
         "call void @__y_gemm_run(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-         i64 {}, i64 {}, i64 {}, i64 {}, ptr {}, i64 {}, i64 {}, i64 {})",
+         i64 {}, i64 {}, i64 {}, i64 {}, ptr {}, i64 {}, i64 {}, i64 {}, i64 {}, \
+         i64 {}, i64 {})",
         vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8],
-        vals[9], vals[10], vals[11], vals[12], vals[13]
+        vals[9], vals[10], vals[11], vals[12], vals[13], vals[14], vals[15], vals[16]
     ));
     b.w("ret ptr null");
 
@@ -1795,8 +2090,8 @@ fn emit_entry() -> String {
     ));
     b.w(&format!(
         "call void @__y_gemm_run(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-         i64 0, i64 {}, i64 0, i64 {}, ptr {}, i64 0, i64 1, i64 0)",
-        a, bb, c, m, n, k, m, n, scr0
+         i64 0, i64 {}, i64 0, i64 {}, ptr {}, i64 0, i64 1, i64 0, i64 0, i64 {}, i64 0)",
+        a, bb, c, m, n, k, m, n, scr0, k
     ));
     b.w("ret void");
 
@@ -1834,8 +2129,8 @@ fn emit_entry() -> String {
     // GEMM costs more than the whole kernel at small sizes.
     b.w(&format!(
         "call void @__y_gemm_run(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-         i64 0, i64 {}, i64 0, i64 {}, ptr {}, i64 0, i64 1, i64 0)",
-        a, bb, c, m, n, k, m, n, FALLBACK
+         i64 0, i64 {}, i64 0, i64 {}, ptr {}, i64 0, i64 1, i64 0, i64 0, i64 {}, i64 0)",
+        a, bb, c, m, n, k, m, n, FALLBACK, k
     ));
     b.w("ret void");
 
@@ -1885,19 +2180,93 @@ fn emit_entry() -> String {
     let pn = b.t();
     b.w(&format!("{} = sdiv i64 {}, {}", pn, n, tl().nr));
     let pn = b.imax(&pn, "1");
+    let cut_m_raw = b.t();
+    b.w(&format!("{} = icmp sge i64 {}, {}", cut_m_raw, pm, pn));
+    let par_mn = b.imax(&pm, &pn);
+
+    // Cut K instead, for the shapes that go to `__y_gemm_small_m`.
+    //
+    // Neither M nor N is the right axis there. M is `SM_MAX_M` or less, so it
+    // cannot be cut at all; and cutting N leaves each thread reading a
+    // `N/nthr`-wide slice of every row of B — 1 KB out of every 16 KB at
+    // 8x4096x4096 on 16 threads, so the thread walks B's whole 64 MB address
+    // span to consume 4 MB of it and no prefetcher can follow. A K-band is
+    // contiguous: thread `t` reads rows `[t*K/nt, (t+1)*K/nt)` end to end.
+    //
+    // The price is a private `M x N` accumulator per thread plus a reduction,
+    // because every thread now contributes a partial sum to every element of C.
+    // At 8x4096x4096 that is 128 KB per thread and a 2 MB reduction against
+    // B's 64 MB — 3% of the traffic, for a partition that measured 221 GFLOPS
+    // where the N-split measured 77.
+    //
+    // Three conditions, all necessary:
+    //   - the shape actually routes to the small-M kernel (`M <= SM_MAX_M`),
+    //   - the panel fits the scratch already allocated per thread,
+    //   - K is deep enough that a band is worth more than the reduction.
+    let is_small = b.t();
+    b.w(&format!("{} = icmp sle i64 {}, {}", is_small, m, SM_MAX_M));
+    let panel = b.mul(m, n);
+    let fits = b.t();
+    b.w(&format!(
+        "{} = icmp sle i64 {}, {}",
+        fits, panel, SCRATCH_FLOATS
+    ));
+    let deep = b.t();
+    b.w(&format!("{} = icmp sge i64 {}, {}", deep, k, KSPLIT_MIN_K));
+    let ks1 = b.t();
+    b.w(&format!("{} = and i1 {}, {}", ks1, is_small, fits));
+    let cut_k = b.t();
+    b.w(&format!("{} = and i1 {}, {}", cut_k, ks1, deep));
+    let ksplit = b.t();
+    b.w(&format!("{} = zext i1 {} to i64", ksplit, cut_k));
+
+    // The K-split OVERRIDES the M/N choice, and every consumer of `cut_m` has
+    // to see that. `cut_m` is `pm >= pn`, and at `N = 33` with `nr = 64` we get
+    // `pn = 0 -> 1` and `pm = 1`, so `cut_m` is *true* for a shape whose M is 8.
+    // The task fill then assigned `lo`/`hi` — which under the K-split are the
+    // reduction's COLUMN bounds — to the M range instead. Thread 0's band came
+    // out empty, so it took the driver's early return, never arrived at a
+    // barrier sized for three threads, and the dispatcher spun forever.
+    // Caught by `tests/cpu_gemm_threaded.rs` at N=33 and N=15; every shape with
+    // `N >= nr` hid it, which is every shape in the benchmark.
+    let not_ck = b.t();
+    b.w(&format!("{} = xor i1 {}, true", not_ck, cut_k));
     let cut_m = b.t();
-    b.w(&format!("{} = icmp sge i64 {}, {}", cut_m, pm, pn));
-    let par = b.imax(&pm, &pn);
+    b.w(&format!("{} = and i1 {}, {}", cut_m, cut_m_raw, not_ck));
+
+    // A K-band shorter than this leaves the reduction dominating, so cap the
+    // thread count by it rather than handing out slivers.
+    let pk = b.t();
+    b.w(&format!("{} = sdiv i64 {}, {}", pk, k, KSPLIT_MIN_BAND));
+    let pk = b.imax(&pk, "1");
+    let par = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 {}, i64 {}",
+        par, cut_k, pk, par_mn
+    ));
     let nt = b.imin(&nt, &par);
+
+    // The reduction's column band is snapped to a whole vector, like the N-split
+    // it replaces; the K-band itself has no alignment to respect.
+    let axis0 = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 {}, i64 {}",
+        axis0, cut_m, m, n
+    ));
     let axis = b.t();
     b.w(&format!(
         "{} = select i1 {}, i64 {}, i64 {}",
-        axis, cut_m, m, n
+        axis, cut_k, n, axis0
+    ));
+    let gran0 = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 {}, i64 {}",
+        gran0, cut_m, tl().mr, tl().nr
     ));
     let gran = b.t();
     b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 {}",
-        gran, cut_m, tl().mr, tl().nr
+        "{} = select i1 {}, i64 16, i64 {}",
+        gran, cut_k, gran0
     ));
 
     // Threads sharing one packed B panel must be exactly the threads the
@@ -1920,8 +2289,14 @@ fn emit_entry() -> String {
     b.w(&format!("{} = load i64, ptr {}, align 8", bn, BARRIER_N));
     let stale = b.t();
     b.w(&format!("{} = icmp ne i64 {}, {}", stale, bn, nt));
+    // Both cooperative modes rendezvous on this barrier: the shared packed-B
+    // path twice per K-block, and the K-split once between accumulating the
+    // private panels and reducing them. Sizing it for one and running the other
+    // hangs the dispatcher, so the two conditions have to be OR'd here.
+    let wants_bar = b.t();
+    b.w(&format!("{} = or i1 {}, {}", wants_bar, do_share, cut_k));
     let need_bar = b.t();
-    b.w(&format!("{} = and i1 {}, {}", need_bar, stale, do_share));
+    b.w(&format!("{} = and i1 {}, {}", need_bar, stale, wants_bar));
     b.w(&format!(
         "br i1 {}, label %{}, label %{}",
         need_bar, resize_l, barok_l
@@ -2025,6 +2400,21 @@ fn emit_entry() -> String {
         "{} = select i1 {}, i64 {}, i64 {}",
         n_to2, inuse, n_to, n_from
     ));
+    // This slot's K-band, for the K-split. Unlike the M/N cut there is no tile
+    // granularity to snap to, and the last thread takes the remainder so no row
+    // of B is dropped.
+    let kl0 = b.mul(&ti, k);
+    let kfrom = b.t();
+    b.w(&format!("{} = sdiv i64 {}, {}", kfrom, kl0, nt));
+    let kl1 = b.mul(&tn, k);
+    let kto0 = b.t();
+    b.w(&format!("{} = sdiv i64 {}, {}", kto0, kl1, nt));
+    let kto = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 {}, i64 {}",
+        kto, is_last, k, kto0
+    ));
+
     let scr_off = b.mul(&ti, &SCRATCH_FLOATS.to_string());
     let scr = b.gep("float", &scratch, &scr_off);
     for (idx, ty, val) in [
@@ -2042,6 +2432,9 @@ fn emit_entry() -> String {
         (11, "i64", ti.clone()),
         (12, "i64", nt.clone()),
         (13, "i64", share.clone()),
+        (14, "i64", kfrom),
+        (15, "i64", kto),
+        (16, "i64", ksplit.clone()),
     ] {
         let f = b.t();
         b.w(&format!(
@@ -2129,6 +2522,8 @@ pub fn emit_kernel_module() -> String {
     s.push_str(&emit_micro());
     s.push('\n');
     s.push_str(&emit_small_m());
+    s.push('\n');
+    s.push_str(&emit_small_reduce());
     s.push('\n');
     s.push_str(&emit_driver());
     s.push('\n');

@@ -460,6 +460,175 @@ mean with large movements underneath — 1024³ and the skinny shapes regressed 
 have not been explained yet. **Do not read the 16-thread mean as "unchanged";
 read the rows.**
 
+## Decode was two separate bugs, and the obvious one was the smaller one
+
+`decode 8x4096x4096` at **0.36x** on 16 threads was the worst ratio in the
+table. The standing diagnosis — "the split axis is wrong" — was right, and was
+not the whole story: **single-threaded the same shape moved B at 13 GB/s
+against a 53 GB/s single-core read bandwidth**, so the inner loop was already
+leaving 4x on the table before any thread was added. Both had to be fixed;
+either alone leaves most of the gap.
+
+### 1. The partition: cut K, not N
+
+`__y_gemm_small_m` runs `p` outer and `j` inner, so a thread given `N/nthr`
+columns reads a **1 KB slice of every 16 KB row of B**. It walks B's whole
+64 MB address span to consume 4 MB of it, and no prefetcher can follow that.
+The aggregate is one pass over B, so the traffic arithmetic says nothing is
+wrong — the *pattern* is what costs.
+
+A K-band is contiguous: thread `t` reads rows `[t*K/nt, (t+1)*K/nt)` end to end.
+The price is that every thread now contributes a partial sum to every element of
+C, so each needs a private `M x N` panel and the panels must be summed. That
+panel is the thread's existing packing scratch, which this path never otherwise
+touches, so it costs no allocation; the reduction is 2 MB against B's 64 MB.
+
+Isolated in a standalone probe (identical inner loop, only the partition
+differing), 8x4096x4096 at 16 threads, three runs of the same protocol:
+
+| partition | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| N-split (what shipped) | 62 | 74 | 66 |
+| K-split | 405 | 427 | 371 |
+
+**Read the ratio, not the values.** B is 64 MB against this part's 64 MB L3, so
+the probe's absolutes move about 2x between runs — an earlier variant list put
+"K-split plain" at 221-242 on exactly the same code. See the measurement note
+below.
+
+### 2. The inner loop: C is read and written once per K-step
+
+One B vector drives `mw` C loads, `mw` FMAs and `mw` stores, so the load/store
+ports run out long before the FMA pipes do — and at `M = 8, N = 4096` the C
+strip is 128 KB, so those accesses miss L1 and run at L2 bandwidth. Holding C
+in a register across `SM_PU` consecutive K-steps divides that traffic by
+`SM_PU` while the FMA count is unchanged.
+
+`SM_PU = 4`, and **the register-pressure argument against it is wrong**. The A
+broadcasts are `SM_MR * SM_PU` values live across the j loop, so 8x4 is 32
+vectors and LLVM must spill. It is still faster, because a spilled broadcast
+reloads from L1 while the C traffic it removes was missing L1 entirely.
+Measured against `SM_PU = 2` through the real emitter and the real harness,
+three interleaved launches, best of each:
+
+| shape | 1 thread | 16 threads |
+|---|---|---|
+| decode 8x4096x4096 | **1.19x** | **1.18x** |
+| decode 4x4096x4096 | **1.41x** | **1.26x** |
+| gemv 1x4096x4096 | 0.98x | 0.98x |
+| gemv 1x8192x8192 | 0.98x | 1.00x |
+
+The unroll is **gated on the row span**, and the threshold is `SM_PU_MIN_ROWS`
+= 2, deliberately *not* `SM_PU`. At one live row there is no C traffic to
+divide — a `1 x N` strip is L1-resident already — while the broadcast block is
+emitted regardless: `gemv 1x4096x4096` measured 31.2 GFLOPS un-unrolled against
+27.4 unrolled.
+
+### Results, against the same OpenBLAS build
+
+Strict A/B: one shape per process, arms interleaved within a launch, arm order
+alternated between launches, three launches, ranked by the best. OpenBLAS
+measured in the **same session** — quoting geomeans from two sweeps taken at
+different times is not valid here, because the OB column alone moved 35%
+between two such sweeps.
+
+**16 threads**
+
+| shape | before | after | OpenBLAS | before/OB | after/OB |
+|---|---|---|---|---|---|
+| decode 8x4096x4096 | 126.8 | **607.9** | 356.3 | 0.36 | **1.71** |
+| decode 4x4096x4096 | 123.6 | **599.2** | 184.2 | 0.67 | **3.25** |
+| gemv 1x4096x4096 | 58.3 | **96.9** | 49.6 | 1.18 | **1.95** |
+| gemv 1x8192x8192 | 31.3 | **34.7** | 14.6 | 2.15 | **2.38** |
+
+**Geomean over all 18 shapes: 0.96 -> 1.20. Y ahead on 8 -> 11 of 18.**
+
+**1 thread** (the unroll alone; the K-split does not run below two threads)
+
+| shape | before | after | OpenBLAS | before/OB | after/OB |
+|---|---|---|---|---|---|
+| decode 8x4096x4096 | 52.8 | **93.8** | 28.9 | 1.82 | **3.24** |
+| decode 4x4096x4096 | 31.2 | **69.6** | 14.6 | 2.14 | **4.77** |
+| gemv 1x4096x4096 | 34.1 | 35.9 | 3.8 | 9.03 | 9.50 |
+| gemv 1x8192x8192 | 26.0 | 26.6 | 3.3 | 7.78 | 7.96 |
+
+**Geomean over all 18 shapes: 1.27 -> 1.38.**
+
+**Nothing else moved.** Single-threaded, every one of the fourteen shapes that
+does not route to the small-M kernel measures between **0.98 and 1.03**. That
+is the load-bearing control, not the 16-thread table: at one thread the pool
+and the partition are bypassed entirely and the launch-to-launch spread is a
+few percent, whereas at 16 threads several shapes swing 10-50% between
+launches and the same controls read 0.96-1.15 — inside their own spread, and
+therefore evidence of nothing either way.
+
+`gemv 1x8192x8192` is the one target shape that barely moved (1.11x at 16
+threads). Its B is 256 MB, four times the L3, so it is genuinely DRAM-bound and
+the partition can only buy prefetch efficiency, not reuse.
+
+### Four traps, three of them found the hard way
+
+1. **`cut_m` is true for shapes whose M is 8.** It is `pm >= pn` with
+   `pn = N / NR`, so at `N = 33` and `NR = 64` both sides are 1. The task fill
+   then assigned the reduction's *column* bounds to the *M* range, thread 0's
+   band came out empty, it took the driver's early return, and it never reached
+   a barrier sized for three threads — the dispatcher spun forever. **Every
+   shape in the benchmark has `N >= NR` and hid this.** `cut_m` is now
+   explicitly `cut_m_raw && !cut_k`: a new partition mode has to be subtracted
+   from the old one at every consumer, not only where it is introduced.
+2. **Under the K-split an empty column band is not an idle thread.** `[n0, n1)`
+   is the band of the *reduction*; the thread still has a K-band to accumulate
+   and still has to arrive at the barrier. The driver's "nothing to do" early
+   return therefore tests `n0 >= n1` only when `ksplit == 0`.
+3. **The unroll depth and the row gate must not be the same constant.** They
+   were, and it made `SM_PU = 8` look catastrophic: `decode 4x4096x4096`
+   measured **0.47x** against `SM_PU = 4` single-threaded, because a 4-row
+   shape fails `mspan >= 8` and falls all the way to the un-unrolled loop. That
+   is the gate firing, not the depth being wrong, and reading it as "8 is too
+   deep" would have been the wrong conclusion from a real measurement. Hence
+   `SM_PU_MIN_ROWS`. (8 is still not shipped: with the gate decoupled it wins
+   `decode 8` by 1.06-1.14x, inside the spread, and was not pursued further.)
+4. **A `select` on the unrolled loop's exit bound is not free.** `kmain` is the
+   unrolled loop's exit and the remainder loop's entry, so choosing it with a
+   `select` hides from LLVM that the two ranges partition `[k0, k1)`. Emitting
+   two whole loop nests under one branch keeps both bounds affine. Measured at
+   `SM_PU = 2`, best of three in one session: 69.4 GFLOPS affine against 59.8
+   with the `select` — arms not order-alternated, and not re-measured since
+   `SM_PU` moved to 4, so treat the 14% as indicative rather than as a figure.
+
+### The measurement note that matters more than any number here
+
+**B is 64 MB and this part's L3 is 64 MB, so this shape sits on a capacity
+cliff, and the standalone probe is not a reliable instrument at this size.**
+Repeated calls leave B partly resident, and which side of the cliff a variant
+lands on flips between runs: the same probe configuration measured **689 and
+270 GFLOPS** on two runs of an identical interleaved, min-ranked protocol, and
+"K-split plain" read 221-242 with one variant list and 371-427 with another.
+
+Every number in this section that is used to *decide* something therefore comes
+from the real emitter through `tests/run_cpu_gemm_bench.py`-style isolation,
+not from the probe. The probe is cited only for the partition ratio, where the
+effect is 5-6x and survives the instability. Two consequences worth carrying:
+
+- **Anything tuned at this size to finer than ~2x is tuning noise.** Prefer a
+  fix with no constant to pick.
+- **Measure the inner loop single-threaded.** Jitter drops to a few percent,
+  the pool and partition drop out, and that is what separated a real 18%
+  codegen effect from run-to-run drift — and what proved the packed path
+  untouched.
+
+### Ruled out by measurement — do not re-chase
+
+- **Blocking the `j` loop so the C strip fits L1 is not a shippable win.**
+  It is the textbook fix for the L2-bound C traffic and it does help in
+  isolation, but the best block width swung 2.3x between neighbouring values
+  and reversed order between runs. That is the capacity cliff above, not a
+  tuning surface. The K-unroll gets the same benefit structurally, without a
+  constant to pick.
+- **Padding the private panel's row stride** to break the 16 KB L1 set
+  aliasing measured *worse* than not padding at `M = 8` (463 vs 568) and better
+  at `M = 1`. Same instability; no consistent effect.
+
 ## Known gaps
 
 Ordered by measured size against the AVX-512 baseline, not by guess.
@@ -469,15 +638,13 @@ Ordered by measured size against the AVX-512 baseline, not by guess.
    there is nothing to amortise the pack against, while OpenBLAS has a cheap
    small-size route. A copy-free direct path for `M, N, K < 64` is the fix.
    Note Y holds 36% of peak here and OpenBLAS 84%, so this is not call overhead.
-2. **`decode 8×4096×4096` at 0.38 on 16 threads** — still the split-axis
-   problem, unchanged by today's work. `__y_gemm_small_m` runs `p` outer and
-   `j` inner, so an N-partition gives each thread a 1 KB column slice of every
-   16 KB row: 4096 pages touched, each 1/16th used, prefetcher unable to
-   stream. Y sustains 28.6 GB/s against OpenBLAS's 96 GB/s (the DRAM roofline).
-   **Splitting K is the fix** — contiguous bands of B per thread, private `M*N`
-   C copies reduced at the end; C is 128 KB so 16 copies cost 2 MB against B's
-   64 MB. Single-threaded the same shape is **1.80x**, which is what says the
-   kernel is fine and the partition is not. Not built.
+2. ~~**`decode 8×4096×4096` at 0.38 on 16 threads** — the split-axis
+   problem.~~ **Fixed** — see "Decode was two separate bugs" above. The K-split
+   was indeed the fix, and the prediction that "the kernel is fine and the
+   partition is not" was only half right: the inner loop was also leaving 4x on
+   the table single-threaded, and the K-unroll that addresses it is worth a
+   further 1.18–1.19x on top of the partition. **0.36 -> 1.71x on 16 threads,
+   1.82 -> 3.24x on one.**
 3. **`1024³` regressed 1.10 → 0.89 and the skinny shapes 1.28/1.41 → 0.93/0.90
    on 16 threads.** New, from today's changes, and unexplained. The runtime
    `kc` rule uses the per-thread `nc`, so an M-split leaves `nc` at full width
@@ -488,7 +655,9 @@ Ordered by measured size against the AVX-512 baseline, not by guess.
    `mc` block and one `nc` block, so the whole cost is packing against very
    little reuse.
 5. **The split is 1-D.** OpenBLAS partitions M and N together. With one axis, a
-   shape small in both caps out at `max(M/mr, N/nr)` threads.
+   shape small in both caps out at `max(M/mr, N/nr)` threads. There are three
+   axes to *choose* from now — M, N, and K for the small-M path — but still only
+   one is cut per call, so the cap stands for the packed path.
 6. **Zero prefetch instructions** in the emitted kernel — `objdump | grep -c
    prefetch` returns 0. OpenBLAS's micro-kernels prefetch the next A and B
    panels aggressively. Untried.
@@ -520,8 +689,18 @@ LD_LIBRARY_PATH=/tmp/ob_avx512 python3 tests/run_cpu_gemm_bench.py \
 LD_LIBRARY_PATH=/tmp/openblas_build python3 tests/run_cpu_gemm_bench.py \
       --bin ./tests/benchmark_cpu_gemm --threads 16 --isa avx2
 
-cargo test --release --test cpu_gemm_end_to_end          # correctness
+cargo test --release --test cpu_gemm_end_to_end          # correctness, 1 thread
+cargo test --release --test cpu_gemm_threaded            # correctness + no hang, 1..16
 ```
+
+`cpu_gemm_end_to_end` never sets `Y_NUM_THREADS` and its largest shape is
+`193x65x257` — below `WORK_PER_THREAD` — so **every shape it runs is
+single-threaded**, and the pool, the partition, the barrier and the K-split
+reduction had no coverage at all until `cpu_gemm_threaded` was added. That file
+runs each shape under 1/2/3/7/16 threads with a timeout, because the failure
+mode of a miscounted barrier is a hang rather than a wrong answer, and it
+carries the tiny-`N` shapes (33, 15) that the benchmark set cannot express —
+those are what caught trap 2 above.
 
 **Check the box is idle first.** A hung process at 99.6% CPU once made
 OpenBLAS read 11 GF at 250³ where it really does 531, and the result looked
