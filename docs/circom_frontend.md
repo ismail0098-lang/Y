@@ -28,13 +28,22 @@ Structural metadata matches circom exactly on every circuit tested: output
 count, public input count, private input count. That is what a verifier and a
 `.wtns` are indexed by.
 
-**Compile time, best of three:**
+**Compile time, best of five, re-measured 2026-08-11:**
 
 | | circom | Y | |
 |---|---|---|---|
-| `Poseidon(2)` | 0.102 s | 0.076 s | Y 1.34x |
-| 200-hash Poseidon chain | 0.662 s | 0.693 s | Y 0.96x |
-| 1000-hash Poseidon chain | 3.236 s | 3.304 s | Y 0.98x |
+| `Poseidon(2)` | 0.101 s | 0.023 s | Y **4.39x** |
+| Merkle inclusion, depth 20 | 0.151 s | 0.059 s | Y **2.54x** |
+| 200-hash Poseidon chain | 0.678 s | 0.631 s | Y 1.07x |
+| 1000-hash Poseidon chain | 3.249 s | 3.154 s | Y 1.03x |
+
+The top rows moved on 2026-08-11 because a **fixed** ~5.5-million-allocation
+cost was removed from hex-literal lexing — merely `include`-ing
+`poseidon.circom` (24,958 lines of hex) had cost 0.094 s before a single
+constraint existed. A constant dominates a small circuit and vanishes into a
+large one, so the chains are unchanged and still ties. Their cost is per-hash
+lowering, at roughly **135 allocations per constraint against the native
+emitter's 12** — that is the next lever, not this one.
 
 **Circuit size, from the same source:**
 
@@ -50,8 +59,8 @@ Non-zero terms land within 7% of circom's (200-hash chain: 383k for circom,
 410k for Y), so the smaller constraint count is not bought by densifying the
 matrices — which is the way this optimisation usually goes wrong.
 
-Read the compile-time column as parity, not as a win: 0.96x and 0.98x are inside
-the noise of "the same". The size column is the real result, and it is worth
+Read the two chain rows as parity, not as a win: 1.07x and 1.03x are inside the
+noise of "the same". The size column is the real result, and it is worth
 more, because constraint count is paid again by every prover run rather than
 once at build time. Measured on a 20-hash chain through arkworks Groth16
 (`what_the_reduction_buys_at_proving_time`, `--ignored`):
@@ -105,7 +114,7 @@ order of size, and only the first was the algorithm:
    `simplify` sorts and merges in place, and the CSE table is open-addressed
    `u32` indices.
 
-Y's headline numbers against circom (2.6x on a Poseidon chain, 261x on the
+Y's headline numbers against circom (3.45x on a 1000-hash Poseidon chain, 261x on the
 polynomial circuit at 1M, and `>345x` at 10M where circom did not finish inside
 an hour) were measured on Y's **own** `.ysu` front end, where
 `emit_poseidon` folds linear combinations as it builds them. They still should
