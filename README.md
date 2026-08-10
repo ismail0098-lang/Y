@@ -170,13 +170,15 @@ unless both compilers report the same non-linear constraint count**, because
 comparing compile speed across tools that built different circuits is
 meaningless.
 
-Measured 2026-08-09, minimum of three runs (`tests/benchmark_zk_vs_circom.py`):
+Measured 2026-08-09, minimum of three runs (`tests/benchmark_zk_vs_circom.py`);
+the 10,000,000 row 2026-08-10:
 
 | circuit | N | Y | circom | speedup |
 |---|---|---|---|---|
 | polynomial | 10,000 | 0.008 s | 0.132 s | 16.5x |
 | polynomial | 100,000 | 0.087 s | 3.53 s | 40.5x |
 | polynomial | 1,000,000 | 0.895 s | 249.04 s | **278x** |
+| polynomial | 10,000,000 | 10.47 s | **did not finish in 1 h** | **>345x** |
 | dot product | 10,000 | 0.038 s | 0.509 s | 13.5x |
 | dot product | 100,000 | 3.19 s | 13.88 s | 4.3x |
 | dot product | 1,000,000 | 476.2 s | 983.2 s | **2.06x** |
@@ -188,6 +190,20 @@ The polynomial circuit's linear combinations are one or two terms wide, and both
 tools emit the same thing: circom reports 1,000,000 non-linear and **0 linear**
 constraints against Y's 1,000,001. Same artifact, and Y is 278x faster building
 it. That is the clean comparison.
+
+**At 10M the 10x row is a bound, not a number, because circom did not finish.**
+It was given a one-hour wall clock under `systemd-run -p MemoryMax=40G` on an
+otherwise idle box and killed at 3,612 s, still running, at 3.53 GB. Y compiles
+the same circuit in **10.47 s** (minimum of three) at 3.60 GB, writing a 1.19 GB
+`.r1cs`. So the row says `>345x`, which is what was observed; the true figure is
+larger. Circom's own scaling says how much larger — 3.50 s at 100k, 26.77 s at
+316k, 245.69 s at 1M is **O(N^1.9)**, which projects ~5.4 hours at 10M — but that
+is a projection and is not what the table reports. Y is linear across the same
+range (0.087 → 0.895 → 10.47 s), so the gap widens with size rather than
+converging. Two caveats worth stating: the harness's fairness gate could not be
+applied at 10M, since circom emitted no constraint count to compare (both
+circuits are the same template, scaled), and this is the *narrow* circuit — see
+the dot product immediately below for the shape where Y loses this property.
 
 The dot product accumulates a dense linear combination, and there **Y is the
 super-linear one**: 10k → 100k costs 85x for 10x the size, and 100k → 1M costs
@@ -219,6 +235,7 @@ polynomial circuit, measured 2026-08-09:
 | Constraints | time | peak RSS | `.r1cs` on disk |
 |---|---|---|---|
 | 1,000,000 | 0.90 s | 0.37 GB | 0.13 GB |
+| 10,000,000 | 10.47 s | 3.60 GB | 1.19 GB |
 | 31,000,000 | 36.1 s | 11.4 GB | 3.97 GB |
 
 Cost is linear in both. **But per-constraint memory is a property of the
@@ -227,7 +244,10 @@ wide (0.37 KB/constraint), where a Poseidon chain's are ~28 (1.42 KB/constraint)
 On a 48 GB box that is ~105M constraints of the former and ~32M of the latter.
 Quote the dense number. Circom, Noir and Leo were not run at 31M — earlier
 tables here reported estimates for them at that size as if measured, and those
-have been removed.
+have been removed. Circom *was* run at 10M and did not finish in an hour; at the
+point it was killed it held 3.53 GB against Y's 3.60 GB peak for the completed
+job, and its memory is linear at ~2.3 KB/constraint, so finishing would have
+cost it roughly 23 GB.
 
 ### Proving cost, end to end
 
