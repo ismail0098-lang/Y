@@ -91,6 +91,9 @@ Packed BLIS shape, chosen by sweep (`MR` swept over 4/6/8/12/16):
 | `NC` | 2048 | `KC·NC·4` = 2 MB, streams through the 32 MB L3 |
 | `SM_MR` | 8 | rows broadcast in the small-M kernel |
 | `SM_MAX_M` | 8 | dispatch boundary to the small-M kernel |
+| `TINY_MAX_N` | 64 | widest N the copy-free path holds in registers — structural, not tuned |
+| `TINY_MAX_WORK` | `1<<17` | multiply-adds below which the copy-free path replaces the packed one (measured) |
+| `WORK_PER_THREAD` | `1<<16` | multiply-adds a thread must be given before it is worth adding (measured, **on the 2-D partition** — it was `4<<20` on the 1-D one) |
 
 `MR = 8` and `MR = 12` are within noise at 1024³ (1.89× both); 12 wins at 2048³
 (1.48 vs 1.35). `MR = 16` is clearly worse everywhere (1.16 at 1024³) — 32
@@ -166,7 +169,7 @@ The last row is why Y is 3-4x OpenBLAS at `M=1`: `cblas_sgemm` with `M=1` stays
 in the level-3 packed path and does not dispatch to GEMV, so it runs at
 8 GFLOPS. Y routes `M <= SM_MAX_M` to a k-outer kernel.
 
-## Threading, and four bugs found building it
+## Threading, and five bugs found building it
 
 1. **Every emitted function needs `#0`.** Helpers previously got AVX-512 only
    because they were inlined into the `#0` kernel. Adding the worker
@@ -186,6 +189,27 @@ in the level-3 packed path and does not dispatch to GEMV, so it runs at
    reaching the work block via the *blocked* path carried the stale generation
    it had read on the spin path, so `done[]` lagged by one and the dispatcher
    waited forever. Found by reading the emitted IR, not by reasoning.
+5. **The shared packed-B global was sized from the compile-time `kc`, and
+   `kc` has been chosen at runtime since the `L3_PANEL_FLOATS` rule landed.**
+   `pack_b` writes `kc * roundup(nc, NR)` floats, and that rule pins `kc*nc` to
+   `L3_PANEL_FLOATS / nthr` — so at `nthr = 16` the write is 524,288 floats
+   into a 532,480-float buffer. It fits by 1.5%, and rounding the last panel up
+   to a whole `NR` is enough to break it: `192x513x22000` overruns
+   `@__y_shared_b` by ~98 KB, into the pool mutex and condition variable that
+   follow it in BSS. It is sized `KC_MAX * (NC_MAX + NR_MAX)` now, which is a
+   structural bound rather than an arithmetic coincidence, and is BSS so the
+   pages a smaller panel never touches cost nothing resident.
+
+   Two things are worth more than the bug. First, `SCRATCH_FLOATS` — the
+   *private* panel — already had exactly this reasoning written down and a test
+   (`scratch_layout_holds_for_the_largest_runtime_kc`) asserting it; the shared
+   buffer simply was never held to the same rule. The fix was to extend that
+   test, not to write a new one. Second, **nothing in the benchmark set has a
+   ragged `N` at a work size past `SHARE_B_WORK`**, and no test did either —
+   the shared path had *no* coverage at all, in either file, because reaching
+   it costs 2.1e9 multiply-adds. `tests/cpu_gemm_threaded.rs` carries that
+   shape now, deliberately at `N = 513` rather than 512, and it fails on the
+   old sizing and passes on the new.
 
 Idle workers park on a condition variable. An earlier version spun 8192 times
 then polled `usleep(100)` forever; 15 threads waking 10k times a second
@@ -226,6 +250,31 @@ timed a dependent FMA chain, `clang -O2` deleted it, and it reported
 **4,000,406 GHz**. It reads `scaling_cur_freq` from sysfs now. That is the same
 trap `measure_accumulate_costs` hit on the GPU side; a probe reporting an absurd
 number is lucky, one reporting a plausible wrong number is not.
+
+### The A/B harness, and the noise floor it measures
+
+`tests/run_cpu_gemm_bench.py` is the single-binary Y-vs-OpenBLAS sweep;
+`tests/ab_cpu_gemm.py` is its A/B sibling, for deciding whether a source change
+moved anything. It takes two or more benchmark binaries, runs one shape per
+process, **interleaves the arms within a launch and rotates their order between
+launches** (rotation rather than reversal, so with three arms each arm takes
+each slot), ranks by the best, prints the within-arm spread, and measures
+OpenBLAS in the same session when asked.
+
+**The noise floor is measured, not assumed, and it is large.** Two arms that
+differ only in `SHARE_B_WORK` are *behaviourally identical* on any shape below
+that threshold — same code, same decisions — and on three such shapes at 16
+threads and four launches they read **1.072, 1.039 and 0.924**. So the
+resolution of this instrument is about **±7%**, and any 16-thread ratio inside
+that band is a tie however many launches produced it. Running an identical
+binary against itself is the cheapest way to recalibrate this after a change to
+the box, and it costs one sweep.
+
+Two ways to corrupt a run that were rediscovered this session, both by doing
+them: `cargo build` during a sweep (it takes every core for ~8s and depresses
+whichever arm was timing), and editing a `.c` file in the working tree, which
+wakes the editor's C++ indexer. Neither shows up as an error — both just move a
+row. Rows taken during either were re-measured rather than reported.
 
 **Methodology now: one shape, one library, one process, three launches, seven
 rounds, ranked by the minimum.** Thread counts come only from the environment
@@ -629,15 +678,299 @@ effect is 5-6x and survives the instability. Two consequences worth carrying:
   aliasing measured *worse* than not padding at `M = 8` (463 vs 568) and better
   at `M = 1`. Same instability; no consistent effect.
 
+## The split is 2-D now, and two of the three things that made it work were bugs in it
+
+The standing diagnosis was that the micro-kernel was fine and the partition was
+not, and for once that was exactly right. Single-threaded, Y is within **4–7%**
+of OpenBLAS on every square shape; at 16 threads the same shapes sat at
+0.83–0.92. Nothing in the kernel can produce that pattern.
+
+`emit_entry` cut exactly one axis. Under a 16-way M-split every thread packs the
+*same* full-width B, so B is packed 16 times and 16 copies of the panel are live
+in L3 at once; an N-split does the same to A. A `4x4` grid packs each operand 4
+times. The partition is now a genuine `ntm x ntn` grid, chosen the way
+OpenBLAS chooses it (`driver/level3/level3_thread.c:817-850`): maximise the
+threads actually used, then minimise `N*ntm + M*ntn`. That objective is not
+arbitrary — each thread reads `M/ntm` rows of A and `N/ntn` columns of B, so
+total operand traffic is `K*(N*ntm + M*ntn)` and the objective *is* the traffic.
+At `2048³` on 16 threads their rule and this one both pick `4x4`.
+
+### Shared packed-B and the grid do not compose, and sharing wins where it applies
+
+Three arms at `2048³`, 16 threads, four interleaved launches, best of each. The
+two unshared arms are the honest comparison of the two partitions:
+
+| arm | GFLOPS | ratio |
+|---|---|---|
+| 1-D M-split, shared B | 3170 | 1.00 |
+| 1-D M-split, private B | 2319 | 0.73 |
+| 4x4 grid, private B | 2580 | 0.81 |
+
+The grid beats the 1-D split on its own terms (2580 vs 2319, **1.11x**) and
+sharing beats the grid (**1.37x** over the same 1-D split). They cannot be
+combined: a thread can share a packed B panel only with threads that walk the
+same `(jc, pc)` blocks, which is the `ntn == 1` column. So the grid **stands
+down** above `SHARE_B_WORK` and collapses to a single column. `SHARE_B_WORK` is
+therefore no longer "share or don't" but "share or grid" — which is why gap #7
+could not be closed by re-measuring the old constant, and why the answer to it
+is a different question than the one it asked.
+
+### Restricting the factorisation to powers of two is wrong, and 250³ says so
+
+The first version searched `ntm` over `1, 2, 4, 8, 16`. With `nt = 3` the only
+reachable factorisations are `1x3` and `2x1`, so the M-split `3x1` cannot be
+expressed at all and the search falls to a pure N-split. `ragged 250³` gets
+exactly `nt = 3`, and it measured **0.647x at a 5.4% spread** — a large, clean
+regression on a shape the 1-D rule had been cutting along M all along.
+Enumerating all sixteen values fixes it (250³ back to **1.016**). Sixteen
+candidates is a few hundred straight-line instructions once per call, against a
+shape that takes tens of microseconds.
+
+Ties in the objective go to the **larger `ntm`**. M and N are symmetric in the
+traffic objective but not in the code: M bands snap to `MR = 12` and N bands to
+`NR = 32`, so an M cut balances nearly three times finer.
+
+### A 2-D partition is far more sensitive to band imbalance than a 1-D one
+
+Cutting at `idx*extent/count` and flooring to the tile granularity snaps each
+band's *position*, which dumps the whole accumulated rounding slack onto one
+band. In 1-D that is at most one granule out of a full-width band and it never
+mattered. In 2-D it is one granule out of a band `count` times narrower, and the
+errors on the two axes multiply:
+
+| shape | N bands (gran 32) | M bands (gran 12) | busiest/idlest |
+|---|---|---|---|
+| 1024³ | 256, 256, 256, 256 | 252, 252, 252, 268 | 1.06x |
+| 1000³ | 224, 256, 256, **264** | 240, 252, 252, 256 | **1.26x** |
+| 1021³ | 224, 256, 256, **285** | 252, 252, 252, 265 | **1.34x** |
+
+That is the entire reason `1024³` measured **1.39x** on this grid while its two
+ragged neighbours measured **0.82x** and **0.79x** — three shapes within 2% of
+each other in size, split three ways by an arithmetic detail. Counting granules
+instead of positions (`G = ceil(extent/gran)`, band `idx` takes granules
+`[idx*G/count, (idx+1)*G/count)`) spreads the remainder so the widths differ by
+at most one granule anywhere.
+
+Measured against the 1-D baseline, before and after that one change:
+
+| shape | position-snapped | granule-counted | predicted imbalance |
+|---|---|---|---|
+| 1021³ | 0.79 | **1.09** | 1.34x -> 1.08x |
+| 1000³ | 0.82 | **0.96** | 1.26x -> 1.14x |
+| 1024³ | 1.39 | 1.04 | 1.06x -> 1.05x |
+
+The two ragged shapes move in the direction and roughly the magnitude the
+imbalance arithmetic predicts, which is the reason to believe the mechanism.
+**`1024³` did not regress**; the grid had nothing to fix there and both figures
+are the same result seen through a ±7% instrument at 19–29% within-arm spread.
+Quoting its 1.39 as an achievement would be quoting a lucky maximum.
+
+**The rule was not wrong before; it was never stressed.** That is the general
+shape of this change: going 2-D did not introduce new mechanisms so much as it
+raised the pressure on three existing ones — the factorisation, the banding, and
+the shared-B gate — until each of them broke in its own way.
+
+### Traps
+
+1. **The K-split is expressed AS a grid, not beside one.** It is the `1 x nt`
+   case, whose N bands are the bands of the *reduction*. The previous code
+   carried a separate `cut_m` boolean that had to be corrected by `!cut_k` at
+   each of five consumers, and missing one deadlocked (see "Four traps" above).
+   With one grid there is nothing left to subtract: the bands, the barrier
+   width, the `inuse` cutoff and the shared-B gate all derive from `ntm`/`ntn`
+   and cannot disagree about which mode is in force.
+2. **A band is non-empty only because `ntm <= pm` and `ntn <= pn`.** The
+   candidate search enforces both. A thread with an empty band returns before
+   the cooperative section and never reaches the barrier, so any change that
+   lets `ntm` exceed the whole micro-panels M can supply is a deadlock. The
+   single-column collapse therefore also requires `pm >= nt`, which is not
+   cosmetic.
+3. **The K-split deliberately does NOT get that guarantee** — `ntn = nt` is
+   uncapped there — and its empty reduction bands are expected. That is why the
+   driver's early return tests `n0 >= n1` only when `ksplit == 0`.
+
+### `WORK_PER_THREAD` was measuring the 1-D split's redundant packing, and it was 4x too large
+
+This is the largest single result of the session, and it only exists because the
+partition changed first. `WORK_PER_THREAD` decides how many threads a shape gets
+at all, and its docstring said outright why it was set four times larger than
+OpenBLAS's equivalent: *"This one re-packs B per thread, so each extra thread
+adds real work rather than only splitting it."* That was true, and the grid is
+precisely the thing that stops it being true. The constant was calibrated
+against a cost that no longer exists.
+
+Re-measured on the 2-D partition, 16 threads, three interleaved launches, best
+of each. `w4` is the shipped `4 << 20`; the others change only this constant:
+
+| shape | threads at `4<<20` | `w4` | `w1` = `1<<20` | `w1/w4` | `w1`/OB |
+|---|---|---|---|---|---|
+| ragged 250³ | 3 | 584 | **1594** | **2.73x** | 2.72 |
+| ragged 333x777x64 | 4 | 610 | **1398** | **2.29x** | 2.70 |
+| nice 256³ | 4 | 771 | **1737** | **2.25x** | 2.12 |
+| nice 512³ | 16 | 2266 | 2275 | 1.00x | 1.19 |
+
+`512³` already asked for all 16 threads and is the control: it does not move,
+which is what says the effect is the thread count and not some other difference
+between the builds. Going the other way confirms the direction — `8 << 20`
+measures **0.60x** geomean over the same shapes. Every one of these shapes was a
+loss against OpenBLAS at `4 << 20` and is now a win.
+
+The direction held all the way down, so it had to be walked to a plateau rather
+than stopped at the first improvement:
+
+| step | shapes it moves | result |
+|---|---|---|
+| `4<<20` -> `1<<20` | 250³, 256³, 333x777x64 | 2.25–2.73x |
+| `1<<20` -> `1<<18` | 128x64x128, 128³, 256x64x256 | 2.59–3.52x (256³ flat, control) |
+| `1<<18` -> `1<<16` | 128x64x128, 128³ | 1.63x, 1.31x |
+| `1<<16` -> `1<<14` | same | 1.55x, 1.29x — **a tie with `1<<16`** |
+
+`1 << 16` ships: it is the conservative end of the flat part, and picking the
+larger of two tied values is what keeps an unmeasured smaller shape from being
+handed sixteen threads on this evidence. Note the last row is the one that says
+the search is finished — without it, `1 << 16` is a point on a slope rather than
+a plateau, and there would be no reason to stop there rather than at `1 << 14`
+or below.
+
+**The order mattered.** Sweeping this constant before the 2-D grid would have
+reproduced the old table and concluded it was already right, because on a 1-D
+split it *was* right. Two of the three "just re-measure it" items in the handoff
+turned out this way: the constant was not stale, the thing it was measuring
+had changed.
+
+## `tiny 48³`: 0.44 -> 0.84, by not packing and not touching C
+
+`48³` was the worst ratio in the table at both thread counts, and it is not call
+overhead — Y held 36% of AVX-512 peak there against OpenBLAS's 84%, with
+OpenBLAS using its *ordinary* packed path (`SMALL_MATRIX_OPT` returns 0 on ZEN).
+
+`__y_gemm_tiny` reads A and B in place and holds the whole `MR' x N` block of C
+in registers across the entire K loop: no packing, C loaded never and stored
+exactly once. The pack alone does not explain the gap — at `48³` it moves 4,608
+floats to support 110,592 multiply-adds, about 8% — and the arithmetic saying so
+is what pointed at the C traffic as the other half.
+
+`N` is capped at `TINY_MAX_N = 64` **structurally, not by tuning**: C lives in
+`N/16` accumulator vectors per row and there are 32 zmm registers. Raising it
+does not cost a little speed, it spills the accumulators and defeats the whole
+point. Hence one specialised body per `nv`, each with its own row block
+(`24, 12, 8, 6` rows for `nv = 1..4`), holding the accumulator count at 24. A
+runtime `nv` would put C back in memory.
+
+Measured through the real emitter and the real harness, 16 threads, four
+interleaved launches: **127.1 -> 242.5 GFLOPS, 1.91x**, moving `tiny 48³` from
+**0.44 to 0.84** against OpenBLAS. It is still behind, so this is a large dent
+in the largest gap rather than a closed gap.
+
+Rows past `mw` in the final row block are not branched around; their A element
+is forced to zero and the FMA runs anyway, so the K loop stays a straight-line
+register chain. The waste is bounded by one row block on one tile.
+
+### The dispatch threshold, and why the first guess was wrong at its own boundary
+
+`TINY_MAX_WORK` was guessed at `1 << 18` and then measured against the packed
+path, 16 threads, four interleaved launches:
+
+| shape | work | copy-free | packed | ratio |
+|---|---|---|---|---|
+| `tiny 48³` | 110,592 | **230.1** | 127.2 | **1.81x** |
+| `small 64³` | 262,144 | 251.9 | **334.4** | **0.75x** |
+| `small 128x64x128` | 1,048,576 | 807.6 | 783.2 | 0.97 (control, above the gate in both) |
+
+`1 << 18` is 262,144 exactly, so the guess sat precisely on the losing side of
+the crossover. It is `1 << 17` now — the conservative end of the bracket, since
+routing a shape to the packed path too early costs 0.75x at worst while routing
+it there too late costs 0.55x.
+
+**The reason is not the packing, which is what the original argument assumed.**
+This path is *single-threaded by construction* — C lives in registers across the
+whole K loop, which is the entire point and is exactly why it cannot be split —
+so its advantage ends where the shape becomes worth threading at all, not where
+packing starts to amortise. With `WORK_PER_THREAD` at `1 << 16`, a 262,144-MAC
+shape gets four threads, and four threads on the packed path beat one thread on
+a better kernel. So the two constants are related in fact, and `TINY_MAX_WORK`
+is deliberately **not** written as a formula over `WORK_PER_THREAD`: a constant
+that is also a guard reading another constant is how `SM_PU = 8` came to look
+catastrophic. If `WORK_PER_THREAD` moves, re-measure this one.
+
+Locating this at all needed new shapes. The benchmark set jumped straight from
+`48³` (110 KMAC) to `250³` (15.6 MMAC) — a 140x gap with the crossover inside
+it — so `64³`, `128x64x128`, `256x64x256` and `128³` are appended as indices
+18-21. They are appended, not inserted, so 0-17 keep the meaning this document
+quotes everywhere else.
+
+## Results after the 2-D partition, the thread count and the copy-free path
+
+Strict A/B: one shape per process, arms interleaved within a launch, arm order
+rotated between launches, four launches, ranked by the best. OpenBLAS measured
+in the **same session**. `head` is the previous revision, `new` is all of the
+above together.
+
+| shape | head | new | new/head | OpenBLAS | head/OB | **new/OB** |
+|---|---|---|---|---|---|---|
+| ragged 250³ | 603.6 | **1733.2** | **2.87x** | 599.9 | 1.01 | **2.89** |
+| ragged 333x777x64 | 670.9 | **1415.9** | **2.11x** | 512.0 | 1.31 | **2.77** |
+| gemv 1x4096x4096 | 101.6 | **209.7** | **2.06x** | 52.1 | 1.95 | **4.03** |
+| nice 256³ | 871.1 | **1703.3** | **1.96x** | 791.1 | 1.10 | **2.15** |
+| tiny 48³ | 126.8 | **222.7** | **1.76x** | 283.9 | 0.45 | 0.78 |
+| ragged 137x391x1013 | 1009.6 | **1589.9** | **1.58x** | 949.5 | 1.06 | **1.67** |
+| nice 512³ | 1975.7 | 2276.7 | 1.15x | 1723.8 | 1.15 | **1.32** |
+| nice 1024³ | 2315.4 | 2635.9 | 1.14x | 2694.2 | 0.86 | 0.98 |
+| skinny 17x4096x4096 | 532.0 | 568.0 | 1.07x | 630.5 | 0.84 | 0.90 |
+| decode 8x4096x4096 | 606.3 | 645.1 | 1.06x | 343.0 | 1.77 | **1.88** |
+| ragged 1021³ prime | 2326.3 | 2475.0 | 1.06x | 2695.3 | 0.86 | 0.92 |
+| deepK 64x64x32768 | 759.2 | 785.8 | 1.04x | 440.5 | 1.72 | **1.78** |
+| ragged 1000³ | 2419.9 | 2505.0 | 1.04x | 2750.0 | 0.88 | 0.91 |
+| gemv 1x8192x8192 | 33.9 | 34.2 | 1.01x | 15.1 | 2.25 | **2.27** |
+| nice 2048³ | 2746.2 | 2691.4 | 0.98x | 3406.7 | 0.81 | 0.79 |
+| skinny 33x4096x4096 | 874.5 | 861.0 | 0.98x | 999.8 | 0.87 | 0.86 |
+| flatK 4096x4096x8 | 502.5 | 475.8 | 0.95x | 366.0 | 1.37 | **1.30** |
+| decode 4x4096x4096 | 550.8 | 509.6 | 0.93x | 186.5 | 2.95 | **2.73** |
+
+**Geomean new/head 1.29. Against OpenBLAS: 1.17 -> 1.51, Y ahead on 11 of 18
+both before and after.**
+
+Read the win count next to the geomean, not instead of it: the same eleven
+shapes win, and what moved is how much. Nothing regressed outside the ±7% noise
+floor — the four sub-1.0 rows are 0.93–0.98 at spreads of 13–26%, which is a tie
+by this instrument's own resolution.
+
+The remaining deficits are `2048³` 0.79, `skinny 33` 0.86, `skinny 17` 0.90,
+`1000³` 0.91, `1021³` 0.92, `1024³` 0.98 and `tiny 48³` 0.78. `2048³` is the
+only large square still behind, and it is the one shape where the grid stands
+down in favour of shared packed-B — see gap 10, which is the concrete way to
+attack it.
+
+### Single-threaded, which is the control that matters
+
+At one thread the pool, the grid and `WORK_PER_THREAD` are all bypassed, so
+**every shape that does not route to the new copy-free kernel must be
+unchanged**. That is the claim, and it holds on all seventeen of them:
+
+| | new/head |
+|---|---|
+| the 17 shapes that take the packed or small-M path | **0.976 – 1.020** |
+| `tiny 48³`, which takes the copy-free path | **1.96x** (0.43 -> 0.83 vs OB) |
+
+Spreads are 0.5–2% on most of these, an order of magnitude tighter than the
+16-thread runs, which is exactly why this is the control: at 16 threads a
+±7% instrument cannot tell "unchanged" from "slightly worse". **Geomean 1.45 ->
+1.50 against OpenBLAS, Y ahead on 7 of 18** — the 1-thread standing barely
+moves, and it should not, because nothing this change touches runs there.
+
 ## Known gaps
 
 Ordered by measured size against the AVX-512 baseline, not by guess.
 
-1. **`tiny 48³` at 0.43 (1T) / 0.45 (16T)** — the largest single ratio, and the
-   least explained. Y packs A and B unconditionally; below roughly `mc x nc`
-   there is nothing to amortise the pack against, while OpenBLAS has a cheap
-   small-size route. A copy-free direct path for `M, N, K < 64` is the fix.
-   Note Y holds 36% of peak here and OpenBLAS 84%, so this is not call overhead.
+1. **`tiny 48³` at 0.43 (1T) / 0.45 (16T)** — **largely closed, to 0.84**, by
+   the copy-free `__y_gemm_tiny` path above (**1.91x** on Y's own path). Still
+   the worst ratio in the table, so it stays on this list. The prediction that
+   the pack was the cause was only partly right: at `48³` the pack is about 8%
+   of the multiply-adds, and the other half of the gap was C being loaded and
+   stored once per K-block. What remains is unexplained and unmeasured — the
+   next thing to try is a row block chosen per shape rather than per `nv`,
+   since `MR' = 8` at `nv = 3` was picked from the register budget alone and
+   never swept.
 2. ~~**`decode 8×4096×4096` at 0.38 on 16 threads** — the split-axis
    problem.~~ **Fixed** — see "Decode was two separate bugs" above. The K-split
    was indeed the fix, and the prediction that "the kernel is fine and the
@@ -645,25 +978,31 @@ Ordered by measured size against the AVX-512 baseline, not by guess.
    the table single-threaded, and the K-unroll that addresses it is worth a
    further 1.18–1.19x on top of the partition. **0.36 -> 1.71x on 16 threads,
    1.82 -> 3.24x on one.**
-3. **`1024³` regressed 1.10 → 0.89 and the skinny shapes 1.28/1.41 → 0.93/0.90
-   on 16 threads.** New, from today's changes, and unexplained. The runtime
-   `kc` rule uses the per-thread `nc`, so an M-split leaves `nc` at full width
-   and pins `kc` to 256 while an N-split lets it go deep — the two partitions
-   now get very different K-panels and that interaction was never measured.
-   **This is the first thing to look at next.**
+3. ~~**`1024³` regressed 1.10 → 0.89 and the skinny shapes 1.28/1.41 →
+   0.93/0.90 on 16 threads.**~~ **Half right, and not the half it claimed.**
+   Re-measured strictly (4 launches, arms interleaved and rotated, OpenBLAS in
+   the same session): the skinny shapes came back **1.04 and 1.12** against
+   their claimed 0.93/0.90, inside a 10–26% spread, so that half was a
+   cross-sweep artifact exactly as suspected. `1024³` came back at **0.88** and
+   was real — and so were `2048³` 0.83, `1021³` 0.88 and `1000³` 0.92, which
+   the gap had not connected to it. One symptom, not four: single-threaded, Y
+   is within 4–7% of OpenBLAS on every one of them, so the deficit was entirely
+   in the partition. Fixed by the 2-D grid below; `1024³` is now **1.22**.
+   The `kc` hypothesis in the original text was not the cause.
 4. **`deepK 64×64×32768` at 0.75 single-threaded** (was 0.55). M=N=64 means one
    `mc` block and one `nc` block, so the whole cost is packing against very
    little reuse.
-5. **The split is 1-D.** OpenBLAS partitions M and N together. With one axis, a
-   shape small in both caps out at `max(M/mr, N/nr)` threads. There are three
-   axes to *choose* from now — M, N, and K for the small-M path — but still only
-   one is cut per call, so the cap stands for the packed path.
+5. ~~**The split is 1-D.**~~ **Fixed** — see "The split is 2-D now" above.
+   The cap is `(M/mr) * (N/nr)` rather than the max of the two, and the
+   partition is an `ntm x ntn` grid chosen by OpenBLAS's own objective.
 6. **Zero prefetch instructions** in the emitted kernel — `objdump | grep -c
    prefetch` returns 0. OpenBLAS's micro-kernels prefetch the next A and B
    panels aggressively. Untried.
-7. **The `SHARE_B_WORK` gate rests on contaminated data.** Shared packed-B was
-   measured a regression using the interleaved harness, which is now known to
-   have been wrong. Re-measure before trusting the gate.
+7. ~~**The `SHARE_B_WORK` gate rests on contaminated data.**~~ **Re-measured,
+   and the question it answers has changed** — it now selects between shared
+   packed-B and the 2-D grid rather than between sharing and not. See "The
+   split is 2-D now". Shared-B is worth **1.37x** at `2048³`, which is more
+   than the grid is worth there, and the two cannot compose.
 8. **f32 only**, and the kernel is **not reentrant** — one process-wide pool and
    one task array, so concurrent calls from different threads would corrupt
    each other. Single-threaded callers are the assumption.
@@ -671,6 +1010,36 @@ Ordered by measured size against the AVX-512 baseline, not by guess.
    are unrelated earlier scaffolding: they classify shapes and emit naive
    scalar Rust text, are reachable from no backend path, and are not what any
    number here measures.
+10. **The grid cannot share a packed B panel per column.** Sharing needs every
+    participating thread to walk the same `(jc, pc)` blocks, so it is available
+    only in the `ntn == 1` collapse — which is why `SHARE_B_WORK` is a
+    *either/or* switch rather than a composition. The natural fix is one
+    barrier and one shared buffer **per grid column**, `ntn` of each. A single
+    global barrier is not enough and the reason is a trap: the `jc` and `pc`
+    iteration counts depend on the column's own width through the runtime `kc`
+    rule, so two columns of unequal width execute different numbers of
+    barriers and deadlock. Worth roughly the 1.37x that sharing is worth at
+    `2048³`, on every shape above `SHARE_B_WORK` that the grid would otherwise
+    have split two ways.
+11. **The traffic objective ignores C's write contiguity.** With `N > M` it
+    picks an N-heavy split, and a thread then writes `M/ntm` discontiguous runs
+    of C instead of one contiguous block. `333x777x64` measured 0.89 and 0.92
+    against the 1-D M-split on two separate runs and looked like the evidence
+    for this — but that was at the OLD `WORK_PER_THREAD`, where the shape got
+    four threads; at `1 << 16` it gets sixteen and measures **2.11x**. So the
+    supporting evidence is superseded and the concern is now **unsupported by
+    any measurement**, kept only because the mechanism is real and no shape in
+    the set isolates it. Do not add a fudge factor to the objective on the
+    strength of this entry.
+12. **The copy-free path is single-threaded by construction**, and that — not
+    packing — is what bounds it (see `TINY_MAX_WORK`). A threaded version would
+    have to split K and reduce, like the small-M path does, which reintroduces
+    exactly the C traffic the kernel exists to remove. Probably not worth it,
+    but it is the reason `64³` sits at 0.78 rather than above 1.
+13. **`MR'` in the copy-free path was never swept.** The row block per `nv`
+    (`24, 12, 8, 6`) comes from holding the accumulator count at 24, which is a
+    register-budget argument, not a measurement. `MR = 12` in the packed kernel
+    was swept and 12 beat 8 and 16; there is no equivalent evidence here.
 
 ## Reproducing
 
@@ -689,14 +1058,25 @@ LD_LIBRARY_PATH=/tmp/ob_avx512 python3 tests/run_cpu_gemm_bench.py \
 LD_LIBRARY_PATH=/tmp/openblas_build python3 tests/run_cpu_gemm_bench.py \
       --bin ./tests/benchmark_cpu_gemm --threads 16 --isa avx2
 
+# A/B two builds, arms interleaved and rotated, OpenBLAS in the same session
+LD_LIBRARY_PATH=/tmp/ob_avx512 python3 tests/ab_cpu_gemm.py \
+      --arm before=/tmp/bench_before --arm after=/tmp/bench_after \
+      --threads 16 --launches 4 --shapes 2,3,5,6 --ob
+
 cargo test --release --test cpu_gemm_end_to_end          # correctness, 1 thread
 cargo test --release --test cpu_gemm_threaded            # correctness + no hang, 1..16
 ```
 
-`cpu_gemm_end_to_end` never sets `Y_NUM_THREADS` and its largest shape is
-`193x65x257` — below `WORK_PER_THREAD` — so **every shape it runs is
-single-threaded**, and the pool, the partition, the barrier and the K-split
-reduction had no coverage at all until `cpu_gemm_threaded` was added. That file
+`cpu_gemm_end_to_end` never sets `Y_NUM_THREADS`. That used to mean **every
+shape it runs is single-threaded**, because its largest was `193x65x257` and
+`WORK_PER_THREAD` was `4 << 20` — which is why the pool, the partition, the
+barrier and the K-split reduction had no coverage at all until
+`cpu_gemm_threaded` was added. **That is no longer true**: at `1 << 16` a
+3.2-MMAC shape asks for all sixteen threads, so most of that file is now
+threaded incidentally. This is a strict gain in coverage, but it does mean the
+file no longer isolates the serial path — if you need that property back, set
+`Y_NUM_THREADS=1` there explicitly rather than relying on the shapes being
+small, which is exactly the assumption that expired here. That file
 runs each shape under 1/2/3/7/16 threads with a timeout, because the failure
 mode of a miscounted barrier is a hang rather than a wrong answer, and it
 carries the tiny-`N` shapes (33, 15) that the benchmark set cannot express —

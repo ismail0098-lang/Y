@@ -84,6 +84,34 @@ const SHAPES: &[(usize, usize, usize, &str)] = &[
     (512, 512, 512, "packed path, M-split"),
     (37, 2048, 1024, "packed path, ragged M"),
     (1024, 96, 512, "packed path, N narrow enough to force the M cut"),
+    // --- packed path, 2-D `ntm x ntn` grid ---
+    //
+    // The grid replaced a 1-D cut, so what needs covering is that both bands
+    // are computed from the right factor and that a slot outside the grid
+    // presents an empty range on BOTH axes. A shape whose N is a whole number
+    // of NR panels cannot show a band-snapping error, so these are ragged.
+    (600, 600, 600, "square: both extents supply many tiles, so ntm and ntn \
+                     are both > 1"),
+    (517, 389, 733, "ragged on every axis: both bands snap down to a whole \
+                     micro-panel and both last bands take a remainder"),
+    (24, 4096, 2048, "pm = 2 but pn = 128, so the grid must collapse to 1 x nt \
+                      — the old pure-N cut, reached through the new code"),
+    (40, 170, 12000, "pm * pn = 15 caps nt below the work-derived 20, and the \
+                      4 x 3 grid then uses only 12 of them: the other pool \
+                      slots must idle, not recompute a band"),
+    // The shared packed-B path had NO coverage at all before this shape, in
+    // either the tests or the benchmark set, because it needs M*N*K past
+    // SHARE_B_WORK -- 2.1e9 multiply-adds, which is why this one shape roughly
+    // doubles the runtime of the file. It is worth it twice over: it is the
+    // only thing that runs the two per-K-block barriers, and its N is
+    // deliberately 513 rather than 512 so that `pack_b` rounds up to a whole
+    // NR panel. That roundup is what overflowed the `@__y_shared_b` global,
+    // which was sized from the compile-time `kc` while `kc` has been chosen at
+    // runtime since the L3_PANEL_FLOATS rule landed: 1024 x 544 floats written
+    // into a 532,480-float buffer, ~98 KB past the end and straight into the
+    // pool mutex and condition variable that follow it.
+    (192, 513, 22000, "shared packed B: work is past SHARE_B_WORK and pm >= nt, \
+                       with N ragged mod NR so the packed panel rounds up"),
 ];
 
 /// Thread counts to run every shape under. 3 and 7 are there because an
