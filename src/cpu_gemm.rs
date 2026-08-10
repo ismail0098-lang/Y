@@ -570,6 +570,58 @@ pub const SCRATCH_FLOATS: usize =
 /// | 17x4096x4096 | 111 | 168 | 234 | **318** |
 pub const WORK_PER_THREAD: usize = 1 << 16;
 
+/// Multiply-adds a shape must have before it is threaded AT ALL when the pool
+/// is cold — i.e. when workers are blocked on the condvar rather than spinning.
+///
+/// `WORK_PER_THREAD` was measured in a throughput harness, which calls the
+/// kernel back-to-back in a tight loop. The workers never exhaust their spin
+/// window there, so a dispatch is a release store and threading is nearly free.
+/// **That is not the only regime, and the harness is structurally incapable of
+/// seeing the other one.** A caller that does anything at all between GEMMs —
+/// even a `nanosleep(0)` — lets the workers park, and then a dispatch costs a
+/// futex wake and a scheduler round trip.
+///
+/// Measured with `tests/cold_call_cpu_gemm.c`, which times a SINGLE call after
+/// a gap, median over 150 isolated calls, 16 threads against 1:
+///
+/// | shape | work | 1 thread | 16 threads | |
+/// |---|---|---|---|---|
+/// | 56³ | 175,616 | 2.78 us | 24.50 us | **0.11x** |
+/// | 72³ | 373,248 | 6.63 | 23.17 | 0.29x |
+/// | 104³ | 1,124,864 | 14.03 | 26.91 | 0.52x |
+/// | 128³ | 2,097,152 | 19.00 | 27.02 | 0.70x |
+/// | 160³ | 4,096,000 | 43.71 | 32.33 | **1.35x** |
+/// | 200³ | 8,000,000 | 97.11 | 40.71 | **2.39x** |
+///
+/// The 16-thread column is nearly FLAT at ~23-27 us from 56³ to 128³: that is a
+/// fixed ~20 us dispatch cost, and it is the same whether `nt` is 2 or 16, so
+/// it is per-dispatch and not per-thread. Threading therefore pays only once
+/// the single-threaded time exceeds roughly twice it, which the table puts
+/// between 128³ and 160³.
+///
+/// **Raising `POOL_SPIN` does not fix this and makes it worse.** Every larger
+/// value is fast while the caller's gap fits inside the spin window and
+/// catastrophic just past it — at 128³, spin 32768 measures 4.6 us at a 200 us
+/// gap and **175 us** at a 500 us gap, against a uniform 22-28 us for the
+/// shipped 512. A library cannot know the caller's gap, so that is tuning to an
+/// unknown; the cliff is worse than the cost it removes.
+///
+/// So the thread count is chosen from the pool's actual state instead. Only two
+/// data points bracket this constant (128³ loses, 160³ wins), so it is a
+/// bracket, not a fitted value.
+pub const COLD_MIN_WORK: usize = 3 << 20;
+
+/// Nanoseconds since the previous GEMM within which a caller counts as a
+/// throughput caller, so small shapes are still threaded.
+///
+/// The pool's own spin window (`POOL_SPIN`, ~3us) is far too short to use as
+/// this signal, and the pool's parked state is the wrong signal entirely
+/// because it latches — see `emit_threads`. This is a property of the CALLER,
+/// not of the pool: 100us is comfortably longer than any back-to-back GEMM
+/// sequence and far shorter than the gap that made isolated calls measure
+/// 0.11x, so nothing in either measured regime sits near the boundary.
+pub const HOT_WINDOW_NS: usize = 100_000;
+
 /// Work above which threads share one packed B panel instead of each packing
 /// their own.
 ///
@@ -670,6 +722,9 @@ const POOL_MUTEX: &str = "@__y_pool_mutex";
 const POOL_COND: &str = "@__y_pool_cond";
 const POOL_BARRIER: &str = "@__y_pool_barrier";
 const BARRIER_N: &str = "@__y_barrier_n";
+/// Nanosecond timestamp of the previous GEMM call, used to tell a throughput
+/// caller from an isolated one. See `COLD_MIN_WORK`.
+const POOL_LAST_NS: &str = "@__y_pool_last_ns";
 /// One B panel shared by all threads when the split is along M.
 const SHARED_B: &str = "@__y_shared_b";
 
@@ -737,6 +792,7 @@ pub fn emit_globals() -> String {
     let _ = writeln!(&mut s, "declare ptr @getenv(ptr)");
     let _ = writeln!(&mut s, "declare i32 @atoi(ptr)");
     let _ = writeln!(&mut s, "declare i64 @sysconf(i32)");
+    let _ = writeln!(&mut s, "declare i32 @clock_gettime(i32, ptr)");
     let _ = writeln!(
         &mut s,
         "declare i32 @pthread_create(ptr, ptr, ptr, ptr)"
@@ -760,6 +816,11 @@ pub fn emit_globals() -> String {
         &mut s,
         "{} = internal global i64 0, align 8   ; barrier width, 0 = uninitialised",
         BARRIER_N
+    );
+    let _ = writeln!(
+        &mut s,
+        "{} = internal global i64 0, align 8   ; ns timestamp of the last call",
+        POOL_LAST_NS
     );
     // Shared B panel. When every thread walks the same (jc, pc) blocks — the
     // `ntn == 1` column of the grid — they all want the same packed B, and
@@ -2132,11 +2193,58 @@ fn emit_threads() -> String {
     // cannot be allocated, but clamping keeps the comparison meaningful.
     let mn = b.mul(m, n);
     let work = b.mul(&mn, k);
-    let big = b.t();
+    // Threading is only nearly free while the workers are still spinning; once
+    // they park, a dispatch costs ~20us of futex wake and scheduling, flat in
+    // the thread count. So a shape below `COLD_MIN_WORK` is threaded only when
+    // this caller is issuing GEMMs often enough to keep the pool warm.
+    //
+    // **The signal is call FREQUENCY, not the pool's parked state.** Counting
+    // parked workers was tried first and it latches: a small shape reads the
+    // pool as cold, drops to one thread, which means the workers are never
+    // woken, so it reads cold forever. It measured 0.21x on `128^3` in the
+    // throughput harness for exactly that reason. Elapsed time since the
+    // previous call cannot latch — a caller in a tight loop looks hot whether
+    // or not the last call used the pool, so the first threaded call pays the
+    // wake once and every one after it is warm.
+    //
+    // `clock_gettime` is a vDSO call, ~25ns, and the tiny path returns before
+    // reaching here so it never pays it. This is a heuristic; a wrong answer
+    // costs a suboptimal thread count for one call, never correctness.
+    b.entry_alloca("%.ts", "{ i64, i64 }", 8);
+    b.w("call i32 @clock_gettime(i32 1, ptr %.ts)");
+    let tsec = b.t();
     b.w(&format!(
-        "{} = icmp sgt i64 {}, {}",
-        big, work, WORK_PER_THREAD
+        "{} = load i64, ptr %.ts, align 8",
+        tsec
     ));
+    let nsp = b.t();
+    b.w(&format!(
+        "{} = getelementptr inbounds {{ i64, i64 }}, ptr %.ts, i64 0, i32 1",
+        nsp
+    ));
+    let tns = b.t();
+    b.w(&format!("{} = load i64, ptr {}, align 8", tns, nsp));
+    let sec_ns = b.mul(&tsec, "1000000000");
+    let now = b.add(&sec_ns, &tns);
+    let last = b.t();
+    b.w(&format!(
+        "{} = load atomic i64, ptr {} monotonic, align 8",
+        last, POOL_LAST_NS
+    ));
+    b.w(&format!(
+        "store atomic i64 {}, ptr {} monotonic, align 8",
+        now, POOL_LAST_NS
+    ));
+    let since = b.sub(&now, &last);
+    let cold = b.t();
+    b.w(&format!("{} = icmp sgt i64 {}, {}", cold, since, HOT_WINDOW_NS));
+    let floor = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 {}, i64 {}",
+        floor, cold, COLD_MIN_WORK, WORK_PER_THREAD
+    ));
+    let big = b.t();
+    b.w(&format!("{} = icmp sgt i64 {}, {}", big, work, floor));
     let scale_l = b.l("nt.scale");
     let one_l = b.l("nt.one");
     let out_l = b.l("nt.out");

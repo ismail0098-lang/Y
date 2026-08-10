@@ -838,6 +838,81 @@ split it *was* right. Two of the three "just re-measure it" items in the handoff
 turned out this way: the constant was not stale, the thing it was measuring
 had changed.
 
+## The throughput harness cannot see cold calls, and every threading decision was made in it
+
+`tests/benchmark_cpu_gemm.c` times a tight loop, so the pool's workers never
+exhaust their spin window and a dispatch is a release store. **Every threading
+constant in this backend was measured in that regime**, including
+`WORK_PER_THREAD`, which the section above just moved by 64x on its evidence.
+
+A caller that does anything at all between GEMMs is in the other regime. Timing
+a SINGLE call after a gap (`tests/cold_call_cpu_gemm.c`, median over 150
+isolated calls, 16 threads against 1):
+
+| shape | work | 1 thread | 16 threads | |
+|---|---|---|---|---|
+| 56³ | 175,616 | 2.78 us | 24.50 us | **0.11x** |
+| 72³ | 373,248 | 6.63 | 23.17 | 0.29x |
+| 104³ | 1,124,864 | 14.03 | 26.91 | 0.52x |
+| 128³ | 2,097,152 | 19.00 | 27.02 | 0.70x |
+| 160³ | 4,096,000 | 43.71 | 32.33 | **1.35x** |
+| 200³ | 8,000,000 | 97.11 | 40.71 | **2.39x** |
+
+The 16-thread column is nearly **flat at ~23-27 us from 56³ to 128³**. That is a
+fixed dispatch cost, and it is the same at `nt = 2` as at `nt = 16`, so it is
+per-dispatch and not per-thread. Threading pays only once the single-threaded
+time is roughly twice it.
+
+### Two fixes that do not work, and why
+
+**Raising `POOL_SPIN` makes it worse.** The spin window is ~3 us, shorter than
+any realistic inter-call gap, so the pool is almost always parked. Spinning
+longer is fast while the caller's gap fits inside the window and catastrophic
+just past it — at 128³, spin 32768 measures 4.6 us at a 200 us gap and **175 us**
+at a 500 us gap, against a uniform 22-28 us for the shipped 512:
+
+| gap | spin 512 | 8192 | 32768 | 65536 |
+|---|---|---|---|---|
+| 0 us | 23.8 | 5.3 | 4.0 | 4.8 |
+| 100 us | 22.3 | 125.0 | 4.6 | 4.3 |
+| 500 us | 25.3 | 32.6 | **174.8** | 4.6 |
+| 2000 us | 28.0 | 120.6 | **412.6** | **314.7** |
+
+A library cannot know the caller's gap, so every larger value trades a uniform
+cost for a cliff at an unknown location. `POOL_SPIN` stays at 512.
+
+**Counting parked workers latches.** The obvious signal — ask the pool whether
+its workers are blocked — measured **0.21x on `128³`** in the throughput
+harness. A small shape reads the pool as cold, drops to one thread, which means
+the workers are never woken, so it reads cold forever. The heuristic is
+self-reinforcing in the wrong direction.
+
+### What works: the caller's call frequency
+
+Elapsed time since the previous GEMM cannot latch, because it is a property of
+the caller rather than of the pool: a caller in a tight loop looks hot whether
+or not the last call used the pool, so the first threaded call pays the wake
+once and every one after it is warm. Below `COLD_MIN_WORK`, a shape is threaded
+only if the previous call was within `HOT_WINDOW_NS`.
+
+| shape | isolated, before | isolated, after | |
+|---|---|---|---|
+| 56³ | 0.12x | **0.92x** | 7.7x better |
+| 104³ | 0.51x | **1.00x** | |
+| 128³ | 0.64x | **0.98x** | |
+| 160³ | 1.33x | **1.44x** | still threads, still wins |
+| 200³ | 2.45x | 2.40x | |
+
+Throughput is unchanged (geomean 1.07 over seven shapes, everything inside its
+spread), and single-threaded is unchanged (0.995 over four). `clock_gettime` is
+a vDSO call at ~25 ns and the copy-free path returns before reaching it.
+
+**The lesson is about the harness, not the constant.** A benchmark that calls
+the thing under test in a loop is measuring one regime and silently asserting it
+is the only one. Every number in this document above this section is a
+throughput number; that is the right regime for a serving workload and the wrong
+one for a library call, and until this section existed nothing said so.
+
 ## `tiny 48³`: 0.44 -> 1.01, by not packing, not touching C, and not filling the register file
 
 `48³` was the worst ratio in the table at both thread counts, and it is not call
