@@ -274,3 +274,59 @@ fn out_of_subset_constructs_are_refused_with_a_reason() {
         e
     );
 }
+
+// ── `<--` witness hints: bitify / comparators ────────────────────────────────
+//
+// `Num2Bits` computes its witness with `out[i] <-- (in >> i) & 1` and then
+// constrains it with `out[i] * (out[i] - 1) === 0` plus the recomposition
+// `lc1 === in`. The shift has no R1CS form and does not need one — a `<--`
+// right-hand side never becomes a constraint.
+//
+// This front end used to evaluate `<--` through the *constraint* value model
+// and so refused the shift, which made circomlib's own `bitify.circom`
+// uncompilable — and with it `comparators.circom`, `aliascheck.circom`, and
+// every range check and comparison built on them. That is most of a real
+// circuit, so these tests are the coverage gate for the fix.
+//
+// They assert values, not just satisfiability: `Num2Bits`'s recomposition
+// constraint already makes a wrong bit *unsatisfiable*, but only a value check
+// catches bits that are individually valid and in the wrong ORDER.
+
+#[test]
+fn num2bits_decomposition_recomposes_to_its_input() {
+    for x in [0u64, 1, 2, 255, 256, 12345, 65535] {
+        assert_eq!(
+            eval("num2bits_sum.circom", &[x]),
+            x.to_string(),
+            "Num2Bits(16) did not recompose {}",
+            x
+        );
+    }
+}
+
+#[test]
+fn num2bits_bits_are_lsb_first() {
+    // Bit 3 is set exactly when (x >> 3) & 1 == 1. A big-endian decomposition
+    // satisfies every constraint in the circuit and fails this.
+    for x in [0u64, 7, 8, 9, 15, 16, 65535] {
+        assert_eq!(
+            eval("num2bits_bit.circom", &[x]),
+            ((x >> 3) & 1).to_string(),
+            "bit 3 of {} is wrong — decomposition is not LSB-first",
+            x
+        );
+    }
+}
+
+#[test]
+fn lessthan_computes_the_right_answer() {
+    for (a, b) in [(3u64, 5u64), (9, 5), (5, 5), (0, 1), (1, 0), (65535, 65536)] {
+        assert_eq!(
+            eval("lessthan.circom", &[a, b]),
+            if a < b { "1" } else { "0" },
+            "LessThan(32) is wrong for ({}, {})",
+            a,
+            b
+        );
+    }
+}

@@ -324,14 +324,15 @@ spread, because circom is superlinear and Y is linear. So the benchmark's *size*
 produces most of the ratio, and 4 × (244.6 / 1.27) = 771x accounts for
 essentially all of it.
 
-**Coverage caveat, and it is a real one:** Y's circom front end cannot currently
-compile circomlib's `bitify.circom`. `Num2Bits` computes its witness with
-`out[i] <-- (in >> i) & 1`, and although `<--` is a witness hint that never
-becomes a constraint, Y applies its constraint value model to the right-hand
-side and refuses the shift. That rules out `Num2Bits`, `comparators.circom`,
-`aliascheck.circom` and anything built on them — range checks and comparisons,
-which is a large fraction of real circuits. Poseidon and Merkle circuits
-(above) do not need them and compile unmodified.
+**Coverage, and a limit that was just removed:** until 2026-08-11 Y's circom
+front end could not compile circomlib's `bitify.circom`, because `Num2Bits`
+computes its witness with `out[i] <-- (in >> i) & 1` and Y applied its
+*constraint* value model to the `<--` right-hand side — refusing a shift that
+never becomes a constraint. That ruled out `Num2Bits`, `comparators.circom`,
+`aliascheck.circom` and everything built on them: range checks and comparisons,
+i.e. most of a real circuit. Fixed: a 200-wide `Num2Bits(64)` range check is
+13,013 constraints against circom's 13,200, and 300 `LessThan(32)` comparisons
+are 10,220 against 11,100, both from unmodified circomlib.
 
 **Memory is the binding constraint on this backend, not time.** Peak RSS,
 polynomial circuit, measured 2026-08-09:
