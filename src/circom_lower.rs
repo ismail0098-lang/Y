@@ -45,6 +45,40 @@ pub enum Val {
 }
 
 impl Val {
+    /// Consume the value and take its linear combination **without copying**.
+    ///
+    /// `lc(&self)` clones, and the arithmetic helpers take their operands by
+    /// value and then drop them — so every `+` and `*` in a circom source file
+    /// was allocating and copying a `Vec` it was about to throw away. Poseidon's
+    /// combinations are ~28 terms wide and a round touches them constantly,
+    /// which is why lowering cost ~135 allocations per constraint against the
+    /// native emitter's 12.
+    fn into_lc(self) -> Option<LinearCombination> {
+        match self {
+            Val::Const(c) => Some(LinearCombination::constant(c)),
+            Val::Lin(l) => Some(l),
+            Val::Quad(..) => None,
+        }
+    }
+
+    /// Add `self * scale` into `dst` in place.
+    ///
+    /// The point is the `Const` arm: `dst.add_linear(&v.lc().unwrap(), scale)`
+    /// builds a one-term `Vec` purely to pass a reference to it.
+    fn add_into(&self, dst: &mut LinearCombination, scale: Fr) -> bool {
+        match self {
+            Val::Const(c) => {
+                dst.add_constant(c.mul(&scale));
+                true
+            }
+            Val::Lin(l) => {
+                dst.add_linear(l, scale);
+                true
+            }
+            Val::Quad(..) => false,
+        }
+    }
+
     fn lc(&self) -> Option<LinearCombination> {
         match self {
             Val::Const(c) => Some(LinearCombination::constant(*c)),
@@ -653,10 +687,9 @@ impl<'a> Lowerer<'a> {
                 Ok(())
             }
             (x, y) => {
-                let (lx, ly) = (x.lc().unwrap(), y.lc().unwrap());
                 // (lx - ly) * 1 = 0
-                let mut d = lx;
-                d.add_linear(&ly, neg);
+                let mut d = x.into_lc().unwrap();
+                y.add_into(&mut d, neg);
                 d.simplify();
                 self.emitter.push_constraint(
                     d,
@@ -1229,21 +1262,20 @@ impl<'a> Lowerer<'a> {
         Ok(match (a, b) {
             (Val::Const(x), Val::Const(y)) => Val::Const(x.add(&y)),
             (Val::Quad(qa, qb, qc), other) | (other, Val::Quad(qa, qb, qc)) => {
-                let Some(o) = other.lc() else {
+                let mut c = qc;
+                if !other.add_into(&mut c, Fr::one()) {
                     return Err(err(
                         pos,
                         "non-quadratic: the sum of two quadratic expressions exceeds what one R1CS \
                          constraint can hold. Assign one to an intermediate signal first.",
                     ));
-                };
-                let mut c = qc;
-                c.add_linear(&o, Fr::one());
+                }
                 c.simplify();
                 Val::Quad(qa, qb, c)
             }
             (x, y) => {
-                let mut l = x.lc().unwrap();
-                l.add_linear(&y.lc().unwrap(), Fr::one());
+                let mut l = x.into_lc().unwrap();
+                y.add_into(&mut l, Fr::one());
                 l.simplify();
                 Val::Lin(l)
             }
@@ -1259,8 +1291,15 @@ impl<'a> Lowerer<'a> {
                 }
                 match other {
                     Val::Const(_) => unreachable!(),
-                    Val::Lin(l) => Val::Lin(l.scale(k)),
-                    Val::Quad(qa, qb, qc) => Val::Quad(qa.scale(k), qb, qc.scale(k)),
+                    Val::Lin(mut l) => {
+                        l.scale_assign(k);
+                        Val::Lin(l)
+                    }
+                    Val::Quad(mut qa, qb, mut qc) => {
+                        qa.scale_assign(k);
+                        qc.scale_assign(k);
+                        Val::Quad(qa, qb, qc)
+                    }
                 }
             }
             (Val::Lin(x), Val::Lin(y)) => Val::Quad(x, y, LinearCombination::zero()),
