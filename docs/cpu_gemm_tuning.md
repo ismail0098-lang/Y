@@ -1041,49 +1041,54 @@ same mistake in reverse (halving the GPU mainloop's instruction count bought
 ~3%) is recorded above. Do not re-chase this without first establishing *what*
 the loop is actually bound by; the count alone has now been wrong twice.
 
-## Results after the 2-D partition, the thread count and the copy-free path
+## Results: everything above, measured together on HEAD
 
 Strict A/B: one shape per process, arms interleaved within a launch, arm order
 rotated between launches, four launches, ranked by the best. OpenBLAS measured
-in the **same session**. `head` is the previous revision, `new` is all of the
-above together.
+in the **same session**, and the benchmark binary verified byte-identical to a
+build from HEAD. `head` is the previous revision.
 
-| shape | head | new | new/head | OpenBLAS | head/OB | **new/OB** |
+| shape | head | final | final/head | OpenBLAS | head/OB | **final/OB** |
 |---|---|---|---|---|---|---|
-| ragged 250³ | 603.6 | **1733.2** | **2.87x** | 599.9 | 1.01 | **2.89** |
-| ragged 333x777x64 | 670.9 | **1415.9** | **2.11x** | 512.0 | 1.31 | **2.77** |
-| gemv 1x4096x4096 | 101.6 | **209.7** | **2.06x** | 52.1 | 1.95 | **4.03** |
-| nice 256³ | 871.1 | **1703.3** | **1.96x** | 791.1 | 1.10 | **2.15** |
-| tiny 48³ | 126.8 | **289.1** | **2.28x** | 287.0 | 0.45 | **1.01** |
-| ragged 137x391x1013 | 1009.6 | **1589.9** | **1.58x** | 949.5 | 1.06 | **1.67** |
-| nice 512³ | 1975.7 | 2276.7 | 1.15x | 1723.8 | 1.15 | **1.32** |
-| nice 1024³ | 2315.4 | 2635.9 | 1.14x | 2694.2 | 0.86 | 0.98 |
-| skinny 17x4096x4096 | 532.0 | 568.0 | 1.07x | 630.5 | 0.84 | 0.90 |
-| decode 8x4096x4096 | 606.3 | 645.1 | 1.06x | 343.0 | 1.77 | **1.88** |
-| ragged 1021³ prime | 2326.3 | 2475.0 | 1.06x | 2695.3 | 0.86 | 0.92 |
-| deepK 64x64x32768 | 759.2 | 785.8 | 1.04x | 440.5 | 1.72 | **1.78** |
-| ragged 1000³ | 2419.9 | 2505.0 | 1.04x | 2750.0 | 0.88 | 0.91 |
-| gemv 1x8192x8192 | 33.9 | 34.2 | 1.01x | 15.1 | 2.25 | **2.27** |
-| nice 2048³ | 2746.2 | 2691.4 | 0.98x | 3406.7 | 0.81 | 0.79 |
-| skinny 33x4096x4096 | 874.5 | 861.0 | 0.98x | 999.8 | 0.87 | 0.86 |
-| flatK 4096x4096x8 | 502.5 | 475.8 | 0.95x | 366.0 | 1.37 | **1.30** |
-| decode 4x4096x4096 | 550.8 | 509.6 | 0.93x | 186.5 | 2.95 | **2.73** |
+| ragged 250³ | 581.7 | **1931.2** | **3.32x** | 681.2 | 0.85 | **2.84** |
+| gemv 1x4096x4096 | 112.0 | **271.8** | **2.43x** | 56.1 | 2.00 | **4.85** |
+| tiny 48³ | 125.3 | **288.2** | **2.30x** | 287.1 | 0.44 | **1.00** |
+| ragged 333x777x64 | 646.9 | **1450.0** | **2.24x** | 553.0 | 1.17 | **2.62** |
+| nice 256³ | 854.5 | **1912.0** | **2.24x** | 809.3 | 1.06 | **2.36** |
+| ragged 137x391x1013 | 945.6 | **1562.0** | **1.65x** | 919.4 | 1.03 | **1.70** |
+| nice 512³ | 1712.4 | 2073.8 | 1.21x | 1842.2 | 0.93 | **1.13** |
+| nice 1024³ | 2652.5 | 3019.5 | 1.14x | 2792.4 | 0.95 | **1.08** |
+| ragged 1021³ prime | 2321.0 | 2504.2 | 1.08x | 2630.0 | 0.88 | 0.95 |
+| skinny 33x4096x4096 | 894.8 | 965.9 | 1.08x | 1033.6 | 0.87 | 0.93 |
+| nice 2048³ | 2531.9 | 2641.5 | 1.04x | 3270.3 | 0.77 | 0.81 |
+| decode 8x4096x4096 | 653.8 | 652.5 | 1.00x | 370.5 | 1.76 | **1.76** |
+| gemv 1x8192x8192 | 35.7 | 35.6 | 1.00x | 17.4 | 2.06 | **2.05** |
+| flatK 4096x4096x8 | 486.2 | 482.4 | 0.99x | 301.1 | 1.61 | **1.60** |
+| decode 4x4096x4096 | 655.7 | 636.8 | 0.97x | 205.3 | 3.19 | **3.10** |
+| ragged 1000³ | 2393.4 | 2300.8 | 0.96x | 2699.1 | 0.89 | 0.85 |
+| skinny 17x4096x4096 | 594.6 | 571.0 | 0.96x | 677.2 | 0.88 | 0.84 |
+| deepK 64x64x32768 | 711.8 | 676.9 | 0.95x | 616.9 | 1.15 | **1.10** |
 
-**Geomean new/head 1.29. Against OpenBLAS: 1.17 -> 1.51, Y ahead on 11 of 18
-both before and after.**
+**Geomean final/head 1.35. Against OpenBLAS: 1.13 -> 1.52, Y ahead on 9 -> 13
+of 18.**
 
-Read the win count next to the geomean, not instead of it: the same eleven
-shapes win, and what moved is how much. Nothing regressed outside the ±7% noise
-floor — the four sub-1.0 rows are 0.93–0.98 at spreads of 13–26%, which is a tie
-by this instrument's own resolution.
+Nothing regressed outside the +/-7% noise floor: the six sub-1.0 rows are
+0.95-0.99 at spreads of 6-29%, which is a tie by this instrument's own
+resolution.
 
-The remaining deficits are `2048³` 0.79, `skinny 33` 0.86, `skinny 17` 0.90,
-`1000³` 0.91, `1021³` 0.92 and `1024³` 0.98. (`tiny 48³` is listed here at the
-0.78 it measured before the accumulator-budget sweep; it is **1.01** now, and
-the geomean below therefore understates the shipped state by about 2%.) `2048³` is the
-only large square still behind, and it is the one shape where the grid stands
-down in favour of shared packed-B — see gap 10, which is the concrete way to
-attack it.
+**Read this by class, not by the mean.** The gains are concentrated where Y was
+previously *under-threading* its own kernel — small and ragged shapes that the
+old `WORK_PER_THREAD` refused to split. That was self-inflicted, and fixing it
+is worth less than "1.52x faster than OpenBLAS" sounds. The large squares moved
+much less: `2048³` 0.81, `1000³` 0.85, `1021³` 0.95, `1024³` 1.08. **A reader
+who cares about large square GEMM should read those four numbers and ignore the
+geomean**, which is sensitive to how many small shapes the set happens to
+contain.
+
+Note also `head/OB` reads 1.13 here against 1.17 and 1.25 in two earlier
+sessions on the identical binary. That is OpenBLAS's own column moving between
+sessions, and it is exactly why both arms and the baseline are measured
+together.
 
 ### Single-threaded, which is the control that matters
 
