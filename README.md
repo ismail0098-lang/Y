@@ -232,18 +232,37 @@ have been removed.
 ### Proving cost, end to end
 
 `cargo test --release --features zk --test zk_groth16_scale -- --ignored`,
-measured 2026-08-09. Y has no prover of its own and performs no trusted setup —
-setup and prove are arkworks, reached through Y's R1CS.
+measured 2026-08-09; the 10M and 31M rows 2026-08-10. Y has no prover of its own
+and performs no trusted setup — setup and prove are arkworks, reached through
+Y's R1CS.
 
-| Constraints | emit | witness | setup | prove | verify | total |
-|---|---|---|---|---|---|---|
-| 10,000 | 0.01 s | 0.00 s | 0.04 s | 0.05 s | 0.002 s | **0.11 s** |
-| 100,000 | 0.12 s | 0.01 s | 0.40 s | 0.36 s | 0.002 s | **0.89 s** |
-| 1,000,000 | 1.25 s | 0.09 s | 2.83 s | 2.99 s | 0.002 s | **7.17 s** |
+| Constraints | emit | witness | setup | prove | verify | total | peak RSS |
+|---|---|---|---|---|---|---|---|
+| 10,000 | 0.01 s | 0.00 s | 0.04 s | 0.05 s | 0.002 s | **0.11 s** | |
+| 100,000 | 0.12 s | 0.01 s | 0.40 s | 0.36 s | 0.002 s | **0.89 s** | |
+| 1,000,000 | 1.25 s | 0.09 s | 2.83 s | 2.99 s | 0.002 s | **7.17 s** | |
+| 10,000,000 | 11.70 s | 0.92 s | 30.73 s | 39.90 s | 0.002 s | **83.25 s** | 31.8 GB |
+| 31,000,000 | 40.35 s | 2.83 s | **OOM** | — | — | — | >40 GB |
 
-arkworks is **81%** of that total. The remaining headroom is in a prover Y does
-not have, so "Y compiles circuits 278x faster than circom" and "Y produces
-proofs faster" are different claims and only the first is supported.
+arkworks is **81%** of the 1M total and **85%** of the 10M one — its share grows
+with size. The remaining headroom is in a prover Y does not have, so "Y compiles
+circuits 278x faster than circom" and "Y produces proofs faster" are different
+claims and only the first is supported.
+
+**31M constraints cannot be proved on this machine, and the row says so rather
+than estimating it.** Under `systemd-run -p MemoryMax=40G -p MemorySwapMax=0`,
+31M reaches the 40 GB cap and is OOM-killed 56 s in, still inside
+`circuit_specific_setup`. Emit and witness — the half Y owns — finish in 43 s at
+30.2 GB. (That is higher than the 11.4 GB the memory table above reports for the
+same size because this harness holds the circuit, the witness IR and the solved
+witness live at once, where `--target=r1cs` streams the constraints to disk and
+drops them. Same circuit, different question.) The wall is Groth16's proving
+key, which holds `num_variables` G1 points for each of `a`, `b_g1` and `l`, as
+many G2 points for `b_g2`, and a domain-sized `h`; at ~3 GB per million
+constraints on this circuit, 31M needs on the order of 100 GB. That is a
+property of the prover and the curve, not of Y's emitter, which is why the
+constraint-emission ceiling in the memory table above (105M on this circuit) is
+so much higher than the *proving* ceiling (~10M).
 
 ### Correctness
 
