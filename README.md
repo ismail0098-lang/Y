@@ -240,6 +240,49 @@ same claim and only the first is measured.
 polynomial circuit is the strictly like-for-like comparison: same non-linear
 count, zero linear constraints on either side, same artifact.
 
+### What it looks like on circuits people actually build
+
+**Neither 278x nor 773x survives contact with a real circuit, and the honest
+range is 1.0–1.4x.** Both benchmark circuits are single unrolled loops a million
+iterations long, which is the shape circom is worst at; real circuits are built
+from hash and range-check gadgets. Measured 2026-08-11 on an idle box, minimum
+of five, **circom source compiled by both tools** so the front end is not a
+variable:
+
+| circuit (circom input) | Y | circom | speedup | Y cons. | circom cons. |
+|---|---|---|---|---|---|
+| `Poseidon(2)` | 0.075 s | 0.102 s | **1.36x** | 286 | 486 |
+| Merkle inclusion, depth 20 | 0.117 s | 0.151 s | **1.29x** | 5,685 | 9,840 |
+| Poseidon chain, 200 hashes | 0.697 s | 0.684 s | **0.98x** | 55,608 | 97,200 |
+
+**Read the last row as a tie, not a win.** The durable result on this input is
+not speed at all — it is that Y emits **1.70–1.75x fewer constraints** for the
+same circuit, which is worth roughly 1.4x at Groth16 proving time (not 1.7x: the
+substitution pass does not compact wires).
+
+On Y's *own* `.ysu` front end the same 200-hash chain is **0.184 s against
+circom's 0.677 s (3.68x)** at 47,404 constraints against 97,200, because
+`poseidon_hash` folds its linear layers as it builds them. That is a real
+number, but it is Y-language-to-circom-language and so not the same comparison
+as the table above.
+
+**Where the 773x actually goes**, since it is 550x larger than any row here:
+circom emits 4x the constraints on the dot product, and costs **244.6 µs per
+constraint** at that size against Y's 1.27 µs. Circom's own per-constraint cost
+is not a constant — it is 7.0 µs on the Poseidon chain and 244.6 µs at 1M, a 35x
+spread, because circom is superlinear and Y is linear. So the benchmark's *size*
+produces most of the ratio, and 4 × (244.6 / 1.27) = 771x accounts for
+essentially all of it.
+
+**Coverage caveat, and it is a real one:** Y's circom front end cannot currently
+compile circomlib's `bitify.circom`. `Num2Bits` computes its witness with
+`out[i] <-- (in >> i) & 1`, and although `<--` is a witness hint that never
+becomes a constraint, Y applies its constraint value model to the right-hand
+side and refuses the shift. That rules out `Num2Bits`, `comparators.circom`,
+`aliascheck.circom` and anything built on them — range checks and comparisons,
+which is a large fraction of real circuits. Poseidon and Merkle circuits
+(above) do not need them and compile unmodified.
+
 **Memory is the binding constraint on this backend, not time.** Peak RSS,
 polynomial circuit, measured 2026-08-09:
 
