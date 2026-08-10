@@ -175,8 +175,10 @@ circomlib's own template. Y emits 241 constraints per hash against circom's 243
 non-linear + 274 linear, so the circuits are comparable and Y's is slightly
 smaller.
 
-The documented **13.5x deficit on Poseidon is gone**, without touching the
-polynomial circuit's 154x lead and without moving a single pinned digest.
+The documented **13.5x deficit on Poseidon is gone**, and without moving a single
+pinned digest. The polynomial circuit's lead was not left alone either — it went
+from 154x to **261x**, because that circuit's emit dropped 1.60 s → 0.94 s for
+the same reasons. Both benchmarks moved; only one of them was the target.
 
 ### The prove path at 1M constraints (polynomial circuit)
 
