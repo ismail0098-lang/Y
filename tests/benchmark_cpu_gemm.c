@@ -106,6 +106,17 @@ static const Shape SHAPES[] = {
     {    1, 4096, 4096, "gemv    1x4096x4096"},
     {    1, 8192, 8192, "gemv    1x8192x8192"},
     {   48,   48,   48, "tiny    48^3"},
+    /* Appended, so indices 0-17 keep the meaning the docs and the harnesses
+       quote.  The benchmark set jumps straight from 48^3 (110 KMAC) to 250^3
+       (15.6 MMAC), which is a 140x gap with nothing in it -- and the crossover
+       between the copy-free path and the packed one lives inside that gap, so
+       it could not be located with the shapes that were here.  N stays <= 64
+       on the first three because that is the copy-free path's structural
+       limit; the fourth is past it and is the control. */
+    {   64,   64,   64, "small   64^3"},
+    {  128,   64,  128, "small   128x64x128"},
+    {  256,   64,  256, "small   256x64x256"},
+    {  128,  128,  128, "small   128^3"},
 };
 #define NSHAPES ((int)(sizeof(SHAPES) / sizeof(SHAPES[0])))
 

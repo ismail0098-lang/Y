@@ -568,7 +568,7 @@ pub const SCRATCH_FLOATS: usize =
 /// | 512^3 | 372 | 487 | **576** | 483 |
 /// | 64x64x32768 | 168 | **257** | 160 | 157 |
 /// | 17x4096x4096 | 111 | 168 | 234 | **318** |
-pub const WORK_PER_THREAD: usize = 4 << 20;
+pub const WORK_PER_THREAD: usize = 1 << 16;
 
 /// Work above which threads share one packed B panel instead of each packing
 /// their own.
@@ -592,6 +592,54 @@ pub const WORK_PER_THREAD: usize = 4 << 20;
 /// per operand; 1024³ moves 4 MB and simply stays cached however many times it
 /// is re-read.
 pub const SHARE_B_WORK: usize = 2 << 30;
+
+/// Widest `N` the copy-free tiny path can serve.
+///
+/// This one is STRUCTURAL, not tuned: `N` lives in `N/16` accumulator vectors
+/// per row and there are 32 zmm registers. Raising it past 64 does not make the
+/// kernel slower by a little, it makes LLVM spill the accumulators — which is
+/// the entire thing the path exists to avoid.
+pub const TINY_MAX_N: usize = 64;
+
+/// `(vectors of N, rows blocked per tile)`, one specialised body each.
+///
+/// The product is held at 24 accumulators, leaving the other 8 registers for
+/// the `nv` B vectors and the A broadcast. `nv` cannot be a runtime value: the
+/// accumulator count decides the register allocation, so a data-dependent one
+/// puts C back in memory.
+const TINY_BLOCK: [(usize, usize); 4] = [(1, 24), (2, 12), (3, 8), (4, 6)];
+
+/// Multiply-adds below which the copy-free path replaces the packed one.
+///
+/// MEASURED, and the first guess (`1 << 18`) was wrong at its own boundary.
+/// Against the packed path, 16 threads, four interleaved launches:
+///
+/// | shape | work | copy-free | packed | ratio |
+/// |---|---|---|---|---|
+/// | 48^3 | 110,592 | **230.1** | 127.2 | **1.81x** |
+/// | 64^3 | 262,144 | 251.9 | **334.4** | **0.75x** |
+///
+/// So the crossover is bracketed between those two, and `1 << 18` = 262,144 sat
+/// exactly on the losing side of it.
+///
+/// The reason is NOT the packing, which is what the original argument assumed.
+/// **This path is single-threaded by construction** — C lives in registers
+/// across the whole K loop, which is the entire point and is why it cannot be
+/// split — so its advantage ends where the shape becomes worth threading at
+/// all. With `WORK_PER_THREAD` at `1 << 16`, a shape of 262,144 multiply-adds
+/// gets four threads, and four threads on the packed path beat one thread on a
+/// better kernel.
+///
+/// That makes this constant and `WORK_PER_THREAD` related in fact, and it is
+/// deliberately NOT written as a formula over it. A constant that is also a
+/// guard reading another constant is how `SM_PU = 8` came to look
+/// catastrophic; if `WORK_PER_THREAD` moves, **re-measure this** rather than
+/// letting it drift silently.
+///
+/// Set to the conservative end of the bracket: routing a shape to the packed
+/// path too early costs 0.75x at worst (measured at 64^3), while routing it
+/// there too late costs 0.55x (measured at 48^3).
+pub const TINY_MAX_WORK: usize = 1 << 17;
 
 /// Depth of K below which the small-M path is not worth splitting along K.
 ///
@@ -713,15 +761,33 @@ pub fn emit_globals() -> String {
         "{} = internal global i64 0, align 8   ; barrier width, 0 = uninitialised",
         BARRIER_N
     );
-    // Shared B panel. When the split is along M every thread walks the same
-    // (jc, pc) blocks and therefore wants the same packed B; packing it once
-    // instead of once per thread is the difference between adding a thread
-    // splitting the work and adding a thread that also re-reads all of B.
+    // Shared B panel. When every thread walks the same (jc, pc) blocks — the
+    // `ntn == 1` column of the grid — they all want the same packed B, and
+    // packing it once instead of once per thread is the difference between
+    // adding a thread that splits the work and adding a thread that also
+    // re-reads all of B.
+    //
+    // Sized for the LARGEST `kc` the runtime rule can produce, not for the
+    // tile's `kc`, exactly as `SCRATCH_FLOATS` is. It used to be
+    // `tl().kc * (tl().nc + tl().nr)`, which is only correct while `kc` stays
+    // at its compile-time 256 — and `kc` has been chosen at runtime since the
+    // `L3_PANEL_FLOATS` rule landed. `pack_b` writes `kc * roundup(nc, NR)`
+    // floats, and `kc*nc` is pinned to `L3_PANEL_FLOATS / nthr` by that rule,
+    // so at `nthr = 16` the write is 524,288 floats against a 532,480-float
+    // buffer: it fits by 1.5%, and the roundup to a whole NR panel is enough to
+    // break it. `192 x 513 x 22000` overflows this global by ~92 KB into the
+    // pool mutex and condvar that follow it. Nothing in the benchmark set has a
+    // ragged N at a work size past `SHARE_B_WORK`, so nothing caught it.
+    //
+    // The bound is now structural rather than arithmetic: `kc <= KC_MAX` and
+    // `roundup(nc, NR) <= NC_MAX + NR_MAX` hold whatever the runtime rule does.
+    // It is BSS, so the pages a smaller panel never touches are never faulted
+    // in and cost nothing resident.
     let _ = writeln!(
         &mut s,
         "{} = internal global [{} x float] zeroinitializer, align 64",
         SHARED_B,
-        tl().kc * (tl().nc + tl().nr)
+        KC_MAX * (NC_MAX + NR_MAX)
     );
     // Over-sized and initialised by call rather than by relying on the
     // all-zero glibc static initialisers, so the layout is not assumed.
@@ -1385,6 +1451,194 @@ fn emit_small_m() -> String {
          ptr {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, \
          i64 {}, i64 {})",
         a, bb, c, _m, n, k, ldc, m0, m1, n0, n1, k0, k1
+    ))
+}
+
+/// `__y_gemm_tiny(A, B, C, M, N, K)` — the copy-free path: no packing at all,
+/// A and B read in place, and the whole `MR' x N` block of C held in registers
+/// across the entire K loop.
+///
+/// The packed path exists to make B's access pattern linear and to amortise
+/// that cost over many row panels. Below roughly `MC x NC` there are no row
+/// panels to amortise against, and at `48^3` the pack moves 4,608 floats to
+/// support 110,592 multiply-adds — while OpenBLAS, whose own `SMALL_MATRIX_OPT`
+/// is disabled on ZEN so it is using its *ordinary* packed path, was still
+/// 2.3x ahead. So the pack is not the whole story and the arithmetic says so:
+/// what this kernel removes as well is every C round trip. The packed
+/// micro-kernel writes C once per `kc`-block per micro-panel; here C is loaded
+/// never and stored exactly once.
+///
+/// `N` is capped at `TINY_MAX_N` because it is held in registers: `nv = N/16`
+/// accumulator vectors per row, `MR' x nv <= 24` of the 32 zmm registers, with
+/// the rest for the `nv` B vectors and the A broadcast. Hence one specialised
+/// body per `nv`, with its own row block — a runtime `nv` would put the
+/// accumulators in memory and defeat the entire point.
+///
+/// Rows past `mw` in the final row block are not branched around; their A
+/// element is forced to zero and the FMA runs anyway, so the K loop stays a
+/// straight-line register chain. The waste is bounded by one row block on one
+/// tile, and only when `M % MR' != 0`.
+fn emit_tiny() -> String {
+    let mut b = IrBuilder::new();
+    let (a, bb, c, m, n, k) = ("%A", "%B", "%C", "%M", "%N", "%K");
+
+    for (nv, mrv) in TINY_BLOCK {
+        for i in 0..mrv {
+            for v in 0..nv {
+                b.entry_alloca(&format!("%ty{}a{}_{}", nv, i, v), "<16 x float>", 64);
+            }
+        }
+    }
+
+    let done_l = b.l("ty.done");
+    let entries: Vec<String> = TINY_BLOCK
+        .iter()
+        .map(|(nv, _)| b.l(&format!("ty.v{}", nv)))
+        .collect();
+
+    // Pick the body by N. The caller has already checked `N <= TINY_MAX_N`, so
+    // the final `else` is the widest body and needs no test of its own.
+    for (idx, entry) in entries.iter().enumerate().take(TINY_BLOCK.len() - 1) {
+        let next = b.l("ty.pick");
+        let cnd = b.t();
+        b.w(&format!(
+            "{} = icmp sle i64 {}, {}",
+            cnd,
+            n,
+            (idx + 1) * 16
+        ));
+        b.w(&format!(
+            "br i1 {}, label %{}, label %{}",
+            cnd, entry, next
+        ));
+        b.out.push_str(&format!("{}:\n", next));
+    }
+    b.w(&format!("br label %{}", entries[TINY_BLOCK.len() - 1]));
+
+    for (idx, (nv, mrv)) in TINY_BLOCK.iter().enumerate() {
+        let (nv, mrv) = (*nv, *mrv);
+        b.out.push_str(&format!("{}:\n", entries[idx]));
+
+        // Only the LAST vector of a row can be ragged, and its mask is
+        // loop-invariant, so it is built once out here rather than per K-step.
+        let rem = b.sub(n, &((nv - 1) * 16).to_string());
+        let mask = lane_mask(&mut b, &rem);
+
+        let il = b.loop_begin("ty.i", "0", m, &mrv.to_string());
+        let i0 = b.iv(&il);
+        let rm = b.sub(m, &i0);
+        let mw = b.imin(&rm, &mrv.to_string());
+        for i in 0..mrv {
+            for v in 0..nv {
+                b.w(&format!(
+                    "store <16 x float> zeroinitializer, ptr %ty{}a{}_{}, align 64",
+                    nv, i, v
+                ));
+            }
+        }
+
+        let pl = b.loop_begin("ty.p", "0", k, "1");
+        let p = b.iv(&pl);
+
+        // One row of B, in place: N contiguous floats at row stride N.
+        let bo = b.mul(&p, n);
+        let brow = b.gep("float", bb, &bo);
+        let mut bv = Vec::new();
+        for v in 0..nv {
+            let q = b.gep("float", &brow, &(v * 16).to_string());
+            let t = b.t();
+            if v == nv - 1 {
+                b.w(&format!(
+                    "{} = call <16 x float> @llvm.masked.load.v16f32.p0(ptr {}, i32 4, \
+                     <16 x i1> {}, <16 x float> zeroinitializer)",
+                    t, q, mask
+                ));
+            } else {
+                b.w(&format!("{} = load <16 x float>, ptr {}, align 4", t, q));
+            }
+            bv.push(t);
+        }
+
+        // One column of A, in place: stride K between rows, broadcast per row.
+        for i in 0..mrv {
+            let ic = i.to_string();
+            let live = b.t();
+            b.w(&format!("{} = icmp slt i64 {}, {}", live, ic, mw));
+            let row = b.add(&i0, &ic);
+            let ro = b.mul(&row, k);
+            let off = b.add(&ro, &p);
+            // A dead row reads element 0 and is zeroed, so the load stays in
+            // bounds and the FMA below contributes nothing.
+            let soff = b.t();
+            b.w(&format!("{} = select i1 {}, i64 {}, i64 0", soff, live, off));
+            let q = b.gep("float", a, &soff);
+            let raw = b.t();
+            b.w(&format!("{} = load float, ptr {}, align 4", raw, q));
+            let val = b.t();
+            b.w(&format!(
+                "{} = select i1 {}, float {}, float 0.0",
+                val, live, raw
+            ));
+            let av = splat(&mut b, &val);
+            for v in 0..nv {
+                let name = format!("%ty{}a{}_{}", nv, i, v);
+                let cur = b.t();
+                b.w(&format!("{} = load <16 x float>, ptr {}, align 64", cur, name));
+                let nx = b.t();
+                b.w(&format!(
+                    "{} = call <16 x float> @llvm.fmuladd.v16f32(<16 x float> {}, \
+                     <16 x float> {}, <16 x float> {})",
+                    nx, av, bv[v], cur
+                ));
+                b.w(&format!("store <16 x float> {}, ptr {}, align 64", nx, name));
+            }
+        }
+        b.loop_end(pl);
+
+        // C is STORED, never loaded: this path owns all of K, so there is no
+        // previous K-block to accumulate onto.
+        for i in 0..mrv {
+            let ic = i.to_string();
+            let live = b.t();
+            b.w(&format!("{} = icmp slt i64 {}, {}", live, ic, mw));
+            let st_l = b.l("ty.st");
+            let sk_l = b.l("ty.sk");
+            b.w(&format!("br i1 {}, label %{}, label %{}", live, st_l, sk_l));
+            b.out.push_str(&format!("{}:\n", st_l));
+            let row = b.add(&i0, &ic);
+            let ro = b.mul(&row, n);
+            for v in 0..nv {
+                let off = b.add(&ro, &(v * 16).to_string());
+                let q = b.gep("float", c, &off);
+                let name = format!("%ty{}a{}_{}", nv, i, v);
+                let cur = b.t();
+                b.w(&format!("{} = load <16 x float>, ptr {}, align 64", cur, name));
+                if v == nv - 1 {
+                    b.w(&format!(
+                        "call void @llvm.masked.store.v16f32.p0(<16 x float> {}, ptr {}, \
+                         i32 4, <16 x i1> {})",
+                        cur, q, mask
+                    ));
+                } else {
+                    b.w(&format!("store <16 x float> {}, ptr {}, align 4", cur, q));
+                }
+            }
+            b.w(&format!("br label %{}", sk_l));
+            b.out.push_str(&format!("{}:\n", sk_l));
+        }
+        b.loop_end(il);
+        b.w(&format!("br label %{}", done_l));
+    }
+
+    b.out.push_str(&format!("{}:\n", done_l));
+    b.finish(&format!(
+        // `C` is deliberately NOT `noalias`, matching `__y_gemm_run`. It buys
+        // nothing here — the accumulators are allocas and every C store is
+        // outside the K loop, so no B load can be clobbered by one — and a
+        // `noalias` the caller does not honour is a silent miscompile.
+        "define internal void @__y_gemm_tiny(ptr noalias {}, ptr noalias {}, \
+         ptr {}, i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k
     ))
 }
 
@@ -2064,6 +2318,43 @@ fn emit_entry() -> String {
     let mut b = IrBuilder::new();
     let (a, bb, c, m, n, k) = ("%A", "%B", "%C", "%M", "%N", "%K");
 
+    // The copy-free path, before anything else looks at this shape.
+    //
+    // Deliberately ahead of the thread count, the pool and the partition: a
+    // shape this small is single-threaded anyway (`WORK_PER_THREAD` alone
+    // settles that), and putting the test here means the tiny path cannot
+    // interact with the barrier or the grid at all. `M > SM_MAX_M` keeps it
+    // clear of `__y_gemm_small_m`, which is already copy-free and is tuned for
+    // the very different `M <= 8` shape.
+    let mn0 = b.mul(m, n);
+    let work0 = b.mul(&mn0, k);
+    let tw = b.t();
+    b.w(&format!(
+        "{} = icmp sle i64 {}, {}",
+        tw, work0, TINY_MAX_WORK
+    ));
+    let tn = b.t();
+    b.w(&format!("{} = icmp sle i64 {}, {}", tn, n, TINY_MAX_N));
+    let tm = b.t();
+    b.w(&format!("{} = icmp sgt i64 {}, {}", tm, m, SM_MAX_M));
+    let t0 = b.t();
+    b.w(&format!("{} = and i1 {}, {}", t0, tw, tn));
+    let is_tiny = b.t();
+    b.w(&format!("{} = and i1 {}, {}", is_tiny, t0, tm));
+    let tiny_l = b.l("e.tiny");
+    let notiny_l = b.l("e.notiny");
+    b.w(&format!(
+        "br i1 {}, label %{}, label %{}",
+        is_tiny, tiny_l, notiny_l
+    ));
+    b.out.push_str(&format!("{}:\n", tiny_l));
+    b.w(&format!(
+        "call void @__y_gemm_tiny(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k
+    ));
+    b.w("ret void");
+    b.out.push_str(&format!("{}:\n", notiny_l));
+
     let nt = b.t();
     b.w(&format!(
         "{} = call i64 @__y_gemm_threads(i64 {}, i64 {}, i64 {})",
@@ -2166,23 +2457,34 @@ fn emit_entry() -> String {
     let scratch = b.t();
     b.w(&format!("{} = load ptr, ptr {}, align 8", scratch, SCRATCH));
 
-    // Choose the split axis by which one yields more whole micro-tiles, and
-    // then cap the thread count by that.
+    // Partition C over a 2-D `ntm x ntn` grid of threads, and cap the thread
+    // count by the number of whole micro-tiles the two extents can supply.
     //
-    // The previous rule cut M only when `M >= nt * MR` and fell back to N
-    // otherwise, which inverts badly when both extents are small: at
-    // 64x64x32768 with 16 threads, M=64 fails `>= 192`, so N=64 was cut into
-    // two useful NR slices and fourteen threads got nothing — 157 GFLOPS where
-    // four threads cutting M reach 257.
+    // The rule before this one cut exactly ONE axis, choosing whichever yielded
+    // more whole micro-tiles. That caps a shape small in both extents at
+    // `max(M/MR, N/NR)` threads, and — more expensively on the large square
+    // shapes — it makes the packing redundancy maximal. Under a 16-way M-split
+    // every thread packs the SAME full-width B, so B is packed 16 times and 16
+    // copies of the packed panel are live in L3 at once; under a 16-way N-split
+    // the same is true of A. A 4x4 grid packs each operand 4 times instead.
+    //
+    // This is exactly what OpenBLAS does (`driver/level3/level3_thread.c`,
+    // `nthreads_m x nthreads_n` with the `switch_ratio` guard), including the
+    // objective function used to pick the factorisation: minimise
+    // `N*ntm + M*ntn`, which is the sum of the two per-thread block edges and
+    // so prefers square blocks. At 2048^3 on 16 threads their rule and this one
+    // both choose 4x4.
+    //
+    // `pm`/`pn` are whole micro-tiles, so a factor can never be handed a band
+    // narrower than one micro-panel.
     let pm = b.t();
     b.w(&format!("{} = sdiv i64 {}, {}", pm, m, tl().mr));
     let pm = b.imax(&pm, "1");
     let pn = b.t();
     b.w(&format!("{} = sdiv i64 {}, {}", pn, n, tl().nr));
     let pn = b.imax(&pn, "1");
-    let cut_m_raw = b.t();
-    b.w(&format!("{} = icmp sge i64 {}, {}", cut_m_raw, pm, pn));
-    let par_mn = b.imax(&pm, &pn);
+    // The 1-D cap was `max(pm, pn)`; a grid can use the product.
+    let par_mn = b.mul(&pm, &pn);
 
     // Cut K instead, for the shapes that go to `__y_gemm_small_m`.
     //
@@ -2220,20 +2522,6 @@ fn emit_entry() -> String {
     let ksplit = b.t();
     b.w(&format!("{} = zext i1 {} to i64", ksplit, cut_k));
 
-    // The K-split OVERRIDES the M/N choice, and every consumer of `cut_m` has
-    // to see that. `cut_m` is `pm >= pn`, and at `N = 33` with `nr = 64` we get
-    // `pn = 0 -> 1` and `pm = 1`, so `cut_m` is *true* for a shape whose M is 8.
-    // The task fill then assigned `lo`/`hi` — which under the K-split are the
-    // reduction's COLUMN bounds — to the M range instead. Thread 0's band came
-    // out empty, so it took the driver's early return, never arrived at a
-    // barrier sized for three threads, and the dispatcher spun forever.
-    // Caught by `tests/cpu_gemm_threaded.rs` at N=33 and N=15; every shape with
-    // `N >= nr` hid it, which is every shape in the benchmark.
-    let not_ck = b.t();
-    b.w(&format!("{} = xor i1 {}, true", not_ck, cut_k));
-    let cut_m = b.t();
-    b.w(&format!("{} = and i1 {}, {}", cut_m, cut_m_raw, not_ck));
-
     // A K-band shorter than this leaves the reduction dominating, so cap the
     // thread count by it rather than handing out slivers.
     let pk = b.t();
@@ -2246,32 +2534,108 @@ fn emit_entry() -> String {
     ));
     let nt = b.imin(&nt, &par);
 
-    // The reduction's column band is snapped to a whole vector, like the N-split
-    // it replaces; the K-band itself has no alignment to respect.
-    let axis0 = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 {}",
-        axis0, cut_m, m, n
-    ));
-    let axis = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 {}",
-        axis, cut_k, n, axis0
-    ));
-    let gran0 = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 {}",
-        gran0, cut_m, tl().mr, tl().nr
-    ));
-    let gran = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 16, i64 {}",
-        gran, cut_k, gran0
-    ));
+    // Factorise the thread count into the grid `ntm x ntn`.
+    //
+    // `ntm` is searched over EVERY value up to `MAX_THREADS`, not over the
+    // powers of two. Powers of two were tried first and are wrong for a reason
+    // worth keeping: with `nt = 3` the only reachable factorisations are 1x3
+    // and 2x1, so the M-split `3x1` cannot be expressed and the search picks a
+    // pure N-split. `ragged 250^3` gets `nt = 3`, and that is exactly what
+    // happened to it — **0.65x**, at a 5.4% spread, on the shape the 1-D rule
+    // had been cutting along M all along. Sixteen candidates is a few hundred
+    // straight-line instructions once per GEMM call; the shape that pays it
+    // takes tens of microseconds.
+    //
+    // `ntn` is `nt / ntm`, clipped to the whole micro-tiles N can supply.
+    //
+    // Two scoring keys, in this order:
+    //   1. threads actually used. Never leave a core idle to get a prettier
+    //      block; `nt` is already the work-derived count and giving some of it
+    //      back is a straight loss. This is also why `ntm` need not divide
+    //      `nt` — a candidate that wastes a thread simply loses on this key.
+    //   2. OpenBLAS's objective `N*ntm + M*ntn`. Each thread reads `M/ntm` rows
+    //      of A and `N/ntn` columns of B, so the total operand traffic is
+    //      `K*(N*ntm + M*ntn)` and this key minimises it directly.
+    //
+    // Ties go to the LARGER `ntm`, which is what the `<=` on the cost does.
+    // M and N are symmetric in the objective but not in the code: M bands snap
+    // to `MR = 12` and N bands to `NR = 32`, so an M cut balances nearly three
+    // times finer and a tie should be spent there.
+    let mut best_m = "1".to_string();
+    let mut best_n = "1".to_string();
+    let mut best_used = "0".to_string();
+    let mut best_cost = i64::MAX.to_string();
+    for cand in 1..=MAX_THREADS {
+        let cs = cand.to_string();
+        // `cand = 1` is always valid (`nt >= 2` on this path and `pm >= 1`), so
+        // the running best is guaranteed to be initialised by the first
+        // iteration and the `best_used = 0` seed can never survive.
+        let fit_nt = b.t();
+        b.w(&format!("{} = icmp sle i64 {}, {}", fit_nt, cs, nt));
+        let fit_m = b.t();
+        b.w(&format!("{} = icmp sle i64 {}, {}", fit_m, cs, pm));
+        let valid = b.t();
+        b.w(&format!("{} = and i1 {}, {}", valid, fit_nt, fit_m));
+        let raw_n = b.t();
+        b.w(&format!("{} = sdiv i64 {}, {}", raw_n, nt, cs));
+        let cn = b.imin(&raw_n, &pn);
+        let cn = b.imax(&cn, "1");
+        let used = b.mul(&cs, &cn);
+        let cost_m = b.mul(n, &cs);
+        let cost_n = b.mul(m, &cn);
+        let cost = b.add(&cost_m, &cost_n);
+        let more = b.t();
+        b.w(&format!("{} = icmp sgt i64 {}, {}", more, used, best_used));
+        let same = b.t();
+        b.w(&format!("{} = icmp eq i64 {}, {}", same, used, best_used));
+        let cheaper = b.t();
+        b.w(&format!("{} = icmp sle i64 {}, {}", cheaper, cost, best_cost));
+        let tie = b.t();
+        b.w(&format!("{} = and i1 {}, {}", tie, same, cheaper));
+        let win0 = b.t();
+        b.w(&format!("{} = or i1 {}, {}", win0, more, tie));
+        let win = b.t();
+        b.w(&format!("{} = and i1 {}, {}", win, win0, valid));
+        let nm = b.t();
+        b.w(&format!("{} = select i1 {}, i64 {}, i64 {}", nm, win, cs, best_m));
+        let nn = b.t();
+        b.w(&format!("{} = select i1 {}, i64 {}, i64 {}", nn, win, cn, best_n));
+        let nu = b.t();
+        b.w(&format!(
+            "{} = select i1 {}, i64 {}, i64 {}",
+            nu, win, used, best_used
+        ));
+        let ncst = b.t();
+        b.w(&format!(
+            "{} = select i1 {}, i64 {}, i64 {}",
+            ncst, win, cost, best_cost
+        ));
+        best_m = nm;
+        best_n = nn;
+        best_used = nu;
+        best_cost = ncst;
+    }
 
-    // Threads sharing one packed B panel must be exactly the threads the
-    // barrier is sized for. Only the M-split shares; an N-split gives each
-    // thread a disjoint B block, so there is nothing to share and no barrier.
+    // The K-split OVERRIDES the grid, and every consumer has to see that.
+    //
+    // It is expressed AS a grid rather than beside one: the K-split is the
+    // `1 x nt` case, whose N bands are the bands of the *reduction* and whose M
+    // band is all of M. Folding it in this way is deliberate — the previous
+    // shape of this code carried a separate `cut_m` boolean that had to be
+    // corrected by `!cut_k` at each of its five consumers, and missing one of
+    // them deadlocked. `cut_m` was `pm >= pn`, and at `N = 33` with `nr = 64`
+    // both sides are 1, so it came out *true* for a shape whose M is 8; the
+    // task fill then assigned the reduction's COLUMN bounds to the M range,
+    // thread 0's band came out empty, it took the driver's early return, never
+    // reached a barrier sized for three threads, and the dispatcher spun
+    // forever. Every benchmark shape has `N >= nr` and hid it; it is
+    // `tests/cpu_gemm_threaded.rs` at N=33 and N=15 that catches it.
+    //
+    // With one grid there is nothing left to subtract: the bands, the barrier
+    // width, the `inuse` cutoff and the shared-B gate are all derived from
+    // `ntm`/`ntn` and cannot disagree about which mode is in force.
+    let not_ck = b.t();
+    b.w(&format!("{} = xor i1 {}, true", not_ck, cut_k));
     let mn2 = b.mul(m, n);
     let work2 = b.mul(&mn2, k);
     let big_enough = b.t();
@@ -2279,8 +2643,78 @@ fn emit_entry() -> String {
         "{} = icmp sge i64 {}, {}",
         big_enough, work2, SHARE_B_WORK
     ));
-    let do_share = b.t();
-    b.w(&format!("{} = and i1 {}, {}", do_share, cut_m, big_enough));
+
+    // Shared packed B collapses the grid to ONE column, and is preferred over
+    // the grid where it applies.
+    //
+    // These are two ways to cut the same redundancy and they do not compose: a
+    // thread can share a packed B panel only with threads that walk the same
+    // `(jc, pc)` blocks, which is the `ntn == 1` column. Measured at 2048^3 on
+    // 16 threads, four interleaved launches, best of each — and note the two
+    // unshared arms are the honest comparison of the partitions:
+    //
+    // | arm                     | GFLOPS | vs 1-D+share |
+    // |-------------------------|--------|--------------|
+    // | 1-D M-split, shared B   | 3170   | 1.00         |
+    // | 1-D M-split, private B  | 2319   | 0.73         |
+    // | 4x4 grid, private B     | 2580   | 0.81         |
+    //
+    // So the grid beats the 1-D split on its own terms (2580 vs 2319, 1.11x)
+    // and sharing beats the grid (1.37x over the same 1-D split). Below
+    // `SHARE_B_WORK` sharing is a measured loss and the grid runs; above it the
+    // grid stands down. `SHARE_B_WORK` is therefore no longer "share or don't"
+    // but "share or grid", which is why it had to be re-measured here rather
+    // than carried over.
+    //
+    // `pm >= nt` is required, not cosmetic: one column means `ntm = nt`, and an
+    // M band per thread only exists if M supplies `nt` whole micro-panels.
+    // Without it a thread gets an empty band, returns before the cooperative
+    // section, and never reaches a barrier sized to include it.
+    let m_fits = b.t();
+    b.w(&format!("{} = icmp sge i64 {}, {}", m_fits, pm, nt));
+    let share0 = b.t();
+    b.w(&format!("{} = and i1 {}, {}", share0, big_enough, m_fits));
+    let share_mode = b.t();
+    b.w(&format!("{} = and i1 {}, {}", share_mode, share0, not_ck));
+
+    let gm = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 {}, i64 {}",
+        gm, share_mode, nt, best_m
+    ));
+    let gn = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 1, i64 {}",
+        gn, share_mode, best_n
+    ));
+    let ntm = b.t();
+    b.w(&format!("{} = select i1 {}, i64 1, i64 {}", ntm, cut_k, gm));
+    let ntn = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 {}, i64 {}",
+        ntn, cut_k, nt, gn
+    ));
+    // The participating thread count is the grid, not `nt`: the factorisation
+    // may use fewer than `nt` threads, and the barrier must be sized for the
+    // threads that actually arrive at it.
+    let nt = b.mul(&ntm, &ntn);
+
+    // The reduction's column band is snapped to a whole vector; an ordinary
+    // N band is snapped to a whole micro-panel. The K-band itself has no
+    // alignment to respect and the M band always uses `mr`.
+    let gran_m = tl().mr.to_string();
+    let gran_n = b.t();
+    b.w(&format!(
+        "{} = select i1 {}, i64 16, i64 {}",
+        gran_n, cut_k, tl().nr
+    ));
+
+    // Threads sharing one packed B panel must be exactly the threads the
+    // barrier is sized for, and must all want the SAME packed B. `share_mode`
+    // is what SELECTED the single-column grid above, so it is also exactly the
+    // condition under which sharing is legal — the two cannot drift apart the
+    // way a separately-computed `cut_m` did.
+    let do_share = share_mode.clone();
     let share = b.t();
     b.w(&format!("{} = zext i1 {} to i64", share, do_share));
     let resize_l = b.l("e.bar");
@@ -2332,64 +2766,85 @@ fn emit_entry() -> String {
     // slice on top of this call's output. Slots past `nt` get an empty range.
     let fl = b.loop_begin("e.fill", "0", &pool_n, "1");
     let ti = b.iv(&fl);
-    // Cut at t*axis/nt, snapped down to the tile granularity, with the last
-    // thread taking whatever is left. This keeps every thread busy; rounding
-    // each width UP to a whole tile overshoots and leaves the tail threads
-    // with an empty range, which is how 256^3 ended up on 11 of 16 threads.
-    let lo0 = b.mul(&ti, &axis);
-    let lo1 = b.t();
-    b.w(&format!("{} = sdiv i64 {}, {}", lo1, lo0, nt));
-    let lo2 = b.t();
-    b.w(&format!("{} = sdiv i64 {}, {}", lo2, lo1, gran));
-    let lo = b.mul(&lo2, &gran);
-    let tn = b.add(&ti, "1");
-    let hi0 = b.mul(&tn, &axis);
-    let hi1 = b.t();
-    b.w(&format!("{} = sdiv i64 {}, {}", hi1, hi0, nt));
-    let hi2 = b.t();
-    b.w(&format!("{} = sdiv i64 {}, {}", hi2, hi1, gran));
-    let hi3 = b.mul(&hi2, &gran);
-    let is_last = b.t();
-    b.w(&format!("{} = icmp eq i64 {}, {}", is_last, tn, nt));
-    let hi4 = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 {}",
-        hi4, is_last, axis, hi3
-    ));
+    // This slot's position in the grid. Row-major, so the `ntn` threads sharing
+    // a row of the grid are consecutive ids.
+    let gi = b.t();
+    b.w(&format!("{} = sdiv i64 {}, {}", gi, ti, ntn));
+    let gi_n0 = b.mul(&gi, &ntn);
+    let gj = b.sub(&ti, &gi_n0);
+
+    // Partition the GRANULE COUNT, not the extent.
+    //
+    // The obvious form — cut at `idx*extent/count` and floor to the tile
+    // granularity — snaps each band's *position*, which dumps the whole
+    // accumulated rounding slack onto one band. In 1-D that is at most one
+    // granule out of a full-width band and it never mattered. In 2-D it is one
+    // granule out of a band `count` times narrower, and the errors on the two
+    // axes MULTIPLY. Measured at 16 threads on a 4x4 grid, busiest thread over
+    // idlest:
+    //
+    // | shape  | N bands (gran 32)     | M bands (gran 12)   | imbalance |
+    // |--------|-----------------------|---------------------|-----------|
+    // | 1024^3 | 256, 256, 256, 256    | 252, 252, 252, 268  | 1.06x     |
+    // | 1000^3 | 224, 256, 256, 264    | 240, 252, 252, 256  | 1.26x     |
+    // | 1021^3 | 224, 256, 256, 285    | 252, 252, 252, 265  | 1.34x     |
+    //
+    // and that is the whole reason 1024^3 measured 1.39x on this grid while its
+    // two ragged neighbours measured 0.82x and 0.79x. A 2-D partition is simply
+    // far more sensitive to this than a 1-D one; the rule was not wrong before,
+    // it was merely never stressed.
+    //
+    // Counting granules instead spreads the remainder: `G = ceil(extent/gran)`
+    // and band `idx` takes granules `[idx*G/count, (idx+1)*G/count)`, so the
+    // widths differ by at most one granule anywhere. 1000^3 becomes
+    // 256/256/256/232 by 252/252/252/244 (1.14x) and 1021^3 1.08x.
+    //
+    // Every band is still non-empty whenever `count <= extent/gran`, which the
+    // candidate search guarantees for the grid (`ntm <= pm`, `ntn <= pn`). The
+    // K-split deliberately does NOT guarantee it — `ntn = nt` is uncapped there
+    // — and its empty reduction bands are expected; see the driver's early
+    // return.
+    let band = |b: &mut IrBuilder, idx: &str, count: &str, extent: &str, gran: &str| {
+        let gm1 = b.sub(gran, "1");
+        let up = b.add(extent, &gm1);
+        let g = b.t();
+        b.w(&format!("{} = sdiv i64 {}, {}", g, up, gran));
+        let lo0 = b.mul(idx, &g);
+        let lo1 = b.t();
+        b.w(&format!("{} = sdiv i64 {}, {}", lo1, lo0, count));
+        let lo2 = b.mul(&lo1, gran);
+        let lo = b.imin(&lo2, extent);
+        let nx = b.add(idx, "1");
+        let hi0 = b.mul(&nx, &g);
+        let hi1 = b.t();
+        b.w(&format!("{} = sdiv i64 {}, {}", hi1, hi0, count));
+        let hi2 = b.mul(&hi1, gran);
+        let hi3 = b.imin(&hi2, extent);
+        let is_last = b.t();
+        b.w(&format!("{} = icmp eq i64 {}, {}", is_last, nx, count));
+        let hi = b.t();
+        b.w(&format!(
+            "{} = select i1 {}, i64 {}, i64 {}",
+            hi, is_last, extent, hi3
+        ));
+        (lo, hi)
+    };
+    let (m_from, m_to) = band(&mut b, &gi, &ntm, m, &gran_m);
+    let (n_from, n_to) = band(&mut b, &gj, &ntn, n, &gran_n);
+
+    // A slot past the grid must present an EMPTY range on BOTH axes. Its `gi`
+    // and `gj` are computed from a `ti` the grid does not cover, so `gj` wraps
+    // back to a live column band and `gi` runs past the last row — neither is
+    // meaningful, and under the K-split, where the driver's early return tests
+    // only the M range, an unclamped M band would have a spare thread recompute
+    // the whole of C on top of this call's output.
     let inuse = b.t();
     b.w(&format!("{} = icmp slt i64 {}, {}", inuse, ti, nt));
-    let hi = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 {}",
-        hi, inuse, hi4, lo
-    ));
     let slot = b.t();
     b.w(&format!(
         "{} = getelementptr inbounds [{} x %y_gemm_task], ptr {}, i64 0, i64 {}",
         slot, MAX_THREADS, POOL_TASK, ti
     ));
-    let m_from = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 0",
-        m_from, cut_m, lo
-    ));
-    let m_to = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 {}",
-        m_to, cut_m, hi, m
-    ));
-    let n_from = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 0, i64 {}",
-        n_from, cut_m, lo
-    ));
-    let n_to = b.t();
-    b.w(&format!(
-        "{} = select i1 {}, i64 {}, i64 {}",
-        n_to, cut_m, n, hi
-    ));
-    // A slot past `nt` must also present an empty range on the *other* axis,
-    // or it would recompute the whole of it.
     let m_to2 = b.t();
     b.w(&format!(
         "{} = select i1 {}, i64 {}, i64 {}",
@@ -2400,9 +2855,13 @@ fn emit_entry() -> String {
         "{} = select i1 {}, i64 {}, i64 {}",
         n_to2, inuse, n_to, n_from
     ));
-    // This slot's K-band, for the K-split. Unlike the M/N cut there is no tile
-    // granularity to snap to, and the last thread takes the remainder so no row
-    // of B is dropped.
+    // This slot's K-band, for the K-split. Unlike the M/N bands there is no
+    // tile granularity to snap to, and the last thread takes the remainder so
+    // no row of B is dropped. Under the K-split the grid is `1 x nt`, so `ti`
+    // indexes the K-bands directly.
+    let tn = b.add(&ti, "1");
+    let k_last = b.t();
+    b.w(&format!("{} = icmp eq i64 {}, {}", k_last, tn, nt));
     let kl0 = b.mul(&ti, k);
     let kfrom = b.t();
     b.w(&format!("{} = sdiv i64 {}, {}", kfrom, kl0, nt));
@@ -2412,7 +2871,7 @@ fn emit_entry() -> String {
     let kto = b.t();
     b.w(&format!(
         "{} = select i1 {}, i64 {}, i64 {}",
-        kto, is_last, k, kto0
+        kto, k_last, k, kto0
     ));
 
     let scr_off = b.mul(&ti, &SCRATCH_FLOATS.to_string());
@@ -2524,6 +2983,8 @@ pub fn emit_kernel_module() -> String {
     s.push_str(&emit_small_m());
     s.push('\n');
     s.push_str(&emit_small_reduce());
+    s.push_str("\n");
+    s.push_str(&emit_tiny());
     s.push('\n');
     s.push_str(&emit_driver());
     s.push('\n');
@@ -2699,6 +3160,21 @@ kernel mm(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, M: I
         assert!(
             ir.contains(&format!("udiv i64 {}", L3_PANEL_FLOATS)),
             "the thread-count-dependent kc rule is not in the emitted IR"
+        );
+
+        // The SHARED B panel needs the identical argument, and did not get it:
+        // it was sized `tl().kc * (tl().nc + tl().nr)` while this very test was
+        // asserting that the private one must not be. `pack_b` writes
+        // `kc * roundup(nc, NR)` floats into whichever of the two it was
+        // handed, so one bound covers both. 192x513x22000 overflowed the
+        // tile-sized version by ~98 KB, into the pool mutex and condvar that
+        // follow it in BSS; `tests/cpu_gemm_threaded.rs` carries that shape.
+        assert!(
+            ir.contains(&format!(
+                "{} = internal global [{} x float]",
+                SHARED_B, widest_b
+            )),
+            "the shared packed-B global is not sized for the largest runtime kc"
         );
     }
 
