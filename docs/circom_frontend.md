@@ -105,8 +105,9 @@ order of size, and only the first was the algorithm:
    `simplify` sorts and merges in place, and the CSE table is open-addressed
    `u32` indices.
 
-Y's headline numbers against circom (2.6x on a Poseidon chain, 154x on the
-polynomial circuit) were measured on Y's **own** `.ysu` front end, where
+Y's headline numbers against circom (2.6x on a Poseidon chain, 261x on the
+polynomial circuit at 1M, and `>345x` at 10M where circom did not finish inside
+an hour) were measured on Y's **own** `.ysu` front end, where
 `emit_poseidon` folds linear combinations as it builds them. They still should
 not be quoted for circom input — the numbers for that are the tables above.
 
