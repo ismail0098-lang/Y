@@ -363,6 +363,7 @@ fn compile_circom(path: &str, args: &[String]) {
 
     let timing = std::env::var("Y_ZK_TIMING").is_ok();
     let t0 = std::time::Instant::now();
+    let alloc0 = counting_alloc::counts();
 
     let emitter = match circom_lower::compile_file(std::path::Path::new(path), &search_paths) {
         Ok(e) => e,
@@ -387,6 +388,15 @@ fn compile_circom(path: &str, args: &[String]) {
             "[Y ZK TIMING] {:<22} {:>12} calls, {:>12} terms scanned",
             "lc simplify", calls, terms
         );
+        let a1 = counting_alloc::counts();
+        if a1.0 > alloc0.0 {
+            eprintln!(
+                "[Y ZK TIMING] {:<22} {:>12} allocs, {:>9.2} GB",
+                "lower allocations",
+                a1.0 - alloc0.0,
+                (a1.1 - alloc0.1) as f64 / 1e9
+            );
+        }
     }
 
     let circuit = emitter.view();

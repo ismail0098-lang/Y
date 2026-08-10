@@ -307,14 +307,44 @@ impl BigUint {
         if body.is_empty() {
             return Err(format!("empty hex literal: {:?}", s));
         }
-        let mut res = Self::zero();
-        let sixteen = Self::from_u64(16);
-        for c in body.chars() {
-            let digit = c
-                .to_digit(16)
-                .ok_or_else(|| format!("invalid hex digit {:?} in {:?}", c, s))?;
-            res = res.mul(&sixteen).add(&Self::from_u64(digit as u64));
+        // Pack four bits at a time straight into the limbs.
+        //
+        // This was `res = res.mul(16).add(digit)` per hex digit, and since
+        // `BigUint` is a heap `Vec<u32>` that is three allocations per digit —
+        // about 219 for a 64-digit field element. It is the *third* time this
+        // exact shape has been found: `emit_poseidon` re-parsed circomlib's
+        // constants on every call, then the circom front end's `POSEIDON_C`
+        // rebuilt them per instantiation, and both were fixed by caching the
+        // result. Caching hid it rather than removing it — the lexer parses
+        // every hex literal in the source exactly once and still paid it, which
+        // made merely `include`-ing `poseidon.circom` (24,958 lines of hex)
+        // cost 5,459,413 allocations and 0.094 s before a single constraint was
+        // emitted. Radix 16 divides 32 evenly, so no arithmetic is needed at
+        // all: one allocation for the whole literal.
+        if let Some(c) = body.chars().find(|c| !c.is_ascii_hexdigit()) {
+            return Err(format!("invalid hex digit {:?} in {:?}", c, s));
         }
+        let bytes = body.as_bytes();
+        let mut digits = Vec::with_capacity((bytes.len() + 7) / 8);
+        let mut end = bytes.len();
+        while end > 0 {
+            // Limbs are little-endian, so consume the literal from the right in
+            // 8-digit (32-bit) chunks.
+            let start = end.saturating_sub(8);
+            let mut limb: u32 = 0;
+            for &b in &bytes[start..end] {
+                let d = match b {
+                    b'0'..=b'9' => b - b'0',
+                    b'a'..=b'f' => b - b'a' + 10,
+                    _ => b - b'A' + 10,
+                };
+                limb = (limb << 4) | d as u32;
+            }
+            digits.push(limb);
+            end = start;
+        }
+        let mut res = Self { digits };
+        res.trim();
         Ok(res)
     }
 
