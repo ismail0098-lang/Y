@@ -22,8 +22,10 @@ Two conventions worth stating up front, because both were learned the hard way
 here:
 
 - **A ratio between 0.9 and 1.1 is a tie**, not a win. This box's run-to-run
-  spread is ±8% on CPU GEMM and a few percent on GPU kernels, so anything inside
-  that band is reported as parity.
+  spread is ±7–8% on 16-thread CPU GEMM and a few percent on GPU kernels, so
+  anything inside that band is reported as parity. The CPU figure is *measured*,
+  not assumed: running two behaviourally identical binaries against each other
+  as if they were an A/B gives 0.92–1.07, and that is the instrument's floor.
 - **The GPU clock idles at ~210 MHz and needs ~3 s of load to reach ~2670 MHz.**
   Timing one implementation fully and then the other gives the second one a
   hotter clock — a systematic bias, not noise. GPU comparisons here ramp the
@@ -45,7 +47,8 @@ repository's own investigation documents contradict.
   compiles unmodified circomlib.
 - FP16 tensor-core GEMM and fused GEMM+bias+ReLU on NVIDIA PTX.
 - Fused RMSNorm+residual and RoPE kernels.
-- A multi-threaded AVX-512 CPU GEMM.
+- A multi-threaded AVX-512 CPU GEMM, partitioned over a 2-D thread grid, with a
+  copy-free path for shapes too small to amortise packing.
 - `@safe` blocks with Z3-discharged loop invariants, `@ZeroDrift` exact
   accumulation, and linear tracking of async memory tokens.
 
@@ -452,32 +455,61 @@ another substring assertion.
 ## CPU: AVX-512 GEMM
 
 A multi-threaded f32 GEMM emitted through the LLVM backend, against OpenBLAS
-built for the same ISA (`TARGET=SKYLAKEX`). All-core clock 5.09 GHz, so AVX-512
-peak is 5212 GF. Every shape gated on relative L2 error < 1e-5.
+built for the same ISA (`TARGET=SKYLAKEX`, 39,476 `zmm`). All-core clock
+5.09 GHz, so AVX-512 peak is 5212 GF. Every shape gated on relative L2 error
+< 1e-5. One shape per process per library, arms interleaved and rotated, four
+launches, OpenBLAS measured in the same session.
 
-**Geomean 0.97 on 16 threads, 1.27 single-threaded. Y is ahead on half the
-shapes and behind on the other half**, and which half is the useful signal:
+**Geomean 1.52 on 16 threads, Y ahead on 13 of 18 shapes. But read it by class,
+because the mean hides where the gains came from:**
 
 | class | shapes | Y vs OpenBLAS |
 |---|---|---|
-| GEMV / skinny / flat-K / rank-k | `1×8192×8192`, `17×4096×4096`, `4096×4096×8` | **1.3–1.9x** |
-| Small square | `256³`, `250³` | tie |
-| Large square | `1024³`, `2048³` | **0.79–0.94x** |
-| Decode (M=4–8) | `8×4096×4096` | **0.30x** |
-| Tiny | `48³` | **0.43x** |
+| GEMV | `1×4096×4096`, `1×8192×8192` | **2.1–4.9x** |
+| Decode (M=4–8) | `4×4096×4096`, `8×4096×4096` | **1.8–3.1x** |
+| Small / ragged square | `250³`, `256³`, `333×777×64` | **2.4–2.8x** |
+| Rank-k / deep-k | `4096×4096×8`, `64×64×32768` | **1.1–1.6x** |
+| Tiny | `48³` | **1.00x** (was 0.43) |
+| Large square | `512³`, `1024³` | 1.08–1.13x |
+| Large square | `1021³`, `1000³`, `2048³` | **0.81–0.95x** |
 
-The skinny and rank-k class is what the work was aimed at and the advantage
-survived every harness correction. Large square and decode are real losses:
-`2048³` is 0.79x on 16 threads, and decode is a partitioning problem — the same
-shape single-threaded is 1.80x, which says the kernel is fine and the split is
-not.
+**Most of the 16-thread gain is Y no longer under-threading its own kernel**, not
+Y beating OpenBLAS at dense arithmetic. The thread-count constant had been
+calibrated against a redundant-packing cost that a 2-D `ntm × ntn` partition
+removed, and it was 64x too large; fixing it is worth 2.2–3.3x on the small and
+ragged shapes and nothing at all on the large ones. Large square GEMM is still
+the weak class — `2048³` is 0.81x — and a reader who cares about that should
+read those rows and ignore the geomean, which is sensitive to how many small
+shapes the set happens to contain.
 
-> **Six independent biases were found in the harness that produced the first
-> version of these numbers, and all six favoured Y.** Both libraries timed in
+Single-threaded, Y is at 1.50 geomean — but that column is a control rather than
+a headline. At one thread the pool and the partition are bypassed entirely, so
+every shape that does not route to the copy-free kernel must be *unchanged* by
+this work, and all seventeen are: **0.976–1.020, at spreads of 0.5–2%**. That is
+what says the micro-kernel was not touched, and at 16 threads a ±7% instrument
+could not have told you. (The 1.50 was measured one revision before the final
+row-block change, which moves `48³` and nothing else, and moves it upward.)
+
+> **The throughput harness measures one regime and cannot see the other.** It
+> calls the kernel in a tight loop, so the thread pool never parks and a
+> dispatch is nearly free. Timing a *single* call after a gap instead, 16
+> threads against 1: `56³` measured **0.11x** — a fixed ~20 µs dispatch cost,
+> flat from `nt=2` to `nt=16`. The thread count is chosen from the caller's call
+> frequency now, which recovers it to 0.92–1.00x with throughput unchanged.
+> Spinning longer does not fix it (fast while the caller's gap fits the spin
+> window, 175 µs just past it) and asking the pool whether workers are parked
+> *latches*.
+
+> **Seven independent biases were found in the harness that produced the first
+> version of these numbers, and all seven favoured Y.** Both libraries timed in
 > one process (OpenBLAS's idle threads spin before parking, so whichever ran
 > second was measured against a busy machine); thread count driven through
 > `openblas_set_num_threads()` on a libgomp build; all 18 shapes in one process,
-> depressing later ones. The reported figures are after those fixes. Detail:
+> depressing later ones; a substring shape filter under which `"48^3"` matched
+> `"2048^3"` and silently reported the wrong row. The reported figures are after
+> those fixes. The run-to-run spread on this box is **±7%, measured** by running
+> two behaviourally identical binaries against each other — anything inside that
+> band is reported as a tie. Detail:
 > [docs/cpu_gemm_tuning.md](docs/cpu_gemm_tuning.md).
 
 ### CPU lock-free queue vs C++
@@ -690,7 +722,8 @@ Further reading:
 - [ZK compile-speed detail and measurement traps](docs/heavy_circuit_speed_test.md)
 - [circom front end](docs/circom_frontend.md)
 - [ZK emit profiling](docs/zk_emit_profile.md)
-- [CPU GEMM tuning, and the harness biases](docs/cpu_gemm_tuning.md)
+- [CPU GEMM tuning, the harness biases, and the two regimes a loop benchmark
+  cannot distinguish](docs/cpu_gemm_tuning.md)
 - [RT/Tensor co-processor: why it is scaffolding](investigation_rt_tensor_coprocessor_findings.md)
 - [Benchmarks index](README_BENCHMARKS.md)
 
