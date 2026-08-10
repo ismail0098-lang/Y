@@ -278,6 +278,14 @@ a signal per intermediate:
 | Poseidon chain, 200 hashes | 0.169 s | 0.678 s | **4.02x** | 47,404 | 103,400 |
 | Poseidon chain, 1000 hashes | 0.942 s | 3.249 s | **3.45x** | 237,004 | 517,000 |
 
+**The ratio falls as the circuit grows (22.8x → 3.45x), and that is circom
+amortising a fixed cost, not Y degrading.** Y's own scaling was checked
+directly rather than inferred: across 125 → 2,000 hashes every phase is linear
+(emit 0.035 → 0.442 s, optimize 0.040 → 0.730 s, write 0.058 → 0.656 s, all ~2x
+per 2x) and the total is 13.7x for 16x the work — *sub*-linear, because Y's own
+fixed cost is amortising too. At the margin Y is a flat ~3.4x per hash at both
+200 and 1,000.
+
 **Quote 3.45x, not 22.8x.** Circom carries a fixed startup of roughly 0.09 s —
 mostly parsing `poseidon_constants.circom` — so on a 517-constraint circuit that
 constant *is* the measurement, and the two small rows mostly report it. At
@@ -286,6 +294,14 @@ is not a like-for-like circuit comparison either: Y emits **2.15–2.18x fewer
 constraints** for the same computation, and the hash is verified identical
 against circomlib's published digests, so read it as "same computation, smaller
 circuit, less time" rather than as raw compiler throughput.
+
+One thing that scaling check did turn up: **`optimize_circuit` is 33–40% of
+compile time on these circuits and removes 1.26% of the constraints**, and its
+share grows with N. That reads like a bad trade and is not one, because a
+circuit is compiled once and proved many times — measured with
+`Y_ZK_CSE=off` and arkworks Groth16 on a 100-hash chain, it costs 0.015 s of
+compile and saves 0.0035 s per proof, so it **pays for itself after 4 proofs**
+(`tests/zk_cse_cost.rs`). It is off-able for measurement, and on by default.
 
 **Read the chain rows as ties, not wins**, and read the spread down each table
 as the real shape of it: the small circuits are fast because a fixed

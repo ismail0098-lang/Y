@@ -710,6 +710,42 @@ fn linsub_budget_from_env() -> Option<usize> {
     }
 }
 
+// `Y_ZK_CSE=off` disables common-subexpression elimination.
+//
+// It exists because the pass's cost and its benefit are wildly different
+// shapes, and neither was measurable before. On a 1000-hash Poseidon chain it
+// is **38% of compile time and removes 1.25% of the constraints**; on the
+// sparse dot-product circuit it removes *nothing at all* and still costs. That
+// is not an argument for turning it off by default — ZK circuits are compiled
+// once and proved many times, so a permanent 1.25% off every future proof beats
+// a one-off 38% of one compile after enough proofs — but it is an argument for
+// being able to measure the trade rather than assume it.
+//
+// Off is not a correctness risk: CSE only merges constraints that are already
+// identical, so the unreduced circuit accepts exactly the same witnesses.
+thread_local! {
+    static CSE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+fn cse_enabled() -> bool {
+    CSE_ENABLED.with(|c| c.get())
+}
+
+/// Enable or disable CSE for this thread. Thread-local for the same reason
+/// `LINSUB_BUDGET` is: a test must be able to compile the same circuit both ways
+/// without racing the rest of the suite.
+pub fn set_cse_enabled(on: bool) {
+    CSE_ENABLED.with(|c| c.set(on));
+}
+
+pub fn init_cse_from_env() {
+    if let Ok(v) = std::env::var("Y_ZK_CSE") {
+        if v.eq_ignore_ascii_case("off") || v == "0" {
+            set_cse_enabled(false);
+        }
+    }
+}
+
 /// Set the fill-in budget for this thread. `None` turns the pass off entirely,
 /// which is only useful as a differential baseline - the reduced circuit and the
 /// unreduced one must accept exactly the same witnesses.
@@ -972,6 +1008,7 @@ fn expr_references_var(expr: &Expr, name: &str) -> bool {
 
 impl ZkEmitter {
     pub fn new() -> Self {
+        init_cse_from_env();
         Self {
             variables: vec!["const_1".to_string()], // wire 0 is constant 1
             public_inputs: Vec::new(),
@@ -2975,7 +3012,11 @@ impl ZkEmitter {
             let t_sub = t.elapsed();
             let after_sub = self.constraints.len();
             let t = std::time::Instant::now();
-            let deduplicated = self.dedup_identical_products(&boundary);
+            let deduplicated = if cse_enabled() {
+                self.dedup_identical_products(&boundary)
+            } else {
+                false
+            };
             if std::env::var_os("Y_ZK_TIMING").is_some() {
                 eprintln!(
                     "[Y ZK TIMING]     opt round {}: linsub {:>7.3} s -> {:>8} | cse {:>7.3} s -> {:>8}",
