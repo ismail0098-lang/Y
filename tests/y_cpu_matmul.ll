@@ -90,6 +90,7 @@ declare <16 x float> @llvm.masked.load.v16f32.p0(ptr, i32 immarg, <16 x i1>, <16
 declare ptr @getenv(ptr)
 declare i32 @atoi(ptr)
 declare i64 @sysconf(i32)
+declare i32 @clock_gettime(i32, ptr)
 declare i32 @pthread_create(ptr, ptr, ptr, ptr)
 declare i32 @pthread_join(i64, ptr)
 declare i32 @pthread_mutex_init(ptr, ptr)
@@ -103,6 +104,7 @@ declare i32 @pthread_barrier_destroy(ptr)
 declare i32 @pthread_barrier_wait(ptr)
 @__y_pool_barrier = internal global [64 x i8] zeroinitializer, align 16
 @__y_barrier_n = internal global i64 0, align 8   ; barrier width, 0 = uninitialised
+@__y_pool_last_ns = internal global i64 0, align 8   ; ns timestamp of the last call
 @__y_shared_b = internal global [2162688 x float] zeroinitializer, align 64
 @__y_pool_mutex = internal global [64 x i8] zeroinitializer, align 16
 @__y_pool_cond = internal global [64 x i8] zeroinitializer, align 16
@@ -4111,6 +4113,7 @@ entry:
 
 define internal i64 @__y_gemm_threads(i64 %M, i64 %N, i64 %K) #0 {
 entry:
+  %.ts = alloca { i64, i64 }, align 8
   %g1 = load i64, ptr @__y_gemm_nthreads, align 8
   %g2 = icmp eq i64 %g1, 0
   br i1 %g2, label %nt.resolve.3, label %nt.have.4
@@ -4137,20 +4140,31 @@ nt.have.4:
   %g18 = load i64, ptr @__y_gemm_nthreads, align 8
   %g19 = mul nsw i64 %M, %N
   %g20 = mul nsw i64 %g19, %K
-  %g21 = icmp sgt i64 %g20, 65536
-  br i1 %g21, label %nt.scale.22, label %nt.one.23
-nt.scale.22:
-  %g25 = sdiv i64 %g20, 65536
-  %g26 = icmp slt i64 %g25, %g18
-  %g27 = select i1 %g26, i64 %g25, i64 %g18
-  %g28 = icmp sgt i64 %g27, 1
-  %g29 = select i1 %g28, i64 %g27, i64 1
-  br label %nt.out.24
-nt.one.23:
-  br label %nt.out.24
-nt.out.24:
-  %g30 = phi i64 [ %g29, %nt.scale.22 ], [ 1, %nt.one.23 ]
-  ret i64 %g30
+  call i32 @clock_gettime(i32 1, ptr %.ts)
+  %g21 = load i64, ptr %.ts, align 8
+  %g22 = getelementptr inbounds { i64, i64 }, ptr %.ts, i64 0, i32 1
+  %g23 = load i64, ptr %g22, align 8
+  %g24 = mul nsw i64 %g21, 1000000000
+  %g25 = add nsw i64 %g24, %g23
+  %g26 = load atomic i64, ptr @__y_pool_last_ns monotonic, align 8
+  store atomic i64 %g25, ptr @__y_pool_last_ns monotonic, align 8
+  %g27 = sub nsw i64 %g25, %g26
+  %g28 = icmp sgt i64 %g27, 100000
+  %g29 = select i1 %g28, i64 3145728, i64 65536
+  %g30 = icmp sgt i64 %g20, %g29
+  br i1 %g30, label %nt.scale.31, label %nt.one.32
+nt.scale.31:
+  %g34 = sdiv i64 %g20, 65536
+  %g35 = icmp slt i64 %g34, %g18
+  %g36 = select i1 %g35, i64 %g34, i64 %g18
+  %g37 = icmp sgt i64 %g36, 1
+  %g38 = select i1 %g37, i64 %g36, i64 1
+  br label %nt.out.33
+nt.one.32:
+  br label %nt.out.33
+nt.out.33:
+  %g39 = phi i64 [ %g38, %nt.scale.31 ], [ 1, %nt.one.32 ]
+  ret i64 %g39
 }
 
 define internal ptr @__y_pool_worker(ptr %idxp) #0 {
