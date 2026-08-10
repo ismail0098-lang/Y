@@ -130,13 +130,13 @@ Measured 2026-08-11, best of three, same circom source through both compilers:
 
 | | circom 2.2.3 | Y | |
 |---|---|---|---|
-| `Poseidon(2)` | 0.102 s | 0.018 s | **5.60x** |
-| 200-hash Poseidon chain | 0.680 s | 0.650 s | **1.05x — a tie** |
-| 1000-hash Poseidon chain | 3.247 s | 3.243 s | **1.00x — a tie** |
+| `Poseidon(2)` | 0.101 s | 0.023 s | **4.39x** |
+| 200-hash Poseidon chain | 0.678 s | 0.631 s | **1.07x — a tie** |
+| 1000-hash Poseidon chain | 3.249 s | 3.154 s | **1.03x — a tie** |
 
 **The first row is not a general speedup, and the shape of this table is the
 point.** A fixed ~5.5-million-allocation cost in hex-literal parsing was removed
-on 2026-08-11 (`Poseidon(2)` went 0.076 s → 0.018 s), and merely `include`-ing
+on 2026-08-11 (`Poseidon(2)` went 0.076 s → 0.023 s), and merely `include`-ing
 `poseidon.circom` — 24,958 lines of hex constants — used to cost 0.094 s before
 a single constraint existed. That is a constant, so it dominates a small circuit
 and vanishes into a large one. The chains are still ties because their cost is
@@ -253,7 +253,8 @@ count, zero linear constraints on either side, same artifact.
 ### What it looks like on circuits people actually build
 
 **Neither 278x nor 773x survives contact with a real circuit, and the honest
-range is 1.1–5.5x.** Both benchmark circuits are single unrolled loops a million
+range is 1.0–4.4x through the circom front end and 3.5–23x through Y's own
+language.** Both benchmark circuits are single unrolled loops a million
 iterations long, which is the shape circom is worst at; real circuits are built
 from hash and range-check gadgets. Measured 2026-08-11 on an idle box, minimum
 of five, **circom source compiled by both tools** so the front end is not a
@@ -261,29 +262,45 @@ variable:
 
 | circuit (circom input) | Y | circom | speedup | Y cons. | circom cons. |
 |---|---|---|---|---|---|
-| `Poseidon(2)` | 0.018 s | 0.100 s | **5.49x** | 286 | 486 |
-| Merkle inclusion, depth 20 | 0.059 s | 0.148 s | **2.51x** | 5,685 | 9,840 |
-| Poseidon chain, 200 hashes | 0.656 s | 0.693 s | **1.06x** | 55,608 | 97,200 |
+| `Poseidon(2)` | 0.023 s | 0.101 s | **4.39x** | 286 | 517 |
+| Merkle inclusion, depth 20 | 0.059 s | 0.151 s | **2.54x** | 5,685 | 10,400 |
+| Poseidon chain, 200 hashes | 0.631 s | 0.678 s | **1.07x** | 55,608 | 103,400 |
+| Poseidon chain, 1000 hashes | 3.154 s | 3.249 s | **1.03x** | 278,008 | 517,000 |
 
-**Read the last row as a tie, not a win**, and read the spread across the three
+**On Y's own `.ysu` front end the same circuits are 3.5–23x**, because
+`poseidon_hash` folds its linear layers as it builds them instead of allocating
+a signal per intermediate:
+
+| circuit (Y's own language) | Y | circom | speedup | Y cons. | circom cons. |
+|---|---|---|---|---|---|
+| `Poseidon(2)` | 0.0045 s | 0.101 s | 22.8x | 241 | 517 |
+| Merkle inclusion, depth 20 | 0.0118 s | 0.151 s | 12.8x | 4,841 | 10,400 |
+| Poseidon chain, 200 hashes | 0.169 s | 0.678 s | **4.02x** | 47,404 | 103,400 |
+| Poseidon chain, 1000 hashes | 0.942 s | 3.249 s | **3.45x** | 237,004 | 517,000 |
+
+**Quote 3.45x, not 22.8x.** Circom carries a fixed startup of roughly 0.09 s —
+mostly parsing `poseidon_constants.circom` — so on a 517-constraint circuit that
+constant *is* the measurement, and the two small rows mostly report it. At
+517,000 constraints it has amortised away and 3.45x is what remains. Note this
+is not a like-for-like circuit comparison either: Y emits **2.15–2.18x fewer
+constraints** for the same computation, and the hash is verified identical
+against circomlib's published digests, so read it as "same computation, smaller
+circuit, less time" rather than as raw compiler throughput.
+
+**Read the chain rows as ties, not wins**, and read the spread down each table
 as the real shape of it: the small circuits are fast because a fixed
 ~5.5-million-allocation cost in hex-literal parsing was removed (2026-08-11),
 and the chain barely moves because its cost is per-hash lowering, which is
 untouched — ~135 allocations per constraint against the native emitter's 12.
 Expect the chain row to improve when that is fixed and not before.
 
-The durable result on this input is not speed at all — it is that Y emits
-**1.70–1.75x fewer constraints** for the same circuit, which is worth roughly
-1.4x at Groth16 proving time (not 1.7x: the substitution pass does not compact
-wires).
+The durable result on circom input is not speed at all — it is that Y emits
+**1.81–1.86x fewer constraints** for the same circuit (2.15–2.18x through Y's
+own language), which is worth roughly 1.4x at Groth16 proving time, not the
+1.8x the count suggests: the substitution pass deletes constraints but does not
+compact the wires they used, and Groth16 pays for wires too.
 
-On Y's *own* `.ysu` front end the same 200-hash chain is **0.184 s against
-circom's 0.677 s (3.68x)** at 47,404 constraints against 97,200, because
-`poseidon_hash` folds its linear layers as it builds them. That is a real
-number, but it is Y-language-to-circom-language and so not the same comparison
-as the table above.
-
-**Where the 773x actually goes**, since it is still 140x larger than any row here:
+**Where the 773x actually goes**, since it is still 34x larger than any row here:
 circom emits 4x the constraints on the dot product, and costs **244.6 µs per
 constraint** at that size against Y's 1.27 µs. Circom's own per-constraint cost
 is not a constant — it is 7.0 µs on the Poseidon chain and 244.6 µs at 1M, a 35x
