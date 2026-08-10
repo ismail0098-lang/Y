@@ -69,6 +69,20 @@ const SHAPES: &[(usize, usize, usize)] = &[
     (64, 64, 64),     // several tiles
     (100, 100, 100),  // ragged, multiple MC/NR blocks
     (193, 65, 257),   // M just past MC, N and K ragged
+    // --- the copy-free tiny path (M > SM_MAX_M, N <= TINY_MAX_N, work <=
+    //     TINY_MAX_WORK).  It has one specialised body per `N/16`, each with
+    //     its own row block, so every bucket needs a shape and every bucket
+    //     needs a ragged M -- a body whose last row block is mishandled is
+    //     wrong only on the rows past `M % MR'`.
+    (48, 48, 48),     // the benchmark's `tiny 48^3`: nv=3, M divides MR'=8
+    (25, 16, 40),     // nv=1, MR'=24, so the last block has 1 live row of 24
+    (25, 17, 40),     // nv=2, MR'=12: N ragged to a 1-lane mask, M ragged too
+    (20, 49, 33),     // nv=4, MR'=6, both ragged
+    (40, 64, 50),     // 128,000 MACs: just inside TINY_MAX_WORK, N exactly 4
+                      // vectors
+    (40, 64, 52),     // 133,120: just outside it, so this one must take the
+                      // PACKED path -- the only control proving the gate is a
+                      // gate and not a no-op
 ];
 
 const DRIVER: &str = r#"
@@ -197,6 +211,39 @@ fn emitted_cpu_gemm_matches_a_reference_on_ragged_shapes() {
         !ir.contains("ptrtoint ptr"),
         "a pointer is still being narrowed through an integer in the kernel"
     );
+    // Same argument one level down, for the copy-free path. The packed path
+    // computes identical numbers, so if the tiny dispatch stopped firing every
+    // shape below would still pass and the only symptom would be `tiny 48^3`
+    // quietly going back to 0.43x.
+    assert!(
+        ir.contains("define internal void @__y_gemm_tiny("),
+        "the copy-free tiny kernel is not being emitted"
+    );
+    assert!(
+        ir.contains("call void @__y_gemm_tiny("),
+        "__y_gemm_tiny is emitted but nothing dispatches to it"
+    );
+    // The accumulators are the whole point: `MR' x nv` vectors per body, and
+    // if they are not entry-block allocas that mem2reg can promote then C is
+    // living in memory and the kernel is pointless.
+    let tiny = ir
+        .split("define internal void @__y_gemm_tiny(")
+        .nth(1)
+        .expect("tiny body");
+    let tiny = tiny.split("\n}").next().unwrap();
+    // Read from the emitter rather than restating them: these are a measured
+    // register budget and they have already moved once (24 accumulators per
+    // body down to 18, worth 1.20-1.47x). A hardcoded copy here does not
+    // protect anything, it just fails the next time they are tuned.
+    for (nv, mrv) in y::cpu_gemm::TINY_BLOCK {
+        assert!(
+            tiny.contains(&format!("%ty{}a{}_{} = alloca <16 x float>", nv, mrv - 1, nv - 1)),
+            "the nv={} body does not declare its {} x {} accumulator block",
+            nv,
+            mrv,
+            nv
+        );
+    }
 
     let shapes = SHAPES
         .iter()
