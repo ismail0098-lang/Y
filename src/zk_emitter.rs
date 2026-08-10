@@ -254,6 +254,35 @@ pub struct WitnessIRGraph {
 // 2. R1CS Structural Definitions & Linear Combinations
 // ────────────────────────────────────────────────────────
 
+thread_local! {
+    /// Calls to `simplify` that actually scanned, and the total terms they
+    /// scanned. **Always compiled in, because this is the number that regresses
+    /// silently**: `simplify`'s cost is invisible in a profile split by phase
+    /// (it is spread across all of `emit_circuit_entry`) and invisible in the
+    /// field-op counters (it does no field arithmetic on its fast path). The
+    /// dot-product circuit was O(N²) for exactly that reason.
+    ///
+    /// A thread-local `Cell` rather than an atomic: the ZK emitter is
+    /// single-threaded, and this sits on its hottest path.
+    static LC_SIMPLIFY_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static LC_SIMPLIFY_TERMS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// `(calls, terms_scanned)` since `reset_lc_simplify_stats`.
+///
+/// `terms_scanned` is the one to watch: it must stay **linear** in circuit size.
+/// If it grows quadratically, some caller is re-establishing the sorted-and-
+/// distinct invariant on a linear combination that never lost it — see
+/// `LinearCombination::append_keeps_order`.
+pub fn lc_simplify_stats() -> (u64, u64) {
+    (LC_SIMPLIFY_CALLS.with(|c| c.get()), LC_SIMPLIFY_TERMS.with(|c| c.get()))
+}
+
+pub fn reset_lc_simplify_stats() {
+    LC_SIMPLIFY_CALLS.with(|c| c.set(0));
+    LC_SIMPLIFY_TERMS.with(|c| c.set(0));
+}
+
 #[derive(Clone, Debug)]
 pub struct LinearCombination {
     // List of (wire_id, coefficient). By convention, wire_id = 0 is constant 1
@@ -278,29 +307,136 @@ impl LinearCombination {
         Self { terms: vec![(id, Fr::one())], is_simplified: true }
     }
 
+    /// Would appending a block of terms whose smallest wire id is `first` keep
+    /// the `is_simplified` invariant — strictly ascending wire ids, no zero
+    /// coefficients?
+    ///
+    /// **This is the whole reason accumulating into a linear combination is
+    /// linear rather than quadratic.** `simplify` re-establishes the invariant
+    /// by scanning every term, which costs O(len) even on its "already sorted"
+    /// fast path. An accumulator (`sum = sum + a * b` in a loop) grows by one
+    /// term per iteration and was simplified once per iteration, so the emitter
+    /// scanned N²/2 terms to re-derive a property that appending a fresh,
+    /// larger wire id had never broken: measured at N=40,000, 119,999 calls but
+    /// **800,259,997 terms**. Deciding it here, from the boundary alone, is O(1)
+    /// and `simplify` then returns immediately.
+    #[inline]
+    fn append_keeps_order(&self, first: usize) -> bool {
+        match self.terms.last() {
+            // An empty combination trivially satisfies the invariant, whatever
+            // the flag happens to say.
+            None => true,
+            Some((last, _)) => self.is_simplified && *last < first,
+        }
+    }
+
     pub fn add_constant(&mut self, val: Fr) {
         if !val.is_zero() {
+            // Wire 0 sorts before everything, so this only stays ordered when
+            // there is nothing to sort against.
+            let keep = self.append_keeps_order(0);
             self.terms.push((0, val));
-            self.is_simplified = false;
+            self.is_simplified = keep;
         }
     }
 
     pub fn add_term(&mut self, wire_id: usize, val: Fr) {
-        if !val.is_zero() {
+        if val.is_zero() {
+            return;
+        }
+        if self.append_keeps_order(wire_id) {
             self.terms.push((wire_id, val));
+            self.is_simplified = true;
+            return;
+        }
+        if self.is_simplified {
+            if let Ok(idx) = self.terms.binary_search_by_key(&wire_id, |t| t.0) {
+                let merged = self.terms[idx].1.add(&val);
+                self.terms[idx].1 = merged;
+                // A coefficient that cancelled to zero breaks the other half of
+                // the invariant; leave it for `simplify` to filter out.
+                self.is_simplified = !merged.is_zero();
+                return;
+            }
+        }
+        self.terms.push((wire_id, val));
+        self.is_simplified = false;
+    }
+
+    /// Fold `other * scale` into `self` by updating coefficients in place, for
+    /// the case where every wire of `other` **already has a slot** in `self`.
+    ///
+    /// This is the second half of keeping accumulation linear, and it covers a
+    /// shape `append_keeps_order` cannot: `s = s + a * y; s = s + x;` in a loop.
+    /// The first statement appends a freshly allocated (largest) wire and takes
+    /// the append shortcut; the second adds `x`, an *input* wire with a small
+    /// id, which is out of order and used to force a full sort of the whole
+    /// accumulator — putting the circuit straight back to O(N²) (measured
+    /// 2,010,998 → 8,021,998 → 32,043,998 terms for N = 2,000 → 4,000 → 8,000).
+    ///
+    /// But an out-of-order wire is necessarily an *older* one, and after its
+    /// first appearance it is already present, so there is nothing to reorder —
+    /// only a coefficient to add. Two binary-search passes rather than one plus
+    /// a scratch vector, so that a missing wire leaves `self` untouched without
+    /// allocating: `other` is one or two terms wide in practice.
+    fn merge_in_place(&mut self, other: &Self, scale: Fr) -> bool {
+        if !self.is_simplified || !other.is_simplified {
+            return false;
+        }
+        for (w, _) in &other.terms {
+            if self.terms.binary_search_by_key(w, |t| t.0).is_err() {
+                return false;
+            }
+        }
+        let mut cancelled = false;
+        for (w, coeff) in &other.terms {
+            let idx = self
+                .terms
+                .binary_search_by_key(w, |t| t.0)
+                .expect("checked present above");
+            let merged = self.terms[idx].1.add(&coeff.mul(&scale));
+            self.terms[idx].1 = merged;
+            cancelled |= merged.is_zero();
+        }
+        if cancelled {
             self.is_simplified = false;
         }
+        true
     }
 
     pub fn add_linear(&mut self, other: &Self, scale: Fr) {
         if scale.is_zero() || other.terms.is_empty() {
             return;
         }
-        let can_keep_simplified = self.terms.is_empty() && other.is_simplified;
+        // `other.is_simplified` is what makes `other.terms[0].0` the smallest of
+        // the block and guarantees none of its coefficients is zero; `scale` is
+        // non-zero and Fr is a field, so the scaled coefficients are non-zero
+        // too. Short-circuits, so the index is only reached once that holds.
+        if other.is_simplified && self.append_keeps_order(other.terms[0].0) {
+            for (wire, coeff) in &other.terms {
+                self.terms.push((*wire, coeff.mul(&scale)));
+            }
+            self.is_simplified = true;
+            return;
+        }
+        if self.merge_in_place(other, scale) {
+            return;
+        }
         for (wire, coeff) in &other.terms {
             self.terms.push((*wire, coeff.mul(&scale)));
         }
-        self.is_simplified = can_keep_simplified;
+        self.is_simplified = false;
+    }
+
+    /// The invariant `is_simplified` claims: strictly ascending wire ids and no
+    /// zero coefficients. For tests and debugging only — this is O(n), and the
+    /// entire point of the flag is not to pay that.
+    pub fn invariant_holds(&self) -> bool {
+        if !self.is_simplified {
+            return true; // claims nothing
+        }
+        self.terms.windows(2).all(|w| w[0].0 < w[1].0)
+            && self.terms.iter().all(|(_, c)| !c.is_zero())
     }
 
     pub fn scale(&self, factor: Fr) -> Self {
@@ -315,6 +451,8 @@ impl LinearCombination {
         if self.is_simplified {
             return;
         }
+        LC_SIMPLIFY_CALLS.with(|c| c.set(c.get() + 1));
+        LC_SIMPLIFY_TERMS.with(|c| c.set(c.get() + self.terms.len() as u64));
         if self.terms.len() <= 1 {
             if self.terms.len() == 1 && self.terms[0].1.is_zero() {
                 self.terms.clear();

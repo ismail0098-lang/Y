@@ -379,6 +379,14 @@ fn compile_circom(path: &str, args: &[String]) {
             t0.elapsed().as_secs_f64(),
             zk_mem::report()
         );
+        // The circom front end shares the linear-combination layer with Y's own,
+        // so it can regress into the same quadratic accumulate — report it here
+        // too rather than only on the `.ysu` path.
+        let (calls, terms) = zk_emitter::lc_simplify_stats();
+        eprintln!(
+            "[Y ZK TIMING] {:<22} {:>12} calls, {:>12} terms scanned",
+            "lc simplify", calls, terms
+        );
     }
 
     let circuit = emitter.view();
@@ -1134,6 +1142,11 @@ fn main() {
                                 eprintln!(
                                     "[Y ZK TIMING] {:<22} {:>12} muls, {:>12} adds",
                                     "field ops", muls, adds
+                                );
+                                let (calls, terms) = zk_emitter::lc_simplify_stats();
+                                eprintln!(
+                                    "[Y ZK TIMING] {:<22} {:>12} calls, {:>12} terms scanned",
+                                    "lc simplify", calls, terms
                                 );
                             }
 
