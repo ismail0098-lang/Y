@@ -77,6 +77,17 @@ repository's own investigation documents contradict.
   compiled program exceeds its 512,000-byte limit (`leo build` on
   `leo/dot_product` errors at 14,322,372 bytes). Those rows have been removed
   rather than corrected.
+- **The PTX backend has no integer datapath, and used to compile integers as
+  floats.** A kernel declared `GlobalMemory<U32>` with `let s: U32 = a + b;`
+  compiled clean, assembled clean under `ptxas -arch=sm_89`, reported success,
+  and emitted `ld.global.f32` / `add.f32` / `st.global.f32` — silently rounding
+  every value above 2^24. `U64`, `I32` and `I64` behaved the same. It is refused
+  now (`tests/ptx_integer_datapath.rs`); the tile intrinsics are hardcoded to
+  f32 at ~557 sites with no element-type plumbing, so this is a feature to
+  build rather than a typo to fix. **It is also the blocker for GPU field
+  arithmetic** — BN254 Montgomery multiply for NTT/MSM needs `mul.wide.u32`,
+  integer add/shift/and, and typed global loads, none of which can be expressed
+  today.
 - **Hopper TMA / WGMMA support never existed.** Sixteen of nineteen `emit_*`
   methods in that family produced PTX that `ptxas` rejects at their own target
   architecture. They were deleted rather than fixed. `mma.sync` — the path the
