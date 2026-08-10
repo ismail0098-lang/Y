@@ -9,7 +9,7 @@
 //! outright.
 //!
 //! That is a wrong answer, not a missing feature, and it is worse than the
-//! `tma_load` / `wgmma_async` intrinsics deleted in CLAUDE.md gotcha #7 —
+//! `tma_load` / `wgmma_async` intrinsics deleted in CLAUDE.md gotcha #8 —
 //! those at least produced PTX `ptxas` rejected. This one assembles, launches,
 //! and returns numbers. **No assembly gate can catch it**, which is why the
 //! centrepiece of this file is a differential run on the real GPU rather than
