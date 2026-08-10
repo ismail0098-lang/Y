@@ -170,8 +170,12 @@ unless both compilers report the same non-linear constraint count**, because
 comparing compile speed across tools that built different circuits is
 meaningless.
 
-Measured 2026-08-09, minimum of three runs (`tests/benchmark_zk_vs_circom.py`);
-the 10,000,000 row 2026-08-10:
+Polynomial rows measured 2026-08-09, minimum of three
+(`tests/benchmark_zk_vs_circom.py`); the 10,000,000 row and **all three dot
+product rows** 2026-08-10 on an idle box, minimum of five below 1M. The two 1M
+figures are single runs of circom (978.6 s and 16 minutes apiece) against a
+minimum of three for Y; a control of two byte-identical Y binaries reads 1.01x,
+so the noise floor is ~3% and none of these ratios is near it:
 
 | circuit | N | Y | circom | speedup |
 |---|---|---|---|---|
@@ -179,12 +183,13 @@ the 10,000,000 row 2026-08-10:
 | polynomial | 100,000 | 0.087 s | 3.53 s | 40.5x |
 | polynomial | 1,000,000 | 0.895 s | 249.04 s | **278x** |
 | polynomial | 10,000,000 | 10.47 s | **did not finish in 1 h** | **>345x** |
-| dot product | 10,000 | 0.038 s | 0.509 s | 13.5x |
-| dot product | 100,000 | 3.19 s | 13.88 s | 4.3x |
-| dot product | 1,000,000 | 476.2 s | 983.2 s | **2.06x** |
+| dot product | 10,000 | 0.011 s | 0.517 s | 46x |
+| dot product | 100,000 | 0.122 s | 14.23 s | 117x |
+| dot product | 1,000,000 | 1.27 s | 978.6 s | **773x** |
 
-**Read the two circuits separately — the gap between them is the whole story,
-and only half of it is flattering.**
+**Read the two circuits separately, and read the dot-product row with the
+constraint counts in front of you — the ratio is real and it is also the least
+honest number on this page.**
 
 The polynomial circuit's linear combinations are one or two terms wide, and both
 tools emit the same thing: circom reports 1,000,000 non-linear and **0 linear**
@@ -202,32 +207,38 @@ is a projection and is not what the table reports. Y is linear across the same
 range (0.087 → 0.895 → 10.47 s), so the gap widens with size rather than
 converging. Two caveats worth stating: the harness's fairness gate could not be
 applied at 10M, since circom emitted no constraint count to compare (both
-circuits are the same template, scaled), and this is the *narrow* circuit — see
-the dot product immediately below for the shape where Y loses this property.
+circuits are the same template, scaled), and this is the *narrow* circuit — the
+dot product below is linear in Y too now, but there the two tools build
+different-sized artifacts, so its ratio is not comparable to this one.
 
-The dot product accumulates a dense linear combination, and there **Y is the
-super-linear one**: 10k → 100k costs 85x for 10x the size, and 100k → 1M costs
-another 149x, ending at 476 seconds. Roughly O(N²·²). Y still wins the wall
-clock — 2.06x — but the margin collapses from 278x to 2x, and it collapses
-because of Y, not because circom got faster.
+The dot product accumulates a dense linear combination, and **Y used to be the
+super-linear one on it** — 476 seconds at 1M, roughly O(N²·²), against circom's
+983. That was a real defect and it is fixed: `sum = sum + a * b` appends one
+freshly allocated wire to `sum` per iteration and then called
+`LinearCombination::simplify`, whose "already sorted" fast path still scans every
+term to conclude it has nothing to do. An accumulator holding `i` terms at
+iteration `i` therefore cost N²/2 term visits. Wire ids are allocated ascending,
+so appending a fresh one cannot break sortedness; deciding that from the boundary
+term is O(1). Measured on the same box, minimum of runs: **424.8 s → 1.27 s at
+1M (336x), 3.14 → 0.12 s at 100k**, and the curve is linear now. Details and the
+attribution in
+[docs/heavy_circuit_speed_test.md](docs/heavy_circuit_speed_test.md).
 
-Two qualifiers on that 2.06x, in both directions:
+**But 773x is not a like-for-like number, and the reason has nothing to do with
+that fix.** The two tools emit different artifacts here: circom emits 1,000,000
+non-linear **plus 3,000,000 linear** constraints, Y emits 1,000,001 total,
+because Y folds the linear operations into the combinations instead of
+allocating a signal per intermediate. So Y is building roughly a quarter of the
+constraints, and the harness's fairness gate compares *non-linear* counts only,
+which is why this pair passes it. A same-total-constraints comparison would be
+markedly less favourable. Y's R1CS is genuinely smaller and correspondingly
+cheaper to prove — 0.22 GB against circom's 0.48 GB, at 0.51 GB peak RSS against
+circom's 10.9 GB — but "773x faster" and "773x more work per second" are not the
+same claim and only the first is measured.
 
-- **In Y's favour:** the artifacts are not the same size. On this circuit circom
-  emits 1,000,000 non-linear **plus 3,000,000 linear** constraints; Y emits
-  1,000,001 total. Y's R1CS is 4x smaller and correspondingly cheaper to prove.
-- **Against Y:** the benchmark harness's fairness gate compares *non-linear*
-  counts only, so it passes this pair. A same-total-constraints comparison would
-  be less favourable to Y on time.
-
-So: Y's constraint emission is fast when linear combinations stay narrow and
-degrades badly when they do not — an accumulator touched once per iteration is
-the shape that triggers it. **The 278x is the polynomial number and should never
-be quoted as "Y's speed".** This is a known open problem, not a measurement
-artifact; the in-place accumulator update and `is_simplified` propagation
-described in
-[docs/heavy_circuit_speed_test.md](docs/heavy_circuit_speed_test.md) reduce the
-constant but do not change the exponent.
+**Quote the polynomial row, not this one, if you want one number.** The
+polynomial circuit is the strictly like-for-like comparison: same non-linear
+count, zero linear constraints on either side, same artifact.
 
 **Memory is the binding constraint on this backend, not time.** Peak RSS,
 polynomial circuit, measured 2026-08-09:

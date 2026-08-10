@@ -65,11 +65,28 @@ exhaustion or quadratic slow-down:
    not overlap (e.g. adding a fresh multiplication temp wire to a running sum),
    the result stays simplified. Bypasses the $O(N)$ check in `simplify()`,
    making such additions $O(1)$.
+
+   > **This entry described code that did not exist, and that is why the
+   > dot-product circuit stayed O(N²) for so long.** Until 2026-08-10
+   > `add_linear` read `self.terms.is_empty() && other.is_simplified` — it kept
+   > the flag only when the accumulator was *empty*, never comparing wire
+   > boundaries at all. The parenthetical example above, "adding a fresh
+   > multiplication temp wire to a running sum", is exactly the case it failed
+   > to handle, and exactly the shape of the dot-product benchmark. So the
+   > document asserted the optimization that would have prevented the quadratic,
+   > which is a good reason nobody went looking for it. It is real now
+   > (`append_keeps_order`) — see §3b, and note that the counter added with it
+   > exists so this claim is *checkable* rather than merely written down.
 3. **Single-Term Simplification Fast Path.** Returns immediately for
    `terms.len() <= 1`, avoiding redundant `HashMap` allocation and sorting.
 4. **Commutative Hash Lookup.** Order-independent hashing on
    `LinearCombination` for constraint deduplication via a global hash map,
    dropping comparison counts from ~20,000,000 to ~20,000.
+5. **In-Place Coefficient Merge** (2026-08-10). When an addend's wires are
+   already present in the accumulator, add the coefficients through a binary
+   search instead of appending and re-sorting. Covers the shape (2) cannot —
+   adding an *input* wire, whose id is small and so never appendable in order.
+   All-or-nothing: a missing wire must leave the combination untouched. See §3b.
 
 ---
 
@@ -89,16 +106,30 @@ exactly one extra constraint, binding the output wire).
 | 10,000 | 0.0111 | 0.1316 | **11.83x** |
 
 ### Iterative Dot Product
-| N | Y (s) | Circom (s) | Speedup |
-|---|---|---|---|
-| 100 | 0.0013 | 0.0055 | **4.19x** |
-| 500 | 0.0025 | 0.0190 | **7.76x** |
-| 1,000 | 0.0031 | 0.0370 | **11.84x** |
-| 5,000 | 0.0188 | 0.2222 | **11.79x** |
-| 10,000 | 0.0593 | 0.5129 | **8.65x** |
 
-**Y is 3.6x–11.8x faster than Circom at emitting an equivalent R1CS**, with the
-advantage widening as the circuit grows (the polynomial case is monotonic in N).
+Re-measured 2026-08-10 as a matched set on an idle box, minimum of 5, after the
+quadratic `simplify` fix in §3b. The middle column is what this table used to
+report, kept so the fix is visible rather than merely asserted.
+
+| N | Y before | Y (s) | Circom (s) | Speedup |
+|---|---|---|---|---|
+| 100 | 0.0012 | 0.0011 | 0.0061 | **5.4x** |
+| 500 | 0.0018 | 0.0018 | 0.0208 | **11.8x** |
+| 1,000 | 0.0024 | 0.0019 | 0.0390 | **20.5x** |
+| 5,000 | 0.0128 | 0.0064 | 0.2249 | **35.1x** |
+| 10,000 | 0.0394 | 0.0113 | 0.5172 | **45.7x** |
+
+**Y is 5.4x–45.7x faster than Circom at emitting an equivalent R1CS**, with the
+advantage widening as the circuit grows — and note the fix does nothing at
+N ≤ 500, where the accumulator is too short for an O(i) rescan to matter. The
+quadratic term only becomes the dominant cost somewhere past a thousand
+iterations, which is exactly why a table that stopped at 10,000 under-reported
+it for so long.
+
+**The word "equivalent" is doing work here** — see §3's dot-product discussion
+and the README: circom emits 3 linear constraints per iteration that Y folds
+into its combinations, so Y is building about a quarter of the artifact. The
+fairness gate compares non-linear counts, which these pairs match exactly.
 
 ### At 1,000,000 constraints — and against Leo / Noir
 
@@ -229,10 +260,78 @@ Two limits on this comparison, stated because they cut against Y:
   template scaled up, and the gate passed on the identical pair at 1M (circom
   1,000,000 non-linear / 0 linear vs Y's 1,000,001), which is the reason to
   believe the 10M pair too — but it is inference, not the check.
-* **This is the narrow circuit.** The dot product, whose linear combinations are
-  dense, is the shape where Y is the super-linear one and the margin collapses to
-  2.06x at 1M. Nothing here was run at 10M for it, and given O(N^2.2) it would
-  not finish inside an hour either.
+* **This is the narrow circuit.** The dot product builds a dense combination,
+  and it is not the same measurement — not because Y is slow on it any more
+  (§3b), but because circom emits four constraints per iteration there to Y's
+  one, so the ratio stops being like-for-like. Nothing here was run at 10M for
+  it; circom needs 978 s at 1M and is superlinear, so it would not finish inside
+  an hour either.
+
+### 3b. The dot product was O(N²), and none of the obvious suspects was it
+
+`sum = sum + a * b` in a loop cost **476 s at 1M** and scaled as roughly O(N²·²).
+It is **1.27 s** now, measured on an idle box against the pre-fix binary:
+
+| N | before | after | |
+|---|---|---|---|
+| 10,000 | 0.0394 s | 0.0113 s | 3.5x |
+| 100,000 | 3.140 s | 0.122 s | 25.8x |
+| 1,000,000 | 424.8 s | 1.266 s | **336x** |
+
+(424.8 s rather than the 476 s this document used to quote: same binary, quieter
+box, minimum of runs.) A control of two byte-identical copies of the pre-fix
+binary reads 1.01x, so the noise floor is ~3% and every ratio here is far
+outside it.
+
+**Two plausible causes were both wrong, which is the reason to instrument
+before optimising.** It was not field arithmetic: the `Fr` counters are exactly
+linear, 3N multiplies and 3N adds. It was not a per-iteration clone of the
+accumulator either — the in-place accumulator update described in §2 already
+existed and already fired. Separating *calls* from *work* inside
+`LinearCombination::simplify` found it immediately: at N=40,000, **119,999 calls
+but 800,259,997 terms scanned**, growing exactly 4x per doubling.
+
+`simplify` has an "already sorted" fast path, and that path still walks every
+term to decide it has nothing to do. An accumulator holds `i` terms at iteration
+`i`, so the emitter spent N²/2 term visits re-deriving a property that appending
+a freshly allocated wire had never broken. Wire ids are handed out in increasing
+order, so the boundary term alone decides it — `append_keeps_order`, O(1).
+
+**The first fix only covered half the shapes, and the check that found the other
+half was to vary the circuit rather than re-run the same one.** `s = s + a * y;
+s = s + x;` names an *input* wire, whose id is small and can never be appended in
+order; that stayed quadratic at 2,010,998 → 8,021,998 → 32,043,998 terms for
+N = 2,000 → 4,000 → 8,000. But an out-of-order wire is necessarily an older one,
+and after its first appearance it is already present, so there is nothing to
+reorder — only a coefficient to add (`merge_in_place`, a binary search). It is
+all-or-nothing on purpose: if any wire of the addend is missing it must leave the
+combination untouched, or the fallback push double-counts the ones it already
+applied.
+
+Costs nothing elsewhere, verified rather than assumed: Poseidon chain 0.99x,
+polynomial 1M 1.03x, circom front end 1.02x — all inside the noise floor. Those
+two circuits were already linear and still are.
+
+**The safety property is byte-identity.** The emitted `.r1cs`, `.r1cs.txt` and
+`.sym` are identical to the pre-fix binary on eight `.ysu` circuits — including
+two written specifically to cancel coefficients to zero, since merging in place
+can zero a term that the old push-then-sort path would have filtered — plus
+circomlib `Poseidon(2)` through the circom front end. Field addition is
+commutative, so merging in place yields the same coefficient as pushing and
+sorting.
+
+`lc_simplify_stats()` is now permanent and reported by `Y_ZK_TIMING=1` on both
+the `.ysu` and circom paths, because **this cost is invisible to every other
+instrument in the tree**: it is spread across `emit_circuit_entry` so a
+phase-level profile just shows that phase growing, and it does no field
+arithmetic so the `Fr` counters stay flat. `tests/zk_lc_accumulator.rs` asserts
+on that counter rather than on wall time — a timing assertion for an asymptotic
+property is either flaky or too loose to catch the regression.
+
+One number in this section is a projection and is labelled as one: the pre-fix
+count at 1M was never measured. The measured points fit `N²/2 + 6.5N − 3`
+exactly at N = 5,000 / 10,000 / 20,000 / 40,000, and that model gives ~5×10¹¹
+term visits at 1M against the 4 the fixed emitter performs.
 
 ---
 

@@ -2095,14 +2095,15 @@ Every benchmark compiler was evaluated in its fastest official optimization mode
 
 #### 2. Compiler Compilation Speed Comparison (BN254 Field)
 
-> **Y's own timings in this table are stale as of 2026-08-09 and now understate
-> it — except for `dot_product`, where the old figure is not reproducible.** The
-> emitter was rewritten (`[u64; 4]` Montgomery field, allocation removal, a
-> linear-substitution pass). Re-measured on the same box: `heavy_circuit` (1M)
-> **0.895 s / 0.37 GB** (was 1.706 s), `heavy_31m` **36.1 s / 11.4 GB** (was
-> 113.0 s), `dot_product` (100k) **3.19 s** (the `0.285 s` here does not
-> reproduce — that circuit accumulates a dense linear combination and Y is
-> super-linear on it). Current dated figures and methodology: `README.md`.
+> **Y's own timings in this table are stale as of 2026-08-10 and now understate
+> it.** The emitter was rewritten (`[u64; 4]` Montgomery field, allocation
+> removal, a linear-substitution pass), and a quadratic rescan in
+> `LinearCombination::simplify` was removed. Re-measured on the same box:
+> `heavy_circuit` (1M) **0.895 s / 0.37 GB** (was 1.706 s), `heavy_31m`
+> **36.1 s / 11.4 GB** (was 113.0 s), `dot_product` (100k) **0.122 s** (was
+> 0.285 s here, then 3.19 s once the quadratic was exposed at scale, now 0.122 s
+> — the `0.285 s` figure was never reproducible and should not be read as the
+> one that was restored). Current dated figures and methodology: `README.md`.
 
 | Benchmark Circuit | Y Time (s) | Circom (`--O2`) Time (s) | Noir (Aggressive) Time (s) | Leo (BLS12-377)* Time (s) | Y Speedup vs Circom / Peer |
 | :--- | :---: | :---: | :---: | :---: | :---: |
