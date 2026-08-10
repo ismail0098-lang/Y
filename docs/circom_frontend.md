@@ -140,6 +140,27 @@ wrote.** Nothing downstream records the difference.
   the multiplexer idiom.
 - **Comparison, boolean and bitwise operators over signals** — these are gadgets,
   not operators. The message names `comparators.circom` / `bitify.circom`.
+
+  > **This refusal is applied to `<--` right-hand sides too, and there it is
+  > wrong — it makes circomlib's own `bitify.circom` uncompilable.** `Num2Bits`
+  > computes its witness with `out[i] <-- (in >> i) & 1` and then constrains the
+  > result with `out[i] * (out[i] - 1) === 0` and `lc1 === in`. The shift is
+  > never an R1CS expression; `<--` exists precisely to compute a value the
+  > constraints will check afterwards, so refusing it for having "no R1CS form"
+  > applies the constraint value model where the witness model belongs. The
+  > diagnostic compounds it by pointing the user at `bitify.circom`, which is
+  > the file that just failed to compile.
+  >
+  > Consequence, measured 2026-08-11: `Poseidon(2)`, a depth-20 Poseidon Merkle
+  > inclusion proof and a 200-hash chain all compile from unmodified circomlib,
+  > but **`Num2Bits`, `comparators.circom` and `aliascheck.circom` do not**, and
+  > nor does anything depending on them — range checks and comparisons, which is
+  > most real circuits. `<--` itself is supported (`out <-- in + 1` compiles);
+  > it is only the value model applied to its RHS that is too strict.
+  >
+  > The fix is to evaluate a `<--` RHS through the witness IR, where Y already
+  > has the operations (`WitnessOp::BitOfLc` and friends) and where an
+  > unconstrained hint is already tracked (`unconstrained_hint_vars`). Not done.
 - **Signal-dependent array indices** — needs an explicit multiplexer.
 - **`bus` declarations** (circom 2.1.5+) — flattening one silently would change
   the signal layout a verifier expects.
