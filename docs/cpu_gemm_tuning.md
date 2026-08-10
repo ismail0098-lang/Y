@@ -899,6 +899,35 @@ it — so `64³`, `128x64x128`, `256x64x256` and `128³` are appended as indices
 18-21. They are appended, not inserted, so 0-17 keep the meaning this document
 quotes everywhere else.
 
+### Ruled out by measurement — splitting the masked tail out of the inner loop
+
+`48³` still sits at 0.78 (16T) / 0.83 (1T), so the obvious next move was the
+one `emit_micro` documents: emit two loop nests, one for `N % 16 == 0` with no
+mask at all and one for the ragged tail. The evidence looked strong. Reading
+the emitted object, the `nv = 3` inner loop carried **24 FMAs in 83
+instructions**, of which 15 were mask machinery (`kmovw`, `vpextrq`,
+`vextracti32x4`, `vmovdqa64`) and 16 were `vmovaps` register shuffles —
+and at `N = 48` the last vector is a full 16 lanes, so the mask is all-ones and
+every one of those instructions is provably useless work.
+
+**It made no difference.** Best of four interleaved launches at one thread,
+where this shape's spread is under 6%:
+
+| shape | masked (shipped) | split | ratio |
+|---|---|---|---|
+| tiny 48³ | 245.4 | 234.4 | 0.96 |
+| small 64³ | 199.6 | 199.2 | 1.00 |
+| small 128x64x128 | 202.9 | 203.2 | 1.00 |
+| small 256x64x256 | 207.9 | 209.4 | 1.01 |
+
+Reverted — it doubles the emitted tiny kernel for nothing. **The lesson is the
+one this file keeps relearning from the other direction: an instruction count
+is not a cost.** Fifteen provably-wasted instructions per 24 FMAs were free,
+presumably because they issue on ports the loop is not contending for. The
+same mistake in reverse (halving the GPU mainloop's instruction count bought
+~3%) is recorded above. Do not re-chase this without first establishing *what*
+the loop is actually bound by; the count alone has now been wrong twice.
+
 ## Results after the 2-D partition, the thread count and the copy-free path
 
 Strict A/B: one shape per process, arms interleaved within a launch, arm order
