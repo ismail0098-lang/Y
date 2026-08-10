@@ -45,6 +45,8 @@ SHAPES = [
     # Appended, so 0-17 keep the meaning the doc quotes. These four sit in the
     # 48^3 -> 250^3 gap, where the copy-free/packed crossover lives.
     "small   64^3", "small   128x64x128", "small   256x64x256", "small   128^3",
+    # One per `nv` bucket of the copy-free path (nv = 1, 2, 4; 48^3 is nv=3).
+    "small   64x16x64", "small   48x32x64", "small   32x64x48",
 ]
 
 ROW = re.compile(r"^(.*?)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.e+-]+)\s*$")

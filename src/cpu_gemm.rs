@@ -607,7 +607,7 @@ pub const TINY_MAX_N: usize = 64;
 /// the `nv` B vectors and the A broadcast. `nv` cannot be a runtime value: the
 /// accumulator count decides the register allocation, so a data-dependent one
 /// puts C back in memory.
-const TINY_BLOCK: [(usize, usize); 4] = [(1, 24), (2, 12), (3, 8), (4, 6)];
+pub const TINY_BLOCK: [(usize, usize); 4] = [(1, 16), (2, 8), (3, 6), (4, 4)];
 
 /// Multiply-adds below which the copy-free path replaces the packed one.
 ///

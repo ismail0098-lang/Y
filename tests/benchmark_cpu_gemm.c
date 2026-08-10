@@ -117,6 +117,12 @@ static const Shape SHAPES[] = {
     {  128,   64,  128, "small   128x64x128"},
     {  256,   64,  256, "small   256x64x256"},
     {  128,  128,  128, "small   128^3"},
+    /* One per `nv` bucket of the copy-free path (N/16 = 1, 2, 4; 48^3 above is
+       the nv=3 case).  Without these only nv=3 is reachable from the benchmark
+       set, so the row block for the other three could only be set by analogy. */
+    {   64,   16,   64, "small   64x16x64"},
+    {   48,   32,   64, "small   48x32x64"},
+    {   32,   64,   48, "small   32x64x48"},
 };
 #define NSHAPES ((int)(sizeof(SHAPES) / sizeof(SHAPES[0])))
 

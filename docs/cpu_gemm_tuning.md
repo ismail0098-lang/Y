@@ -838,7 +838,7 @@ split it *was* right. Two of the three "just re-measure it" items in the handoff
 turned out this way: the constant was not stale, the thing it was measuring
 had changed.
 
-## `tiny 48³`: 0.44 -> 0.84, by not packing and not touching C
+## `tiny 48³`: 0.44 -> 1.01, by not packing, not touching C, and not filling the register file
 
 `48³` was the worst ratio in the table at both thread counts, and it is not call
 overhead — Y held 36% of AVX-512 peak there against OpenBLAS's 84%, with
@@ -853,14 +853,52 @@ is what pointed at the C traffic as the other half.
 `N` is capped at `TINY_MAX_N = 64` **structurally, not by tuning**: C lives in
 `N/16` accumulator vectors per row and there are 32 zmm registers. Raising it
 does not cost a little speed, it spills the accumulators and defeats the whole
-point. Hence one specialised body per `nv`, each with its own row block
-(`24, 12, 8, 6` rows for `nv = 1..4`), holding the accumulator count at 24. A
+point. Hence one specialised body per `nv`, each with its own row block. A
 runtime `nv` would put C back in memory.
 
 Measured through the real emitter and the real harness, 16 threads, four
-interleaved launches: **127.1 -> 242.5 GFLOPS, 1.91x**, moving `tiny 48³` from
-**0.44 to 0.84** against OpenBLAS. It is still behind, so this is a large dent
-in the largest gap rather than a closed gap.
+interleaved launches: **127.1 -> 289.1 GFLOPS**, moving `tiny 48³` from
+**0.44 to 1.01** against OpenBLAS — from the worst ratio in the table to
+parity.
+
+### Filling the register file was exactly the wrong instinct, and it cost 1.34x
+
+The row blocks were first set to `24, 12, 8, 6` for `nv = 1..4`, i.e. holding
+the accumulator count at **24** — the largest that "fits" 32 zmm registers with
+room for the `nv` B vectors and one broadcast. That reasoning is the same one
+that picks `MR = 12` in the packed micro-kernel, and here it is wrong.
+
+The tell was in the emitted object: the `nv = 3` inner loop carried 24 FMAs,
+**11 `vbroadcastss` where 8 suffice, and 16 `vmovaps`**. Twenty-four
+accumulators plus operands leaves LLVM nothing to schedule with, and it pays
+for that in register moves. Dropping the budget, one shape per `nv` bucket, one
+thread, best of four interleaved launches:
+
+| shape | `nv` | 24 accumulators | **18** | 12 |
+|---|---|---|---|---|
+| small 64x16x64 | 1 | 83.7 | **106.2** (1.27x) | 95.0 (1.13x) |
+| small 48x32x64 | 2 | 152.5 | 224.4 (1.47x) | **249.2 (1.63x)** |
+| tiny 48³ | 3 | 241.7 | 290.9 (1.20x) | **293.4 (1.21x)** |
+| small 32x64x48 | 4 | 216.3 | **313.3 (1.45x)** | 303.9 (1.41x) |
+| geomean | | 1.00 | **1.343** | 1.334 |
+
+**Wrong in every bucket, not just the one that was measured.** 18 and 12 are a
+tie with each other on the geomean, so 18 ships: it is the larger-block end
+(better FMA:load ratio, fewer passes over B), and it wins or ties three of the
+four. Row blocks are now `16, 8, 6, 4`.
+
+Two things worth carrying. First, **`MR = 12` in the packed kernel was swept
+and this was not** — it was set by a register-count argument that sounded like
+the same argument and is not, because the packed micro-kernel reads its A from
+a packed panel with a different operand pattern. An argument that worked
+elsewhere is not evidence. Second, locating this needed **one benchmark shape
+per `nv` bucket** (indices 22-24); with only `48³` in the set, three of the four
+bodies could only have been set by analogy, and the analogy would have been
+wrong for `nv = 2` by 11%.
+
+`64x16x64` at 0.44 and `48x32x64` at 0.72 against OpenBLAS are new shapes that
+have never been tuned for anything else; they are not regressions, they are
+newly visible.
 
 Rows past `mw` in the final row block are not branched around; their A element
 is forced to zero and the FMA runs anyway, so the K loop stays a straight-line
@@ -941,7 +979,7 @@ above together.
 | ragged 333x777x64 | 670.9 | **1415.9** | **2.11x** | 512.0 | 1.31 | **2.77** |
 | gemv 1x4096x4096 | 101.6 | **209.7** | **2.06x** | 52.1 | 1.95 | **4.03** |
 | nice 256³ | 871.1 | **1703.3** | **1.96x** | 791.1 | 1.10 | **2.15** |
-| tiny 48³ | 126.8 | **222.7** | **1.76x** | 283.9 | 0.45 | 0.78 |
+| tiny 48³ | 126.8 | **289.1** | **2.28x** | 287.0 | 0.45 | **1.01** |
 | ragged 137x391x1013 | 1009.6 | **1589.9** | **1.58x** | 949.5 | 1.06 | **1.67** |
 | nice 512³ | 1975.7 | 2276.7 | 1.15x | 1723.8 | 1.15 | **1.32** |
 | nice 1024³ | 2315.4 | 2635.9 | 1.14x | 2694.2 | 0.86 | 0.98 |
@@ -965,7 +1003,9 @@ floor — the four sub-1.0 rows are 0.93–0.98 at spreads of 13–26%, which is
 by this instrument's own resolution.
 
 The remaining deficits are `2048³` 0.79, `skinny 33` 0.86, `skinny 17` 0.90,
-`1000³` 0.91, `1021³` 0.92, `1024³` 0.98 and `tiny 48³` 0.78. `2048³` is the
+`1000³` 0.91, `1021³` 0.92 and `1024³` 0.98. (`tiny 48³` is listed here at the
+0.78 it measured before the accumulator-budget sweep; it is **1.01** now, and
+the geomean below therefore understates the shipped state by about 2%.) `2048³` is the
 only large square still behind, and it is the one shape where the grid stands
 down in favour of shared packed-B — see gap 10, which is the concrete way to
 attack it.
@@ -991,15 +1031,12 @@ moves, and it should not, because nothing this change touches runs there.
 
 Ordered by measured size against the AVX-512 baseline, not by guess.
 
-1. **`tiny 48³` at 0.43 (1T) / 0.45 (16T)** — **largely closed, to 0.84**, by
-   the copy-free `__y_gemm_tiny` path above (**1.91x** on Y's own path). Still
-   the worst ratio in the table, so it stays on this list. The prediction that
-   the pack was the cause was only partly right: at `48³` the pack is about 8%
-   of the multiply-adds, and the other half of the gap was C being loaded and
-   stored once per K-block. What remains is unexplained and unmeasured — the
-   next thing to try is a row block chosen per shape rather than per `nv`,
-   since `MR' = 8` at `nv = 3` was picked from the register budget alone and
-   never swept.
+1. ~~**`tiny 48³` at 0.43 (1T) / 0.45 (16T)**~~ — **CLOSED, to 1.01**, by the
+   copy-free `__y_gemm_tiny` path plus the accumulator-budget sweep above. The
+   prediction that the pack was the cause was only partly right: at `48³` the
+   pack is about 8% of the multiply-adds, the second part was C being loaded
+   and stored once per K-block, and the third — worth 1.20x on its own — was
+   that the kernel's row block had been set to fill the register file.
 2. ~~**`decode 8×4096×4096` at 0.38 on 16 threads** — the split-axis
    problem.~~ **Fixed** — see "Decode was two separate bugs" above. The K-split
    was indeed the fix, and the prediction that "the kernel is fine and the
@@ -1065,10 +1102,10 @@ Ordered by measured size against the AVX-512 baseline, not by guess.
     have to split K and reduce, like the small-M path does, which reintroduces
     exactly the C traffic the kernel exists to remove. Probably not worth it,
     but it is the reason `64³` sits at 0.78 rather than above 1.
-13. **`MR'` in the copy-free path was never swept.** The row block per `nv`
-    (`24, 12, 8, 6`) comes from holding the accumulator count at 24, which is a
-    register-budget argument, not a measurement. `MR = 12` in the packed kernel
-    was swept and 12 beat 8 and 16; there is no equivalent evidence here.
+13. ~~**`MR'` in the copy-free path was never swept.**~~ **Swept** — see
+    "Filling the register file was exactly the wrong instinct". It was worth
+    **1.34x geomean** across the four `nv` buckets, and the un-swept value was
+    wrong in all four.
 
 ## Reproducing
 
