@@ -231,7 +231,11 @@ fn emitted_cpu_gemm_matches_a_reference_on_ragged_shapes() {
         .nth(1)
         .expect("tiny body");
     let tiny = tiny.split("\n}").next().unwrap();
-    for (nv, mrv) in [(1usize, 24usize), (2, 12), (3, 8), (4, 6)] {
+    // Read from the emitter rather than restating them: these are a measured
+    // register budget and they have already moved once (24 accumulators per
+    // body down to 18, worth 1.20-1.47x). A hardcoded copy here does not
+    // protect anything, it just fails the next time they are tuned.
+    for (nv, mrv) in y::cpu_gemm::TINY_BLOCK {
         assert!(
             tiny.contains(&format!("%ty{}a{}_{} = alloca <16 x float>", nv, mrv - 1, nv - 1)),
             "the nv={} body does not declare its {} x {} accumulator block",
