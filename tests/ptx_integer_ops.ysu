@@ -1,0 +1,78 @@
+// Every integer operator the PTX backend lowers, one output buffer each.
+//
+// Deliberately branch-free and one element per thread: this exists to check
+// that the *arithmetic* is right, so nothing else should be able to fail.
+//
+// The discriminating detail is that the inputs are full-range u32, i.e. mostly
+// above 2^31. If any of `/`, `%`, `>>` or `<` were lowered signed, this kernel
+// disagrees with the unsigned reference on roughly half of all inputs; if the
+// values were routed through the f32 datapath (which is what happened before
+// the integer one existed), everything above 2^24 disagrees.
+kernel int_ops(
+    A: GlobalMemory<U32>,
+    B: GlobalMemory<U32>,
+    OAdd: GlobalMemory<U32>,
+    OSub: GlobalMemory<U32>,
+    OMul: GlobalMemory<U32>,
+    ODiv: GlobalMemory<U32>,
+    ORem: GlobalMemory<U32>,
+    OAnd: GlobalMemory<U32>,
+    OOr: GlobalMemory<U32>,
+    OXor: GlobalMemory<U32>,
+    OShl: GlobalMemory<U32>,
+    OShr: GlobalMemory<U32>,
+    OLt: GlobalMemory<U32>,
+    OHi: GlobalMemory<U32>,
+    OW64Lo: GlobalMemory<U32>,
+    OW64Hi: GlobalMemory<U32>,
+    OMixHi: GlobalMemory<U32>,
+    OSext: GlobalMemory<U32>,
+    N: I32
+) {
+    let i: I32 = block_idx_x() * 256 + thread_idx_x();
+    let a: U32 = block_ptr2d_load(A, 0, i, N, 1, N);
+    let b: U32 = block_ptr2d_load(B, 0, i, N, 1, N);
+    let sh: U32 = b & 31;
+
+    block_ptr2d_store(OAdd, 0, i, N, 1, N, a + b);
+    block_ptr2d_store(OSub, 0, i, N, 1, N, a - b);
+    block_ptr2d_store(OMul, 0, i, N, 1, N, a * b);
+    block_ptr2d_store(ODiv, 0, i, N, 1, N, a / b);
+    block_ptr2d_store(ORem, 0, i, N, 1, N, a % b);
+    block_ptr2d_store(OAnd, 0, i, N, 1, N, a & b);
+    block_ptr2d_store(OOr, 0, i, N, 1, N, a | b);
+    block_ptr2d_store(OXor, 0, i, N, 1, N, a ^ b);
+    block_ptr2d_store(OShl, 0, i, N, 1, N, a << sh);
+    block_ptr2d_store(OShr, 0, i, N, 1, N, a >> sh);
+    block_ptr2d_store(OLt, 0, i, N, 1, N, a < b);
+
+    // The high half of the 64-bit product - the carry that makes
+    // multiprecision arithmetic possible and that no operator can express.
+    let w: U64 = mul_wide_u32(a, b);
+    block_ptr2d_store(OHi, 0, i, N, 1, N, u64_hi32(w));
+
+    // ── Width conversions ──────────────────────────────────────────────
+    //
+    // Everything above is 32 bits wide from end to end, so it stays correct
+    // even if every conversion in the emitter is a silent identity - which is
+    // exactly the failure mode CLAUDE.md's design rule is about, and which an
+    // earlier version of this kernel could not see. These four cannot be
+    // computed at 32 bits at all.
+    let wa: U64 = a;
+    let wb: U64 = b;
+    let p: U64 = wa * wb + wa;
+    block_ptr2d_store(OW64Lo, 0, i, N, 1, N, u64_lo32(p));
+    block_ptr2d_store(OW64Hi, 0, i, N, 1, N, u64_hi32(p));
+
+    // A 32-bit value promoted into a 64-bit addition: the high half is the
+    // carry out, and is identically zero if the promotion did not happen.
+    block_ptr2d_store(OMixHi, 0, i, N, 1, N, u64_hi32(a + wb));
+
+    // Sign extension. `cvt.s64.s32` replicates the sign bit; `cvt.u64.u32`
+    // does not, and half the inputs are negative as I32.
+    let s: I32 = a;
+    let ws: I64 = s;
+    block_ptr2d_store(OSext, 0, i, N, 1, N, u64_hi32(ws));
+}
+
+fn main() {}
