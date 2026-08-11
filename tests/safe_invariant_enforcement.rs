@@ -308,3 +308,87 @@ fn unencodable_operator_is_refused_not_mistranslated() {
         out
     );
 }
+
+// ── Loops whose bounds are variables ───────────────────────────────────────
+//
+// These were unverifiable, and the message blamed the wrong thing. A loop
+// `for k in lo..hi` puts `lo_0` into the assertions, but `lo` is not one of
+// the tracked variables the declaration pass walks, so z3 received an unknown
+// constant, exited 1, and the compiler reported "the SMT solver could not be
+// run". The solver ran fine; it was handed a malformed query. Every existing
+// test used literal bounds, which is why none of them saw it.
+
+const VAR_BOUNDS: &str = r#"
+kernel probe(A: GlobalMemory<F32>, N: I32) {
+    let lo: I32 = block_idx_x();
+    let hi: I32 = lo + 8;
+    @invariant(k >= lo)
+    for k in lo..hi {
+        let v: F32 = block_ptr2d_load(A, 0, k, N, 1, N);
+        block_ptr2d_store(A, 0, k, N, 1, N, v);
+    }
+}
+fn main() {}
+"#;
+
+#[test]
+fn a_loop_with_variable_bounds_can_be_verified() {
+    let src = write_source("var_bounds_ok", VAR_BOUNDS);
+    let out = compile(&src, true, false);
+    assert!(
+        !out.contains("could not be run"),
+        "a variable-bounded loop still reports the solver as unrunnable:\n{}",
+        out
+    );
+    assert!(
+        out.contains("Compilation Successful"),
+        "a true invariant on a variable-bounded loop was not accepted:\n{}",
+        out
+    );
+}
+
+/// The control, and it is the one that matters: `declare_free_symbols` gives an
+/// undeclared symbol an UNCONSTRAINED value, which must make obligations
+/// harder, never easier. If it had instead made them vacuously true, this
+/// false invariant would now pass.
+#[test]
+fn a_false_invariant_on_a_variable_bounded_loop_is_still_rejected() {
+    let src = write_source(
+        "var_bounds_false",
+        &VAR_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k > 1000)"),
+    );
+    let out = compile(&src, true, false);
+    assert!(
+        out.contains("Verification Failed") || out.contains("may not hold"),
+        "a false invariant on a variable-bounded loop was accepted:\n{}",
+        out
+    );
+    assert!(
+        !out.contains("Compilation Successful"),
+        "the build succeeded despite a false invariant:\n{}",
+        out
+    );
+}
+
+/// An unconstrained bound must NOT be assumed non-negative. `k >= 0` on
+/// `for k in lo..hi` with `lo` unknown is genuinely unprovable, and saying so
+/// is correct behaviour rather than a gap - it is what caught the real
+/// modelling limit in the MSM kernel.
+#[test]
+fn an_unprovable_invariant_on_an_unknown_bound_is_reported_as_such() {
+    let src = write_source(
+        "var_bounds_unknown",
+        &VAR_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k >= 0)"),
+    );
+    let out = compile(&src, true, false);
+    assert!(
+        !out.contains("could not be run"),
+        "this must be a verification result, not a solver failure:\n{}",
+        out
+    );
+    assert!(
+        out.contains("may not hold") || out.contains("Verification Failed"),
+        "an unprovable invariant was accepted:\n{}",
+        out
+    );
+}

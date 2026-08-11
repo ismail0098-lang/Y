@@ -2110,6 +2110,170 @@ own operand, so `*p` was proven as `p`)",
         }
     }
 
+    /// Backward slice of a loop body against its invariant.
+    ///
+    /// The SMT encoder puts the WHOLE body into one query per obligation, and
+    /// that stops working on generated code: a Pippenger bucket-accumulation
+    /// loop whose body is a 30-multiply elliptic-curve point addition is
+    /// ~9,000 statements, and z3 never returns. The invariant on that loop is
+    /// `k >= 0` - it mentions the loop variable and nothing else, so not one
+    /// of those 9,000 statements can affect it.
+    ///
+    /// So: keep only the statements that can. Starting from the variables the
+    /// invariant reads, any assignment INTO a relevant variable makes its
+    /// right-hand side relevant too, to a fixpoint; every other assignment is
+    /// dropped. Control-flow statements survive if anything inside them
+    /// survived, which preserves the havoc sets `trace_body_statements`
+    /// computes (havoc of an irrelevant variable cannot change the answer).
+    ///
+    /// Soundness rests on `relevant` being an OVER-approximation of what the
+    /// invariant depends on. `collect_reads` therefore reports failure on any
+    /// expression shape it does not fully understand, and `slice_body` then
+    /// returns `None`, which makes the caller encode the entire body exactly
+    /// as before. A gap in this analysis costs compile time, never a missed
+    /// violation - which is the only acceptable direction here, because the
+    /// thing being weakened is a safety check.
+    fn slice_body_for_invariant(stmts: &[Stmt], invariant: &Expr, loop_var: &str) -> Option<Vec<Stmt>> {
+        let mut relevant = std::collections::HashSet::new();
+        relevant.insert(loop_var.to_string());
+        if !Self::collect_reads(invariant, &mut relevant) {
+            return None;
+        }
+        loop {
+            let before = relevant.len();
+            if !Self::grow_relevant(stmts, &mut relevant) {
+                return None;
+            }
+            if relevant.len() == before {
+                break;
+            }
+        }
+        Some(Self::keep_relevant(stmts, &relevant))
+    }
+
+    /// Adds every identifier `e` reads to `out`. Returns false if it met an
+    /// expression it cannot fully walk, in which case the caller must not
+    /// slice.
+    fn collect_reads(e: &Expr, out: &mut std::collections::HashSet<String>) -> bool {
+        match e {
+            Expr::Ident(n, _) => {
+                out.insert(n.clone());
+                true
+            }
+            Expr::IntLit(..) | Expr::FloatLit(..) | Expr::BoolLit(..) | Expr::StringLit(..) => true,
+            Expr::BinaryOp { left, right, .. } => {
+                Self::collect_reads(left, out) && Self::collect_reads(right, out)
+            }
+            Expr::UnaryOp { operand, .. } => Self::collect_reads(operand, out),
+            Expr::Index { base, index, .. } => {
+                Self::collect_reads(base, out) && Self::collect_reads(index, out)
+            }
+            Expr::Call { func, args, .. } => {
+                Self::collect_reads(func, out) && args.iter().all(|a| Self::collect_reads(a, out))
+            }
+            Expr::MemberAccess { base, .. } => Self::collect_reads(base, out),
+            Expr::Path { .. } => true,
+            _ => false,
+        }
+    }
+
+    /// One fixpoint round. Returns false if anything was unanalysable.
+    fn grow_relevant(stmts: &[Stmt], relevant: &mut std::collections::HashSet<String>) -> bool {
+        for stmt in stmts {
+            let ok = match stmt {
+                Stmt::Assign { target, value, .. } => match target {
+                    Expr::Ident(n, _) if relevant.contains(n) => Self::collect_reads(value, relevant),
+                    Expr::Ident(_, _) => true,
+                    // A write through anything other than a plain name could
+                    // alias a relevant variable; refuse to slice.
+                    _ => false,
+                },
+                Stmt::CompoundAssign { target, value, .. } => match target {
+                    Expr::Ident(n, _) if relevant.contains(n) => Self::collect_reads(value, relevant),
+                    Expr::Ident(_, _) => true,
+                    _ => false,
+                },
+                Stmt::Let { name, init, .. } => {
+                    if relevant.contains(name) {
+                        init.as_ref().map_or(true, |e| Self::collect_reads(e, relevant))
+                    } else {
+                        true
+                    }
+                }
+                Stmt::If { then_block, else_block, .. } => {
+                    Self::grow_relevant(&then_block.stmts, relevant)
+                        && else_block.as_ref().map_or(true, |b| Self::grow_relevant(&b.stmts, relevant))
+                }
+                Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                    Self::grow_relevant(&body.stmts, relevant)
+                }
+                Stmt::SafeBlock(b, _) | Stmt::Chisel(b, _) | Stmt::GhostBlock(b, _)
+                | Stmt::HintBlock { body: b, .. } | Stmt::ClockDomainBlock { body: b, .. } => {
+                    Self::grow_relevant(&b.stmts, relevant)
+                }
+                Stmt::Expr(_) | Stmt::Return(..) | Stmt::TypeAlias { .. } | Stmt::Break { .. } => true,
+                // Anything unrecognised: do not slice.
+                _ => false,
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn keep_relevant(stmts: &[Stmt], relevant: &std::collections::HashSet<String>) -> Vec<Stmt> {
+        let mut out = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Assign { target: Expr::Ident(n, _), .. }
+                | Stmt::CompoundAssign { target: Expr::Ident(n, _), .. } => {
+                    if relevant.contains(n) {
+                        out.push(stmt.clone());
+                    }
+                }
+                Stmt::Let { name, .. } => {
+                    if relevant.contains(name) {
+                        out.push(stmt.clone());
+                    }
+                }
+                Stmt::If { condition, then_block, else_block, is_uniform_branch, span } => {
+                    let t = Self::keep_relevant(&then_block.stmts, relevant);
+                    let e = else_block.as_ref().map(|b| Self::keep_relevant(&b.stmts, relevant));
+                    if !t.is_empty() || e.as_ref().map_or(false, |v| !v.is_empty()) {
+                        let mut tb = then_block.clone();
+                        tb.stmts = t;
+                        let eb = else_block.as_ref().map(|b| {
+                            let mut nb = b.clone();
+                            nb.stmts = e.clone().unwrap_or_default();
+                            nb
+                        });
+                        out.push(Stmt::If {
+                            condition: condition.clone(),
+                            then_block: tb,
+                            else_block: eb,
+                            is_uniform_branch: *is_uniform_branch,
+                            span: span.clone(),
+                        });
+                    }
+                }
+                Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                    if !Self::keep_relevant(&body.stmts, relevant).is_empty() {
+                        out.push(stmt.clone());
+                    }
+                }
+                Stmt::SafeBlock(b, _) | Stmt::Chisel(b, _) | Stmt::GhostBlock(b, _)
+                | Stmt::HintBlock { body: b, .. } | Stmt::ClockDomainBlock { body: b, .. } => {
+                    if !Self::keep_relevant(&b.stmts, relevant).is_empty() {
+                        out.push(stmt.clone());
+                    }
+                }
+                _ => out.push(stmt.clone()),
+            }
+        }
+        out
+    }
+
     fn trace_body_statements(
         &self,
         stmts: &[Stmt],
@@ -2511,8 +2675,15 @@ anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
 
         let mut versions_pres = versions_init.clone();
         let mut body_assertions = Vec::new();
+        // Encode only the statements that can affect the invariant. On an
+        // ordinary loop this changes nothing; on a generated one it is the
+        // difference between a query z3 answers and one it never returns
+        // from. `None` means the analysis met something it did not fully
+        // understand, and the whole body is encoded as before.
+        let sliced = Self::slice_body_for_invariant(&body.stmts, invariant, "");
+        let to_encode: &[Stmt] = sliced.as_deref().unwrap_or(&body.stmts);
         if let Err(why) =
-            self.trace_body_statements(&body.stmts, &mut versions_pres, &mut decls_pres, &mut body_assertions)
+            self.trace_body_statements(to_encode, &mut versions_pres, &mut decls_pres, &mut body_assertions)
         {
             return self.smt_unmodellable(span.line, invariant, &why);
         }
@@ -2642,8 +2813,15 @@ anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
 
         let mut versions_pres = versions_init.clone();
         let mut body_assertions = Vec::new();
+        // Encode only the statements that can affect the invariant. On an
+        // ordinary loop this changes nothing; on a generated one it is the
+        // difference between a query z3 answers and one it never returns
+        // from. `None` means the analysis met something it did not fully
+        // understand, and the whole body is encoded as before.
+        let sliced = Self::slice_body_for_invariant(&body.stmts, invariant, loop_var);
+        let to_encode: &[Stmt] = sliced.as_deref().unwrap_or(&body.stmts);
         if let Err(why) =
-            self.trace_body_statements(&body.stmts, &mut versions_pres, &mut decls_pres, &mut body_assertions)
+            self.trace_body_statements(to_encode, &mut versions_pres, &mut decls_pres, &mut body_assertions)
         {
             return self.smt_unmodellable(span.line, invariant, &why);
         }
@@ -2732,6 +2910,73 @@ fn z3_candidates() -> Vec<String> {
     v
 }
 
+/// Declares any `name_version` symbol the query REFERENCES but never declares.
+///
+/// A loop whose bounds are variables (`for k in ks..e`) puts `ks_0` into the
+/// assertions, but `ks` is not one of the tracked variables the declaration
+/// pass walks, so z3 got an unknown constant and exited 1 - which the caller
+/// then reported as "the SMT solver could not be run". The solver ran fine;
+/// it was handed a malformed query. Literal bounds never hit this, which is
+/// why every existing test passed.
+///
+/// Declaring the symbol unconstrained is the sound direction: the invariant
+/// must then hold for ANY value it could have taken, exactly as with the
+/// havoc used for branches. It can only make an obligation harder to
+/// discharge, never easier.
+fn declare_free_symbols(query: &str) -> String {
+    let mut declared = std::collections::HashSet::new();
+    for line in query.lines() {
+        if let Some(rest) = line.trim().strip_prefix("(declare-const ") {
+            if let Some(name) = rest.split_whitespace().next() {
+                declared.insert(name.to_string());
+            }
+        }
+    }
+    let mut missing: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in query.lines() {
+        if line.trim().starts_with("(declare-const ") {
+            continue;
+        }
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            if c.is_ascii_alphabetic() || c == '_' {
+                let start = i;
+                while i < bytes.len() {
+                    let d = bytes[i] as char;
+                    if d.is_ascii_alphanumeric() || d == '_' {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let tok = &line[start..i];
+                // Only `name_<digits>`, the shape the version-mangler emits.
+                let versioned = tok
+                    .rsplit_once('_')
+                    .map_or(false, |(h, t)| !h.is_empty() && !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()));
+                if versioned && !declared.contains(tok) && seen.insert(tok.to_string()) {
+                    missing.push(tok.to_string());
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+    if missing.is_empty() {
+        return query.to_string();
+    }
+    missing.sort();
+    let mut out = String::new();
+    for m in missing {
+        out.push_str(&format!("(declare-const {} Int)\n", m));
+    }
+    out.push_str(query);
+    out
+}
+
 fn run_z3(query: &str) -> Result<String, String> {
     let candidates = z3_candidates();
     let mut spawned = None;
@@ -2757,6 +3002,7 @@ fn run_z3(query: &str) -> Result<String, String> {
 
     {
         let stdin = child.stdin.as_mut().ok_or("Failed to open stdin")?;
+        let query = declare_free_symbols(query);
         stdin.write_all(query.as_bytes()).map_err(|e| e.to_string())?;
     }
 
