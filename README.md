@@ -160,18 +160,18 @@ vendored here. Reproduce with `python3 tools/circomlib_coverage.py`:
 
 | | |
 |---|---|
-| compiles | **Y 27/31, circom 31/31** |
-| size, geomean circom/Y | **1.03x — a tie** (win 4 / tie 20 / loss 3) |
-| totals over the 27 | circom 46,448 constraints, Y 37,310 |
+| compiles | **Y 29/31, circom 31/31** |
+| size, geomean circom/Y | **1.04x — a tie** (win 5 / tie 21 / loss 3) |
+| totals over the 29 | circom 46,684 constraints, Y 37,512 |
 
-Still refused: array literals as template arguments (`EscalarMul`,
-`EscalarMulFix`), an array-valued signal port (`Sha256`), and `/` by a signal
-inside a constraint (`EdDSA`).
+Still refused: `Sha256` and `EdDSA`. Both need the same thing — `var`s that
+hold signal-dependent values, so that a circom `function` can be evaluated at
+witness time. See [docs/circom_frontend.md](docs/circom_frontend.md#known-gaps).
 
 **Read the geomean, not the best row.** Where Y wins it wins large — `Poseidon(2)`
-1.81x, `SMTProcessor` 1.71x, `SMTVerifier` 1.64x — but on twenty of the
-twenty-seven it lands on circom's number, and on three it is worse (`Point2Bits`
-1,301 vs 1,560, `Mux1` 1 vs 2). The wins share a shape: circuits written as long
+1.81x, `SMTProcessor` 1.71x, `SMTVerifier` 1.64x, `EscalarMul` 1.53x — but on
+twenty-one of the twenty-nine it lands on circom's number, and on three it is
+worse (`Point2Bits` 1,301 vs 1,560, `Mux1` 1 vs 2). The wins share a shape: circuits written as long
 chains of `<==` linear assignments, which is exactly what
 `substitute_linear_constraints` eliminates. Circuits that are already tight have
 nothing to remove.
