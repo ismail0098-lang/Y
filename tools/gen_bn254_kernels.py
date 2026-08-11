@@ -254,11 +254,95 @@ def gen_ntt():
     return "\n".join(L)
 
 
+def gen_ntt4():
+    """One radix-4 Cooley-Tukey stage: one 4-point butterfly per thread.
+
+    Halves the number of passes over memory against the radix-2 stage, which
+    is the only thing that helps once a transform is DRAM-bound - at N = 2^23
+    the radix-2 version sits at 82% of peak bandwidth, where no layout change
+    moves fewer bytes. It also does LESS arithmetic: three twiddle multiplies
+    per four points, where two radix-2 stages cost four.
+
+    With `i` the primitive 4th root (omega_m^(m/4)) and the twiddled inputs
+    A, B, C, D, the 4-point DFT is
+
+        t0 = A + C     t2 = B + D
+        t1 = A - C     t3 = (B - D) * i
+        X0 = t0 + t2   X1 = t1 + t3   X2 = t0 - t2   X3 = t1 - t3
+
+    Requires log2(N) EVEN, i.e. N = 4^k, and the input in base-4
+    digit-reversed order. The host enforces both; an odd log2(N) needs a
+    mixed-radix permutation that is not worth the risk of getting subtly
+    wrong - it would still pass a round trip.
+    """
+    L = [HEADER.replace("%d", "N"), "",
+         "kernel bn254_ntt4_stage(",
+         "    X: GlobalMemory<U32>,",
+         "    Tw1: GlobalMemory<U32>,",
+         "    Tw2: GlobalMemory<U32>,",
+         "    Tw3: GlobalMemory<U32>,",
+         "    Iw: GlobalMemory<U32>,",
+         "    Quarter: I32,",
+         "    NElem: I32",
+         ") {",
+         "    let gid: I32 = block_idx_x() * 256 + thread_idx_x();",
+         "    let blk: I32 = gid / Quarter;",
+         "    let pos: I32 = gid % Quarter;",
+         "    let i0: I32 = blk * Quarter * 4 + pos;",
+         "    let i1: I32 = i0 + Quarter;",
+         "    let i2: I32 = i1 + Quarter;",
+         "    let i3: I32 = i2 + Quarter;"]
+    L += [f"    let A{j}: U32 = 0;" for j in range(S)]
+    L += [f"    let B{j}: U32 = 0;" for j in range(S)]
+    L += [f"    let C{j}: U32 = 0;" for j in range(S)]
+    L += [f"    let D{j}: U32 = 0;" for j in range(S)]
+    L += [f"    let E{j}: U32 = 0;" for j in range(S)]   # t0 / X0
+    L += [f"    let F{j}: U32 = 0;" for j in range(S)]   # t1 / X1
+    L += [f"    let G{j}: U32 = 0;" for j in range(S)]   # t2 / X2
+    L += [f"    let H{j}: U32 = 0;" for j in range(S)]   # t3 / X3
+    L += scratch_decls()
+
+    # A = x[i0]; the other three are twiddled as they are read, so each
+    # twiddle dies immediately and never competes for a register.
+    L += load("ld", "X", "i0", "NElem")
+    L += [f"    A{j} = ld{j};" for j in range(S)]
+    L += load("qb", "X", "i1", "NElem")
+    L += load("wb", "Tw1", "pos", "Quarter")
+    L += mont_mul("B", "qb", "wb")
+    L += load("qc", "X", "i2", "NElem")
+    L += load("wc", "Tw2", "pos", "Quarter")
+    L += mont_mul("C", "qc", "wc")
+    L += load("qd", "X", "i3", "NElem")
+    L += load("wd", "Tw3", "pos", "Quarter")
+    L += mont_mul("D", "qd", "wd")
+
+    L += ["    // t0 = A + C, t1 = A - C, t2 = B + D, t3 = (B - D) * i"]
+    L += add_mod("E", "A", "C")
+    L += sub_mod("F", "A", "C")
+    L += add_mod("G", "B", "D")
+    L += sub_mod("A", "B", "D")           # A is dead; reuse it for (B - D)
+    L += load("iw", "Iw", "0", "1")
+    L += mont_mul("H", "A", "iw")
+
+    L += ["    // X0 = t0 + t2, X1 = t1 + t3, X2 = t0 - t2, X3 = t1 - t3"]
+    L += add_mod("B", "E", "G")
+    L += add_mod("C", "F", "H")
+    L += sub_mod("D", "E", "G")
+    L += sub_mod("E", "F", "H")
+    L += store("B", "X", "i0", "NElem")
+    L += store("C", "X", "i1", "NElem")
+    L += store("D", "X", "i2", "NElem")
+    L += store("E", "X", "i3", "NElem")
+    L += ["}", "", "fn main() {}", ""]
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     import os
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for name, text in [("tests/bn254_fr_mul_fast.ysu", gen_mul()),
-                       ("tests/bn254_ntt_stage.ysu", gen_ntt())]:
+                       ("tests/bn254_ntt_stage.ysu", gen_ntt()),
+                       ("tests/bn254_ntt4_stage.ysu", gen_ntt4())]:
         path = os.path.join(here, name)
         with open(path, "w") as f:
             f.write(text)
