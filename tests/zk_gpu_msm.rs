@@ -363,6 +363,27 @@ fn the_msm_oracle_is_not_vacuous() {
 /// The honest reading is that the true whole-CPU number sits somewhere between
 /// this and `threads *` the single-core number — so this is the baseline to
 /// beat, not one to hide behind.
+/// The best CPU MSM available, and what it cost.
+///
+/// Takes the better of the monolithic call and the chunked one, because
+/// NEITHER dominates: chunking wins slightly at 2^20 (279 vs 342 ms) and loses
+/// badly at small n, where it splits into 32 Pippengers of a few hundred
+/// points each. Timing against only the chunked version at n = 14,000 reported
+/// 9.72 ms where the monolithic call takes ~5.5 ms -- enough to make the GPU
+/// look like it wins at a size where it loses, which is how
+/// `the_dispatch_thresholds_are_still_true` first failed.
+fn cpu_msm_best(points: &[G1Affine], scalars: &[Fr], threads: usize) -> (G1Projective, f64) {
+    use std::time::Instant;
+    let t = Instant::now();
+    let a = G1Projective::msm(points, scalars).expect("msm");
+    let mono = t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let b = cpu_msm_all_cores(points, scalars, threads);
+    let chunked = t.elapsed().as_secs_f64();
+    assert_eq!(a, b, "the two CPU baselines disagree");
+    (a, mono.min(chunked))
+}
+
 fn cpu_msm_all_cores(points: &[G1Affine], scalars: &[Fr], threads: usize) -> G1Projective {
     let chunk = points.len().div_ceil(threads);
     std::thread::scope(|s| {
@@ -472,4 +493,129 @@ fn what_the_gpu_msm_costs() {
         );
     }
     println!("\nA ratio that stops growing means both sides have reached their\nasymptotic cost per point; a ratio that falls means the GPU has hit a\nlimit (bandwidth or memory) the CPU has not.");
+}
+
+/// `cargo test --release --features zk --test zk_gpu_msm where_the_gpu_starts_winning -- --ignored --nocapture`
+///
+/// Locates the crossover finely, for both the cold path and the path where the
+/// bases already live on the device. They are different thresholds because
+/// staging is a per-call cost the second one does not pay, and a single
+/// threshold would be wrong for one of them.
+#[test]
+#[ignore]
+fn where_the_gpu_starts_winning() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let module = load_kernel(&ctx, "bn254_msm_bucket");
+    let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1);
+
+    println!(
+        "\n{:>8} {:>6} {:>10} {:>10} {:>9} {:>10} {:>9}",
+        "n", "nw", "cpu ms", "gpu cold", "cold x", "gpu warm", "warm x"
+    );
+    for log_n in 11..=18usize {
+        let n = 1usize << log_n;
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0x5EED + log_n as u64);
+        let points: Vec<G1Projective> = (0..n).map(|_| G1Projective::rand(&mut rng)).collect();
+        let scalars: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+        let affine: Vec<G1Affine> = points.iter().map(|p| p.into_affine()).collect();
+
+        // Pick the geometry the dispatcher would pick, not the best one in
+        // hindsight -- a threshold tuned against an oracle is not a threshold.
+        let g = Geom::new(pick_windows(n));
+
+        let _ = gpu_msm(&ctx, &module, &points, &scalars, &g);
+        let bases = stage_bases(&ctx, &points);
+
+        let (mut cold, mut warm, mut cpu) = (f64::MAX, f64::MAX, f64::MAX);
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let _ = gpu_msm(&ctx, &module, &points, &scalars, &g);
+            cold = cold.min(t.elapsed().as_secs_f64());
+
+            let t = std::time::Instant::now();
+            let _ = gpu_msm_staged(&ctx, &module, &bases, &scalars, &g);
+            warm = warm.min(t.elapsed().as_secs_f64());
+
+            let t = std::time::Instant::now();
+            let a = G1Projective::msm(&affine, &scalars).unwrap();
+            let e1 = t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            let b = cpu_msm_all_cores(&affine, &scalars, threads);
+            let e2 = t.elapsed().as_secs_f64();
+            assert_eq!(a, b);
+            cpu = cpu.min(e1.min(e2));
+        }
+        println!(
+            "{:>8} {:>6} {:10.2} {:10.2} {:8.2}x {:10.2} {:8.2}x",
+            n, g.nw, cpu * 1e3, cold * 1e3, cpu / cold, warm * 1e3, cpu / warm
+        );
+    }
+    println!("\n  The crossover is where a column reaches 1.00x. Below it the GPU\n  is the slower choice and a dispatcher should not use it.");
+}
+
+/// The dispatch thresholds are measured constants, and a measured constant
+/// with no test is a magic number waiting to go stale. This asserts the
+/// direction of the inequality still holds on whatever machine is running it:
+/// comfortably below the threshold the CPU must win, comfortably above it the
+/// GPU must.
+///
+/// The 2x margins are deliberate. Asserting the crossover sits at exactly
+/// 56,000 would fail on any hardware change and teach nothing; asserting the
+/// SHAPE is right is what catches a threshold that has become wrong.
+#[test]
+fn the_dispatch_thresholds_are_still_true() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let module = load_kernel(&ctx, "bn254_msm_bucket");
+    let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1);
+
+    let time_both = |n: usize| -> (f64, f64) {
+        let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0xD15 + n as u64);
+        let points: Vec<G1Projective> = (0..n).map(|_| G1Projective::rand(&mut rng)).collect();
+        let scalars: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+        let affine: Vec<G1Affine> = points.iter().map(|p| p.into_affine()).collect();
+        let g = Geom::new(pick_windows(n));
+        let _ = gpu_msm(&ctx, &module, &points, &scalars, &g); // warm the clock
+        let (mut gpu, mut cpu) = (f64::MAX, f64::MAX);
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let _ = gpu_msm(&ctx, &module, &points, &scalars, &g);
+            gpu = gpu.min(t.elapsed().as_secs_f64());
+            // The BEST CPU, not just the chunked one -- chunking is a poor
+            // baseline at small n and that is exactly where this test looks.
+            let (_, e) = cpu_msm_best(&affine, &scalars, threads);
+            cpu = cpu.min(e);
+        }
+        (cpu, gpu)
+    };
+
+    let small = MSM_GPU_MIN_COLD / 4;
+    let (cpu_s, gpu_s) = time_both(small);
+    assert!(
+        cpu_s < gpu_s,
+        "at n={} (well under the {} threshold) the GPU was FASTER ({:.2} ms vs CPU {:.2} ms) \
+         -- MSM_GPU_MIN_COLD is too high on this machine and the dispatcher is leaving \
+         performance on the table",
+        small, MSM_GPU_MIN_COLD, gpu_s * 1e3, cpu_s * 1e3
+    );
+
+    let large = MSM_GPU_MIN_COLD * 4;
+    let (cpu_l, gpu_l) = time_both(large);
+    assert!(
+        gpu_l < cpu_l,
+        "at n={} (well over the {} threshold) the CPU was FASTER ({:.2} ms vs GPU {:.2} ms) \
+         -- MSM_GPU_MIN_COLD is too low on this machine and the dispatcher is choosing \
+         the slower backend",
+        large, MSM_GPU_MIN_COLD, cpu_l * 1e3, gpu_l * 1e3
+    );
+
+    assert!(
+        !gpu_is_worth_it(small, false) && gpu_is_worth_it(large, false),
+        "gpu_is_worth_it disagrees with the constants it is built from"
+    );
 }
