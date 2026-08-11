@@ -686,7 +686,8 @@ fn what_the_gpu_prover_costs() {
     let module = load_kernel(&ctx, "bn254_msm_bucket");
     let g = Geom::new(28);
 
-    for (a, b) in [(256usize, 256usize), (512, 512)] {
+    let mut summary: Vec<(usize, f64, f64, f64, f64, f64, f64)> = Vec::new();
+    for (a, b) in [(64usize, 64usize), (128, 128), (256, 256), (512, 512), (1024, 1024)] {
         let (circuit, witness) = compile(&poly_src(a, b), &[], &[3, 2]);
         let nc = circuit.constraints.len();
         let c = YCircuit::new(circuit, witness);
@@ -775,5 +776,22 @@ fn what_the_gpu_prover_costs() {
             100.0 * best_tm.g1_msms / best,
             100.0 * best_tm.g2_msm / best
         );
+        summary.push((nc, cpu, best, best_replay, best_qap, best_tm.g1_msms, best_tm.g2_msm));
     }
+
+    println!("\n=== how the prover speedup scales ===");
+    println!(
+        "{:>9} {:>9} {:>9} {:>8}   {:>7} {:>7} {:>7} {:>7}",
+        "constr", "cpu ms", "gpu ms", "speedup", "mat%", "qap%", "msm%", "g2%"
+    );
+    for (nc, cpu, gpu, mat, qap, msm, g2) in &summary {
+        println!(
+            "{:>9} {:9.1} {:9.1} {:7.2}x   {:6.0}% {:6.0}% {:6.0}% {:6.0}%",
+            nc, cpu * 1e3, gpu * 1e3, cpu / gpu,
+            100.0 * mat / gpu, 100.0 * qap / gpu, 100.0 * msm / gpu, 100.0 * g2 / gpu
+        );
+    }
+    println!(
+        "\nThe MSM share is what the GPU accelerates. If it shrinks as the\ncircuit grows, the speedup is heading for a ceiling set by whatever is\ngrowing faster -- here the QAP FFT, which is O(n log n) and on the CPU."
+    );
 }
