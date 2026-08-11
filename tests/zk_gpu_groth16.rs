@@ -26,13 +26,16 @@
 
 #[path = "common/msm.rs"]
 mod msm;
+#[path = "common/qap.rs"]
+mod qap;
 use msm::*;
+use qap::GpuQap;
 
 use ark_bn254::{Bn254, Fr as ArkFr, G1Affine, G1Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
-use ark_ff::{PrimeField, Zero};
+use ark_ff::{FftField, Field, PrimeField, Zero};
 use ark_groth16::{r1cs_to_qap::{LibsnarkReduction, R1CSToQAP}, Groth16, Proof, ProvingKey};
-use ark_poly::GeneralEvaluationDomain;
+use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_relations::r1cs::{
     ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef,
     LinearCombination as ArkLc, OptimizationGoal, SynthesisError, Variable,
@@ -243,6 +246,104 @@ fn synthesize_native(c: &YCircuit) -> ((Vec<ArkFr>, Vec<ArkFr>, Vec<ArkFr>), f64
         build,
         qap,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Inside the QAP witness map
+// ---------------------------------------------------------------------------
+
+/// `LibsnarkReduction::witness_map_from_matrices`, transcribed so its phases
+/// can be timed separately, and so a GPU transform can later be substituted
+/// for one of them.
+///
+/// Transcribed rather than reformulated, for the same reason the prover was:
+/// it is checked against the original by exact equality, so it can only be a
+/// measurement of the original if it IS the original.
+///
+/// The shape is 3 iFFTs, 3 coset FFTs and 1 coset iFFT over `domain_size`,
+/// plus three sparse matrix-vector products. Knowing which of those two
+/// halves dominates decides whether the GPU NTT is worth wiring in at all --
+/// accelerating the transforms caps out at whatever fraction they are.
+/// The three constraint-evaluation vectors, zero-padded to the domain. This
+/// is the part of the witness map that is NOT a transform.
+fn qap_inputs(
+    matrices: &ConstraintMatrices<ArkFr>,
+    num_inputs: usize,
+    num_constraints: usize,
+    full_assignment: &[ArkFr],
+    domain_size: usize,
+) -> (Vec<ArkFr>, Vec<ArkFr>, Vec<ArkFr>) {
+    let zero = ArkFr::zero();
+    let dot = |row: &[(ArkFr, usize)]| -> ArkFr {
+        row.iter().map(|(c, i)| *c * full_assignment[*i]).sum()
+    };
+    let mut a = vec![zero; domain_size];
+    let mut b = vec![zero; domain_size];
+    let mut c = vec![zero; domain_size];
+    for i in 0..num_constraints {
+        a[i] = dot(&matrices.a[i]);
+        b[i] = dot(&matrices.b[i]);
+        c[i] = dot(&matrices.c[i]);
+    }
+    a[num_constraints..num_constraints + num_inputs]
+        .clone_from_slice(&full_assignment[..num_inputs]);
+    (a, b, c)
+}
+
+fn witness_map_timed(
+    matrices: &ConstraintMatrices<ArkFr>,
+    num_inputs: usize,
+    num_constraints: usize,
+    full_assignment: &[ArkFr],
+) -> (Vec<ArkFr>, f64, f64) {
+    use std::time::Instant;
+    let domain = GeneralEvaluationDomain::<ArkFr>::new(num_constraints + num_inputs)
+        .expect("domain");
+    let domain_size = domain.size();
+    let zero = ArkFr::zero();
+
+    let dot = |row: &[(ArkFr, usize)]| -> ArkFr {
+        row.iter().map(|(c, i)| *c * full_assignment[*i]).sum()
+    };
+
+    let t = Instant::now();
+    let mut a = vec![zero; domain_size];
+    let mut b = vec![zero; domain_size];
+    for i in 0..num_constraints {
+        a[i] = dot(&matrices.a[i]);
+        b[i] = dot(&matrices.b[i]);
+    }
+    a[num_constraints..num_constraints + num_inputs]
+        .clone_from_slice(&full_assignment[..num_inputs]);
+    let mut c = vec![zero; domain_size];
+    for i in 0..num_constraints {
+        c[i] = dot(&matrices.c[i]);
+    }
+    let matvec = t.elapsed().as_secs_f64();
+
+    let t = Instant::now();
+    domain.ifft_in_place(&mut a);
+    domain.ifft_in_place(&mut b);
+    let coset = domain.get_coset(ArkFr::GENERATOR).unwrap();
+    coset.fft_in_place(&mut a);
+    coset.fft_in_place(&mut b);
+    let mut ab = domain.mul_polynomials_in_evaluation_domain(&a, &b);
+    drop(a);
+    drop(b);
+    domain.ifft_in_place(&mut c);
+    coset.fft_in_place(&mut c);
+    let vanishing = domain
+        .evaluate_vanishing_polynomial(ArkFr::GENERATOR)
+        .inverse()
+        .unwrap();
+    for (x, y) in ab.iter_mut().zip(c) {
+        *x -= &y;
+        *x *= &vanishing;
+    }
+    coset.ifft_in_place(&mut ab);
+    let ffts = t.elapsed().as_secs_f64();
+
+    (ab, matvec, ffts)
 }
 
 // ---------------------------------------------------------------------------
@@ -508,6 +609,28 @@ fn synthesize(circuit: YCircuit, check: bool) -> (Vec<ArkFr>, Vec<ArkFr>, Vec<Ar
     synthesize_timed(circuit, check).0
 }
 
+/// The native path with the QAP transforms on the GPU.
+fn synthesize_gpu(
+    ctx: &CudaContext,
+    engine: &GpuQap,
+    c: &YCircuit,
+) -> ((Vec<ArkFr>, Vec<ArkFr>, Vec<ArkFr>), f64, f64) {
+    use std::time::Instant;
+    let t = Instant::now();
+    let (m, full) = y_matrices(c);
+    let ni = m.num_instance_variables;
+    let nc = m.num_constraints;
+    let domain = GeneralEvaluationDomain::<ArkFr>::new(nc + ni).expect("domain");
+    let (a, b, cv) = qap_inputs(&m, ni, nc, &full, domain.size());
+    let build = t.elapsed().as_secs_f64();
+
+    let t = Instant::now();
+    let h = engine.h_from_abc(ctx, &a, &b, &cv);
+    let qap = t.elapsed().as_secs_f64();
+
+    ((h, full[1..ni].to_vec(), full[ni..].to_vec()), build, qap)
+}
+
 /// Same, reporting how the pre-MSM time splits between replaying the circuit
 /// into arkworks' constraint system and the QAP witness map. The split decides
 /// what is worth accelerating next: the witness map is an FFT over the
@@ -756,6 +879,21 @@ fn what_the_gpu_prover_costs() {
             (h.len(), aa.len(), ia.len() + aa.len())
         };
         let gk = GpuProvingKey::new(&ctx, &pk, hlen, auxlen, alen, false);
+        let domain_size = {
+            let (m, _) = y_matrices(&c);
+            GeneralEvaluationDomain::<ArkFr>::new(m.num_constraints + m.num_instance_variables)
+                .unwrap()
+                .size()
+        };
+        // The QAP engine is per DOMAIN SIZE, i.e. per circuit, so its twiddle
+        // and coset tables are key-load work like the MSM bases.
+        let t = std::time::Instant::now();
+        let engine = GpuQap::new(&ctx, domain_size);
+        println!(
+            "[key-load] QAP tables for domain 2^{} built in {:.1} ms (once per circuit)",
+            domain_size.trailing_zeros(),
+            t.elapsed().as_secs_f64() * 1e3
+        );
         let on_gpu: Vec<&str> = [("h", &gk.h), ("l", &gk.l), ("a", &gk.a), ("b1", &gk.b_g1)]
             .iter()
             .filter(|(_, q)| q.on_gpu())
@@ -774,7 +912,7 @@ fn what_the_gpu_prover_costs() {
 
         // Warm up the GPU clock and the JIT before timing anything.
         {
-            let ((h, ia, aa), _, _) = synthesize_native(&c);
+            let ((h, ia, aa), _, _) = synthesize_gpu(&ctx, &engine, &c);
             let mut tm = ProveTiming::default();
             let _ = gpu_prove(&ctx, &module, &g, &pk, &gk, r, s, &h, &ia, &aa, &mut tm);
         }
@@ -797,7 +935,7 @@ fn what_the_gpu_prover_costs() {
         let mut best_synth = 0.0;
         let (mut best_replay, mut best_qap) = (0.0, 0.0);
         for _ in 0..3 {
-            let ((h, ia, aa), replay, qap) = synthesize_native(&c);
+            let ((h, ia, aa), replay, qap) = synthesize_gpu(&ctx, &engine, &c);
             let synth = replay + qap;
             let mut tm = ProveTiming::default();
             let p = gpu_prove(&ctx, &module, &g, &pk, &gk, r, s, &h, &ia, &aa, &mut tm);
@@ -824,7 +962,7 @@ fn what_the_gpu_prover_costs() {
         println!("\n=== {} constraints ({} a_query terms) ===", nc, pk.a_query.len());
         println!("  matrices, from Y     = {:8.1} ms   (was {:.1} ms as an arkworks replay)",
                  best_replay * 1e3, replay_cost * 1e3);
-        println!("  QAP witness map      = {:8.1} ms   (an FFT -- the GPU NTT's target)", best_qap * 1e3);
+        println!("  QAP witness map      = {:8.1} ms   (7 transforms, on the GPU)", best_qap * 1e3);
         println!("  G1 MSMs, on the GPU  = {:8.1} ms", best_tm.g1_msms * 1e3);
         println!("  G2 MSM, on the CPU   = {:8.1} ms   (no Fq2 kernel yet)", best_tm.g2_msm * 1e3);
         println!("  GPU prover, TOTAL    = {:8.1} ms", best * 1e3);
@@ -852,6 +990,97 @@ fn what_the_gpu_prover_costs() {
         );
     }
     println!(
-        "\nThe MSM share is what the GPU accelerates. If it shrinks as the\ncircuit grows, the speedup is heading for a ceiling set by whatever is\ngrowing faster -- here the QAP FFT, which is O(n log n) and on the CPU."
+        "\nThe qap% column is what moving the seven transforms to the GPU did:\nit was 29-37% and is now 7-10%, and the speedup went from flattening\n(2.56 -> 2.59x) to still climbing (3.27 -> 3.61x). What is left on the\nCPU is mat%, which is building the matrices and the sparse matvecs --\nnow the largest single phase."
     );
+}
+
+/// The transcription above must BE arkworks' witness map, not merely resemble
+/// it — otherwise timing it measures nothing about the real prover.
+#[test]
+fn the_transcribed_witness_map_is_the_real_one() {
+    let (circuit, witness) = compile(&poly_src(48, 48), &[], &[3, 2]);
+    let c = YCircuit::new(circuit, witness);
+    let (m, full) = y_matrices(&c);
+
+    let want = LibsnarkReduction::witness_map_from_matrices::<
+        ArkFr,
+        GeneralEvaluationDomain<ArkFr>,
+    >(&m, m.num_instance_variables, m.num_constraints, &full)
+    .expect("reference witness map");
+
+    let (got, _, _) =
+        witness_map_timed(&m, m.num_instance_variables, m.num_constraints, &full);
+
+    assert_eq!(got.len(), want.len(), "h has the wrong length");
+    assert_eq!(got, want, "the transcribed witness map is not arkworks'");
+}
+
+/// `cargo test --release --features zk --test zk_gpu_groth16 what_the_qap_costs -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn what_the_qap_costs() {
+    println!(
+        "\n{:>10} {:>8} {:>10} {:>10} {:>8} {:>8}",
+        "constr", "domain", "matvec ms", "ffts ms", "matvec%", "fft%"
+    );
+    for (a, b) in [(128usize, 128usize), (256, 256), (512, 512), (1024, 1024)] {
+        let (circuit, witness) = compile(&poly_src(a, b), &[], &[3, 2]);
+        let c = YCircuit::new(circuit, witness);
+        let (m, full) = y_matrices(&c);
+        let ni = m.num_instance_variables;
+        let nc = m.num_constraints;
+
+        let (_, _, _) = witness_map_timed(&m, ni, nc, &full); // warm
+        let (mut mv, mut ff) = (f64::MAX, f64::MAX);
+        for _ in 0..3 {
+            let (_, x, y) = witness_map_timed(&m, ni, nc, &full);
+            if x + y < mv + ff {
+                mv = x;
+                ff = y;
+            }
+        }
+        let dom = GeneralEvaluationDomain::<ArkFr>::new(nc + ni).unwrap().size();
+        println!(
+            "{:>10} {:>8} {:>10.1} {:>10.1} {:>7.0}% {:>7.0}%",
+            nc, dom, mv * 1e3, ff * 1e3,
+            100.0 * mv / (mv + ff), 100.0 * ff / (mv + ff)
+        );
+    }
+    println!(
+        "\n  The FFT column is the ceiling on what a GPU NTT can remove from\n  this phase. The matvec column is sparse work over the constraint\n  matrices and is a different problem."
+    );
+}
+
+/// The GPU QAP must produce `h` EXACTLY — not approximately, not up to a
+/// permutation. It feeds `h_query`'s MSM, so a wrong `h` is a wrong proof, and
+/// the field is exact so there is no tolerance to hide in.
+#[test]
+fn the_gpu_qap_matches_arkworks() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — the GPU QAP was not executed.");
+        return;
+    };
+    // Two sizes: the domain is a power of two but the constraint count is not,
+    // so the zero-padding at the tail is a real case and not a corner one.
+    for (x, y) in [(32usize, 32usize), (48, 48)] {
+        let (circuit, witness) = compile(&poly_src(x, y), &[], &[3, 2]);
+        let c = YCircuit::new(circuit, witness);
+        let (m, full) = y_matrices(&c);
+        let ni = m.num_instance_variables;
+        let nc = m.num_constraints;
+
+        let want = LibsnarkReduction::witness_map_from_matrices::<
+            ArkFr,
+            GeneralEvaluationDomain<ArkFr>,
+        >(&m, ni, nc, &full)
+        .expect("reference witness map");
+
+        let domain = GeneralEvaluationDomain::<ArkFr>::new(nc + ni).unwrap();
+        let (a, b, cv) = qap_inputs(&m, ni, nc, &full, domain.size());
+        let engine = GpuQap::new(&ctx, domain.size());
+        let got = engine.h_from_abc(&ctx, &a, &b, &cv);
+
+        assert_eq!(got.len(), want.len(), "h has the wrong length at {}x{}", x, y);
+        assert_eq!(got, want, "the GPU QAP disagrees with arkworks at {}x{}", x, y);
+    }
 }
