@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ark_bn254::{Fq, G1Projective};
-use ark_ec::PrimeGroup;
-use ark_ff::{BigInteger, Field, PrimeField, UniformRand};
+use ark_ec::{AdditiveGroup, PrimeGroup};
+use ark_ff::{BigInteger, Field, PrimeField, UniformRand, Zero};
 use ark_std::rand::SeedableRng;
 
 use y::cuda_runtime::{CudaContext, KernelModule};
@@ -221,6 +221,119 @@ fn gpu_g1_addition_agrees_with_arkworks() {
             "GPU result at {} is not on the curve",
             i
         );
+    }
+}
+
+
+/// Doubling needs its own formula, and this is not a nicety: `add-2007-bl`
+/// computes `H = U2 - U1`, which is ZERO when P == Q, and then builds the
+/// result out of it. Feeding a doubling to the add kernel does not give a
+/// wrong point, it gives the point at infinity - silently. Pippenger's bucket
+/// reduction doubles constantly, so both formulas have to exist and both have
+/// to be right.
+#[test]
+fn gpu_g1_doubling_agrees_with_arkworks() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — bn254_g1_dbl.ysu was not executed.");
+        return;
+    };
+    let module = load_kernel(&ctx, "bn254_g1_dbl");
+
+    const N: usize = 1024;
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0xD00B1E);
+    let r = r_mod_q();
+    let ps: Vec<G1Projective> = (0..N).map(|_| G1Projective::rand(&mut rng)).collect();
+
+    let up = |v: &[u32]| {
+        let d = ctx.alloc(v.len() * 4).unwrap();
+        ctx.memcpy_htod_at(&d, 0, as_bytes(v)).unwrap();
+        d
+    };
+    let mont = |f: fn(&G1Projective) -> Fq| -> Vec<u32> {
+        to_planar(&ps.iter().map(|p| f(p) * r).collect::<Vec<Fq>>(), N)
+    };
+    let (dx, dy, dz) = (up(&mont(|p| p.x)), up(&mont(|p| p.y)), up(&mont(|p| p.z)));
+    let (drx, dry, drz) = (
+        ctx.alloc(N * 8 * 4).unwrap(),
+        ctx.alloc(N * 8 * 4).unwrap(),
+        ctx.alloc(N * 8 * 4).unwrap(),
+    );
+    for d in [&drx, &dry, &drz] {
+        ctx.memset_u8(d, 0xA5).unwrap();
+    }
+    let args = vec![
+        dx.device_ptr(), dy.device_ptr(), dz.device_ptr(),
+        drx.device_ptr(), dry.device_ptr(), drz.device_ptr(),
+        N as u64,
+    ];
+    ctx.launch(&module, ((N / 256) as u32, 1, 1), (256, 1, 1), 0, &args)
+        .expect("launch failed");
+    ctx.synchronize().expect("kernel did not complete");
+
+    let read = |d: &y::cuda_runtime::DeviceBuffer| {
+        let mut raw = vec![0u8; N * 8 * 4];
+        ctx.memcpy_dtoh_at(&mut raw, d, 0).unwrap();
+        let w: Vec<u32> = raw
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        from_planar(&w, N)
+    };
+    let r_inv = r.inverse().unwrap();
+    let (rx, ry, rz) = (read(&drx), read(&dry), read(&drz));
+    for i in 0..N {
+        let got = G1Projective::new_unchecked(rx[i] * r_inv, ry[i] * r_inv, rz[i] * r_inv);
+        assert_eq!(got, ps[i].double(), "GPU G1 double disagrees with arkworks at {}", i);
+        assert!(got.into_affine_unchecked_is_on_curve(), "result {} is not on the curve", i);
+    }
+}
+
+/// The reason the two kernels cannot be collapsed into one, stated as a test:
+/// the ADD kernel, given P and P, must NOT produce 2P. If a future change made
+/// add-2007-bl appear to handle doubling, that would mean H stopped being
+/// computed correctly.
+#[test]
+fn the_add_formula_really_is_incomplete() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let module = load_kernel(&ctx, "bn254_g1_add");
+    const N: usize = 256;
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(7);
+    let r = r_mod_q();
+    let ps: Vec<G1Projective> = (0..N).map(|_| G1Projective::rand(&mut rng)).collect();
+    let up = |v: &[u32]| {
+        let d = ctx.alloc(v.len() * 4).unwrap();
+        ctx.memcpy_htod_at(&d, 0, as_bytes(v)).unwrap();
+        d
+    };
+    let mont = |f: fn(&G1Projective) -> Fq| -> Vec<u32> {
+        to_planar(&ps.iter().map(|p| f(p) * r).collect::<Vec<Fq>>(), N)
+    };
+    let (dx, dy, dz) = (up(&mont(|p| p.x)), up(&mont(|p| p.y)), up(&mont(|p| p.z)));
+    let (drx, dry, drz) = (
+        ctx.alloc(N * 8 * 4).unwrap(),
+        ctx.alloc(N * 8 * 4).unwrap(),
+        ctx.alloc(N * 8 * 4).unwrap(),
+    );
+    // Both operands are the same buffer: P + P.
+    let args = vec![
+        dx.device_ptr(), dy.device_ptr(), dz.device_ptr(),
+        dx.device_ptr(), dy.device_ptr(), dz.device_ptr(),
+        drx.device_ptr(), dry.device_ptr(), drz.device_ptr(),
+        N as u64,
+    ];
+    ctx.launch(&module, ((N / 256).max(1) as u32, 1, 1), (256, 1, 1), 0, &args).unwrap();
+    ctx.synchronize().unwrap();
+    let mut raw = vec![0u8; N * 8 * 4];
+    ctx.memcpy_dtoh_at(&mut raw, &drz, 0).unwrap();
+    let w: Vec<u32> = raw.chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    let rz = from_planar(&w, N);
+    // H = 0 makes Z3 = 0: the point at infinity, not 2P. Caller beware.
+    for (i, z) in rz.iter().enumerate() {
+        assert!(z.is_zero(), "add(P, P) at {} did not degenerate to Z=0 as documented", i);
     }
 }
 
