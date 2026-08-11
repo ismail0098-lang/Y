@@ -632,6 +632,51 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        // `cond ? t : e` over signals. Legal in a `<--` and nowhere else.
+        //
+        // This is circomlib's `IsZero`, verbatim:
+        //
+        //     inv <-- in != 0 ? 1/in : 0;
+        //     out <== -in*inv + 1;
+        //     in*out === 0;
+        //
+        // and `IsZero` is underneath `IsEqual`, `ForceEqualIfEnabled`, the SMT
+        // circuits, `Multiplexer` and every EdDSA verifier - so refusing it cost
+        // a third of circomlib. Both comparisons reduce to one test against
+        // zero: `a == b` is `a - b == 0`, and `!=` is the same with the branches
+        // swapped.
+        //
+        // Being permissive HERE is safe in a way it would not be one line over,
+        // and the reason is worth stating: `<--` emits no constraint. A witness
+        // value this computes is not trusted by anything - it still has to
+        // satisfy the `===` the author wrote (`in*out === 0` above). Getting it
+        // wrong yields an unsatisfiable circuit, never an unsound proof. The
+        // same expression on the left of a `<==` is refused, as it must be.
+        if let Expr::Ternary(cond, then_e, else_e, tpos) = rhs {
+            if let Expr::Binary(op @ (BinOp::Eq | BinOp::Neq), a, b, _) = &**cond {
+                let va = self.eval_expr(a, f)?;
+                let vb = self.eval_expr(b, f)?;
+                if let (Some(la), Some(lb)) = (va.lc(), vb.lc()) {
+                    // cond_lc = a - b, zero exactly when they are equal.
+                    let mut cond_lc = la;
+                    cond_lc.add_linear(&lb, Fr::zero().sub(&Fr::one()));
+                    cond_lc.simplify();
+                    let t = self.witness_only_recipe(then_e, f, *tpos)?;
+                    let e = self.witness_only_recipe(else_e, f, *tpos)?;
+                    // `IfZeroLc` takes the ZERO branch first, i.e. the `==` one.
+                    let (zero_branch, nonzero_branch) = match op {
+                        BinOp::Eq => (t, e),
+                        _ => (e, t),
+                    };
+                    return Ok(WitnessOp::IfZeroLc(
+                        cond_lc,
+                        Box::new(zero_branch),
+                        Box::new(nonzero_branch),
+                    ));
+                }
+            }
+        }
+
         // `x <-- a / b` with a signal divisor is the canonical use.
         if let Expr::Binary(BinOp::Div, a, b, _) = rhs {
             let va = self.eval_expr(a, f)?;
