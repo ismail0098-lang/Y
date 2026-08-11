@@ -37,10 +37,17 @@ an RTX 4070 Ti SUPER with a 32-thread CPU:
 | sparse (multiplication chain) | ~4.6–6.0x | ~5.1x |
 | dense (Poseidon chain) | ~5.7x | ~6.2x |
 
-Run-to-run variance is ~15%; do not quote these more precisely. **These are
-not measured against `icicle`, `sppark` or `rapidsnark`** — that comparison
-has not been run, and some of the margin above is arkworks being a softer
-baseline than the state of the art.
+Run-to-run variance is ~15%; do not quote these more precisely.
+
+**Against a mature GPU MSM library, y-gpu loses.** icicle v1.3.0 on the same
+GPU is **2.8–4.8x faster** at the BN254 G1 MSM, and the gap grows with `n` —
+its entire staged MSM at n=2^20 beats y-gpu's kernel alone with all host work
+excluded. See [BENCHMARKS.md](BENCHMARKS.md) for the table and the list of
+suspected causes (host-side bucket reduction and binning, serial per-bucket
+accumulation, no signed-digit recoding, no mixed addition).
+
+So: this beats a parallel CPU prover, and does not currently compete with
+icicle. Both statements are measured.
 
 ## Correctness
 
