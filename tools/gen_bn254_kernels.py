@@ -455,13 +455,82 @@ def gen_g1_add():
     return "\n".join(L)
 
 
+def gen_g1_dbl():
+    """BN254 G1 point doubling, `dbl-2009-l` (valid because BN254 has a = 0).
+
+    Doubling needs its own formula: `add-2007-bl` computes H = U2 - U1, which
+    is zero when P == Q, and then divides the geometry by it. Feeding a
+    doubling to the add kernel does not produce a wrong point, it produces the
+    point at infinity - silently. Pippenger needs both.
+
+        A = X1^2   B = Y1^2   C = B^2
+        D = 2*((X1+B)^2 - A - C)      E = 3*A       F = E^2
+        X3 = F - 2D    Y3 = E*(D - X3) - 8C    Z3 = 2*Y1*Z1
+    """
+    use_field(FQ)
+    L = [HEADER.replace("%d", "N"), "",
+         "// BN254 G1 Jacobian point doubling over the base field Fq (a = 0).",
+         "kernel bn254_g1_dbl(",
+         "    PX: GlobalMemory<U32>,",
+         "    PY: GlobalMemory<U32>,",
+         "    PZ: GlobalMemory<U32>,",
+         "    RX: GlobalMemory<U32>,",
+         "    RY: GlobalMemory<U32>,",
+         "    RZ: GlobalMemory<U32>,",
+         "    N: I32",
+         ") {",
+         "    let tid: I32 = block_idx_x() * 256 + thread_idx_x();"]
+    L += load("X1", "PX", "tid", "N")
+    L += load("Y1", "PY", "tid", "N")
+    L += load("Z1", "PZ", "tid", "N")
+    temps = ["AA", "BB", "CC", "DD", "EE", "FF", "T1", "T2", "X3", "Y3", "Z3"]
+    check_names(temps + ["X1", "Y1", "Z1"])
+    for v in temps:
+        L += [f"    let {v}{j}: U32 = 0;" for j in range(S)]
+    L += scratch_decls()
+    L += ["    // A = X1^2 ; B = Y1^2 ; C = B^2"]
+    L += mont_mul("AA", "X1", "X1")
+    L += mont_mul("BB", "Y1", "Y1")
+    L += mont_mul("CC", "BB", "BB")
+    L += ["    // D = 2*((X1+B)^2 - A - C)"]
+    L += add_mod("T1", "X1", "BB")
+    L += mont_mul("T2", "T1", "T1")
+    L += sub_mod("T1", "T2", "AA")
+    L += sub_mod("T2", "T1", "CC")
+    L += dbl_mod("DD", "T2")
+    L += ["    // E = 3A ; F = E^2"]
+    L += dbl_mod("T1", "AA")
+    L += add_mod("EE", "T1", "AA")
+    L += mont_mul("FF", "EE", "EE")
+    L += ["    // X3 = F - 2D"]
+    L += dbl_mod("T1", "DD")
+    L += sub_mod("X3", "FF", "T1")
+    L += ["    // Y3 = E*(D - X3) - 8C"]
+    L += sub_mod("T1", "DD", "X3")
+    L += mont_mul("T2", "EE", "T1")
+    L += dbl_mod("T1", "CC")
+    L += dbl_mod("CC", "T1")
+    L += dbl_mod("T1", "CC")
+    L += sub_mod("Y3", "T2", "T1")
+    L += ["    // Z3 = 2*Y1*Z1"]
+    L += mont_mul("T1", "Y1", "Z1")
+    L += dbl_mod("Z3", "T1")
+    L += store("X3", "RX", "tid", "N")
+    L += store("Y3", "RY", "tid", "N")
+    L += store("Z3", "RZ", "tid", "N")
+    L += ["}", "", "fn main() {}", ""]
+    use_field(FR)
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     import os
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for name, text in [("tests/bn254_fr_mul_fast.ysu", gen_mul()),
                        ("tests/bn254_ntt_stage.ysu", gen_ntt()),
                        ("tests/bn254_ntt4_stage.ysu", gen_ntt4()),
-                       ("tests/bn254_g1_add.ysu", gen_g1_add())]:
+                       ("tests/bn254_g1_add.ysu", gen_g1_add()),
+                       ("tests/bn254_g1_dbl.ysu", gen_g1_dbl())]:
         path = os.path.join(here, name)
         with open(path, "w") as f:
             f.write(text)
