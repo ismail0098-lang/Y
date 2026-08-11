@@ -155,9 +155,31 @@ and vanishes into a large one. The chains are still ties because their cost is
 emitter's 12. Until that is fixed, expect small circom circuits to be fast and
 large ones to be a tie.
 
-**Compile time on the large circuits is a tie. The circuit size is not:**
+**Coverage and size, measured across real circomlib** — 31 gadgets, not the 7
+vendored here. Reproduce with `python3 tools/circomlib_coverage.py`:
 
-| | circom | Y | |
+| | |
+|---|---|
+| compiles | **Y 27/31, circom 31/31** |
+| size, geomean circom/Y | **1.03x — a tie** (win 4 / tie 20 / loss 3) |
+| totals over the 27 | circom 46,448 constraints, Y 37,310 |
+
+Still refused: array literals as template arguments (`EscalarMul`,
+`EscalarMulFix`), an array-valued signal port (`Sha256`), and `/` by a signal
+inside a constraint (`EdDSA`).
+
+**Read the geomean, not the best row.** Where Y wins it wins large — `Poseidon(2)`
+1.81x, `SMTProcessor` 1.71x, `SMTVerifier` 1.64x — but on twenty of the
+twenty-seven it lands on circom's number, and on three it is worse (`Point2Bits`
+1,301 vs 1,560, `Mux1` 1 vs 2). The wins share a shape: circuits written as long
+chains of `<==` linear assignments, which is exactly what
+`substitute_linear_constraints` eliminates. Circuits that are already tight have
+nothing to remove.
+
+Every size figure this repo published before 2026-08-11 was measured on Poseidon
+and quoted as a general result. It is not one.
+
+| Poseidon specifically | circom | Y | |
 |---|---|---|---|
 | `Poseidon(2)` | 517 | 286 | 1.81x fewer constraints |
 | 200-hash chain | 103,400 | 55,608 | 1.86x fewer |

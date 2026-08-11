@@ -160,55 +160,90 @@ pub fn execute_host_witness_ir(
             // before its advice wires. They are what makes `==`, `!=` and the
             // comparisons witnessable at all: their constraints each carry two
             // unknowns, so back-propagation alone can never pin them.
-            WitnessOp::IsZeroLc(lc) => {
-                let v = eval_lc(lc, &w);
-                w[node_idx] = if v.is_zero() { Fr::one() } else { Fr::zero() };
-            }
-            WitnessOp::InvOrZeroLc(lc) => {
-                let v = eval_lc(lc, &w);
-                w[node_idx] = if v.is_zero() { Fr::zero() } else { v.inv() };
-            }
             // Deliberately leaves the wire at zero and UNSOLVED, so the
             // back-propagation pass owns it. See `WitnessOp::Unknown`.
             WitnessOp::Unknown => {}
-            WitnessOp::BitOfLc { lc, bit } => {
-                let v = eval_lc(lc, &w);
-                w[node_idx] = if v.get_bit(*bit as usize) { Fr::one() } else { Fr::zero() };
-            }
-            WitnessOp::MulLc(a, b) => {
-                w[node_idx] = eval_lc(a, &w).mul(&eval_lc(b, &w));
-            }
-            WitnessOp::MulAddLc(a, b, c) => {
-                w[node_idx] = eval_lc(a, &w).mul(&eval_lc(b, &w)).add(&eval_lc(c, &w));
-            }
-            WitnessOp::DivLc(a, b) => {
-                let bv = eval_lc(b, &w);
-                w[node_idx] = if bv.is_zero() {
-                    Fr::zero()
-                } else {
-                    eval_lc(a, &w).mul(&bv.inv())
-                };
-            }
-            WitnessOp::IntDivLc(a, b) => {
-                let (bv, av) = (eval_lc(b, &w), eval_lc(a, &w));
-                w[node_idx] = if bv.is_zero() {
-                    Fr::zero()
-                } else {
-                    av.int_div_rem(&bv).0
-                };
-            }
-            WitnessOp::IntModLc(a, b) => {
-                let (bv, av) = (eval_lc(b, &w), eval_lc(a, &w));
-                w[node_idx] = if bv.is_zero() {
-                    Fr::zero()
-                } else {
-                    av.int_div_rem(&bv).1
-                };
+            WitnessOp::IsZeroLc(_)
+            | WitnessOp::InvOrZeroLc(_)
+            | WitnessOp::BitOfLc { .. }
+            | WitnessOp::MulLc(..)
+            | WitnessOp::MulAddLc(..)
+            | WitnessOp::DivLc(..)
+            | WitnessOp::IntDivLc(..)
+            | WitnessOp::IntModLc(..)
+            | WitnessOp::IfZeroLc(..) => {
+                w[node_idx] = eval_lc_recipe(op, &w);
             }
         }
     }
 
     Ok(w)
+}
+
+/// Evaluate a linear-combination recipe against the wires solved so far.
+///
+/// Split out of the forward pass so that `IfZeroLc` can recurse into its
+/// branches. These are the recipes whose value is a pure function of the
+/// linear combinations they carry; the `SignalId` variants are handled by the
+/// forward pass directly and `Unknown` is deliberately left for
+/// back-propagation, so both are unreachable here and say so rather than
+/// returning a plausible zero.
+fn eval_lc_recipe(op: &WitnessOp, w: &[Fr]) -> Fr {
+    match op {
+        WitnessOp::IsZeroLc(lc) => {
+            if eval_lc(lc, w).is_zero() { Fr::one() } else { Fr::zero() }
+        }
+        WitnessOp::InvOrZeroLc(lc) => {
+            let v = eval_lc(lc, w);
+            if v.is_zero() { Fr::zero() } else { v.inv() }
+        }
+        WitnessOp::BitOfLc { lc, bit } => {
+            if eval_lc(lc, w).get_bit(*bit as usize) { Fr::one() } else { Fr::zero() }
+        }
+        WitnessOp::MulLc(a, b) => eval_lc(a, w).mul(&eval_lc(b, w)),
+        WitnessOp::MulAddLc(a, b, c) => {
+            eval_lc(a, w).mul(&eval_lc(b, w)).add(&eval_lc(c, w))
+        }
+        WitnessOp::DivLc(a, b) => {
+            let bv = eval_lc(b, w);
+            if bv.is_zero() { Fr::zero() } else { eval_lc(a, w).mul(&bv.inv()) }
+        }
+        WitnessOp::IntDivLc(a, b) => {
+            let (bv, av) = (eval_lc(b, w), eval_lc(a, w));
+            if bv.is_zero() { Fr::zero() } else { av.int_div_rem(&bv).0 }
+        }
+        WitnessOp::IntModLc(a, b) => {
+            let (bv, av) = (eval_lc(b, w), eval_lc(a, w));
+            if bv.is_zero() { Fr::zero() } else { av.int_div_rem(&bv).1 }
+        }
+        // Only the taken branch. The tempting story is that eager evaluation
+        // would divide by zero - circomlib's `IsZero` is
+        // `inv <-- in != 0 ? 1/in : 0`, so at `in = 0` the untaken branch is
+        // `1/0` - but that is NOT true as things stand: `DivLc` above returns 0
+        // for a zero divisor, so both branches are defined and eager evaluation
+        // agrees. Verified by mutation; removing the laziness passes every test.
+        // It stays because correctness here should not depend on that
+        // convention holding in a sibling arm.
+        WitnessOp::IfZeroLc(cond, then_, else_) => {
+            if eval_lc(cond, w).is_zero() {
+                eval_lc_recipe(then_, w)
+            } else {
+                eval_lc_recipe(else_, w)
+            }
+        }
+        WitnessOp::Const(_)
+        | WitnessOp::Unknown
+        | WitnessOp::LoadInput { .. }
+        | WitnessOp::Add(..)
+        | WitnessOp::Sub(..)
+        | WitnessOp::Mul(..)
+        | WitnessOp::Div(..)
+        | WitnessOp::Inv(..)
+        | WitnessOp::AssertEq(..)
+        | WitnessOp::HintBlock { .. } => {
+            unreachable!("eval_lc_recipe called on a non-LC recipe: {:?}", op)
+        }
+    }
 }
 
 /// Seeds from the witness IR, then back-propagates through the R1CS to pin any
@@ -262,7 +297,8 @@ pub fn solve_r1cs_witness(
         | WitnessOp::MulAddLc(..)
         | WitnessOp::DivLc(..)
         | WitnessOp::IntDivLc(..)
-        | WitnessOp::IntModLc(..) = op
+        | WitnessOp::IntModLc(..)
+        | WitnessOp::IfZeroLc(..) = op
         {
             if node_idx < solved_mask.len() {
                 solved_mask[node_idx] = true;

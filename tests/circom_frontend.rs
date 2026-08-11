@@ -318,6 +318,46 @@ fn num2bits_bits_are_lsb_first() {
     }
 }
 
+/// circomlib's `IsZero`, whose witness advice is a ternary over a signal.
+///
+/// `inv <-- in != 0 ? 1/in : 0` is the reason `WitnessOp::IfZeroLc` exists. Two
+/// things have to be right and only one of them is visible in the output:
+/// the branch selection, and the fact that only the TAKEN branch is evaluated.
+/// At `in = 0` the untaken branch is `1/0`, and an eager evaluator would divide
+/// by zero on precisely the input this gadget exists to classify.
+///
+/// `eval` asserts satisfiability, which is the real check here: `<--` emits no
+/// constraint, so a wrong advice value cannot forge a proof - it makes the
+/// circuit unsatisfiable, and `in*out === 0` is what catches it.
+#[test]
+fn iszero_computes_the_right_answer() {
+    for v in [0u64, 1, 2, 7, 65535, u32::MAX as u64] {
+        assert_eq!(
+            eval("iszero.circom", &[v]),
+            if v == 0 { "1" } else { "0" },
+            "IsZero is wrong for {}",
+            v
+        );
+    }
+    let c = compile("iszero.circom").unwrap();
+    assert_eq!(c.constraints, 2, "IsZero is exactly two R1CS constraints, as in circom");
+}
+
+/// `IsEqual` is `IsZero(in[1] - in[0])` - the `==` direction of the ternary,
+/// where `IsZero` alone only covers `!=`.
+#[test]
+fn isequal_computes_the_right_answer() {
+    for (a, b) in [(0u64, 0u64), (5, 5), (5, 6), (6, 5), (0, 1), (u32::MAX as u64, u32::MAX as u64)] {
+        assert_eq!(
+            eval("isequal.circom", &[a, b]),
+            if a == b { "1" } else { "0" },
+            "IsEqual is wrong for ({}, {})",
+            a,
+            b
+        );
+    }
+}
+
 #[test]
 fn lessthan_computes_the_right_answer() {
     for (a, b) in [(3u64, 5u64), (9, 5), (5, 5), (0, 1), (1, 0), (65535, 65536)] {

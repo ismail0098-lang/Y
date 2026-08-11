@@ -61,7 +61,55 @@ Getting the chains off parity means changing how a constraint is represented
 churn around them), not deleting another clone. That is a design change, and it
 is not done.
 
-**Circuit size, from the same source:**
+## Coverage and size, across real circomlib
+
+`tools/circomlib_coverage.py` compiles one `main` per circomlib gadget through
+both compilers and reports both axes. This exists because the vendored
+`circomlib/` here is 7 files, so nothing in the test suite could have noticed
+what the other 26 do.
+
+| | |
+|---|---|
+| compiles | **Y 27/31, circom 31/31** |
+| size, geomean circom/Y | **1.028x — a tie** (win 4 / tie 20 / loss 3, band 0.95–1.05) |
+| totals over the 27 | circom 46,448, Y 37,310 |
+
+Where Y wins it wins large:
+
+| circuit | circom | Y | |
+|---|---|---|---|
+| `Poseidon(2)` | 517 | 286 | 1.81x |
+| `SMTProcessor(10)` | 12,874 | 7,528 | 1.71x |
+| `SMTVerifier(10)` | 7,598 | 4,634 | 1.64x |
+| `EdDSAPoseidonVerifier` | 8,086 | 7,570 | 1.07x |
+
+and where it loses it loses small, but it does lose:
+
+| circuit | circom | Y | |
+|---|---|---|---|
+| `Point2Bits_Strict` | 1,301 | 1,560 | 0.83x |
+| `MultiAND(8)` | 7 | 8 | 0.88x |
+| `Mux1` | 1 | 2 | 0.50x |
+
+**The wins share a shape.** They are circuits written as long chains of `<==`
+linear assignments, which is exactly what `substitute_linear_constraints`
+eliminates. A circuit that is already tight has nothing to remove, and twenty of
+the twenty-seven land on circom's number to within 5%.
+
+Every size figure this repo published before 2026-08-11 was measured on
+`Poseidon(2)` or a chain of it and quoted as though it generalised. It does not.
+The honest one-line claim is **"compiles most of circomlib, same size as circom,
+occasionally much smaller"**, not "1.86x smaller".
+
+Still refused, by cause:
+
+| cause | circuits |
+|---|---|
+| array literal as a template argument | `EscalarMul`, `EscalarMulFix` |
+| array-valued signal port | `Sha256` |
+| `/` by a signal inside a constraint | `EdDSA` |
+
+**Poseidon specifically**, since it is what the proving measurements below use:
 
 | circuit | circom | Y | |
 |---|---|---|---|
@@ -277,8 +325,12 @@ wrote.** Nothing downstream records the difference.
 - **Input JSON does not accept arrays.** `mini_json::parse_scalar_map` is
   scalar-only, but circom inputs are routinely `{"in": ["1", "2"]}`. The
   `--witness` path therefore works only for scalar inputs today.
+- **Four circomlib circuits do not compile** — `EscalarMul` and `EscalarMulFix`
+  (array literal as a template argument), `Sha256` (array-valued signal port),
+  `EdDSA` (`/` by a signal inside a constraint). See the coverage table above;
+  re-measure with `tools/circomlib_coverage.py` after touching the front end.
 - `Y_ZK_COMPACT=off` disables wire compaction. It is a differential baseline, not
-  a safety valve — with it off, Y emits 1.86x fewer constraints than circom and
-  1.49x *more* wires.
+  a safety valve — with it off, Y carries 1.49x *more* wires than circom on a
+  200-hash Poseidon chain.
 - `include` resolution is path-based only; there is no package/`node_modules`
   lookup.

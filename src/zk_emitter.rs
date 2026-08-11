@@ -217,6 +217,25 @@ pub enum WitnessOp {
     /// deliberately emits NO constraint. That is the operator's whole purpose
     /// and also its danger; see `AssignOp::SignalOnly`.
     DivLc(LinearCombination, LinearCombination),
+    /// `if lc == 0 { then } else { else_ }`, evaluated at witness time.
+    ///
+    /// circom's ternary over signals, which is legal in a `<--` and nowhere
+    /// else. It exists because circomlib's `IsZero` is
+    /// `inv <-- in != 0 ? 1/in : 0` - and `IsZero` is underneath `IsEqual`,
+    /// `ForceEqualIfEnabled`, the SMT circuits, `Multiplexer` and every EdDSA
+    /// verifier, so without it a third of circomlib does not compile.
+    ///
+    /// Both comparisons reduce to this one: `a == b ? t : e` is
+    /// `IfZeroLc(a - b, t, e)` and `a != b ? t : e` swaps the branches.
+    ///
+    /// Only the taken branch is evaluated. In `IsZero` the untaken branch at
+    /// `in = 0` is `1/in`, and `DivLc` happens to return 0 for a zero divisor
+    /// rather than trapping - so eager evaluation would agree here, today, by
+    /// coincidence of that convention. Mutation-checked: removing the laziness
+    /// breaks nothing currently. It is kept so that correctness does not rest on
+    /// a neighbouring variant's choice about division by zero, and so a future
+    /// branch op that traps or is costly does not have to rediscover this.
+    IfZeroLc(LinearCombination, Box<WitnessOp>, Box<WitnessOp>),
     /// The product of two linear combinations.
     ///
     /// R1CS lets the `A` and `B` of a constraint be arbitrary linear
@@ -848,6 +867,41 @@ fn substitute_one(lc: &mut LinearCombination, wire: usize, expr: &LinearCombinat
     true
 }
 
+/// Whether a recipe refers to wires only through `LinearCombination`s.
+///
+/// `substitute_linear_constraints` can rewrite an LC into a longer expression;
+/// it cannot rewrite a bare `SignalId`, because there is nowhere to put one. The
+/// flat variants are sorted into those two groups by hand at the match in that
+/// function. `IfZeroLc` nests, so its group depends on what is inside it, and
+/// this answers that question rather than assuming the front end only ever
+/// builds LC-only branches - which is true today and is not a property anything
+/// enforces.
+fn witness_op_is_lc_only(op: &WitnessOp) -> bool {
+    match op {
+        WitnessOp::Const(_)
+        | WitnessOp::Unknown
+        | WitnessOp::LoadInput { .. }
+        | WitnessOp::IsZeroLc(_)
+        | WitnessOp::InvOrZeroLc(_)
+        | WitnessOp::BitOfLc { .. }
+        | WitnessOp::IntDivLc(..)
+        | WitnessOp::IntModLc(..)
+        | WitnessOp::MulLc(..)
+        | WitnessOp::DivLc(..)
+        | WitnessOp::MulAddLc(..) => true,
+        WitnessOp::Add(..)
+        | WitnessOp::Sub(..)
+        | WitnessOp::Mul(..)
+        | WitnessOp::Div(..)
+        | WitnessOp::Inv(..)
+        | WitnessOp::AssertEq(..)
+        | WitnessOp::HintBlock { .. } => false,
+        WitnessOp::IfZeroLc(_, then_, else_) => {
+            witness_op_is_lc_only(then_) && witness_op_is_lc_only(else_)
+        }
+    }
+}
+
 /// Rewrite the linear combinations a recipe holds.
 ///
 /// Exhaustive, no `_ =>` arm, exactly as in `remap_witness_op`. The `SignalId`
@@ -881,6 +935,11 @@ fn substitute_witness_op(op: &mut WitnessOp, sub_idx: &[u32], exprs: &[LinearCom
             substitute_lc(a, sub_idx, exprs);
             substitute_lc(b, sub_idx, exprs);
             substitute_lc(c, sub_idx, exprs);
+        }
+        WitnessOp::IfZeroLc(cond, then_, else_) => {
+            substitute_lc(cond, sub_idx, exprs);
+            substitute_witness_op(then_, sub_idx, exprs);
+            substitute_witness_op(else_, sub_idx, exprs);
         }
     }
 }
@@ -962,6 +1021,13 @@ fn remap_witness_op(op: &mut WitnessOp, subst: &[usize]) {
             replace_wires_in_lc(a, subst);
             replace_wires_in_lc(b, subst);
             replace_wires_in_lc(c, subst);
+        }
+        // Recursive: a branch is itself a recipe, and a stale wire inside one
+        // is exactly as invisible as a stale wire at the top level.
+        WitnessOp::IfZeroLc(cond, then_, else_) => {
+            replace_wires_in_lc(cond, subst);
+            remap_witness_op(then_, subst);
+            remap_witness_op(else_, subst);
         }
     }
 }
@@ -1562,6 +1628,15 @@ impl ZkEmitter {
                 lc(b);
                 lc(c);
             }
+            // BOTH branches, not just the one that will be taken. Which branch
+            // runs is a runtime fact and this is a compile-time sort; if the
+            // untaken branch's wires were left out of the ordering, a change of
+            // input would evaluate them as zero.
+            WitnessOp::IfZeroLc(cond, then_, else_) => {
+                out.extend(cond.terms.iter().map(|(w, _)| *w));
+                Self::witness_op_deps(then_, out);
+                Self::witness_op_deps(else_, out);
+            }
         }
     }
 
@@ -1590,6 +1665,10 @@ impl ZkEmitter {
             | WitnessOp::MulLc(..)
             | WitnessOp::DivLc(..)
             | WitnessOp::MulAddLc(..) => {}
+            WitnessOp::IfZeroLc(_, then_, else_) => {
+                Self::witness_op_writes(then_, out);
+                Self::witness_op_writes(else_, out);
+            }
             WitnessOp::HintBlock { outputs, ops, .. } => {
                 out.extend(outputs.iter().map(|s| s.0));
                 for hop in ops {
@@ -3358,6 +3437,16 @@ impl ZkEmitter {
                 | WitnessOp::MulLc(..)
                 | WitnessOp::DivLc(..)
                 | WitnessOp::MulAddLc(..) => {}
+                // Holds only linear combinations, at every nesting level, so
+                // substitution can rewrite it - but only if the branches really
+                // are LC-only. `witness_op_is_lc_only` walks them and puts the
+                // wire in `opaque` if any nested variant takes a `SignalId`,
+                // which is the same guard the arms below apply at depth 0.
+                WitnessOp::IfZeroLc(..) => {
+                    if !witness_op_is_lc_only(op) {
+                        opaque.insert(*wire);
+                    }
+                }
                 WitnessOp::Add(a, b)
                 | WitnessOp::Sub(a, b)
                 | WitnessOp::Mul(a, b)
