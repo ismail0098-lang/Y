@@ -575,29 +575,21 @@ def gen_msm_bucket():
     with the identity, because `add-2007-bl` cannot represent the identity -
     it has no zero element. Empty buckets (`Off[b] == Off[b+1]`) therefore
     produce garbage here and the host treats them as the identity; it already
-    knows which they are.
+    knows which they are. The loop is pre-guarded (`setp.ge` + branch, not a
+    do-while), so an empty slice runs zero times rather than once.
 
-    STATUS: this generates and parses, and it does NOT currently compile.
-    `@safe`'s invariant checker refuses it:
+    `Idx` carries its OWN length, `NIdx`, separate from `NPts`. Those two are
+    equal only for a single window; a whole MSM bins every point once per
+    window, so `NIdx = NPts * num_windows` and the bucket array covers every
+    window at once (`bucket = window * 2^c + digit`). Sharing one length
+    parameter would have capped a launch at one window - 2^c threads, which is
+    256 of them at c=8, i.e. a GPU running one warp per SM.
 
-        [Strict Safety] Could not verify invariant `(k >= 0)` (initiation
-        check) because the SMT solver could not be run.
-
-    z3 is installed and present (`venv/bin/z3`), and the same invariant on the
-    same shape of loop verifies fine in `tests/bn254_fr_mul.ysu`. What is
-    different here is SIZE: the loop body is a full 30-multiply point
-    addition, ~9,000 lines of Y, and `trace_body_statements` encodes the whole
-    body into one SMT query per obligation. The solver does not come back.
-
-    This is a real limitation of the verification layer meeting generated
-    code, not a property of the kernel, and the fix belongs in
-    `type_checker.rs` - the body of a loop whose invariant mentions only the
-    loop variable does not need encoding at all, and more generally the
-    encoder should slice the body to statements that can affect the invariant.
-
-    It is NOT fixed by `Y_ALLOW_UNVERIFIED_INVARIANTS=1`. CLAUDE.md says so
-    directly and it is right: that variable does not make the check pass, it
-    makes the check not happen.
+    The invariant is `k >= ks`, not `k >= 0`: `ks` is a runtime value, so
+    `k >= 0` is genuinely unprovable and z3 says `sat` (a counterexample) when
+    asked. See gotcha #11 - the checker was reporting that as "the solver
+    could not be run", which is a different claim and sent the first
+    investigation at the loop's SIZE rather than at its BOUNDS.
     """
     use_field(FQ)
     L = [HEADER.replace("%d", "N"), "",
@@ -613,14 +605,15 @@ def gen_msm_bucket():
          "    RY: GlobalMemory<U32>,",
          "    RZ: GlobalMemory<U32>,",
          "    NB: I32,",
-         "    NPts: I32",
+         "    NPts: I32,",
+         "    NIdx: I32",
          ") {",
          "    let b: I32 = block_idx_x() * 256 + thread_idx_x();",
          "    let nb1: I32 = NB + 1;",
          "    let s: U32 = block_ptr2d_load(Off, 0, b, nb1, 1, nb1);",
          "    let b1: I32 = b + 1;",
          "    let e: U32 = block_ptr2d_load(Off, 0, b1, nb1, 1, nb1);",
-         "    let first: U32 = block_ptr2d_load(Idx, 0, s, NPts, 1, NPts);"]
+         "    let first: U32 = block_ptr2d_load(Idx, 0, s, NIdx, 1, NIdx);"]
     temps = ["ZA", "ZB", "UA", "UB", "S1", "S2", "HH", "II", "JJ", "RR", "VV", "T1", "T2"]
     check_names(temps)
     # accumulator
@@ -633,7 +626,7 @@ def gen_msm_bucket():
     L += ["    let ks: U32 = s + 1;",
           "    @invariant(k >= ks)",
           "    for k in ks..e {",
-          "        let pi: U32 = block_ptr2d_load(Idx, 0, k, NPts, 1, NPts);"]
+          "        let pi: U32 = block_ptr2d_load(Idx, 0, k, NIdx, 1, NIdx);"]
     L += load("bX", "PX", "pi", "NPts", ind="        ")
     L += load("bY", "PY", "pi", "NPts", ind="        ")
     L += load("bZ", "PZ", "pi", "NPts", ind="        ")

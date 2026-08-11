@@ -22,14 +22,15 @@ kernel bn254_msm_bucket(
     RY: GlobalMemory<U32>,
     RZ: GlobalMemory<U32>,
     NB: I32,
-    NPts: I32
+    NPts: I32,
+    NIdx: I32
 ) {
     let b: I32 = block_idx_x() * 256 + thread_idx_x();
     let nb1: I32 = NB + 1;
     let s: U32 = block_ptr2d_load(Off, 0, b, nb1, 1, nb1);
     let b1: I32 = b + 1;
     let e: U32 = block_ptr2d_load(Off, 0, b1, nb1, 1, nb1);
-    let first: U32 = block_ptr2d_load(Idx, 0, s, NPts, 1, NPts);
+    let first: U32 = block_ptr2d_load(Idx, 0, s, NIdx, 1, NIdx);
     let aXv0: U32x4 = block_ptr2d_load_v4(PX, 0, (first) * 4, 4 * NPts, 2, 4 * NPts);
     let aX0: U32 = aXv0.x;
     let aX1: U32 = aXv0.y;
@@ -243,7 +244,7 @@ kernel bn254_msm_bucket(
     let ks: U32 = s + 1;
     @invariant(k >= ks)
     for k in ks..e {
-        let pi: U32 = block_ptr2d_load(Idx, 0, k, NPts, 1, NPts);
+        let pi: U32 = block_ptr2d_load(Idx, 0, k, NIdx, 1, NIdx);
         let bXv0: U32x4 = block_ptr2d_load_v4(PX, 0, (pi) * 4, 4 * NPts, 2, 4 * NPts);
         let bX0: U32 = bXv0.x;
         let bX1: U32 = bXv0.y;
