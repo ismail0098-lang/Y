@@ -706,6 +706,31 @@ fn cpu_ntt_stage(x: &mut [Fr], m: usize, tw: &[Fr], nthreads: usize) {
 /// Sanity-check any figure here against the bandwidth it implies before
 /// believing it. That is what caught the cold run: 30.6 ms implies 44 GB/s,
 /// which no GPU of this class does.
+///
+/// ## Bandwidth efficiency is finished; pass count is not
+///
+/// Profiled per radix-4 stage at N = 2^22 (a 134.2 MB array):
+///
+///   dram__bytes_read   135.81 MB    dram__bytes_write  118.76 MB
+///   254.57 MB in 424.5 us  =  600 GB/s  =  89% of the 672 GB/s peak
+///
+/// Reads exceed the array itself by 1.6 MB, i.e. the three twiddle tables are
+/// served almost entirely by L2. **There is no wasted traffic left to
+/// recover** - every byte moved is one the algorithm needs, at 89% of peak.
+/// Tuning the access pattern further cannot buy more than the last 11%.
+///
+/// The only remaining lever is moving over the array fewer times, and both
+/// roads to that need the same missing compiler feature - `ld.shared` /
+/// `st.shared`, which are unwired (shared memory currently computes an
+/// address and then accesses it as global):
+///
+///   today, radix-4                          11 passes
+///   + the 5 small stages fused in shared     7 passes   ~1.57x
+///   four-step (Bailey), NTTs held in shared  3-4 passes ~3x
+///
+/// Radix-8 is the cheap-looking alternative and is not worth it: 8 passes
+/// (1.37x) for eight elements plus seven twiddles live at once, where radix-4
+/// already needs 96 registers.
 #[test]
 #[ignore]
 fn is_the_gpu_actually_winning() {
