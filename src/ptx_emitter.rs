@@ -1551,14 +1551,18 @@ declare it as a Q format.",
             } => {
                 let val_reg = self.emit_expr(value, None, hw_profile);
                 if let Expr::Ident(name, _) = target {
-                    if let Some(tgt_reg) = self.variables.get(name) {
-                        if val_reg.starts_with("%f") {
-                            writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", tgt_reg, val_reg).unwrap();
-                        } else if val_reg.starts_with("%rd") {
-                            writeln!(&mut self.ptx_buffer, "    mov.u64 {}, {};", tgt_reg, val_reg).unwrap();
-                        } else {
-                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", tgt_reg, val_reg).unwrap();
-                        }
+                    if let Some(tgt_reg) = self.variables.get(name).cloned() {
+                        // The width of the `mov` used to be read off the
+                        // VALUE's register prefix, so `x = y` where `x: U64`
+                        // and `y: U32` emitted `mov.u32 %rd7, %r3` - which
+                        // ptxas rejects outright, and which for the f32/u32
+                        // pair would have been a silent reinterpretation of
+                        // the bits. The target's type is what a `mov` has to
+                        // agree with, and the value converts into it, exactly
+                        // as it does at a `let`.
+                        let ty = self.ty_of(&tgt_reg);
+                        let src = self.emit_convert(&val_reg, ty);
+                        writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", ty.mem(), tgt_reg, src).unwrap();
                     }
                 }
             }
@@ -1684,9 +1688,29 @@ declare it as a Q format.",
         hw_profile: &HardwareProfile,
     ) -> String {
         match expr {
+            // An integer literal is typed by its VALUE, not fixed at I32.
+            //
+            // This is not a nicety. A modulus limb such as `4026531841`
+            // (0xf0000001) sits above `i32::MAX`; typed I32 it is a negative
+            // number, and widening it to 64 bits then sign-extends to
+            // 0xFFFFFFFF_F0000001. The BN254 kernel's conditional subtract
+            // came back with four limbs of all-ones from exactly this, on the
+            // one operand pair (p-1 squared) whose reduction actually fires.
+            // Nothing rejects it: `cvt.s64.s32` is a legal instruction on a
+            // legal register.
             Expr::IntLit(val, _) => {
-                let reg = self.alloc_reg32();
-                writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", reg, *val).unwrap();
+                let v = *val;
+                let ty = if v >= 0 && v > u32::MAX as i64 {
+                    ScalarTy::I64
+                } else if v < i32::MIN as i64 {
+                    ScalarTy::I64
+                } else if v > i32::MAX as i64 {
+                    ScalarTy::U32
+                } else {
+                    ScalarTy::I32
+                };
+                let reg = self.alloc_ty(ty);
+                writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", ty.mem(), reg, v).unwrap();
                 reg
             }
             Expr::FloatLit(val, _) => {

@@ -165,7 +165,7 @@ fn float_element_types_still_compile() {
 
 /// The reference. Plain Rust `u32`/`u64` arithmetic, which is the definition
 /// the kernel is claiming to implement.
-fn reference(a: u32, b: u32) -> [u32; 16] {
+fn reference(a: u32, b: u32) -> [u32; 17] {
     let sh = b & 31;
     let (wa, wb) = (a as u64, b as u64);
     let p = wa.wrapping_mul(wb).wrapping_add(wa);
@@ -186,13 +186,14 @@ fn reference(a: u32, b: u32) -> [u32; 16] {
         (p >> 32) as u32,
         ((wa + wb) >> 32) as u32,
         ((a as i32 as i64 as u64) >> 32) as u32,
+        ((4026531841u64) >> 32) as u32,
     ]
 }
 
-const OP_NAMES: [&str; 16] = [
+const OP_NAMES: [&str; 17] = [
     "a + b", "a - b", "a * b", "a / b", "a % b", "a & b", "a | b", "a ^ b",
     "a << (b & 31)", "a >> (b & 31)", "a < b", "hi32(a * b)",
-    "lo32(a64*b64 + a64)", "hi32(a64*b64 + a64)", "hi32(a + b64)", "hi32(sext(a))",
+    "lo32(a64*b64 + a64)", "hi32(a64*b64 + a64)", "hi32(a + b64)", "hi32(sext(a))", "hi32(0xf0000001 as U64)",
 ];
 
 /// Splitmix64, so the inputs are reproducible and full-range. Values above
@@ -254,7 +255,7 @@ fn every_integer_operator_matches_a_cpu_reference_on_the_gpu() {
     ctx.memcpy_htod_at(&d_a, 0, bytemuck_u32(&a)).unwrap();
     ctx.memcpy_htod_at(&d_b, 0, bytemuck_u32(&b)).unwrap();
 
-    let outs: Vec<_> = (0..16).map(|_| ctx.alloc(bytes).unwrap()).collect();
+    let outs: Vec<_> = (0..17).map(|_| ctx.alloc(bytes).unwrap()).collect();
     for o in &outs {
         // Poison the outputs, so a kernel that writes nothing at all fails
         // rather than accidentally matching a zero reference.
@@ -269,7 +270,7 @@ fn every_integer_operator_matches_a_cpu_reference_on_the_gpu() {
         .expect("launch failed");
     ctx.synchronize().expect("kernel did not complete");
 
-    let mut host = vec![vec![0u32; N]; 16];
+    let mut host = vec![vec![0u32; N]; 17];
     for (k, o) in outs.iter().enumerate() {
         let mut raw = vec![0u8; bytes];
         ctx.memcpy_dtoh_at(&mut raw, o, 0).unwrap();
@@ -282,7 +283,7 @@ fn every_integer_operator_matches_a_cpu_reference_on_the_gpu() {
     let mut first: Option<String> = None;
     for i in 0..N {
         let want = reference(a[i], b[i]);
-        for k in 0..16 {
+        for k in 0..17 {
             if host[k][i] != want[k] {
                 failures += 1;
                 if first.is_none() {
@@ -299,7 +300,7 @@ fn every_integer_operator_matches_a_cpu_reference_on_the_gpu() {
         0,
         "{} of {} integer results disagree with the CPU reference. First: {}",
         failures,
-        N * 16,
+        N * 17,
         first.unwrap_or_default()
     );
 }
