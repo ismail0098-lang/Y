@@ -631,7 +631,7 @@ def gen_msm_bucket():
         L += [f"    let {v}{j}: U32 = 0;" for j in range(S)]
     L += scratch_decls()
     L += ["    let ks: U32 = s + 1;",
-          "    @invariant(k >= 0)",
+          "    @invariant(k >= ks)",
           "    for k in ks..e {",
           "        let pi: U32 = block_ptr2d_load(Idx, 0, k, NPts, 1, NPts);"]
     L += load("bX", "PX", "pi", "NPts", ind="        ")

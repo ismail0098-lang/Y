@@ -241,7 +241,7 @@ kernel bn254_msm_bucket(
     let d6: U32 = 0;
     let d7: U32 = 0;
     let ks: U32 = s + 1;
-    @invariant(k >= 0)
+    @invariant(k >= ks)
     for k in ks..e {
         let pi: U32 = block_ptr2d_load(Idx, 0, k, NPts, 1, NPts);
         let bXv0: U32x4 = block_ptr2d_load_v4(PX, 0, (pi) * 4, 4 * NPts, 2, 4 * NPts);
