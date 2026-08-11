@@ -76,15 +76,16 @@ fn r_mod_p() -> Fr {
     r
 }
 
-/// Transposes `n` field elements into struct-of-arrays: limb `j` of element
-/// `i` at `[j * n + i]`. The kernels read this layout so that a warp's 32
-/// consecutive `u32` are contiguous; see the note in the generator.
-fn to_soa(v: &[Fr], n: usize) -> Vec<u32> {
+/// Planar arrays of `uint4`: limb `j` of element `i` at
+/// `[(j/4) * 4n + i*4 + (j%4)]`. Two planes, each an array of 4-limb vectors,
+/// so one `ld.global.v4.u32` per plane covers 512 contiguous fully-used bytes
+/// across a warp. See the note in `tools/gen_bn254_kernels.py`.
+fn to_planar(v: &[Fr], n: usize) -> Vec<u32> {
     let mut out = vec![0u32; n * 8];
     for (i, x) in v.iter().enumerate() {
         let l = limbs32(x);
         for j in 0..8 {
-            out[j * n + i] = l[j];
+            out[(j / 4) * 4 * n + i * 4 + (j % 4)] = l[j];
         }
     }
     out
@@ -309,9 +310,9 @@ fn the_register_resident_kernel_agrees_too() {
     const N: usize = 4096;
     let (xs, ys) = operands(N);
     let r = r_mod_p();
-    let a_host = to_soa(&xs.iter().map(|x| x.mul(&r)).collect::<Vec<_>>(), N);
-    let b_host = to_soa(&ys, N);
-    let expect = to_soa(
+    let a_host = to_planar(&xs.iter().map(|x| x.mul(&r)).collect::<Vec<_>>(), N);
+    let b_host = to_planar(&ys, N);
+    let expect = to_planar(
         &(0..N).map(|i| xs[i].mul(&ys[i])).collect::<Vec<_>>(),
         N,
     );
@@ -329,8 +330,9 @@ fn the_register_resident_kernel_agrees_too() {
 
     let got = read_u32(&ctx, &d_out, N * 8);
     for i in 0..N {
-        let g: Vec<u32> = (0..8).map(|j| got[j * N + i]).collect();
-        let e: Vec<u32> = (0..8).map(|j| expect[j * N + i]).collect();
+        let ix = |j: usize| (j / 4) * 4 * N + i * 4 + (j % 4);
+        let g: Vec<u32> = (0..8).map(|j| got[ix(j)]).collect();
+        let e: Vec<u32> = (0..8).map(|j| expect[ix(j)]).collect();
         assert_eq!(g, e, "element {}: x={} y={}",
                    i, xs[i].to_decimal_string(), ys[i].to_decimal_string());
     }

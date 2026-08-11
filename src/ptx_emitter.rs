@@ -382,6 +382,14 @@ pub struct PtxEmitter {
     /// the pre-existing behaviour exactly: `%f` is an f32 and anything else is
     /// a signed 32-bit index.
     reg_ty: std::collections::HashMap<String, ScalarTy>,
+    /// Names bound to a 4-wide vector of `u32`, i.e. the four registers a
+    /// single `ld.global.v4.u32` fills. Read back through `.x/.y/.z/.w`.
+    ///
+    /// This exists because a field limb load was 8 separate `LDG.E`, and
+    /// ptxas will not merge them: each carries its own bounds predicate, and
+    /// a predicated load is not a merge candidate. One `v4` instruction moves
+    /// 16 bytes and keeps the predicate.
+    vec_vars: std::collections::HashMap<String, [String; 4]>,
     /// Element type of each `GlobalMemory<T>` parameter, by parameter name.
     /// Absent means f32, which is what every load site assumed unconditionally
     /// before the integer datapath existed.
@@ -494,6 +502,7 @@ impl PtxEmitter {
             label_count: 0,
             variables: std::collections::HashMap::new(),
             reg_ty: std::collections::HashMap::new(),
+            vec_vars: std::collections::HashMap::new(),
             ptr_elem: std::collections::HashMap::new(),
             zero_drift: std::collections::HashMap::new(),
             drift_costs: crate::zero_drift::CostTable::new(),
@@ -668,6 +677,25 @@ impl PtxEmitter {
         } else {
             ScalarTy::I32
         }
+    }
+
+    /// A `v4` result is carried between `emit_expr` and `Stmt::Let` as a
+    /// marker string, because `emit_expr` returns one register name and a
+    /// vector is four. Nothing else in the emitter ever sees it: `Stmt::Let`
+    /// unpacks it into `vec_vars` and any other consumer is a hard error.
+    const V4_TAG: &'static str = "%v4[";
+
+    fn v4_marker(regs: &[String; 4]) -> String {
+        format!("{}{}|{}|{}|{}]", Self::V4_TAG, regs[0], regs[1], regs[2], regs[3])
+    }
+
+    fn parse_v4_marker(s: &str) -> Option<[String; 4]> {
+        let inner = s.strip_prefix(Self::V4_TAG)?.strip_suffix(']')?;
+        let parts: Vec<&str> = inner.split('|').collect();
+        if parts.len() != 4 {
+            return None;
+        }
+        Some([parts[0].into(), parts[1].into(), parts[2].into(), parts[3].into()])
     }
 
     /// The element type of the buffer `e` points at, if it is a parameter this
@@ -1073,6 +1101,7 @@ impl PtxEmitter {
         // Clear variables mapping for fresh compilation unit
         self.variables.clear();
         self.reg_ty.clear();
+        self.vec_vars.clear();
         self.ptr_elem.clear();
         self.record_pointer_element_types(kernel);
 
@@ -1444,6 +1473,10 @@ declare it as a Q format.",
             } => {
                 if let Some(expr) = init {
                     let val_str = self.emit_expr(expr, cache_policy.as_ref(), hw_profile);
+                    if let Some(regs) = Self::parse_v4_marker(&val_str) {
+                        self.vec_vars.insert(name.clone(), regs);
+                        return;
+                    }
                     if !val_str.is_empty() {
                         // The declared type is honoured, not ignored: `let lo:
                         // U32 = t;` on a 64-bit `t` truncates, and `let w: U64
@@ -2277,6 +2310,94 @@ declare it as a Q format.",
                         // gives you: `a * b` is `mul.lo`, and the high half is
                         // where the carry lives. These three are what make a
                         // 256-bit Montgomery multiply writable in Y.
+                        // ── 128-bit vector load / store ───────────────────
+                        //
+                        // `block_ptr2d_load_v4(buf, row, col, stride, max_r,
+                        // max_c)` moves four consecutive u32 in ONE
+                        // instruction, read back as `.x/.y/.z/.w`.
+                        //
+                        // The reason this exists is measured, not assumed: the
+                        // field kernels were issuing 8 separate `LDG.E` per
+                        // element, and NCU put 45.1 of every 64.3 warp cycles
+                        // on the local/global instruction queue being full at
+                        // 9.73% compute throughput. ptxas cannot merge those
+                        // loads because each carries its own bounds predicate.
+                        // Emitting the wide form directly keeps the predicate
+                        // and still costs one instruction.
+                        //
+                        // `col` must be a multiple of 4 and the buffer 16-byte
+                        // aligned; `ld.global.v4.u32` faults otherwise, and
+                        // cuMemAlloc's 256-byte alignment covers the base.
+                        } else if (fname == "block_ptr2d_load_v4" || fname == "block_ptr2d_store_v4")
+                            && args.len() >= 6
+                        {
+                            let storing = fname.ends_with("store_v4");
+                            let elem = self.elem_ty_or_f32(&args[0]);
+                            if elem.is_64() {
+                                self.unsupported_intrinsic(
+                                    fname,
+                                    "only 32-bit element types have a v4 form here; a v4 of \
+                                     64-bit values would be 32 bytes and needs `.v2.u64` twice",
+                                );
+                                return "".into();
+                            }
+                            let ptr_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let row_reg = self.emit_expr(&args[1], cache_policy, hw_profile);
+                            let col_reg = self.emit_expr(&args[2], cache_policy, hw_profile);
+                            let stride_reg = self.emit_expr(&args[3], cache_policy, hw_profile);
+                            let max_r_reg = self.emit_expr(&args[4], cache_policy, hw_profile);
+                            let max_c_reg = self.emit_expr(&args[5], cache_policy, hw_profile);
+
+                            let lin_off = self.alloc_reg32();
+                            let lin_idx = self.alloc_reg32();
+                            let lin_u64 = self.alloc_reg64();
+                            let byte_off = self.alloc_reg64();
+                            let addr = self.alloc_reg64();
+                            let p_r = self.alloc_pred();
+                            let p_c = self.alloc_pred();
+                            let p_valid = self.alloc_pred();
+
+                            writeln!(&mut self.ptx_buffer, "    // [Y 2D BLOCK POINTER {} - 128-BIT VECTOR]",
+                                     if storing { "STORE" } else { "LOAD" }).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mul.lo.s32 {}, {}, {};", lin_off, row_reg, stride_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", lin_idx, lin_off, col_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", lin_u64, lin_idx).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, {};", byte_off, lin_u64, elem.log2_bytes()).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, ptr_reg, byte_off).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_r, row_reg, max_r_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_c, col_reg, max_c_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_valid, p_r, p_c).unwrap();
+
+                            if storing {
+                                if args.len() < 10 {
+                                    self.unsupported_intrinsic(
+                                        fname,
+                                        "needs four values to store: (buf, row, col, stride, \
+                                         max_r, max_c, v0, v1, v2, v3)",
+                                    );
+                                    return "".into();
+                                }
+                                let mut vals = Vec::with_capacity(4);
+                                for k in 6..10 {
+                                    let v = self.emit_expr(&args[k], cache_policy, hw_profile);
+                                    vals.push(self.emit_convert(&v, elem));
+                                }
+                                writeln!(&mut self.ptx_buffer, "    @{} st.global.v4.{} [{}], {{{}, {}, {}, {}}};",
+                                         p_valid, elem.mem(), addr, vals[0], vals[1], vals[2], vals[3]).unwrap();
+                                "".into()
+                            } else {
+                                let regs = [
+                                    self.alloc_ty(elem), self.alloc_ty(elem),
+                                    self.alloc_ty(elem), self.alloc_ty(elem),
+                                ];
+                                writeln!(&mut self.ptx_buffer, "    @{} ld.global.v4.{} {{{}, {}, {}, {}}}, [{}];",
+                                         p_valid, elem.mem(), regs[0], regs[1], regs[2], regs[3], addr).unwrap();
+                                for r in &regs {
+                                    writeln!(&mut self.ptx_buffer, "    @!{} mov.{} {}, {};",
+                                             p_valid, elem.mem(), r, elem.zero_imm()).unwrap();
+                                }
+                                Self::v4_marker(&regs)
+                            }
                         } else if fname == "mul_wide_u32" && args.len() == 2 {
                             let a = self.emit_expr(&args[0], cache_policy, hw_profile);
                             let b = self.emit_expr(&args[1], cache_policy, hw_profile);
@@ -2689,7 +2810,30 @@ declare it as a Q format.",
                     _ => "".into()
                 }
             }
-            Expr::MemberAccess { base: _, member, .. } => {
+            Expr::MemberAccess { base, member, span } => {
+                // `v.x` / `v.y` / `v.z` / `v.w` on a name bound by a v4 load.
+                if let Expr::Ident(n, _) = &**base {
+                    if let Some(regs) = self.vec_vars.get(n) {
+                        let lane = match member.as_str() {
+                            "x" | "r" | "e0" => Some(0),
+                            "y" | "g" | "e1" => Some(1),
+                            "z" | "b" | "e2" => Some(2),
+                            "w" | "a" | "e3" => Some(3),
+                            _ => None,
+                        };
+                        match lane {
+                            Some(i) => return regs[i].clone(),
+                            None => {
+                                self.emit_errors.push(format!(
+                                    "Line {}: `{}` is a 4-wide vector; `.{}` is not one of \
+                                     its lanes (.x .y .z .w).",
+                                    span.line, n, member
+                                ));
+                                return "".into();
+                            }
+                        }
+                    }
+                }
                 if member == "wait" {
                     writeln!(&mut self.ptx_buffer, "    cp.async.wait_group 0;").unwrap();
                 }
