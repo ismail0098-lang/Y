@@ -209,6 +209,49 @@ impl Geom {
     }
 }
 
+/// Below these sizes the GPU MSM is the SLOWER choice and a dispatcher should
+/// not use it. Measured by `where_the_gpu_starts_winning`, which prints the
+/// table these are read off: cold crosses 1.00x between 32,768 (0.81x) and
+/// 65,536 (1.07x); staged crosses between 32,768 (0.88x) and 65,536 (1.30x).
+///
+/// Two thresholds rather than one because staging the bases is a per-call cost
+/// the warm path does not pay, so a single number would be wrong for one of
+/// them — and wrong in the direction of using the GPU when it loses.
+///
+/// **These encode this machine.** An RTX 4070 Ti SUPER against a 32-thread
+/// CPU; a faster GPU or a smaller CPU moves them. `Y_MSM_GPU_MIN` overrides,
+/// and `the_dispatch_thresholds_are_still_true` fails if the hardware has
+/// drifted far enough to invalidate them — which is the only thing separating
+/// a measured constant from a magic number.
+pub const MSM_GPU_MIN_COLD: usize = 56_000;
+pub const MSM_GPU_MIN_STAGED: usize = 40_000;
+
+/// Is the GPU worth using for an MSM of `n` terms?
+pub fn gpu_is_worth_it(n: usize, staged: bool) -> bool {
+    use std::sync::OnceLock;
+    static OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
+    let ov = OVERRIDE.get_or_init(|| {
+        std::env::var("Y_MSM_GPU_MIN").ok().and_then(|v| v.parse().ok())
+    });
+    let min = ov.unwrap_or(if staged { MSM_GPU_MIN_STAGED } else { MSM_GPU_MIN_COLD });
+    n >= min
+}
+
+/// The window count to use at a given problem size.
+///
+/// Fewer windows means less GPU work but more buckets, and the bucket count is
+/// what the host pays for (binning's cursor table, the readback, the
+/// reduction). At small `n` those fixed costs dominate, so narrow windows win;
+/// at large `n` the kernel dominates and wide ones do. Measured from the sweep
+/// in `what_the_gpu_msm_costs`, which prints the whole table it is fitted to.
+pub fn pick_windows(n: usize) -> usize {
+    match n {
+        0..=65_536 => 31,
+        65_537..=262_144 => 28,
+        _ => 25,
+    }
+}
+
 /// The `width`-bit field of a little-endian 4-limb scalar starting at `shift`.
 /// Written over limbs rather than over a bit vector because the bit vector is
 /// 254 pushes per scalar and this is on the measured path.

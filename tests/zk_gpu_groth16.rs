@@ -276,53 +276,79 @@ fn live_base_indices(bases: &[G1Affine], len: usize) -> Vec<u32> {
         .collect()
 }
 
-/// The bases of one proving-key query, staged on the device once.
-struct StagedQuery {
-    dev: DeviceBases,
+/// The bases of one proving-key query.
+///
+/// Staged onto the device only if an MSM of this size is worth putting there.
+/// A Groth16 proof does FOUR MSMs of different sizes, so the choice is made
+/// per query and not per proof: `h_query` is the FFT domain size while
+/// `l_query` is only the witness count, and at small circuits they can land on
+/// opposite sides of the threshold.
+struct StagedQuery<'a> {
+    bases: &'a [G1Affine],
+    len: usize,
+    dev: Option<DeviceBases>,
     keep: Vec<u32>,
 }
 
-impl StagedQuery {
-    fn new(ctx: &CudaContext, bases: &[G1Affine], len: usize) -> Self {
+impl<'a> StagedQuery<'a> {
+    fn new(ctx: &CudaContext, bases: &'a [G1Affine], len: usize, force_gpu: bool) -> Self {
         let keep = live_base_indices(bases, len);
-        let pts: Vec<G1Projective> =
-            keep.iter().map(|&i| bases[i as usize].into_group()).collect();
-        let dev = stage_bases(ctx, &pts);
-        StagedQuery { dev, keep }
+        let len = len.min(bases.len());
+        // Decide against the number of LIVE terms: a query that is mostly
+        // points at infinity is a smaller MSM than its length suggests.
+        //
+        // `force_gpu` exists for the correctness tests. Once dispatch is doing
+        // its job, a small test circuit routes entirely to the CPU and the
+        // GPU tests silently stop testing the GPU -- they would keep passing
+        // with the kernel deleted. Correctness and dispatch have to be
+        // exercised separately.
+        let dev = if force_gpu || gpu_is_worth_it(keep.len(), true) {
+            let pts: Vec<G1Projective> =
+                keep.iter().map(|&i| bases[i as usize].into_group()).collect();
+            Some(stage_bases(ctx, &pts))
+        } else {
+            None
+        };
+        StagedQuery { bases, len, dev, keep }
     }
 
     fn gather(&self, scalars: &[ArkFr]) -> Vec<ArkFr> {
         self.keep.iter().map(|&i| scalars[i as usize]).collect()
     }
+
+    fn on_gpu(&self) -> bool {
+        self.dev.is_some()
+    }
 }
 
 /// Everything about a proving key that does not change between proofs.
-struct GpuProvingKey {
-    h: StagedQuery,
-    l: StagedQuery,
-    a: StagedQuery,
-    b_g1: StagedQuery,
+struct GpuProvingKey<'a> {
+    h: StagedQuery<'a>,
+    l: StagedQuery<'a>,
+    a: StagedQuery<'a>,
+    b_g1: StagedQuery<'a>,
     stage_seconds: f64,
 }
 
-impl GpuProvingKey {
+impl<'a> GpuProvingKey<'a> {
     /// Lengths are passed rather than inferred because `msm_bigint` silently
     /// takes the shorter of bases and scalars, and a gather over an index the
     /// scalar vector does not have would panic instead.
     fn new(
         ctx: &CudaContext,
-        pk: &ProvingKey<Bn254>,
+        pk: &'a ProvingKey<Bn254>,
         h_len: usize,
         aux_len: usize,
         assign_len: usize,
+        force_gpu: bool,
     ) -> Self {
         use std::time::Instant;
         let t = Instant::now();
         let k = GpuProvingKey {
-            h: StagedQuery::new(ctx, &pk.h_query, h_len),
-            l: StagedQuery::new(ctx, &pk.l_query, aux_len),
-            a: StagedQuery::new(ctx, &pk.a_query[1..], assign_len),
-            b_g1: StagedQuery::new(ctx, &pk.b_g1_query[1..], assign_len),
+            h: StagedQuery::new(ctx, &pk.h_query, h_len, force_gpu),
+            l: StagedQuery::new(ctx, &pk.l_query, aux_len, force_gpu),
+            a: StagedQuery::new(ctx, &pk.a_query[1..], assign_len, force_gpu),
+            b_g1: StagedQuery::new(ctx, &pk.b_g1_query[1..], assign_len, force_gpu),
             stage_seconds: 0.0,
         };
         GpuProvingKey { stage_seconds: t.elapsed().as_secs_f64(), ..k }
@@ -331,7 +357,12 @@ impl GpuProvingKey {
 
 /// One MSM on the GPU, falling back to nothing — an empty term list is the
 /// identity, which is the correct answer and not a special case.
-fn msm_gpu(
+/// One MSM, on whichever backend is faster at this size.
+///
+/// The CPU path uses the ORIGINAL bases, points at infinity and all, because
+/// arkworks handles those — the filtering exists for the GPU kernel's sake,
+/// not the algorithm's.
+fn msm_dispatch(
     ctx: &CudaContext,
     module: &KernelModule,
     g: &Geom,
@@ -341,7 +372,14 @@ fn msm_gpu(
     if q.keep.is_empty() {
         return G1Projective::zero();
     }
-    gpu_msm_staged(ctx, module, &q.dev, &q.gather(scalars), g).0
+    match &q.dev {
+        Some(dev) => gpu_msm_staged(ctx, module, dev, &q.gather(scalars), g).0,
+        None => {
+            let n = q.len.min(scalars.len());
+            let bi: Vec<_> = scalars[..n].iter().map(|s| s.into_bigint()).collect();
+            G1Projective::msm_bigint(&q.bases[..n], &bi)
+        }
+    }
 }
 
 /// `Groth16::calculate_coeff`, with the MSM on the GPU.
@@ -359,7 +397,7 @@ fn calculate_coeff_gpu(
     vk_param: G1Affine,
     assignment: &[ArkFr],
 ) -> G1Projective {
-    let acc = msm_gpu(ctx, module, g, staged, assignment);
+    let acc = msm_dispatch(ctx, module, g, staged, assignment);
     let mut res = initial;
     res += query[0].into_group();
     res += acc;
@@ -398,8 +436,8 @@ fn gpu_prove(
     let t0 = Instant::now();
 
     let t = Instant::now();
-    let h_acc = msm_gpu(ctx, module, g, &gk.h, h);
-    let l_aux_acc = msm_gpu(ctx, module, g, &gk.l, aux_assignment);
+    let h_acc = msm_dispatch(ctx, module, g, &gk.h, h);
+    let l_aux_acc = msm_dispatch(ctx, module, g, &gk.l, aux_assignment);
 
     let assignment: Vec<ArkFr> =
         [input_assignment, aux_assignment].concat();
@@ -557,9 +595,15 @@ fn gpu_groth16_proof_verifies_and_matches_arkworks() {
     let (r, s) = (ArkFr::rand(&mut rng2), ArkFr::rand(&mut rng2));
 
     let ((h, input_assignment, aux_assignment), _, _) = synthesize_native(&c);
+    // Forced onto the GPU: this circuit is far under the dispatch threshold,
+    // and a correctness test that quietly runs on the CPU tests nothing.
     let gk = GpuProvingKey::new(
         &ctx, &pk, h.len(), aux_assignment.len(),
-        input_assignment.len() + aux_assignment.len(),
+        input_assignment.len() + aux_assignment.len(), true,
+    );
+    assert!(
+        gk.h.on_gpu() && gk.l.on_gpu() && gk.a.on_gpu(),
+        "the queries under test are not on the GPU; this test would pass with the kernel deleted"
     );
     let mut tm = ProveTiming::default();
     let proof = gpu_prove(
@@ -602,9 +646,15 @@ fn gpu_groth16_rejects_a_tampered_statement() {
         Groth16::<Bn254>::circuit_specific_setup(c.clone(), &mut rng).expect("setup");
     let (r, s) = (ArkFr::rand(&mut rng), ArkFr::rand(&mut rng));
     let ((h, input_assignment, aux_assignment), _, _) = synthesize_native(&c);
+    // Forced onto the GPU: this circuit is far under the dispatch threshold,
+    // and a correctness test that quietly runs on the CPU tests nothing.
     let gk = GpuProvingKey::new(
         &ctx, &pk, h.len(), aux_assignment.len(),
-        input_assignment.len() + aux_assignment.len(),
+        input_assignment.len() + aux_assignment.len(), true,
+    );
+    assert!(
+        gk.h.on_gpu() && gk.l.on_gpu() && gk.a.on_gpu(),
+        "the queries under test are not on the GPU; this test would pass with the kernel deleted"
     );
     let mut tm = ProveTiming::default();
     let proof = gpu_prove(
@@ -705,10 +755,20 @@ fn what_the_gpu_prover_costs() {
             let ((h, ia, aa), _, _) = synthesize_native(&c);
             (h.len(), aa.len(), ia.len() + aa.len())
         };
-        let gk = GpuProvingKey::new(&ctx, &pk, hlen, auxlen, alen);
+        let gk = GpuProvingKey::new(&ctx, &pk, hlen, auxlen, alen, false);
+        let on_gpu: Vec<&str> = [("h", &gk.h), ("l", &gk.l), ("a", &gk.a), ("b1", &gk.b_g1)]
+            .iter()
+            .filter(|(_, q)| q.on_gpu())
+            .map(|(n, _)| *n)
+            .collect();
         println!(
-            "\n[key-load] staged {} G1 bases onto the device in {:.1} ms (once per key)",
-            gk.h.keep.len() + gk.l.keep.len() + gk.a.keep.len() + gk.b_g1.keep.len(),
+            "\n[dispatch] queries on the GPU: {:?}   (sizes h={} l={} a={} b1={})",
+            on_gpu, gk.h.keep.len(), gk.l.keep.len(), gk.a.keep.len(), gk.b_g1.keep.len()
+        );
+        println!(
+            "[key-load] staged {} G1 bases onto the device in {:.1} ms (once per key)",
+            [&gk.h, &gk.l, &gk.a, &gk.b_g1].iter().filter(|q| q.on_gpu())
+                .map(|q| q.keep.len()).sum::<usize>(),
             gk.stage_seconds * 1e3
         );
 
