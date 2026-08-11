@@ -389,8 +389,9 @@ fn what_the_gpu_msm_costs() {
     };
     let module = load_kernel(&ctx, "bn254_msm_bucket");
     let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1);
+    let mut summary: Vec<(usize, f64, f64, f64, f64)> = Vec::new();
 
-    for log_n in [16usize, 18, 20] {
+    for log_n in [14usize, 16, 18, 20, 22] {
         let n = 1usize << log_n;
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0x11115 + log_n as u64);
         let points: Vec<G1Projective> = (0..n).map(|_| G1Projective::rand(&mut rng)).collect();
@@ -459,5 +460,16 @@ fn what_the_gpu_msm_costs() {
             "  kernel only         = {:.1} ms -> {:.2}x the best CPU",
             tm.kernel * 1e3, cpu_best / tm.kernel
         );
+        summary.push((log_n, cpu_best, total, tm.steady_state(), tm.kernel));
     }
+
+    println!("\n=== how the MSM speedup scales ===");
+    println!("{:>5} {:>10} {:>10} {:>9} {:>9} {:>9}", "n", "cpu ms", "gpu ms", "cold", "fixed", "kernel");
+    for (l, cpu, cold, fixed, kern) in &summary {
+        println!(
+            "2^{:<3} {:10.1} {:10.1} {:8.2}x {:8.2}x {:8.2}x",
+            l, cpu * 1e3, cold * 1e3, cpu / cold, cpu / fixed, cpu / kern
+        );
+    }
+    println!("\nA ratio that stops growing means both sides have reached their\nasymptotic cost per point; a ratio that falls means the GPU has hit a\nlimit (bandwidth or memory) the CPU has not.");
 }
