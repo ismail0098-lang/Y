@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/y-gpu"]
+
 [package]
 name = "Y-compiler"
 version = "1.0.0"

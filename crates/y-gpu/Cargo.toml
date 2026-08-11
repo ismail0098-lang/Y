@@ -1,0 +1,24 @@
+[package]
+name = "y-gpu"
+version = "0.1.0"
+edition = "2021"
+description = "GPU-accelerated BN254 primitives (MSM, NTT, Groth16 QAP) for the Y compiler's ZK backend."
+
+# arkworks is a REAL dependency here, and that is the whole reason this is a
+# separate crate. The `Y` compiler itself deliberately links nothing external
+# (see the root Cargo.toml), so its BN254 arithmetic stays the single source of
+# truth for codegen. This crate is the consumer-facing side: it speaks
+# arkworks types because that is what a caller already has a ProvingKey in.
+[dependencies]
+y = { package = "Y-compiler", path = "../.." }
+ark-bn254 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-groth16 = "0.5"
+ark-poly = "0.5"
+ark-relations = "0.5"
+ark-serialize = "0.5"
+ark-std = "0.5"
+
+[dev-dependencies]
+ark-snark = "0.5"

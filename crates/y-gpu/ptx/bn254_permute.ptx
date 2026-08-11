@@ -1,0 +1,125 @@
+.version 8.4
+.target sm_89
+.address_size 64
+
+.visible .entry bn254_permute(
+    .param .u64 Src_0,
+    .param .u64 Dst_1,
+    .param .u64 Perm_2,
+    .param .b32 NElem_3
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 97
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 128 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 33.33% (2 active blocks per SM)
+.maxnreg 128
+{
+    .reg .b32 %r<61>;
+    .reg .f32 %f<1>;
+    .reg .b64 %rd<18>;
+    .reg .pred %p<15>;
+
+    ld.param.u64 %rd0, [Src_0];
+    ld.param.u64 %rd1, [Dst_1];
+    ld.param.u64 %rd2, [Perm_2];
+    ld.param.u32 %r0, [NElem_3];
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, 256;
+    mul.lo.s32 %r3, %r1, %r2;
+    mov.u32 %r4, %tid.x;
+    add.s32 %r5, %r3, %r4;
+    mov.u32 %r6, 0;
+    mov.u32 %r7, 1;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r9, %r6, %r0;
+    add.s32 %r8, %r9, %r5;
+    cvt.u64.u32 %rd4, %r8;
+    shl.b64 %rd3, %rd4, 2;
+    add.u64 %rd5, %rd2, %rd3;
+    setp.lt.u32 %p0, %r6, %r7;
+    setp.lt.u32 %p1, %r5, %r0;
+    and.pred %p2, %p0, %p1;
+    @%p2 ld.global.u32 %r10, [%rd5];
+    @!%p2 mov.u32 %r10, 0;
+    mov.u32 %r11, 0;
+    mov.u32 %r12, 4;
+    mov.u32 %r13, %r12;
+    mul.lo.u32 %r14, %r10, %r13;
+    mov.u32 %r15, 4;
+    mul.lo.s32 %r16, %r15, %r0;
+    mov.u32 %r17, 2;
+    mov.u32 %r18, 4;
+    mul.lo.s32 %r19, %r18, %r0;
+    // [Y 2D BLOCK POINTER LOAD - 128-BIT VECTOR]
+    mul.lo.s32 %r20, %r11, %r16;
+    add.s32 %r21, %r20, %r14;
+    cvt.u64.u32 %rd6, %r21;
+    shl.b64 %rd7, %rd6, 2;
+    add.u64 %rd8, %rd0, %rd7;
+    setp.lt.u32 %p3, %r11, %r17;
+    setp.lt.u32 %p4, %r14, %r19;
+    and.pred %p5, %p3, %p4;
+    @%p5 ld.global.v4.u32 {%r22, %r23, %r24, %r25}, [%rd8];
+    @!%p5 mov.u32 %r22, 0;
+    @!%p5 mov.u32 %r23, 0;
+    @!%p5 mov.u32 %r24, 0;
+    @!%p5 mov.u32 %r25, 0;
+    mov.u32 %r26, 1;
+    mov.u32 %r27, 4;
+    mov.u32 %r28, %r27;
+    mul.lo.u32 %r29, %r10, %r28;
+    mov.u32 %r30, 4;
+    mul.lo.s32 %r31, %r30, %r0;
+    mov.u32 %r32, 2;
+    mov.u32 %r33, 4;
+    mul.lo.s32 %r34, %r33, %r0;
+    // [Y 2D BLOCK POINTER LOAD - 128-BIT VECTOR]
+    mul.lo.s32 %r35, %r26, %r31;
+    add.s32 %r36, %r35, %r29;
+    cvt.u64.u32 %rd9, %r36;
+    shl.b64 %rd10, %rd9, 2;
+    add.u64 %rd11, %rd0, %rd10;
+    setp.lt.u32 %p6, %r26, %r32;
+    setp.lt.u32 %p7, %r29, %r34;
+    and.pred %p8, %p6, %p7;
+    @%p8 ld.global.v4.u32 {%r37, %r38, %r39, %r40}, [%rd11];
+    @!%p8 mov.u32 %r37, 0;
+    @!%p8 mov.u32 %r38, 0;
+    @!%p8 mov.u32 %r39, 0;
+    @!%p8 mov.u32 %r40, 0;
+    mov.u32 %r41, 0;
+    mov.u32 %r42, 4;
+    mul.lo.s32 %r43, %r5, %r42;
+    mov.u32 %r44, 4;
+    mul.lo.s32 %r45, %r44, %r0;
+    mov.u32 %r46, 2;
+    mov.u32 %r47, 4;
+    mul.lo.s32 %r48, %r47, %r0;
+    // [Y 2D BLOCK POINTER STORE - 128-BIT VECTOR]
+    mul.lo.s32 %r49, %r41, %r45;
+    add.s32 %r50, %r49, %r43;
+    cvt.u64.u32 %rd12, %r50;
+    shl.b64 %rd13, %rd12, 2;
+    add.u64 %rd14, %rd1, %rd13;
+    setp.lt.u32 %p9, %r41, %r46;
+    setp.lt.u32 %p10, %r43, %r48;
+    and.pred %p11, %p9, %p10;
+    @%p11 st.global.v4.u32 [%rd14], {%r22, %r23, %r24, %r25};
+    mov.u32 %r51, 1;
+    mov.u32 %r52, 4;
+    mul.lo.s32 %r53, %r5, %r52;
+    mov.u32 %r54, 4;
+    mul.lo.s32 %r55, %r54, %r0;
+    mov.u32 %r56, 2;
+    mov.u32 %r57, 4;
+    mul.lo.s32 %r58, %r57, %r0;
+    // [Y 2D BLOCK POINTER STORE - 128-BIT VECTOR]
+    mul.lo.s32 %r59, %r51, %r55;
+    add.s32 %r60, %r59, %r53;
+    cvt.u64.u32 %rd15, %r60;
+    shl.b64 %rd16, %rd15, 2;
+    add.u64 %rd17, %rd1, %rd16;
+    setp.lt.u32 %p12, %r51, %r56;
+    setp.lt.u32 %p13, %r53, %r58;
+    and.pred %p14, %p12, %p13;
+    @%p14 st.global.v4.u32 [%rd17], {%r37, %r38, %r39, %r40};
+}
