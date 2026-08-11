@@ -70,9 +70,9 @@ what the other 26 do.
 
 | | |
 |---|---|
-| compiles | **Y 27/31, circom 31/31** |
-| size, geomean circom/Y | **1.028x — a tie** (win 4 / tie 20 / loss 3, band 0.95–1.05) |
-| totals over the 27 | circom 46,448, Y 37,310 |
+| compiles | **Y 29/31, circom 31/31** |
+| size, geomean circom/Y | **1.043x — a tie** (win 5 / tie 21 / loss 3, band 0.95–1.05) |
+| totals over the 29 | circom 46,684, Y 37,512 |
 
 Where Y wins it wins large:
 
@@ -81,6 +81,7 @@ Where Y wins it wins large:
 | `Poseidon(2)` | 517 | 286 | 1.81x |
 | `SMTProcessor(10)` | 12,874 | 7,528 | 1.71x |
 | `SMTVerifier(10)` | 7,598 | 4,634 | 1.64x |
+| `EscalarMul(8, base)` | 84 | 55 | 1.53x |
 | `EdDSAPoseidonVerifier` | 8,086 | 7,570 | 1.07x |
 
 and where it loses it loses small, but it does lose:
@@ -93,8 +94,8 @@ and where it loses it loses small, but it does lose:
 
 **The wins share a shape.** They are circuits written as long chains of `<==`
 linear assignments, which is exactly what `substitute_linear_constraints`
-eliminates. A circuit that is already tight has nothing to remove, and twenty of
-the twenty-seven land on circom's number to within 5%.
+eliminates. A circuit that is already tight has nothing to remove, and twenty-one
+of the twenty-nine land on circom's number to within 5%.
 
 Every size figure this repo published before 2026-08-11 was measured on
 `Poseidon(2)` or a chain of it and quoted as though it generalised. It does not.
@@ -103,11 +104,14 @@ occasionally much smaller"**, not "1.86x smaller".
 
 Still refused, by cause:
 
-| cause | circuits |
+| circuit | what it needs |
 |---|---|
-| array literal as a template argument | `EscalarMul`, `EscalarMulFix` |
-| array-valued signal port | `Sha256` |
-| `/` by a signal inside a constraint | `EdDSA` |
+| `Sha256` | `var outCalc[256] = sha256compression(hin, inp);` — a circom `function` called on signal ARRAYS |
+| `EdDSA` | `var x = sqrt((1-y2)/(a - d*y2)); if (in[255]==1) x = -x; out[0] <-- x;` — signal-dependent `var`s, a function over them, and a branch on a signal |
+
+Both are the same gap: **a `var` holding a value that is not compile-time
+constant.** Note what they have in common downstream — the result reaches only a
+`<--`, never a `<==` or `===`. See [Known gaps](#known-gaps).
 
 **Poseidon specifically**, since it is what the proving measurements below use:
 
@@ -325,10 +329,35 @@ wrote.** Nothing downstream records the difference.
 - **Input JSON does not accept arrays.** `mini_json::parse_scalar_map` is
   scalar-only, but circom inputs are routinely `{"in": ["1", "2"]}`. The
   `--witness` path therefore works only for scalar inputs today.
-- **Four circomlib circuits do not compile** — `EscalarMul` and `EscalarMulFix`
-  (array literal as a template argument), `Sha256` (array-valued signal port),
-  `EdDSA` (`/` by a signal inside a constraint). See the coverage table above;
-  re-measure with `tools/circomlib_coverage.py` after touching the front end.
+- **`Sha256` and `EdDSA` do not compile**, and both want the same feature: a
+  `var` that holds a value which is not compile-time constant, so that a circom
+  `function` can be evaluated at *witness* time. Re-measure with
+  `tools/circomlib_coverage.py` after touching the front end.
+
+  The shape of the fix is worth writing down, because it is smaller than
+  "implement circom's witness calculator" and the reason is a property of both
+  circuits: **the non-constant value reaches only a `<--`.** In
+  `sha256compression.circom` the whole constrained SHA-256 circuit is built
+  below the call, and `outCalc` is used exactly once — `out[i] <-- outCalc[i]` —
+  as advice so circom's witness calculator does not have to derive the digest
+  through the circuit. Same in `Bits2Point_Strict`: `sqrt` picks a square root
+  and the sign bit picks which, then `<--`, and `BabyCheck` + `Num2Bits` +
+  `AliasCheck` do the constraining.
+
+  So a value Y cannot compute could be modelled as *opaque* and allowed to
+  propagate only into a `<--`, becoming `WitnessOp::Unknown`; reaching a `<==`,
+  a `===`, an array index or a loop bound stays a hard error. **The emitted
+  `.r1cs` would then be complete and correct**, because `<--` contributes no
+  constraints — byte-identical to what a perfect witness recipe would produce.
+  What Y would lose is the ability to produce a `.wtns` for those circuits by
+  itself, which is fail-closed and visible: an unsolved wire stays zero and the
+  satisfiability check reports it.
+
+  This is a deliberate open decision, not an oversight. It trades this repo's
+  "refuse rather than half-do" default for coverage of the two most-used circuits
+  in the ecosystem, and the trade is only defensible because the artifact that
+  gets weaker (`.wtns`) is not the artifact users of a circom compiler mainly
+  want (`.r1cs`).
 - `Y_ZK_COMPACT=off` disables wire compaction. It is a differential baseline, not
   a safety valve — with it off, Y carries 1.49x *more* wires than circom on a
   200-hash Poseidon chain.
