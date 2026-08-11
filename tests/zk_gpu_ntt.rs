@@ -13,6 +13,12 @@
 //! both and cancels. The direct sum has no structure to get wrong, which is
 //! the whole reason it is worth its 1M field multiplies here.
 
+// The oracle these kernels are checked against is Y's OWN field / emitter
+// (`zk_field.rs`, `zk_emitter.rs`), which is behind the `zk` feature. Without
+// this the file does not compile at all under a plain `cargo test`, which is how
+// the whole default test run has been failing to build.
+#![cfg(feature = "zk")]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

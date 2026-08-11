@@ -24,6 +24,12 @@
 //! It is named here, measured separately below, and it is the reason the
 //! end-to-end prover speedup is smaller than the MSM speedup.
 
+// The oracle these kernels are checked against is Y's OWN field / emitter
+// (`zk_field.rs`, `zk_emitter.rs`), which is behind the `zk` feature. Without
+// this the file does not compile at all under a plain `cargo test`, which is how
+// the whole default test run has been failing to build.
+#![cfg(feature = "zk")]
+
 #[path = "common/msm.rs"]
 mod msm;
 #[path = "common/qap.rs"]
