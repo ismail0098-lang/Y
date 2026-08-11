@@ -76,6 +76,20 @@ fn r_mod_p() -> Fr {
     r
 }
 
+/// Transposes `n` field elements into struct-of-arrays: limb `j` of element
+/// `i` at `[j * n + i]`. The kernels read this layout so that a warp's 32
+/// consecutive `u32` are contiguous; see the note in the generator.
+fn to_soa(v: &[Fr], n: usize) -> Vec<u32> {
+    let mut out = vec![0u32; n * 8];
+    for (i, x) in v.iter().enumerate() {
+        let l = limbs32(x);
+        for j in 0..8 {
+            out[j * n + i] = l[j];
+        }
+    }
+    out
+}
+
 fn as_bytes(v: &[u32]) -> &[u8] {
     // u32 has no padding and no invalid bit patterns; read-only view.
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) }
@@ -295,14 +309,12 @@ fn the_register_resident_kernel_agrees_too() {
     const N: usize = 4096;
     let (xs, ys) = operands(N);
     let r = r_mod_p();
-    let mut a_host = Vec::with_capacity(N * 8);
-    let mut b_host = Vec::with_capacity(N * 8);
-    let mut expect = Vec::with_capacity(N * 8);
-    for i in 0..N {
-        a_host.extend_from_slice(&limbs32(&xs[i].mul(&r)));
-        b_host.extend_from_slice(&limbs32(&ys[i]));
-        expect.extend_from_slice(&limbs32(&xs[i].mul(&ys[i])));
-    }
+    let a_host = to_soa(&xs.iter().map(|x| x.mul(&r)).collect::<Vec<_>>(), N);
+    let b_host = to_soa(&ys, N);
+    let expect = to_soa(
+        &(0..N).map(|i| xs[i].mul(&ys[i])).collect::<Vec<_>>(),
+        N,
+    );
 
     let d_a = ctx.alloc(N * 8 * 4).unwrap();
     let d_b = ctx.alloc(N * 8 * 4).unwrap();
@@ -317,11 +329,10 @@ fn the_register_resident_kernel_agrees_too() {
 
     let got = read_u32(&ctx, &d_out, N * 8);
     for i in 0..N {
-        assert_eq!(
-            &got[i * 8..i * 8 + 8],
-            &expect[i * 8..i * 8 + 8],
-            "element {}: x={} y={}", i, xs[i].to_decimal_string(), ys[i].to_decimal_string()
-        );
+        let g: Vec<u32> = (0..8).map(|j| got[j * N + i]).collect();
+        let e: Vec<u32> = (0..8).map(|j| expect[j * N + i]).collect();
+        assert_eq!(g, e, "element {}: x={} y={}",
+                   i, xs[i].to_decimal_string(), ys[i].to_decimal_string());
     }
 }
 
@@ -374,7 +385,14 @@ fn what_the_gpu_field_multiply_costs() {
 
     // The register-resident kernel, same shape, same operands.
     let fast = load_kernel(&ctx, "bn254_fr_mul_fast");
-    let fargs = vec![d_a.device_ptr(), d_b.device_ptr(), d_out.device_ptr(), N as u64];
+    // Its own buffers: the rolled kernel above reads array-of-structs, this
+    // one reads struct-of-arrays, and feeding it the wrong layout would time
+    // a kernel computing nonsense.
+    let d_fa = ctx.alloc(N * 8 * 4).unwrap();
+    let d_fb = ctx.alloc(N * 8 * 4).unwrap();
+    ctx.memset_u8(&d_fa, 0x11).unwrap();
+    ctx.memset_u8(&d_fb, 0x22).unwrap();
+    let fargs = vec![d_fa.device_ptr(), d_fb.device_ptr(), d_out.device_ptr(), N as u64];
     let fus = ctx
         .time_launches(&fast, ((N / 256) as u32, 1, 1), (256, 1, 1), 0, &[fargs], 50)
         .unwrap();

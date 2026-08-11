@@ -17,22 +17,22 @@ kernel bn254_fr_mul_fast(
     N: I32
 ) {
     let tid: I32 = block_idx_x() * 256 + thread_idx_x();
-    let a0: U32 = block_ptr2d_load(A, tid, 0, 8, N, 8);
-    let a1: U32 = block_ptr2d_load(A, tid, 1, 8, N, 8);
-    let a2: U32 = block_ptr2d_load(A, tid, 2, 8, N, 8);
-    let a3: U32 = block_ptr2d_load(A, tid, 3, 8, N, 8);
-    let a4: U32 = block_ptr2d_load(A, tid, 4, 8, N, 8);
-    let a5: U32 = block_ptr2d_load(A, tid, 5, 8, N, 8);
-    let a6: U32 = block_ptr2d_load(A, tid, 6, 8, N, 8);
-    let a7: U32 = block_ptr2d_load(A, tid, 7, 8, N, 8);
-    let b0: U32 = block_ptr2d_load(B, tid, 0, 8, N, 8);
-    let b1: U32 = block_ptr2d_load(B, tid, 1, 8, N, 8);
-    let b2: U32 = block_ptr2d_load(B, tid, 2, 8, N, 8);
-    let b3: U32 = block_ptr2d_load(B, tid, 3, 8, N, 8);
-    let b4: U32 = block_ptr2d_load(B, tid, 4, 8, N, 8);
-    let b5: U32 = block_ptr2d_load(B, tid, 5, 8, N, 8);
-    let b6: U32 = block_ptr2d_load(B, tid, 6, 8, N, 8);
-    let b7: U32 = block_ptr2d_load(B, tid, 7, 8, N, 8);
+    let a0: U32 = block_ptr2d_load(A, 0, tid, N, 8, N);
+    let a1: U32 = block_ptr2d_load(A, 1, tid, N, 8, N);
+    let a2: U32 = block_ptr2d_load(A, 2, tid, N, 8, N);
+    let a3: U32 = block_ptr2d_load(A, 3, tid, N, 8, N);
+    let a4: U32 = block_ptr2d_load(A, 4, tid, N, 8, N);
+    let a5: U32 = block_ptr2d_load(A, 5, tid, N, 8, N);
+    let a6: U32 = block_ptr2d_load(A, 6, tid, N, 8, N);
+    let a7: U32 = block_ptr2d_load(A, 7, tid, N, 8, N);
+    let b0: U32 = block_ptr2d_load(B, 0, tid, N, 8, N);
+    let b1: U32 = block_ptr2d_load(B, 1, tid, N, 8, N);
+    let b2: U32 = block_ptr2d_load(B, 2, tid, N, 8, N);
+    let b3: U32 = block_ptr2d_load(B, 3, tid, N, 8, N);
+    let b4: U32 = block_ptr2d_load(B, 4, tid, N, 8, N);
+    let b5: U32 = block_ptr2d_load(B, 5, tid, N, 8, N);
+    let b6: U32 = block_ptr2d_load(B, 6, tid, N, 8, N);
+    let b7: U32 = block_ptr2d_load(B, 7, tid, N, 8, N);
     let r0: U32 = 0;
     let r1: U32 = 0;
     let r2: U32 = 0;
@@ -587,14 +587,14 @@ kernel bn254_fr_mul_fast(
     r5 = (d5 & mask) | (t5 & nmask);
     r6 = (d6 & mask) | (t6 & nmask);
     r7 = (d7 & mask) | (t7 & nmask);
-    block_ptr2d_store(Out, tid, 0, 8, N, 8, r0);
-    block_ptr2d_store(Out, tid, 1, 8, N, 8, r1);
-    block_ptr2d_store(Out, tid, 2, 8, N, 8, r2);
-    block_ptr2d_store(Out, tid, 3, 8, N, 8, r3);
-    block_ptr2d_store(Out, tid, 4, 8, N, 8, r4);
-    block_ptr2d_store(Out, tid, 5, 8, N, 8, r5);
-    block_ptr2d_store(Out, tid, 6, 8, N, 8, r6);
-    block_ptr2d_store(Out, tid, 7, 8, N, 8, r7);
+    block_ptr2d_store(Out, 0, tid, N, 8, N, r0);
+    block_ptr2d_store(Out, 1, tid, N, 8, N, r1);
+    block_ptr2d_store(Out, 2, tid, N, 8, N, r2);
+    block_ptr2d_store(Out, 3, tid, N, 8, N, r3);
+    block_ptr2d_store(Out, 4, tid, N, 8, N, r4);
+    block_ptr2d_store(Out, 5, tid, N, 8, N, r5);
+    block_ptr2d_store(Out, 6, tid, N, 8, N, r6);
+    block_ptr2d_store(Out, 7, tid, N, 8, N, r7);
 }
 
 fn main() {}

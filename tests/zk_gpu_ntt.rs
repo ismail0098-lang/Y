@@ -52,6 +52,27 @@ fn load_kernel(ctx: &CudaContext, entry: &str) -> KernelModule {
         "{} is routing field limbs through the float datapath",
         entry
     );
+    // `Y_PTX_MAXNREG` rewrites the emitter's `.maxnreg` before JIT, for
+    // measuring what register pressure is actually costing. The emitter
+    // derives that number from its VIRTUAL register count, which in a fully
+    // unrolled kernel runs into the thousands and buckets straight to 255 -
+    // nowhere near the ~82 ptxas really needs, and the difference is whole
+    // blocks of occupancy.
+    let ptx = match std::env::var("Y_PTX_MAXNREG") {
+        Ok(v) => {
+            let mut out = String::with_capacity(ptx.len());
+            for line in ptx.lines() {
+                if line.trim_start().starts_with(".maxnreg") {
+                    out.push_str(&format!(".maxnreg {}\n", v));
+                } else {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            out
+        }
+        Err(_) => ptx,
+    };
     ctx.load_ptx(&ptx, entry)
         .unwrap_or_else(|e| panic!("{} did not load: {}", entry, e))
 }
@@ -64,6 +85,31 @@ fn limbs32(x: &Fr) -> [u32; 8] {
         o[2 * i + 1] = (l[i] >> 32) as u32;
     }
     o
+}
+
+/// Struct-of-arrays: limb `j` of element `i` at `[j * n + i]`. See the note in
+/// `tools/gen_bn254_kernels.py` for why the kernels want this layout.
+fn to_soa(v: &[Fr], n: usize) -> Vec<u32> {
+    let mut out = vec![0u32; n * 8];
+    for (i, x) in v.iter().enumerate() {
+        let l = limbs32(x);
+        for j in 0..8 {
+            out[j * n + i] = l[j];
+        }
+    }
+    out
+}
+
+fn from_soa(raw: &[u32], n: usize) -> Vec<Fr> {
+    (0..n)
+        .map(|i| {
+            let mut l = [0u64; 4];
+            for j in 0..4 {
+                l[j] = raw[(2 * j) * n + i] as u64 | ((raw[(2 * j + 1) * n + i] as u64) << 32);
+            }
+            Fr::from_limbs_reduce(l)
+        })
+        .collect()
 }
 
 fn as_bytes(v: &[u32]) -> &[u8] {
@@ -163,11 +209,7 @@ fn gpu_ntt(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<Fr
     let log_n = n.trailing_zeros();
     let r = r_mod_p();
 
-    let input = bit_reverse(a, log_n);
-    let mut flat = Vec::with_capacity(n * 8);
-    for x in &input {
-        flat.extend_from_slice(&limbs32(x));
-    }
+    let flat = to_soa(&bit_reverse(a, log_n), n);
     let d_x = ctx.alloc(n * 8 * 4).unwrap();
     ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
 
@@ -176,12 +218,13 @@ fn gpu_ntt(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<Fr
         let half = m / 2;
         // omega_m = w^(n/m), and the table holds omega_m^pos * R.
         let step = w.pow_limbs(&[(n / m) as u64, 0, 0, 0]);
-        let mut tw = Vec::with_capacity(half * 8);
+        let mut tws = Vec::with_capacity(half);
         let mut cur = Fr::one();
         for _ in 0..half {
-            tw.extend_from_slice(&limbs32(&cur.mul(&r)));
+            tws.push(cur.mul(&r));
             cur = cur.mul(&step);
         }
+        let tw = to_soa(&tws, half);
         let d_tw = ctx.alloc(half * 8 * 4).unwrap();
         ctx.memcpy_htod_at(&d_tw, 0, as_bytes(&tw)).unwrap();
 
@@ -200,16 +243,7 @@ fn gpu_ntt(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<Fr
         ctx.synchronize().expect("stage did not complete");
     }
 
-    let got = read_u32(ctx, &d_x, n * 8);
-    (0..n)
-        .map(|i| {
-            let mut l = [0u64; 4];
-            for j in 0..4 {
-                l[j] = got[i * 8 + 2 * j] as u64 | ((got[i * 8 + 2 * j + 1] as u64) << 32);
-            }
-            Fr::from_limbs_reduce(l)
-        })
-        .collect()
+    from_soa(&read_u32(ctx, &d_x, n * 8), n)
 }
 
 #[test]
@@ -346,10 +380,7 @@ fn what_the_gpu_ntt_costs() {
     // ── setup, outside the timed region, as a library would have it ──
     let r = r_mod_p();
     let input = bit_reverse(&a, LOG_N);
-    let mut flat = Vec::with_capacity(N * 8);
-    for x in &input {
-        flat.extend_from_slice(&limbs32(x));
-    }
+    let flat = to_soa(&input, N);
     let d_x = ctx.alloc(N * 8 * 4).unwrap();
     ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
 
@@ -358,12 +389,13 @@ fn what_the_gpu_ntt_costs() {
         let m = 1usize << s;
         let half = m / 2;
         let step = w.pow_limbs(&[(N / m) as u64, 0, 0, 0]);
-        let mut tw = Vec::with_capacity(half * 8);
+        let mut tws = Vec::with_capacity(half);
         let mut cur = Fr::one();
         for _ in 0..half {
-            tw.extend_from_slice(&limbs32(&cur.mul(&r)));
+            tws.push(cur.mul(&r));
             cur = cur.mul(&step);
         }
+        let tw = to_soa(&tws, half);
         let d_tw = ctx.alloc(half * 8 * 4).unwrap();
         ctx.memcpy_htod_at(&d_tw, 0, as_bytes(&tw)).unwrap();
         stages.push((half, d_tw));
@@ -411,8 +443,7 @@ fn what_the_gpu_ntt_costs() {
     // ── and what the harness adds on top, so it is not mistaken for either ──
     let t2 = std::time::Instant::now();
     let br = bit_reverse(&a, LOG_N);
-    let mut f2 = Vec::with_capacity(N * 8);
-    for v in &br { f2.extend_from_slice(&limbs32(v)); }
+    let f2 = to_soa(&br, N);
     let host_ms = t2.elapsed().as_secs_f64() * 1000.0;
     std::hint::black_box(f2);
 
@@ -503,11 +534,28 @@ fn cpu_ntt_stage(x: &mut [Fr], m: usize, tw: &[Fr], nthreads: usize) {
 ///     taken after it, which came back 8x too fast. Hence the warmup and the
 ///     minimum over interleaved rounds.
 ///   - **Size it past L2.** `LOG_N = 20` is 33 MB, which fits inside this
-///     card's 48 MB L2: the transform then runs at 766 GB/s, ABOVE the 672
-///     GB/s DRAM peak, for 21x over the parallel CPU. That is a real effect
-///     and a real use case, but quoting it alone is quoting a cache hit. At
-///     `LOG_N = 23` (268 MB, 5.6x L2) it settles to 525 GB/s - 78% of DRAM
-///     peak, which is the number to trust.
+///     card's 48 MB L2, and the transform then runs above DRAM peak: 0.88 ms,
+///     41.8x the parallel CPU. That is a real effect and a real use case, but
+///     quoting it alone is quoting a cache hit. At `LOG_N = 23` (268 MB, 5.6x
+///     L2) it is 22.5 ms, 12.3x, and 82% of DRAM peak - the number to trust.
+///
+/// Profiled with NCU. What that changed, and what it did not:
+///
+///   - The layout transpose (array-of-structs -> struct-of-arrays, see
+///     `tools/gen_bn254_kernels.py`) took one stage launch from 252.5 us to
+///     88.5 us and the whole 2^20 transform from 1.81 ms to 0.88 ms. Warp
+///     cycles per issued instruction: 64.3 -> 15.1.
+///   - It is worth ~nothing at 2^23, because that size is already at 82% of
+///     DRAM peak and a transpose moves no fewer bytes. Fewer PASSES is the
+///     only lever left there, i.e. fusing stages in shared memory.
+///   - **Occupancy is a red herring here, and NCU says otherwise.** It reports
+///     26.9% achieved occupancy and 2 blocks/SM limited by registers, which
+///     reads as an obvious fix. It is not: forcing the register count down
+///     with `Y_PTX_MAXNREG` - with ZERO spills at every level tested - makes
+///     it strictly slower (255: 0.87 ms, 96: 0.86, 80: 1.38, 64: 1.26, 48:
+///     3.39). The kernel is bandwidth-bound with plenty of ILP, so more
+///     resident blocks buy nothing and cost L2 contention. Measure before
+///     acting on an occupancy warning.
 ///
 /// Sanity-check any figure here against the bandwidth it implies before
 /// believing it. That is what caught the cold run: 30.6 ms implies 44 GB/s,
@@ -521,7 +569,7 @@ fn is_the_gpu_actually_winning() {
     };
     let module = load_kernel(&ctx, "bn254_ntt_stage");
 
-    const LOG_N: u32 = 23;
+    const LOG_N: u32 = 20;
     const N: usize = 1 << LOG_N;
     let nthreads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
     let w = root_of_unity(LOG_N);
@@ -582,17 +630,11 @@ fn is_the_gpu_actually_winning() {
     let cpu_best_ms = sweep.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);
 
     // ── GPU ──
-    let mut flat = Vec::with_capacity(N * 8);
-    for v in bit_reverse(&a, LOG_N) {
-        flat.extend_from_slice(&limbs32(&v));
-    }
+    let flat = to_soa(&bit_reverse(&a, LOG_N), N);
     let d_x = ctx.alloc(N * 8 * 4).unwrap();
     let mut dev_tw = Vec::new();
     for t in &tables {
-        let mut f = Vec::with_capacity(t.len() * 8);
-        for v in t {
-            f.extend_from_slice(&limbs32(&v.mul(&r)));
-        }
+        let f = to_soa(&t.iter().map(|v| v.mul(&r)).collect::<Vec<_>>(), t.len());
         let d = ctx.alloc(t.len() * 8 * 4).unwrap();
         ctx.memcpy_htod_at(&d, 0, as_bytes(&f)).unwrap();
         dev_tw.push((t.len(), d));
