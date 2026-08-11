@@ -34,7 +34,7 @@ use ark_ff::{PrimeField, Zero};
 use ark_groth16::{r1cs_to_qap::{LibsnarkReduction, R1CSToQAP}, Groth16, Proof, ProvingKey};
 use ark_poly::GeneralEvaluationDomain;
 use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef,
+    ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, ConstraintSystemRef,
     LinearCombination as ArkLc, OptimizationGoal, SynthesisError, Variable,
 };
 use ark_snark::SNARK;
@@ -136,6 +136,116 @@ impl ConstraintSynthesizer<ArkFr> for YCircuit {
 }
 
 // ---------------------------------------------------------------------------
+// Y's R1CS as arkworks matrices, without the replay
+// ---------------------------------------------------------------------------
+
+/// Y already HAS the constraint matrices. Handing them to arkworks by
+/// replaying every constraint through `ConstraintSystem::enforce_constraint`
+/// and then asking for them back was 42% of the prover — allocating a
+/// `LinearCombination` per matrix per constraint, assigning variables one at a
+/// time, and running the LC inliner over work that was already flat.
+///
+/// This builds them directly. It is not an optimisation of that path, it is
+/// the deletion of it: `create_proof_with_reduction_and_matrices` takes
+/// matrices, so the constraint system never has to exist on the proving path.
+///
+/// The column numbering is arkworks': `One` is 0, instance variable `i` is
+/// `i`, and witness variable `j` is `num_instance_variables + j`
+/// (`Variable::get_index_unchecked`). It has to match exactly, because the
+/// proving key was generated against that numbering — and
+/// `y_matrices_match_the_arkworks_replay` asserts it rather than trusting it.
+fn y_matrices(c: &YCircuit) -> (ConstraintMatrices<ArkFr>, Vec<ArkFr>) {
+    let n = c.circuit.num_variables;
+    let num_instance = 1 + c.public_wires.len();
+
+    // Y wire -> arkworks column.
+    let mut col = vec![usize::MAX; n];
+    col[0] = 0;
+    for (k, &w) in c.public_wires.iter().enumerate() {
+        col[w] = 1 + k;
+    }
+    let mut next = num_instance;
+    for w in 1..n {
+        if col[w] == usize::MAX {
+            col[w] = next;
+            next += 1;
+        }
+    }
+    let num_witness = next - num_instance;
+
+    let mut full = vec![ArkFr::zero(); n];
+    for w in 0..n {
+        full[col[w]] = to_ark(&c.witness[w]);
+    }
+    full[0] = ArkFr::from(1u64);
+
+    // A row is a sum, so the order of its terms does not matter — field
+    // addition is exact and commutative. Duplicate wires are combined and zero
+    // coefficients dropped, which is what `make_row` does.
+    let row = |lc: &LinearCombination| -> Vec<(ArkFr, usize)> {
+        let mut acc: Vec<(ArkFr, usize)> = Vec::with_capacity(lc.terms.len());
+        for (wire, coeff) in &lc.terms {
+            let idx = col[*wire];
+            let v = to_ark(coeff);
+            if let Some(e) = acc.iter_mut().find(|(_, i)| *i == idx) {
+                e.0 += v;
+            } else {
+                acc.push((v, idx));
+            }
+        }
+        acc.retain(|(v, _)| !v.is_zero());
+        acc
+    };
+
+    let (mut a, mut b, mut cm) = (Vec::new(), Vec::new(), Vec::new());
+    for k in &c.circuit.constraints {
+        a.push(row(&k.a));
+        b.push(row(&k.b));
+        cm.push(row(&k.c));
+    }
+    let nnz = |m: &Vec<Vec<(ArkFr, usize)>>| m.iter().map(|r| r.len()).sum();
+    (
+        ConstraintMatrices {
+            num_instance_variables: num_instance,
+            num_witness_variables: num_witness,
+            num_constraints: a.len(),
+            a_num_non_zero: nnz(&a),
+            b_num_non_zero: nnz(&b),
+            c_num_non_zero: nnz(&cm),
+            a,
+            b,
+            c: cm,
+        },
+        full,
+    )
+}
+
+/// The pieces `create_proof_with_assignment` needs, straight from Y's circuit.
+fn synthesize_native(c: &YCircuit) -> ((Vec<ArkFr>, Vec<ArkFr>, Vec<ArkFr>), f64, f64) {
+    use std::time::Instant;
+    let t = Instant::now();
+    let (m, full) = y_matrices(c);
+    let build = t.elapsed().as_secs_f64();
+
+    let t = Instant::now();
+    let h = LibsnarkReduction::witness_map_from_matrices::<ArkFr, GeneralEvaluationDomain<ArkFr>>(
+        &m,
+        m.num_instance_variables,
+        m.num_constraints,
+        &full,
+    )
+    .expect("QAP witness map");
+    let qap = t.elapsed().as_secs_f64();
+
+    let ni = m.num_instance_variables;
+    (
+        (h, full[1..ni].to_vec(), full[ni..].to_vec()),
+        build,
+        qap,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // The GPU MSM, adapted to a proving key
 // ---------------------------------------------------------------------------
 
@@ -152,18 +262,71 @@ impl ConstraintSynthesizer<ArkFr> for YCircuit {
 /// This is a PRECONDITION of the kernel being made checkable, not a
 /// workaround: `gpu_msm` is documented to require non-identity points, and
 /// feeding it one produces a wrong bucket rather than an error.
-fn filter_msm_terms(bases: &[G1Affine], scalars: &[ArkFr]) -> (Vec<G1Projective>, Vec<ArkFr>) {
-    let n = bases.len().min(scalars.len());
-    let mut p = Vec::with_capacity(n);
-    let mut s = Vec::with_capacity(n);
-    for i in 0..n {
-        if bases[i].is_zero() || scalars[i].is_zero() {
-            continue;
-        }
-        p.push(bases[i].into_group());
-        s.push(scalars[i]);
+///
+/// **Only the BASES are filtered, deliberately.** Filtering zero scalars too
+/// would shrink the MSM further, but it makes the surviving point set depend
+/// on the witness — and then the bases cannot be staged onto the device once
+/// per proving key, which is worth far more. A zero scalar costs nothing in
+/// the kernel anyway: every one of its window digits is 0, and digit 0 is
+/// dropped during binning, so it lands in no bucket at all.
+fn live_base_indices(bases: &[G1Affine], len: usize) -> Vec<u32> {
+    (0..bases.len().min(len))
+        .filter(|&i| !bases[i].is_zero())
+        .map(|i| i as u32)
+        .collect()
+}
+
+/// The bases of one proving-key query, staged on the device once.
+struct StagedQuery {
+    dev: DeviceBases,
+    keep: Vec<u32>,
+}
+
+impl StagedQuery {
+    fn new(ctx: &CudaContext, bases: &[G1Affine], len: usize) -> Self {
+        let keep = live_base_indices(bases, len);
+        let pts: Vec<G1Projective> =
+            keep.iter().map(|&i| bases[i as usize].into_group()).collect();
+        let dev = stage_bases(ctx, &pts);
+        StagedQuery { dev, keep }
     }
-    (p, s)
+
+    fn gather(&self, scalars: &[ArkFr]) -> Vec<ArkFr> {
+        self.keep.iter().map(|&i| scalars[i as usize]).collect()
+    }
+}
+
+/// Everything about a proving key that does not change between proofs.
+struct GpuProvingKey {
+    h: StagedQuery,
+    l: StagedQuery,
+    a: StagedQuery,
+    b_g1: StagedQuery,
+    stage_seconds: f64,
+}
+
+impl GpuProvingKey {
+    /// Lengths are passed rather than inferred because `msm_bigint` silently
+    /// takes the shorter of bases and scalars, and a gather over an index the
+    /// scalar vector does not have would panic instead.
+    fn new(
+        ctx: &CudaContext,
+        pk: &ProvingKey<Bn254>,
+        h_len: usize,
+        aux_len: usize,
+        assign_len: usize,
+    ) -> Self {
+        use std::time::Instant;
+        let t = Instant::now();
+        let k = GpuProvingKey {
+            h: StagedQuery::new(ctx, &pk.h_query, h_len),
+            l: StagedQuery::new(ctx, &pk.l_query, aux_len),
+            a: StagedQuery::new(ctx, &pk.a_query[1..], assign_len),
+            b_g1: StagedQuery::new(ctx, &pk.b_g1_query[1..], assign_len),
+            stage_seconds: 0.0,
+        };
+        GpuProvingKey { stage_seconds: t.elapsed().as_secs_f64(), ..k }
+    }
 }
 
 /// One MSM on the GPU, falling back to nothing — an empty term list is the
@@ -172,14 +335,13 @@ fn msm_gpu(
     ctx: &CudaContext,
     module: &KernelModule,
     g: &Geom,
-    bases: &[G1Affine],
+    q: &StagedQuery,
     scalars: &[ArkFr],
 ) -> G1Projective {
-    let (p, s) = filter_msm_terms(bases, scalars);
-    if p.is_empty() {
+    if q.keep.is_empty() {
         return G1Projective::zero();
     }
-    gpu_msm(ctx, module, &p, &s, g).0
+    gpu_msm_staged(ctx, module, &q.dev, &q.gather(scalars), g).0
 }
 
 /// `Groth16::calculate_coeff`, with the MSM on the GPU.
@@ -193,10 +355,11 @@ fn calculate_coeff_gpu(
     g: &Geom,
     initial: G1Projective,
     query: &[G1Affine],
+    staged: &StagedQuery,
     vk_param: G1Affine,
     assignment: &[ArkFr],
 ) -> G1Projective {
-    let acc = msm_gpu(ctx, module, g, &query[1..], assignment);
+    let acc = msm_gpu(ctx, module, g, staged, assignment);
     let mut res = initial;
     res += query[0].into_group();
     res += acc;
@@ -223,6 +386,7 @@ fn gpu_prove(
     module: &KernelModule,
     g: &Geom,
     pk: &ProvingKey<Bn254>,
+    gk: &GpuProvingKey,
     r: ArkFr,
     s: ArkFr,
     h: &[ArkFr],
@@ -234,8 +398,8 @@ fn gpu_prove(
     let t0 = Instant::now();
 
     let t = Instant::now();
-    let h_acc = msm_gpu(ctx, module, g, &pk.h_query, h);
-    let l_aux_acc = msm_gpu(ctx, module, g, &pk.l_query, aux_assignment);
+    let h_acc = msm_gpu(ctx, module, g, &gk.h, h);
+    let l_aux_acc = msm_gpu(ctx, module, g, &gk.l, aux_assignment);
 
     let assignment: Vec<ArkFr> =
         [input_assignment, aux_assignment].concat();
@@ -246,6 +410,7 @@ fn gpu_prove(
         ctx, module, g,
         pk.delta_g1.into_group() * r,
         &pk.a_query,
+        &gk.a,
         pk.vk.alpha_g1,
         &assignment,
     );
@@ -256,6 +421,7 @@ fn gpu_prove(
             ctx, module, g,
             pk.delta_g1.into_group() * s,
             &pk.b_g1_query,
+            &gk.b_g1,
             pk.beta_g1,
             &assignment,
         )
@@ -390,10 +556,14 @@ fn gpu_groth16_proof_verifies_and_matches_arkworks() {
     let mut rng2 = StdRng::seed_from_u64(0xC0DE);
     let (r, s) = (ArkFr::rand(&mut rng2), ArkFr::rand(&mut rng2));
 
-    let (h, input_assignment, aux_assignment) = synthesize(c.clone(), true);
+    let ((h, input_assignment, aux_assignment), _, _) = synthesize_native(&c);
+    let gk = GpuProvingKey::new(
+        &ctx, &pk, h.len(), aux_assignment.len(),
+        input_assignment.len() + aux_assignment.len(),
+    );
     let mut tm = ProveTiming::default();
     let proof = gpu_prove(
-        &ctx, &module, &g, &pk, r, s, &h, &input_assignment, &aux_assignment, &mut tm,
+        &ctx, &module, &g, &pk, &gk, r, s, &h, &input_assignment, &aux_assignment, &mut tm,
     );
 
     assert!(
@@ -431,10 +601,14 @@ fn gpu_groth16_rejects_a_tampered_statement() {
     let (pk, vk) =
         Groth16::<Bn254>::circuit_specific_setup(c.clone(), &mut rng).expect("setup");
     let (r, s) = (ArkFr::rand(&mut rng), ArkFr::rand(&mut rng));
-    let (h, input_assignment, aux_assignment) = synthesize(c, true);
+    let ((h, input_assignment, aux_assignment), _, _) = synthesize_native(&c);
+    let gk = GpuProvingKey::new(
+        &ctx, &pk, h.len(), aux_assignment.len(),
+        input_assignment.len() + aux_assignment.len(),
+    );
     let mut tm = ProveTiming::default();
     let proof = gpu_prove(
-        &ctx, &module, &g, &pk, r, s, &h, &input_assignment, &aux_assignment, &mut tm,
+        &ctx, &module, &g, &pk, &gk, r, s, &h, &input_assignment, &aux_assignment, &mut tm,
     );
 
     assert!(Groth16::<Bn254>::verify(&vk, &public, &proof).unwrap());
@@ -444,6 +618,58 @@ fn gpu_groth16_rejects_a_tampered_statement() {
         !Groth16::<Bn254>::verify(&vk, &tampered, &proof).unwrap(),
         "a tampered public input was accepted"
     );
+}
+
+/// Deleting the R1CS replay is only safe if what replaces it is byte-identical,
+/// and "the proof still verifies" is too weak a check to establish that — the
+/// proving key was generated against arkworks' exact column numbering, so a
+/// mismatch would produce a wrong `h` and a wrong proof, but a *subset* of
+/// mismatches (a permutation of terms within a row, say) would not.
+///
+/// So this compares the matrices themselves, entry for entry, against the ones
+/// arkworks builds from the replay.
+#[test]
+fn y_matrices_match_the_arkworks_replay() {
+    let (circuit, witness) = compile(&poly_src(32, 32), &[], &[3, 2]);
+    let c = YCircuit::new(circuit, witness);
+
+    let cs = ConstraintSystem::new_ref();
+    cs.set_optimization_goal(OptimizationGoal::Constraints);
+    c.clone().generate_constraints(cs.clone()).expect("synthesis");
+    cs.finalize();
+    let replayed = cs.to_matrices().expect("matrices");
+    let full_replayed = {
+        let p = cs.borrow().unwrap();
+        [p.instance_assignment.clone(), p.witness_assignment.clone()].concat()
+    };
+
+    let (native, full_native) = y_matrices(&c);
+
+    assert_eq!(native.num_instance_variables, replayed.num_instance_variables);
+    assert_eq!(native.num_witness_variables, replayed.num_witness_variables);
+    assert_eq!(native.num_constraints, replayed.num_constraints);
+    assert_eq!(full_native, full_replayed, "the assignment vectors differ");
+
+    // Rows are sums, so term ORDER is free; the sets must match.
+    let norm = |m: &[Vec<(ArkFr, usize)>]| -> Vec<Vec<(usize, ArkFr)>> {
+        m.iter()
+            .map(|r| {
+                let mut v: Vec<(usize, ArkFr)> = r.iter().map(|(c, i)| (*i, *c)).collect();
+                v.sort_by_key(|(i, _)| *i);
+                v
+            })
+            .collect()
+    };
+    for (name, n, r) in [
+        ("A", &native.a, &replayed.a),
+        ("B", &native.b, &replayed.b),
+        ("C", &native.c, &replayed.c),
+    ] {
+        assert_eq!(norm(n), norm(r), "matrix {} differs from the replay", name);
+    }
+    assert_eq!(native.a_num_non_zero, replayed.a_num_non_zero);
+    assert_eq!(native.b_num_non_zero, replayed.b_num_non_zero);
+    assert_eq!(native.c_num_non_zero, replayed.c_num_non_zero);
 }
 
 /// `cargo test --release --features zk --test zk_gpu_groth16 -- --ignored --nocapture`
@@ -470,12 +696,34 @@ fn what_the_gpu_prover_costs() {
         let (pk, vk) =
             Groth16::<Bn254>::circuit_specific_setup(c.clone(), &mut rng).expect("setup");
         let (r, s) = (ArkFr::rand(&mut rng), ArkFr::rand(&mut rng));
+        // The proving key is staged onto the device ONCE. In Groth16 the G1
+        // bases are the key and the scalars are the witness, so this is
+        // key-load work, not per-proof work -- and it is what makes the
+        // fixed-base column of the MSM benchmark reachable in practice.
+        let (hlen, auxlen, alen) = {
+            let ((h, ia, aa), _, _) = synthesize_native(&c);
+            (h.len(), aa.len(), ia.len() + aa.len())
+        };
+        let gk = GpuProvingKey::new(&ctx, &pk, hlen, auxlen, alen);
+        println!(
+            "\n[key-load] staged {} G1 bases onto the device in {:.1} ms (once per key)",
+            gk.h.keep.len() + gk.l.keep.len() + gk.a.keep.len() + gk.b_g1.keep.len(),
+            gk.stage_seconds * 1e3
+        );
+
         // Warm up the GPU clock and the JIT before timing anything.
         {
-            let (h, ia, aa) = synthesize(c.clone(), true);
+            let ((h, ia, aa), _, _) = synthesize_native(&c);
             let mut tm = ProveTiming::default();
-            let _ = gpu_prove(&ctx, &module, &g, &pk, r, s, &h, &ia, &aa, &mut tm);
+            let _ = gpu_prove(&ctx, &module, &g, &pk, &gk, r, s, &h, &ia, &aa, &mut tm);
         }
+
+        // What the replay used to cost, kept as the thing being deleted.
+        let replay_cost = {
+            let t = std::time::Instant::now();
+            let _ = synthesize(c.clone(), false);
+            t.elapsed().as_secs_f64()
+        };
 
         // Synthesis + the QAP witness map are part of proving and arkworks'
         // `create_proof_with_reduction` does them inside the call being timed,
@@ -488,10 +736,10 @@ fn what_the_gpu_prover_costs() {
         let mut best_synth = 0.0;
         let (mut best_replay, mut best_qap) = (0.0, 0.0);
         for _ in 0..3 {
-            let ((h, ia, aa), replay, qap) = synthesize_timed(c.clone(), false);
+            let ((h, ia, aa), replay, qap) = synthesize_native(&c);
             let synth = replay + qap;
             let mut tm = ProveTiming::default();
-            let p = gpu_prove(&ctx, &module, &g, &pk, r, s, &h, &ia, &aa, &mut tm);
+            let p = gpu_prove(&ctx, &module, &g, &pk, &gk, r, s, &h, &ia, &aa, &mut tm);
             assert!(Groth16::<Bn254>::verify(&vk, &public, &p).unwrap());
             if synth + tm.total < best {
                 best = synth + tm.total;
@@ -513,7 +761,8 @@ fn what_the_gpu_prover_costs() {
         }
 
         println!("\n=== {} constraints ({} a_query terms) ===", nc, pk.a_query.len());
-        println!("  R1CS replay          = {:8.1} ms   (identical work on both sides)", best_replay * 1e3);
+        println!("  matrices, from Y     = {:8.1} ms   (was {:.1} ms as an arkworks replay)",
+                 best_replay * 1e3, replay_cost * 1e3);
         println!("  QAP witness map      = {:8.1} ms   (an FFT -- the GPU NTT's target)", best_qap * 1e3);
         println!("  G1 MSMs, on the GPU  = {:8.1} ms", best_tm.g1_msms * 1e3);
         println!("  G2 MSM, on the CPU   = {:8.1} ms   (no Fq2 kernel yet)", best_tm.g2_msm * 1e3);

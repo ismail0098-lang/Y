@@ -374,16 +374,35 @@ pub fn gpu_msm(
     scalars: &[Fr],
     g: &Geom,
 ) -> (G1Projective, MsmTiming) {
-    use std::time::Instant;
-    let (buckets, _off, mut tm) = bucket_pass(ctx, module, points, scalars, g);
+    let (buckets, _off, tm) = bucket_pass(ctx, module, points, scalars, g);
+    reduce_buckets(&buckets, g, tm)
+}
 
+/// The same MSM over bases that already live on the device.
+pub fn gpu_msm_staged(
+    ctx: &CudaContext,
+    module: &KernelModule,
+    bases: &DeviceBases,
+    scalars: &[Fr],
+    g: &Geom,
+) -> (G1Projective, MsmTiming) {
+    let (buckets, _off, tm) = bucket_pass_staged(ctx, module, bases, scalars, g);
+    reduce_buckets(&buckets, g, tm)
+}
+
+/// `sum_b d(b) * B[b]`, then the window combination.
+pub fn reduce_buckets(
+    buckets: &[G1Projective],
+    g: &Geom,
+    mut tm: MsmTiming,
+) -> (G1Projective, MsmTiming) {
+    use std::time::Instant;
     // Each window's `sum_d d * B[d]` is independent, so they run in parallel
     // and only the final combination is serial.
     let t = Instant::now();
     let sums: Vec<G1Projective> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..g.nw)
             .map(|w| {
-                let buckets = &buckets;
                 s.spawn(move || {
                     // sum_d d * B[d], by a running sum from the top: each B[d]
                     // is added once for every step down to 1, i.e. d times.
@@ -450,27 +469,39 @@ pub fn bucket_pass(
     scalars: &[Fr],
     g: &Geom,
 ) -> (Vec<G1Projective>, Vec<u32>, MsmTiming) {
+    let bases = stage_bases(ctx, points);
+    let (b, o, mut tm) = bucket_pass_staged(ctx, module, &bases, scalars, g);
+    tm.stage = bases.stage;
+    tm.h2d += bases.h2d;
+    (b, o, tm)
+}
+
+/// Point bases that already live on the device, in the planar `uint4` layout.
+///
+/// A Groth16 proving key is fixed for the lifetime of a circuit while the
+/// scalars change every proof, so Montgomery-staging the bases and pushing
+/// them across PCIe is key-load work. Holding them here is what makes the
+/// `steady_state` column of the MSM benchmark reachable in practice rather
+/// than merely arithmetic.
+pub struct DeviceBases {
+    pub dpx: y::cuda_runtime::DeviceBuffer,
+    pub dpy: y::cuda_runtime::DeviceBuffer,
+    pub dpz: y::cuda_runtime::DeviceBuffer,
+    pub n: usize,
+    pub stage: f64,
+    pub h2d: f64,
+}
+
+pub fn stage_bases(ctx: &CudaContext, points: &[G1Projective]) -> DeviceBases {
     use std::time::Instant;
-    let mut tm = MsmTiming::default();
-    let n = points.len();
     let r = r_mod_q();
-
-    let t = Instant::now();
-    let (idx, off) = bin_by_digit(scalars, g);
-    tm.bin = t.elapsed().as_secs_f64();
-    tm.nidx = idx.len();
-
-    // Montgomery staging of the point coordinates into the planar layout.
-    // This is `to_limbs()`-shaped work and is exactly what made the NTT's
-    // first end-to-end number meaningless, so it gets its own column.
     let t = Instant::now();
     let (hx, hy, hz) = (
         stage_planar(points, |p| p.x, r),
         stage_planar(points, |p| p.y, r),
         stage_planar(points, |p| p.z, r),
     );
-    tm.stage = t.elapsed().as_secs_f64();
-
+    let stage = t.elapsed().as_secs_f64();
     let t = Instant::now();
     let up = |v: &[u32]| {
         let d = ctx.alloc(v.len().max(1) * 4).unwrap();
@@ -478,6 +509,36 @@ pub fn bucket_pass(
         d
     };
     let (dpx, dpy, dpz) = (up(&hx), up(&hy), up(&hz));
+    ctx.synchronize().unwrap();
+    DeviceBases { dpx, dpy, dpz, n: points.len(), stage, h2d: t.elapsed().as_secs_f64() }
+}
+
+/// The bucket pass over bases already on the device: bin, upload the CSR pair,
+/// launch, read back.
+pub fn bucket_pass_staged(
+    ctx: &CudaContext,
+    module: &KernelModule,
+    bases: &DeviceBases,
+    scalars: &[Fr],
+    g: &Geom,
+) -> (Vec<G1Projective>, Vec<u32>, MsmTiming) {
+    use std::time::Instant;
+    let mut tm = MsmTiming::default();
+    let n = bases.n;
+    let r = r_mod_q();
+
+    let t = Instant::now();
+    let (idx, off) = bin_by_digit(scalars, g);
+    tm.bin = t.elapsed().as_secs_f64();
+    tm.nidx = idx.len();
+
+    let t = Instant::now();
+    let up = |v: &[u32]| {
+        let d = ctx.alloc(v.len().max(1) * 4).unwrap();
+        ctx.memcpy_htod_at(&d, 0, as_bytes(v)).unwrap();
+        d
+    };
+    let (dpx, dpy, dpz) = (&bases.dpx, &bases.dpy, &bases.dpz);
     let (didx, doff) = (up(&idx), up(&off));
     let (drx, dry, drz) = (
         ctx.alloc(g.nb * 8 * 4).unwrap(),
