@@ -384,6 +384,34 @@ fn cpu_msm_best(points: &[G1Affine], scalars: &[Fr], threads: usize) -> (G1Proje
     (a, mono.min(chunked))
 }
 
+/// Refuse to compare a CPU against a GPU in a debug build.
+///
+/// `cargo test` is a DEBUG build, and a debug build unoptimises exactly one side
+/// of this comparison. The GPU work is PTX that `ptxas` compiled and the device
+/// executes: it runs at full speed no matter how the host was built. arkworks'
+/// MSM is Rust that rustc just compiled with `-O0`, and it is roughly an order
+/// of magnitude slower than it should be. So the measured crossover moves by
+/// that factor and the GPU appears to win at sizes where it loses badly.
+///
+/// This is not a stale constant, which is what it looked like:
+/// `the_dispatch_thresholds_are_still_true` reported the GPU faster at n=14,000
+/// (42 ms vs 56 ms) and suggested `MSM_GPU_MIN_COLD` was too high, while the same
+/// test passes in release and the release sweep puts the crossover at ~70,000 -
+/// right where the constant says. Skipping is the honest outcome: the machine
+/// cannot answer this question in this build mode. Same shape as the `ptxas` and
+/// `solc` skips elsewhere in the suite.
+fn require_release_build(what: &str) -> bool {
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "SKIP: {} compares a CPU against a GPU, and a debug build unoptimises \
+             only the CPU side. Re-run with --release.",
+            what
+        );
+        return false;
+    }
+    true
+}
+
 fn cpu_msm_all_cores(points: &[G1Affine], scalars: &[Fr], threads: usize) -> G1Projective {
     let chunk = points.len().div_ceil(threads);
     std::thread::scope(|s| {
@@ -404,6 +432,9 @@ fn cpu_msm_all_cores(points: &[G1Affine], scalars: &[Fr], threads: usize) -> G1P
 #[test]
 #[ignore]
 fn what_the_gpu_msm_costs() {
+    if !require_release_build("what_the_gpu_msm_costs") {
+        return;
+    }
     let Some(ctx) = CudaContext::new() else {
         eprintln!("SKIP: no CUDA driver.");
         return;
@@ -504,6 +535,9 @@ fn what_the_gpu_msm_costs() {
 #[test]
 #[ignore]
 fn where_the_gpu_starts_winning() {
+    if !require_release_build("where_the_gpu_starts_winning") {
+        return;
+    }
     let Some(ctx) = CudaContext::new() else {
         eprintln!("SKIP: no CUDA driver.");
         return;
@@ -567,6 +601,9 @@ fn where_the_gpu_starts_winning() {
 /// SHAPE is right is what catches a threshold that has become wrong.
 #[test]
 fn the_dispatch_thresholds_are_still_true() {
+    if !require_release_build("the_dispatch_thresholds_are_still_true") {
+        return;
+    }
     let Some(ctx) = CudaContext::new() else {
         eprintln!("SKIP: no CUDA driver.");
         return;
