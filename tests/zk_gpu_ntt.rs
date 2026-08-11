@@ -247,6 +247,151 @@ fn gpu_ntt(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<Fr
     from_planar(&read_u32(ctx, &d_x, n * 8), n)
 }
 
+/// Base-4 digit reversal, the input permutation a radix-4 DIT needs.
+///
+/// Digit reversal is an involution, so the swap loop is safe.
+fn digit_reverse4<T: Clone>(v: &[T], log_n: u32) -> Vec<T> {
+    assert_eq!(log_n % 2, 0, "radix-4 needs N = 4^k");
+    let n = v.len();
+    let k = log_n / 2;
+    let mut out = v.to_vec();
+    for i in 0..n {
+        let (mut r, mut t) = (0usize, i);
+        for _ in 0..k {
+            r = r * 4 + (t & 3);
+            t >>= 2;
+        }
+        if r > i {
+            out.swap(i, r);
+        }
+    }
+    out
+}
+
+/// Everything the radix-4 stages need on the device, built once.
+struct Radix4Plan {
+    stages: Vec<(usize, DeviceBuffer, DeviceBuffer, DeviceBuffer)>, // quarter, w^p, w^2p, w^3p
+    i_root: DeviceBuffer,
+}
+
+fn radix4_plan(ctx: &CudaContext, n: usize, log_n: u32, w: &Fr) -> Radix4Plan {
+    let r = r_mod_p();
+    let mut stages = Vec::new();
+    let mut m = 4usize;
+    while m <= n {
+        let q = m / 4;
+        let wm = w.pow_limbs(&[(n / m) as u64, 0, 0, 0]);
+        let mut t1 = Vec::with_capacity(q);
+        let mut t2 = Vec::with_capacity(q);
+        let mut t3 = Vec::with_capacity(q);
+        let mut cur = Fr::one();
+        for _ in 0..q {
+            let c2 = cur.mul(&cur);
+            t1.push(cur.mul(&r));
+            t2.push(c2.mul(&r));
+            t3.push(c2.mul(&cur).mul(&r));
+            cur = cur.mul(&wm);
+        }
+        let mk = |v: &[Fr]| {
+            let f = to_planar(v, v.len());
+            let d = ctx.alloc(v.len() * 8 * 4).unwrap();
+            ctx.memcpy_htod_at(&d, 0, as_bytes(&f)).unwrap();
+            d
+        };
+        stages.push((q, mk(&t1), mk(&t2), mk(&t3)));
+        m *= 4;
+    }
+    // The primitive 4th root. Taken from `w` itself, so the inverse transform
+    // (which passes w^-1) automatically gets i^-1 rather than i.
+    let i_root = {
+        let v = vec![w.pow_limbs(&[(n / 4) as u64, 0, 0, 0]).mul(&r)];
+        let f = to_planar(&v, 1);
+        let d = ctx.alloc(8 * 4).unwrap();
+        ctx.memcpy_htod_at(&d, 0, as_bytes(&f)).unwrap();
+        d
+    };
+    Radix4Plan { stages, i_root }
+}
+
+fn gpu_ntt4(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<Fr> {
+    let n = a.len();
+    let log_n = n.trailing_zeros();
+    let flat = to_planar(&digit_reverse4(a, log_n), n);
+    let d_x = ctx.alloc(n * 8 * 4).unwrap();
+    ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
+
+    let plan = radix4_plan(ctx, n, log_n, w);
+    let butterflies = n / 4;
+    let block = 256u32.min(butterflies as u32);
+    let grid = (butterflies as u32).div_ceil(block);
+    for (q, t1, t2, t3) in &plan.stages {
+        let args = vec![
+            d_x.device_ptr(), t1.device_ptr(), t2.device_ptr(), t3.device_ptr(),
+            plan.i_root.device_ptr(), *q as u64, n as u64,
+        ];
+        ctx.launch(module, (grid, 1, 1), (block, 1, 1), 0, &args)
+            .expect("radix-4 stage launch failed");
+        ctx.synchronize().expect("radix-4 stage did not complete");
+    }
+    from_planar(&read_u32(ctx, &d_x, n * 8), n)
+}
+
+/// The radix-4 transform, against the same naive DFT. Nothing about halving
+/// the pass count is allowed to change the answer.
+#[test]
+fn gpu_radix4_ntt_matches_a_naive_dft() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — bn254_ntt4_stage.ysu was not executed.");
+        return;
+    };
+    let module = load_kernel(&ctx, "bn254_ntt4_stage");
+
+    const LOG_N: u32 = 10;
+    const N: usize = 1 << LOG_N;
+    let w = root_of_unity(LOG_N);
+    let mut state = 0x7E57_D06_0BADu64;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state >> 1
+    };
+    let a: Vec<Fr> = (0..N)
+        .map(|_| Fr::from_limbs_reduce([next(), next(), next(), next()]))
+        .collect();
+
+    let want = naive_dft(&a, &w);
+    let got = gpu_ntt4(&ctx, &module, &a, &w);
+    for k in 0..N {
+        assert_eq!(
+            got[k].to_decimal_string(),
+            want[k].to_decimal_string(),
+            "radix-4 output {} disagrees with the DFT",
+            k
+        );
+    }
+}
+
+/// And it must agree with the radix-2 path element for element, since a real
+/// library would pick between them by size alone.
+#[test]
+fn radix4_and_radix2_agree() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let m2 = load_kernel(&ctx, "bn254_ntt_stage");
+    let m4 = load_kernel(&ctx, "bn254_ntt4_stage");
+    const LOG_N: u32 = 12;
+    const N: usize = 1 << LOG_N;
+    let w = root_of_unity(LOG_N);
+    let a: Vec<Fr> = (0..N).map(|i| Fr::from_u64((i * 7 + 3) as u64)).collect();
+    let r2 = gpu_ntt(&ctx, &m2, &a, &w);
+    let r4 = gpu_ntt4(&ctx, &m4, &a, &w);
+    for k in 0..N {
+        assert_eq!(r2[k].to_decimal_string(), r4[k].to_decimal_string(),
+                   "radix-2 and radix-4 disagree at {}", k);
+    }
+}
+
 #[test]
 fn gpu_ntt_matches_a_naive_dft() {
     let Some(ctx) = CudaContext::new() else {
@@ -570,7 +715,7 @@ fn is_the_gpu_actually_winning() {
     };
     let module = load_kernel(&ctx, "bn254_ntt_stage");
 
-    const LOG_N: u32 = 23;
+    const LOG_N: u32 = 22;
     const N: usize = 1 << LOG_N;
     let nthreads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
     let w = root_of_unity(LOG_N);
@@ -666,6 +811,35 @@ fn is_the_gpu_actually_winning() {
     }
     ctx.synchronize().unwrap();
 
+    // ── radix-4: half the passes, and fewer multiplies ──
+    let m4 = load_kernel(&ctx, "bn254_ntt4_stage");
+    let flat4 = to_planar(&digit_reverse4(&a, LOG_N), N);
+    let d_x4 = ctx.alloc(N * 8 * 4).unwrap();
+    ctx.memcpy_htod_at(&d_x4, 0, as_bytes(&flat4)).unwrap();
+    let plan4 = radix4_plan(&ctx, N, LOG_N, &w);
+    let bf = N / 4;
+    let launch4 = |ctx: &CudaContext| {
+        for (q, t1, t2, t3) in &plan4.stages {
+            let args = vec![
+                d_x4.device_ptr(), t1.device_ptr(), t2.device_ptr(), t3.device_ptr(),
+                plan4.i_root.device_ptr(), *q as u64, N as u64,
+            ];
+            ctx.launch(&m4, ((bf / 256) as u32, 1, 1), (256, 1, 1), 0, &args).unwrap();
+        }
+    };
+    for _ in 0..5 {
+        launch4(&ctx);
+    }
+    ctx.synchronize().unwrap();
+    let mut gpu_r4_ms = f64::INFINITY;
+    for _ in 0..7 {
+        ctx.synchronize().unwrap();
+        let t = std::time::Instant::now();
+        launch4(&ctx);
+        ctx.synchronize().unwrap();
+        gpu_r4_ms = gpu_r4_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+    }
+
     let mut back = vec![0u8; N * 8 * 4];
     let mut gpu_resident_ms = f64::INFINITY;
     let mut gpu_offload_ms = f64::INFINITY;
@@ -695,8 +869,12 @@ fn is_the_gpu_actually_winning() {
     println!("  --- best CPU: {:.2} ms ---", cpu_best_ms);
     println!("  GPU, data already resident:   {:>9.2} ms   ({:.1}x over the BEST CPU)",
              gpu_resident_ms, cpu_best_ms / gpu_resident_ms);
+    println!("  GPU, radix-4, resident:       {:>9.2} ms   ({:.1}x over the BEST CPU)",
+             gpu_r4_ms, cpu_best_ms / gpu_r4_ms);
     println!("  GPU, offloaded over PCIe:     {:>9.2} ms   ({:.1}x over the BEST CPU)",
              gpu_offload_ms, cpu_best_ms / gpu_offload_ms);
+    println!("  radix-4 vs radix-2: {:.2}x  ({} passes vs {})",
+             gpu_resident_ms / gpu_r4_ms, plan4.stages.len(), LOG_N);
     let _ = cpu_par_ms;
     println!();
     println!("  PCIe round trip is {:.2} ms of that, {:.0}% of the offloaded time.",
