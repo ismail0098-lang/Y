@@ -442,22 +442,22 @@ fn what_the_gpu_msm_costs() {
         let (_, nw, tm) = best;
         let total = tm.total();
         println!("\n  best nw           = {}  (chosen by the fixed-base cost)", nw);
-        println!("  arkworks 1 core   = {:.1} ms", one_core * 1e3);
-        println!("  arkworks {:>2} cores = {:.1} ms", threads, all_cores * 1e3);
+        // NOT one core: arkworks' msm is parallel here via feature unification
+        // (~12.5 cores at n = 2^20). See cpu_msm_all_cores' docstring.
+        println!("  arkworks monolithic = {:.1} ms  (internally parallel, ~12.5 cores)", one_core * 1e3);
+        println!("  arkworks chunked {:>2}x = {:.1} ms", threads, all_cores * 1e3);
+        let cpu_best = one_core.min(all_cores);
         println!(
-            "  cold end-to-end   = {:.1} ms -> {:.2}x one core, {:.2}x {} cores",
-            total * 1e3, one_core / total, all_cores / total, threads
+            "  cold end-to-end     = {:.1} ms -> {:.2}x the best CPU",
+            total * 1e3, cpu_best / total
         );
         println!(
-            "  fixed bases       = {:.1} ms -> {:.2}x one core, {:.2}x {} cores   <- what a prover pays per proof",
-            tm.steady_state() * 1e3,
-            one_core / tm.steady_state(),
-            all_cores / tm.steady_state(),
-            threads
+            "  fixed bases         = {:.1} ms -> {:.2}x the best CPU   <- what a prover pays per proof",
+            tm.steady_state() * 1e3, cpu_best / tm.steady_state()
         );
         println!(
-            "  kernel only       = {:.1} ms -> {:.2}x one core, {:.2}x {} cores",
-            tm.kernel * 1e3, one_core / tm.kernel, all_cores / tm.kernel, threads
+            "  kernel only         = {:.1} ms -> {:.2}x the best CPU",
+            tm.kernel * 1e3, cpu_best / tm.kernel
         );
     }
 }
