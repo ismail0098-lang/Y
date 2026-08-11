@@ -523,6 +523,132 @@ def gen_g1_dbl():
     return "\n".join(L)
 
 
+def g1_add_body(dst, a, b, ind="    "):
+    """`add-2007-bl` writing to dst{X,Y,Z}, reading a{...} and b{...}.
+
+    Shared by the standalone add kernel and the MSM bucket loop. The statement
+    order is chosen for liveness; see gen_g1_add.
+    """
+    L = []
+    L += mont_mul("ZA", a + "Z", a + "Z", ind)
+    L += mont_mul("ZB", b + "Z", b + "Z", ind)
+    L += mont_mul("UA", a + "X", "ZB", ind)
+    L += mont_mul("UB", b + "X", "ZA", ind)
+    L += mont_mul("T1", a + "Y", b + "Z", ind)
+    L += mont_mul("S1", "T1", "ZB", ind)
+    L += mont_mul("T1", b + "Y", a + "Z", ind)
+    L += mont_mul("S2", "T1", "ZA", ind)
+    L += sub_mod("HH", "UB", "UA", ind)
+    L += add_mod("T1", a + "Z", b + "Z", ind)
+    L += mont_mul("T2", "T1", "T1", ind)
+    L += sub_mod("T1", "T2", "ZA", ind)
+    L += sub_mod("T2", "T1", "ZB", ind)
+    L += mont_mul(dst + "Z", "T2", "HH", ind)
+    L += dbl_mod("T1", "HH", ind)
+    L += mont_mul("II", "T1", "T1", ind)
+    L += mont_mul("JJ", "HH", "II", ind)
+    L += sub_mod("T1", "S2", "S1", ind)
+    L += dbl_mod("RR", "T1", ind)
+    L += mont_mul("VV", "UA", "II", ind)
+    L += mont_mul("T1", "RR", "RR", ind)
+    L += sub_mod("T2", "T1", "JJ", ind)
+    L += dbl_mod("T1", "VV", ind)
+    L += sub_mod(dst + "X", "T2", "T1", ind)
+    L += sub_mod("T1", "VV", dst + "X", ind)
+    L += mont_mul("T2", "RR", "T1", ind)
+    L += mont_mul("T1", "S1", "JJ", ind)
+    L += dbl_mod("UA", "T1", ind)
+    L += sub_mod(dst + "Y", "T2", "UA", ind)
+    return L
+
+
+def gen_msm_bucket():
+    """Pippenger bucket accumulation: one thread per bucket.
+
+    The host bins point indices by scalar window digit and hands over a CSR
+    pair - `Off[b]..Off[b+1]` names the slice of `Idx` belonging to bucket `b`.
+    Each thread walks its own slice, so the scatter that makes bucket
+    accumulation awkward on a GPU (many scalars landing in one bucket) is
+    resolved on the host by a counting sort, which is cheap integer work.
+
+    The accumulator is SEEDED with the first point of the slice rather than
+    with the identity, because `add-2007-bl` cannot represent the identity -
+    it has no zero element. Empty buckets (`Off[b] == Off[b+1]`) therefore
+    produce garbage here and the host treats them as the identity; it already
+    knows which they are.
+
+    STATUS: this generates and parses, and it does NOT currently compile.
+    `@safe`'s invariant checker refuses it:
+
+        [Strict Safety] Could not verify invariant `(k >= 0)` (initiation
+        check) because the SMT solver could not be run.
+
+    z3 is installed and present (`venv/bin/z3`), and the same invariant on the
+    same shape of loop verifies fine in `tests/bn254_fr_mul.ysu`. What is
+    different here is SIZE: the loop body is a full 30-multiply point
+    addition, ~9,000 lines of Y, and `trace_body_statements` encodes the whole
+    body into one SMT query per obligation. The solver does not come back.
+
+    This is a real limitation of the verification layer meeting generated
+    code, not a property of the kernel, and the fix belongs in
+    `type_checker.rs` - the body of a loop whose invariant mentions only the
+    loop variable does not need encoding at all, and more generally the
+    encoder should slice the body to statements that can affect the invariant.
+
+    It is NOT fixed by `Y_ALLOW_UNVERIFIED_INVARIANTS=1`. CLAUDE.md says so
+    directly and it is right: that variable does not make the check pass, it
+    makes the check not happen.
+    """
+    use_field(FQ)
+    L = [HEADER.replace("%d", "N"), "",
+         "// Pippenger bucket accumulation over BN254 G1, one thread per bucket.",
+         "// Idx/Off are a CSR binning of point indices by scalar window digit.",
+         "kernel bn254_msm_bucket(",
+         "    PX: GlobalMemory<U32>,",
+         "    PY: GlobalMemory<U32>,",
+         "    PZ: GlobalMemory<U32>,",
+         "    Idx: GlobalMemory<U32>,",
+         "    Off: GlobalMemory<U32>,",
+         "    RX: GlobalMemory<U32>,",
+         "    RY: GlobalMemory<U32>,",
+         "    RZ: GlobalMemory<U32>,",
+         "    NB: I32,",
+         "    NPts: I32",
+         ") {",
+         "    let b: I32 = block_idx_x() * 256 + thread_idx_x();",
+         "    let nb1: I32 = NB + 1;",
+         "    let s: U32 = block_ptr2d_load(Off, 0, b, nb1, 1, nb1);",
+         "    let b1: I32 = b + 1;",
+         "    let e: U32 = block_ptr2d_load(Off, 0, b1, nb1, 1, nb1);",
+         "    let first: U32 = block_ptr2d_load(Idx, 0, s, NPts, 1, NPts);"]
+    temps = ["ZA", "ZB", "UA", "UB", "S1", "S2", "HH", "II", "JJ", "RR", "VV", "T1", "T2"]
+    check_names(temps)
+    # accumulator
+    L += load("aX", "PX", "first", "NPts")
+    L += load("aY", "PY", "first", "NPts")
+    L += load("aZ", "PZ", "first", "NPts")
+    for v in temps + ["nX", "nY", "nZ", "bX", "bY", "bZ"]:
+        L += [f"    let {v}{j}: U32 = 0;" for j in range(S)]
+    L += scratch_decls()
+    L += ["    let ks: U32 = s + 1;",
+          "    @invariant(k >= 0)",
+          "    for k in ks..e {",
+          "        let pi: U32 = block_ptr2d_load(Idx, 0, k, NPts, 1, NPts);"]
+    L += load("bX", "PX", "pi", "NPts", ind="        ")
+    L += load("bY", "PY", "pi", "NPts", ind="        ")
+    L += load("bZ", "PZ", "pi", "NPts", ind="        ")
+    L += g1_add_body("n", "a", "b", ind="        ")
+    for c in ["X", "Y", "Z"]:
+        L += [f"        a{c}{j} = n{c}{j};" for j in range(S)]
+    L += ["    }"]
+    L += store("aX", "RX", "b", "NB")
+    L += store("aY", "RY", "b", "NB")
+    L += store("aZ", "RZ", "b", "NB")
+    L += ["}", "", "fn main() {}", ""]
+    use_field(FR)
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     import os
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -530,7 +656,8 @@ if __name__ == "__main__":
                        ("tests/bn254_ntt_stage.ysu", gen_ntt()),
                        ("tests/bn254_ntt4_stage.ysu", gen_ntt4()),
                        ("tests/bn254_g1_add.ysu", gen_g1_add()),
-                       ("tests/bn254_g1_dbl.ysu", gen_g1_dbl())]:
+                       ("tests/bn254_g1_dbl.ysu", gen_g1_dbl()),
+                       ("tests/bn254_msm_bucket.ysu", gen_msm_bucket())]:
         path = os.path.join(here, name)
         with open(path, "w") as f:
             f.write(text)
