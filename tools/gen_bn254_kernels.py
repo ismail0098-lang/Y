@@ -280,6 +280,65 @@ def gen_ntt():
     return "\n".join(L)
 
 
+def gen_sub_vec():
+    """Out[i] = (A[i] - B[i]) mod p.
+
+    The one pointwise operation the QAP witness map needs that is not already
+    a multiply. Everything else folds into a table: the ifft's 1/n scaling and
+    the coset offset g^i become one vector, and the vanishing-polynomial
+    constant folds into the final one, so no separate scale kernel exists.
+    """
+    use_field(FR)
+    L = [HEADER.replace("%d", "N"), "",
+         "kernel bn254_sub_vec(",
+         "    A: GlobalMemory<U32>,",
+         "    B: GlobalMemory<U32>,",
+         "    Out: GlobalMemory<U32>,",
+         "    N: I32",
+         ") {",
+         "    let tid: I32 = block_idx_x() * 256 + thread_idx_x();"]
+    L += load("a", "A", "tid", "N")
+    L += load("b", "B", "tid", "N")
+    L += [f"    let r{j}: U32 = 0;" for j in range(S)]
+    L += scratch_decls()
+    L += sub_mod("r", "a", "b")
+    L += store("r", "Out", "tid", "N")
+    L += ["}", "", "fn main() {}", ""]
+    return "\n".join(L)
+
+
+def gen_permute():
+    """Gather `Dst[i] = Src[Perm[i]]`, 8 limbs at a time.
+
+    Exists so that a CHAIN of transforms can stay on the device. The radix-2
+    stage is decimation-in-time: it wants bit-reversed input and produces
+    natural order. A single transform can be permuted on the host for free
+    (the data is being uploaded anyway), but the Groth16 QAP witness map runs
+    SEVEN transforms back to back, and round-tripping 2^21 elements over PCIe
+    between each one costs more than the transforms save.
+
+    The permutation is a table rather than bit-twiddling in the kernel: it is
+    identical for all seven transforms, so it is built once on the host and
+    uploaded once, and a table also serves the base-4 digit reversal the
+    radix-4 stage needs without a second kernel.
+    """
+    use_field(FR)
+    L = [HEADER.replace("%d", "N"), "",
+         "// Dst[i] = Src[Perm[i]] over 8-limb elements in the planar layout.",
+         "kernel bn254_permute(",
+         "    Src: GlobalMemory<U32>,",
+         "    Dst: GlobalMemory<U32>,",
+         "    Perm: GlobalMemory<U32>,",
+         "    NElem: I32",
+         ") {",
+         "    let i: I32 = block_idx_x() * 256 + thread_idx_x();",
+         "    let j: U32 = block_ptr2d_load(Perm, 0, i, NElem, 1, NElem);"]
+    L += load("v", "Src", "j", "NElem")
+    L += store("v", "Dst", "i", "NElem")
+    L += ["}", "", "fn main() {}", ""]
+    return "\n".join(L)
+
+
 def gen_ntt4():
     """One radix-4 Cooley-Tukey stage: one 4-point butterfly per thread.
 
@@ -650,7 +709,9 @@ if __name__ == "__main__":
                        ("tests/bn254_ntt4_stage.ysu", gen_ntt4()),
                        ("tests/bn254_g1_add.ysu", gen_g1_add()),
                        ("tests/bn254_g1_dbl.ysu", gen_g1_dbl()),
-                       ("tests/bn254_msm_bucket.ysu", gen_msm_bucket())]:
+                       ("tests/bn254_msm_bucket.ysu", gen_msm_bucket()),
+                       ("tests/bn254_permute.ysu", gen_permute()),
+                       ("tests/bn254_sub_vec.ysu", gen_sub_vec())]:
         path = os.path.join(here, name)
         with open(path, "w") as f:
             f.write(text)
