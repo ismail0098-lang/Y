@@ -87,25 +87,26 @@ fn limbs32(x: &Fr) -> [u32; 8] {
     o
 }
 
-/// Struct-of-arrays: limb `j` of element `i` at `[j * n + i]`. See the note in
-/// `tools/gen_bn254_kernels.py` for why the kernels want this layout.
-fn to_soa(v: &[Fr], n: usize) -> Vec<u32> {
+/// Planar arrays of `uint4`: limb `j` of element `i` at
+/// `[(j/4) * 4n + i*4 + (j%4)]`. See the note in `tools/gen_bn254_kernels.py`.
+fn to_planar(v: &[Fr], n: usize) -> Vec<u32> {
     let mut out = vec![0u32; n * 8];
     for (i, x) in v.iter().enumerate() {
         let l = limbs32(x);
         for j in 0..8 {
-            out[j * n + i] = l[j];
+            out[(j / 4) * 4 * n + i * 4 + (j % 4)] = l[j];
         }
     }
     out
 }
 
-fn from_soa(raw: &[u32], n: usize) -> Vec<Fr> {
+fn from_planar(raw: &[u32], n: usize) -> Vec<Fr> {
+    let limb = |i: usize, j: usize| raw[(j / 4) * 4 * n + i * 4 + (j % 4)] as u64;
     (0..n)
         .map(|i| {
             let mut l = [0u64; 4];
             for j in 0..4 {
-                l[j] = raw[(2 * j) * n + i] as u64 | ((raw[(2 * j + 1) * n + i] as u64) << 32);
+                l[j] = limb(i, 2 * j) | (limb(i, 2 * j + 1) << 32);
             }
             Fr::from_limbs_reduce(l)
         })
@@ -209,7 +210,7 @@ fn gpu_ntt(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<Fr
     let log_n = n.trailing_zeros();
     let r = r_mod_p();
 
-    let flat = to_soa(&bit_reverse(a, log_n), n);
+    let flat = to_planar(&bit_reverse(a, log_n), n);
     let d_x = ctx.alloc(n * 8 * 4).unwrap();
     ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
 
@@ -224,7 +225,7 @@ fn gpu_ntt(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<Fr
             tws.push(cur.mul(&r));
             cur = cur.mul(&step);
         }
-        let tw = to_soa(&tws, half);
+        let tw = to_planar(&tws, half);
         let d_tw = ctx.alloc(half * 8 * 4).unwrap();
         ctx.memcpy_htod_at(&d_tw, 0, as_bytes(&tw)).unwrap();
 
@@ -243,7 +244,7 @@ fn gpu_ntt(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<Fr
         ctx.synchronize().expect("stage did not complete");
     }
 
-    from_soa(&read_u32(ctx, &d_x, n * 8), n)
+    from_planar(&read_u32(ctx, &d_x, n * 8), n)
 }
 
 #[test]
@@ -380,7 +381,7 @@ fn what_the_gpu_ntt_costs() {
     // ── setup, outside the timed region, as a library would have it ──
     let r = r_mod_p();
     let input = bit_reverse(&a, LOG_N);
-    let flat = to_soa(&input, N);
+    let flat = to_planar(&input, N);
     let d_x = ctx.alloc(N * 8 * 4).unwrap();
     ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
 
@@ -395,7 +396,7 @@ fn what_the_gpu_ntt_costs() {
             tws.push(cur.mul(&r));
             cur = cur.mul(&step);
         }
-        let tw = to_soa(&tws, half);
+        let tw = to_planar(&tws, half);
         let d_tw = ctx.alloc(half * 8 * 4).unwrap();
         ctx.memcpy_htod_at(&d_tw, 0, as_bytes(&tw)).unwrap();
         stages.push((half, d_tw));
@@ -443,7 +444,7 @@ fn what_the_gpu_ntt_costs() {
     // ── and what the harness adds on top, so it is not mistaken for either ──
     let t2 = std::time::Instant::now();
     let br = bit_reverse(&a, LOG_N);
-    let f2 = to_soa(&br, N);
+    let f2 = to_planar(&br, N);
     let host_ms = t2.elapsed().as_secs_f64() * 1000.0;
     std::hint::black_box(f2);
 
@@ -569,7 +570,7 @@ fn is_the_gpu_actually_winning() {
     };
     let module = load_kernel(&ctx, "bn254_ntt_stage");
 
-    const LOG_N: u32 = 20;
+    const LOG_N: u32 = 23;
     const N: usize = 1 << LOG_N;
     let nthreads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
     let w = root_of_unity(LOG_N);
@@ -630,11 +631,11 @@ fn is_the_gpu_actually_winning() {
     let cpu_best_ms = sweep.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);
 
     // ── GPU ──
-    let flat = to_soa(&bit_reverse(&a, LOG_N), N);
+    let flat = to_planar(&bit_reverse(&a, LOG_N), N);
     let d_x = ctx.alloc(N * 8 * 4).unwrap();
     let mut dev_tw = Vec::new();
     for t in &tables {
-        let f = to_soa(&t.iter().map(|v| v.mul(&r)).collect::<Vec<_>>(), t.len());
+        let f = to_planar(&t.iter().map(|v| v.mul(&r)).collect::<Vec<_>>(), t.len());
         let d = ctx.alloc(t.len() * 8 * 4).unwrap();
         ctx.memcpy_htod_at(&d, 0, as_bytes(&f)).unwrap();
         dev_tw.push((t.len(), d));

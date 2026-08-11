@@ -310,3 +310,63 @@ fn bytemuck_u32(v: &[u32]) -> &[u8] {
     // only read. Avoids taking a dependency for four lines.
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) }
 }
+
+// ── 128-bit vector load / store ─────────────────────────────────────────────
+
+const V4_KERNEL: &str = r#"
+kernel v4_probe(A: GlobalMemory<U32>, C: GlobalMemory<U32>, N: I32) {
+    let i: I32 = block_idx_x() * 256 + thread_idx_x();
+    let v: U32x4 = block_ptr2d_load_v4(A, 0, i * 4, N * 4, 1, N * 4);
+    block_ptr2d_store_v4(C, 0, i * 4, N * 4, 1, N * 4, v.w, v.z, v.y, v.x);
+}
+fn main() {}
+"#;
+
+/// The reason this intrinsic exists is that ptxas will not merge the scalar
+/// form: each `block_ptr2d_load` carries its own bounds predicate, and a
+/// predicated load is not a merge candidate. So the wide instruction has to be
+/// emitted directly - and it must still be ONE instruction, predicate intact.
+#[test]
+fn vector_loads_emit_one_wide_instruction() {
+    let (ok, out, ptx) = compile(V4_KERNEL, "v4_probe");
+    assert!(ok, "the v4 kernel must compile:\n{}", out);
+    let text = std::fs::read_to_string(&ptx).unwrap();
+    assert_eq!(
+        text.matches("ld.global.v4.u32").count(),
+        1,
+        "expected exactly one wide load:\n{}",
+        text
+    );
+    assert_eq!(
+        text.matches("st.global.v4.u32").count(),
+        1,
+        "expected exactly one wide store:\n{}",
+        text
+    );
+    // Predication is not sacrificed for width; that was never the trade.
+    assert!(
+        text.contains("@%p") && text.contains("and.pred"),
+        "the v4 access lost its bounds predicate:\n{}",
+        text
+    );
+    // Four lanes read back must not cost four loads.
+    assert!(
+        !text.contains("ld.global.u32"),
+        "a scalar load survived alongside the vector one:\n{}",
+        text
+    );
+}
+
+/// A lane that does not exist is a refusal, not lane 0. Reading `.q` as `.x`
+/// is the silent-substitution failure this repo keeps finding.
+#[test]
+fn a_nonexistent_lane_is_refused() {
+    let src = V4_KERNEL.replace("v.w, v.z, v.y, v.x", "v.q, v.z, v.y, v.x");
+    let (ok, out, _) = compile(&src, "v4_badlane");
+    assert!(!ok, "`.q` on a 4-wide vector must be refused");
+    assert!(
+        out.contains("not one of") && out.contains(".x .y .z .w"),
+        "the refusal did not name the valid lanes:\n{}",
+        out
+    );
+}

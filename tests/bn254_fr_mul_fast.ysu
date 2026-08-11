@@ -17,22 +17,26 @@ kernel bn254_fr_mul_fast(
     N: I32
 ) {
     let tid: I32 = block_idx_x() * 256 + thread_idx_x();
-    let a0: U32 = block_ptr2d_load(A, 0, tid, N, 8, N);
-    let a1: U32 = block_ptr2d_load(A, 1, tid, N, 8, N);
-    let a2: U32 = block_ptr2d_load(A, 2, tid, N, 8, N);
-    let a3: U32 = block_ptr2d_load(A, 3, tid, N, 8, N);
-    let a4: U32 = block_ptr2d_load(A, 4, tid, N, 8, N);
-    let a5: U32 = block_ptr2d_load(A, 5, tid, N, 8, N);
-    let a6: U32 = block_ptr2d_load(A, 6, tid, N, 8, N);
-    let a7: U32 = block_ptr2d_load(A, 7, tid, N, 8, N);
-    let b0: U32 = block_ptr2d_load(B, 0, tid, N, 8, N);
-    let b1: U32 = block_ptr2d_load(B, 1, tid, N, 8, N);
-    let b2: U32 = block_ptr2d_load(B, 2, tid, N, 8, N);
-    let b3: U32 = block_ptr2d_load(B, 3, tid, N, 8, N);
-    let b4: U32 = block_ptr2d_load(B, 4, tid, N, 8, N);
-    let b5: U32 = block_ptr2d_load(B, 5, tid, N, 8, N);
-    let b6: U32 = block_ptr2d_load(B, 6, tid, N, 8, N);
-    let b7: U32 = block_ptr2d_load(B, 7, tid, N, 8, N);
+    let av0: U32x4 = block_ptr2d_load_v4(A, 0, (tid) * 4, 4 * N, 2, 4 * N);
+    let a0: U32 = av0.x;
+    let a1: U32 = av0.y;
+    let a2: U32 = av0.z;
+    let a3: U32 = av0.w;
+    let av1: U32x4 = block_ptr2d_load_v4(A, 1, (tid) * 4, 4 * N, 2, 4 * N);
+    let a4: U32 = av1.x;
+    let a5: U32 = av1.y;
+    let a6: U32 = av1.z;
+    let a7: U32 = av1.w;
+    let bv0: U32x4 = block_ptr2d_load_v4(B, 0, (tid) * 4, 4 * N, 2, 4 * N);
+    let b0: U32 = bv0.x;
+    let b1: U32 = bv0.y;
+    let b2: U32 = bv0.z;
+    let b3: U32 = bv0.w;
+    let bv1: U32x4 = block_ptr2d_load_v4(B, 1, (tid) * 4, 4 * N, 2, 4 * N);
+    let b4: U32 = bv1.x;
+    let b5: U32 = bv1.y;
+    let b6: U32 = bv1.z;
+    let b7: U32 = bv1.w;
     let r0: U32 = 0;
     let r1: U32 = 0;
     let r2: U32 = 0;
@@ -587,14 +591,8 @@ kernel bn254_fr_mul_fast(
     r5 = (d5 & mask) | (t5 & nmask);
     r6 = (d6 & mask) | (t6 & nmask);
     r7 = (d7 & mask) | (t7 & nmask);
-    block_ptr2d_store(Out, 0, tid, N, 8, N, r0);
-    block_ptr2d_store(Out, 1, tid, N, 8, N, r1);
-    block_ptr2d_store(Out, 2, tid, N, 8, N, r2);
-    block_ptr2d_store(Out, 3, tid, N, 8, N, r3);
-    block_ptr2d_store(Out, 4, tid, N, 8, N, r4);
-    block_ptr2d_store(Out, 5, tid, N, 8, N, r5);
-    block_ptr2d_store(Out, 6, tid, N, 8, N, r6);
-    block_ptr2d_store(Out, 7, tid, N, 8, N, r7);
+    block_ptr2d_store_v4(Out, 0, (tid) * 4, 4 * N, 2, 4 * N, r0, r1, r2, r3);
+    block_ptr2d_store_v4(Out, 1, (tid) * 4, 4 * N, 2, 4 * N, r4, r5, r6, r7);
 }
 
 fn main() {}
