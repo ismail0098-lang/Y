@@ -358,6 +358,27 @@ fn isequal_computes_the_right_answer() {
     }
 }
 
+/// An array literal as a template argument.
+///
+/// circomlib passes curve base points this way. The top-level `component main`
+/// path evaluated its arguments with the scalar `eval_expr` while every nested
+/// component already used the array-aware `eval_to_slot`, so the construct
+/// worked everywhere except where a user actually writes it -- which cost
+/// `EscalarMul` and `EscalarMulFix`.
+///
+/// The weights are distinct and asymmetric so that an array arriving empty,
+/// truncated or REVERSED is caught. All three of those still produce a
+/// satisfiable circuit, so "it compiled" proves nothing here.
+#[test]
+fn array_literal_template_arg_arrives_intact_and_in_order() {
+    // 2*1 + 30*0 + 500*0
+    assert_eq!(eval("array_template_arg.circom", &[1, 0, 0]), "2");
+    // reversed weights would give 500 here
+    assert_eq!(eval("array_template_arg.circom", &[0, 0, 1]), "500");
+    assert_eq!(eval("array_template_arg.circom", &[1, 1, 1]), "532");
+    assert_eq!(eval("array_template_arg.circom", &[3, 2, 1]), "566");
+}
+
 #[test]
 fn lessthan_computes_the_right_answer() {
     for (a, b) in [(3u64, 5u64), (9, 5), (5, 5), (0, 1), (1, 0), (65535, 65536)] {

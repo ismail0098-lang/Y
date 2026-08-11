@@ -208,12 +208,17 @@ impl<'a> Lowerer<'a> {
             ));
         }
 
-        // Template arguments are compile-time by definition.
+        // Template arguments are compile-time by definition - but not
+        // necessarily SCALAR. `component main = EscalarMul(8, [x, y])` passes a
+        // curve base point as an array literal, and this used to call
+        // `eval_expr`, which refuses one. The identical path for a nested
+        // component (`Stmt::DeclComponent`) already used `eval_to_slot`, so the
+        // construct worked everywhere except at the top level - which is the
+        // only place a user writes it directly.
         let mut args = Vec::new();
         for a in &main.args {
             let mut root = Frame::new(String::new());
-            let v = self.eval_expr(a, &mut root)?;
-            args.push(Slot::Leaf(v));
+            args.push(self.eval_to_slot(a, &mut root)?);
         }
 
         let inst_id = self.instantiate(&main.template, args, "main", main.pos)?;
