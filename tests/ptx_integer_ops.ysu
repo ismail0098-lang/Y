@@ -27,6 +27,7 @@ kernel int_ops(
     OW64Hi: GlobalMemory<U32>,
     OMixHi: GlobalMemory<U32>,
     OSext: GlobalMemory<U32>,
+    OBigLit: GlobalMemory<U32>,
     N: I32
 ) {
     let i: I32 = block_idx_x() * 256 + thread_idx_x();
@@ -73,6 +74,14 @@ kernel int_ops(
     let s: I32 = a;
     let ws: I64 = s;
     block_ptr2d_store(OSext, 0, i, N, 1, N, u64_hi32(ws));
+
+    // A literal above i32::MAX must be an UNSIGNED 32-bit value, so widening
+    // it zero-extends. Typed I32 it is negative, `cvt.s64.s32` sign-extends,
+    // and 0xf0000001 becomes 0xFFFFFFFF_F0000001 - which is how a BN254
+    // modulus limb turned four limbs of the result into all-ones. Legal
+    // instruction, legal register, wrong number.
+    let big: U64 = 4026531841;
+    block_ptr2d_store(OBigLit, 0, i, N, 1, N, u64_hi32(big));
 }
 
 fn main() {}
