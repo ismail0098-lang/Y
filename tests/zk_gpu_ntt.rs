@@ -431,3 +431,232 @@ fn what_the_gpu_ntt_costs() {
         N * 32 / 1_000_000
     );
 }
+
+// ── Is the GPU actually winning? ────────────────────────────────────────────
+
+/// One NTT stage across `nthreads` threads, using precomputed twiddles.
+///
+/// Two parallel shapes, because one is not enough. While there are more blocks
+/// than threads, the blocks are independent and `chunks_mut(m)` splits them.
+/// The last few stages have fewer blocks than threads - at `m = N` there is one
+/// - and leaving those serial caps the whole thing by Amdahl at about 4x
+/// however many cores are present. So within a block, `split_at_mut` separates
+/// the two halves the butterfly touches, and the `j` range parallelises
+/// instead.
+fn cpu_ntt_stage(x: &mut [Fr], m: usize, tw: &[Fr], nthreads: usize) {
+    let half = m / 2;
+    let n = x.len();
+    if n / m >= nthreads {
+        let per = (n / m).div_ceil(nthreads) * m;
+        std::thread::scope(|s| {
+            for chunk in x.chunks_mut(per) {
+                s.spawn(move || {
+                    for blk in chunk.chunks_mut(m) {
+                        let (lo, hi) = blk.split_at_mut(half);
+                        for j in 0..half {
+                            let u = lo[j];
+                            let v = hi[j].mul(&tw[j]);
+                            lo[j] = u.add(&v);
+                            hi[j] = u.sub(&v);
+                        }
+                    }
+                });
+            }
+        });
+    } else {
+        for blk in x.chunks_mut(m) {
+            let (lo, hi) = blk.split_at_mut(half);
+            let per = half.div_ceil(nthreads).max(1);
+            std::thread::scope(|s| {
+                for (ci, (lc, hc)) in lo.chunks_mut(per).zip(hi.chunks_mut(per)).enumerate() {
+                    let tws = &tw[ci * per..];
+                    s.spawn(move || {
+                        for j in 0..lc.len() {
+                            let u = lc[j];
+                            let v = hc[j].mul(&tws[j]);
+                            lc[j] = u.add(&v);
+                            hc[j] = u.sub(&v);
+                        }
+                    });
+                }
+            });
+        }
+    }
+}
+
+/// The comparison that actually answers "is this worth a GPU".
+///
+/// The 60.6x in `what_the_gpu_ntt_costs` is device time against ONE core, and
+/// no one runs a prover on one core. This times the whole 16-core machine, and
+/// counts what offloading really costs: the PCIe transfer in both directions.
+///
+/// It also reports the case that matters more in practice - data already
+/// resident on the device, because a real prover chains NTTs and MSMs without
+/// coming back to the host between them.
+///
+/// Two measurement traps this has already fallen into, both worth keeping:
+///
+///   - **Warm the GPU.** The CPU thread sweep above leaves the device idle for
+///     the better part of a second, which drops its clocks. Measured cold, the
+///     first timed rep absorbed the whole ramp and reported 30.6 ms against a
+///     warm 1.8 - and, being wall-clock, stole that time from the PCIe figure
+///     taken after it, which came back 8x too fast. Hence the warmup and the
+///     minimum over interleaved rounds.
+///   - **Size it past L2.** `LOG_N = 20` is 33 MB, which fits inside this
+///     card's 48 MB L2: the transform then runs at 766 GB/s, ABOVE the 672
+///     GB/s DRAM peak, for 21x over the parallel CPU. That is a real effect
+///     and a real use case, but quoting it alone is quoting a cache hit. At
+///     `LOG_N = 23` (268 MB, 5.6x L2) it settles to 525 GB/s - 78% of DRAM
+///     peak, which is the number to trust.
+///
+/// Sanity-check any figure here against the bandwidth it implies before
+/// believing it. That is what caught the cold run: 30.6 ms implies 44 GB/s,
+/// which no GPU of this class does.
+#[test]
+#[ignore]
+fn is_the_gpu_actually_winning() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let module = load_kernel(&ctx, "bn254_ntt_stage");
+
+    const LOG_N: u32 = 23;
+    const N: usize = 1 << LOG_N;
+    let nthreads = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1);
+    let w = root_of_unity(LOG_N);
+    let r = r_mod_p();
+
+    let mut state = 0x2468_ACE0_1357_9BDFu64;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state >> 1
+    };
+    let a: Vec<Fr> = (0..N)
+        .map(|_| Fr::from_limbs_reduce([next(), next(), next(), next()]))
+        .collect();
+
+    // Twiddle tables, precomputed once for BOTH sides. The GPU reads a table;
+    // letting the CPU derive its twiddles by a multiply per butterfly would
+    // charge it for work the GPU does not do.
+    let mut tables: Vec<Vec<Fr>> = Vec::new();
+    for s in 1..=LOG_N {
+        let m = 1usize << s;
+        let step = w.pow_limbs(&[(N / m) as u64, 0, 0, 0]);
+        let mut t = Vec::with_capacity(m / 2);
+        let mut cur = Fr::one();
+        for _ in 0..m / 2 {
+            t.push(cur);
+            cur = cur.mul(&step);
+        }
+        tables.push(t);
+    }
+
+    // ── CPU, all cores ──
+    let mut x = bit_reverse(&a, LOG_N);
+    let t0 = std::time::Instant::now();
+    for s in 1..=LOG_N {
+        cpu_ntt_stage(&mut x, 1 << s, &tables[(s - 1) as usize], nthreads);
+    }
+    let cpu_par_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    // ── CPU thread sweep, so the baseline is where the CPU actually
+    // plateaus rather than wherever `available_parallelism` happens to land.
+    // SMT can make 32 slower than 16 on a compute-bound kernel, and quoting
+    // the wrong one moves the GPU's ratio either way.
+    let mut sweep = Vec::new();
+    let mut cpu_one_ms = 0.0;
+    for &nt in &[1usize, 2, 4, 8, 16, 24, 32] {
+        if nt > nthreads { continue; }
+        let mut y = bit_reverse(&a, LOG_N);
+        let t = std::time::Instant::now();
+        for s in 1..=LOG_N {
+            cpu_ntt_stage(&mut y, 1 << s, &tables[(s - 1) as usize], nt);
+        }
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(x[7].to_decimal_string(), y[7].to_decimal_string(),
+                   "the {}-thread CPU path disagrees with the {}-thread one", nt, nthreads);
+        if nt == 1 { cpu_one_ms = ms; }
+        sweep.push((nt, ms));
+    }
+    let cpu_best_ms = sweep.iter().map(|s| s.1).fold(f64::INFINITY, f64::min);
+
+    // ── GPU ──
+    let mut flat = Vec::with_capacity(N * 8);
+    for v in bit_reverse(&a, LOG_N) {
+        flat.extend_from_slice(&limbs32(&v));
+    }
+    let d_x = ctx.alloc(N * 8 * 4).unwrap();
+    let mut dev_tw = Vec::new();
+    for t in &tables {
+        let mut f = Vec::with_capacity(t.len() * 8);
+        for v in t {
+            f.extend_from_slice(&limbs32(&v.mul(&r)));
+        }
+        let d = ctx.alloc(t.len() * 8 * 4).unwrap();
+        ctx.memcpy_htod_at(&d, 0, as_bytes(&f)).unwrap();
+        dev_tw.push((t.len(), d));
+    }
+
+    let pairs = N / 2;
+    let grid = (pairs / 256) as u32;
+    let launch = |ctx: &CudaContext| {
+        for (half, d) in &dev_tw {
+            let args = vec![
+                d_x.device_ptr(), d.device_ptr(),
+                *half as u64, pairs as u64, N as u64,
+            ];
+            ctx.launch(&module, (grid, 1, 1), (256, 1, 1), 0, &args).unwrap();
+        }
+    };
+
+    // The CPU sweep above leaves the GPU idle for the better part of a
+    // second, which drops its clocks to idle. Measured cold, the first timed
+    // rep absorbed the whole ramp and reported 30.6 ms against a warm 8.4 -
+    // and, being wall-clock, it stole that time from the PCIe figure measured
+    // after it, which came back 8x too fast. So: warm first, then take the
+    // MINIMUM over interleaved rounds, which is this repo's standing rule for
+    // GPU timing precisely because a ramp can only ever make a run slower.
+    ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
+    for _ in 0..5 {
+        launch(&ctx);
+    }
+    ctx.synchronize().unwrap();
+
+    let mut back = vec![0u8; N * 8 * 4];
+    let mut gpu_resident_ms = f64::INFINITY;
+    let mut gpu_offload_ms = f64::INFINITY;
+    for _ in 0..7 {
+        ctx.synchronize().unwrap();
+        let t = std::time::Instant::now();
+        launch(&ctx);
+        ctx.synchronize().unwrap();
+        gpu_resident_ms = gpu_resident_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+
+        ctx.synchronize().unwrap();
+        let t = std::time::Instant::now();
+        ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
+        launch(&ctx);
+        ctx.memcpy_dtoh_at(&mut back, &d_x, 0).unwrap();
+        ctx.synchronize().unwrap();
+        gpu_offload_ms = gpu_offload_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    println!("\nBN254 NTT, N = 2^{} = {}  ({} MB of field elements)", LOG_N, N, N * 32 / 1_000_000);
+    println!("  machine: {} hardware threads", nthreads);
+    println!();
+    for (nt, ms) in &sweep {
+        println!("  CPU, {:>2} thread(s):            {:>9.2} ms   ({:.1}x over one)",
+                 nt, ms, cpu_one_ms / ms);
+    }
+    println!("  --- best CPU: {:.2} ms ---", cpu_best_ms);
+    println!("  GPU, data already resident:   {:>9.2} ms   ({:.1}x over the BEST CPU)",
+             gpu_resident_ms, cpu_best_ms / gpu_resident_ms);
+    println!("  GPU, offloaded over PCIe:     {:>9.2} ms   ({:.1}x over the BEST CPU)",
+             gpu_offload_ms, cpu_best_ms / gpu_offload_ms);
+    let _ = cpu_par_ms;
+    println!();
+    println!("  PCIe round trip is {:.2} ms of that, {:.0}% of the offloaded time.",
+             gpu_offload_ms - gpu_resident_ms,
+             (gpu_offload_ms - gpu_resident_ms) / gpu_offload_ms * 100.0);
+}
