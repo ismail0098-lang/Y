@@ -185,27 +185,42 @@ fn y_matrices(c: &YCircuit) -> (ConstraintMatrices<ArkFr>, Vec<ArkFr>) {
     // A row is a sum, so the order of its terms does not matter — field
     // addition is exact and commutative. Duplicate wires are combined and zero
     // coefficients dropped, which is what `make_row` does.
+    //
+    // Combining by sort-and-merge rather than by scanning the accumulator for
+    // each term. The scan is O(k^2) per row, which is invisible on the
+    // polynomial benchmark circuit (k = 1 or 2) and quadratic on a Poseidon
+    // chain (k ~ 28) — the exact trap `CLAUDE.md` records for field-arithmetic
+    // changes, met again one layer up. Measure on a dense circuit.
     let row = |lc: &LinearCombination| -> Vec<(ArkFr, usize)> {
-        let mut acc: Vec<(ArkFr, usize)> = Vec::with_capacity(lc.terms.len());
-        for (wire, coeff) in &lc.terms {
-            let idx = col[*wire];
-            let v = to_ark(coeff);
-            if let Some(e) = acc.iter_mut().find(|(_, i)| *i == idx) {
-                e.0 += v;
+        let mut acc: Vec<(ArkFr, usize)> =
+            lc.terms.iter().map(|(w, c)| (to_ark(c), col[*w])).collect();
+        acc.sort_unstable_by_key(|(_, i)| *i);
+        acc.dedup_by(|b, a| {
+            if a.1 == b.1 {
+                a.0 += b.0;
+                true
             } else {
-                acc.push((v, idx));
+                false
             }
-        }
+        });
         acc.retain(|(v, _)| !v.is_zero());
         acc
     };
 
-    let (mut a, mut b, mut cm) = (Vec::new(), Vec::new(), Vec::new());
-    for k in &c.circuit.constraints {
-        a.push(row(&k.a));
-        b.push(row(&k.b));
-        cm.push(row(&k.c));
-    }
+    // Rows are independent, so the three matrices are built in parallel.
+    let cons = &c.circuit.constraints;
+    let build = |pick: fn(&y::zk_emitter::Constraint) -> &LinearCombination| -> Vec<Vec<(ArkFr, usize)>> {
+        let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1);
+        let chunk = cons.len().div_ceil(threads).max(1);
+        std::thread::scope(|s| {
+            let hs: Vec<_> = cons
+                .chunks(chunk)
+                .map(|part| s.spawn(move || part.iter().map(|k| row(pick(k))).collect::<Vec<_>>()))
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        })
+    };
+    let (a, b, cm) = (build(|k| &k.a), build(|k| &k.b), build(|k| &k.c));
     let nnz = |m: &Vec<Vec<(ArkFr, usize)>>| m.iter().map(|r| r.len()).sum();
     (
         ConstraintMatrices {
@@ -280,11 +295,28 @@ fn qap_inputs(
     let mut a = vec![zero; domain_size];
     let mut b = vec![zero; domain_size];
     let mut c = vec![zero; domain_size];
-    for i in 0..num_constraints {
-        a[i] = dot(&matrices.a[i]);
-        b[i] = dot(&matrices.b[i]);
-        c[i] = dot(&matrices.c[i]);
-    }
+    // Parallel over constraints: three dot products per row, ~28 terms wide on
+    // a hash circuit and 1-2 on the polynomial one.
+    let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1);
+    let chunk = num_constraints.div_ceil(threads).max(1);
+    std::thread::scope(|s| {
+        for (t, ((ca, cb), cc)) in a[..num_constraints]
+            .chunks_mut(chunk)
+            .zip(b[..num_constraints].chunks_mut(chunk))
+            .zip(c[..num_constraints].chunks_mut(chunk))
+            .enumerate()
+        {
+            let dot = &dot;
+            s.spawn(move || {
+                for j in 0..ca.len() {
+                    let i = t * chunk + j;
+                    ca[j] = dot(&matrices.a[i]);
+                    cb[j] = dot(&matrices.b[i]);
+                    cc[j] = dot(&matrices.c[i]);
+                }
+            });
+        }
+    });
     a[num_constraints..num_constraints + num_inputs]
         .clone_from_slice(&full_assignment[..num_inputs]);
     (a, b, c)
@@ -689,6 +721,34 @@ fn main(x: I32, y: I32) -> I32 {{
     )
 }
 
+/// A chain of Poseidon hashes: `h = poseidon_hash(h, y)`, `n` times.
+///
+/// **The polynomial circuit above is not representative and this repo already
+/// knows it** — `CLAUDE.md` says so about field-arithmetic changes, and it is
+/// just as true of the prover. Its linear combinations are one or two terms
+/// wide, which is why `b_g1_query` has a single live base on it: the `B`
+/// matrix is almost entirely points at infinity, so one of the four MSMs
+/// costs nothing. A hash circuit's rows are ~28 terms wide, which changes the
+/// sparse matvec cost, the number of live bases, and therefore the balance
+/// between every phase being measured.
+///
+/// At 241 constraints per hash this reaches useful sizes quickly.
+fn poseidon_src(n: usize) -> String {
+    format!(
+        r#"
+@unsafe
+fn main(x: I32, y: I32) -> I32 {{
+    let mut h = x;
+    for i in 0..{} {{
+        h = poseidon_hash(h, y);
+    }}
+    return h;
+}}
+"#,
+        n
+    )
+}
+
 // ---------------------------------------------------------------------------
 // The tests
 // ---------------------------------------------------------------------------
@@ -1083,4 +1143,86 @@ fn the_gpu_qap_matches_arkworks() {
         assert_eq!(got.len(), want.len(), "h has the wrong length at {}x{}", x, y);
         assert_eq!(got, want, "the GPU QAP disagrees with arkworks at {}x{}", x, y);
     }
+}
+
+/// `cargo test --release --features zk --test zk_gpu_groth16 what_the_gpu_prover_costs_on_a_hash_circuit -- --ignored --nocapture`
+///
+/// The same measurement on a circuit whose constraint matrices are DENSE.
+/// Every prover figure in this file was taken on a multiplication chain, whose
+/// rows are one or two terms wide; if the speedup is a property of that shape
+/// rather than of the work, this is where it shows.
+#[test]
+#[ignore]
+fn what_the_gpu_prover_costs_on_a_hash_circuit() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let module = load_kernel(&ctx, "bn254_msm_bucket");
+    let g = Geom::new(28);
+
+    println!(
+        "\n{:>7} {:>9} {:>9} {:>9} {:>8}   {:>7} {:>7} {:>7} {:>7}",
+        "hashes", "constr", "cpu ms", "gpu ms", "speedup", "mat%", "qap%", "msm%", "g2%"
+    );
+    for hashes in [256usize, 1024, 4096] {
+        let (circuit, witness) = compile(&poseidon_src(hashes), &[], &[3, 2]);
+        let nc = circuit.constraints.len();
+        let c = YCircuit::new(circuit, witness);
+        let public = c.public_values();
+
+        let mut rng = StdRng::seed_from_u64(0xA5_1234);
+        let (pk, vk) =
+            Groth16::<Bn254>::circuit_specific_setup(c.clone(), &mut rng).expect("setup");
+        let (r, s) = (ArkFr::rand(&mut rng), ArkFr::rand(&mut rng));
+
+        let (hlen, auxlen, alen) = {
+            let ((h, ia, aa), _, _) = synthesize_native(&c);
+            (h.len(), aa.len(), ia.len() + aa.len())
+        };
+        let gk = GpuProvingKey::new(&ctx, &pk, hlen, auxlen, alen, false);
+        let domain_size = {
+            let (m, _) = y_matrices(&c);
+            GeneralEvaluationDomain::<ArkFr>::new(m.num_constraints + m.num_instance_variables)
+                .unwrap()
+                .size()
+        };
+        let engine = GpuQap::new(&ctx, domain_size);
+
+        {
+            let ((h, ia, aa), _, _) = synthesize_gpu(&ctx, &engine, &c);
+            let mut tm = ProveTiming::default();
+            let _ = gpu_prove(&ctx, &module, &g, &pk, &gk, r, s, &h, &ia, &aa, &mut tm);
+        }
+
+        let (mut best, mut bt, mut bm, mut bq) = (f64::MAX, ProveTiming::default(), 0.0, 0.0);
+        for _ in 0..3 {
+            let ((h, ia, aa), mat, qap) = synthesize_gpu(&ctx, &engine, &c);
+            let mut tm = ProveTiming::default();
+            let p = gpu_prove(&ctx, &module, &g, &pk, &gk, r, s, &h, &ia, &aa, &mut tm);
+            assert!(Groth16::<Bn254>::verify(&vk, &public, &p).unwrap());
+            if mat + qap + tm.total < best {
+                best = mat + qap + tm.total;
+                bt = tm;
+                bm = mat;
+                bq = qap;
+            }
+        }
+        let mut cpu = f64::MAX;
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let p = Groth16::<Bn254>::create_proof_with_reduction(c.clone(), &pk, r, s).unwrap();
+            cpu = cpu.min(t.elapsed().as_secs_f64());
+            assert!(Groth16::<Bn254>::verify(&vk, &public, &p).unwrap());
+        }
+        println!(
+            "{:>7} {:>9} {:9.1} {:9.1} {:7.2}x   {:6.0}% {:6.0}% {:6.0}% {:6.0}%",
+            hashes, nc, cpu * 1e3, best * 1e3, cpu / best,
+            100.0 * bm / best, 100.0 * bq / best,
+            100.0 * bt.g1_msms / best, 100.0 * bt.g2_msm / best
+        );
+    }
+    println!(
+        "\n  Compare against the polynomial circuit's row for the same\n  constraint count. A large gap means the earlier numbers were a\n  property of that circuit's sparsity, not of the prover."
+    );
 }
