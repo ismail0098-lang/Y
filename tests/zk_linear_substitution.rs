@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 use y::circom_lower::compile_file;
-use y::zk_emitter::{set_linsub_budget, Constraint};
+use y::zk_emitter::{set_linsub_budget, set_wire_compaction, Constraint};
 use y::zk_field::Fr;
 use y::zk_witness::{check_r1cs_satisfiability, solve_r1cs_witness};
 
@@ -49,11 +49,21 @@ struct Run {
 /// `set_linsub_budget` is thread-local precisely so this can flip between the
 /// two settings without an `env::set_var` that would race every other test in
 /// the binary.
+///
+/// Wire compaction is turned off for both settings, and that is what makes the
+/// comparisons in this file mean anything. Every assertion here is stated in
+/// wire numbers - `out`, and `the_reduced_witness_satisfies_the_original_circuit`
+/// feeding one run's witness to the other run's constraints - and compaction
+/// deliberately renumbers, by an amount that differs between the two settings
+/// because they leave different wires dead. Compaction has its own file,
+/// `zk_wire_compaction.rs`.
 fn run(name: &str, budget: Option<usize>, inputs: &[u64]) -> Run {
     set_linsub_budget(budget);
+    set_wire_compaction(false);
     let emitter = compile_file(&fixture(name), &[circomlib()])
         .unwrap_or_else(|e| panic!("{} failed to compile: {}", name, e));
     set_linsub_budget(Some(16));
+    set_wire_compaction(true);
 
     let circuit = emitter.build_circuit();
     let ir = emitter.build_witness_ir();
@@ -300,7 +310,7 @@ fn what_the_reduction_buys_at_proving_time() {
 
     for (label, budget) in [("unreduced", OFF), ("reduced  ", ON)] {
         set_linsub_budget(budget);
-        let emitter = compile_file(&fixture("poseidon_chain20.circom"), &[circomlib()]).unwrap();
+        let emitter = compile_file(&fixture("poseidon_chain200.circom"), &[circomlib()]).unwrap();
         set_linsub_budget(Some(16));
         let circuit = emitter.build_circuit();
         let ir = emitter.build_witness_ir();

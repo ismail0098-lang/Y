@@ -78,22 +78,64 @@ matrices — which is the way this optimisation usually goes wrong.
 Read the two chain rows as parity, not as a win: 1.07x and 1.03x are inside the
 noise of "the same". The size column is the real result, and it is worth
 more, because constraint count is paid again by every prover run rather than
-once at build time. Measured on a 20-hash chain through arkworks Groth16
+once at build time. Measured on a 200-hash chain through arkworks Groth16
 (`what_the_reduction_buys_at_proving_time`, `--ignored`):
 
 ```
-unreduced    14963 constraints    15365 wires    51872 nnz   setup 0.048 s   prove 0.062 s
-reduced       5568 constraints    15365 wires    35765 nnz   setup 0.028 s   prove 0.044 s
+unreduced   149423 constraints   149426 wires   518072 nnz   setup 0.522 s   prove 0.617 s
+reduced      55608 constraints    55611 wires   357425 nnz   setup 0.228 s   prove 0.288 s
 ```
 
-1.7x on setup and 1.4x on prove. Not the 2.7x the constraint count alone
-suggests, and the reason is in the middle column: **the wire count does not
-move.** The pass deletes constraints and leaves the eliminated wires in the
-variable table, because removing them means renumbering every wire in the
-circuit — and Groth16's cost scales with wires as well as constraints. Compacting
-them is the next lever, and it is the one with a real trap in it: every consumer
-of a wire id has to be renumbered together, which is the failure that made
-`optimize_circuit` produce unprovable circuits once already (CLAUDE.md gotcha #8).
+2.29x on setup and 2.14x on prove, against 2.69x on the constraint count. The
+shortfall is structural: Groth16's prover splits between terms that scale with
+the WIRE count (the `a`/`b`/`c` query MSMs) and terms that scale with the
+evaluation DOMAIN, which the constraint count fixes and no amount of wire
+reduction touches (the QAP FFTs, the `h` query MSM).
+
+### Wire compaction
+
+The middle column used to read `153605` in both rows. Both reduction passes
+abandon wires — linear substitution deletes the constraint that defined an
+intermediate, CSE abandons the loser of a merged pair — and neither renumbers,
+because both index scratch arrays by wire id for the duration of a fixpoint
+round. So Y carried **1.49x more wires than circom** on this circuit while
+emitting 1.86x fewer constraints.
+
+`compact_wires` runs once, after the fixpoint, and drops what no surviving
+constraint mentions: 153,605 → 55,611, i.e. 1.86x *fewer* than circom on both
+axes. It costs ~1.6% of compile time, so Y stays at compile-time parity.
+
+What it buys, measured separately (`what_compaction_buys_at_proving_time`):
+
+```
+uncompacted   55608 constraints   153605 wires   setup 0.281 s   prove 0.363 s   pk 25.4 MB
+compacted     55608 constraints    55611 wires   setup 0.251 s   prove 0.306 s   pk 10.5 MB
+```
+
+1.17x on prove, 1.11x on setup — and **2.42x on the proving key**, which is the
+part that is exact rather than a timing ratio, since Groth16 stores a G1 element
+per wire. For a shipped circuit that is distribution size and prover memory.
+
+Two things the pass has to get right, both of which produce a *valid proof of the
+wrong statement* if missed rather than a crash:
+
+- **Every consumer of a wire id must be renumbered together** — the constraints,
+  the witness recipes (keys *and* the linear combinations inside them), the name
+  table, the three boundary lists, `unconstrained_hint_vars`, `next_var_id`. This
+  is the failure that made `optimize_circuit` produce unprovable circuits once
+  already (CLAUDE.md gotcha #8).
+- **The renumbering must be stable and the boundary must be live outright.**
+  Inputs are consumed positionally in wire order, so a permuted map shuffles a
+  circuit's arguments; and an input that is never read appears in no constraint
+  at all, so liveness-by-constraint-scan would collect it and silently change the
+  circuit's interface.
+
+`tests/zk_wire_compaction.rs` covers both, over *both* front ends — which is not
+redundant. circom declares outputs at the top of a template, so its boundary is a
+live low-numbered prefix that compaction maps to itself, and a version that
+forgot to renumber the boundary lists passes every circom case. Y binds its
+return value last. Seven mutations of the pass were checked; the boundary one is
+caught by the Y cases only.
 
 ### How it got here
 
@@ -235,8 +277,8 @@ wrote.** Nothing downstream records the difference.
 - **Input JSON does not accept arrays.** `mini_json::parse_scalar_map` is
   scalar-only, but circom inputs are routinely `{"in": ["1", "2"]}`. The
   `--witness` path therefore works only for scalar inputs today.
-- **Eliminated wires are not compacted away**, so Y's wire count is well above
-  circom's (200-hash chain: 153,605 against ~103,000) and Groth16 pays for it.
-  See the proving measurement above.
+- `Y_ZK_COMPACT=off` disables wire compaction. It is a differential baseline, not
+  a safety valve — with it off, Y emits 1.86x fewer constraints than circom and
+  1.49x *more* wires.
 - `include` resolution is path-based only; there is no package/`node_modules`
   lookup.

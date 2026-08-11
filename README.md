@@ -167,18 +167,25 @@ Non-zero matrix terms land within 7% of circom's, so the smaller constraint
 count is not bought by densifying the matrices — which is how this optimisation
 usually goes wrong.
 
-What that is worth downstream, measured through arkworks Groth16 on a 20-hash
+What that is worth downstream, measured through arkworks Groth16 on a 200-hash
 chain rather than assumed:
 
 ```
-unreduced   14963 constraints   15365 wires   51872 nnz   setup 0.048s   prove 0.062s
-reduced      5568 constraints   15365 wires   35765 nnz   setup 0.028s   prove 0.044s
+unreduced  149423 constraints  149426 wires  518072 nnz   setup 0.522s   prove 0.617s
+reduced     55608 constraints   55611 wires  357425 nnz   setup 0.228s   prove 0.288s
 ```
 
-**1.7x on setup, 1.4x on prove** — not the 2.7x the constraint count alone
-suggests, because the wire count does not move: the pass deletes constraints and
-leaves the eliminated wires in the variable table, and Groth16 pays for wires
-too. Compacting them is not done.
+**2.29x on setup, 2.14x on prove**, against 2.69x on the constraint count. The
+shortfall is structural rather than a missing optimisation: Groth16's cost splits
+between terms that scale with the wire count and terms that scale with the
+evaluation domain, which the constraint count fixes — so reducing wires moves
+some of the prover and none of the FFTs.
+
+Wires are compacted (`compact_wires`): the reduction passes abandon wires and
+neither renumbers, which left Y at 153,605 wires against circom's 103,403 on this
+circuit even while emitting 1.86x fewer constraints. Compacting takes that to
+55,611 — 1.86x fewer than circom on both axes — for ~1.6% of compile time, and
+shrinks the Groth16 proving key from **25.4 MB to 10.5 MB**.
 
 Detail, subset, and the constructs that are refused by name:
 [docs/circom_frontend.md](docs/circom_frontend.md).
