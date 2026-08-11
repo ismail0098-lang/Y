@@ -768,6 +768,43 @@ pub fn set_linsub_budget(budget: Option<usize>) {
     LINSUB_BUDGET.with(|b| b.set(budget));
 }
 
+// `Y_ZK_COMPACT=off` disables wire compaction.
+//
+// `substitute_linear_constraints` and `dedup_identical_products` both leave
+// wires behind: the first deletes the constraint that defined one, the second
+// points two products at a single wire and abandons the loser. Neither renumbers
+// the survivors, because doing so mid-fixpoint would invalidate every index the
+// round is holding. So the wire count stayed at its pre-reduction value, and
+// Groth16 pays per wire - which is the entire gap between Y emitting 1.86x fewer
+// constraints than circom and only proving 1.4x faster.
+//
+// Off is a differential baseline, not a safety valve: compaction only drops
+// wires that no surviving constraint mentions and no verifier sees, so the
+// compacted circuit and the uncompacted one accept the same assignments modulo
+// the renumbering.
+thread_local! {
+    static COMPACT_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+fn compaction_enabled() -> bool {
+    COMPACT_ENABLED.with(|c| c.get())
+}
+
+/// Enable or disable wire compaction for this thread. Thread-local for the same
+/// reason `LINSUB_BUDGET` is: a test must be able to compile the same circuit
+/// both ways without racing the rest of the suite.
+pub fn set_wire_compaction(on: bool) {
+    COMPACT_ENABLED.with(|c| c.set(on));
+}
+
+pub fn init_compaction_from_env() {
+    if let Ok(v) = std::env::var("Y_ZK_COMPACT") {
+        if v.eq_ignore_ascii_case("off") || v == "0" {
+            set_wire_compaction(false);
+        }
+    }
+}
+
 fn linsub_fill_budget() -> Option<usize> {
     LINSUB_BUDGET.with(|b| b.get())
 }
@@ -1024,6 +1061,7 @@ fn expr_references_var(expr: &Expr, name: &str) -> bool {
 impl ZkEmitter {
     pub fn new() -> Self {
         init_cse_from_env();
+        init_compaction_from_env();
         Self {
             variables: vec!["const_1".to_string()], // wire 0 is constant 1
             public_inputs: Vec::new(),
@@ -1523,6 +1561,47 @@ impl ZkEmitter {
                 lc(a);
                 lc(b);
                 lc(c);
+            }
+        }
+    }
+
+    /// Every wire a recipe *writes* besides the one it is filed under.
+    ///
+    /// Only `HintBlock` has any: it computes several wires in one go, so if one
+    /// of them survives compaction the rest must too - a block whose outputs are
+    /// half-deleted would write past the end of the witness. Exhaustive for the
+    /// same reason `witness_op_deps` is, and paired with it at every call site.
+    fn witness_op_writes(op: &WitnessOp, out: &mut Vec<usize>) {
+        match op {
+            WitnessOp::Const(_)
+            | WitnessOp::Unknown
+            | WitnessOp::LoadInput { .. }
+            | WitnessOp::Add(..)
+            | WitnessOp::Sub(..)
+            | WitnessOp::Mul(..)
+            | WitnessOp::Div(..)
+            | WitnessOp::AssertEq(..)
+            | WitnessOp::Inv(_)
+            | WitnessOp::IsZeroLc(_)
+            | WitnessOp::InvOrZeroLc(_)
+            | WitnessOp::BitOfLc { .. }
+            | WitnessOp::IntDivLc(..)
+            | WitnessOp::IntModLc(..)
+            | WitnessOp::MulLc(..)
+            | WitnessOp::DivLc(..)
+            | WitnessOp::MulAddLc(..) => {}
+            WitnessOp::HintBlock { outputs, ops, .. } => {
+                out.extend(outputs.iter().map(|s| s.0));
+                for hop in ops {
+                    match hop {
+                        HintOp::NonDeterministicInv { dst, .. } | HintOp::AssignExpr { dst, .. } => {
+                            out.push(dst.0)
+                        }
+                        HintOp::BitDecompose { dst_bits, .. } => {
+                            out.extend(dst_bits.iter().map(|s| s.0))
+                        }
+                    }
+                }
             }
         }
     }
@@ -3051,6 +3130,21 @@ impl ZkEmitter {
                 break; // Safety limit
             }
         }
+
+        // Once, after the fixpoint - not inside it. Both passes index arrays by
+        // wire id for the duration of a round, so renumbering between rounds
+        // would be renumbering under them.
+        let t = std::time::Instant::now();
+        let before = self.next_var_id;
+        let compacted = self.compact_wires();
+        if compacted && std::env::var_os("Y_ZK_TIMING").is_some() {
+            eprintln!(
+                "[Y ZK TIMING]     compact wires {:>7.3} s -> {} wires (was {})",
+                t.elapsed().as_secs_f64(),
+                self.next_var_id,
+                before
+            );
+        }
     }
 
     /// Common-subexpression elimination: two constraints with the same `A` and
@@ -3501,6 +3595,211 @@ let one = LinearCombination::constant(Fr::one());
         // identity is unsatisfiable and stays, because deleting it would turn an
         // impossible circuit into a provable one.
 self.constraints.retain(|c| !constraint_is_vacuous(c));
+        true
+    }
+
+    /// Renumber the wires densely, dropping the ones nothing refers to any more.
+    ///
+    /// # Why the circuit has dead wires at all
+    ///
+    /// The two reduction passes above both abandon wires by design.
+    /// `substitute_linear_constraints` deletes the constraint that *defined* an
+    /// intermediate and rewrites its uses into the defining expression;
+    /// `dedup_identical_products` points two products at one wire and abandons
+    /// the loser. Neither renumbers, and neither can: they run to a fixpoint,
+    /// and renumbering mid-round would invalidate the `occ`/`uses`/`sub_idx`
+    /// arrays the round is indexing by wire id. So the wire count stayed at
+    /// whatever the front end allocated - 153,605 on a 200-hash Poseidon chain
+    /// against circom's ~103,000, *after* Y had already emitted 1.86x fewer
+    /// constraints than circom for the same circuit.
+    ///
+    /// That gap is not cosmetic. Groth16's proving key has a G1 element per
+    /// wire and its MSMs run over one scalar per wire, so a dead wire costs a
+    /// curve operation in every proof, forever. It is the whole difference
+    /// between the 2.7x constraint reduction and the 1.4x prove speedup
+    /// measured in `zk_linear_substitution::what_the_reduction_buys_at_proving_time`.
+    ///
+    /// # Why it is sound
+    ///
+    /// A wire that appears in no surviving constraint is existentially
+    /// quantified and unconstrained: the system's satisfying assignments are a
+    /// product of the surviving wires' solutions with *every* value of the dead
+    /// one. Projecting it away preserves satisfiability in both directions, and
+    /// it cannot change the statement, because the boundary - `1`, the public
+    /// inputs, the private inputs and the outputs - is marked live outright and
+    /// is exactly what a verifier sees.
+    ///
+    /// The one subtlety is that liveness is not just "mentioned in a
+    /// constraint". A live wire's *witness recipe* may read a wire that no
+    /// constraint mentions, so liveness is closed transitively over
+    /// `witness_op_deps` (and `witness_op_writes`, so a `HintBlock` cannot end
+    /// up with half its outputs deleted). Dropping a wire the solver still
+    /// needed would not produce a wrong proof - it would produce no proof, the
+    /// same shape of failure the CSE pass caused when it forgot the recipes.
+    ///
+    /// # The renumbering must be stable
+    ///
+    /// New ids ascend with old ones. `execute_host_witness_ir` assigns the
+    /// public and private inputs POSITIONALLY in wire order, so a map that
+    /// reordered them would feed the circuit its arguments shuffled - a wrong
+    /// answer with nothing to catch it, since every wire would still be defined.
+    ///
+    /// Returns whether anything was dropped.
+    fn compact_wires(&mut self) -> bool {
+        if !compaction_enabled() {
+            return false;
+        }
+        let n = self.next_var_id;
+        if n == 0 {
+            return false;
+        }
+
+        let mut live = vec![false; n];
+        live[0] = true; // the constant-1 wire
+
+        for &w in self
+            .public_inputs
+            .iter()
+            .chain(self.private_inputs.iter())
+            .chain(self.outputs.iter())
+        {
+            if w < n {
+                live[w] = true;
+            }
+        }
+
+        // Under-constrained hint wires are kept deliberately. They are what
+        // error[Z0042] reports, and `run_optimizer()` lets a front end reach
+        // this pass without having run that check yet - deleting the evidence
+        // would turn a refused circuit into an accepted one.
+        for &w in self.unconstrained_hint_vars.keys() {
+            if w < n {
+                live[w] = true;
+            }
+        }
+
+        for c in &self.constraints {
+            for lc in [&c.a, &c.b, &c.c] {
+                for (t, _) in &lc.terms {
+                    if *t < n {
+                        live[*t] = true;
+                    }
+                }
+            }
+        }
+
+        // Transitive closure through the recipes, as above.
+        let mut stack: Vec<usize> = (0..n).filter(|&i| live[i]).collect();
+        let mut touched = Vec::new();
+        while let Some(w) = stack.pop() {
+            let Some(op) = self.witness_recipes.get(&w) else {
+                continue;
+            };
+            touched.clear();
+            Self::witness_op_deps(op, &mut touched);
+            Self::witness_op_writes(op, &mut touched);
+            for &d in &touched {
+                if d < n && !live[d] {
+                    live[d] = true;
+                    stack.push(d);
+                }
+            }
+        }
+
+        let live_count = live.iter().filter(|b| **b).count();
+        if live_count == n {
+            return false;
+        }
+
+        const DEAD: usize = usize::MAX;
+        let mut map = vec![DEAD; n];
+        let mut next = 0;
+        for (old, &alive) in live.iter().enumerate() {
+            if alive {
+                map[old] = next;
+                next += 1;
+            }
+        }
+
+        // Every consumer of a wire id, rewritten together.
+        //
+        // This is the obligation the design-rule table in CLAUDE.md records
+        // against `optimize_circuit`: a pass that renumbers wires has more than
+        // one output, and updating only some of them is the same failure as
+        // handling only some arms of a match. The full list of things indexed by
+        // wire id is the constraints, the witness recipes (keys *and* the linear
+        // combinations inside them), the variable-name table, the three boundary
+        // lists, the hint-variable map, and `next_var_id`.
+        for c in &mut self.constraints {
+            replace_wires_in_lc(&mut c.a, &map);
+            replace_wires_in_lc(&mut c.b, &map);
+            replace_wires_in_lc(&mut c.c, &map);
+        }
+
+        let recipes = std::mem::take(&mut self.witness_recipes);
+        self.witness_recipes = recipes
+            .into_iter()
+            .filter(|(w, _)| map.get(*w).copied().unwrap_or(DEAD) != DEAD)
+            .map(|(w, mut op)| {
+                remap_witness_op(&mut op, &map);
+                (map[w], op)
+            })
+            .collect();
+
+        let mut names = Vec::with_capacity(live_count);
+        for (old, &alive) in live.iter().enumerate() {
+            if alive {
+                names.push(match self.variables.get_mut(old) {
+                    Some(s) => std::mem::take(s),
+                    None => format!("wire_{}", old),
+                });
+            }
+        }
+        self.variables = names;
+
+        // The boundary is marked live unconditionally above, so none of these
+        // can be dead. Stated rather than assumed, because the failure if it
+        // ever were is a `usize::MAX` stored in `public_inputs` - which does not
+        // fault here, but indexes off the end of the witness in whichever
+        // consumer touches it first, arbitrarily far from this pass.
+        for list in [
+            &mut self.public_inputs,
+            &mut self.private_inputs,
+            &mut self.outputs,
+        ] {
+            for w in list.iter_mut() {
+                let new = map[*w];
+                assert!(
+                    new != DEAD,
+                    "compact_wires dropped boundary wire {} - the circuit's \
+                     interface is part of the statement it proves",
+                    *w
+                );
+                *w = new;
+            }
+        }
+
+        let hints = std::mem::take(&mut self.unconstrained_hint_vars);
+        self.unconstrained_hint_vars = hints
+            .into_iter()
+            .filter(|(w, _)| map.get(*w).copied().unwrap_or(DEAD) != DEAD)
+            .map(|(w, v)| (map[w], v))
+            .collect();
+
+        self.next_var_id = live_count;
+
+        // A dead id surviving into a constraint would be `usize::MAX`, which
+        // indexes nothing and would panic far from here. The liveness closure
+        // above makes it impossible; this is what says so out loud if a future
+        // `WitnessOp` variant is added to one of the two walkers and not the
+        // other.
+        debug_assert!(
+            self.constraints.iter().all(|c| [&c.a, &c.b, &c.c]
+                .iter()
+                .all(|lc| lc.terms.iter().all(|(t, _)| *t < live_count))),
+            "compact_wires left a dangling wire id in a constraint"
+        );
+
         true
     }
 

@@ -49,6 +49,11 @@ ark-groth16 = "0.5"
 # tests/zk_gpu_groth16.rs reproduce the prover's QAP step around a GPU MSM.
 ark-poly = "0.5"
 ark-relations = "0.5"
+# Only so `zk_wire_compaction.rs` can report the PROVING KEY SIZE. Groth16
+# stores a G1 element per wire, so the key is the one part of what compaction
+# buys that is exact rather than a timing ratio. Already in the tree as an
+# ark-groth16 dependency.
+ark-serialize = "0.5"
 ark-snark = "0.5"
 ark-std = "0.5"
 revm = "42.0.1"

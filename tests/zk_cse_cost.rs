@@ -116,18 +116,40 @@ fn compile(cse: bool) -> (f64, Circuit, Vec<Fr>) {
 /// and nothing else observable.
 #[test]
 fn cse_off_still_produces_a_provable_circuit() {
-    let (_, on, _) = compile(true);
-    let (_, off, _) = compile(false);
+    let (_, on, on_w) = compile(true);
+    let (_, off, off_w) = compile(false);
     assert!(
         off.constraints.len() > on.constraints.len(),
         "CSE removed nothing on a circuit it should reduce: {} vs {}",
         off.constraints.len(),
         on.constraints.len()
     );
-    // Same interface either way — CSE must not touch the boundary.
-    assert_eq!(on.public_inputs, off.public_inputs);
-    assert_eq!(on.private_inputs, off.private_inputs);
-    assert_eq!(on.outputs, off.outputs);
+
+    // Same interface either way - CSE must not touch the boundary.
+    //
+    // Compared by NAME, not by wire id. The ids stopped being comparable when
+    // wire compaction landed: CSE abandons the loser of every merged pair, so
+    // the two settings leave different wires dead and the renumbering that
+    // follows differs by exactly that count. Names are allocated during
+    // emission, before either pass runs, so they are the stable identity here -
+    // and the values below are what the assertion was really about anyway.
+    let names = |c: &Circuit, ws: &[usize]| -> Vec<String> {
+        ws.iter().map(|w| c.variables[*w].clone()).collect()
+    };
+    assert_eq!(names(&on, &on.public_inputs), names(&off, &off.public_inputs));
+    assert_eq!(names(&on, &on.private_inputs), names(&off, &off.private_inputs));
+    assert_eq!(names(&on, &on.outputs), names(&off, &off.outputs));
+
+    // And the boundary must carry the same values, which is the property the
+    // wire-id comparison was standing in for.
+    for (i, (&a, &b)) in on.outputs.iter().zip(off.outputs.iter()).enumerate() {
+        assert_eq!(
+            on_w[a].to_decimal_string(),
+            off_w[b].to_decimal_string(),
+            "CSE changed output {}",
+            i
+        );
+    }
 }
 
 #[test]

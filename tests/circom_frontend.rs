@@ -170,9 +170,9 @@ fn r1cs_metadata_matches_circom() {
 
         // Public/private input and output COUNTS must agree: they define the
         // public signal layout a verifier checks and the order a `.wtns` is
-        // written in. The wire and constraint totals legitimately differ —
-        // circom's default `--O2` substitutes linear constraints away and Y
-        // does not yet — so those are reported, not asserted.
+        // written in. The wire and constraint totals legitimately differ — both
+        // compilers reduce, and Y reduces harder (286/289 against circom's
+        // 517/520 on `Poseidon(2)`) — so those are reported, not asserted.
         assert_eq!(
             their.pub_out, v.outputs.len(),
             "{}: output signal count differs from circom",
