@@ -32,7 +32,18 @@ fn repo() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn load_kernel(ctx: &CudaContext, entry: &str) -> KernelModule {
+/// Compiling the same `.ysu` from several test threads at once races on the
+/// `.ptx` output path: one thread reads the file while another is still
+/// writing it, and the JIT rejects the torn result with "Can't load this
+/// binary kind". Compile each kernel once per process, under a lock.
+fn ptx_for(entry: &str) -> String {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = guard.get(entry) {
+        return p.clone();
+    }
     let out = Command::new(bin())
         .arg(repo().join(format!("tests/{}.ysu", entry)))
         .arg("--emit-ptx")
@@ -46,31 +57,34 @@ fn load_kernel(ctx: &CudaContext, entry: &str) -> KernelModule {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let ptx = std::fs::read_to_string(repo().join(format!("tests/{}.ptx", entry))).unwrap();
+    let ptx = std::fs::read_to_string(repo().join(format!("tests/{}.ptx", entry)))
+        .expect("no .ptx written");
+    guard.insert(entry.to_string(), ptx.clone());
+    ptx
+}
+
+fn load_kernel(ctx: &CudaContext, entry: &str) -> KernelModule {
+    let ptx = ptx_for(entry);
+    // A single float instruction in a field kernel means some path is
+    // still hardcoded and the limbs are being rounded.
     assert!(
         !ptx.contains("ld.global.f32") && !ptx.contains("add.f32"),
         "{} is routing field limbs through the float datapath",
         entry
     );
     // `Y_PTX_MAXNREG` rewrites the emitter's `.maxnreg` before JIT, for
-    // measuring what register pressure is actually costing. The emitter
-    // derives that number from its VIRTUAL register count, which in a fully
-    // unrolled kernel runs into the thousands and buckets straight to 255 -
-    // nowhere near the ~82 ptxas really needs, and the difference is whole
-    // blocks of occupancy.
+    // measuring what register pressure is actually costing.
     let ptx = match std::env::var("Y_PTX_MAXNREG") {
-        Ok(v) => {
-            let mut out = String::with_capacity(ptx.len());
-            for line in ptx.lines() {
-                if line.trim_start().starts_with(".maxnreg") {
-                    out.push_str(&format!(".maxnreg {}\n", v));
+        Ok(v) => ptx
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with(".maxnreg") {
+                    format!(".maxnreg {}\n", v)
                 } else {
-                    out.push_str(line);
-                    out.push('\n');
+                    format!("{}\n", l)
                 }
-            }
-            out
-        }
+            })
+            .collect::<String>(),
         Err(_) => ptx,
     };
     ctx.load_ptx(&ptx, entry)
@@ -865,6 +879,20 @@ fn is_the_gpu_actually_winning() {
         gpu_r4_ms = gpu_r4_ms.min(t.elapsed().as_secs_f64() * 1000.0);
     }
 
+    // The same radix-4 transform, but paying PCIe both ways - what a caller
+    // with host-side data actually experiences.
+    let mut back4 = vec![0u8; N * 8 * 4];
+    let mut gpu_r4_offload_ms = f64::INFINITY;
+    for _ in 0..7 {
+        ctx.synchronize().unwrap();
+        let t = std::time::Instant::now();
+        ctx.memcpy_htod_at(&d_x4, 0, as_bytes(&flat4)).unwrap();
+        launch4(&ctx);
+        ctx.memcpy_dtoh_at(&mut back4, &d_x4, 0).unwrap();
+        ctx.synchronize().unwrap();
+        gpu_r4_offload_ms = gpu_r4_offload_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+    }
+
     let mut back = vec![0u8; N * 8 * 4];
     let mut gpu_resident_ms = f64::INFINITY;
     let mut gpu_offload_ms = f64::INFINITY;
@@ -898,6 +926,8 @@ fn is_the_gpu_actually_winning() {
              gpu_r4_ms, cpu_best_ms / gpu_r4_ms);
     println!("  GPU, offloaded over PCIe:     {:>9.2} ms   ({:.1}x over the BEST CPU)",
              gpu_offload_ms, cpu_best_ms / gpu_offload_ms);
+    println!("  GPU, radix-4 over PCIe:       {:>9.2} ms   ({:.1}x over the BEST CPU)",
+             gpu_r4_offload_ms, cpu_best_ms / gpu_r4_offload_ms);
     println!("  radix-4 vs radix-2: {:.2}x  ({} passes vs {})",
              gpu_resident_ms / gpu_r4_ms, plan4.stages.len(), LOG_N);
     let _ = cpu_par_ms;

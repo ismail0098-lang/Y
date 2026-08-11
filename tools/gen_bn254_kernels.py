@@ -19,11 +19,37 @@ and re-run `cargo test --release --features zk --test zk_gpu_field`, which
 checks both kernels against `src/zk_field.rs` on the device.
 """
 
-P = 21888242871839275222246405745257275088548364400416034343698204186575808495617
-P32 = [(P >> (32 * i)) & 0xFFFFFFFF for i in range(8)]
-NP = (-pow(P, -1, 1 << 32)) % (1 << 32)   # -p^-1 mod 2^32
-assert (P * NP + 1) % (1 << 32) == 0
+# BN254 has two 254-bit primes and they are NOT interchangeable: Fr is the
+# scalar field (the order of G1, what a witness lives in), Fq is the base
+# field (what a point's coordinates live in). MSM needs Fq; the NTT needs Fr.
+# Every routine below reads the module-level P32/NP, and `use_field` switches
+# them, so one CIOS implementation serves both.
+FR = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+FQ = 21888242871839275222246405745257275088696311157297823662689037894645226208583
 S = 8   # limbs
+
+
+# Y reserves U8/U16/U32/U64/I8/... as TYPE keywords, so a generated temporary
+# called `U1` produces `U16` at limb 6 and the parser rejects it as a `let`
+# name. Any new temporary prefix must avoid colliding once a limb index is
+# appended - hence `UA`/`UB` rather than `U1`/`U2`.
+RESERVED = {f"{p}{w}" for p in "UI" for w in (8, 16, 32, 64)}
+
+
+def check_names(names):
+    bad = [f"{v}{j}" for v in names for j in range(S) if f"{v}{j}" in RESERVED]
+    assert not bad, f"generated variable names collide with type keywords: {bad}"
+
+
+def use_field(p):
+    global P, P32, NP
+    P = p
+    P32 = [(p >> (32 * i)) & 0xFFFFFFFF for i in range(S)]
+    NP = (-pow(p, -1, 1 << 32)) % (1 << 32)   # -p^-1 mod 2^32
+    assert (p * NP + 1) % (1 << 32) == 0
+
+
+use_field(FR)
 
 
 def mont_mul(dst, a, b, ind="    "):
@@ -337,12 +363,105 @@ def gen_ntt4():
     return "\n".join(L)
 
 
+def dbl_mod(dst, a, ind="    "):
+    """dst = 2a mod p."""
+    return add_mod(dst, a, a, ind)
+
+
+def gen_g1_add():
+    """BN254 G1 point addition in Jacobian coordinates, over Fq.
+
+    `add-2007-bl` from the EFD: 11 multiplies and 5 squarings. The statement
+    order below is chosen for LIVENESS, not readability - `Z3` is computed
+    early so that Z1, Z2, Z1Z1 and Z2Z2 can all die before the second half,
+    which keeps peak register pressure near the radix-4 kernel's rather than
+    at the 11 simultaneous 8-limb temporaries the naive order needs.
+
+    This is the atom of MSM. It is NOT complete addition: it assumes both
+    inputs are non-zero and P != +-Q, which is the standard precondition
+    Pippenger's bucket accumulation is arranged to satisfy. The test says so
+    and only feeds it independent random points.
+    """
+    use_field(FQ)
+    names = ["X1", "Y1", "Z1", "X2", "Y2", "Z2"]
+    L = [HEADER.replace("%d", "N"), "",
+         "// BN254 G1 Jacobian point addition over the BASE field Fq.",
+         "// add-2007-bl; assumes P and Q are non-zero and P != +-Q.",
+         "kernel bn254_g1_add(",
+         "    PX: GlobalMemory<U32>,",
+         "    PY: GlobalMemory<U32>,",
+         "    PZ: GlobalMemory<U32>,",
+         "    QX: GlobalMemory<U32>,",
+         "    QY: GlobalMemory<U32>,",
+         "    QZ: GlobalMemory<U32>,",
+         "    RX: GlobalMemory<U32>,",
+         "    RY: GlobalMemory<U32>,",
+         "    RZ: GlobalMemory<U32>,",
+         "    N: I32",
+         ") {",
+         "    let tid: I32 = block_idx_x() * 256 + thread_idx_x();"]
+    for v, buf in zip(names, ["PX", "PY", "PZ", "QX", "QY", "QZ"]):
+        L += load(v, buf, "tid", "N")
+    # working temporaries
+    temps = ["ZA", "ZB", "UA", "UB", "S1", "S2", "HH", "II", "JJ", "RR", "VV", "T1", "T2", "X3", "Y3", "Z3"]
+    check_names(temps + names)
+    for v in temps:
+        L += [f"    let {v}{j}: U32 = 0;" for j in range(S)]
+    L += scratch_decls()
+
+    L += ["    // Z1Z1 = Z1^2 ; Z2Z2 = Z2^2"]
+    L += mont_mul("ZA", "Z1", "Z1")
+    L += mont_mul("ZB", "Z2", "Z2")
+    L += ["    // U1 = X1*Z2Z2 ; U2 = X2*Z1Z1"]
+    L += mont_mul("UA", "X1", "ZB")
+    L += mont_mul("UB", "X2", "ZA")
+    L += ["    // S1 = Y1*Z2*Z2Z2 ; S2 = Y2*Z1*Z1Z1"]
+    L += mont_mul("T1", "Y1", "Z2")
+    L += mont_mul("S1", "T1", "ZB")
+    L += mont_mul("T1", "Y2", "Z1")
+    L += mont_mul("S2", "T1", "ZA")
+    L += ["    // H = U2 - U1"]
+    L += sub_mod("HH", "UB", "UA")
+    L += ["    // Z3 = ((Z1+Z2)^2 - Z1Z1 - Z2Z2) * H, computed here so that",
+          "    // Z1, Z2, Z1Z1 and Z2Z2 can all die before the second half."]
+    L += add_mod("T1", "Z1", "Z2")
+    L += mont_mul("T2", "T1", "T1")
+    L += sub_mod("T1", "T2", "ZA")
+    L += sub_mod("T2", "T1", "ZB")
+    L += mont_mul("Z3", "T2", "HH")
+    L += ["    // I = (2H)^2 ; J = H*I ; r = 2*(S2-S1) ; V = U1*I"]
+    L += dbl_mod("T1", "HH")
+    L += mont_mul("II", "T1", "T1")
+    L += mont_mul("JJ", "HH", "II")
+    L += sub_mod("T1", "S2", "S1")
+    L += dbl_mod("RR", "T1")
+    L += mont_mul("VV", "UA", "II")
+    L += ["    // X3 = r^2 - J - 2V"]
+    L += mont_mul("T1", "RR", "RR")
+    L += sub_mod("T2", "T1", "JJ")
+    L += dbl_mod("T1", "VV")
+    L += sub_mod("X3", "T2", "T1")
+    L += ["    // Y3 = r*(V - X3) - 2*S1*J"]
+    L += sub_mod("T1", "VV", "X3")
+    L += mont_mul("T2", "RR", "T1")
+    L += mont_mul("T1", "S1", "JJ")
+    L += dbl_mod("UA", "T1")
+    L += sub_mod("Y3", "T2", "UA")
+    L += store("X3", "RX", "tid", "N")
+    L += store("Y3", "RY", "tid", "N")
+    L += store("Z3", "RZ", "tid", "N")
+    L += ["}", "", "fn main() {}", ""]
+    use_field(FR)
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     import os
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for name, text in [("tests/bn254_fr_mul_fast.ysu", gen_mul()),
                        ("tests/bn254_ntt_stage.ysu", gen_ntt()),
-                       ("tests/bn254_ntt4_stage.ysu", gen_ntt4())]:
+                       ("tests/bn254_ntt4_stage.ysu", gen_ntt4()),
+                       ("tests/bn254_g1_add.ysu", gen_g1_add())]:
         path = os.path.join(here, name)
         with open(path, "w") as f:
             f.write(text)

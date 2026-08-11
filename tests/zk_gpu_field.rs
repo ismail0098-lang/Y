@@ -97,10 +97,20 @@ fn as_bytes(v: &[u32]) -> &[u8] {
 }
 
 /// Compiles a `.ysu` of the same stem and loads `entry` onto the device.
-fn load_kernel(ctx: &CudaContext, entry: &str) -> y::cuda_runtime::KernelModule {
-    let src = repo().join(format!("tests/{}.ysu", entry));
+/// Compiling the same `.ysu` from several test threads at once races on the
+/// `.ptx` output path: one thread reads the file while another is still
+/// writing it, and the JIT rejects the torn result with "Can't load this
+/// binary kind". Compile each kernel once per process, under a lock.
+fn ptx_for(entry: &str) -> String {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(p) = guard.get(entry) {
+        return p.clone();
+    }
     let out = Command::new(bin())
-        .arg(&src)
+        .arg(repo().join(format!("tests/{}.ysu", entry)))
         .arg("--emit-ptx")
         .current_dir(repo())
         .output()
@@ -114,15 +124,21 @@ fn load_kernel(ctx: &CudaContext, entry: &str) -> y::cuda_runtime::KernelModule 
     );
     let ptx = std::fs::read_to_string(repo().join(format!("tests/{}.ptx", entry)))
         .expect("no .ptx written");
-    // A single float instruction in a field kernel means some path is still
-    // hardcoded and the limbs are being rounded.
+    guard.insert(entry.to_string(), ptx.clone());
+    ptx
+}
+
+fn load_kernel(ctx: &CudaContext, entry: &str) -> y::cuda_runtime::KernelModule {
+    let ptx = ptx_for(entry);
+    // A single float instruction in a field kernel means some path is
+    // still hardcoded and the limbs are being rounded.
     assert!(
         !ptx.contains("ld.global.f32") && !ptx.contains("add.f32"),
-        "{} is routing limbs through the float datapath",
+        "{} is routing field limbs through the float datapath",
         entry
     );
     ctx.load_ptx(&ptx, entry)
-        .unwrap_or_else(|e| panic!("{} did not load on the device: {}", entry, e))
+        .unwrap_or_else(|e| panic!("{} did not load: {}", entry, e))
 }
 
 fn read_u32(ctx: &CudaContext, buf: &y::cuda_runtime::DeviceBuffer, n: usize) -> Vec<u32> {
