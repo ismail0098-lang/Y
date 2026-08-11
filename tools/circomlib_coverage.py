@@ -155,13 +155,21 @@ def main():
         with open(p, "w") as f:
             f.write("pragma circom 2.0.0;\n" + body + "\n")
 
-        cres = None
+        cres = {}
         if have_circom:
-            c = subprocess.run(["circom", p, "--r1cs", "-o", out, "-l", lib],
-                               capture_output=True, text=True)
-            rp = os.path.join(out, f"probe_{name}.r1cs")
-            if c.returncode == 0 and os.path.exists(rp):
-                cres = r1cs_header(rp)
+            # BOTH optimisation levels. `--O1` is circom's DEFAULT (its own
+            # --help says so) and `--O2` is "full constraint simplification".
+            # Comparing only against the default flatters Y: on Poseidon-shaped
+            # circuits --O2 produces a SMALLER circuit than Y does, at roughly
+            # 2x the compile time. Quoting one number without the level is how
+            # this repo published "1.86x smaller than circom" for two days.
+            for lvl in ("--O1", "--O2"):
+                c = subprocess.run(["circom", p, "--r1cs", lvl, "-o", out, "-l", lib],
+                                   capture_output=True, text=True)
+                rp = os.path.join(out, f"probe_{name}.r1cs")
+                if c.returncode == 0 and os.path.exists(rp):
+                    cres[lvl] = r1cs_header(rp)
+                    os.remove(rp)
 
         y = subprocess.run([Y_BIN, p, "--target=r1cs", "-l", lib],
                            capture_output=True, text=True)
@@ -170,35 +178,44 @@ def main():
         err = "" if yres else first_error(y.stdout + y.stderr)
         rows.append((name, cres, yres, err))
 
-    print(f"\n{'circuit':<16}{'circom':>18}{'Y':>18}   note")
-    print("-" * 96)
+    print(f"\n{'circuit':<16}{'circom --O1':>14}{'circom --O2':>14}{'Y':>12}{'vs O1':>8}{'vs O2':>8}  note")
+    print("-" * 100)
     for name, c, yv, err in rows:
-        cs = f"{c[0]:,}c/{c[1]:,}w" if c else ("-" if not have_circom else "FAILED")
-        ys = f"{yv[0]:,}c/{yv[1]:,}w" if yv else "REFUSED"
-        if c and yv:
-            note = f"{c[0] / yv[0]:.2f}x constraints"
-        elif yv:
-            note = ""
-        else:
-            note = f"[{classify(err)}] {err[:52]}"
-        print(f"{name:<16}{cs:>18}{ys:>18}   {note}")
-    print("-" * 96)
+        o1 = c.get("--O1")
+        o2 = c.get("--O2")
+        f1 = f"{o1[0]:,}" if o1 else "-"
+        f2 = f"{o2[0]:,}" if o2 else "-"
+        ys = f"{yv[0]:,}" if yv else "REFUSED"
+        r1 = f"{o1[0] / yv[0]:.2f}x" if (o1 and yv) else ""
+        r2 = f"{o2[0] / yv[0]:.2f}x" if (o2 and yv) else ""
+        note = "" if yv else f"[{classify(err)}]"
+        print(f"{name:<16}{f1:>14}{f2:>14}{ys:>12}{r1:>8}{r2:>8}  {note}")
+    print("-" * 100)
 
-    both = [(n, c[0], y[0]) for n, c, y, _ in rows if c and y]
     n_y = sum(1 for r in rows if r[2])
-    n_c = sum(1 for r in rows if r[1])
+    n_c = sum(1 for r in rows if r[1].get("--O1"))
     print(f"coverage: Y {n_y}/{len(rows)}" + (f", circom {n_c}/{len(rows)}" if have_circom else ""))
 
-    if both:
+    for lvl in ("--O1", "--O2"):
+        # A circuit can reduce to ZERO constraints (circom --O2 does that to
+        # `Bits2Num`, which is entirely linear). Those carry no ratio - a
+        # geomean cannot take log(0) - so they are counted separately rather
+        # than dropped silently.
+        both = [(n, c[lvl][0], y[0]) for n, c, y, _ in rows
+                if c.get(lvl) and y and c[lvl][0] > 0 and y[0] > 0]
+        zeroed = [n for n, c, y, _ in rows if c.get(lvl) and y and c[lvl][0] == 0]
+        if not both:
+            continue
         ratios = [c / y for _, c, y in both]
         gm = math.exp(sum(math.log(r) for r in ratios) / len(ratios))
         wins = sum(1 for r in ratios if r > 1.05)
         ties = sum(1 for r in ratios if 0.95 <= r <= 1.05)
         loss = sum(1 for r in ratios if r < 0.95)
-        print(f"size:     geomean circom/Y {gm:.3f}x over {len(both)} circuits"
-              f"  (win {wins} / tie {ties} / loss {loss}, tie band 0.95-1.05)")
-        print(f"          totals  circom {sum(c for _, c, _ in both):,}"
-              f"  Y {sum(y for _, _, y in both):,}")
+        tag = "(circom default)" if lvl == "--O1" else "(circom best)   "
+        extra = f"  [+{len(zeroed)} reduced to 0 by circom: {', '.join(zeroed)}]" if zeroed else ""
+        print(f"size vs {lvl} {tag}: geomean {gm:.3f}x over {len(both)}"
+              f"  (win {wins} / tie {ties} / loss {loss})"
+              f"   totals circom {sum(c for _, c, _ in both):,} / Y {sum(y for _, _, y in both):,}{extra}")
 
     failed = [(n, classify(e)) for n, _, y, e in rows if not y]
     if failed:

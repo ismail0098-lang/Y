@@ -113,6 +113,48 @@ Both are the same gap: **a `var` holding a value that is not compile-time
 constant.** Note what they have in common downstream — the result reaches only a
 `<--`, never a `<==` or `===`. See [Known gaps](#known-gaps).
 
+## Against circom's `--O2`, Y loses on size
+
+**`--O1` is circom's default; `--O2` is "full constraint simplification" (its own
+`--help` says both).** Every size figure in this repo compares against the
+default. That is a legitimate comparison — it is what a user gets by typing
+`circom` — but quoting it without the level is not, because circom's best is
+better than Y's best:
+
+| across 29 circomlib circuits | geomean circom/Y | win / tie / loss | totals |
+|---|---|---|---|
+| vs `--O1` (default) | **1.04x — a tie** | 5 / 21 / 3 | circom 46,684, Y 37,512 |
+| vs `--O2` (best) | **0.69x — Y loses** | 0 / 13 / 15 | circom 25,666, Y 37,511 |
+
+circom `--O2` reduces `EscalarMulFix` to 21 constraints where Y emits 147,
+`Pedersen(8)` to 13 where Y emits 92, and `Bits2Num(64)` to **zero** — it is
+entirely linear, and full simplification substitutes the whole thing away. Y
+does not do that.
+
+**Time is the other half, and it is where Y stands up:**
+
+| circuit | circom `--O0` | circom `--O1` (default) | circom `--O2` | Y |
+|---|---|---|---|---|
+| Poseidon x400 | 0.415 s / 307,202 | 1.269 s / 206,800 | 2.875 s / 96,000 | 1.273 s / 111,208 |
+| MiMC x400 | 0.247 s / 146,802 | 1.012 s / 145,600 | 1.029 s / 145,600 | **0.383 s** / 145,601 |
+| EdDSAPoseidon | 0.253 s / 21,246 | 0.317 s / 8,086 | 0.826 s / 4,217 | **0.243 s** / 7,570 |
+
+Read across the rows:
+
+- **On Poseidon, Y is exactly at circom's default speed** and lands between the
+  two levels on size. `--O2` buys 1.16x smaller than Y for 2.26x the time.
+- **On MiMC, Y is 2.6x faster for the same circuit** — 145,601 constraints
+  against 145,600. Neither simplifier finds anything (0.8%), and circom charges
+  0.77 s for that while Y charges 0.14 s.
+- **Y's raw lowering is not the fast part.** circom `--O0` beats Y with reduction
+  off on Poseidon (0.415 s vs 0.879 s). Where Y wins, it wins because its
+  *simplification* is cheap, not because its front end is.
+
+**So the honest answer to "is it fast?" is: it is competitive, not dominant.**
+Parity with circom's default on Poseidon-shaped circuits, 1.3–2.6x on others, and
+it cannot reach `--O2`'s circuit sizes at any speed. The 154x figure is for Y's
+**own `.ysu` language**, which is a different front end and a different claim.
+
 **Poseidon specifically**, since it is what the proving measurements below use:
 
 | circuit | circom | Y | |

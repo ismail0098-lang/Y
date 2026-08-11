@@ -161,8 +161,24 @@ vendored here. Reproduce with `python3 tools/circomlib_coverage.py`:
 | | |
 |---|---|
 | compiles | **Y 29/31, circom 31/31** |
-| size, geomean circom/Y | **1.04x — a tie** (win 5 / tie 21 / loss 3) |
-| totals over the 29 | circom 46,684 constraints, Y 37,512 |
+| size vs circom `--O1` (its default) | **1.04x — a tie** (win 5 / tie 21 / loss 3) |
+| size vs circom `--O2` (its best) | **0.69x — Y loses** (win 0 / tie 13 / loss 15) |
+
+**`--O1` is circom's default and `--O2` is "full constraint simplification".**
+Every size claim in this repo is against the default — what a user gets by typing
+`circom` — and Y **cannot reach `--O2`'s circuit sizes**: it reduces
+`EscalarMulFix` to 21 constraints where Y emits 147, and `Bits2Num(64)` to zero.
+Y sits between the two levels, closer on time to `--O1`:
+
+| circuit | circom `--O1` | circom `--O2` | Y |
+|---|---|---|---|
+| Poseidon x400 | 1.269 s / 206,800 | 2.875 s / 96,000 | 1.273 s / 111,208 |
+| MiMC x400 | 1.012 s / 145,600 | 1.029 s / 145,600 | **0.383 s** / 145,601 |
+| EdDSAPoseidon | 0.317 s / 8,086 | 0.826 s / 4,217 | **0.243 s** / 7,570 |
+
+Y is at circom's default speed on Poseidon and 1.3–2.6x faster elsewhere,
+because its *simplification* is cheap — not its front end. circom `--O0` lowers
+Poseidon faster than Y does with reduction off (0.415 s vs 0.879 s).
 
 Still refused: `Sha256` and `EdDSA`. Both need the same thing — `var`s that
 hold signal-dependent values, so that a circom `function` can be evaluated at
