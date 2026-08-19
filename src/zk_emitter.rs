@@ -675,6 +675,71 @@ fn lc_u64(lc: &LinearCombination) -> Option<u64> {
     lc.is_constant()?.to_u64()
 }
 
+/// Discharge, at compile time, the range check a gadget operand must satisfy.
+///
+/// Every gadget in this emitter that treats its operands as 32-bit integers —
+/// `<`, `<=`, `>`, `>=`, `/`, `%`, `&`, `|`, `^`, `<<`, `>>` — decomposes them
+/// with `emit_num2bits`, and that decomposition *is* the range proof: an
+/// operand of 2^32 or more makes the circuit unsatisfiable, so no proof can be
+/// produced. Beside each of those gadgets sits a constant-folding fast path,
+/// and none of them performed the check. So the same source program meant two
+/// different things depending on whether the compiler could see the values:
+///
+/// ```text
+/// let v: I32 = 4;  return v >= 31 * 4294967296;   // folded to 0
+/// return p >= q;   // p = 4, q = 31 * 2^32        // unprovable
+/// ```
+///
+/// Worse for the ordering operators, whose fold used `Fr`'s full 254-bit
+/// canonical `Ord`: `0 - 1` is `p - 1` in the field, so `0 - 1 >= 0` folded to
+/// **true** on a 254-bit comparison the author never asked for, where the
+/// gadget refuses the underflowed operand. The bitwise fold was `l & r` over
+/// `u64` with no mask, so it could even return a value wider than the 32 bits
+/// the gadget can represent.
+///
+/// Found by `tests/zk_fuzz_differential.rs`, whose metamorphic oracle renders
+/// one generated program twice — once taking its inputs as parameters, once
+/// with those same inputs substituted as literals — and requires the two to
+/// agree. That oracle needs no reference implementation, so it cannot be wrong
+/// in the same direction as one.
+///
+/// A compile-time-known violation is an **error** rather than an unsatisfiable
+/// circuit. It is the same fail-closed answer, delivered where it costs the
+/// user a line number instead of a debugging session, and no program that could
+/// previously produce a proof is affected: the dynamic path already refused
+/// exactly these operands.
+fn require_gadget_range(
+    lc: &LinearCombination,
+    op_name: &str,
+    span: &Span,
+) -> Result<(), String> {
+    if let Some(v) = lc.is_constant() {
+        if v >= Fr::from_u64(1u64 << ZK_COMPARISON_BITS) {
+            return Err(format!(
+                "Circuit target error: `{}` decomposes its operands into {} bits, so the \
+                 constant operand {} is out of range and no witness could satisfy it. \
+                 Line {}",
+                op_name,
+                ZK_COMPARISON_BITS,
+                v.to_decimal_string(),
+                span.line
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Both operands of a 32-bit gadget, checked together.
+fn require_gadget_range2(
+    a: &LinearCombination,
+    b: &LinearCombination,
+    op_name: &str,
+    span: &Span,
+) -> Result<(), String> {
+    require_gadget_range(a, op_name, span)?;
+    require_gadget_range(b, op_name, span)
+}
+
 /// A cheap 64-bit mixer for hash-table bucketing.
 ///
 /// Not cryptographic, and does not need to be: every bucket hit in
@@ -733,6 +798,23 @@ fn replace_wires_in_lc(lc: &mut LinearCombination, subst: &[usize]) {
 thread_local! {
     static LINSUB_BUDGET: std::cell::Cell<Option<usize>> =
         std::cell::Cell::new(linsub_budget_from_env());
+}
+
+/// Fixpoint round cap for `optimize_circuit`.
+///
+/// Was a hardcoded 10, which the `EscalarMulFix` family hit while still
+/// removing constraints on every round: constant propagation there is a CHAIN
+/// (fixed base -> 2B -> 3B -> ... -> 8B), and each link needs its own round
+/// because the linearity test reads each constraint as stored, so a constraint
+/// that BECAME linear earlier in the same round is not noticed until the next.
+///
+/// `Y_ZK_OPT_ROUNDS` overrides it, which is how the true fixpoint was located.
+fn linsub_max_rounds() -> usize {
+    const DEFAULT: usize = 10;
+    match std::env::var("Y_ZK_OPT_ROUNDS") {
+        Ok(v) => v.trim().parse().unwrap_or(DEFAULT),
+        Err(_) => DEFAULT,
+    }
 }
 
 fn linsub_budget_from_env() -> Option<usize> {
@@ -826,6 +908,38 @@ pub fn init_compaction_from_env() {
 
 fn linsub_fill_budget() -> Option<usize> {
     LINSUB_BUDGET.with(|b| b.get())
+}
+
+/// `substitute_lc`, but returning a fresh LC and only when something changed.
+///
+/// Used to resolve a constraint through the eliminations already made in the
+/// CURRENT round before testing whether it is linear. Without it the test reads
+/// each constraint as stored, so one that became linear a moment ago is not
+/// recognised until the next round - and constant propagation through a chain
+/// then costs one round per link. `EscalarMulFix` is such a chain (fixed base
+/// -> 2B -> 3B -> ... -> 8B through `MontgomeryAdd`), needed ~100 rounds, and
+/// silently hit the safety cap at 10.
+fn resolve_lc(
+    lc: &LinearCombination,
+    sub_idx: &[u32],
+    exprs: &[LinearCombination],
+) -> Option<LinearCombination> {
+    let hit = lc
+        .terms
+        .iter()
+        .any(|(w, _)| matches!(sub_idx.get(*w), Some(&i) if i != u32::MAX));
+    if !hit {
+        return None;
+    }
+    let mut out = LinearCombination::zero();
+    for (w, coeff) in &lc.terms {
+        match sub_idx.get(*w).copied() {
+            Some(i) if i != u32::MAX => out.add_linear(&exprs[i as usize], *coeff),
+            _ => out.add_term(*w, *coeff),
+        }
+    }
+    out.simplify();
+    Some(out)
 }
 
 /// Replace each eliminated wire by its defining expression.
@@ -1109,6 +1223,28 @@ pub struct ZkEmitter {
     /// variants. Without these, gadget wires stay unsolved and the circuit
     /// cannot be proved.
     witness_recipes: HashMap<usize, WitnessOp>,
+}
+
+/// What a statement contributes to the enclosing function's return value: a
+/// PREDICATED return.
+///
+/// `flag` is 1 when this statement returned and 0 when control fell through;
+/// `value` is meaningful only where `flag` is 1. Carrying the flag is the
+/// whole point — it is the information two earlier versions of this lowering
+/// threw away, and without it an inner `if` cannot tell its enclosing block
+/// that control fell past it.
+///
+/// The flag is constant-folded whenever it is statically known, which is the
+/// common case (`return e` at the end of a function, or an `if/else` where
+/// both arms return), so ordinary circuits pay nothing for it.
+///
+/// `proofs/ZkControlFlow.v` proves this scheme agrees with the operational
+/// semantics on every program, and gives machine-checked counterexamples for
+/// the two lowerings that preceded it.
+#[derive(Clone)]
+struct Ret {
+    flag: LinearCombination,
+    value: LinearCombination,
 }
 
 fn expr_references_var(expr: &Expr, name: &str) -> bool {
@@ -1996,8 +2132,11 @@ impl ZkEmitter {
         // Lower body
         let ret_lc = self.emit_block(&f.body, items)?;
 
-        // If there is a return expression, register it as Output wire
-        if let Some(lc) = ret_lc {
+        // If there is a return expression, register it as Output wire.
+        // Only the VALUE is bound; a function whose flag is not the constant 1
+        // can fall off its end, which the pre-existing convention leaves
+        // unconstrained rather than rejecting.
+        if let Some(lc) = ret_lc.map(|r| r.value) {
             let out_wire = self.new_wire("out_ret");
             self.outputs.push(out_wire);
             // Constrain out_wire = lc
@@ -2023,19 +2162,122 @@ impl ZkEmitter {
         Ok(())
     }
 
-    fn emit_block(&mut self, block: &Block, items: &[Item]) -> Result<Option<LinearCombination>, String> {
+    fn emit_block(&mut self, block: &Block, items: &[Item]) -> Result<Option<Ret>, String> {
         self.enter_scope();
-        let mut last_ret = None;
-        for stmt in &block.stmts {
-            if let Some(ret) = self.emit_stmt(stmt, items)? {
-                last_ret = Some(ret);
-            }
-        }
+        let r = self.emit_stmts(&block.stmts, items);
         self.exit_scope();
-        Ok(last_ret)
+        r
     }
 
-    fn emit_stmt(&mut self, stmt: &Stmt, items: &[Item]) -> Result<Option<LinearCombination>, String> {
+    /// Emit a statement sequence as a PREDICATED return.
+    ///
+    /// `Ok(None)` means the sequence can never return; otherwise the `Ret`
+    /// carries a flag saying whether it did and the value it returned. This is
+    /// `low` in `proofs/ZkControlFlow.v`, whose `low_correct` proves it agrees
+    /// with the operational semantics for every program and environment.
+    ///
+    /// Two earlier versions are refuted there by machine-checked
+    /// counterexamples, and both shipped:
+    ///
+    /// - Recording the LAST return rather than stopping at the first, so
+    ///   `return 1; return 2;` computed 2 and `if c { return x; } return y;`
+    ///   computed `y` unconditionally. Z3 proved the emitted circuit for the
+    ///   latter was the constant 0.
+    /// - Stopping at the first return and multiplexing a one-sided return
+    ///   against the tail. Right for a flat block — which is the case anyone
+    ///   would test — and wrong as soon as the `if` is NESTED, because the
+    ///   inner `if` reported the zero its own empty tail supplied instead of
+    ///   telling the outer block that control fell through.
+    fn emit_stmts(&mut self, stmts: &[Stmt], items: &[Item]) -> Result<Option<Ret>, String> {
+        let mut acc: Option<Ret> = None;
+        for stmt in stmts {
+            // Once the accumulated flag is the constant 1 the function has
+            // definitely returned and the rest is unreachable. Emitting it
+            // would be sound but wasteful, and it is what makes `return e` at
+            // the end of a function cost nothing extra.
+            if let Some(r) = &acc {
+                if r.flag.is_constant().map_or(false, |c| c == Fr::one()) {
+                    break;
+                }
+            }
+            let here = self.emit_stmt(stmt, items)?;
+            acc = match (acc, here) {
+                (None, h) => h,
+                // The statement can never return, so it cannot change either
+                // component where the flag is 1. (The literal model would give
+                // `mux(fa, va, 0)` for the value; it differs from `va` only
+                // where the flag is 0, i.e. where the value is meaningless.)
+                (Some(a), None) => Some(a),
+                (Some(a), Some(b)) => Some(self.seq_ret(a, b, stmt.span())),
+            };
+        }
+        Ok(acc)
+    }
+
+    /// Sequence two predicated returns: `flag = fa + (1 - fa) * fb`, and
+    /// `value = mux(fa, va, vb)`.
+    fn seq_ret(&mut self, a: Ret, b: Ret, span: Span) -> Ret {
+        if let Some(c) = a.flag.is_constant() {
+            if c == Fr::one() {
+                return a; // `a` always returns; `b` is unreachable
+            }
+            if c.is_zero() {
+                return b; // `a` never returns; `b` decides
+            }
+        }
+        let minus_one = Fr::from_u64(0).sub(&Fr::one());
+        let mut not_a = LinearCombination::constant(Fr::one());
+        not_a.add_linear(&a.flag, minus_one);
+        let prod = self.emit_mul_lc(&not_a, &b.flag, "ret_flag");
+        let mut flag = a.flag.clone();
+        flag.add_linear(&prod, Fr::one());
+        flag.simplify();
+        let value = self.emit_mux(&a.flag, &a.value, &b.value, span);
+        Ret { flag, value }
+    }
+
+    /// `cond ? a : b`, as the single constraint `cond * (a - b) = out - b`.
+    ///
+    /// Correct only for `cond` in {0, 1}; `Stmt::If` constrains its condition
+    /// to be a bit, and the flags built here are bits by construction.
+    fn emit_mux(
+        &mut self,
+        cond: &LinearCombination,
+        a: &LinearCombination,
+        b: &LinearCombination,
+        span: Span,
+    ) -> LinearCombination {
+        if let Some(c) = cond.is_constant() {
+            if c == Fr::one() {
+                return a.clone();
+            }
+            if c.is_zero() {
+                return b.clone();
+            }
+        }
+        let minus_one = Fr::from_u64(0).sub(&Fr::one());
+        // Both arms identical: no selector needed.
+        let mut diff = a.clone();
+        diff.add_linear(b, minus_one.clone());
+        diff.simplify();
+        if diff.is_constant().map_or(false, |c| c.is_zero()) {
+            return a.clone();
+        }
+
+        let wire = self.new_wire("ret_mux");
+        let out = LinearCombination::variable(wire);
+        let mut c_term = out.clone();
+        c_term.add_linear(b, minus_one);
+        self.constraints.push(Constraint {
+            a: cond.clone(),
+            b: diff,
+            c: c_term,
+            span: Some(span),
+        });
+        out
+    }
+
+    fn emit_stmt(&mut self, stmt: &Stmt, items: &[Item]) -> Result<Option<Ret>, String> {
         match stmt {
             Stmt::Let { name, init, bounds, .. } => {
                 let lc = if let Some(expr) = init {
@@ -2259,6 +2501,12 @@ impl ZkEmitter {
                 };
 
                 let mut current = start_const;
+                // A `return` inside the body is a conditional return like any
+                // other: the loop is fully unrolled, so the iterations are just
+                // a statement sequence and the same predicated fold applies.
+                // Discarding this is how `for i in 0..4 { if c { return 1; } }
+                // return 9;` emitted the constant 9.
+                let mut loop_ret: Option<Ret> = None;
 
                 let mut unroll_count: usize = 0;
                 // Soft guard against a typo'd bound turning into an OOM, NOT a
@@ -2289,13 +2537,25 @@ impl ZkEmitter {
                     self.bind(loop_var, WireBinding::Linear(LinearCombination::constant(current.clone())));
 
                     // Inline loop body
-                    for body_stmt in &body.stmts {
-                        self.emit_stmt(body_stmt, items)?;
-                    }
+                    let body_ret = self.emit_stmts(&body.stmts, items)?;
+                    loop_ret = match (loop_ret, body_ret) {
+                        (None, h) => h,
+                        (Some(a), None) => Some(a),
+                        (Some(a), Some(b)) => Some(self.seq_ret(a, b, span.clone())),
+                    };
 
                     self.exit_scope();
                     current = current.add(&step_val);
+
+                    // An unconditional return in the body makes every later
+                    // iteration unreachable.
+                    if let Some(r) = &loop_ret {
+                        if r.flag.is_constant().map_or(false, |c| c == Fr::one()) {
+                            break;
+                        }
+                    }
                 }
+                return Ok(loop_ret);
             }
             Stmt::If {
                 condition,
@@ -2316,6 +2576,25 @@ impl ZkEmitter {
                     }
                 } else {
                     // Dynamic conditional execution: both branches must be evaluated and output wires merged using selectors
+
+                    // The merge below is `cond * (then - else) = out - else`,
+                    // which selects a branch ONLY when `cond` is 0 or 1. For
+                    // any other value it linearly interpolates: `if a { 5 }
+                    // else { 9 }` emitted `9 - 4a`, so `a = 2` gave 1 and
+                    // `a = 3` gave a value no branch ever produces. Nothing
+                    // constrained it, so the circuit was quietly not a branch.
+                    //
+                    // A comparison already yields a booleanity-constrained bit,
+                    // so this is free there. Where the condition is a raw
+                    // integer it makes the circuit UNSATISFIABLE rather than
+                    // wrong, which is the same fail-closed choice the
+                    // comparison gadget's range checks make.
+                    self.constraints.push(Constraint {
+                        a: cond_lc.clone(),
+                        b: cond_lc.clone(),
+                        c: cond_lc.clone(),
+                        span: Some(span.clone()),
+                    });
                     
                     // 1. Clone the current scopes and const_bindings for branch isolation
                     let mut then_scopes = self.scopes.clone();
@@ -2408,35 +2687,31 @@ impl ZkEmitter {
                         }
                     }
 
-                    // Return values multiplexing
+                    // Return multiplexing, on BOTH components.
+                    //
+                    // Multiplexing only the value is what made the two earlier
+                    // lowerings wrong: a branch that does not return has no
+                    // value to select, and substituting zero for it is only
+                    // right by coincidence. The flag says which branch
+                    // returned, and `emit_stmts` uses it to decide whether the
+                    // statements after this `if` are reachable.
                     if then_ret.is_some() || else_ret.is_some() {
-                        let tr = then_ret.unwrap_or_else(LinearCombination::zero);
-                        let er = else_ret.unwrap_or_else(LinearCombination::zero);
-
-                        let merged_ret_wire = self.new_wire("ret_mux");
-                        let merged_ret_lc = LinearCombination::variable(merged_ret_wire);
-
-                        let mut b_term = tr;
-                        b_term.add_linear(&er, Fr::from_u64(0).sub(&Fr::one()));
-
-                        let mut c_term = merged_ret_lc.clone();
-                        c_term.add_linear(&er, Fr::from_u64(0).sub(&Fr::one()));
-
-                        self.constraints.push(Constraint {
-                            a: cond_lc,
-                            b: b_term,
-                            c: c_term,
-                            span: Some(span.clone()),
-                        });
-
-                        return Ok(Some(merged_ret_lc));
+                        let zero = Ret {
+                            flag: LinearCombination::zero(),
+                            value: LinearCombination::zero(),
+                        };
+                        let tr = then_ret.unwrap_or_else(|| zero.clone());
+                        let er = else_ret.unwrap_or(zero);
+                        let flag = self.emit_mux(&cond_lc, &tr.flag, &er.flag, span.clone());
+                        let value = self.emit_mux(&cond_lc, &tr.value, &er.value, span.clone());
+                        return Ok(Some(Ret { flag, value }));
                     }
                 }
             }
             Stmt::Return(expr_opt, _span) => {
                 if let Some(expr) = expr_opt {
                     let lc = self.emit_expr(expr, items)?;
-                    return Ok(Some(lc));
+                    return Ok(Some(Ret { flag: LinearCombination::constant(Fr::one()), value: lc }));
                 }
             }
             Stmt::Expr(expr) => {
@@ -2576,7 +2851,64 @@ impl ZkEmitter {
             Stmt::Match { span, .. } => {
                 return Err(format!("Circuit target error: Pattern matching is currently not supported in ZK circuits. Line {}", span.line));
             }
-            _ => {}
+            // `x += 5;` used to fall into a `_ => {}` arm below and emit
+            // NOTHING. The circuit compiled clean, was satisfiable, and
+            // computed `out = a` for `let x = a; x += 5; return x;` - a
+            // different function from the one in the source, which Groth16
+            // proves as readily as the right one. It is the design rule's
+            // exact shape, in the backend where it costs the most.
+            //
+            // Desugared rather than reimplemented: `x op= e` IS `x = x op e`,
+            // and `Stmt::Assign` already carries the `target = target + expr`
+            // fast path that keeps a running sum in one linear combination
+            // instead of allocating a wire per step.
+            Stmt::CompoundAssign { target, op, value, span } => {
+                let desugared = Stmt::Assign {
+                    target: target.clone(),
+                    value: Expr::BinaryOp {
+                        left: Box::new(target.clone()),
+                        op: op.clone(),
+                        right: Box::new(value.clone()),
+                        span: span.clone(),
+                    },
+                    span: span.clone(),
+                };
+                return self.emit_stmt(&desugared, items);
+            }
+            // Ordinary blocks in every other backend - `ptx_emitter`,
+            // `llvm_emitter` and `cpu_emitter` all lower them by emitting the
+            // body - and dropped entirely here, so `@ghost { x = x + 5; }`
+            // also emitted a circuit computing `out = a`. `@safe` is a
+            // front-end obligation and `@ghost` is speculative; neither says
+            // the statements inside do not happen.
+            Stmt::SafeBlock(block, _) | Stmt::GhostBlock(block, _) => {
+                return self.emit_block(block, items);
+            }
+            // A `chisel` block is raw register and memory-bus access and a
+            // `@clock_domain` is an HDL construct. Neither has any meaning as
+            // a constraint, and there is no honest lowering - so refuse by
+            // name rather than emit a circuit that quietly omits them.
+            Stmt::Chisel(_, span) => {
+                return Err(format!(
+                    "Circuit target error: a `chisel` block is direct hardware access and has no \
+                     R1CS form. Line {}",
+                    span.line
+                ));
+            }
+            Stmt::ClockDomainBlock { span, .. } => {
+                return Err(format!(
+                    "Circuit target error: `@clock_domain` is an HDL construct and has no R1CS \
+                     form. Line {}",
+                    span.line
+                ));
+            }
+            // These two genuinely emit nothing, and the reason is stated so
+            // the next reader does not have to decide it again. A type alias
+            // is erased before any backend sees it, and
+            // `compile_time::assert!` is discharged by the type checker - it
+            // is zero-cost by definition, so a constraint for it would be
+            // wrong, not merely wasteful.
+            Stmt::TypeAlias { .. } | Stmt::CompileTimeAssert { .. } => {}
         }
         Ok(None)
     }
@@ -2650,6 +2982,7 @@ impl ZkEmitter {
                         // a way that still produces a valid proof. It also has
                         // to match `%`: with field division,
                         // `(a/b)*b + a%b == a` fails.
+                        require_gadget_range2(&left_lc, &right_lc, "/", span)?;
                         if let (Some(l), Some(r)) = (lc_u64(&left_lc), lc_u64(&right_lc)) {
                             if r == 0 {
                                 return Err(format!(
@@ -2728,6 +3061,11 @@ impl ZkEmitter {
                         Ok(res)
                     }
                     BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                        // The operands are range-checked whether or not they
+                        // fold - see `require_gadget_range`. Without this the
+                        // fold answered a 254-bit `Fr` ordering question while
+                        // the gadget beside it refused the same operands.
+                        require_gadget_range2(&left_lc, &right_lc, &format!("{:?}", op), span)?;
                         if let (Some(lc), Some(rc)) = (left_lc.is_constant(), right_lc.is_constant()) {
                             let is_true = match op {
                                 BinaryOp::Lt => lc < rc,
@@ -2776,6 +3114,7 @@ impl ZkEmitter {
                         }
                     }
                     BinaryOp::Mod => {
+                        require_gadget_range2(&left_lc, &right_lc, "%", span)?;
                         if let (Some(l), Some(r)) = (lc_u64(&left_lc), lc_u64(&right_lc)) {
                             if r == 0 {
                                 return Err(format!(
@@ -2790,6 +3129,7 @@ impl ZkEmitter {
                         Ok(rem)
                     }
                     BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                        require_gadget_range2(&left_lc, &right_lc, &format!("{:?}", op), span)?;
                         if let (Some(l), Some(r)) = (lc_u64(&left_lc), lc_u64(&right_lc)) {
                             let v = match op {
                                 BinaryOp::BitAnd => l & r,
@@ -2813,6 +3153,11 @@ impl ZkEmitter {
                             )
                         })?;
                         let left = matches!(op, BinaryOp::Shl);
+                        // Only the shifted VALUE is range-checked. A shift
+                        // amount of 32 or more is not out of range, it is
+                        // "everything shifted out", which `emit_shift` and the
+                        // fold below both answer as 0.
+                        require_gadget_range(&left_lc, &format!("{:?}", op), span)?;
                         if let Some(l) = lc_u64(&left_lc) {
                             let n = ZK_COMPARISON_BITS as u64;
                             let mask = (1u64 << n) - 1;
@@ -2908,7 +3253,9 @@ impl ZkEmitter {
                 self.active_calls.pop();
                 self.exit_scope();
 
-                ret_lc.ok_or_else(|| format!("Function {} did not return a value in circuit context. Line {}", func_name, span.line))
+                ret_lc
+                    .map(|r| r.value)
+                    .ok_or_else(|| format!("Function {} did not return a value in circuit context. Line {}", func_name, span.line))
             }
             Expr::Index { base, index, span } => {
                 // Validate circuit restrictions: No dynamic pointer arithmetic / dynamic indexing
@@ -3205,7 +3552,7 @@ impl ZkEmitter {
                 break;
             }
             iteration += 1;
-            if iteration > 10 {
+            if iteration > linsub_max_rounds() {
                 break; // Safety limit
             }
         }
@@ -3486,6 +3833,12 @@ const NONE: u32 = u32::MAX;
         let mut sub_idx: Vec<u32> = vec![NONE; self.next_var_id];
         let mut exprs: Vec<LinearCombination> = Vec::new();
         let mut eliminated: Vec<usize> = Vec::new();
+        // `(intermediate, boundary)` pairs collapsed by the pure-copy rename
+        // above. The boundary wire must inherit the intermediate's witness
+        // recipe: the constraint that used to define it is being deleted, and
+        // `build_witness_ir`'s scan derives a wire's value from the constraint
+        // whose `C` is that wire alone.
+        let mut copy_renames: Vec<(usize, usize)> = Vec::new();
         // Which expressions read each wire, so that eliminating a wire an
         // earlier expression depends on can be pushed back into it immediately.
         //
@@ -3506,40 +3859,154 @@ const NONE: u32 = u32::MAX;
 
 for i in 0..self.constraints.len() {
             let c = &self.constraints[i];
-            if c.c.terms.len() != 1 {
-                continue;
-            }
-            let (w, coeff_w) = (c.c.terms[0].0, c.c.terms[0].1);
-            if w == 0 || w >= sub_idx.len() || sub_idx[w] != NONE {
-                continue;
-            }
+            // Resolve through this round's eliminations FIRST - see `resolve_lc`.
+            let ra = resolve_lc(&c.a, &sub_idx, &exprs);
+            let rb = resolve_lc(&c.b, &sub_idx, &exprs);
+            let rc = resolve_lc(&c.c, &sub_idx, &exprs);
+            let a_ref = ra.as_ref().unwrap_or(&c.a);
+            let b_ref = rb.as_ref().unwrap_or(&c.b);
+            let c_ref = rc.as_ref().unwrap_or(&c.c);
 
-            // `A * B` must be linear, i.e. one side is a bare constant. Tested
-            // before the two set lookups because it is a couple of array reads
-            // against a hash, and on a circuit built from `a * b` products it
-            // rejects almost everything.
-            let (k, lin) = if let Some(k) = c.a.is_constant() {
-                (k, &c.b)
-            } else if let Some(k) = c.b.is_constant() {
-                (k, &c.a)
+            // `A * B` must be linear, i.e. one side is a bare constant. On a
+            // circuit built from `a * b` products this rejects almost
+            // everything, and `is_constant` stops at the first variable term.
+            let (k, lin) = if let Some(k) = a_ref.is_constant() {
+                (k, b_ref)
+            } else if let Some(k) = b_ref.is_constant() {
+                (k, a_ref)
             } else {
                 continue;
             };
-            if boundary.contains(&w) || opaque.contains(&w) {
-                continue;
-            }
             if k.is_zero() {
-                // `0 = c_w * w` pins `w` to zero; that is a definition, but the
-                // dedicated `Const` recipe path below expects a real expression
-                // and this shape is rare enough not to special-case.
+                // `0 = C` says nothing about any single wire.
                 continue;
             }
-            // The pivot must not appear on the product side as well - then the
-            // constraint does not define it in the shape the witness scan reads,
-            // and the coefficient arithmetic below would be wrong.
-            if lin.terms.iter().any(|(t, _)| *t == w) {
-                continue;
-            }
+
+            let eligible = |t: usize| {
+                t != 0
+                    && t < sub_idx.len()
+                    && sub_idx[t] == NONE
+                    && !boundary.contains(&t)
+                    && !opaque.contains(&t)
+            };
+
+            // Which wire does this constraint define, and by what expression?
+            //
+            // Shape A is `k * lin = c_w * w`: the `<==` that circom emits for
+            // every assignment, and the only shape this pass used to accept.
+            //
+            // Shape B is `k * lin = c0` with `c0` a constant, which PINS any
+            // one wire of `lin` to a constant. Skipping it left Y at circom's
+            // `--O1` on the whole `EscalarMulFix` family, because that shape is
+            // the *seed* of constant propagation and without it the cascade
+            // never starts: circomlib passes a fixed base point in as a signal,
+            // `MontgomeryDouble`/`MontgomeryAdd` compute its multiples with
+            // `<--` (which is witness-domain and so opaque to constant folding),
+            // and the `===` that pins each one back down is exactly this shape.
+            // Pin the first and every later stage becomes constant in turn, which
+            // is how `--O2` reaches 21 constraints where Y emitted 147.
+            //
+            // Pivoting away from `C` is only safe because `C` here names no wire
+            // at all. `build_witness_ir` derives a wire's value from the
+            // constraint whose `C` is that wire ALONE, so deleting a constraint
+            // can orphan the wire its `C` names - which is why shape A must
+            // still pivot on `C`'s own term and never on one from `lin`.
+            let (w, expr) = if c_ref.terms.len() != 1 || c_ref.terms[0].0 == 0 {
+                // The constraint is one linear EQUATION, `k*lin - C = 0`, and
+                // any eligible wire in it is defined by the rest. Building `E`
+                // costs an allocation, which is why shape A keeps its own path:
+                // it is the overwhelmingly common one and needs no equation.
+                let mut e = LinearCombination::zero();
+                for (t, tc) in &lin.terms {
+                    e.add_term(*t, tc.mul(&k));
+                }
+                let neg_one = Fr::zero().sub(&Fr::one());
+                for (t, tc) in &c_ref.terms {
+                    e.add_term(*t, tc.mul(&neg_one));
+                }
+                e.simplify();
+                let Some(&(w, e_w)) = e.terms.iter().find(|(t, _)| eligible(*t)) else {
+                    continue;
+                };
+                // e_w*w + rest = 0  =>  w = -rest/e_w
+                let neg_inv = Fr::zero().sub(&e_w.inv());
+                let mut expr = LinearCombination::zero();
+                for (t, tc) in &e.terms {
+                    if *t == w {
+                        continue;
+                    }
+                    let c2 = tc.mul(&neg_inv);
+                    match sub_idx.get(*t).copied() {
+                        Some(idx) if idx != NONE => expr.add_linear(&exprs[idx as usize], c2),
+                        _ => expr.add_term(*t, c2),
+                    }
+                }
+                expr.simplify();
+                // **The pivot's expression must be a CONSTANT here.**
+                //
+                // Shape A's expression is the wire's genuine definition, so it
+                // is topologically earlier and substituting it into the witness
+                // recipes that read the wire is safe. This shape carries no such
+                // guarantee: the equation is just an equation, and the wire it
+                // is used to define may be one the recipes derive their own
+                // values FROM. `Num2Bits` is exactly that - `1*(sum 2^i b_i -
+                // in) = 0` would define `in` as the sum of the bits, and every
+                // bit's `BitOfLc` recipe decomposes `in`, so the recipes end up
+                // reading a value computed from themselves. The circuit stayed
+                // satisfiable and no witness could be found.
+                //
+                // A constant expression references no wire, so it cannot close
+                // a cycle - and constant propagation is the whole point of this
+                // shape, so the restriction costs nothing it was added for.
+                if expr.is_constant().is_none() {
+                    continue;
+                }
+                (w, expr)
+            } else {
+                let (w, coeff_w) = (c_ref.terms[0].0, c_ref.terms[0].1);
+                if !eligible(w) {
+                    // `C`'s wire is on the boundary, so it cannot be
+                    // eliminated - but a pure COPY `u * 1 = v` can still be
+                    // collapsed by renaming `u` to `v` instead. Every component
+                    // output in circom is such a copy (`out[i] <== bits[i]`),
+                    // and `Point2Bits_Strict` alone carries 255 of them: it has
+                    // 256 outputs, each a rename of an internal bit.
+                    //
+                    // This is the one reduction here that is free in BOTH
+                    // directions. The expression is a bare wire, so fill-in is
+                    // exactly zero and the matrix gets SPARSER - unlike raising
+                    // the fill-in budget, which buys fewer constraints at 3.4x
+                    // the non-zero terms and measures 1.60x slower to prove.
+                    //
+                    // Restricted to all-ones coefficients so the rename is
+                    // exact: `v` inherits `u`'s witness recipe unscaled (see
+                    // `copy_renames`), and a scale factor would have to be
+                    // pushed into that recipe.
+                    let one_c = Fr::one();
+                    if k != one_c || coeff_w != one_c {
+                        continue;
+                    }
+                    // A CONSTANT term disqualifies it: `u + 5 = v` is not a
+                    // rename, it is `u = v - 5`, and treating it as one drops
+                    // the offset silently. Caught by the generative fuzzer -
+                    // `return 1 + ((v0 > 1) == p0)` came out one too small -
+                    // which is exactly the class of bug it exists for.
+                    if lin.terms.len() != 1 {
+                        continue;
+                    }
+                    let (u, cu) = lin.terms[0];
+                    if u == 0 || cu != one_c || !eligible(u) {
+                        continue;
+                    }
+                    copy_renames.push((u, w));
+                    (u, LinearCombination::variable(w))
+                } else {
+                // The pivot must not appear on the product side as well - then
+                // the constraint does not define it in the shape the witness
+                // scan reads, and the coefficient arithmetic would be wrong.
+                if lin.terms.iter().any(|(t, _)| *t == w) {
+                    continue;
+                }
 
             // w = k * lin / coeff_w, with any wire eliminated earlier in this
             // round already resolved so the expression never dangles.
@@ -3550,18 +4017,21 @@ for i in 0..self.constraints.len() {
             // 200-hash chain, for a coefficient that a `<==` always leaves as
             // exactly 1. The identity checks below are not micro-optimisation,
             // they are the difference between the pass paying for itself and not.
-            let one = Fr::one();
-            let scale = if coeff_w == one { k } else { k.mul(&coeff_w.inv()) };
-            let unit = scale == one;
-            let mut expr = LinearCombination::zero();
-            for (t, tc) in &lin.terms {
-                let c2 = if unit { *tc } else { tc.mul(&scale) };
-                match sub_idx.get(*t).copied() {
-                    Some(idx) if idx != NONE => expr.add_linear(&exprs[idx as usize], c2),
-                    _ => expr.add_term(*t, c2),
+                let one = Fr::one();
+                let scale = if coeff_w == one { k } else { k.mul(&coeff_w.inv()) };
+                let unit = scale == one;
+                let mut expr = LinearCombination::zero();
+                for (t, tc) in &lin.terms {
+                    let c2 = if unit { *tc } else { tc.mul(&scale) };
+                    match sub_idx.get(*t).copied() {
+                        Some(idx) if idx != NONE => expr.add_linear(&exprs[idx as usize], c2),
+                        _ => expr.add_term(*t, c2),
+                    }
                 }
-            }
-            expr.simplify();
+                expr.simplify();
+                (w, expr)
+                }
+            };
             // Load-bearing, not defensive. `w2 * 1 = w1` followed by
             // `w1 * 1 = w2` states the same equality twice; having eliminated
             // `w1` as `w2`, resolving the second constraint yields `w2 = w2`.
@@ -3654,6 +4124,21 @@ for c in &mut self.constraints {
         // below - and on circom input that is most of them, since every `<==`
         // leaves a recipe behind and this pass exists to eliminate exactly those
         // wires.
+// A renamed intermediate hands its recipe to the boundary wire it was
+        // collapsed into, BEFORE the substitution below and before the
+        // eliminated wires' own recipes are overwritten. Without this the
+        // boundary wire has neither a defining constraint (just deleted) nor a
+        // recipe (it was the intermediate's), and the witness solve fails with
+        // the circuit still perfectly satisfiable.
+        for (u, v) in &copy_renames {
+            if self.witness_recipes.contains_key(v) {
+                continue;
+            }
+            if let Some(op) = self.witness_recipes.get(u).cloned() {
+                self.witness_recipes.insert(*v, op);
+            }
+        }
+
 for (wire, op) in self.witness_recipes.iter_mut() {
             if sub_idx.get(*wire).copied().unwrap_or(NONE) != NONE {
                 continue;
