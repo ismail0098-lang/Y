@@ -176,6 +176,56 @@ none of them was consulted by the code that needed it.
 
 ---
 
+## Finding 06 — the bridge that proves "the demo's numbers are the kernel's" was comparing the kernel to itself
+
+`tools/ptx_bridge.py` is the artifact behind the claim above: it loads the
+compiler's own PTX through the CUDA driver, runs it on real post-RoPE Qwen
+activations, and reports **12/12 bit-identical** against the torch path. The
+number is true and it was not evidence.
+
+* **The temperature was 65536x too small.** The kernel takes `KFix` and forms
+  the exp's Q16.16 argument as `t = ((m - s) * KFix + 2^15) >> 16`, so one
+  factor of `2^16` is consumed by the shift and `KFix` must be `C * 2^32`,
+  where `C = q_scale * k_scale * softmax_scale * log2(e)`. The torch demo has
+  no shift — it builds the Q16.16 logit directly — so *its* multiplier is
+  `C * 2^16`. Two conventions, one variable name. The bridge computed the
+  demo's and handed it to the kernel.
+* **The consequence is not a small numeric error, it is a different function.**
+  At Qwen's per-tensor scales that puts every exponent `t >> 16` below 0.014,
+  so every softmax weight lands within 1% of `2^28`: attention with **uniform
+  weights**. A computation with no temperature in it at all.
+* **The differential could not see it, by construction.** Both arms replicate
+  the kernel's formula — which is the right design, because `KFix` is a rounded
+  integer and only a replica can be compared bit for bit — so they agree
+  perfectly on the uniform answer too. The check would have passed with the
+  temperature deleted from the kernel. This is the failure the repo already has
+  a name for: *two wrong things agreeing*.
+* **What was missing was a control, and it costs one line.** `max(p)/mean(p)`
+  is exactly 1.0 for a uniform weight vector; the bridge now tracks it and
+  fails below 2.0. Every other claim in this document has such a control — the
+  f32 baseline's error must be non-zero, the divergence probe must actually
+  diverge — and this one did not.
+* **Two CPU-side tests pin the convention** so it cannot drift again unseen:
+  one asserts the kernel's integer path reproduces the demo's Q16.16 argument
+  (with the tolerance the rounded `KFix` forces, `1 + ds/2^17`) and that the
+  demo's own multiplier does *not*; the other asserts the emitted PTX still has
+  the multiply-and-shift shape, and that the saturate precedes the narrowing.
+  Both are mutation-verified. `tests/attention_quantization_error.rs` now also
+  ties its three private constants — the Q0.28 width, the temperature and the
+  sequence bound — to the ones the compiler actually emits, instead of
+  transcribing them.
+
+**The bridge has not been re-run: that needs the GPU.** The fix is arithmetic
+and the arithmetic is checked on the CPU, but the 12/12 line above should be
+read as unverified until it runs again with a non-uniform softmax underneath
+it.
+
+Finding 05's lesson generalises: a number in a comment is not a check, and a
+**differential whose two arms share a constant is not a check of that
+constant.**
+
+---
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
