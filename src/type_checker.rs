@@ -1496,11 +1496,26 @@ impl TypeChecker {
             Stmt::Match {
                 scrutinee, arms, ..
             } => {
+                // The scrutinee runs whatever the arms do, so it is evaluated
+                // outside the conditional.
                 self.check_expr(scrutinee);
+                // A `match` IS a branch, and the linear tracker was never told.
+                // `if n { pipe.wait(t); }` was rejected as an await on one path
+                // out of two, and `match n { _ => pipe.wait(t) }` - the same
+                // program - compiled clean, because only `Stmt::If`,
+                // `Stmt::For` and `Stmt::While` raised the depth. Same shape as
+                // the `takes_reference` gap: a guard is only as good as the
+                // list of sites that consult it.
+                //
+                // A single irrefutable arm is not really conditional, and this
+                // over-approximates it. That is the safe direction and it is
+                // free here: nothing in the kernel corpus matches on anything.
+                self.linear_tracker.enter_conditional();
                 for arm in arms {
                     let arm_ty = self.check_expr(&arm.body);
                     self.reject_transfer_escape(&arm_ty, &arm.span, "as a match arm result");
                 }
+                self.linear_tracker.exit_conditional();
             }
             Stmt::CompoundAssign { target, value, .. } => {
                 let lhs = self.check_expr(target);

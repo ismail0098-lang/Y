@@ -223,3 +223,64 @@ fn copy_and_await_within_the_same_branch_compiles() {
         "on the paths where the copy happens, the await happens too",
     );
 }
+
+// ── `match` is a branch, and the tracker was never told ─────────────────
+//
+// The conditional-depth fix wired `Stmt::If`, `Stmt::For` and `Stmt::While`
+// into the tracker and stopped there. `Stmt::Match` is a branch too, so
+//
+//     if N { pipe.wait(tok); }            -> rejected
+//     match N { _ => pipe.wait(tok) }     -> "Compilation Successful!"
+//
+// were the same program with two different answers. That is the same shape as
+// the `takes_reference` gap in `@safe` invariants: the guard was right and the
+// list of sites that consult it was short.
+
+/// The same missing-await race as `conditionally_awaited_transfer_is_rejected`,
+/// written with a `match` instead of an `if`.
+#[test]
+fn an_await_inside_a_match_arm_is_rejected() {
+    assert_rejected(
+        "lt_match_await",
+        "    let tok: AsyncToken = cp_async(A, B, 16);\n    match N {\n        _ => pipe.wait(tok)\n    }",
+        "the await runs only on the paths that reach that arm",
+    );
+}
+
+/// Two arms, one await each: the copy is consumed once per path, but the
+/// tracker cannot know the arms are exclusive, and over-approximating here is
+/// the safe direction.
+///
+/// Mutation-verified as a CONFIRMATION, not as a guard on the depth fix -
+/// deleting `enter_conditional` for `match` leaves this green, because two
+/// `pipe.wait(tok)` in one walk are already a double consume whatever their
+/// depth. `an_await_inside_a_match_arm_is_rejected` above is the case that
+/// pins the fix; only it fails under that mutation.
+#[test]
+fn an_await_in_every_match_arm_is_still_rejected() {
+    assert_rejected(
+        "lt_match_both_arms",
+        "    let tok: AsyncToken = cp_async(A, B, 16);\n    match N {\n        0 => pipe.wait(tok),\n        _ => pipe.wait(tok)\n    }",
+        "the tracker does not reason about arm exhaustiveness, and a second \
+         await of a retired group is exactly what it exists to catch",
+    );
+}
+
+/// The control. It is not the same shape as the `if` and loop controls above,
+/// and the reason is worth recording: a match arm's body is a single `Expr` -
+/// the parser builds no `Expr::BlockExpr` - so "copy and await inside the same
+/// arm" is not a program that can be written. There is nothing for the
+/// over-approximation to ban inside an arm.
+///
+/// What it could still break is everything around the arm, so that is what
+/// this checks: a correct copy-and-await at depth 0, with an ordinary `match`
+/// beside it, must still compile. Without it, "reject every kernel containing
+/// a `match`" would satisfy both cases above.
+#[test]
+fn a_match_beside_a_correct_transfer_still_compiles() {
+    assert_accepted(
+        "lt_ok_match",
+        "    let tok: AsyncToken = cp_async(A, B, 16);\n    pipe.wait(tok);\n    match N {\n        _ => N\n    }",
+        "the await is unconditional; the `match` shares no token with it",
+    );
+}
