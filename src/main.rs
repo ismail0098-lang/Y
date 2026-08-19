@@ -491,11 +491,52 @@ fn load_or_measure_drift_costs(gpu_name: &str) -> zero_drift::CostTable {
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    // `--emit-attention-ptx <head_dim> <seq_len>`
+    //
+    // Advertised by `src/exact_attention.rs`'s module header ("the
+    // `--emit-attention-ptx` CLI ... all take the same string") and invoked by
+    // `tools/ptx_bridge.py`, and implemented nowhere: the flag fell through to
+    // the ordinary source-file path, which read `64` as `64.ysu` and reported a
+    // missing file. The bridge's `check=True` saw the non-zero exit, so the
+    // failure was loud rather than silent - but the surface two files documented
+    // did not exist.
+    //
+    // Handled before the banner: stdout is piped straight into
+    // `cuModuleLoadData`, so a line of ASCII art on it is a driver parse error
+    // rather than a diagnostic.
+    if let Some(pos) = args.iter().position(|a| a == "--emit-attention-ptx") {
+        let parse = |i: usize, what: &str| -> usize {
+            match args.get(i).and_then(|v| v.parse::<usize>().ok()) {
+                Some(v) => v,
+                None => {
+                    log_error!(
+                        "--emit-attention-ptx needs {}: Y --emit-attention-ptx <head_dim> <seq_len>",
+                        what
+                    );
+                    exit(1);
+                }
+            }
+        };
+        let head_dim = parse(pos + 1, "a head dimension");
+        let seq_len = parse(pos + 2, "a sequence length");
+        match y::exact_attention::attention_ptx(head_dim, seq_len) {
+            // Straight to stdout with no banner: the bridge pipes this into
+            // `cuModuleLoadData`, so anything else on the stream is a parse
+            // error in the driver rather than a diagnostic.
+            Ok(ptx) => print!("{}", ptx),
+            Err(why) => {
+                log_error!("{}", why);
+                exit(1);
+            }
+        }
+        return;
+    }
+
     println!("========================================");
     println!("=== Y Compiler v1.0 ===");
     println!("========================================\n");
-
-    let args: Vec<String> = env::args().collect();
 
     // Verifier generation takes a verifying key, not a .ysu source, and touches
     // none of the compilation pipeline - so handle it before the hardware probe
@@ -521,9 +562,18 @@ fn main() {
 
     let mut source_file = None;
     let mut lib_paths = Vec::new();
+    // `-o` / `--output` were honoured by `--emit-verifier` and `--target=r1cs`
+    // and IGNORED by the main compile path, which read only `--output=`. So
+    // `Y foo.ysu -o bar` silently wrote `foo`, and `Y -o bar foo.ysu` compiled
+    // `bar` - the value was not consumed here, so it was taken as the source
+    // file. Consume it in one place so both readings agree.
+    let mut cli_output = None;
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "-I" && i + 1 < args.len() {
+        if (args[i] == "-o" || args[i] == "--output") && i + 1 < args.len() {
+            cli_output = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "-I" && i + 1 < args.len() {
             lib_paths.push(std::path::PathBuf::from(&args[i + 1]));
             i += 2;
         } else if args[i].starts_with("-I") {
@@ -797,7 +847,9 @@ fn main() {
     }
 
     // Check for target flags
-    let emit_c = args.iter().any(|a| a == "--emit-c" || a == "--target=c");
+    let emit_c = args
+        .iter()
+        .any(|a| a == "--emit-c" || a == "--target=c" || a == "--c");
     let emit_llvm = args
         .iter()
         .any(|a| a == "--emit-llvm" || a == "--target=llvm");
@@ -1037,6 +1089,7 @@ fn main() {
         .iter()
         .find(|a| a.starts_with("--output="))
         .map(|a| a.trim_start_matches("--output=").to_string())
+        .or(cli_output)
         .unwrap_or_else(|| {
             if emit_native {
                 "output_bin".to_string()
@@ -1198,6 +1251,17 @@ fn main() {
         log_step!("4/4", "Emitting Native x86-64 ELF Binary...");
         let mut emitter = NativeEmitter::new();
         let binary_output = emitter.emit_program(&ast);
+
+        // This path wrote a RUNNABLE ELF whatever the emitter had to skip. Of
+        // the backends in this repo it is the one where a silent gap costs the
+        // most, so the check goes in before the file is written at all.
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
+
         match fs::write(&output_path, &binary_output) {
             Ok(_) => {
                 println!("      -> Written to: {}", output_path);
@@ -1326,6 +1390,18 @@ fn main() {
         log_step!("4/4", "Emitting CPU AVX-512 Host Code...");
         let mut emitter = CpuEmitter::new();
         let cpu_output = emitter.emit_program(&ast);
+
+        // Printing the blob regardless of what the emitter refused would hand
+        // the user Rust that compiles into a different program - the same
+        // "green build, wrong artifact" shape the LLVM and PTX paths were
+        // fixed for.
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
+
         println!("======= GENERATED RUST/AVX BLOB =======");
         println!("{}", cpu_output);
         println!("=======================================");
