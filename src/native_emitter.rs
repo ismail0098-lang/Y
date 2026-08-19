@@ -60,7 +60,19 @@ pub struct NativeEmitter {
     pub relocs: Vec<Reloc>,
     pub stack_offset: usize,
     pub base_addr: u64,
+    /// Name -> positive byte offset below `rbp`. Without this, `Expr::Ident`
+    /// emitted `mov eax, [rbp-4]` for EVERY identifier, so every name in a
+    /// function read the value of its first local.
+    locals: HashMap<String, usize>,
+    /// Constructs this backend cannot encode. It writes an executable ELF, so
+    /// a silent gap here is a runnable artifact that computes the wrong thing -
+    /// the most severe form of the failure this repo's design rule describes.
+    pub emit_errors: Vec<String>,
 }
+
+/// The prologue reserves 64 bytes, and the `disp8` addressing this emitter uses
+/// only reaches -128.
+const STACK_BYTES: usize = 64;
 
 impl NativeEmitter {
     pub fn new() -> Self {
@@ -70,6 +82,8 @@ impl NativeEmitter {
             relocs: Vec::new(),
             stack_offset: 0,
             base_addr: 0x400000,
+            locals: HashMap::new(),
+            emit_errors: Vec::new(),
         }
     }
 
@@ -161,6 +175,38 @@ impl NativeEmitter {
         self.code.emit32(64);
 
         self.stack_offset = 0;
+        self.locals.clear();
+
+        // System V passes the first six integer arguments in registers, and
+        // nothing used to store them anywhere - so a function with parameters
+        // read whatever happened to be on the stack.
+        const ARG_STORE: [&[u8]; 6] = [
+            &[0x89, 0x7D], // mov [rbp-N], edi
+            &[0x89, 0x75], // mov [rbp-N], esi
+            &[0x89, 0x55], // mov [rbp-N], edx
+            &[0x89, 0x4D], // mov [rbp-N], ecx
+            &[0x44, 0x89, 0x45], // mov [rbp-N], r8d
+            &[0x44, 0x89, 0x4D], // mov [rbp-N], r9d
+        ];
+        if let Some(rt) = &f.ret_ty {
+            self.check_type_width(rt, "a return type", &f.body.span);
+        }
+        for (i, param) in f.params.iter().enumerate() {
+            if i >= ARG_STORE.len() {
+                let _ = param;
+                let sp = f.body.span.clone();
+                self.unsupported("a function with more than six parameters", &sp);
+                break;
+            }
+            self.check_type_width(&param.ty, "a parameter", &param.span);
+            let Some(off) = self.alloc_local(&param.name, &f.body.span) else {
+                break;
+            };
+            for b in ARG_STORE[i] {
+                self.code.emit8(*b);
+            }
+            self.code.emit8((256 - off) as u8);
+        }
 
         for stmt in &f.body.stmts {
             self.emit_stmt(stmt);
@@ -177,6 +223,67 @@ impl NativeEmitter {
         self.code.emit8(0xC3);
     }
 
+    /// Reserves four bytes of frame for `name` and returns its offset, or
+    /// refuses when the fixed 64-byte frame is exhausted. Returning `None`
+    /// rather than wrapping the `disp8` matters: `(256 - offset) as u8` past
+    /// 128 addresses memory ABOVE `rbp`, i.e. the caller's frame.
+    fn alloc_local(&mut self, name: &str, span: &Span) -> Option<usize> {
+        self.stack_offset += 4;
+        if self.stack_offset > STACK_BYTES {
+            let off = self.stack_offset;
+            self.unsupported(
+                &format!(
+                    "a function needing more than {} bytes of locals ({} so far)",
+                    STACK_BYTES, off
+                ),
+                span,
+            );
+            return None;
+        }
+        let off = self.stack_offset;
+        self.locals.insert(name.to_string(), off);
+        Some(off)
+    }
+
+    fn unsupported(&mut self, what: &str, span: &Span) {
+        self.emit_errors.push(format!(
+            "[Native x86-64 Backend] {} (line {}, col {}) cannot be encoded.",
+            what, span.line, span.col
+        ));
+    }
+
+    /// Refuse a declared type this backend cannot represent.
+    ///
+    /// The whole datapath is 32 bits - `eax`, `ecx`, `imul`, and a `mov eax,
+    /// imm32` for every literal - so a 64-bit type here is a claim the
+    /// generated code does not honour. It is not merely a large-value problem:
+    ///
+    /// ```text
+    /// let a: I64 = 100000; let b: I64 = 100000; return (a * b) >> 32;
+    /// ```
+    ///
+    /// is 2, and this backend answered 0 under "Compiled to native ELF
+    /// executable!" and exit 0. Widening the datapath is a feature (REX.W on
+    /// every instruction, `movabs` for the immediates), not a typo, so the
+    /// answer is a named refusal - the same choice the branch-free statements
+    /// above make.
+    ///
+    /// This is the `ptx_emitter` integer-width gotcha found in a THIRD
+    /// backend, after `llvm_emitter`. When a gotcha is written for one
+    /// backend, grep the others for its shape.
+    fn check_type_width(&mut self, ty: &Type, what: &str, span: &Span) {
+        let name = match ty {
+            Type::Primitive(n, _) | Type::Ident(n, _) => n.as_str(),
+            _ => return,
+        };
+        if matches!(name, "I64" | "U64" | "i64" | "u64" | "isize" | "usize") {
+            self.unsupported(
+                &format!("{} of 64-bit type `{}` (this backend's datapath is 32 bits)", what, name),
+                span,
+            );
+        }
+    }
+
     fn emit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Return(expr_opt, _) => {
@@ -184,16 +291,21 @@ impl NativeEmitter {
                     self.emit_expr(expr);
                 }
             }
-            Stmt::Let { init, .. } => {
+            Stmt::Let {
+                name, ty, init, span, ..
+            } => {
+                if let Some(t) = ty {
+                    self.check_type_width(t, "a `let`", span);
+                }
                 if let Some(expr) = init {
                     self.emit_expr(expr);
                 }
-                self.stack_offset += 4;
-                // store eax into [rbp - stack_offset]
-                // mov [rbp - stack_offset], eax
-                self.code.emit8(0x89);
-                self.code.emit8(0x45);
-                self.code.emit8((256 - self.stack_offset) as u8);
+                if let Some(off) = self.alloc_local(name, span) {
+                    // mov [rbp - off], eax
+                    self.code.emit8(0x89);
+                    self.code.emit8(0x45);
+                    self.code.emit8((256 - off) as u8);
+                }
             }
             Stmt::Expr(expr) => {
                 self.emit_expr(expr);
@@ -218,13 +330,48 @@ impl NativeEmitter {
                     self.emit_stmt(stmt);
                 }
             }
-            _ => {}
+            Stmt::TypeAlias { .. } | Stmt::CompileTimeAssert { .. } => {}
+            // `_ => {}` used to live here. This backend has no branches and no
+            // assignment, so `if`, `while`, `for`, `=` and `+=` all emitted
+            // NOTHING - the ELF ran, exited 0, and computed a different program.
+            other => {
+                let span = other.span();
+                let what = match other {
+                    Stmt::If { .. } => "`if` (this backend emits no branches)",
+                    Stmt::While { .. } => "`while` (this backend emits no branches)",
+                    Stmt::For { .. } => "`for` (this backend emits no branches)",
+                    Stmt::Break { .. } => "`break`",
+                    Stmt::Match { .. } => "`match`",
+                    Stmt::Assign { .. } => "assignment to an existing variable",
+                    Stmt::CompoundAssign { .. } => "a compound assignment (`+=` and friends)",
+                    Stmt::Chisel(..) => "a `chisel` block",
+                    _ => "this statement",
+                };
+                self.unsupported(what, &span);
+            }
         }
     }
 
     fn emit_expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::IntLit(val, _) => {
+            Expr::IntLit(val, span) => {
+                // `emit32(*val as u32)` silently dropped the top half of any
+                // literal that did not fit. `let a: I64 = 4294967296; return
+                // a >> 32;` is 1 and this emitted 0 - in a RUNNABLE ELF, under
+                // a success banner. Same defect as `llvm_emitter::infer_type`
+                // typing every literal `i32`, and as the PTX one before it.
+                if *val > i32::MAX as i64 || *val < i32::MIN as i64 {
+                    let v = *val;
+                    self.unsupported(
+                        &format!(
+                            "the integer literal {} (this backend's datapath is 32 bits, so it \
+                             would be truncated to {})",
+                            v, v as i32
+                        ),
+                        span,
+                    );
+                    return;
+                }
                 // mov eax, val
                 self.code.emit8(0xB8);
                 self.code.emit32(*val as u32);
@@ -240,24 +387,52 @@ impl NativeEmitter {
                 // pop rax
                 self.code.emit8(0x58);
 
+                // `_ => {}` used to close this match, so Div, Mod, every
+                // comparison, every bitwise op and both shifts emitted NO
+                // instruction at all - leaving the LEFT operand in eax and
+                // calling it the answer. `9 / 2` returned 9.
                 match op {
-                    BinaryOp::Add => {
-                        // add eax, ecx
-                        self.code.emit8(0x01);
-                        self.code.emit8(0xC8);
+                    // add eax, ecx
+                    BinaryOp::Add => self.emit_bytes(&[0x01, 0xC8]),
+                    // sub eax, ecx
+                    BinaryOp::Sub => self.emit_bytes(&[0x29, 0xC8]),
+                    // imul eax, ecx
+                    BinaryOp::Mul => self.emit_bytes(&[0x0F, 0xAF, 0xC1]),
+                    // cdq ; idiv ecx   -> quotient in eax
+                    BinaryOp::Div => self.emit_bytes(&[0x99, 0xF7, 0xF9]),
+                    // cdq ; idiv ecx ; mov eax, edx  -> remainder
+                    BinaryOp::Mod => self.emit_bytes(&[0x99, 0xF7, 0xF9, 0x89, 0xD0]),
+                    // and/or/xor eax, ecx
+                    BinaryOp::BitAnd => self.emit_bytes(&[0x21, 0xC8]),
+                    BinaryOp::BitOr => self.emit_bytes(&[0x09, 0xC8]),
+                    BinaryOp::BitXor => self.emit_bytes(&[0x31, 0xC8]),
+                    // shl/sar eax, cl - arithmetic shift right, to match I32
+                    BinaryOp::Shl => self.emit_bytes(&[0xD3, 0xE0]),
+                    BinaryOp::Shr => self.emit_bytes(&[0xD3, 0xF8]),
+                    // cmp eax, ecx ; setcc al ; movzx eax, al
+                    BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::Gt
+                    | BinaryOp::Le
+                    | BinaryOp::Ge => {
+                        let cc = match op {
+                            BinaryOp::Eq => 0x94,
+                            BinaryOp::NotEq => 0x95,
+                            BinaryOp::Lt => 0x9C,
+                            BinaryOp::Gt => 0x9F,
+                            BinaryOp::Le => 0x9E,
+                            _ => 0x9D,
+                        };
+                        self.emit_bytes(&[0x39, 0xC8, 0x0F, cc, 0xC0, 0x0F, 0xB6, 0xC0]);
                     }
-                    BinaryOp::Sub => {
-                        // sub eax, ecx
-                        self.code.emit8(0x29);
-                        self.code.emit8(0xC8);
+                    // `&&` and `||` short-circuit, which needs a branch this
+                    // backend cannot emit. Evaluating both sides is a different
+                    // language, so refuse rather than approximate.
+                    BinaryOp::And | BinaryOp::Or => {
+                        let sp = expr.span();
+                        self.unsupported("`&&` / `||` (short-circuit needs a branch)", &sp);
                     }
-                    BinaryOp::Mul => {
-                        // imul eax, ecx
-                        self.code.emit8(0x0F);
-                        self.code.emit8(0xAF);
-                        self.code.emit8(0xC1);
-                    }
-                    _ => {}
                 }
             }
             Expr::Call { func, args, .. } => {
@@ -297,15 +472,51 @@ impl NativeEmitter {
 
                 if let Expr::Ident(name, _) = &**func {
                     self.emit_call_rel32(name);
+                } else {
+                    // The argument setup was emitted and then no CALL, so the
+                    // callee's return value was whatever was already in eax.
+                    let sp = func.span();
+                    self.unsupported("a call through a computed callee", &sp);
                 }
             }
-            Expr::Ident(_, _) => {
-                // load first local: mov eax, [rbp - 4]
-                self.code.emit8(0x8B);
-                self.code.emit8(0x45);
-                self.code.emit8(252);
+            Expr::Ident(name, span) => match self.locals.get(name).copied() {
+                Some(off) => {
+                    // mov eax, [rbp - off]
+                    self.code.emit8(0x8B);
+                    self.code.emit8(0x45);
+                    self.code.emit8((256 - off) as u8);
+                }
+                None => {
+                    let span = span.clone();
+                    self.unsupported(&format!("the name `{}` (no local of that name)", name), &span);
+                }
+            },
+            // Floats, strings, chars, bools, indexing, member access, struct
+            // literals and unary operators all reached a `_ => {}` here and
+            // emitted nothing, leaving whatever was already in eax.
+            other => {
+                let span = other.span();
+                let what = match other {
+                    Expr::FloatLit(..) => "a float literal (this backend is integer-only)",
+                    Expr::StringLit(..) => "a string literal",
+                    Expr::CharLit(..) => "a char literal",
+                    Expr::BoolLit(..) => "a bool literal",
+                    Expr::UnaryOp { .. } => "a unary operator",
+                    Expr::Index { .. } => "an index expression",
+                    Expr::MemberAccess { .. } => "a field access",
+                    Expr::Path { .. } => "a `Namespace::member` path",
+                    Expr::StructLit { .. } => "a struct literal",
+                    Expr::BlockExpr(..) => "a block expression",
+                    _ => "this expression",
+                };
+                self.unsupported(what, &span);
             }
-            _ => {}
+        }
+    }
+
+    fn emit_bytes(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.code.emit8(*b);
         }
     }
 
