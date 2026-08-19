@@ -52,6 +52,31 @@ pub const LN2_Q30: u64 = 744_261_118;
 /// `ceil(2^32 / 6)`. Exact for dividends below `2^12`, which bounds `y^3`.
 pub const RECIP6_Q32: u64 = 715_827_883;
 
+/// FNV-1a over `exp2_neg_q16_16(t)` for every `t` in the whole domain
+/// `0 .. 31 << 16`, as the cross-language bit-identity anchor.
+///
+/// There are FOUR transcriptions of this recipe in the repo: this one, the PTX
+/// in `ptx_device_function`, a pure-Python one in
+/// `tools/attention_real_activations.py`, and a vectorised torch one in
+/// `tools/batch_invariance_demo.py` (which is what the demo, `exact_accuracy`
+/// and `tools/ptx_bridge.py`'s reference arm all call). The PTX one is checked
+/// against this one by `tests/ptx_fixed_exp.rs`; the two Python ones were
+/// checked against nothing.
+///
+/// What they DID have was a self-check asserting the result is within 1 ulp of
+/// `2^28 * 2^-t` and monotonic — properties, not identity. Two implementations
+/// can both be within 1 ulp of the truth and still differ from each other by 1,
+/// and 1 ulp IS a bit. So the check could not see the only failure that matters
+/// to a project whose claim is bit-identity, while its comment said it could.
+///
+/// Both replicas assert this constant now. It is a whole-domain digest, so it
+/// cannot be satisfied by a spot check, and it costs ~4 ms here and ~2 s in
+/// pure Python.
+///
+/// The three implementations DO agree today — verified before pinning, over all
+/// 2,031,616 inputs. The gate is what makes that a fact rather than a hope.
+pub const EXP2_DOMAIN_DIGEST: u64 = 0x7170_cd39_b442_d506;
+
 /// `round(2^30 * 2^-(i/64))`.
 pub const EXP2_TABLE: [u32; 64] = [
     1073741824, 1062175491, 1050733751, 1039415261,
@@ -184,6 +209,25 @@ mod tests {
     use super::*;
 
     /// Correctly rounded to within one unit, over the entire domain.
+    /// The anchor `tools/attention_real_activations.py` and
+    /// `tools/batch_invariance_demo.py` assert against. If this moves, either
+    /// the recipe changed (and both Python replicas must move with it) or
+    /// something drifted.
+    #[test]
+    fn the_whole_domain_digest_is_the_cross_language_anchor() {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for t in 0..(31u32 << 16) {
+            h ^= exp2_neg_q16_16(t) as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+        assert_eq!(
+            h, EXP2_DOMAIN_DIGEST,
+            "the fixed-point exp changed. Two Python transcriptions and one PTX \
+             one pin this same value; move all four together or the demo stops \
+             computing what the kernel computes"
+        );
+    }
+
     #[test]
     fn it_is_sub_ulp_accurate_everywhere() {
         let mut worst = 0.0f64;
