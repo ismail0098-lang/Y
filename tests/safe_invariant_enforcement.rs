@@ -603,3 +603,142 @@ fn a_reference_inside_a_struct_literal_is_refused() {
     let src = "struct P { x: I32 }\nfn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            bump(P { x: &i });\n        }\n    }\n}\n";
     assert_reference_refused("ref_in_struct_lit", src, "inside a struct literal");
 }
+
+// ── The entry state is what the INITIATION obligation is about ──────────
+//
+// `check_stmt` clears the interval of every variable a loop body assigns
+// before it verifies the loop, and it has to: `check_block` reasons about
+// `@bounds` inside the body, where a range measured before the loop no longer
+// holds, and so does the PRESERVATION obligation. But INITIATION is a
+// statement about the state on ENTRY, where that range is still exactly true.
+// Clearing it first made every useful invariant unprovable:
+//
+//     let acc: I32 = 0;
+//     @invariant(acc >= 0)
+//     for i in 0..4 { acc = acc + 1; }     // "initiation check failed"
+//
+// An invariant about a variable the body does not touch is trivial, so the
+// only kind worth writing was the only kind that could not be stated. `while`
+// was unusable outright -- its induction variable is always body-assigned --
+// and `for` worked only for invariants over its own induction variable, whose
+// range `verify_for_loop_invariant` re-derives from `start`/`end`.
+// `tests/math.ysu` and `tests/safe_test.ysu` were both refused by this.
+
+fn phase(name: &str, src: &str) -> Option<&'static str> {
+    let out = compile_with_solver(name, src)?;
+    Some(if out.contains("initiation check failed") {
+        "initiation"
+    } else if out.contains("preservation") {
+        "preservation"
+    } else if out.contains("Compilation Successful") {
+        "accepted"
+    } else {
+        "other"
+    })
+}
+
+/// A true invariant over a variable the body assigns must verify.
+#[test]
+fn an_invariant_over_a_body_assigned_variable_can_be_verified() {
+    let cases = [
+        (
+            "entry_for",
+            "fn main() {\n    let acc: I32 = 0;\n    @invariant(acc >= 0)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n",
+        ),
+        (
+            "entry_while",
+            "fn main() {\n    let i: I32 = 0;\n    @invariant(i >= 0)\n    while i < 4 {\n        i = i + 1;\n    }\n}\n",
+        ),
+    ];
+    for (name, src) in cases {
+        let Some(p) = phase(name, src) else {
+            eprintln!("skipping: no z3 binary found");
+            return;
+        };
+        assert_eq!(
+            p, "accepted",
+            "`{}` states a true invariant about a variable its body assigns, \
+             which is the only kind worth writing. It failed the {} check.",
+            name, p
+        );
+    }
+}
+
+/// ...and the entry fact must be able to REFUTE one, not only support it.
+/// This is what shows the snapshot actually reaches the initiation query
+/// rather than the check having been weakened into always passing.
+#[test]
+fn an_invariant_false_on_entry_fails_the_initiation_check() {
+    let src = "fn main() {\n    let acc: I32 = 0;\n    @invariant(acc > 5)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n";
+    let Some(p) = phase("entry_false", src) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    assert_eq!(
+        p, "initiation",
+        "`acc > 5` is false at `acc = 0`, so the INITIATION check is what must \
+         reject it. Getting {:?} instead means the entry state is not reaching \
+         that query.",
+        p
+    );
+}
+
+/// The soundness half, and the reason this fix is narrow rather than "pass the
+/// intervals to both queries".
+///
+/// A fact true on entry is NOT true after an iteration, so the snapshot must
+/// not reach the preservation query. With `acc = 0` on entry:
+///
+///     @invariant(acc <= 1)
+///     for i in 0..4 { acc = acc + 1; }
+///
+/// is FALSE — `acc` reaches 4. Preservation refutes it only because it treats
+/// `acc` as unconstrained: pinned to its entry value 0, one body step gives 1,
+/// and `1 <= 1` holds. Verified by mutation — leaking the snapshot into the
+/// preservation query makes this exact program compile clean.
+#[test]
+fn the_entry_state_does_not_leak_into_the_preservation_check() {
+    let src = "fn main() {\n    let acc: I32 = 0;\n    @invariant(acc <= 1)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n";
+    let Some(p) = phase("entry_leak", src) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    assert_eq!(
+        p, "preservation",
+        "`acc <= 1` is false — `acc` reaches 4 — and only the PRESERVATION \
+         check can see that. Getting {:?} means the entry interval is pinning \
+         `acc` to 0 inside the loop, which proves false invariants.",
+        p
+    );
+}
+
+/// Two more in the same shape, so the fix is not pinned by a single program.
+#[test]
+fn body_violations_are_still_caught() {
+    let cases = [
+        (
+            "entry_eq",
+            "fn main() {\n    let acc: I32 = 0;\n    @invariant(acc == 0)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n",
+        ),
+        (
+            "entry_dec",
+            "fn main() {\n    let acc: I32 = 0;\n    @invariant(acc >= 0)\n    for i in 0..4 {\n        acc = acc - 1;\n    }\n}\n",
+        ),
+        (
+            "entry_while_dec",
+            "fn main() {\n    let i: I32 = 0;\n    @invariant(i >= 0)\n    while i < 4 {\n        i = i - 1;\n    }\n}\n",
+        ),
+    ];
+    for (name, src) in cases {
+        let Some(p) = phase(name, src) else {
+            eprintln!("skipping: no z3 binary found");
+            return;
+        };
+        assert_eq!(
+            p, "preservation",
+            "`{}` states an invariant its body breaks; the preservation check \
+             must reject it. Got {:?}.",
+            name, p
+        );
+    }
+}

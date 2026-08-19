@@ -423,6 +423,21 @@ impl TypeChecker {
         }
     }
 
+    /// The interval each of `names` holds right now.
+    ///
+    /// Used to preserve the pre-loop state across the invalidation a loop
+    /// performs, so the initiation obligation can be stated about it. Names
+    /// with no known interval are simply absent, which is the same as before.
+    fn snapshot_intervals(
+        &self,
+        names: &std::collections::HashSet<String>,
+    ) -> HashMap<String, Interval> {
+        names
+            .iter()
+            .filter_map(|n| self.lookup_interval(n).map(|i| (n.clone(), *i)))
+            .collect()
+    }
+
     fn insert_interval(&mut self, name: String, interval: Interval) {
         if let Some(frame) = self.scopes.last_mut() {
             if let Some(entry) = frame.symbols.get_mut(&name) {
@@ -1322,6 +1337,10 @@ impl TypeChecker {
 
                 let mut assigned_vars = std::collections::HashSet::new();
                 self.collect_assigned_vars_in_block(body, &mut assigned_vars);
+                // Taken BEFORE the clearing below, because that is the state
+                // the initiation obligation is about. See
+                // `generate_smt_decls_and_preconditions_with`.
+                let entry_intervals = self.snapshot_intervals(&assigned_vars);
                 for var in &assigned_vars {
                     self.update_interval(var, None);
                 }
@@ -1337,7 +1356,9 @@ impl TypeChecker {
 
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
-                        self.verify_for_loop_invariant(loop_var, start, end, step, body, inv_expr, span);
+                        self.verify_for_loop_invariant(
+                            loop_var, start, end, step, body, inv_expr, &entry_intervals, span,
+                        );
                     }
                 }
 
@@ -1467,6 +1488,7 @@ impl TypeChecker {
 
                 let mut assigned_vars = std::collections::HashSet::new();
                 self.collect_assigned_vars_in_block(body, &mut assigned_vars);
+                let entry_intervals = self.snapshot_intervals(&assigned_vars);
                 for var in &assigned_vars {
                     self.update_interval(var, None);
                 }
@@ -1484,7 +1506,9 @@ impl TypeChecker {
 
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
-                        self.verify_while_loop_invariant(condition, body, inv_expr, &condition.span());
+                        self.verify_while_loop_invariant(
+                            condition, body, inv_expr, &entry_intervals, &condition.span(),
+                        );
                     }
                 }
 
@@ -2168,9 +2192,52 @@ own operand, so `*p` was proven as `p`)",
         declarations: &mut Vec<String>,
         preconditions: &mut Vec<String>,
     ) {
+        self.generate_smt_decls_and_preconditions_with(vars, None, declarations, preconditions)
+    }
+
+    /// As above, but `at_entry` may supply the interval a variable held
+    /// immediately BEFORE the loop.
+    ///
+    /// `check_stmt` clears the interval of every variable a loop body assigns
+    /// before it verifies anything, and it has to: `check_block` reasons about
+    /// `@bounds` inside the body, where a range measured before the loop is no
+    /// longer true, and the PRESERVATION obligation needs the same. But the
+    /// INITIATION obligation is a statement about the state on entry, where
+    /// that range is still exactly true - so clearing it first made every
+    /// useful invariant unprovable:
+    ///
+    /// ```text
+    /// let acc: I32 = 0;
+    /// @invariant(acc >= 0)
+    /// for i in 0..4 { acc = acc + 1; }   // initiation check FAILED
+    /// ```
+    ///
+    /// An invariant about a variable the body does not touch is trivial, and
+    /// an invariant about one it does was the only kind that could not be
+    /// stated - so `while` was unusable outright (its induction variable is
+    /// always body-assigned) and `for` worked only for invariants over its own
+    /// induction variable, whose range `verify_for_loop_invariant` re-derives
+    /// from `start`/`end`. Two of this repo's own test programs, `math.ysu`
+    /// and `safe_test.ysu`, were refused by it.
+    ///
+    /// Passing the snapshot is not an assumption: it is the value the pass had
+    /// already computed for the statement before the loop. It must reach the
+    /// initiation query ONLY - a fact true on entry is not true after an
+    /// iteration, and the preservation query is where that distinction is the
+    /// whole point.
+    fn generate_smt_decls_and_preconditions_with(
+        &self,
+        vars: &std::collections::HashSet<String>,
+        at_entry: Option<&HashMap<String, Interval>>,
+        declarations: &mut Vec<String>,
+        preconditions: &mut Vec<String>,
+    ) {
         for var in vars {
             declarations.push(format!("(declare-const {}_{} Int)", var, 0));
-            if let Some(interval) = self.lookup_interval(var) {
+            let interval = at_entry
+                .and_then(|m| m.get(var))
+                .or_else(|| self.lookup_interval(var));
+            if let Some(interval) = interval {
                 preconditions.push(format!(
                     "(assert (and (>= {}_{} {}) (<= {}_{} {})))",
                     var, 0, interval.min, var, 0, interval.max
@@ -2713,7 +2780,14 @@ model",
             Stmt::Chisel(..) => "chisel",
             Stmt::SafeBlock(..) => "safe block",
             Stmt::GhostBlock(..) => "ghost block",
-            _ => "unsupported",
+            // These produced "a `unsupported` statement" - ungrammatical, and
+            // it named neither the construct nor a reason. The message is a
+            // user's only handle on why a loop will not verify.
+            Stmt::Break { .. } => "break",
+            Stmt::Match { .. } => "match",
+            Stmt::ClockDomainBlock { .. } => "clock domain block",
+            Stmt::CompileTimeAssert { .. } => "compile-time assert",
+            Stmt::HintBlock { .. } => "hint block",
         }
     }
 
@@ -2791,7 +2865,14 @@ anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
         ));
     }
 
-    fn verify_while_loop_invariant(&mut self, condition: &Expr, body: &Block, invariant: &Expr, span: &Span) {
+    fn verify_while_loop_invariant(
+        &mut self,
+        condition: &Expr,
+        body: &Block,
+        invariant: &Expr,
+        entry_intervals: &HashMap<String, Interval>,
+        span: &Span,
+    ) {
         // The SMT model rests on one assumption: no callee can write a
         // caller's local integer scalar unless it is handed a reference. That
         // has to be checked of the WHOLE body, and of the unsliced body -
@@ -2820,7 +2901,14 @@ tracked variable in a way this verifier cannot see",
         // --- 1. CHECK INITIATION ---
         let mut decls_init = Vec::new();
         let mut preconditions_init = Vec::new();
-        self.generate_smt_decls_and_preconditions(&vars, &mut decls_init, &mut preconditions_init);
+        // The snapshot goes HERE and only here - see
+        // `generate_smt_decls_and_preconditions_with`.
+        self.generate_smt_decls_and_preconditions_with(
+            &vars,
+            Some(entry_intervals),
+            &mut decls_init,
+            &mut preconditions_init,
+        );
 
         let mut versions_init = std::collections::HashMap::new();
         for var in &vars {
@@ -2926,6 +3014,7 @@ tracked variable in a way this verifier cannot see",
         step: &Option<Expr>,
         body: &Block,
         invariant: &Expr,
+        entry_intervals: &HashMap<String, Interval>,
         span: &Span,
     ) {
         // The SMT model rests on one assumption: no callee can write a
@@ -2957,7 +3046,14 @@ tracked variable in a way this verifier cannot see",
         // --- 1. CHECK INITIATION ---
         let mut decls_init = Vec::new();
         let mut preconditions_init = Vec::new();
-        self.generate_smt_decls_and_preconditions(&vars, &mut decls_init, &mut preconditions_init);
+        // The snapshot goes HERE and only here - see
+        // `generate_smt_decls_and_preconditions_with`.
+        self.generate_smt_decls_and_preconditions_with(
+            &vars,
+            Some(entry_intervals),
+            &mut decls_init,
+            &mut preconditions_init,
+        );
 
         let start_smt = match self.expr_to_smt(start, &std::collections::HashMap::new()) {
             Ok(v) => v,
