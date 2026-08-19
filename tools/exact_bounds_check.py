@@ -351,6 +351,40 @@ def exhaust_k_levels_for():
         widths[d] = exact_kv.k_levels_for(d, D.Q_LEVELS)
     print(f"         head_dim -> K width: {widths}")
 
+    # The sweep above fixes `q_levels` at 127 and `K_LEVELS` at its default,
+    # and BOTH are documented as sweepable -- `K_LEVELS` through
+    # `Y_EXACT_K_LEVELS`, `q_levels` because it is a parameter. A check pinned
+    # to the default configuration is how a dropped Montgomery carry survived
+    # in this repo once already: it was correct under BN254 and wrong under
+    # Pallas. `k_levels_for` reads the module-level `K_LEVELS`, so the third
+    # axis is swept by re-deriving with the same arithmetic and comparing
+    # against the module at its own setting.
+    def klv(d, q, kmax):
+        cap = min(exact_kv.SCORE_BUDGET // max(d * q, 1), kmax)
+        n = max(1, cap.bit_length())
+        if (1 << n) - 1 > cap:
+            n -= 1
+        return max(127, (1 << n) - 1)
+
+    agree = all(klv(d, D.Q_LEVELS, exact_kv.K_LEVELS)
+                == exact_kv.k_levels_for(d, D.Q_LEVELS)
+                for d in range(1, MAX_D + 1))
+    off_axis = []
+    for kmax in (127, 255, 511, 1023, 2047, 4095, 16383):
+        for q in (1, 7, 15, 63, 127, 128, 255, 1023):
+            for d in range(1, MAX_D + 1):
+                k = klv(d, q, kmax)
+                if (k + 1) & k:
+                    off_axis.append((d, q, kmax, k, "not 2^n-1"))
+                elif d * q * k >= TWO24 and k != 127:
+                    off_axis.append((d, q, kmax, k, "over budget, not the floor"))
+    report("the same holds off the default axes (K_LEVELS x q_levels x head_dim)",
+           agree and not off_axis,
+           f"{len(off_axis)} violations, first {off_axis[:2]}" if off_axis
+           else ("7 K_LEVELS x 8 q_levels x " + str(MAX_D) + " head_dims = "
+                 + f"{7 * 8 * MAX_D:,} configurations, and the re-derivation "
+                   "agrees with the module at its own setting"))
+
 
 def exhaust_digit_loop():
     print("\n--- exhaustive: does exact_pv's digit loop meet bound B? ---")
@@ -467,9 +501,23 @@ def check_asserts_refuse():
     wrong answer; a limit it refuses at is a documented ceiling.
     """
     print("\n--- do the asserts actually refuse at the limits Z3 found? ---")
-    dmin = 1
-    while dmin * D.Q_LEVELS * exact_kv.k_levels_for(dmin, D.Q_LEVELS) < TWO24:
-        dmin += 1
+    # Bounded, not `while True`. The search only terminates because
+    # `k_levels_for` floors at 127 and so eventually exceeds the budget; delete
+    # that floor and the width shrinks with `d` fast enough that the product
+    # stays under budget forever. Mutation-checked, and the first version of
+    # this loop HUNG on it -- a test that runs forever is worse than one that
+    # fails, which is the same harness weakness `tests/llvm_control_flow.rs`
+    # had to grow a deadline for.
+    dmin = None
+    for d in range(1, MAX_D + 1):
+        if d * D.Q_LEVELS * exact_kv.k_levels_for(d, D.Q_LEVELS) >= TWO24:
+            dmin = d
+            break
+    if dmin is None:
+        report(f"some head_dim <= {MAX_D} exceeds the score budget", False,
+               "k_levels_for never exceeds the budget, so its fail-closed floor "
+               "is gone and nothing below can be tested")
+        return
     ok = False
     try:
         D.assert_exact_range(None, "integer scores",
