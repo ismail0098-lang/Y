@@ -57,6 +57,12 @@ repository's own investigation documents contradict.
 - A deterministic-inference path whose output does not depend on batch
   composition — 0/16 against a stock bf16 control that changes on 16/16 — at
   +0.12% perplexity.
+- A C-callable shared library: the crate builds as `cdylib` as well as `rlib`
+  (`src/c_api.rs`), so the compiler can be embedded rather than shelled out to.
+- **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
+  compiler ships its own BN254 field arithmetic and its own JSON reader. The
+  arkworks crates are `[dev-dependencies]` and are used as an *independent
+  oracle* in tests — nothing in the `Y` binary links them.
 
 **Not real, and previously presented as if it were:**
 
@@ -101,6 +107,16 @@ repository's own investigation documents contradict.
   below. **Sub-word widths (`U8`/`U16`/`I8`/`I16`) are still refused**, because
   an element type is also a stride and there is no byte width threaded through
   the address math.
+- **There is no AMD/ROCm backend.** `src/rocm_emitter.rs` is 173 lines, is
+  compiled into the library, and is called by **nothing** — no CLI flag, no
+  test, no caller anywhere in the tree. The header of this file says "CPU
+  (x86-64 / AVX-512) and GPU (NVIDIA PTX)" and that is the complete list.
+- **`ypm`, the package manager, is not in the build.** `src/ypm.rs` is 504 lines
+  and is not a `mod` in either `lib.rs` or `main.rs`, so it is not compiled —
+  the same state `c_emitter.rs` is in. `docs/y_language_documentation.md` §19
+  nevertheless documents `Y ypm init / add / install / build / run` and a
+  `Y.toml` manifest. `Y ypm init` reports `Failed to read file: ypm.ysu` and
+  exits 1: it fails loudly, but it fails.
 - **Hopper TMA / WGMMA support never existed.** Sixteen of nineteen `emit_*`
   methods in that family produced PTX that `ptxas` rejects at their own target
   architecture. They were deleted rather than fixed. `mma.sync` — the path the
@@ -971,19 +987,42 @@ Solidity verifier test.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-# Compile a Y program
-./target/release/Y tests/hello.ysu                     # LLVM -> native binary
-./target/release/Y tests/hello.ysu --emit-llvm         # LLVM IR
-./target/release/Y tests/gemm_f16_4096.ysu --emit-ptx  # NVIDIA PTX
-./target/release/Y tests/hello.ysu --emit-native       # standalone ELF
-
-# ZK
-./target/release/Y circuit.ysu    --target=r1cs --witness input.json
-./target/release/Y circuit.circom --target=r1cs -l circomlib/circuits
-
 cargo test --release                    # 63 test binaries, 415 tests
 cargo test --release --features zk      # 612 tests, ZK included
 ```
+
+### The whole command-line surface
+
+Every flag the binary accepts, so that none of it has to be discovered by
+reading `main.rs`. `--target=<x>` is accepted as a synonym of `--emit-<x>`
+throughout.
+
+| flag | what it does | state |
+|---|---|---|
+| *(none)* | LLVM IR → native binary via `clang` | the default backend |
+| `--emit-llvm` | LLVM IR | real |
+| `--emit-ptx` | NVIDIA PTX | real |
+| `--emit-native` | standalone x86-64 ELF | **straight-line integer subset only**; refuses the rest by name |
+| `--emit-cpu` | prints Rust/AVX source **for you to paste** — Y never compiles it | real, but not a build step |
+| `--emit-attention-ptx <head_dim> <seq_len>` | the exact-attention kernel, to stdout | real |
+| `--emit-coprocessor` | RT + Tensor Core fused schedule | **a scheduling simulation** — see "What is real" |
+| `--emit-c`, `--c`, `--target=c` | removed; reports so and exits 1 | gone |
+| `--target=r1cs` / `--emit-r1cs` | R1CS `.r1cs` / `.sym` / `.r1cs.txt` | real, needs `--features zk` |
+| `--witness <in.json>` | also solve and write `.wtns` (iden3 format) | real |
+| `--emit-verifier <vkey.json>` | Groth16 Solidity verifier | real; `--name <N>` sets the contract name |
+| `--emit-zk-ptx` | GPU witness-generator PTX | emits, and `ptxas -arch=sm_89` accepts it — but **no test covers it** (see below) |
+| `-l`, `--link <dir>` | circom include path | real |
+| `-o`, `--output <path>` | output path | real |
+| `--autotune` / `--autotune-force` / `--no-autotune` | GEMM tile selection: measure / re-measure / analytic model only | real |
+| `--portable` | clears the probed AVX / AVX-512 feature bits | real |
+
+**`--emit-zk-ptx` is the one line in this table to read sceptically.** It writes
+a `<name>.witness.ptx` that assembles cleanly (`ptxas` exit 0, a 19.6 KB cubin
+on an 8-iteration circuit) and prints "compiled successfully" — and **nothing in
+the test suite runs it or checks what it computes.** This repository's own rule
+is that assembling is not correctness: a missing instruction assembles
+perfectly, which is how a `while` loop that emitted no PTX at all survived here.
+Treat it as unverified.
 
 Empirical GEMM autotuning for `@tile`d kernels measures candidates on the real
 GPU and caches per (M, N, K, precision, GPU) in `.ysu_hw_profile`. A cold shape
@@ -1026,8 +1065,15 @@ src/                       Rust bootstrap compiler
   zk_poseidon_constants.rs         circomlib parameters (GENERATED — do not edit)
   zk_solidity.rs                   Groth16 on-chain verifier
   circom_{lexer,ast,parser,lower}.rs   circom 2.x front end
+  quantization_pass.rs             FP32 -> FP16 staging conversions
+  auto_vectorize.rs layout_pass.rs cpu_specializer.rs
+                                   CPU-side rewrites
+  zk_fuzz.rs                       generative differential fuzzer (grammar + 3 oracles)
+  c_api.rs                         C ABI — the crate also builds as a cdylib
   ir_grapher.rs coprocessor_scheduler.rs rt_core_emitter.rs
                                    scheduling simulation — see "What is real"
+  rocm_emitter.rs                  compiled, reachable from nothing — see "What is not real"
+  ypm.rs c_emitter.rs              NOT compiled; no `mod` declares them
 
 self_hosted/    compiler phases rewritten in Y (.ysu); not the default build path
 tests/          test programs, benchmarks, PTX assembly gates
