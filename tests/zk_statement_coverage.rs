@@ -182,3 +182,59 @@ fn statements_that_correctly_emit_nothing_still_compile() {
         "an erased statement must not disturb the statements around it"
     );
 }
+
+/// The desugaring builds `x = x op e`, so `e` may mention `x` itself. That is
+/// exactly the shape `Stmt::Assign`'s running-sum fast path guards against
+/// with `expr_references_var` — it takes the target's binding OUT of scope
+/// before emitting the right-hand side, so a missed self-reference would read
+/// a name that is no longer bound.
+///
+/// Audited rather than assumed: the failure mode is fail-closed. An unbound
+/// identifier is `Err("Undefined variable ...")` in `emit_expr`, never a fresh
+/// wire, so a gap in that guard costs a compile error and not a wrong circuit.
+/// These cases pin the values regardless, because the guard is what keeps the
+/// error from happening at all.
+#[test]
+fn a_self_referencing_right_hand_side_is_computed_correctly() {
+    let cases = [
+        ("x = x + x;", 14u64),
+        ("x += x;", 14),
+        ("x = x + (x * 2);", 21),
+        ("x += x * 2;", 21),
+        ("x -= x;", 0),
+        ("x *= x;", 49),
+        ("x += 1; x += x;", 16),
+    ];
+    for (stmts, want) in cases {
+        let src = body(&format!("    {}", stmts));
+        assert_eq!(
+            eval(&src, &[7]).as_deref(),
+            Some(want.to_string().as_str()),
+            "`{}` on x = 7 must give {}",
+            stmts,
+            want
+        );
+    }
+}
+
+/// Expression shapes the ZK backend cannot lower must be REFUSED, not guessed
+/// at. `emit_expr`'s catch-all is an error and this pins that it stays one —
+/// the whole design-rule table is instances of that arm having been a value.
+#[test]
+fn unlowerable_expressions_are_refused() {
+    let cases = [
+        ("unary minus", "fn main(a: I32) -> I32 { return -a; }"),
+        ("unary not", "fn main(a: I32) -> I32 { if !a { return 1; } return 0; }"),
+        ("float literal", "fn main(a: I32) -> I32 { let x: I32 = 1.5; return x; }"),
+        ("member access", "fn main(a: I32) -> I32 { return a.x; }"),
+    ];
+    for (what, src) in cases {
+        let msg = refusal(src).unwrap_or_default();
+        assert!(
+            msg.contains("unsupported in ZK backends"),
+            "{} has no R1CS lowering and must be refused by name. Got: {:?}",
+            what,
+            msg
+        );
+    }
+}

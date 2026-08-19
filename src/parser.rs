@@ -14,11 +14,73 @@ use crate::lexer::{Token, TokenKind};
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Suppresses struct-literal parsing, for expressions immediately followed
+    /// by a block.
+    ///
+    /// `if p0 { }` is ambiguous: `p0 { }` is a well-formed empty struct
+    /// literal, and taking it as one leaves the `if` with no block, so the
+    /// parser reported `Line 4: Expected '{' to begin block but found Return` —
+    /// pointing at the statement AFTER the `if`, which is not where the problem
+    /// is. Rust resolves this the same way, by forbidding struct literals in
+    /// condition position.
+    ///
+    /// Only the empty-body case was reachable: the other arm of the
+    /// `is_struct` test requires `ident :` after the brace, which no statement
+    /// in Y begins with. `while p0 { }` and `match p0 { }` have the same shape
+    /// and are covered here too.
+    ///
+    /// Found by `tests/zk_fuzz_differential.rs`, which reduced a 40-line
+    /// generated program to `if p0 { } return 59;`. Nothing in the ZK backend
+    /// was involved — a generative fuzzer over the surface syntax reaches the
+    /// front end as well.
+    no_struct_literal: bool,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            no_struct_literal: false,
+        }
+    }
+
+    /// Parse an expression that is immediately followed by a block, so a `{`
+    /// belongs to the block rather than to a struct literal.
+    fn parse_block_header_expr(&mut self) -> Result<Expr, String> {
+        let saved = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let r = self.parse_expr();
+        self.no_struct_literal = saved;
+        r
+    }
+
+    /// A `for` header's `start`, `end` and `step`, for the same reason.
+    ///
+    /// This site was missed when the `if`/`while`/`match` ambiguity was fixed,
+    /// and the symptom was identical: `for i in 0..n { }` swallowed the empty
+    /// body as an empty struct literal `n { }` and then reported
+    /// `Expected '{' to begin block` pointing at the token AFTER the loop.
+    /// Only `end` and `step` can actually reach a `{` - `start` is always
+    /// followed by `..` - but the flag is set across the whole header because
+    /// a struct literal is not a meaningful loop bound at any of the three.
+    fn parse_loop_bound_expr(&mut self) -> Result<Expr, String> {
+        let saved = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let r = self.parse_primary_expr();
+        self.no_struct_literal = saved;
+        r
+    }
+
+    /// Parse an expression inside a bracketing construct, where a `{` is
+    /// unambiguous again. Without this, `if f(P { }) { }` would refuse the
+    /// struct literal in the argument.
+    fn parse_expr_unrestricted(&mut self) -> Result<Expr, String> {
+        let saved = self.no_struct_literal;
+        self.no_struct_literal = false;
+        let r = self.parse_expr();
+        self.no_struct_literal = saved;
+        r
     }
 
     fn peek(&self) -> &Token {
@@ -1037,13 +1099,13 @@ impl Parser {
             };
             self.expect(TokenKind::In, "'in'")?;
 
-            let start = self.parse_primary_expr()?;
+            let start = self.parse_loop_bound_expr()?;
             self.expect(TokenKind::DotDot, "'..'")?;
-            let end = self.parse_primary_expr()?;
+            let end = self.parse_loop_bound_expr()?;
 
             let mut step = None;
             if self.match_token(TokenKind::Step) {
-                step = Some(self.parse_primary_expr()?);
+                step = Some(self.parse_loop_bound_expr()?);
             }
 
             let body = self.parse_block()?;
@@ -1110,7 +1172,7 @@ impl Parser {
             let body = self.parse_block()?;
             Ok(Stmt::ClockDomainBlock { clock, body, span })
         } else if self.match_token(TokenKind::If) {
-            let condition = Box::new(self.parse_expr()?);
+            let condition = Box::new(self.parse_block_header_expr()?);
             let then_block = self.parse_block()?;
             let else_block = if self.match_token(TokenKind::Else) {
                 if self.check(TokenKind::If) {
@@ -1135,7 +1197,7 @@ impl Parser {
                 span,
             })
         } else if self.match_token(TokenKind::While) {
-            let condition = Box::new(self.parse_expr()?);
+            let condition = Box::new(self.parse_block_header_expr()?);
             let body = self.parse_block()?;
             Ok(Stmt::While {
                 condition,
@@ -1146,7 +1208,7 @@ impl Parser {
                 span,
             })
         } else if self.match_token(TokenKind::Match) {
-            let scrutinee = Box::new(self.parse_expr()?);
+            let scrutinee = Box::new(self.parse_block_header_expr()?);
             self.expect(TokenKind::LBrace, "'{' to begin match body")?;
             let mut arms = Vec::new();
             while !self.check(TokenKind::RBrace) && !self.check(TokenKind::Eof) {
@@ -1679,7 +1741,7 @@ impl Parser {
             // Function call
             let mut args = Vec::new();
             while !self.check(TokenKind::RParen) {
-                args.push(self.parse_expr()?);
+                args.push(self.parse_expr_unrestricted()?);
                 if !self.match_token(TokenKind::Comma) {
                     break;
                 }
@@ -1857,7 +1919,9 @@ impl Parser {
 
         // Parenthesized expression: (expr)
         if self.match_token(TokenKind::LParen) {
-            let inner = self.parse_expr()?;
+            // Inside brackets a `{` cannot be a block header, so struct
+            // literals are unambiguous again.
+            let inner = self.parse_expr_unrestricted()?;
             self.expect(TokenKind::RParen, "')' to close parenthesized expression")?;
             return Ok(inner);
         }
@@ -1934,9 +1998,10 @@ impl Parser {
                             .map(|t| &t.kind)
                             .unwrap_or(&TokenKind::Eof);
 
-                        let is_struct = matches!(look1, TokenKind::RBrace)
-                            || (matches!(look1, TokenKind::Ident(_))
-                                && matches!(look2, TokenKind::Colon));
+                        let is_struct = !self.no_struct_literal
+                            && (matches!(look1, TokenKind::RBrace)
+                                || (matches!(look1, TokenKind::Ident(_))
+                                    && matches!(look2, TokenKind::Colon)));
 
                         if is_struct {
                             self.advance(); // consume '{'
