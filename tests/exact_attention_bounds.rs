@@ -113,3 +113,108 @@ fn the_shape_reaches_the_generated_kernel() {
     assert!(a.contains("osm[512]"), "head_dim 64 must allocate 64 u64 of shared memory");
     assert!(b.contains("osm[1024]"), "head_dim 128 must allocate 128 u64 of shared memory");
 }
+
+// ---------------------------------------------------------------- the temperature
+
+/// `KFix` is `C * 2^32`, and `tools/ptx_bridge.py` passed `C * 2^16`.
+///
+/// The kernel forms the exp's Q16.16 argument as
+/// `t = ((m - s) * KFix + 2^15) >> 16`, so one factor of `2^16` is consumed by
+/// the shift and `KFix` must carry `2^32`. The demo
+/// (`tools/batch_invariance_demo.py`) has no shift — it builds the Q16.16 logit
+/// directly — so its multiplier is `C * 2^16`. Two conventions, one name.
+///
+/// The bridge computed the demo's and handed it to the kernel. That makes every
+/// exponent 65536x too small: on real Qwen activations no `t >> 16` reaches
+/// 0.014, so every weight is within 1% of `2^28` and the softmax is uniform.
+/// Its differential could not see it, because BOTH arms replicate the kernel's
+/// formula and agree bit for bit on a uniform answer just as readily.
+///
+/// Nothing here can run the kernel — that needs a GPU — so this pins the
+/// arithmetic the two sides have to share, and the emitted PTX is checked for
+/// the multiply-and-shift shape rather than the `shl 3` it replaced.
+#[test]
+fn the_temperature_multiplier_carries_two_to_the_thirty_two() {
+    // The kernel's integer path, exactly as the PTX writes it.
+    let kernel_t = |ds: i64, kfix: i64| ((ds * kfix + 32768) >> 16) as f64;
+    // The demo's float path: the Q16.16 argument, formed directly.
+    let demo_t = |ds: i64, c: f64| (ds as f64 * c * 65536.0).round();
+
+    // Score deltas span what an int8 dot product over head_dim <= 128 can
+    // produce, and `c` spans the per-tensor scales real activations give.
+    for &c in &[7.0e-5f64, 4.5e-4, 1.8e-3, 3.0e-2] {
+        let kfix = (c * 2f64.powi(32)).round() as i64;
+        let wrong = (c * 65536.0).round() as i64; // what the bridge passed
+        for &ds in &[1i64, 97, 10_000, 100_000, 500_000, 2_064_512] {
+            let want = demo_t(ds, c);
+            let got = kernel_t(ds, kfix);
+            // `kfix` is a rounded integer, so its error is `ds * 0.5 / 2^16`
+            // in the argument. That is inherent to a fixed-point temperature
+            // and is why `ptx_bridge.py` must compare the kernel against a
+            // replica of the KERNEL's formula, not against the demo's.
+            let tol = 1.0 + ds as f64 / 131_072.0;
+            assert!(
+                (got - want).abs() <= tol,
+                "C={c:e} ds={ds}: kernel gave t={got}, the demo's Q16.16 \
+                 argument is {want} (tolerance {tol:.2})"
+            );
+            // The control: the demo's own multiplier, fed to the kernel, is
+            // not close — it is 2^16 out. Without this the test above would
+            // pass for a `kfix` that is merely in the right ballpark.
+            if ds >= 10_000 {
+                let bad = kernel_t(ds, wrong);
+                assert!(
+                    bad < want / 1000.0,
+                    "C={c:e} ds={ds}: passing the demo's C*2^16 to the kernel \
+                     gave t={bad} against the correct {want}; the two \
+                     conventions have stopped being distinguishable, so this \
+                     test can no longer catch the bridge's bug"
+                );
+            }
+        }
+    }
+
+    // The synthetic tests use C = 2^-13 and pass `8 << 16`. The docs claim that
+    // "is exactly the old shift, so their semantics are unchanged" — which is
+    // an arithmetic identity, and therefore checkable.
+    let legacy = 8i64 << 16;
+    for ds in 0..4096i64 {
+        assert_eq!(
+            (ds * legacy + 32768) >> 16,
+            ds << 3,
+            "KFix = 8<<16 must reproduce the kernel's old `shl 3` exactly"
+        );
+    }
+}
+
+/// The emitted PTX must actually be the runtime-temperature form.
+#[test]
+fn the_emitted_kernel_multiplies_by_a_runtime_temperature() {
+    let ptx = attention_ptx(64, 4096).expect("64/4096 is well inside every bound");
+    // Both entry points read the parameter and use the multiply-and-shift.
+    assert_eq!(
+        ptx.matches("ld.param.u32 %r50, [q6]").count(),
+        2,
+        "both accum entry points must load the runtime temperature"
+    );
+    assert_eq!(
+        ptx.matches("mul.wide.s32 %rd50, %r16, %r50").count(),
+        2,
+        "the score delta must be multiplied by the runtime temperature, not \
+         shifted by a compile-time constant"
+    );
+    assert_eq!(
+        ptx.matches("shr.s64 %rd50, %rd50, 16").count(),
+        2,
+        "the >> 16 is what makes KFix a 2^32-scaled quantity; if it goes, every \
+         caller's temperature is 65536x wrong"
+    );
+    // The saturate must come before the narrowing, or a large delta wraps into
+    // a small argument and a far-away key gets a large weight.
+    let sat = ptx.find("min.s64 %rd50, %rd50, 1073741824").expect("saturate");
+    let narrow = ptx.find("cvt.u32.u64 %r16, %rd50").expect("narrowing");
+    assert!(
+        sat < narrow,
+        "the argument must be clamped to 2^30 BEFORE it is narrowed to u32"
+    );
+}

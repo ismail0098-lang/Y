@@ -162,7 +162,9 @@ DONE_A:
     .param .u64 q3,   // L      u64   [B]
     .param .u64 q4,   // O      s64   [B][D]
     .param .u64 q5,   // P      int32 [B][S]   (the quantised weights, for the oracle)
-    .param .u32 q6    // KFix   Q16.16 temperature: t = ((m - s) * KFix) >> 16
+    .param .u32 q6    // KFix = C * 2^32, where C is log2 units per unit of
+                      // integer score. t = ((m - s) * KFix + 2^15) >> 16,
+                      // and t is the exp's Q16.16 argument. NOT C * 2^16.
 )
 {
     .shared .align 8 .b8 osm[$D8];
@@ -242,15 +244,19 @@ LOOP_I:
     mul.wide.s32 %rd18, %r14, 4;
     add.s64 %rd19, %rd17, %rd18;
     ld.global.s32 %r15, [%rd19];
-    // p_i by the INTEGER exp. `C` is 2^-13, so the Q16.16 argument is a
-    // SHIFT, not a multiply -- there is no floating-point operation
-    // anywhere on this path. The result is already Q0.28, which is the
-    // fixed-point scale, so there is no rescale either.
+    // p_i by the INTEGER exp: no floating-point operation anywhere on this
+    // path, and the result is already Q0.28, so there is no rescale either.
     sub.s32 %r16, %r11, %r15;           // m - s_i  (>= 0)
     // -> Q16.16. The temperature is a RUNTIME parameter: a real model's
     // softmax scale is `q_scale * k_scale / sqrt(d)`, an arbitrary number, not
     // the power of two the tests use. Hardcoding a shift made this kernel
     // usable only on synthetic data.
+    //
+    // KFix is therefore `C * 2^32`, NOT `C * 2^16`: the argument this feeds is
+    // in Q16.16, and one factor of 2^16 is consumed by the shift below. The
+    // synthetic tests pass `8 << 16`, which reproduces the old `shl 3` exactly.
+    // `tools/ptx_bridge.py` passed `C * 2^16` and got a uniform softmax that
+    // its own differential could not see -- see finding 06.
     mul.wide.s32 %rd50, %r16, %r50;
     add.s64 %rd50, %rd50, 32768;
     shr.s64 %rd50, %rd50, 16;
@@ -377,15 +383,19 @@ NLOOP_I:
     mul.wide.s32 %rd18, %r14, 4;
     add.s64 %rd19, %rd17, %rd18;
     ld.global.s32 %r15, [%rd19];
-    // p_i by the INTEGER exp. `C` is 2^-13, so the Q16.16 argument is a
-    // SHIFT, not a multiply -- there is no floating-point operation
-    // anywhere on this path. The result is already Q0.28, which is the
-    // fixed-point scale, so there is no rescale either.
+    // p_i by the INTEGER exp: no floating-point operation anywhere on this
+    // path, and the result is already Q0.28, so there is no rescale either.
     sub.s32 %r16, %r11, %r15;           // m - s_i  (>= 0)
     // -> Q16.16. The temperature is a RUNTIME parameter: a real model's
     // softmax scale is `q_scale * k_scale / sqrt(d)`, an arbitrary number, not
     // the power of two the tests use. Hardcoding a shift made this kernel
     // usable only on synthetic data.
+    //
+    // KFix is therefore `C * 2^32`, NOT `C * 2^16`: the argument this feeds is
+    // in Q16.16, and one factor of 2^16 is consumed by the shift below. The
+    // synthetic tests pass `8 << 16`, which reproduces the old `shl 3` exactly.
+    // `tools/ptx_bridge.py` passed `C * 2^16` and got a uniform softmax that
+    // its own differential could not see -- see finding 06.
     mul.wide.s32 %rd50, %r16, %r50;
     add.s64 %rd50, %rd50, 32768;
     shr.s64 %rd50, %rd50, 16;
