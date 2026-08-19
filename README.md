@@ -59,6 +59,9 @@ repository's own investigation documents contradict.
   +0.12% perplexity.
 - A C-callable shared library: the crate builds as `cdylib` as well as `rlib`
   (`src/c_api.rs`), so the compiler can be embedded rather than shelled out to.
+- A **machine-checked proof** of the ZK backend's control-flow lowering
+  (`proofs/ZkControlFlow.v`, Rocq 9.1.1, `coqchk` reports no axioms), and a
+  generative differential fuzzer with a metamorphic oracle.
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
   arkworks crates are `[dev-dependencies]` and are used as an *independent
@@ -998,6 +1001,85 @@ compares it at consumption. `tests/linear_tracker_enforcement.rs` is 10 tests,
 6 negative and 4 positive — rejecting every `pipe.wait` under a loop would be
 sound and would also ban the shape every real pipelined kernel is built from.
 
+### A machine-checked proof of the ZK control-flow lowering
+
+`proofs/ZkControlFlow.v` formalises the `return` / `if` / sequencing fragment of
+the ZK backend: an operational semantics for the language, three candidate
+lowerings, and the theorem that the shipped one agrees with the semantics **on
+every program and every environment**.
+
+```
+Theorem low_correct : forall s e, bools e s -> agrees e s.
+```
+
+Reproduce with `coqc proofs/ZkControlFlow.v && coqchk -o proofs/ZkControlFlow.vo`
+— Rocq 9.1.1, 0.3 s to compile, and the kernel checker reports:
+
+```
+* Axioms: <none>
+* Constants/Inductives relying on type-in-type: <none>
+* Constants/Inductives relying on unsafe (co)fixpoints: <none>
+* Inductives whose positivity is assumed: <none>
+```
+
+Nothing admitted, nothing assumed. **Writing it down is what found the last
+bug** — a one-sided `return` inside a *nested* `if` reported its own empty
+tail's zero, so `if c { if d { return 1; } } return 7;` emitted a circuit
+computing 0. Z3 on the emitted artifact had missed it, a fresh test file had
+missed it, and so had the fix that was supposed to close the family. The flat
+case is the one everyone tests.
+
+The proof also states what it does **not** cover, in the file: it is a model
+rather than `zk_emitter.rs` (no extraction, no refinement proof — the tests are
+what tie them together); the field is a commutative ring taken as `Z`, so
+nothing about modular range transfers; and constraint emission is modelled as
+evaluation, so it says nothing about constraint *count* or about what an
+adversarial prover could satisfy.
+
+### Generative differential fuzzing
+
+`src/zk_fuzz.rs` generates well-formed programs from a grammar — 100% parse rate
+by construction — and checks each against three oracles. It found two bugs in
+two different subsystems on its first run.
+
+The eight `cargo fuzz` targets in `fuzz/` are a useful counter-example and are
+kept as one: none has ever been run here (`cargo-fuzz` is not installed and
+there is no nightly toolchain), and none *could* have found these bugs. Two feed
+raw bytes to the lexer, so the chance of forming a program with an `if` and a
+`return` in it is negligible; the "differential" one compared nothing, merely
+asserting an output string was non-empty; and the soundness one reported every
+finding with `eprintln!` and never panicked, so libFuzzer could not see a
+failure — a week-long run over a backend computing the wrong function would have
+exited 0.
+
+| oracle | what it is | why it is there |
+|---|---|---|
+| Independent interpreter | written against the fuzzer's own IR, sharing no code with the compiler path | walking the parser's AST would have hidden the parser bug it found |
+| **Metamorphic fold** | the same program rendered twice — inputs as parameters, then as literals — must agree | needs no reference implementation, so it **cannot be wrong in the same direction as the model** |
+| Parse-failure grading | parse failures counted separately from semantic refusals | collapsing them hid an over-refusal, and reverting the parser fix passed the whole sweep |
+
+400 programs per `cargo test` run, 20,000 in the extended sweep
+(`extended_sweep --ignored`). The corpus is checked for **coverage** rather than
+assumed to have it — `the_generated_corpus_is_not_vacuous` asserts how many
+generated programs actually contain an `if`, a loop, an ordering comparison and
+a compound assignment, because a generator restriction made to simplify an
+oracle once silently deleted two bug classes. Counterexamples are minimised by
+delta debugging **over the IR**, not the text, so every candidate stays a
+well-formed program; that took a 40-line counterexample down to four lines and
+turned a guess into an attribution.
+
+### Mutation testing, as a standing practice
+
+Every gate in this repository is expected to fail when the mechanism it guards
+is removed, and the ones that did not are recorded rather than quietly fixed.
+Three of eight mutations survived one fresh, all-green test file; a device test
+for a shared-memory barrier passed with `bar.sync` deleted, because the race
+never fired; a `u32`-to-`u32` differential passed with the conversion replaced by
+the identity. Mutations that survive are then sorted into **test holes** (fix the
+test) and **confirmations** (the guard is genuinely redundant with a rule
+enforced earlier — keep it, and say so), which is a distinction that only shows
+up if you look.
+
 ### A design rule the repository enforces
 
 **In any pass whose output is a correctness claim, an unhandled AST node is a
@@ -1143,6 +1225,7 @@ Further reading:
 - [ZK emit profiling](docs/zk_emit_profile.md)
 - [CPU GEMM tuning, the harness biases, and the two regimes a loop benchmark
   cannot distinguish](docs/cpu_gemm_tuning.md)
+- [The ZK control-flow lowering, proved in Rocq](proofs/ZkControlFlow.v)
 - [Deterministic / bit-identical decode](docs/bit_identical_decode.md)
 - [Deterministic inference design notes](docs/deterministic_inference.md)
 - [Proof-carrying kernels](docs/proof_carrying_kernels.md)
