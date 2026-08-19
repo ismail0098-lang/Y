@@ -499,6 +499,22 @@ impl TypeChecker {
         match expr {
             Expr::IntLit(val, _) => Some(Interval { min: *val, max: *val }),
             Expr::Ident(name, _) => self.lookup_interval(name).cloned(),
+            // The GPU index intrinsics have ranges the HARDWARE guarantees, so
+            // they are the one call shape this domain can evaluate. Without
+            // them a grid-stride loop cannot be verified at all: `let i =
+            // block_idx_x() * block_dim_x() + thread_idx_x();` left `i` with
+            // no interval, so `@invariant(i >= 0)` - true of every GPU kernel
+            // ever written - got no precondition and Z3 correctly refuted it.
+            //
+            // Everything asserted here makes an obligation EASIER, which is
+            // the direction `CLAUDE.md`'s design rule warns about, so these
+            // are CUDA launch-configuration limits and nothing more. Widening
+            // a `max` is safe (it weakens what can be concluded); narrowing
+            // one, or raising a `min`, would not be.
+            Expr::Call { func, args, .. } if args.is_empty() => match &**func {
+                Expr::Ident(name, _) => gpu_index_interval(name),
+                _ => None,
+            },
             Expr::BinaryOp { left, op, right, .. } => {
                 let lhs = self.eval_interval(left)?;
                 let rhs = self.eval_interval(right)?;
@@ -998,6 +1014,25 @@ impl TypeChecker {
         //   second Tensor Core operand, not an epilogue addend - see
         //   `ptx_emitter::tile_gemm_swiglu_operands`'s doc comment for the
         //   fused Linear+SwiGLU epilogue this shape dispatches to.
+        // - (A, B: GlobalMemory<I8>, C: GlobalMemory<I32>): the exact int8
+        //   Tensor Core GEMM over `mma.sync.m16n8k32.s32.s8.s8.s32`. Told
+        //   apart from the f16 shape by its element types alone, which is
+        //   enough because no other accepted shape mentions I8.
+        //
+        //   **This list and `ptx_emitter`'s dispatch chain are two
+        //   implementations of one rule** — the comment above says so, and it
+        //   is the hazard `CLAUDE.md`'s design-rule table describes. A shape
+        //   accepted here but not recognised there falls through to generic
+        //   scalar lowering, which silently computes something else; a shape
+        //   recognised there but rejected here is unreachable. Change both.
+        if kernel.params.len() == 3
+            && is_global_memory_of(&kernel.params[0].ty, "I8")
+            && is_global_memory_of(&kernel.params[1].ty, "I8")
+            && is_global_memory_of(&kernel.params[2].ty, "I32")
+        {
+            return;
+        }
+
         let is_swiglu_shape = kernel.params.len() == 4 && is_global_memory_of(&kernel.params[2].ty, "F16");
         let expected_elem = |i: usize| if i < 2 || (is_swiglu_shape && i == 2) { "F16" } else { "F32" };
         let bad_params: Vec<String> = kernel
@@ -2043,6 +2078,25 @@ impl TypeChecker {
                     Ok(format!("{}_0", name))
                 }
             }
+            // The GPU index intrinsics are the one class of call this encoder
+            // models rather than refuses. They take no arguments, have no
+            // side effects, and their ranges are guaranteed by the hardware -
+            // so mapping each to a canonical symbol lets an ordinary
+            // grid-stride loop be verified instead of rejected. Before this,
+            // `let i = block_idx_x() * block_dim_x() + thread_idx_x();` made
+            // `i` a havoc, and `@invariant(i >= 0)` - which is true of every
+            // GPU kernel ever written - could not be discharged.
+            //
+            // This is the one place in this file that makes an obligation
+            // EASIER, so the facts asserted alongside it (in
+            // `gpu_index_bound`) must be hardware guarantees and nothing more.
+            Expr::Call { func, args, .. } if args.is_empty() => match &**func {
+                Expr::Ident(name, _) => match gpu_index_symbol(name) {
+                    Some(sym) => Ok(format!("{}_0", sym)),
+                    None => Err(format!("call to `{}` is not modellable", name)),
+                },
+                _ => Err("indirect call is not modellable".to_string()),
+            },
             Expr::BinaryOp { left, op, right, .. } => {
                 let lhs = self.expr_to_smt(left, versions)?;
                 let rhs = self.expr_to_smt(right, versions)?;
@@ -2448,6 +2502,11 @@ model",
     }
 
     /// Names assigned anywhere in `stmts`, including nested blocks.
+    ///
+    /// This is the havoc set for a branch or a nested loop, so a name it misses
+    /// keeps its stale version and the preservation obligation gets STRICTLY
+    /// EASIER - the unsound direction. Matched exhaustively with no `_ =>` arm
+    /// for that reason; every empty arm below states why it is empty.
     fn collect_assigned(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
         for stmt in stmts {
             match stmt {
@@ -2475,7 +2534,21 @@ model",
                 | Stmt::GhostBlock(b, _)
                 | Stmt::HintBlock { body: b, .. } => Self::collect_assigned(&b.stmts, out),
                 Stmt::ClockDomainBlock { body, .. } => Self::collect_assigned(&body.stmts, out),
-                _ => {}
+                // A match arm's body is an `Expr`, not a `Block` - the parser
+                // builds no `Expr::BlockExpr` - so an arm cannot contain an
+                // assignment. It can still contain a CALL, which is why
+                // `stmts_take_reference` walks arms and this does not.
+                Stmt::Match { .. } => {}
+                // None of these can write a tracked integer scalar. The one
+                // way they could - handing a callee a reference to one - is
+                // refused for the whole body by `stmts_take_reference` before
+                // any of this runs, which is what makes leaving them empty a
+                // stated assumption rather than a silent one.
+                Stmt::Expr(_)
+                | Stmt::Return(..)
+                | Stmt::Break { .. }
+                | Stmt::TypeAlias { .. }
+                | Stmt::CompileTimeAssert { .. } => {}
             }
         }
     }
@@ -2506,13 +2579,108 @@ model",
             Expr::Call { func, args, .. } => {
                 Self::takes_reference(func) || args.iter().any(Self::takes_reference)
             }
-            Expr::GenericCall { args, .. } => args.iter().any(Self::takes_reference),
+            // `func` was not visited here, only `args`. A callee named by an
+            // expression that itself hands out a reference is exotic, but the
+            // asymmetry with `Expr::Call` one arm up was an oversight, not a
+            // decision.
+            Expr::GenericCall { func, args, .. } => {
+                Self::takes_reference(func) || args.iter().any(Self::takes_reference)
+            }
             Expr::Index { base, index, .. } => {
                 Self::takes_reference(base) || Self::takes_reference(index)
             }
             Expr::MemberAccess { base, .. } => Self::takes_reference(base),
-            _ => false,
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|(_, e)| Self::takes_reference(e))
+            }
+            Expr::BlockExpr(b, _) => Self::stmts_take_reference(&b.stmts),
+            Expr::Ident(..)
+            | Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::CharLit(..)
+            | Expr::BoolLit(..)
+            | Expr::Path { .. }
+            | Expr::SelfLit(..)
+            | Expr::ZeroInit(..) => false,
         }
+    }
+
+    /// The same question asked of a whole statement tree.
+    ///
+    /// `takes_reference` was consulted at exactly ONE site - the top-level
+    /// `Stmt::Expr` arm of `trace_body_statements` - while the assumption it
+    /// enforces has to hold of the ENTIRE loop body. Everywhere else the
+    /// reference was invisible, and each of these compiled clean with
+    /// "Compilation Successful!" and the invariant "verified" against a
+    /// variable the callee was free to overwrite:
+    ///
+    /// ```text
+    /// if i >= 0 { bump(&i); }     // inside a branch
+    /// y = bump(&i);               // an assignment's right-hand side
+    /// let y: I32 = bump(&i);      // a `let` initialiser
+    /// match i { _ => bump(&i) }   // a match arm
+    /// for j in 0..2 { bump(&i); } // a nested loop's body
+    /// ```
+    ///
+    /// The top-level arm rejected the first of those when the `if` was removed,
+    /// which is the same one-level-deep shape as the `Stmt::If` bug that
+    /// `nested_if_cannot_hide_a_false_invariant` pins.
+    ///
+    /// Asked of the FULL body, never of the slice: `slice_body_for_invariant`
+    /// drops statements it judges irrelevant to the invariant, and relevance is
+    /// computed from names - which is exactly the reasoning a reference
+    /// invalidates.
+    ///
+    /// Exhaustive over `Stmt` with no `_ =>` arm, so a new statement kind is a
+    /// compile error here rather than an unvisited subtree.
+    fn stmts_take_reference(stmts: &[Stmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            Stmt::Let { init, .. } => init.as_ref().is_some_and(Self::takes_reference),
+            Stmt::Assign { target, value, .. }
+            | Stmt::CompoundAssign { target, value, .. } => {
+                Self::takes_reference(target) || Self::takes_reference(value)
+            }
+            Stmt::Expr(e) => Self::takes_reference(e),
+            Stmt::Return(e, _) => e.as_ref().is_some_and(Self::takes_reference),
+            Stmt::If { condition, then_block, else_block, .. } => {
+                Self::takes_reference(condition)
+                    || Self::stmts_take_reference(&then_block.stmts)
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|b| Self::stmts_take_reference(&b.stmts))
+            }
+            Stmt::For { start, end, step, body, .. } => {
+                Self::takes_reference(start)
+                    || Self::takes_reference(end)
+                    || step.as_ref().is_some_and(Self::takes_reference)
+                    || Self::stmts_take_reference(&body.stmts)
+            }
+            Stmt::While { condition, body, .. } => {
+                Self::takes_reference(condition) || Self::stmts_take_reference(&body.stmts)
+            }
+            // The two loop arms above are redundant TODAY and are kept anyway:
+            // `check_stmt` requires an `@invariant` on every loop outside an
+            // `unsafe` context, so a nested loop is verified in its own right
+            // and catches its own body first. Mutation-verified - deleting
+            // either traversal leaves the suite green. This check must not
+            // depend on a rule a different pass happens to enforce.
+            Stmt::Match { scrutinee, arms, .. } => {
+                Self::takes_reference(scrutinee)
+                    || arms.iter().any(|a| Self::takes_reference(&a.body))
+            }
+            Stmt::Chisel(b, _)
+            | Stmt::SafeBlock(b, _)
+            | Stmt::GhostBlock(b, _)
+            | Stmt::HintBlock { body: b, .. } => Self::stmts_take_reference(&b.stmts),
+            Stmt::ClockDomainBlock { clock, body, .. } => {
+                Self::takes_reference(clock) || Self::stmts_take_reference(&body.stmts)
+            }
+            Stmt::CompileTimeAssert { condition, .. } => Self::takes_reference(condition),
+            // Nothing to hand out: `break` has no operands, and a type alias is
+            // erased before anything runs.
+            Stmt::Break { .. } | Stmt::TypeAlias { .. } => false,
+        })
     }
 
     /// A short name for a statement kind, for diagnostics.
@@ -2609,6 +2777,20 @@ anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
     }
 
     fn verify_while_loop_invariant(&mut self, condition: &Expr, body: &Block, invariant: &Expr, span: &Span) {
+        // The SMT model rests on one assumption: no callee can write a
+        // caller's local integer scalar unless it is handed a reference. That
+        // has to be checked of the WHOLE body, and of the unsliced body -
+        // `slice_body_for_invariant` decides relevance from names, which is
+        // precisely the reasoning a reference invalidates.
+        if Self::stmts_take_reference(&body.stmts) {
+            return self.smt_unmodellable(
+                span.line,
+                invariant,
+                "the loop body passes a reference to a call, which could modify a \
+tracked variable in a way this verifier cannot see",
+            );
+        }
+
         let mut vars = std::collections::HashSet::new();
         for frame in &self.scopes {
             for (name, entry) in &frame.symbols {
@@ -2731,6 +2913,20 @@ anyway with invariants UNVERIFIED, set Y_ALLOW_UNVERIFIED_INVARIANTS=1.",
         invariant: &Expr,
         span: &Span,
     ) {
+        // The SMT model rests on one assumption: no callee can write a
+        // caller's local integer scalar unless it is handed a reference. That
+        // has to be checked of the WHOLE body, and of the unsliced body -
+        // `slice_body_for_invariant` decides relevance from names, which is
+        // precisely the reasoning a reference invalidates.
+        if Self::stmts_take_reference(&body.stmts) {
+            return self.smt_unmodellable(
+                span.line,
+                invariant,
+                "the loop body passes a reference to a call, which could modify a \
+tracked variable in a way this verifier cannot see",
+            );
+        }
+
         let mut vars = std::collections::HashSet::new();
         for frame in &self.scopes {
             for (name, entry) in &frame.symbols {
@@ -2923,6 +3119,60 @@ fn z3_candidates() -> Vec<String> {
 /// must then hold for ANY value it could have taken, exactly as with the
 /// havoc used for branches. It can only make an obligation harder to
 /// discharge, never easier.
+/// Canonical SMT symbol for a GPU index intrinsic, if it is one.
+/// Hardware-guaranteed range of a GPU index intrinsic, as a CUDA launch limit.
+fn gpu_index_interval(name: &str) -> Option<Interval> {
+    let (min, max) = match name {
+        "thread_idx_x" | "thread_idx_y" => (0, 1023),
+        "thread_idx_z" => (0, 63),
+        "block_dim_x" | "block_dim_y" => (1, 1024),
+        "block_dim_z" => (1, 64),
+        "block_idx_x" => (0, 2_147_483_646),
+        "block_idx_y" | "block_idx_z" => (0, 65_534),
+        "grid_dim_x" => (1, 2_147_483_647),
+        "grid_dim_y" | "grid_dim_z" => (1, 65_535),
+        _ => return None,
+    };
+    Some(Interval { min, max })
+}
+
+fn gpu_index_symbol(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "thread_idx_x" => "gpuTidX",
+        "thread_idx_y" => "gpuTidY",
+        "thread_idx_z" => "gpuTidZ",
+        "block_idx_x" => "gpuCtaX",
+        "block_idx_y" => "gpuCtaY",
+        "block_idx_z" => "gpuCtaZ",
+        "block_dim_x" => "gpuNtidX",
+        "block_dim_y" => "gpuNtidY",
+        "block_dim_z" => "gpuNtidZ",
+        "grid_dim_x" => "gpuNctaX",
+        "grid_dim_y" => "gpuNctaY",
+        "grid_dim_z" => "gpuNctaZ",
+        _ => return None,
+    })
+}
+
+/// The hardware guarantee for a GPU index symbol, as an SMT assertion.
+///
+/// **Only lower bounds.** Every fact asserted here makes a proof obligation
+/// easier, which is the direction the design rule in `CLAUDE.md` warns about,
+/// so the set is kept to what the hardware actually promises and to the
+/// minimum that lets ordinary kernels verify: indices are non-negative, and
+/// extents are at least one (a launch with a zero dimension is rejected by the
+/// driver, not executed). Upper bounds would also be true but are not needed
+/// by anything, and each one is another chance to be wrong in the unsafe
+/// direction.
+fn gpu_index_bound(sym: &str) -> Option<String> {
+    let lower = match sym {
+        "gpuTidX" | "gpuTidY" | "gpuTidZ" | "gpuCtaX" | "gpuCtaY" | "gpuCtaZ" => 0,
+        "gpuNtidX" | "gpuNtidY" | "gpuNtidZ" | "gpuNctaX" | "gpuNctaY" | "gpuNctaZ" => 1,
+        _ => return None,
+    };
+    Some(format!("(assert (>= {}_0 {}))", sym, lower))
+}
+
 fn declare_free_symbols(query: &str) -> String {
     let mut declared = std::collections::HashSet::new();
     for line in query.lines() {
@@ -2972,6 +3222,13 @@ fn declare_free_symbols(query: &str) -> String {
     let mut out = String::new();
     for m in missing {
         out.push_str(&format!("(declare-const {} Int)\n", m));
+        // A GPU index symbol is free, but not arbitrary.
+        if let Some(sym) = m.strip_suffix("_0") {
+            if let Some(bound) = gpu_index_bound(sym) {
+                out.push_str(&bound);
+                out.push('\n');
+            }
+        }
     }
     out.push_str(query);
     out

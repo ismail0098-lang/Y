@@ -318,6 +318,28 @@ fn unencodable_operator_is_refused_not_mistranslated() {
 // run". The solver ran fine; it was handed a malformed query. Every existing
 // test used literal bounds, which is why none of them saw it.
 
+/// A bound the verifier genuinely knows NOTHING about. `Lo` is a kernel
+/// parameter, so it may be any i32 including a negative one.
+///
+/// This used to be `block_idx_x()`, which stopped being unconstrained when the
+/// interval domain learned the GPU index intrinsics' hardware ranges (see
+/// `gpu_index_interval`). `k >= 0` became provable there — correctly, since
+/// `%ctaid.x` really is non-negative — which would have quietly turned this
+/// test into a no-op. The property it exists to protect is unchanged: an
+/// unknown bound must not be *assumed* non-negative.
+const UNKNOWN_BOUNDS: &str = r#"
+kernel probe(A: GlobalMemory<F32>, N: I32, Lo: I32) {
+    let lo: I32 = Lo;
+    let hi: I32 = lo + 8;
+    @invariant(k >= lo)
+    for k in lo..hi {
+        let v: F32 = block_ptr2d_load(A, 0, k, N, 1, N);
+        block_ptr2d_store(A, 0, k, N, 1, N, v);
+    }
+}
+fn main() {}
+"#;
+
 const VAR_BOUNDS: &str = r#"
 kernel probe(A: GlobalMemory<F32>, N: I32) {
     let lo: I32 = block_idx_x();
@@ -378,7 +400,7 @@ fn a_false_invariant_on_a_variable_bounded_loop_is_still_rejected() {
 fn an_unprovable_invariant_on_an_unknown_bound_is_reported_as_such() {
     let src = write_source(
         "var_bounds_unknown",
-        &VAR_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k >= 0)"),
+        &UNKNOWN_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k >= 0)"),
     );
     let out = compile(&src, true, false);
     assert!(
@@ -391,4 +413,193 @@ fn an_unprovable_invariant_on_an_unknown_bound_is_reported_as_such() {
         "an unprovable invariant was accepted:\n{}",
         out
     );
+}
+
+
+/// The flip side of the test above: a bound derived from a GPU index intrinsic
+/// IS non-negative, and the verifier now knows it.
+///
+/// Without this, `for i in worker..N step nworkers` — the grid-stride loop,
+/// which is how every kernel in `docs/deterministic_inference.md` is written —
+/// could not be given any invariant at all, because `worker` was a havoc and
+/// even `i >= 0` was refutable. The facts asserted are CUDA launch limits
+/// (`gpu_index_interval`), and they are the only place in the type checker
+/// that makes an obligation easier rather than harder.
+#[test]
+fn a_bound_from_a_gpu_index_intrinsic_is_known_non_negative() {
+    let src = write_source(
+        "var_bounds_intrinsic",
+        &VAR_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k >= 0)"),
+    );
+    let out = compile(&src, true, false);
+    if out.contains("could not be run") {
+        eprintln!("SKIP: no z3 on this machine");
+        return;
+    }
+    assert!(
+        out.contains("Compilation Successful"),
+        "`k >= 0` on `for k in block_idx_x()..hi` was not provable, so a \
+         grid-stride loop still cannot carry an invariant:\n{}",
+        out
+    );
+}
+
+/// ...and the intrinsic's range must not be over-claimed. `%ctaid.x` is
+/// non-negative, but nothing says it is non-ZERO, so a strict `> 0` must still
+/// be refuted.
+#[test]
+fn the_intrinsic_range_is_not_over_claimed() {
+    let src = write_source(
+        "var_bounds_strict",
+        &VAR_BOUNDS.replace("@invariant(k >= lo)", "@invariant(k > 0)"),
+    );
+    let out = compile(&src, true, false);
+    if out.contains("could not be run") {
+        eprintln!("SKIP: no z3 on this machine");
+        return;
+    }
+    assert!(
+        !out.contains("Compilation Successful"),
+        "`k > 0` was accepted on a loop starting at `block_idx_x()`, which is \
+         zero on the first CTA of every launch. The interval bounds are too \
+         strong:\n{}",
+        out
+    );
+}
+
+// ── A reference handed to a callee, anywhere in the body ────────────────
+//
+// The SMT model rests on exactly one assumption about calls: Y has no way for
+// a callee to write a caller's local integer scalar unless the caller hands
+// over a reference. `takes_reference` enforces it - and used to be consulted
+// at ONE site, the top-level `Stmt::Expr` arm of `trace_body_statements`. The
+// assumption is about the whole loop body, so everywhere else the reference
+// was invisible and the invariant was "verified" against a variable the callee
+// was free to overwrite.
+//
+// This is the same one-level-deep shape as `nested_if_cannot_hide_a_false_
+// invariant` above: the construct is refused when written plainly and was
+// accepted the moment it sat inside anything.
+//
+// Each case asserts on its OWN diagnostic rather than merely on the absence of
+// success, so a fixture that is stopped by some earlier pass fails instead of
+// passing for the wrong reason. The positive controls below are what prove
+// the fixtures reach this check at all.
+
+/// `bump(&i);` at the top of the loop body, the one spelling that was already
+/// refused. The control for everything under it.
+const REF_PLAIN: &str = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            bump(&i);\n        }\n    }\n}\n";
+
+fn assert_reference_refused(name: &str, src: &str, site: &str) {
+    let Some(out) = compile_with_solver(name, src) else {
+        eprintln!("skipping: no z3 binary found");
+        return;
+    };
+    assert!(
+        out.contains("passes a reference to a call"),
+        "a reference handed to a callee {} was not refused. The invariant was \
+         discharged against a variable the callee could have overwritten.\n{}",
+        site,
+        out
+    );
+}
+
+#[test]
+fn a_reference_at_the_top_of_the_body_is_refused() {
+    assert_reference_refused("ref_plain", REF_PLAIN, "at the top of the loop body");
+}
+
+#[test]
+fn a_reference_inside_a_branch_is_refused() {
+    let src = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            if i >= 0 {\n                bump(&i);\n            }\n        }\n    }\n}\n";
+    assert_reference_refused("ref_in_if", src, "inside an `if`");
+}
+
+#[test]
+fn a_reference_in_an_assignment_value_is_refused() {
+    let src = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            let y: I32 = 0;\n            y = bump(&i);\n        }\n    }\n}\n";
+    assert_reference_refused("ref_in_assign", src, "in an assignment's right-hand side");
+}
+
+#[test]
+fn a_reference_in_a_let_initialiser_is_refused() {
+    let src = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            let y: I32 = bump(&i);\n        }\n    }\n}\n";
+    assert_reference_refused("ref_in_let", src, "in a `let` initialiser");
+}
+
+#[test]
+fn a_reference_in_a_match_arm_is_refused() {
+    let src = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            if i >= 0 {\n                match i {\n                    _ => bump(&i)\n                }\n            }\n        }\n    }\n}\n";
+    assert_reference_refused("ref_in_match", src, "in a `match` arm");
+}
+
+/// Mutation-verified as a CONFIRMATION, not as a guard on the outer walk.
+///
+/// Deleting `Stmt::For`'s body traversal from `stmts_take_reference` leaves
+/// this test green, and that is correct: `check_stmt` requires an `@invariant`
+/// on every loop outside an `unsafe` context, so the inner loop is itself
+/// verified and runs its own reference check first. The outer arm is kept
+/// anyway - it is not sound for this check to depend on a rule enforced by a
+/// different pass - but do not read this test as pinning it.
+#[test]
+fn a_reference_in_a_nested_loop_is_refused() {
+    let src = "fn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            @invariant(j >= 0)\n            for j in 0..2 {\n                bump(&i);\n            }\n        }\n    }\n}\n";
+    assert_reference_refused("ref_in_nested_loop", src, "in a nested loop's body");
+}
+
+/// The controls, and they carry as much weight as the six cases above.
+///
+/// Refusing every loop body that contains a call would pass all six and be
+/// useless - `print_int(i)` is the ordinary shape. Each of these is the
+/// corresponding negative case with the `&` removed, so it also proves the
+/// fixture reaches the reference check rather than being stopped by an earlier
+/// pass. The `match` control matters most: if `match` were refused inside
+/// `@safe` for some unrelated reason, that negative case would be vacuous.
+#[test]
+fn calls_that_hand_out_no_reference_still_verify() {
+    let cases = [
+        ("ok_ref_plain", "bump(i);", ""),
+        ("ok_ref_in_if", "if i >= 0 {\n                print_int(i);\n            }", ""),
+        ("ok_ref_in_assign", "let y: I32 = 0;\n            y = bump(i);", ""),
+        ("ok_ref_in_let", "let y: I32 = bump(i);", ""),
+        (
+            "ok_ref_in_match",
+            "if i >= 0 {\n                match i {\n                    _ => print_int(i)\n                }\n            }",
+            "",
+        ),
+        (
+            "ok_ref_in_nested_loop",
+            "@invariant(j >= 0)\n            for j in 0..2 {\n                print_int(i);\n            }",
+            "",
+        ),
+    ];
+    for (name, body, _) in cases {
+        let src = format!(
+            "fn main() {{\n    @safe {{\n        @invariant(i >= 0)\n        for i in 0..10 {{\n            {}\n        }}\n    }}\n}}\n",
+            body
+        );
+        let Some(out) = compile_with_solver(name, &src) else {
+            eprintln!("skipping: no z3 binary found");
+            return;
+        };
+        assert!(
+            out.contains("Compilation Successful"),
+            "`{}` hands out no reference and its invariant is true, so it must \
+             still verify. Refusing every body containing a call would satisfy \
+             every negative case in this section and check nothing.\n{}",
+            name,
+            out
+        );
+    }
+}
+
+/// A reference inside a struct literal inside a call argument.
+///
+/// `takes_reference` ended in `_ => false`, and `Expr::StructLit` fell into it -
+/// so `bump(P { x: &i })` was a reference the check could not see even at the
+/// one site where the check was run. It is exhaustive over `Expr` now.
+#[test]
+fn a_reference_inside_a_struct_literal_is_refused() {
+    let src = "struct P { x: I32 }\nfn main() {\n    @safe {\n        @invariant(i >= 0)\n        for i in 0..10 {\n            bump(P { x: &i });\n        }\n    }\n}\n";
+    assert_reference_refused("ref_in_struct_lit", src, "inside a struct literal");
 }
