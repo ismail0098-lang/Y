@@ -51,6 +51,12 @@ repository's own investigation documents contradict.
   copy-free path for shapes too small to amortise packing.
 - `@safe` blocks with Z3-discharged loop invariants, `@ZeroDrift` exact
   accumulation, and linear tracking of async memory tokens.
+- BN254 field arithmetic, NTT and MSM as compiler-emitted PTX, checked on the
+  device against arkworks. The NTT is **ahead of icicle** at both sizes measured;
+  the MSM is still behind it.
+- A deterministic-inference path whose output does not depend on batch
+  composition — 0/16 against a stock bf16 control that changes on 16/16 — at
+  +0.12% perplexity.
 
 **Not real, and previously presented as if it were:**
 
@@ -69,25 +75,32 @@ repository's own investigation documents contradict.
   [investigation_rt_tensor_coprocessor_findings.md](investigation_rt_tensor_coprocessor_findings.md).
   The scheduler is kept as a design artifact; do not read its output as a
   measurement.
-- **There are not five working backends.** LLVM IR (the default), NVIDIA PTX,
-  direct x86-64 and a standalone ELF emitter work. The C transpiler was removed
-  — `--emit-c` says so and exits.
+- **There are not five working backends.** LLVM IR (the default) and NVIDIA PTX
+  are the two real ones. The C transpiler was removed — `--emit-c` says so and
+  exits. `--emit-native` writes a runnable x86-64 ELF but covers only a
+  **straight-line integer subset**: `let`, `return`, calls of up to six integer
+  arguments, and the sixteen integer binary operators. It has no branches, so
+  `if`/`while`/`for`/assignment, floats, strings, indexing and field access are
+  refused by name with a line number, as are 64-bit types. Before that it
+  emitted an ELF for all of them and computed the wrong answer under a success
+  banner — `9 / 2` returned **9**.
 - **Leo did not compile the ZK benchmark circuits.** Earlier tables reported
   timings for Leo at 100k and 1M constraints. Leo 4.2.0 refuses both: the
   compiled program exceeds its 512,000-byte limit (`leo build` on
   `leo/dot_product` errors at 14,322,372 bytes). Those rows have been removed
   rather than corrected.
-- **The PTX backend has no integer datapath, and used to compile integers as
-  floats.** A kernel declared `GlobalMemory<U32>` with `let s: U32 = a + b;`
-  compiled clean, assembled clean under `ptxas -arch=sm_89`, reported success,
-  and emitted `ld.global.f32` / `add.f32` / `st.global.f32` — silently rounding
-  every value above 2^24. `U64`, `I32` and `I64` behaved the same. It is refused
-  now (`tests/ptx_integer_datapath.rs`); the tile intrinsics are hardcoded to
-  f32 at ~557 sites with no element-type plumbing, so this is a feature to
-  build rather than a typo to fix. **It is also the blocker for GPU field
-  arithmetic** — BN254 Montgomery multiply for NTT/MSM needs `mul.wide.u32`,
-  integer add/shift/and, and typed global loads, none of which can be expressed
-  today.
+- **The PTX backend compiled integers as floats.** *(Fixed since; kept here
+  because this README asserted the opposite for a while.)* A kernel declaring
+  `GlobalMemory<U32>` with `let s: U32 = a + b;` compiled clean, assembled clean
+  under `ptxas -arch=sm_89`, reported success, and emitted `ld.global.f32` /
+  `add.f32` / `st.global.f32` — silently rounding every value above 2^24. There
+  is a real integer datapath now (typed loads and strides, signed-vs-unsigned
+  arithmetic, `mul.wide.u32`, carry-flag chains, 128-bit vector loads), gated by
+  `tests/ptx_integer_datapath.rs`, which runs 16 operations over 4,096
+  full-range `u32` pairs on the device. That is what unblocked the BN254 kernels
+  below. **Sub-word widths (`U8`/`U16`/`I8`/`I16`) are still refused**, because
+  an element type is also a stride and there is no byte width threaded through
+  the address math.
 - **Hopper TMA / WGMMA support never existed.** Sixteen of nineteen `emit_*`
   methods in that family produced PTX that `ptxas` rejects at their own target
   architecture. They were deleted rather than fixed. `mma.sync` — the path the
@@ -160,15 +173,23 @@ vendored here. Reproduce with `python3 tools/circomlib_coverage.py`:
 
 | | |
 |---|---|
-| compiles | **Y 29/31, circom 31/31** |
-| size vs circom `--O1` (its default) | **1.04x — a tie** (win 5 / tie 21 / loss 3) |
-| size vs circom `--O2` (its best) | **0.69x — Y loses** (win 0 / tie 13 / loss 15) |
+| compiles | **Y 31/31, circom 31/31** |
+| size vs circom `--O1` (its default) | **1.341x — Y wins** (win 11 / tie 20 / **loss 0**) |
+| size vs circom `--O2` (its best) | **0.895x — Y loses** (win 0 / tie 20 / loss 10) |
+
+`Sha256` and `EdDSA` were the two that did not compile. They were one gap — a
+circom `var` holding a value that is not compile-time constant — and it is closed;
+see [the witness domain](docs/circom_frontend.md#the-witness-domain-values-the-compiler-cannot-compute).
+Both land near parity with circom's default, so they *lower* the geomean (1.352x →
+1.341x) rather than raise it.
 
 **`--O1` is circom's default and `--O2` is "full constraint simplification".**
 Every size claim in this repo is against the default — what a user gets by typing
-`circom` — and Y **cannot reach `--O2`'s circuit sizes**: it reduces
-`EscalarMulFix` to 21 constraints where Y emits 147, and `Bits2Num(64)` to zero.
-Y sits between the two levels, closer on time to `--O1`:
+`circom` — and Y still **cannot reach `--O2`'s circuit sizes**: it reduces
+`Bits2Num(64)` to zero, which Y has no equivalent for. What remains of that gap is
+mostly a deliberate trade, not a missing pass: closing it costs 3.8x matrix
+density and 1.60x proving time (see `docs/circom_frontend.md`). Y sits between the
+two levels, closer on time to `--O1`:
 
 | circuit | circom `--O1` | circom `--O2` | Y |
 |---|---|---|---|
@@ -604,6 +625,42 @@ a wash: it removes work but lengthens the live ranges around the branch, and
 kept because it is what makes the multi-head epilogue affordable, not because
 it was a speedup.
 
+### BN254 field kernels, NTT and MSM
+
+Once the integer datapath existed, the ZK backend's arithmetic could be
+expressed as Y source and compiled to PTX. These are the compiler's own kernels,
+checked on the device against `src/zk_field.rs` and against arkworks.
+
+| kernel | result | baseline |
+|---|---|---|
+| Fr Montgomery multiply | **0.160 ns/mul, 6.23 G mul/s** | 89% of the card's DRAM peak — memory-bound, not compute-bound |
+| NTT, N = 2^20 | **0.56 ms** | icicle 0.608 ms |
+| NTT, N = 2^22 | **2.47 ms** | icicle 2.834 ms |
+| MSM, n = 2^22, kernel | 6.10x a 32-core CPU | **still 2.8–4.8x behind icicle** |
+| Groth16 prove, 2^20 constraints | **~5–6x** arkworks on 32 cores | sparse *and* dense circuits, ±15% run to run |
+
+**The NTT result is the halved pass count, not the arithmetic.** Radix-4 plus
+shared-memory stage fusion takes 11 passes to 3 at N = 2^22 and is what puts Y
+ahead of icicle; the fused kernel is no longer DRAM-bound (39% of peak, 71% SM)
+so the bottleneck moved rather than shrank. **Carry-flag intrinsics were
+predicted at 2x and measured at 1.06x** — `IMAD.WIDE` already produces both
+halves of a 32x32 product in one instruction, so the two-pass carry form doubles
+the multiply count exactly as it collapses the bookkeeping. Count the work an
+instruction does, not the instructions.
+
+**The Groth16 figure is honest about which circuit it was measured on.** A
+sparse polynomial benchmark circuit reported 3.61x where a dense Poseidon chain
+reported 1.76x, and the phase split *inverted* — matrix build 73% instead of
+45%, MSM 10% instead of 39%. Both are ~5–6x after the O(k²) and the
+single-threaded matvecs that difference exposed were fixed. On the dense circuit
+the largest remaining phase is the **G2 MSM at 47%**, which needs `Fq2`
+arithmetic that does not exist in this kernel series — a roadmap drawn from the
+sparse circuit alone would have ranked it last.
+
+**Do not multiply these against the circom compile-speed numbers.** Those
+measure *emitting* R1CS; circom does not prove at all. Different stage,
+different baseline.
+
 ### Where the GPU backend loses
 
 | workload | baseline | result |
@@ -729,6 +786,67 @@ compiler derived the alignment from the measured L2 cache line size.
 
 ---
 
+## Deterministic inference
+
+A quantized transformer whose output does not depend on who else is in the
+batch. Every reduction whose order changes with batch shape is made integer, and
+integer addition is associative — so tile shape, K-split, atomic completion
+order and batch size cannot change the answer. That is the whole mechanism.
+
+Model: Qwen2.5-0.5B-Instruct · RTX 4070 Ti SUPER · measured 2026-08-18.
+
+| | result | control |
+|---|---|---|
+| **Determinism** | **0 / 16** batch compositions changed the output | stock bf16 changed on **16 / 16** |
+| **Accuracy vs bf16** | **+0.12%** wikitext-2 perplexity | 4-bit arm: +189% |
+| **Task accuracy** | statistical null | net +40 of 3,000 items |
+| **Decode speed** | 1.09x slower wall clock | **0.97x device time** — the gap is launch overhead |
+
+**The control had to be earned.** At 24 generated tokens the stock arm was
+invariant *too*, because a bf16 reduction-order delta needs room to flip a greedy
+argmax. The test runs 160 tokens on prompts chosen for a small top-2 margin. A
+test both arms pass is measuring the harness.
+
+**The textbook lever was the wrong lever.** The remaining 2.2% perplexity gap was
+labelled "the linears", and the standard fix is group-wise weight scales.
+Measuring the ceiling first — fake quantization in fp32, no kernel — showed
+weight quantization costs **−0.12%**, i.e. nothing. The whole gap was
+*activations*: group scales recover 6.2% of it, one extra bit of activation width
+recovers 102%. And the winning fix does not fight the invariant, where group
+scales would have — they recombine partial sums with *float* weights, which is
+the exact thing being prevented.
+
+**The exactness argument is machine-checked.** `tools/exact_bounds_check.py`
+puts every bound to Z3 and then exhausts the real selectors rather than
+transcriptions of them. Checking the conjunction rather than each bound alone
+showed one bound *subsumes* another and surfaced an unwritten hard context
+ceiling (264,208 tokens at V=127). It found two live bugs doing it.
+
+**The compiler emits the attention kernel itself** — `Y --emit-attention-ptx
+<head_dim> <seq_len>`, in `src/exact_attention.rs`, with an architecture-
+independent integer `exp2` (`src/fixed_exp.rs`, 0.908 ulp proved exhaustively)
+so the result is identical across GPU *architectures*, not merely across launches
+of one.
+
+### What this does not yet claim
+
+- **No fixed-order-float control arm.** A float kernel with a pinned reduction
+  order might get determinism without quantization. It is the missing control and
+  it could reframe the whole result.
+- **One model, one GPU, one stack.** Cross-hardware bit-identity is the strongest
+  thing exactness buys and is the headline claim with no evidence behind it.
+- **The `ptx_bridge.py` result is stale as measured.** It reported 12/12
+  bit-identical between the compiler's PTX and the torch path on real
+  activations, while passing the kernel a temperature 65,536x too small — a
+  uniform softmax that both arms of the comparison agreed on perfectly. Fixed and
+  pinned by CPU tests; not yet re-run.
+
+Full write-ups: [bit-identical decode](docs/bit_identical_decode.md) (findings,
+controls, and eight bugs found by turning this process on the tooling itself)
+and [deterministic inference](docs/deterministic_inference.md) (the design).
+
+---
+
 ## Safety and verification
 
 These are the features the compiler refuses to compile without, and each one is
@@ -825,10 +943,21 @@ sound and would also ban the shape every real pipelined kernel is built from.
 
 **In any pass whose output is a correctness claim, an unhandled AST node is a
 hard error — never a silent identity, no-op, or "close enough" substitution.**
-This is written down because the same bug was found eight times: a `_ =>` arm
-that guessed instead of refusing. A pass that silently approximates produces the
-paperwork of a proof without the proof, and the build goes green. The full table
-of the eight instances is in [../CLAUDE.md](../CLAUDE.md).
+This is written down because the same bug has now been found **39 times** — a
+`_ =>` arm that guessed instead of refusing, or, in the later cases, a correct
+guard consulted at a subset of the sites where its property has to hold. A pass
+that silently approximates produces the paperwork of a proof without the proof,
+and the build goes green. The full table — site, silent fallback, consequence —
+is maintained in the project's engineering notes, which live outside this
+repository.
+
+The instances span every layer: a comparison lowered to the wrong operator in the
+ZK backend (`5 <= 5` was false, and Groth16 proved it anyway); an SMT encoder
+that translated `x & y` as `x + y`; a `while` loop that emitted no PTX at all;
+an ELF emitter in which every identifier read the first local; and a Coq proof
+of the ZK control-flow lowering that found a bug three rounds of testing had
+missed. Reading it as a list of past mistakes is the wrong reading — it is a
+list of **shapes to grep for in the next pass you write.**
 
 ---
 
@@ -852,8 +981,8 @@ cargo build --release --features zk     # ZK backend is NOT in a default build
 ./target/release/Y circuit.ysu    --target=r1cs --witness input.json
 ./target/release/Y circuit.circom --target=r1cs -l circomlib/circuits
 
-cargo test --release                    # 31 test binaries
-cargo test --release --features zk      # 31 test binaries, ZK included
+cargo test --release                    # 63 test binaries, 415 tests
+cargo test --release --features zk      # 612 tests, ZK included
 ```
 
 Empirical GEMM autotuning for `@tile`d kernels measures candidates on the real
@@ -891,6 +1020,7 @@ src/                       Rust bootstrap compiler
   cpu_emitter.rs cpu_gemm.rs       x86-64 / AVX-512 GEMM
   native_emitter.rs                standalone ELF
   zero_drift.rs                    @ZeroDrift representation selection
+  exact_attention.rs fixed_exp.rs  exact int8 attention PTX + integer exp2
   zk_field.rs                      BN254 Fr, Montgomery form
   zk_emitter.rs zk_witness.rs      R1CS emission and witness solving
   zk_poseidon_constants.rs         circomlib parameters (GENERATED — do not edit)
@@ -924,6 +1054,9 @@ Further reading:
 - [ZK emit profiling](docs/zk_emit_profile.md)
 - [CPU GEMM tuning, the harness biases, and the two regimes a loop benchmark
   cannot distinguish](docs/cpu_gemm_tuning.md)
+- [Deterministic / bit-identical decode](docs/bit_identical_decode.md)
+- [Deterministic inference design notes](docs/deterministic_inference.md)
+- [Proof-carrying kernels](docs/proof_carrying_kernels.md)
 - [RT/Tensor co-processor: why it is scaffolding](investigation_rt_tensor_coprocessor_findings.md)
 - [Benchmarks index](README_BENCHMARKS.md)
 
