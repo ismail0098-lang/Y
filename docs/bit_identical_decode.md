@@ -226,6 +226,52 @@ constant.**
 
 ---
 
+## Finding 07 — two more checks that did not reach the thing they name
+
+Finding 06 was a comparison that could not see a wrong shared constant. The
+same sweep, continued through the Python side, found two more of the same
+family — a check standing next to the property it claims, not on it.
+
+* **The Python transcriptions of the fixed-point exp were checked against
+  Python.** There are four copies of that recipe: `src/fixed_exp.rs`, the PTX
+  in `ptx_device_function`, a pure-Python one in
+  `tools/attention_real_activations.py`, and a vectorised torch one in
+  `tools/batch_invariance_demo.py` — the last being what the demo,
+  `exact_accuracy.py` and `ptx_bridge.py`'s reference arm all call. Only the
+  PTX one was tied to Rust. The two Python ones were compared against float64
+  transcriptions of *themselves*, asserting the result is within 1 ulp of
+  `2^28 · 2^-t` and monotonic. Those are **properties, not identity**: two
+  implementations can both be within 1 ulp of the truth and differ from each
+  other by 1, and 1 ulp is a bit. The comment claimed it made "a divergence
+  visible rather than assumed away"; it made exactly that divergence invisible.
+  `EXP2_DOMAIN_DIGEST` — FNV-1a over all 2,031,616 arguments — is asserted on
+  both sides now. A one-LSB error in a table entry, which is how a hand-copied
+  table actually goes wrong and has already happened once in this repo's
+  vendored circomlib, passes the old check and fails the digest. The three
+  implementations do agree; that is now a fact rather than a hope. (The ulp
+  sweep also covered `t < 2^16` only — one of thirty-one unit intervals — at
+  stride 7. It is exhaustive now and independently reproduces 0.9076 ulp.)
+* **`exact_bounds_check.py`'s score-budget check was testing its own copy of
+  the rule.** That file closes with "do the asserts actually refuse at the
+  limits Z3 found?", which is the part that ties the model to the running code.
+  The 2^24 fp32 score budget was a bare assert inside `exact_attention`,
+  unreachable without building a model, so the checker re-derived
+  `d * Q_LEVELS * k_lv < 2^24` locally and asserted that instead. Neuter the
+  real assert and the checker still prints `[ok] head_dim 1041 (past the score
+  budget) is refused` and passes everything else. It is a callable now
+  (`assert_score_budget`) and the checker exhausts the real one.
+
+The second is the sharper finding, because **the file already knew the rule.**
+`digit_width`'s docstring, three hundred lines up, says a checker that
+re-implements what it checks "only ever proves I can copy a line twice" — and
+was split out of `exact_pv` for exactly that reason. The discipline was
+correct, written down, and applied at one of the two sites that needed it.
+
+Everything in this finding is CPU-only. `exact_bounds_check.py` runs green
+under z3 5.0.0, including the 264,208-token context ceiling at V=127.
+
+---
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
