@@ -83,6 +83,20 @@ impl Parser {
         r
     }
 
+    /// A token as a user would name it, for diagnostics.
+    ///
+    /// `{:?}` on a `TokenKind` prints the Rust variant (`Step`, `In`, `Loop`),
+    /// which is close enough to be confusing and never the spelling the user
+    /// typed.
+    fn describe_token(kind: &TokenKind) -> String {
+        match kind {
+            TokenKind::Ident(s) => format!("the identifier `{}`", s),
+            TokenKind::IntLit(v) => format!("the number `{}`", v),
+            TokenKind::StringLit(s) => format!("the string \"{}\"", s),
+            other => format!("the reserved word `{}`", format!("{:?}", other).to_lowercase()),
+        }
+    }
+
     fn peek(&self) -> &Token {
         if self.pos < self.tokens.len() {
             &self.tokens[self.pos]
@@ -1038,10 +1052,22 @@ impl Parser {
                     self.advance();
                     s.clone()
                 }
-                _ => {
+                // Naming the collision is the whole value of this arm. `step`
+                // is a reserved word (the `for i in a..b step N` syntax), so
+                // `let step: I64 = ...;` reported "Expected identifier after
+                // let" and nothing else - a message that points at `let` and
+                // says nothing about which word is the problem. Y's own
+                // self-hosted type checker used `step` as a variable and had
+                // been unparseable ever since. Same shape as the generated
+                // BN254 temporaries colliding with `U16`, recorded in
+                // CLAUDE.md, and found the same way: by a name that reads as
+                // perfectly ordinary.
+                other => {
                     return Err(format!(
-                        "Line {}: Expected identifier after let",
-                        ident_tok.line
+                        "Line {}: expected a variable name after `let`, found {}. \
+                         Reserved words cannot be used as variable names; rename it.",
+                        ident_tok.line,
+                        Self::describe_token(other)
                     ))
                 }
             };

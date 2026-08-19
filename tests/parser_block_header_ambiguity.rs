@@ -102,3 +102,46 @@ fn struct_literals_still_parse_where_they_are_unambiguous() {
         parses(src).unwrap_err()
     );
 }
+
+// ── Reserved words as variable names ───────────────────────────────────
+//
+// Not the same bug as the ones above, but the same cost: a message that
+// points at the construct instead of at the word. `step` is reserved by the
+// `for i in a..b step N` syntax, so `let step: I64 = ...;` reported only
+// "Expected identifier after let". Y's own self-hosted type checker used
+// `step` as a variable and had been unparseable ever since.
+
+/// The refusal is correct; the diagnostic must name the word.
+#[test]
+fn a_reserved_word_used_as_a_variable_names_itself() {
+    let err = {
+        let src = "fn main() -> I32 {\n    let step: I32 = 3;\n    return step;\n}\n";
+        let tokens = y::lexer::Lexer::new(src).tokenize();
+        y::parser::Parser::new(tokens)
+            .parse_program()
+            .expect_err("`step` is reserved, so this must not parse")
+    };
+    assert!(
+        err.contains("step"),
+        "the error must name the offending word, or a user has to guess which \
+         of the line's tokens is reserved. Got: {:?}",
+        err
+    );
+    assert!(
+        err.contains("reserved"),
+        "the error must say WHY the name is rejected. Got: {:?}",
+        err
+    );
+}
+
+/// The control: an ordinary name must still work, and the message above must
+/// not be produced for a genuine syntax error elsewhere.
+#[test]
+fn an_ordinary_name_still_parses() {
+    let src = "fn main() -> I32 {\n    let stride: I32 = 3;\n    return stride;\n}\n";
+    let tokens = y::lexer::Lexer::new(src).tokenize();
+    assert!(
+        y::parser::Parser::new(tokens).parse_program().is_ok(),
+        "`stride` is not reserved and must parse"
+    );
+}
