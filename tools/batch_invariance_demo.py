@@ -226,6 +226,41 @@ def assert_exact_range(x, what, bound=None):
             )
 
 
+def assert_score_budget(d, q_levels, k_lv):
+    """The fp32 score budget, as a callable rather than a bare assert.
+
+    Split out of `exact_attention` for the same reason `digit_width` was, and
+    stated there: a checker that re-implements the rule it is checking only
+    ever proves the line can be copied twice. `tools/exact_bounds_check.py`
+    used to mirror this one -- its own comment said so -- so the check "head_dim
+    past the score budget is refused" would have passed with the assert deleted.
+    It exhausts this function now.
+
+    A dot product of two int8 vectors of length `d` is bounded by
+    `d * q_levels * k_lv`, and so is every partial sum of it, so fp32's 24-bit
+    mantissa holds the whole computation without a single rounding -- which is
+    what makes the reduction order-independent, and is the same argument the
+    int64 kernel uses one level down.
+    """
+    assert d * q_levels * k_lv < (1 << 24), (
+        f"head_dim {d} with Q at {q_levels} and K at {k_lv} levels puts the "
+        f"score sum past 2^24; fp32 would start rounding and the reduction would "
+        f"stop being order-independent. Max K width here is "
+        f"{(1 << 24) // (d * q_levels)}; `k_levels_for` should already have "
+        f"capped to it, so reaching this means head_dim is too large for exact "
+        f"int8 scores in fp32."
+    )
+
+
+# `P_BITS` is not an independent choice: it is the exp's output scale, and
+# `exp2_neg_q16_16(0)` is exactly `1 << P_BITS` by construction. The digest
+# above pins the FUNCTION; this pins the constant the bound arithmetic
+# downstream reads, so the two cannot drift apart.
+assert int(exp2_neg_q16_16(torch.zeros(1, dtype=torch.int64),
+                           _table("cpu"))[0]) == 1 << P_BITS, \
+    "P_BITS disagrees with the exp's own output scale"
+
+
 # ---- the exact attention path ---------------------------------------------
 _orig = qwen2.eager_attention_forward
 TABLE = {}
@@ -277,14 +312,7 @@ def exact_attention(module, query, key, value, attention_mask, scaling=None,
     # partial sum of it, so fp32's 24-bit mantissa holds the whole computation
     # without a single rounding - which is what makes it order-independent, and
     # is the same argument the int64 kernel uses one level down.
-    assert d * Q_LEVELS * k_lv < (1 << 24), (
-        f"head_dim {d} with Q at {Q_LEVELS} and K at {k_lv} levels puts the "
-        f"score sum past 2^24; fp32 would start rounding and the reduction would "
-        f"stop being order-independent. Max K width here is "
-        f"{(1 << 24) // (d * Q_LEVELS)}; `k_levels_for` should already have "
-        f"capped to it, so reaching this means head_dim is too large for exact "
-        f"int8 scores in fp32."
-    )
+    assert_score_budget(d, Q_LEVELS, k_lv)
     # ... and the query group is folded into the row dimension instead of K
     # being broadcast into it, so this is one matmul over `nkv` heads.
     qg = qi.reshape(b, nkv, rep * q_len, d).contiguous()
