@@ -272,6 +272,40 @@ under z3 5.0.0, including the 264,208-token context ceiling at V=127.
 
 ---
 
+## Finding 08 — the sweepable knobs were the ones nothing swept
+
+`exact_kv.py` exposes `Y_EXACT_K_LEVELS` and `Y_EXACT_V_LEVELS` "so the
+accuracy/throughput trade can be swept without edits". Both were read with a
+bare `int()` and used unchecked, and the exhaustive checker swept head_dim only,
+at their defaults.
+
+* **`Y_EXACT_V_LEVELS=0` zeroed the V cache, silently.** Measured on
+  `quantize_rows([1, -2, 3, 4], lv)`: `levels=0` gives `q = [0,0,0,0]` with
+  `scale = inf`, and `levels=-5` gives `q = [-5,-5,-5,-5]` with a negative
+  scale. No error, no NaN — a model computing something else. `quantize_rows`'s
+  docstring already cites the design-rule table for whether `levels` was
+  *supplied*; the rule was never applied to its *value*.
+* **A K request below 127 was silently widened to 127**, because 127 is also
+  `k_levels_for`'s fail-closed sentinel — the value the score assert is
+  guaranteed to refuse. A sentinel and a request cannot share a value. Sweeping
+  that axis would have produced a flat left tail reading as "narrowing K costs
+  nothing", which is the shape of measurement error this project has recorded
+  three times already.
+* **The off-axis sweep found nothing, and that is the result.** 7 `K_LEVELS`
+  x 8 `q_levels` x 4096 head_dims = 229,376 configurations: every width is a
+  `2^n - 1`, and every case where `d·q·k >= 2^24` is the documented 127
+  fail-closed floor. The selector is correct on a domain 229,376 times larger
+  than the one that was checked. Recorded because a negative result on a widened
+  axis is worth as much as a positive one — it is what lets the next person
+  stop looking here.
+* **The checker's search for the first over-budget head_dim was an unbounded
+  `while`.** It terminates only because of the 127 floor; delete the floor and
+  it runs forever rather than failing. Bounded now — the same weakness
+  `tests/llvm_control_flow.rs` grew a deadline for, and the mutation that
+  exposed it is now caught in bounded time by two checks.
+
+---
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
