@@ -237,6 +237,45 @@ impl CtaTileConfig {
 
 /// Manages virtual registers and produces raw PTX strings.
 /// A literal's value, for reading `@bounds` at compile time.
+/// The PTX opcode for a carry-chained 32-bit intrinsic, if `name` is one and
+/// the arity matches.
+///
+/// The suffix convention is PTX's own, and it is worth reading once rather
+/// than guessing at a call site:
+///
+/// * a leading `add`/`sub`/`mad` **starts** a chain — no carry-in.
+/// * a leading `addc`/`subc`/`madc` **continues** one — carry-in from CC.
+/// * a trailing `_cc` means the instruction also **writes** the carry-out, so
+///   the chain can continue past it. Its absence ends the chain.
+///
+/// So an eight-limb accumulate is `mad_lo_cc` once, `madc_lo_cc` six times,
+/// and `madc_lo` (or `addc`) to close. Getting `_cc` wrong on the last link
+/// is harmless; getting it wrong in the middle silently drops a carry, which
+/// is why `tests/ptx_carry_chain.rs` checks every one of them against plain
+/// Rust `u64` arithmetic on the device rather than string-matching the PTX.
+fn carry_op(name: &str, argc: usize) -> Option<&'static str> {
+    let (op, want) = match name {
+        "add_cc_u32" => ("add.cc.u32", 2),
+        "addc_u32" => ("addc.u32", 2),
+        "addc_cc_u32" => ("addc.cc.u32", 2),
+        "sub_cc_u32" => ("sub.cc.u32", 2),
+        "subc_u32" => ("subc.u32", 2),
+        "subc_cc_u32" => ("subc.cc.u32", 2),
+        "mad_lo_cc_u32" => ("mad.lo.cc.u32", 3),
+        "madc_lo_u32" => ("madc.lo.u32", 3),
+        "madc_lo_cc_u32" => ("madc.lo.cc.u32", 3),
+        "mad_hi_cc_u32" => ("mad.hi.cc.u32", 3),
+        "madc_hi_u32" => ("madc.hi.u32", 3),
+        "madc_hi_cc_u32" => ("madc.hi.cc.u32", 3),
+        _ => return None,
+    };
+    if argc == want {
+        Some(op)
+    } else {
+        None
+    }
+}
+
 fn ptx_const_f64(expr: &Expr) -> Option<f64> {
     match expr {
         Expr::IntLit(v, _) => Some(*v as f64),
@@ -268,6 +307,10 @@ pub(crate) enum ScalarTy {
     I32,
     U64,
     I64,
+    U8,
+    I8,
+    U16,
+    I16,
 }
 
 impl ScalarTy {
@@ -278,6 +321,10 @@ impl ScalarTy {
             "I32" => ScalarTy::I32,
             "U64" => ScalarTy::U64,
             "I64" => ScalarTy::I64,
+            "U8" => ScalarTy::U8,
+            "I8" => ScalarTy::I8,
+            "U16" => ScalarTy::U16,
+            "I16" => ScalarTy::I16,
             _ => return None,
         })
     }
@@ -291,33 +338,110 @@ impl ScalarTy {
     }
 
     fn is_signed(self) -> bool {
-        matches!(self, ScalarTy::I32 | ScalarTy::I64)
+        matches!(
+            self,
+            ScalarTy::I32 | ScalarTy::I64 | ScalarTy::I8 | ScalarTy::I16
+        )
+    }
+
+    /// Narrower than a register, i.e. a **memory format only**.
+    ///
+    /// PTX has no 8-bit register class and no sub-word arithmetic. A value of
+    /// one of these types exists in memory; the moment it is loaded it becomes
+    /// its [`Self::promoted`] 32-bit type, extended according to signedness,
+    /// and a store truncates it back. That is C's integer-promotion rule and it
+    /// is the whole semantic model for these types here — see
+    /// [`Self::promoted`] for what it costs.
+    fn is_subword(self) -> bool {
+        matches!(
+            self,
+            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16
+        )
+    }
+
+    /// The type a value of this type has once it is in a register.
+    ///
+    /// **This is a real semantic commitment, not an implementation detail.**
+    /// `U8 + U8` is computed at 32 bits and does NOT wrap at 255; it wraps only
+    /// when stored back to a `U8` buffer. Emulating true 8-bit wraparound would
+    /// mean masking after every operation, which is a different language and a
+    /// much slower one. The rule chosen matches C, and it is the rule quantized
+    /// inference wants — load int8, accumulate int32.
+    ///
+    /// Sub-word **locals** are refused precisely so this promotion cannot be
+    /// observed by surprise: a user cannot declare `let x: I8` and then wonder
+    /// why `x` did not wrap. The type is reachable only as a buffer element,
+    /// where the width is unambiguous because it is a storage format.
+    fn promoted(self) -> ScalarTy {
+        match self {
+            ScalarTy::U8 | ScalarTy::U16 => ScalarTy::U32,
+            ScalarTy::I8 | ScalarTy::I16 => ScalarTy::I32,
+            other => other,
+        }
     }
 
     /// Element size in bytes - i.e. the stride of an array of this type.
     fn bytes(self) -> u32 {
-        if self.is_64() {
-            8
-        } else {
-            4
+        match self {
+            ScalarTy::U8 | ScalarTy::I8 => 1,
+            ScalarTy::U16 | ScalarTy::I16 => 2,
+            ScalarTy::U64 | ScalarTy::I64 => 8,
+            _ => 4,
         }
     }
 
     /// log2 of `bytes()`, for the shift in an address computation.
+    ///
+    /// Zero for the 8-bit types, which is what makes `shl.b64 %rd, %rd, 0` show
+    /// up in emitted PTX. It is correct and ptxas folds it away; do not
+    /// "optimise" it into a special case without checking every caller, because
+    /// the bug this whole type exists to prevent is an index scaled by the
+    /// wrong power of two.
     fn log2_bytes(self) -> u32 {
-        if self.is_64() {
-            3
-        } else {
-            2
+        match self.bytes() {
+            1 => 0,
+            2 => 1,
+            8 => 3,
+            _ => 2,
         }
     }
 
-    /// Suffix for `ld` / `st` / `mov`, where signedness does not exist.
+    /// Suffix for `ld` / `st` — the **memory** type, which for the sub-word
+    /// widths is where sign extension is decided.
+    ///
+    /// `ld.global.s8` sign-extends into the destination register and
+    /// `ld.global.u8` zero-extends, so this must carry signedness even though
+    /// the 32- and 64-bit forms do not. Getting it wrong turns every negative
+    /// int8 into a large positive number - assembles, launches, wrong answer.
     fn mem(self) -> &'static str {
         match self {
             ScalarTy::F32 => "f32",
             ScalarTy::U32 | ScalarTy::I32 => "u32",
             ScalarTy::U64 | ScalarTy::I64 => "u64",
+            ScalarTy::U8 => "u8",
+            ScalarTy::I8 => "s8",
+            ScalarTy::U16 => "u16",
+            ScalarTy::I16 => "s16",
+        }
+    }
+
+    /// Suffix for a `mov` between registers holding this type.
+    ///
+    /// Distinct from [`Self::mem`] because a sub-word value never occupies a
+    /// sub-word register - `mov.u8` does not exist in PTX. Every `mov` site
+    /// must use this and every `ld`/`st` site must use `mem`; the two were one
+    /// method before the sub-word widths existed, which is exactly why they are
+    /// easy to confuse now.
+    fn reg_mem(self) -> &'static str {
+        self.promoted().mem_wide()
+    }
+
+    /// `mem()` restricted to the register-width types, for use by `reg_mem`.
+    fn mem_wide(self) -> &'static str {
+        match self {
+            ScalarTy::F32 => "f32",
+            ScalarTy::U64 | ScalarTy::I64 => "u64",
+            _ => "u32",
         }
     }
 
@@ -325,12 +449,19 @@ impl ScalarTy {
     /// `div`, `rem`, `shr` and every comparison differ between `.u32` and
     /// `.s32`. Getting this wrong is a wrong answer, not a slow one.
     fn arith(self) -> &'static str {
-        match self {
+        match self.promoted() {
             ScalarTy::F32 => "f32",
             ScalarTy::U32 => "u32",
             ScalarTy::I32 => "s32",
             ScalarTy::U64 => "u64",
             ScalarTy::I64 => "s64",
+            // `promoted()` maps every sub-word type into the four above, so
+            // this arm is unreachable. It is spelled out rather than `_ =>`
+            // so that adding a width without deciding its arithmetic type is
+            // a compile error, per the design rule.
+            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16 => {
+                unreachable!("promoted() must map sub-word types to a register width")
+            }
         }
     }
 
@@ -359,6 +490,10 @@ impl ScalarTy {
             ScalarTy::I32 => "I32",
             ScalarTy::U64 => "U64",
             ScalarTy::I64 => "I64",
+            ScalarTy::U8 => "U8",
+            ScalarTy::I8 => "I8",
+            ScalarTy::U16 => "U16",
+            ScalarTy::I16 => "I16",
         }
     }
 }
@@ -445,6 +580,23 @@ pub struct PtxEmitter {
     /// body - because register numbering is per-entry and the emitter's
     /// counters are reset for it (see `emit_attention_split_reduce_entry`).
     pending_module_items: Vec<String>,
+    /// `.shared` arrays this kernel's body asked for, as (symbol, u32 count).
+    ///
+    /// Declared at MODULE scope, textually before the `.visible .entry` that
+    /// uses them, because the body is emitted into a scratch buffer before the
+    /// entry line exists (see `emit_kernel`) and there is nowhere inside the
+    /// entry to put them by the time we know they are needed.
+    ///
+    /// Reset per kernel: a `.shared` symbol is module-scope in PTX, so two
+    /// kernels allocating one each must not collide, and the counter in the
+    /// name is global for exactly that reason.
+    shared_arrays: Vec<(String, usize)>,
+    /// Monotonic across the whole module, NOT `shared_arrays.len()`. That
+    /// vector is drained per kernel, so numbering from its length would give
+    /// two kernels in one module the same `__y_smem_0` symbol - a redefinition
+    /// ptxas rejects, and it would only ever show up in a module with two
+    /// shared-memory kernels in it.
+    shared_sym_count: usize,
 }
 
 /// Split-K ("flash decoding") configuration for
@@ -512,6 +664,8 @@ impl PtxEmitter {
             debug_info: false,
             pending_extern_decls: Vec::new(),
             pending_module_items: Vec::new(),
+            shared_arrays: Vec::new(),
+            shared_sym_count: 0,
         }
     }
 
@@ -650,11 +804,21 @@ impl PtxEmitter {
     // is the regression gate.
 
     /// Allocates a register of `ty` and records its type.
+    ///
+    /// A sub-word type is allocated — and **recorded** — as its promoted
+    /// 32-bit type. There is no 8- or 16-bit register class in PTX, so a
+    /// register can never hold `I8`; recording it as `I8` would make every
+    /// later `reg_ty` lookup describe a register that does not exist and emit
+    /// `mov.s8`, which ptxas rejects.
     fn alloc_ty(&mut self, ty: ScalarTy) -> String {
+        let ty = ty.promoted();
         let r = match ty {
             ScalarTy::F32 => self.alloc_regf32(),
             ScalarTy::U64 | ScalarTy::I64 => self.alloc_reg64(),
             ScalarTy::U32 | ScalarTy::I32 => self.alloc_reg32(),
+            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16 => {
+                unreachable!("promoted() must map sub-word types to a register width")
+            }
         };
         self.reg_ty.insert(r.clone(), ty);
         r
@@ -740,7 +904,7 @@ impl PtxEmitter {
         // is keyed by register and one register cannot hold two types.
         if !from.is_float() && !to.is_float() && from.bytes() == to.bytes() {
             let dst = self.alloc_ty(to);
-            writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", to.mem(), dst, reg).unwrap();
+            writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", to.reg_mem(), dst, reg).unwrap();
             return dst;
         }
         let dst = self.alloc_ty(to);
@@ -941,44 +1105,73 @@ impl PtxEmitter {
     /// same bug with a different spelling - the caller asked for a copy or a
     /// matrix multiply, and silently not doing it produces a kernel that
     /// computes garbage instead of one that fails to build.
-    /// Refuse buffer element types narrower than 32 bits.
+    /// Refuse sub-word types where they would be a *value* rather than a
+    /// storage format.
     ///
-    /// `U32`, `I32`, `U64` and `I64` are lowered for real now (see the integer
-    /// datapath above). The sub-word widths are not, and the reason they are
-    /// refused rather than widened is that an element type is simultaneously a
-    /// *stride*: `GlobalMemory<U8>` means `ld.global.u8` at a 1-byte stride,
-    /// and every address computation in this file shifts by a hardcoded
-    /// log2(4). Loading a `u8` at a 4-byte stride reads every fourth element
-    /// and calls it an array - a wrong answer that assembles.
+    /// `U8`/`I8`/`U16`/`I16` are lowered for real now, as **buffer element
+    /// types only**. The stride is threaded through `ScalarTy::log2_bytes` and
+    /// the sign extension through `ScalarTy::mem`, so `GlobalMemory<I8>` loads
+    /// `ld.global.s8` at a 1-byte stride.
     ///
-    /// This is the residue of a broader refusal that used to cover every
-    /// integer width. The bug it was written for was live and worth restating:
-    /// a kernel declared `GlobalMemory<U32>` doing `let s: U32 = a + b;`
-    /// compiled clean, assembled clean under `ptxas -arch=sm_89`, printed
-    /// success, and emitted `ld.global.f32` / `add.f32` / `st.global.f32`,
-    /// silently rounding every value above 2^24.
+    /// What is still refused is a sub-word **local**, and that is a semantic
+    /// decision rather than a missing feature. PTX has no sub-word register
+    /// class, so `let x: I8 = ...` would be a 32-bit register and `x + x`
+    /// would not wrap at 8 bits. Accepting the declaration would mean a value
+    /// whose type says one thing and whose arithmetic does another — the exact
+    /// shape of failure this file's design rule exists to prevent. As a buffer
+    /// element the width is unambiguous, because there it really is the
+    /// storage format.
+    ///
+    /// The refusal this replaces was written when the widths were not lowered
+    /// at all: an element type is simultaneously a *stride*, and every address
+    /// computation used to shift by a hardcoded log2(4), so a `u8` array would
+    /// have been read every fourth element — a wrong answer that assembles.
     fn reject_unsupported_element_types(&mut self, kernel: &KernelDecl) {
         for param in &kernel.params {
-            if let Type::Generic { base, args, .. } = &param.ty {
-                if base != "GlobalMemory" && base != "SharedMemory" && base != "L2Memory" {
+            let Type::Generic { base, args, .. } = &param.ty else {
+                continue;
+            };
+            if base != "GlobalMemory" && base != "SharedMemory" && base != "L2Memory" {
+                continue;
+            }
+            for a in args {
+                let GenericArg::Type(Type::Primitive(name, _) | Type::Ident(name, _)) = a else {
                     continue;
-                }
-                for a in args {
-                    let GenericArg::Type(Type::Primitive(name, _) | Type::Ident(name, _)) = a else {
-                        continue;
-                    };
-                    if matches!(name.as_str(), "U8" | "U16" | "I8" | "I16") {
-                        self.emit_errors.push(format!(
-                            "[PTX] `{}: {}<{}>` cannot be lowered: this backend addresses buffers \
-                             at a 4- or 8-byte stride, so a sub-word element type would read every \
-                             fourth element and report it as the array. Use U32/I32/U64/I64, or \
-                             thread a byte width through the address computations in ptx_emitter.rs.",
-                            param.name, base, name
-                        ));
-                    }
+                };
+                // `SharedMemory` addressing is still 32-bit-only: the shared
+                // surface indexes in 16-byte units (`shared_load_v4`) and has
+                // no byte-addressed form, so a sub-word element there would be
+                // the original bug in a different building.
+                if base != "GlobalMemory"
+                    && ScalarTy::from_name(name).is_some_and(ScalarTy::is_subword)
+                {
+                    self.emit_errors.push(format!(
+                        "[PTX] `{}: {}<{}>` cannot be lowered: sub-word element types are \
+                         supported for GlobalMemory only. {} is indexed in 16-byte units and \
+                         has no byte-addressed form.",
+                        param.name, base, name, base
+                    ));
                 }
             }
         }
+    }
+
+    /// Refuse a sub-word type used as a local declaration.
+    ///
+    /// See [`Self::reject_unsupported_element_types`] for why this is a
+    /// deliberate boundary and not an unfinished one.
+    fn reject_subword_local(&mut self, name: &str, ty_name: &str, line: usize) -> bool {
+        if !ScalarTy::from_name(ty_name).is_some_and(ScalarTy::is_subword) {
+            return false;
+        }
+        self.emit_errors.push(format!(
+            "Line {}: `let {}: {}` cannot be lowered: PTX has no sub-word register class, so \
+             this would be a 32-bit value whose declared type promises 8- or 16-bit wraparound \
+             it will not perform. Sub-word types are buffer element types only - load from a \
+             `GlobalMemory<{}>` into an I32/U32 and the width is honoured by the load.",
+            line, name, ty_name, ty_name
+        ));
+        true
     }
 
     /// Record the element type of each typed buffer parameter, so the load and
@@ -1026,6 +1219,100 @@ impl PtxEmitter {
             }
             _ => false,
         }
+    }
+
+    /// Does this initialiser produce a linear token rather than a value?
+    ///
+    /// The list is explicit because the alternative - treating "emitted no
+    /// register" as acceptable everywhere - is exactly the silent failure the
+    /// `let` refusal beside it exists to catch.
+    fn binds_a_linear_token(expr: &Expr) -> bool {
+        matches!(expr, Expr::Call { func, .. }
+            if matches!(&**func, Expr::Ident(n, _) if n == "cp_async"))
+    }
+
+    /// Required argument count for intrinsics whose missing operands would
+    /// otherwise alias an unrelated register.
+    ///
+    /// **This is the design-rule table applied to arity.** Every one of these
+    /// lowerings reads its operands as `if args.len() >= N { emit(args[N-1]) }
+    /// else { "%r0".into() }` - so calling one with too few arguments does not
+    /// fail, it substitutes *whatever happens to live in `%r0`/`%rd0`/`%f0`*,
+    /// which is another variable in the same kernel. Two outcomes, both bad:
+    /// the register has the wrong type and `ptxas` rejects the module after the
+    /// compiler has printed "Compilation Successful!" and exited 0, or it has
+    /// the right type and the kernel silently computes with the wrong operand.
+    ///
+    /// Found by giving `block_ptr2d_store` five arguments instead of seven: the
+    /// value being stored became the bounds limit, emitting
+    /// `setp.lt.u32 %p0, %r6, %f0` - a u32 compared against an f32 register.
+    ///
+    /// **The count here is the last position whose fallback is a REGISTER, not
+    /// the total number of parameters.** Several of these lowerings have
+    /// genuinely optional trailing operands that default to a literal -
+    /// `block_tile_store`'s bound falls back to `128`, which is a defensible
+    /// default and not an aliased register - so requiring the full parameter
+    /// list would reject calls that were always correct. The first version of
+    /// this table did exactly that and broke
+    /// `supported_intrinsics_emit_assemblable_ptx`, which calls
+    /// `block_tile_store` with three arguments.
+    ///
+    /// Only `block_ptr2d_store` is called by any kernel in this repo, and
+    /// always with its full seven, so this gate cannot break working code. The
+    /// rest are reachable from the surface syntax and used by nothing, exactly
+    /// like the Hopper intrinsics in gotcha #8.
+    fn required_arity(fname: &str) -> Option<usize> {
+        Some(match fname {
+            "block_cdiv" | "block_ptr2d_advance" | "block_ptr3d_advance"
+            | "shfl_sync_bfly" | "shfl_sync_bfly_b32" | "ld_global_v4_f32"
+            | "load_v4" | "warp_reduce_max" | "warp_reduce_sum" => 1,
+            "block_tile_load" | "tile_load" | "st_global_v4_f32"
+            | "store_v4" => 2,
+            "block_ptr2d_load" | "block_tile_store" | "tile_store"
+            | "make_block_ptr2d" | "rmsnorm_fast" | "rmsnorm_v4"
+            | "swiglu_fast" | "swiglu_v4" | "vec_add_v4" | "vector_add_v4"
+            | "vec_add_unrolled4" => 3,
+            "block_ptr3d_load" | "block_ptr3d_load_v4" | "block_ptr3d_store"
+            | "make_block_ptr3d" => 4,
+            "block_ptr2d_store" => 7,
+            "block_ptr3d_store_v4" => 10,
+            _ => return None,
+        })
+    }
+
+    /// `required_arity`, for the `Namespace::member` callees.
+    ///
+    /// Same rule and same reason: the count is the last position whose fallback
+    /// is a REGISTER. `BlockTile::load`'s bound falls back to the literal `128`
+    /// and is genuinely optional; its offset falls back to `%r0` and is not.
+    fn required_path_arity(namespace: &str, member: &str) -> Option<usize> {
+        Some(match (namespace, member) {
+            ("BlockTile", "load") => 2,
+            ("BlockTile", "store") => 3,
+            _ => return None,
+        })
+    }
+
+    /// A statement this backend cannot lower, refused by name.
+    ///
+    /// `emit_stmt` ended in `_ => {}`, so `while`, `break` and `match` emitted
+    /// NOTHING - the PTX assembled (it is simply a shorter kernel), the kernel
+    /// launched, and it computed a different program. A `while` loop's whole
+    /// body vanished:
+    ///
+    /// ```text
+    /// let i: I32 = 0;
+    /// while i < N { i = i + 1; }
+    /// store(A, 0, i);              // stored 0, whatever N was
+    /// ```
+    ///
+    /// No `ptxas` gate can catch that, for the reason gotcha #8 states: a
+    /// MISSING instruction assembles perfectly.
+    fn unsupported_stmt(&mut self, what: &str, span: &Span) {
+        self.emit_errors.push(format!(
+            "[PTX] {} (line {}, col {}) cannot be lowered by this backend.",
+            what, span.line, span.col
+        ));
     }
 
     fn unsupported_intrinsic(&mut self, name: &str, reason: &str) {
@@ -1159,6 +1446,8 @@ impl PtxEmitter {
         // below - see that computation's doc comment for why this matters.
         let tile_gemm_threads_per_cta = if let Some((m, n, k, a_ptr, b_ptr, c_ptr, bias_ptr)) = self.tile_gemm_operands(kernel) {
             Some(self.emit_tensor_core_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &c_ptr, bias_ptr.as_deref(), hw_profile, &kernel.name))
+        } else if let Some((m, n, k, a_ptr, b_ptr, c_ptr)) = self.tile_gemm_int8_operands(kernel) {
+            Some(self.emit_int8_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &c_ptr, &kernel.name))
         } else if let Some((m, n, k, a_ptr, b_ptr, scale_a_reg, scale_b_reg, c_ptr)) = self.tile_gemm_fp8_operands(kernel) {
             Some(self.emit_fp8_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &scale_a_reg, &scale_b_reg, &c_ptr, &kernel.name))
         } else if let Some((m, n, k, x_ptr, wgate_ptr, wup_ptr, out_ptr)) = self.tile_gemm_swiglu_operands(kernel) {
@@ -1209,6 +1498,17 @@ impl PtxEmitter {
         // scope, textually before this kernel's own entry.
         for item in std::mem::take(&mut self.pending_module_items) {
             writeln!(&mut self.ptx_buffer, "{}", item).unwrap();
+        }
+        // `.shared` arrays the body asked for, same placement rule. 16-byte
+        // aligned because every access to them is `ld/st.shared.v4.u32`,
+        // which faults on a misaligned address rather than being slow.
+        for (sym, count) in std::mem::take(&mut self.shared_arrays) {
+            writeln!(
+                &mut self.ptx_buffer,
+                ".shared .align 16 .b32 {}[{}];",
+                sym, count
+            )
+            .unwrap();
         }
 
         // Emit kernel signature to original self.ptx_buffer
@@ -1326,6 +1626,60 @@ impl PtxEmitter {
         writeln!(&mut self.ptx_buffer, "}}").unwrap();
     }
 
+    /// Every identifier `e` reads, for the barrier-hoisting legality check.
+    ///
+    /// Over-approximating is the safe direction here: a name collected that is
+    /// not really a read only makes the hoist give up. Under-approximating
+    /// moves a statement across a barrier it depends on, which is silent and
+    /// wrong, so the walk is exhaustive with no `_ =>` arm.
+    fn collect_idents(e: &Expr, out: &mut Vec<String>) {
+        match e {
+            Expr::Ident(n, _) => out.push(n.clone()),
+            Expr::BinaryOp { left, right, .. } => {
+                Self::collect_idents(left, out);
+                Self::collect_idents(right, out);
+            }
+            Expr::UnaryOp { operand, .. } => Self::collect_idents(operand, out),
+            Expr::Call { func, args, .. } => {
+                Self::collect_idents(func, out);
+                for a in args {
+                    Self::collect_idents(a, out);
+                }
+            }
+            Expr::GenericCall { func, args, .. } => {
+                Self::collect_idents(func, out);
+                for a in args {
+                    Self::collect_idents(a, out);
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                Self::collect_idents(base, out);
+                Self::collect_idents(index, out);
+            }
+            Expr::MemberAccess { base, .. } => Self::collect_idents(base, out),
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    Self::collect_idents(v, out);
+                }
+            }
+            // A block expression can bind names of its own, so its free
+            // variables are not simply the identifiers inside it. Rather than
+            // model scoping for a construct no kernel body uses, poison the
+            // check: a name that cannot be bound makes the caller refuse to
+            // hoist.
+            Expr::BlockExpr(..) => out.push("\0unmodelled".into()),
+            // Leaves: nothing to read.
+            Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::CharLit(..)
+            | Expr::BoolLit(..)
+            | Expr::SelfLit(..)
+            | Expr::Path { .. }
+            | Expr::ZeroInit(..) => {}
+        }
+    }
+
     fn emit_block(&mut self, block: &Block, hw_profile: &HardwareProfile) {
         let mut stmts = block.stmts.clone();
 
@@ -1350,26 +1704,52 @@ impl PtxEmitter {
                     as usize;
                 let mut hoist_count = 0;
 
+                // Moving work from AFTER a barrier to BEFORE it is only legal
+                // when the work does not depend on the barrier. Two rules
+                // enforce that, and both were missing:
+                //
+                //   * Stop at the first statement that cannot be hoisted.
+                //     This loop used to `j += 1` past anything it did not
+                //     recognise and keep scanning, so it would reach into
+                //     code arbitrarily far ahead and pull an arithmetic
+                //     statement out from under the loads that define its
+                //     operands.
+                //   * Hoist only statements whose every operand is ALREADY
+                //     bound at the barrier. An operand that is not bound yet
+                //     is, by definition, produced after the barrier - and in
+                //     a shared-memory kernel that is exactly the value
+                //     another thread wrote, which is the whole reason the
+                //     barrier is there.
+                //
+                // This never fired before because `barrier_sync()` emitted no
+                // instruction at all and no reachable kernel used shared
+                // memory; the pass was live code guarding a barrier that did
+                // not exist. Guarded now by
+                // `tests/ptx_shared_memory.rs::hoisting_cannot_cross_a_real_dependency`.
                 let mut j = i + 1;
                 let mut hoisted = Vec::new();
                 while j < stmts.len() && hoist_count < budget {
-                    let is_independent_alu = matches!(
-                        &stmts[j],
+                    let value = match &stmts[j] {
                         Stmt::Let {
-                            init: Some(Expr::BinaryOp { .. }),
+                            init: Some(v @ Expr::BinaryOp { .. }),
                             ..
-                        } | Stmt::Assign {
-                            value: Expr::BinaryOp { .. },
+                        } => v,
+                        Stmt::Assign {
+                            value: v @ Expr::BinaryOp { .. },
                             ..
-                        }
-                    );
-
-                    if is_independent_alu {
-                        hoisted.push(stmts.remove(j));
-                        hoist_count += 1;
-                    } else {
-                        j += 1;
+                        } => v,
+                        _ => break,
+                    };
+                    let mut reads = Vec::new();
+                    Self::collect_idents(value, &mut reads);
+                    if !reads
+                        .iter()
+                        .all(|n| self.variables.contains_key(n) || self.vec_vars.contains_key(n))
+                    {
+                        break;
                     }
+                    hoisted.push(stmts.remove(j));
+                    hoist_count += 1;
                 }
 
                 if hoist_count > 0 {
@@ -1469,8 +1849,18 @@ declare it as a Q format.",
                 ty,
                 init,
                 cache_policy,
+                span,
                 ..
             } => {
+                // A sub-word local is refused before anything is emitted for
+                // it: PTX has no sub-word register, so honouring the
+                // declaration is impossible and ignoring it would silently give
+                // 32-bit semantics to a type that promises 8- or 16-bit ones.
+                if let Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) = ty {
+                    if self.reject_subword_local(name, n, span.line) {
+                        return;
+                    }
+                }
                 if let Some(expr) = init {
                     let val_str = self.emit_expr(expr, cache_policy.as_ref(), hw_profile);
                     if let Some(regs) = Self::parse_v4_marker(&val_str) {
@@ -1495,6 +1885,39 @@ declare it as a Q format.",
                             None => val_str,
                         };
                         self.variables.insert(name.clone(), reg);
+                    } else if Self::binds_a_linear_token(expr) {
+                        // `cp_async` yields a LINEAR TOKEN, not a value: the
+                        // copy is emitted, and the token exists only so
+                        // `linear_tracker` can prove it is awaited exactly
+                        // once. Nothing ever reads its register - `pipe.wait`
+                        // lowers to `cp.async.wait_group 0` without touching
+                        // the operand - so having no register is correct here
+                        // rather than a failure to lower. Binding nothing is
+                        // what the tracker expects.
+                    } else {
+                        // An initialiser this backend cannot lower used to fall
+                        // through here silently: the name was never bound to a
+                        // register, and every later use emitted the NAME as
+                        // though it were one. `let v: I32 = load(Src[i]);`
+                        // (there is no bare `load`, only `GlobalMemory::load`)
+                        // produced `setp.gt.s32 %p1, v, %r1;` - PTX that
+                        // ptxas rejects, after a clean compile and a
+                        // "Compilation Successful!".
+                        //
+                        // Refusing is the fix, not a stopgap: a named gap
+                        // costs a user five minutes, and this cost a silent
+                        // undefined symbol in the middle of a kernel. Same
+                        // reasoning as the `tma_load` / `wgmma_async` refusals
+                        // in gotcha #8.
+                        self.emit_errors.push(format!(
+                            "[PTX] line {}: the initialiser of `let {}` produced no value. \
+                             This backend could not lower it - check the spelling and the \
+                             argument count of any intrinsic it calls (for example there is \
+                             no bare `load`; global loads are `block_ptr2d_load`). \
+                             Binding the name anyway would emit `{}` into the PTX as if it \
+                             were a register.",
+                            span.line, name, name
+                        ));
                     }
                 }
             }
@@ -1523,14 +1946,47 @@ declare it as a Q format.",
                 if let Some(t) = tile {
                     writeln!(&mut self.ptx_buffer, "    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}", t.block_m, t.block_n, t.block_k).unwrap();
                 }
+                // A `step` this arm could not read used to fall through to
+                // `_ => 1`, silently. So `for i in w..N step nworkers` - the
+                // grid-stride loop, the canonical way to write a kernel whose
+                // launch geometry is a tuning parameter - compiled cleanly and
+                // stepped by ONE: every thread walked the whole range, which
+                // is N-times redundant work and, in any reduction, a wrong
+                // answer. Same shape as every row in the design-rule table in
+                // CLAUDE.md: a default that is plausible rather than correct.
+                //
+                // A dynamic step is emitted as a register instead. The
+                // literal path is kept because the v4 vectorising pass keys
+                // off `step_val == 4`, which a runtime value cannot satisfy.
+                let mut step_reg: Option<String> = None;
                 let step_val = match step {
                     Some(Expr::IntLit(step, _)) if *step > 0 && *step <= u32::MAX as i64 => {
                         *step as u32
                     }
-                    _ => 1,
+                    Some(Expr::IntLit(bad, _)) => {
+                        // Zero never terminates and a negative step is a
+                        // different loop than the one written, since the exit
+                        // test is `>=`.
+                        self.unsupported_intrinsic(
+                            "for-step",
+                            &format!(
+                                "step must be positive; `{}` would not terminate under \
+                                 this loop's `>=` exit test",
+                                bad
+                            ),
+                        );
+                        1
+                    }
+                    Some(dynamic) => {
+                        let r = self.alloc_reg32();
+                        self.emit_u32_init(&r, dynamic);
+                        step_reg = Some(r);
+                        1
+                    }
+                    None => 1,
                 };
 
-                if step_val == 4 {
+                if step_reg.is_none() && step_val == 4 {
                     writeln!(&mut self.ptx_buffer, "    // [Y AUTOMATED VECTORIZING PASS] Transformed loop step into 128-bit SIMD v4 stride").unwrap();
                 }
 
@@ -1547,11 +2003,18 @@ declare it as a Q format.",
                 .unwrap();
                 writeln!(&mut self.ptx_buffer, "    @{} bra {};", exit_pred, loop_end).unwrap();
                 self.emit_block(body, hw_profile);
-                writeln!(
-                    &mut self.ptx_buffer,
-                    "    add.u32 {}, {}, {};",
-                    loop_reg, loop_reg, step_val
-                )
+                match &step_reg {
+                    Some(r) => writeln!(
+                        &mut self.ptx_buffer,
+                        "    add.u32 {}, {}, {};",
+                        loop_reg, loop_reg, r
+                    ),
+                    None => writeln!(
+                        &mut self.ptx_buffer,
+                        "    add.u32 {}, {}, {};",
+                        loop_reg, loop_reg, step_val
+                    ),
+                }
                 .unwrap();
                 writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
                 writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
@@ -1595,14 +2058,27 @@ declare it as a Q format.",
                         // as it does at a `let`.
                         let ty = self.ty_of(&tgt_reg);
                         let src = self.emit_convert(&val_reg, ty);
-                        writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", ty.mem(), tgt_reg, src).unwrap();
+                        writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", ty.reg_mem(), tgt_reg, src).unwrap();
                     }
                 }
             }
             Stmt::Expr(expr) => {
                 self.emit_expr(expr, None, hw_profile);
             }
-            Stmt::Return(_, _) => {}
+            // A kernel is void, so a bare `return;` is `ret;` and a returned
+            // VALUE has nowhere to go. Both used to emit nothing, which is
+            // right for neither: the first is an early exit that silently did
+            // not happen.
+            Stmt::Return(value, span) => {
+                if value.is_some() {
+                    self.unsupported_stmt(
+                        "`return <expr>` inside a kernel (a kernel has no return value)",
+                        span,
+                    );
+                } else {
+                    writeln!(&mut self.ptx_buffer, "    ret;").unwrap();
+                }
+            }
             Stmt::SafeBlock(block, _) => {
                 self.emit_block(block, hw_profile);
             }
@@ -1647,46 +2123,43 @@ declare it as a Q format.",
                     hw_profile.branch_divergence_penalty_cycles
                 )
                 .unwrap();
-                if total_cost < hw_profile.branch_divergence_penalty_cycles {
+                {
+                    // The "predicated execution" path emitted `@%p { ... }`,
+                    // which is NOT PTX: the ISA predicates a single
+                    // instruction, never a block. Every `if` small enough to
+                    // trip the divergence heuristic therefore produced a file
+                    // `ptxas` rejects with `Parsing error near '{'` - after a
+                    // clean compile and a "Compilation Successful!".
+                    //
+                    // It survived because no reachable kernel had a scalar
+                    // `if` in it, and the tests that did exist string-matched
+                    // rather than assembling (gotcha #8, again). Deleted
+                    // rather than repaired: real predication means predicating
+                    // each emitted instruction, which is a change to every
+                    // arm of `emit_block`, not a fix to this one. A branch is
+                    // always correct; the divergence penalty it may cost is a
+                    // performance question, and the old code's answer to it
+                    // was a file that did not assemble.
                     writeln!(
                         &mut self.ptx_buffer,
-                        "    // Block cost ({} cy) < Penalty. Emitting PREDICATED execution.",
+                        "    // if: emitting BRANCH execution (block cost {} cy).",
                         total_cost
                     )
                     .unwrap();
                     let pred = self.alloc_pred();
-                    let cond_reg = if cond_str.is_empty() {
-                        "%r0".to_string()
-                    } else {
-                        cond_str
-                    };
-                    writeln!(
-                        &mut self.ptx_buffer,
-                        "    setp.ne.u32 {}, {}, 0;",
-                        pred, cond_reg
-                    )
-                    .unwrap();
-                    writeln!(&mut self.ptx_buffer, "    @{} {{", pred).unwrap();
-                    self.emit_block(then_block, hw_profile);
-                    writeln!(&mut self.ptx_buffer, "    }}").unwrap();
-                    if let Some(eb) = else_block {
-                        writeln!(&mut self.ptx_buffer, "    @!{} {{", pred).unwrap();
-                        self.emit_block(eb, hw_profile);
-                        writeln!(&mut self.ptx_buffer, "    }}").unwrap();
+                    // `if cond_str.is_empty() { "%r0" }` lived here. An empty
+                    // string means `emit_expr` could not lower the condition,
+                    // and `%r0` is parameter 0 - so the kernel branched on an
+                    // unrelated value and assembled cleanly. Same row of the
+                    // design-rule table as the intrinsic arity fallbacks.
+                    if cond_str.is_empty() {
+                        self.unsupported_stmt(
+                            "an `if` whose condition this backend cannot lower",
+                            &condition.span(),
+                        );
+                        return;
                     }
-                } else {
-                    writeln!(
-                        &mut self.ptx_buffer,
-                        "    // Block cost ({} cy) >= Penalty. Emitting BRANCH execution.",
-                        total_cost
-                    )
-                    .unwrap();
-                    let pred = self.alloc_pred();
-                    let cond_reg = if cond_str.is_empty() {
-                        "%r0".to_string()
-                    } else {
-                        cond_str
-                    };
+                    let cond_reg = cond_str;
                     let else_label = self.alloc_label("IF_ELSE");
                     let end_label = self.alloc_label("IF_END");
                     writeln!(
@@ -1709,6 +2182,52 @@ declare it as a Q format.",
                     }
                     writeln!(&mut self.ptx_buffer, "    {}:", end_label).unwrap();
                 }
+            }
+            // Lowered exactly like `Stmt::For` above, minus the induction
+            // variable and the step: test at the top, branch out on false,
+            // body, branch back. This was `_ => {}` and emitted nothing at
+            // all - see `unsupported_stmt`.
+            //
+            // Reachable only since the loop-invariant initiation check stopped
+            // rejecting every `while` in the language, which is why a whole
+            // missing statement kind went unnoticed in a backend with a
+            // `ptxas` gate over it.
+            Stmt::While { condition, body, .. } => {
+                let loop_start = self.alloc_label("WHILE_START");
+                let loop_end = self.alloc_label("WHILE_END");
+                let exit_pred = self.alloc_pred();
+
+                writeln!(&mut self.ptx_buffer, "    // while ...").unwrap();
+                writeln!(&mut self.ptx_buffer, "    {}:", loop_start).unwrap();
+                // The condition is re-evaluated every iteration, which is the
+                // point of a `while`: hoisting it would be a `do`-loop.
+                let cond_str = self.emit_expr(condition, None, hw_profile);
+                if cond_str.is_empty() {
+                    self.unsupported_stmt(
+                        "a `while` whose condition this backend cannot lower",
+                        &condition.span(),
+                    );
+                    return;
+                }
+                writeln!(
+                    &mut self.ptx_buffer,
+                    "    setp.eq.u32 {}, {}, 0;",
+                    exit_pred, cond_str
+                )
+                .unwrap();
+                writeln!(&mut self.ptx_buffer, "    @{} bra {};", exit_pred, loop_end).unwrap();
+                self.emit_block(body, hw_profile);
+                writeln!(&mut self.ptx_buffer, "    bra {};", loop_start).unwrap();
+                writeln!(&mut self.ptx_buffer, "    {}:", loop_end).unwrap();
+            }
+            // `break` needs a stack of enclosing loop-exit labels, which this
+            // emitter does not keep. Refusing costs a line number; emitting
+            // nothing costs a loop that never exits early.
+            Stmt::Break { span } => {
+                self.unsupported_stmt("`break` (this backend keeps no loop-exit label stack)", span);
+            }
+            Stmt::Match { span, .. } => {
+                self.unsupported_stmt("`match`", span);
             }
             _ => {}
         }
@@ -1743,7 +2262,7 @@ declare it as a Q format.",
                     ScalarTy::I32
                 };
                 let reg = self.alloc_ty(ty);
-                writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", ty.mem(), reg, v).unwrap();
+                writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", ty.reg_mem(), reg, v).unwrap();
                 reg
             }
             Expr::FloatLit(val, _) => {
@@ -1773,6 +2292,43 @@ declare it as a Q format.",
                 let l_reg = self.emit_expr(left, cache_policy, hw_profile);
                 let r_reg = self.emit_expr(right, cache_policy, hw_profile);
                 self.emit_binary(op.clone(), &l_reg, &r_reg, span)
+            }
+            // There was no `UnaryOp` arm at all, so `-5` fell through to the
+            // catch-all and emitted NOTHING. `let best: I32 = -2147483647;`
+            // therefore bound nothing, and every later use of `best` put the
+            // bare identifier into the PTX. Found by the `let`-produced-no-value
+            // refusal added beside it, on the first kernel that needed a
+            // negative sentinel.
+            Expr::UnaryOp { op, operand, .. } => {
+                let v = self.emit_expr(operand, cache_policy, hw_profile);
+                if v.is_empty() {
+                    return "".into();
+                }
+                match op {
+                    UnaryOp::Neg => {
+                        let t = self.ty_of(&v);
+                        let out = self.alloc_ty(t);
+                        let suffix = if t.is_float() {
+                            t.arith()
+                        } else if t.is_64() {
+                            "s64"
+                        } else {
+                            "s32"
+                        };
+                        writeln!(&mut self.ptx_buffer, "    neg.{} {}, {};", suffix, out, v)
+                            .unwrap();
+                        out
+                    }
+                    other => {
+                        self.emit_errors.push(format!(
+                            "[PTX] the unary operator `{:?}` is not lowered by this backend. \
+                             Only negation is. Emitting nothing for it would bind the \
+                             enclosing name to no register at all.",
+                            other
+                        ));
+                        "".into()
+                    }
+                }
             }
             Expr::Index { base, index, span } => {
                 let base_reg = self.emit_expr(base, cache_policy, hw_profile);
@@ -1866,6 +2422,26 @@ declare it as a Q format.",
             Expr::Call { func, args, .. } => {
                 match &**func {
                     Expr::Ident(fname, _) => {
+                        // Arity gate, before any lowering runs. See
+                        // `required_arity`: a short call otherwise silently
+                        // reads an unrelated register instead of failing.
+                        if let Some(want) = Self::required_arity(fname) {
+                            // `<`, not `!=`: trailing operands past `want`
+                            // default to literals and are legitimately optional.
+                            if args.len() < want {
+                                let n = args.len();
+                                self.unsupported_intrinsic(
+                                    fname,
+                                    &format!(
+                                        "it needs at least {} arguments and was given {}; \
+                                         a missing operand would be read from an unrelated \
+                                         register rather than reported",
+                                        want, n
+                                    ),
+                                );
+                                return "".into();
+                            }
+                        }
                         if fname == "cp_async" && args.len() >= 2 {
                             let src_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
                             let dest_reg = self.emit_expr(&args[1], cache_policy, hw_profile);
@@ -2223,24 +2799,65 @@ declare it as a Q format.",
                                  the sm_80/sm_89 tensor-core path",
                             );
                             "".into()
-                        } else if fname == "mbarrier_init" && args.len() >= 2 {
-                            let bar_ptr = self.emit_expr(&args[0], cache_policy, hw_profile);
-                            let threads = self.emit_expr(&args[1], cache_policy, hw_profile);
-                            writeln!(&mut self.ptx_buffer, "    mbarrier.init.shared.b64 [{}], {};", bar_ptr, threads).unwrap();
+                        } else if fname == "mbarrier_init"
+                            || fname == "mbarrier_arrive"
+                            || fname == "mbarrier_try_wait"
+                        {
+                            // The last of the mbarrier surface gotcha #8 deleted
+                            // the rest of, and broken in three separate ways:
+                            //
+                            //  * `mbarrier_arrive` emitted
+                            //    `mbarrier.arrive.expect_tx.shared.b64 %rd0,
+                            //    [%rd0], %r1` - destination hardcoded to `%rd0`,
+                            //    which is also the source AND a kernel parameter
+                            //    register, so it clobbers a parameter.
+                            //  * `.expect_tx` is **sm_90 only**, and the hardware
+                            //    profile here selects sm_89, so `ptxas` rejects
+                            //    it at its own target.
+                            //  * `mbarrier_init` takes a `GlobalMemory` pointer
+                            //    and feeds it to a `.shared` instruction. An
+                            //    mbarrier object has to live in shared memory;
+                            //    the operand is wrong by construction.
+                            //
+                            // Used by no kernel. Refused rather than patched,
+                            // for the reason gotcha #8 gives about the TMA path:
+                            // a working mbarrier pipeline is a feature to design
+                            // (shared-memory barrier objects, which
+                            // `shared_alloc_u32` does not provide), not a typo
+                            // to correct.
+                            self.unsupported_intrinsic(
+                                fname,
+                                "the mbarrier surface is not implemented: it emitted \
+                                 hardcoded parameter registers, and `expect_tx` needs \
+                                 sm_90 while this target is sm_89. Use `barrier_sync()` \
+                                 with `shared_alloc_u32`",
+                            );
                             "".into()
-                        } else if fname == "mbarrier_arrive" && args.len() >= 2 {
-                            let bar_ptr = self.emit_expr(&args[0], cache_policy, hw_profile);
-                            let bytes = self.emit_expr(&args[1], cache_policy, hw_profile);
-                            writeln!(&mut self.ptx_buffer, "    mbarrier.arrive.expect_tx.shared.b64 %rd0, [{}], {};", bar_ptr, bytes).unwrap();
-                            "".into()
-                        } else if fname == "mbarrier_try_wait" && !args.is_empty() {
-                            let bar_ptr = self.emit_expr(&args[0], cache_policy, hw_profile);
-                            let parity = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "0".to_string() };
-                            let p = self.alloc_pred();
-                            writeln!(&mut self.ptx_buffer, "    mbarrier.try_wait.parity.shared.b64 {}, [{}], {};", p, bar_ptr, parity).unwrap();
-                            p
                         } else if fname == "mma_sync" {
-                            writeln!(&mut self.ptx_buffer, "    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {{%f0,%f1}}, {{%r0,%r1}}, {{%r2,%r3}}, {{%f0,%f1}};").unwrap();
+                            // **The `wgmma_async` bug again, missed by the sweep
+                            // that fixed it.** This emitted one hardcoded
+                            // instruction with fixed register names, discarding
+                            // all three of its arguments - and the registers are
+                            // wrong twice over: `m16n8k16.f32.f16.f16.f32` takes
+                            // FOUR accumulator registers and two-register B, not
+                            // `{%f0,%f1}, {%r0,%r1}, {%r2,%r3}, {%f0,%f1}`, and
+                            // `%f1` is outside the `.reg .f32 %f<1>` pool the
+                            // emitter declares. `ptxas` reports four errors on a
+                            // file the compiler wrote after printing
+                            // "Compilation Successful!" and exiting 0.
+                            //
+                            // The reachable tensor-core paths are unaffected:
+                            // `emit_tensor_core_gemm_kernel` and the
+                            // `--emit-coprocessor` scheduler build their own
+                            // `mma.sync` with real operands, which is why the
+                            // `coprocessor_*.ysu` kernels work.
+                            self.unsupported_intrinsic(
+                                "mma_sync",
+                                "it discarded its fragment arguments and emitted a \
+                                 fixed instruction with the wrong register counts; \
+                                 use `--emit-coprocessor`, or a @tile'd GEMM which \
+                                 lowers to real `mma.sync`",
+                            );
                             "".into()
                         } else if fname == "thread_id" || fname == "global_thread_id" || fname == "thread_idx" {
                             let tid = self.alloc_reg32();
@@ -2288,6 +2905,24 @@ declare it as a Q format.",
                             let ntid = self.alloc_reg32();
                             writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ntid.z;", ntid).unwrap();
                             ntid
+                        // The grid dimensions. Without these a grid-stride
+                        // loop - the canonical way to write a kernel whose
+                        // launch geometry is a tuning parameter rather than
+                        // part of its meaning - cannot be expressed in Y at
+                        // all, which is exactly the shape every deterministic
+                        // reduction in docs/deterministic_inference.md needs.
+                        } else if fname == "grid_dim_x" {
+                            let nctaid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.x;", nctaid).unwrap();
+                            nctaid
+                        } else if fname == "grid_dim_y" {
+                            let nctaid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.y;", nctaid).unwrap();
+                            nctaid
+                        } else if fname == "grid_dim_z" {
+                            let nctaid = self.alloc_reg32();
+                            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.z;", nctaid).unwrap();
+                            nctaid
 
                         } else if fname == "store" && args.len() >= 2 {
                             let addr_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
@@ -2394,10 +3029,54 @@ declare it as a Q format.",
                                          p_valid, elem.mem(), regs[0], regs[1], regs[2], regs[3], addr).unwrap();
                                 for r in &regs {
                                     writeln!(&mut self.ptx_buffer, "    @!{} mov.{} {}, {};",
-                                             p_valid, elem.mem(), r, elem.zero_imm()).unwrap();
+                                             p_valid, elem.reg_mem(), r, elem.zero_imm()).unwrap();
                                 }
                                 Self::v4_marker(&regs)
                             }
+                        // ── Carry-chained 32-bit arithmetic ───────────────
+                        //
+                        // These read and/or write the hardware condition code,
+                        // which is the ONE piece of implicit state in this
+                        // backend. Everything else here is pure SSA over named
+                        // registers; a `.cc` instruction communicates with the
+                        // next one through a flag that appears in no operand.
+                        //
+                        // They exist because NCU said so. A Montgomery
+                        // multiply written with `mul_wide_u32` + 64-bit adds
+                        // compiles to ~5 SASS instructions per limb product -
+                        // an `IMAD.WIDE`, an `IADD3`/`IADD3.X` pair for the
+                        // 64-bit accumulate, and a shift-and-truncate to get
+                        // the halves back out. In the fused NTT that put the
+                        // actual multiplies at 18% of the instruction stream
+                        // and the carry bookkeeping at the rest, with the
+                        // kernel SM-bound at 71%. `mad.lo.cc` / `madc.hi.cc`
+                        // chain the carry in hardware and do it in two.
+                        //
+                        // ORDER IS SEMANTIC HERE. A chain must be emitted with
+                        // nothing between its links that writes CC. Nothing in
+                        // this emitter reorders straight-line code, and the
+                        // one pass that moves statements at all (barrier
+                        // hoisting in `emit_block`) stops at the first
+                        // statement it cannot hoist - a call is one - so a
+                        // chain cannot be broken by it. Instructions the
+                        // operands need (`mov` for an immediate, `ld` for a
+                        // value) do not touch CC.
+                        } else if let Some(op) = carry_op(fname, args.len()) {
+                            let mut regs = Vec::with_capacity(args.len());
+                            for a in args.iter() {
+                                let v = self.emit_expr(a, cache_policy, hw_profile);
+                                regs.push(self.emit_convert(&v, ScalarTy::U32));
+                            }
+                            let dst = self.alloc_ty(ScalarTy::U32);
+                            writeln!(
+                                &mut self.ptx_buffer,
+                                "    {} {}, {};",
+                                op,
+                                dst,
+                                regs.join(", ")
+                            )
+                            .unwrap();
+                            dst
                         } else if fname == "mul_wide_u32" && args.len() == 2 {
                             let a = self.emit_expr(&args[0], cache_policy, hw_profile);
                             let b = self.emit_expr(&args[1], cache_policy, hw_profile);
@@ -2501,7 +3180,7 @@ declare it as a Q format.",
                             writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_c, col_reg, max_c_reg).unwrap();
                             writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_valid, p_r, p_c).unwrap();
                             writeln!(&mut self.ptx_buffer, "    @{} ld.global.{} {}, [{}];", p_valid, elem.mem(), res, addr).unwrap();
-                            writeln!(&mut self.ptx_buffer, "    @!{} mov.{} {}, {};", p_valid, elem.mem(), res, elem.zero_imm()).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    @!{} mov.{} {}, {};", p_valid, elem.reg_mem(), res, elem.zero_imm()).unwrap();
                             res
                         } else if fname == "block_ptr2d_store" {
                             let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
@@ -2680,18 +3359,263 @@ declare it as a Q format.",
                             writeln!(&mut self.ptx_buffer, "    sub.s32 {}, {}, 1;", num_num, num_plus_den).unwrap();
                             writeln!(&mut self.ptx_buffer, "    div.s32 {}, {}, {};", res, num_num, den).unwrap();
                             res
+                        // ── Shared memory ─────────────────────────────────
+                        //
+                        // `shared_alloc_u32(n)` declares one `.shared` array
+                        // of `n` u32 at module scope and yields its address;
+                        // `shared_load_v4` / `shared_store_v4` index it in
+                        // 16-BYTE units, matching the global `v4` intrinsics.
+                        //
+                        // Together with `barrier_sync()` this is the whole
+                        // surface, and it is deliberately small: it is exactly
+                        // what a stage-fused NTT needs. There is no bounds
+                        // check, because the slot index is a pure function of
+                        // `%tid.x` in every intended use and a predicate on a
+                        // shared store would cost more than the store.
+                        } else if fname == "shared_alloc_u32" && args.len() == 1 {
+                            let n = match &args[0] {
+                                Expr::IntLit(v, _) if *v > 0 => *v as usize,
+                                _ => {
+                                    self.unsupported_intrinsic(
+                                        fname,
+                                        "the element count must be a positive integer literal - \
+                                         a `.shared` array's size is fixed when the module is \
+                                         assembled, so it cannot come from a runtime value",
+                                    );
+                                    return "".into();
+                                }
+                            };
+                            // 48 KB is the static per-CTA limit on every
+                            // architecture this backend targets. Anything
+                            // above it is rejected by ptxas with a message
+                            // about the module, not about this line, so name
+                            // the real cause here instead.
+                            if n * 4 > 48 * 1024 {
+                                self.unsupported_intrinsic(
+                                    fname,
+                                    "over the 48 KB static shared-memory limit per CTA; a larger \
+                                     allocation needs dynamic shared memory, which this backend \
+                                     does not plumb through the launch",
+                                );
+                                return "".into();
+                            }
+                            let sym = format!("__y_smem_{}", self.shared_sym_count);
+                            self.shared_sym_count += 1;
+                            self.shared_arrays.push((sym.clone(), n));
+                            let base = self.alloc_ty(ScalarTy::U64);
+                            writeln!(&mut self.ptx_buffer, "    // [Y SHARED ALLOC] {} u32 = {} bytes", n, n * 4).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    mov.u64 {}, {};", base, sym).unwrap();
+                            base
+                        } else if (fname == "shared_load_v4" || fname == "shared_store_v4")
+                            && args.len() >= 2
+                        {
+                            let storing = fname.ends_with("store_v4");
+                            let base = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let slot = self.emit_expr(&args[1], cache_policy, hw_profile);
+                            let slot32 = self.emit_convert(&slot, ScalarTy::U32);
+                            let slot64 = self.alloc_ty(ScalarTy::U64);
+                            let byte_off = self.alloc_ty(ScalarTy::U64);
+                            let addr = self.alloc_ty(ScalarTy::U64);
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", slot64, slot32).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 4;", byte_off, slot64).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, base, byte_off).unwrap();
+                            if storing {
+                                if args.len() < 6 {
+                                    self.unsupported_intrinsic(
+                                        fname,
+                                        "needs four values to store: (base, slot, v0, v1, v2, v3)",
+                                    );
+                                    return "".into();
+                                }
+                                let mut vals = Vec::with_capacity(4);
+                                for k in 2..6 {
+                                    let v = self.emit_expr(&args[k], cache_policy, hw_profile);
+                                    vals.push(self.emit_convert(&v, ScalarTy::U32));
+                                }
+                                writeln!(&mut self.ptx_buffer, "    st.shared.v4.u32 [{}], {{{}, {}, {}, {}}};",
+                                         addr, vals[0], vals[1], vals[2], vals[3]).unwrap();
+                                "".into()
+                            } else {
+                                let regs = [
+                                    self.alloc_ty(ScalarTy::U32), self.alloc_ty(ScalarTy::U32),
+                                    self.alloc_ty(ScalarTy::U32), self.alloc_ty(ScalarTy::U32),
+                                ];
+                                writeln!(&mut self.ptx_buffer, "    ld.shared.v4.u32 {{{}, {}, {}, {}}}, [{}];",
+                                         regs[0], regs[1], regs[2], regs[3], addr).unwrap();
+                                Self::v4_marker(&regs)
+                            }
+                        // `barrier_sync()` was already recognised by the
+                        // barrier-hoisting pass in `emit_block` - which hoists
+                        // independent ALU work ACROSS it - while emitting no
+                        // instruction at all here, so the hoist was legal for
+                        // a barrier that did not exist. Same shape as
+                        // `pipe.wait(t)` (gotcha #8): one pass proves a
+                        // property the backend then discards.
+                        } else if (fname == "atomic_add" || fname == "atomic_max")
+                            && args.len() == 3
+                        {
+                            // The determinism primitives. An integer atomic is
+                            // order-independent BY CONSTRUCTION - addition and
+                            // max over integers are associative and
+                            // commutative exactly - so a reduction built from
+                            // these gives one answer whatever order the CTAs
+                            // finish in. That is the entire product claim of
+                            // `docs/deterministic_inference.md`, and until
+                            // these existed it could not be written in Y at
+                            // all, only in hand-written PTX.
+                            let elem = self.elem_ty_or_f32(&args[0]);
+                            if elem.is_float() {
+                                // `red.global.add.f32` is real hardware and is
+                                // exactly the instruction that makes GPU
+                                // results irreproducible: CTAs finish in
+                                // scheduler order and float addition is not
+                                // associative, so the identical binary on the
+                                // identical input gives different answers
+                                // between launches. Refusing it by name is the
+                                // point of this compiler, not a limitation of
+                                // it - see the design rule in CLAUDE.md.
+                                self.unsupported_intrinsic(
+                                    fname,
+                                    "refuses a floating-point buffer. A float atomic is \
+                                     order-dependent, so the reduction would not be \
+                                     reproducible - which is the one thing this backend \
+                                     exists to guarantee. Accumulate in U32/I32/U64/I64 \
+                                     (see @ZeroDrift), or if you genuinely want a \
+                                     non-reproducible reduction, say so in a kernel that \
+                                     does not claim determinism.",
+                                );
+                                return "".into();
+                            }
+                            if elem.is_subword() {
+                                self.unsupported_intrinsic(
+                                    fname,
+                                    "has no sub-word form: the hardware's red/atom \
+                                     instructions start at 32 bits. Widen the \
+                                     accumulator to U32/I32 or wider.",
+                                );
+                                return "".into();
+                            }
+                            let base = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let idx = self.emit_expr(&args[1], cache_policy, hw_profile);
+                            let val_raw = self.emit_expr(&args[2], cache_policy, hw_profile);
+                            let val = self.emit_convert(&val_raw, elem);
+                            let idx32 = self.emit_convert(&idx, ScalarTy::U32);
+                            let idx64 = self.alloc_ty(ScalarTy::U64);
+                            let byte_off = self.alloc_ty(ScalarTy::U64);
+                            let addr = self.alloc_ty(ScalarTy::U64);
+                            let shift = elem.log2_bytes();
+                            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", idx64, idx32).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, {};", byte_off, idx64, shift).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, base, byte_off).unwrap();
+                            let op = if fname == "atomic_add" { "add" } else { "max" };
+                            // `add` is defined on the unsigned type for both
+                            // signednesses - two's complement wraps
+                            // identically - while `max` genuinely differs, so
+                            // it must follow the buffer's signedness.
+                            let suffix = if op == "add" {
+                                // Two's complement wraps identically, so the
+                                // unsigned form is correct for both.
+                                if elem.is_64() { "u64" } else { "u32" }
+                            } else {
+                                //  genuinely differs by signedness, and
+                                // `mem()` reports `u32` for I32 because a LOAD
+                                // does not care. Using it here made
+                                // `atomic_max` on an I32 buffer an UNSIGNED
+                                // max, so any negative accumulator compared as
+                                // a huge positive one.
+                                match (elem.is_64(), elem.is_signed()) {
+                                    (true, true) => "s64",
+                                    (true, false) => "u64",
+                                    (false, true) => "s32",
+                                    (false, false) => "u32",
+                                }
+                            };
+                            writeln!(&mut self.ptx_buffer, "    red.global.{}.{} [{}], {};",
+                                     op, suffix, addr, val).unwrap();
+                            "".into()
+                        } else if fname == "barrier_sync" || fname == "membar" {
+                            writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
+                            "".into()
                         } else if fname == "block_arange" {
+                            // The NULLARY form is the supported one: it yields
+                            // this thread's index, the scalar analogue of
+                            // `tl.arange` in a backend with no vector values.
+                            //
+                            // Passing arguments was the bug. `block_arange(0,
+                            // 128)` - the spelling a Triton user reaches for -
+                            // DISCARDED both and returned `%tid.x` anyway, so a
+                            // non-zero start silently produced the wrong index.
+                            // It assembles perfectly, which is why the
+                            // substring test in `test_rust_triton_parity.rs`
+                            // never noticed; that test calls the nullary form.
+                            if !args.is_empty() {
+                                let n = args.len();
+                                self.unsupported_intrinsic(
+                                    "block_arange",
+                                    &format!(
+                                        "it takes no arguments and would silently \
+                                         discard the {} given; it yields this \
+                                         thread's index, so write `start + \
+                                         block_arange()` for a non-zero start",
+                                        n
+                                    ),
+                                );
+                                return "".into();
+                            }
                             let res = self.alloc_reg32();
                             writeln!(&mut self.ptx_buffer, "    // [Y BLOCK ARANGE - 1D INDEX GENERATOR]").unwrap();
                             writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", res).unwrap();
                             res
                         } else {
+                            // **The general case of every row this family has
+                            // added to CLAUDE.md's table.** A name nothing
+                            // matched used to return an empty string, and the
+                            // callers splice that straight into instruction
+                            // text: `block_ptr2d_store(A, 0, made_up(t), ...)`
+                            // emitted `setp.lt.u32 %p1, , %r0;` - a missing
+                            // operand - and the compiler printed "Compilation
+                            // Successful!" and exited 0.
+                            //
+                            // It was only ever caught when the result was bound
+                            // with `let`, which has its own guard. In argument
+                            // position, as a statement, or on the right of an
+                            // assignment, nothing noticed. A user-defined `fn`
+                            // called from a kernel lands here too - this backend
+                            // cannot lower one, and saying so at the call site
+                            // is better than a malformed instruction.
+                            self.unsupported_intrinsic(
+                                fname,
+                                "no PTX lowering exists for this name - check the \
+                                 spelling, and note that user-defined functions \
+                                 cannot be called from a kernel in this backend",
+                            );
                             "".into()
                         }
                     }
                     Expr::Path {
                         namespace, member, ..
                     } => {
+                        // The same arity gate the `Ident` callees get. This arm
+                        // has its own register-aliasing fallbacks - `BlockTile`'s
+                        // offset falls back to `%r0` and its value to `%f0` -
+                        // and the first version of the gate only covered `Ident`,
+                        // so these were still open. Two match arms, one bug.
+                        if let Some(want) = Self::required_path_arity(namespace, member) {
+                            if args.len() < want {
+                                let (ns, me, n) =
+                                    (namespace.clone(), member.clone(), args.len());
+                                self.unsupported_intrinsic(
+                                    &format!("{}::{}", ns, me),
+                                    &format!(
+                                        "it needs at least {} arguments and was given \
+                                         {}; a missing operand would be read from an \
+                                         unrelated register rather than reported",
+                                        want, n
+                                    ),
+                                );
+                                return "".into();
+                            }
+                        }
                         if namespace == "barrier" && member == "sync" {
                             writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
                             "".into()
@@ -2766,6 +3690,20 @@ declare it as a Q format.",
                             writeln!(&mut self.ptx_buffer, "    ld.global{}.{} {}, [{}];", cache_str, elem.mem(), dst, addr_reg).unwrap();
                             dst
                         } else {
+                            // An unhandled `Namespace::member(...)` call. This is
+                            // how `Fragment::zero()` and `ldmatrix`-style paths
+                            // reached the emitter and produced nothing, which the
+                            // caller then spliced into an instruction as an empty
+                            // operand.
+                            let path = format!("{}::{}", namespace, member);
+                            self.unsupported_intrinsic(
+                                &path,
+                                "no PTX lowering exists for this path; the matrix \
+                                 fragment surface here is not implemented (a \
+                                 m16n8k16 f32 accumulator is four registers per \
+                                 thread, not one) - use a @tile'd GEMM or \
+                                 `--emit-coprocessor`",
+                            );
                             "".into()
                         }
                     }
@@ -2807,7 +3745,18 @@ declare it as a Q format.",
                         );
                         "".into()
                     }
-                    _ => "".into()
+                    _ => {
+                        // A callee that is neither an identifier, a path, nor a
+                        // member access - a call through an index or a nested
+                        // call, say. Nothing lowers it, and returning "" hands
+                        // the caller an empty operand.
+                        self.unsupported_intrinsic(
+                            "<computed callee>",
+                            "only direct calls to intrinsics are supported; this \
+                             callee is an expression the backend cannot resolve",
+                        );
+                        "".into()
+                    }
                 }
             }
             Expr::MemberAccess { base, member, span } => {
@@ -2850,13 +3799,45 @@ declare it as a Q format.",
                     writeln!(&mut self.ptx_buffer, "    mov.f32 {}, 0f00000000;", dst).unwrap();
                     dst
                 } else if namespace == "GlobalMemory" && member == "load" {
-                    let dst = self.alloc_regf32();
-                    writeln!(&mut self.ptx_buffer, "    ld.global.ca.f32 {}, [%rd0];", dst).unwrap();
-                    dst
+                    // Emitted `ld.global.ca.f32 %f, [%rd0]` - a load from
+                    // parameter 0, whatever that parameter is, with its own
+                    // arguments discarded entirely. Well-formed PTX that
+                    // assembles, launches, and reads the wrong buffer, under
+                    // "Compilation Successful!". Same shape as `tma_load` in
+                    // gotcha #8, and refused for the same reason: a named gap
+                    // costs a user five minutes, a plausible-looking broken
+                    // kernel costs them however long it takes to suspect the
+                    // compiler.
+                    self.unsupported_intrinsic(
+                        "GlobalMemory::load",
+                        "it discarded its arguments and always loaded from \
+                         parameter 0; use an indexed load such as \
+                         `block_ptr2d_load`",
+                    );
+                    "".into()
                 } else if namespace == "SharedMemory" && member == "alloc" {
-                    writeln!(&mut self.ptx_buffer, "    .shared .align 128 .b8 smem[8192];").unwrap();
-                    "smem".into()
+                    // The stub gotcha #8 describes: a hardcoded
+                    // `.shared .align 128 .b8 smem[8192]` with the type
+                    // argument ignored and no way to index the result. It
+                    // assembles, which is why it survived - `ptxas` is happy
+                    // with a mid-body declaration. The working surface is
+                    // `shared_alloc_u32(n)` + `shared_load_v4`/`shared_store_v4`.
+                    self.unsupported_intrinsic(
+                        "SharedMemory::alloc",
+                        "it ignored its element type, always allocated 8192 \
+                         bytes, and returned a symbol nothing can index; use \
+                         `shared_alloc_u32(n)` with `shared_load_v4` / \
+                         `shared_store_v4`",
+                    );
+                    "".into()
                 } else {
+                    let path = format!("{}::{}", namespace, member);
+                    self.unsupported_intrinsic(
+                        &path,
+                        "no PTX lowering exists for this path - returning nothing \
+                         here splices an empty operand into the instruction that \
+                         uses it",
+                    );
                     "".into()
                 }
             }
@@ -3311,6 +4292,273 @@ declare it as a Q format.",
     /// generic per-statement lowering", distinguished from
     /// `tile_gemm_operands`'s 3/4-param F16 shapes by both param COUNT (5)
     /// and TYPE (F32 GlobalMemory for A/B here, vs F16 there) - no ambiguity.
+    /// Emit an exact int8 tensor-core GEMM over `mma.sync.m16n8k32.s32.s8.s8.s32`.
+    ///
+    /// One warp owns one 16x8 output tile and walks the whole K range; the grid
+    /// is `(N/8, M/16, 1)` with a 32-thread block. Fragments are loaded
+    /// **straight from global memory**, not staged through shared memory.
+    ///
+    /// **That is a deliberate choice for this milestone, not an oversight.**
+    /// The fragment layout is the part that silently produces wrong answers
+    /// (see `tests/ptx_int8_mma_layout.rs`, where four mutations all yield
+    /// plausible matrices), and it is validated in exactly this
+    /// straight-from-global form. Adding CTA tiling and shared-memory staging
+    /// changes the addressing and would have to be re-validated; doing it in
+    /// the same step would mean never knowing which half was wrong. This kernel
+    /// is bandwidth-bound and re-reads A and B once per output tile — it is
+    /// correct and reproducible, not fast.
+    ///
+    /// Layouts, fixed by the instruction rather than chosen:
+    /// - `A`: row-major `[M][K]` int8.
+    /// - `B`: **`[N][K]`** int8, i.e. column-major in the mma's terms. This is
+    ///   the natural layout for an inference weight matrix and is what `.col`
+    ///   means; passing a `[K][N]` buffer computes a different function.
+    /// - `C`: row-major `[M][N]` int32, **overwritten**, not accumulated.
+    ///
+    /// Returns the thread count per CTA.
+    fn emit_int8_gemm_kernel(
+        &mut self,
+        m: u32,
+        n: u32,
+        k: u32,
+        a_ptr: &str,
+        b_ptr: &str,
+        c_ptr: &str,
+        kernel_name: &str,
+    ) -> u32 {
+        // Refused rather than padded: a partial tile would need predication on
+        // every fragment load, and silently rounding the shape up would compute
+        // a different matrix than the source asked for.
+        if m % 16 != 0 || n % 8 != 0 || k % 32 != 0 {
+            self.emit_errors.push(format!(
+                "[PTX] `{}`: an int8 tensor-core GEMM needs M % 16 == 0, N % 8 == 0 and \
+                 K % 32 == 0 (the mma shape is m16n8k32); got M={}, N={}, K={}.",
+                kernel_name, m, n, k
+            ));
+            return 32;
+        }
+
+        writeln!(
+            &mut self.ptx_buffer,
+            "    // [Y INT8 TENSOR CORE GEMM] M={} N={} K={} | mma.sync.m16n8k32.row.col.s32.s8.s8.s32\n\
+             \x20   // one warp per 16x8 tile, grid ({}, {}, 1), block (32,1,1)\n\
+             \x20   // A row-major [M][K], B [N][K], C row-major [M][N] int32",
+            m, n, k, n / 8, m / 16
+        )
+        .unwrap();
+
+        let ga = self.alloc_reg64();
+        let gb = self.alloc_reg64();
+        let gc = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", ga, a_ptr).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", gb, b_ptr).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", gc, c_ptr).unwrap();
+
+        let tid = self.alloc_reg32();
+        let cx = self.alloc_reg32();
+        let cy = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", cx).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.y;", cy).unwrap();
+
+        // g = laneid >> 2, t = laneid & 3 — the decomposition validated in
+        // tests/ptx_int8_mma_layout.rs.
+        let g = self.alloc_reg32();
+        let t = self.alloc_reg32();
+        let t4 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, 2;", g, tid).unwrap();
+        writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 3;", t, tid).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", t4, t).unwrap();
+
+        // &A[(ctaid.y*16 + g)][4t]
+        let arow = self.alloc_reg32();
+        let aoff = self.alloc_reg32();
+        let aoff64 = self.alloc_reg64();
+        let alane = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 16;", arow, cy).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", arow, arow, g).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", aoff, arow, k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", aoff, aoff, t4).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", aoff64, aoff).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", alane, ga, aoff64).unwrap();
+
+        // &B[(ctaid.x*8 + g)][4t]
+        let bcol = self.alloc_reg32();
+        let boff = self.alloc_reg32();
+        let boff64 = self.alloc_reg64();
+        let blane = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 8;", bcol, cx).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", bcol, bcol, g).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", boff, bcol, k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", boff, boff, t4).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", boff64, boff).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", blane, gb, boff64).unwrap();
+
+        let d: Vec<String> = (0..4).map(|_| self.alloc_reg32()).collect();
+        for r in &d {
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", r).unwrap();
+        }
+
+        // Split-K over `%ctaid.z`, striped rather than blocked: CTA `z` takes
+        // every `nctaid.z`-th 32-wide K step starting at `z`. Striping means
+        // ANY grid.z divides the work with no divisibility precondition, which
+        // is what lets the batch-invariance harness sweep the split factor
+        // without recompiling.
+        //
+        // **The partial sums combine through `red.global.add.s32`, and that is
+        // the whole demonstration.** An atomic float add is the canonical
+        // reason GPU results are not reproducible: it is non-associative, so
+        // the answer depends on the order CTAs happen to finish. Integer
+        // addition is associative and commutative, so this atomic is
+        // order-independent by construction — the same result for every grid,
+        // every launch, every scheduling accident.
+        let cz = self.alloc_reg32();
+        let nz = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.z;", cz).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.z;", nz).unwrap();
+
+        let zoff = self.alloc_reg32();
+        let zoff64 = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 32;", zoff, cz).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", zoff64, zoff).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", alane, alane, zoff64).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", blane, blane, zoff64).unwrap();
+
+        let kstep = self.alloc_reg32();
+        let kstep64 = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 32;", kstep, nz).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", kstep64, kstep).unwrap();
+
+        let kk = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, {};", kk, zoff).unwrap();
+        let top = self.alloc_label("int8_gemm_k");
+        let end = self.alloc_label("int8_gemm_end");
+        let pred = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "{}:", top).unwrap();
+        writeln!(&mut self.ptx_buffer, "    setp.ge.u32 {}, {}, {};", pred, kk, k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", pred, end).unwrap();
+
+        // The four A registers and two B registers, at the offsets derived and
+        // validated in tests/ptx_int8_mma_layout.rs. `8 * k` is the byte step
+        // to the row-half 8 rows down, because A's rows are k bytes apart.
+        let a: Vec<String> = (0..4).map(|_| self.alloc_reg32()).collect();
+        let b: Vec<String> = (0..2).map(|_| self.alloc_reg32()).collect();
+        writeln!(&mut self.ptx_buffer, "    ld.global.u32 {}, [{}];", a[0], alane).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ld.global.u32 {}, [{}+{}];", a[1], alane, 8 * k).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ld.global.u32 {}, [{}+16];", a[2], alane).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ld.global.u32 {}, [{}+{}];", a[3], alane, 8 * k + 16).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ld.global.u32 {}, [{}];", b[0], blane).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ld.global.u32 {}, [{}+16];", b[1], blane).unwrap();
+
+        writeln!(
+            &mut self.ptx_buffer,
+            "    mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 \
+             {{{}, {}, {}, {}}}, {{{}, {}, {}, {}}}, {{{}, {}}}, {{{}, {}, {}, {}}};",
+            d[0], d[1], d[2], d[3],
+            a[0], a[1], a[2], a[3],
+            b[0], b[1],
+            d[0], d[1], d[2], d[3]
+        )
+        .unwrap();
+
+        writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", alane, alane, kstep64).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", blane, blane, kstep64).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", kk, kk, kstep).unwrap();
+        writeln!(&mut self.ptx_buffer, "    bra {};", top).unwrap();
+        writeln!(&mut self.ptx_buffer, "{}:", end).unwrap();
+
+        // &C[(ctaid.y*16 + g)][ctaid.x*8 + 2t], in bytes.
+        let crow = self.alloc_reg32();
+        let coff = self.alloc_reg32();
+        let coff64 = self.alloc_reg64();
+        let clane = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 16;", crow, cy).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", crow, crow, g).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, {};", coff, crow, n).unwrap();
+        let cbase = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 8;", cbase, cx).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", coff, coff, cbase).unwrap();
+        let t2 = self.alloc_reg32();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 2;", t2, t).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", coff, coff, t2).unwrap();
+        writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", coff, coff).unwrap();
+        writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", coff64, coff).unwrap();
+        writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", clane, gc, coff64).unwrap();
+        // Reduce, not store: with split-K several CTAs own the same output
+        // element. `red.global.add.s32` is the fire-and-forget form (no result
+        // register), and being an INTEGER add it is associative, so the value
+        // in C does not depend on which CTA got there first.
+        //
+        // The cost is that **C must be zero-initialised by the caller**. This
+        // kernel accumulates into it rather than overwriting it, which is the
+        // same contract the CPU exact GEMM has and for the same reason.
+        for (idx, reg) in d.iter().enumerate() {
+            let byte = (idx / 2) * (8 * n as usize * 4) + (idx % 2) * 4;
+            if byte == 0 {
+                writeln!(&mut self.ptx_buffer, "    red.global.add.s32 [{}], {};", clane, reg).unwrap();
+            } else {
+                writeln!(
+                    &mut self.ptx_buffer,
+                    "    red.global.add.s32 [{}+{}], {};",
+                    clane, byte, reg
+                )
+                .unwrap();
+            }
+        }
+
+        32
+    }
+
+    /// Recognise an exact int8 tensor-core GEMM:
+    /// `@tile(M, N, K) kernel f(A: GlobalMemory<I8>, B: GlobalMemory<I8>, C: GlobalMemory<I32>)`.
+    ///
+    /// Distinguished from the FP8 path by its element types alone, which is
+    /// sufficient because no other recogniser accepts an `I8` buffer.
+    ///
+    /// **The accumulator is `I32` and that is the point.** `mma...s32.s8.s8.s32`
+    /// accumulates exactly, so the reduction is associative and the result does
+    /// not depend on how K was split across warps, CTAs or launches. That is
+    /// the same property `docs/deterministic_inference.md` M0 established on the
+    /// CPU, on the tensor cores instead.
+    fn tile_gemm_int8_operands(
+        &self,
+        kernel: &KernelDecl,
+    ) -> Option<(u32, u32, u32, String, String, String)> {
+        let tile = kernel.tile.as_ref()?;
+
+        fn as_positive_u32(e: &Expr) -> Option<u32> {
+            match e {
+                Expr::IntLit(v, _) if *v > 0 => u32::try_from(*v).ok(),
+                _ => None,
+            }
+        }
+        let m = as_positive_u32(&tile.block_m)?;
+        let n = as_positive_u32(&tile.block_n)?;
+        let k = as_positive_u32(tile.block_k.as_deref()?)?;
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+
+        if kernel.params.len() != 3
+            || !is_global_memory_of(&kernel.params[0].ty, "I8")
+            || !is_global_memory_of(&kernel.params[1].ty, "I8")
+            || !is_global_memory_of(&kernel.params[2].ty, "I32")
+        {
+            return None;
+        }
+
+        let a_reg = self.variables.get(&kernel.params[0].name)?.clone();
+        let b_reg = self.variables.get(&kernel.params[1].name)?.clone();
+        let c_reg = self.variables.get(&kernel.params[2].name)?.clone();
+        Some((m, n, k, a_reg, b_reg, c_reg))
+    }
+
     fn tile_gemm_fp8_operands(&self, kernel: &KernelDecl) -> Option<(u32, u32, u32, String, String, String, String, String)> {
         let tile = kernel.tile.as_ref()?;
 
