@@ -809,6 +809,13 @@ batch. Every reduction whose order changes with batch shape is made integer, and
 integer addition is associative — so tile shape, K-split, atomic completion
 order and batch size cannot change the answer. That is the whole mechanism.
 
+**This is unfinished work, and it is here because the finished parts are
+measured.** What exists is a PyTorch + Triton **prototype** carrying the whole
+pipeline, plus one kernel the compiler itself emits (exact attention) and its
+integer `exp2`. The determinism and accuracy numbers below are the prototype's.
+Replacing the rest of the prototype with compiler output is the remaining work,
+not a detail.
+
 Model: Qwen2.5-0.5B-Instruct · RTX 4070 Ti SUPER · measured 2026-08-18.
 
 | | result | control |
@@ -844,6 +851,15 @@ independent integer `exp2` (`src/fixed_exp.rs`, 0.908 ulp proved exhaustively)
 so the result is identical across GPU *architectures*, not merely across launches
 of one.
 
+### Scope: "deterministic", not "exact"
+
+RoPE's sine and cosine, the residual adds and the softmax exponential are
+approximate — deterministic, but not exact. Exactness is applied to the
+reductions whose order moves with batch shape, and nowhere else, because nowhere
+else needs it. Switching cache implementation moves the output by 5.7e-6 once
+and is stable after: batch invariance survives that, but *cache-implementation*
+invariance is a different claim and is not made.
+
 ### What this does not yet claim
 
 - **No fixed-order-float control arm.** A float kernel with a pinned reduction
@@ -856,6 +872,33 @@ of one.
   activations, while passing the kernel a temperature 65,536x too small — a
   uniform softmax that both arms of the comparison agreed on perfectly. Fixed and
   pinned by CPU tests; not yet re-run.
+- **CUDA graphs are worth up to 1.47x and are blocked.** The prerequisites are
+  cheap — a static cache costs 5–8% and improves the exact/stock ratio to 1.01x
+  — and the property survives them. Capture then segfaults on *both* arms, from
+  an in-place mutation inside the captured region in this transformers/torch
+  pair. A library bug rather than an exactness problem, and its proper home is a
+  serving integration rather than this prototype.
+
+### What is being worked on now
+
+Ranked, and the first item is the one that could invalidate the framing rather
+than extend it:
+
+1. **Build the fixed-order-float arm.** The missing control, above.
+2. **Run a second GPU.** Cross-hardware bit-identity is the strongest thing
+   exactness buys and the only headline claim with no evidence behind it.
+3. **Re-run `ptx_bridge.py`** now that the temperature is right and a
+   non-degeneracy control refuses a uniform softmax.
+4. **Move the pipeline off the prototype** onto compiler-emitted kernels, and
+   into a serving integration — which is also where CUDA graphs stop being
+   blocked.
+
+Findings 05–08 in the write-up are the result of turning this same process on
+the tooling: four rounds that found the emitted kernel enforced none of its own
+bounds, a differential whose two arms shared a wrong constant, two replicas
+checked against themselves, and a checker asserting a copy of the rule it was
+checking. None of those changed a number above; all four changed what the
+numbers are worth.
 
 Full write-ups: [bit-identical decode](docs/bit_identical_decode.md) (findings,
 controls, and eight bugs found by turning this process on the tooling itself)
