@@ -1961,6 +1961,23 @@ impl TypeChecker {
                     SemanticType::Primitive("ptr".into())
                 } else if let Some(t) = self.lookup_var(name) {
                     t.clone() // alias resolution
+                } else if self.structs.contains_key(name) {
+                    // A declared struct, resolved the way `Expr::StructLit`
+                    // reports itself. Without this arm the name fell through to
+                    // `Unknown`, and since `types_are_compatible` treats
+                    // `Unknown` as compatible with nothing, an ANNOTATED
+                    // binding of a struct was a type error:
+                    //
+                    //     struct P { x: I32, y: I32 }
+                    //     let p: P = P { x: 4, y: 3 };   // "Type mismatch in
+                    //                                    //  let assignment."
+                    //
+                    // The same binding without the annotation compiled, so the
+                    // language rejected the more explicit of two spellings of
+                    // one program. `resolve_type` consulted only the variable
+                    // table (type aliases); the struct table sat beside it and
+                    // was read by `Expr::StructLit` alone.
+                    SemanticType::Primitive(name.clone())
                 } else {
                     SemanticType::Unknown
                 }
