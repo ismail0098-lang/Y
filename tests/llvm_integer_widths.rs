@@ -108,3 +108,51 @@ fn narrow_values_still_work() {
         Some(code) => assert_eq!(code, 1, "ordinary small integers regressed"),
     }
 }
+
+#[test]
+fn a_comparison_used_as_a_value_is_one_not_minus_one() {
+    // Found by `tests/backend_differential.rs` on its first run, six programs
+    // out of forty. `emit_coerce`'s narrow->wide arm was an unconditional
+    // `sext`, and `icmp` produces `i1`, so `true` sign-extended to **-1**:
+    //
+    //     let t: I32 = a > b;   // 5 > 3  ->  -1
+    //
+    // Invisible in a condition, because `if t` tests non-zero either way, and
+    // wrong everywhere a comparison is used as a VALUE -- `t * 5` was -5, and
+    // a `sum = sum + (a > b)` counter runs backwards.
+    //
+    // The other three backends all answer 1: `--emit-native`, the ZK emitter
+    // (whose condition carries an explicit booleanity constraint), and
+    // `cpu_emitter` (which emits a Rust `bool`). LLVM was the outlier.
+    let src = "\
+fn main() -> I32 {
+    let a: I32 = 5;
+    let b: I32 = 3;
+    let t: I32 = a > b;
+    return t * 5;
+}
+";
+    match run_program("cmp_is_one", src) {
+        // 5, not -5 (which arrives as exit status 251).
+        Some(v) => assert_eq!(v, 5, "`(5 > 3) * 5` should be 5"),
+        None => eprintln!("SKIP cmp_is_one: could not build (clang missing?)"),
+    }
+}
+
+#[test]
+fn a_false_comparison_is_still_zero() {
+    // The control. "Make `true` be 1" must not be achieved by making every
+    // comparison 1 -- a mutation returning a constant passes the case above.
+    let src = "\
+fn main() -> I32 {
+    let a: I32 = 3;
+    let b: I32 = 5;
+    let t: I32 = a > b;
+    return t * 5 + 7;
+}
+";
+    match run_program("cmp_is_zero", src) {
+        Some(v) => assert_eq!(v, 7, "`(3 > 5) * 5 + 7` should be 7"),
+        None => eprintln!("SKIP cmp_is_zero: could not build (clang missing?)"),
+    }
+}

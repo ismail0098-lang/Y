@@ -604,10 +604,24 @@ impl LlvmEmitter {
                 )
                 .unwrap();
             } else if src_bits < dst_bits {
+                // **`i1` must ZERO-extend.** A boolean is 0 or 1; sign-extending
+                // it makes `true` into -1, and the comparison operators are the
+                // only producers of `i1` in this backend. So
+                //
+                //     let t: I32 = a > b;   // 5 > 3
+                //
+                // evaluated to **-1**, and `t * 5` to -5. It is invisible in a
+                // condition (`if t` tests non-zero either way) and wrong
+                // wherever a comparison is used as a VALUE. Found by
+                // `tests/backend_differential.rs` on its first run: the native
+                // backend answers 1, and so do the ZK backend (whose condition
+                // carries a booleanity constraint) and `cpu_emitter` (which
+                // emits a Rust `bool`), so LLVM was the only one disagreeing.
+                let how = if src_ty == "i1" { "zext" } else { "sext" };
                 writeln!(
                     &mut self.output,
-                    "  {} = sext {} {} to {}",
-                    tmp, src_ty, val, dst_ty
+                    "  {} = {} {} {} to {}",
+                    tmp, how, src_ty, val, dst_ty
                 )
                 .unwrap();
             } else {
