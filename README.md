@@ -892,7 +892,15 @@ invariance is a different claim and is not made.
 ### What this does not yet claim
 
 - **One model, one GPU, one stack.** Cross-hardware bit-identity is the strongest
-  thing exactness buys and is the headline claim with no evidence behind it.
+  thing exactness buys and is the headline claim with no *measurement* behind it.
+  Its premise is checked, though, and on an ordinary machine: disassembling the
+  emitted cubin, the integer exp compiles to **no `MUFU` and no floating-point
+  instruction** — 72 instructions of IMAD/SHF/IADD3/ISETP, all exactly specified
+  by the ISA — while the `ex2.approx.f32` probe beside it compiles to a `MUFU`,
+  which the ISA specifies by tolerance rather than by value. So the integer path
+  contains nothing two architectures are permitted to disagree about. That is a
+  gate (`ptxas` + `cuobjdump`, no device), not a claim; two architectures
+  actually agreeing still needs a second card.
 - **CUDA graphs are worth up to 1.47x and are blocked.** The prerequisites are
   cheap — a static cache costs 5–8% and improves the exact/stock ratio to 1.01x
   — and the property survives them. Capture then segfaults on *both* arms, from
