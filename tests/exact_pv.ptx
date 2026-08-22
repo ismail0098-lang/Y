@@ -8,16 +8,17 @@
     .param .u64 Out_2,
     .param .b32 T_3,
     .param .b32 D_4,
-    .param .b32 NP_5,
-    .param .b32 NV_6,
-    .param .b32 NO_7
+    .param .b32 Q_5,
+    .param .b32 NP_6,
+    .param .b32 NV_7,
+    .param .b32 NO_8
 )
-    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 66
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 72
     // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 128 (to maximize SM occupancy)
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 33.33% (2 active blocks per SM)
 .maxnreg 128
 {
-    .reg .b32 %r<32>;
+    .reg .b32 %r<38>;
     .reg .f32 %f<1>;
     .reg .b64 %rd<17>;
     .reg .pred %p<10>;
@@ -27,71 +28,77 @@
     ld.param.u64 %rd2, [Out_2];
     ld.param.u32 %r0, [T_3];
     ld.param.u32 %r1, [D_4];
-    ld.param.u32 %r2, [NP_5];
-    ld.param.u32 %r3, [NV_6];
-    ld.param.u32 %r4, [NO_7];
-    mov.u32 %r5, %ctaid.x;
-    mov.u32 %r6, %tid.x;
-    mov.u32 %r7, 0;
-    cvt.s64.s32 %rd3, %r7;
+    ld.param.u32 %r2, [Q_5];
+    ld.param.u32 %r3, [NP_6];
+    ld.param.u32 %r4, [NV_7];
+    ld.param.u32 %r5, [NO_8];
+    mov.u32 %r6, %ctaid.x;
+    mov.u32 %r7, %ctaid.y;
+    mov.u32 %r8, %tid.x;
+    mul.lo.s32 %r9, %r7, %r2;
+    add.s32 %r10, %r9, %r6;
+    mul.lo.s32 %r11, %r10, %r0;
+    mul.lo.s32 %r12, %r7, %r0;
+    mov.u32 %r13, 0;
+    cvt.s64.s32 %rd3, %r13;
     // for t in ...
-    mov.u32 %r8, 0;
-    mov.u32 %r9, %r0;
+    mov.u32 %r14, 0;
+    mov.u32 %r15, %r0;
     $LOOP_START_0:
-    setp.ge.u32 %p0, %r8, %r9;
+    setp.ge.u32 %p0, %r14, %r15;
     @%p0 bra $LOOP_END_1;
-    mov.u32 %r10, 0;
-    mul.lo.s32 %r11, %r5, %r0;
-    add.s32 %r12, %r11, %r8;
-    mov.u32 %r13, 1;
+    mov.u32 %r16, 0;
+    add.s32 %r17, %r11, %r14;
+    mov.u32 %r18, 1;
     // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
-    mul.lo.s32 %r15, %r10, %r2;
-    add.s32 %r14, %r15, %r12;
-    cvt.u64.u32 %rd5, %r14;
+    mul.lo.s32 %r20, %r16, %r3;
+    add.s32 %r19, %r20, %r17;
+    cvt.u64.u32 %rd5, %r19;
     shl.b64 %rd4, %rd5, 2;
     add.u64 %rd6, %rd0, %rd4;
-    setp.lt.u32 %p1, %r10, %r13;
-    setp.lt.u32 %p2, %r12, %r2;
+    setp.lt.u32 %p1, %r16, %r18;
+    setp.lt.u32 %p2, %r17, %r3;
     and.pred %p3, %p1, %p2;
-    @%p3 ld.global.u32 %r16, [%rd6];
-    @!%p3 mov.u32 %r16, 0;
-    cvt.u64.u32 %rd7, %r16;
-    mov.u32 %r17, 0;
-    mul.lo.s32 %r18, %r5, %r0;
-    add.s32 %r19, %r18, %r8;
-    mul.lo.s32 %r20, %r19, %r1;
-    add.s32 %r21, %r20, %r6;
-    mov.u32 %r22, 1;
+    @%p3 ld.global.u32 %r21, [%rd6];
+    @!%p3 mov.u32 %r21, 0;
+    cvt.u64.u32 %rd7, %r21;
+    mov.u32 %r22, 0;
+    add.s32 %r23, %r12, %r14;
+    mul.lo.s32 %r24, %r23, %r1;
+    add.s32 %r25, %r24, %r8;
+    mov.u32 %r26, 1;
     // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
-    mul.lo.s32 %r24, %r17, %r3;
-    add.s32 %r23, %r24, %r21;
-    cvt.u64.u32 %rd9, %r23;
+    mul.lo.s32 %r28, %r22, %r4;
+    add.s32 %r27, %r28, %r25;
+    cvt.u64.u32 %rd9, %r27;
     shl.b64 %rd8, %rd9, 0;
     add.u64 %rd10, %rd1, %rd8;
-    setp.lt.u32 %p4, %r17, %r22;
-    setp.lt.u32 %p5, %r21, %r3;
+    setp.lt.u32 %p4, %r22, %r26;
+    setp.lt.u32 %p5, %r25, %r4;
     and.pred %p6, %p4, %p5;
-    @%p6 ld.global.s8 %r25, [%rd10];
-    @!%p6 mov.u32 %r25, 0;
-    cvt.s64.s32 %rd11, %r25;
+    @%p6 ld.global.s8 %r29, [%rd10];
+    @!%p6 mov.u32 %r29, 0;
+    cvt.s64.s32 %rd11, %r29;
     mul.lo.s64 %rd12, %rd7, %rd11;
     add.s64 %rd13, %rd3, %rd12;
     mov.u64 %rd3, %rd13;
-    add.u32 %r8, %r8, 1;
+    add.u32 %r14, %r14, 1;
     bra $LOOP_START_0;
     $LOOP_END_1:
-    mov.u32 %r26, 0;
-    mul.lo.s32 %r27, %r5, %r1;
-    add.s32 %r28, %r27, %r6;
-    mov.u32 %r29, 1;
+    mov.u32 %r30, 0;
+    mul.lo.s32 %r31, %r7, %r2;
+    add.s32 %r32, %r31, %r6;
+    mul.lo.s32 %r33, %r32, %r1;
+    add.s32 %r34, %r33, %r8;
+    mov.u32 %r35, 1;
     // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
-    mul.lo.s32 %r31, %r26, %r4;
-    add.s32 %r30, %r31, %r28;
-    cvt.u64.u32 %rd15, %r30;
+    mul.lo.s32 %r37, %r30, %r5;
+    add.s32 %r36, %r37, %r34;
+    cvt.u64.u32 %rd15, %r36;
     shl.b64 %rd14, %rd15, 3;
     add.u64 %rd16, %rd2, %rd14;
-    setp.lt.u32 %p7, %r26, %r29;
-    setp.lt.u32 %p8, %r28, %r4;
+    setp.lt.u32 %p7, %r30, %r35;
+    setp.lt.u32 %p8, %r34, %r5;
     and.pred %p9, %p7, %p8;
     @%p9 st.global.u64 [%rd16], %rd3;
 }

@@ -25,9 +25,13 @@
 
 use y::cuda_runtime::CudaContext;
 
-const B: usize = 8; // batch * heads
+const B: usize = 8; // batch * KV heads
 const T: usize = 67; // a key length, deliberately not a power of two
 const D: usize = 64; // head_dim
+// Query rows per KV row. `exact_attention` reshapes to [b, nkv, rep*q_len, tk],
+// so this is >1 for every grouped-query model -- Q = 1 would leave the shared-V
+// indexing untested, which is the whole reason the grid has two dimensions.
+const Q: usize = 3;
 const P_BITS: u32 = 28;
 
 /// Compiled ONCE per process, behind a `OnceLock`.
@@ -79,11 +83,14 @@ fn lcg(state: &mut u64) -> u64 {
 /// `v` is the one a zero-extending load destroys.
 fn inputs(seed: u64) -> (Vec<u32>, Vec<i8>) {
     let mut s = seed;
-    let mut p: Vec<u32> = (0..B * T).map(|_| (lcg(&mut s) % ((1u64 << P_BITS) + 1)) as u32).collect();
+    let mut p: Vec<u32> =
+        (0..B * Q * T).map(|_| (lcg(&mut s) % ((1u64 << P_BITS) + 1)) as u32).collect();
     let mut v: Vec<i8> = (0..B * T * D).map(|_| (lcg(&mut s) % 255) as i64 as i8 - 127).collect();
     for b in 0..B {
-        p[b * T] = 1 << P_BITS; // exactly 2^28
-        p[b * T + 1] = 0;
+        for q in 0..Q {
+            p[(b * Q + q) * T] = 1 << P_BITS; // exactly 2^28
+            p[(b * Q + q) * T + 1] = 0;
+        }
         for d in 0..D {
             v[(b * T) * D + d] = -127;
             v[(b * T + 1) * D + d] = 127;
@@ -93,14 +100,16 @@ fn inputs(seed: u64) -> (Vec<u32>, Vec<i8>) {
 }
 
 fn reference(p: &[u32], v: &[i8]) -> Vec<i64> {
-    let mut out = vec![0i64; B * D];
+    let mut out = vec![0i64; B * Q * D];
     for b in 0..B {
-        for d in 0..D {
-            let mut acc = 0i64;
-            for t in 0..T {
-                acc += p[b * T + t] as i64 * v[(b * T + t) * D + d] as i64;
+        for q in 0..Q {
+            for d in 0..D {
+                let mut acc = 0i64;
+                for t in 0..T {
+                    acc += p[(b * Q + q) * T + t] as i64 * v[(b * T + t) * D + d] as i64;
+                }
+                out[(b * Q + q) * D + d] = acc;
             }
-            out[b * D + d] = acc;
         }
     }
     out
@@ -110,7 +119,7 @@ fn run(ctx: &CudaContext, p: &[u32], v: &[i8]) -> Vec<i64> {
     let module = ctx.load_ptx(ptx(), "exact_pv").expect("PTX failed to load");
     let d_p = ctx.alloc(p.len() * 4).unwrap();
     let d_v = ctx.alloc(v.len()).unwrap();
-    let d_o = ctx.alloc(B * D * 8).unwrap();
+    let d_o = ctx.alloc(B * Q * D * 8).unwrap();
 
     let raw_p: Vec<u8> = p.iter().flat_map(|x| x.to_le_bytes()).collect();
     let raw_v: Vec<u8> = v.iter().map(|x| *x as u8).collect();
@@ -126,15 +135,16 @@ fn run(ctx: &CudaContext, p: &[u32], v: &[i8]) -> Vec<i64> {
         d_o.device_ptr(),
         T as u64,
         D as u64,
-        (B * T) as u64,
+        Q as u64,
+        (B * Q * T) as u64,
         (B * T * D) as u64,
-        (B * D) as u64,
+        (B * Q * D) as u64,
     ];
-    ctx.launch(&module, (B as u32, 1, 1), (D as u32, 1, 1), 0, &args)
+    ctx.launch(&module, (Q as u32, B as u32, 1), (D as u32, 1, 1), 0, &args)
         .expect("launch failed");
     ctx.synchronize().unwrap();
 
-    let mut bytes = vec![0u8; B * D * 8];
+    let mut bytes = vec![0u8; B * Q * D * 8];
     ctx.memcpy_dtoh_at(&mut bytes, &d_o, 0).unwrap();
     bytes
         .chunks_exact(8)
@@ -164,7 +174,7 @@ fn the_device_kernel_equals_an_exact_integer_reference() {
     // reference" only if the reference were constant too.
     let distinct: std::collections::HashSet<i64> = got.iter().copied().collect();
     assert!(
-        distinct.len() > B * D / 2,
+        distinct.len() > B * Q * D / 2,
         "only {} distinct outputs of {} -- the kernel is not computing per-lane \
          results",
         distinct.len(),
@@ -182,20 +192,22 @@ fn an_fp32_accumulator_over_the_same_data_disagrees() {
     let mut differ = 0usize;
     let mut worst = 0i64;
     for b in 0..B {
-        for d in 0..D {
-            let mut acc = 0f32;
-            for t in 0..T {
-                acc += p[b * T + t] as f32 * v[(b * T + t) * D + d] as f32;
-            }
-            let exact = want[b * D + d];
-            if acc as i64 != exact {
-                differ += 1;
-                worst = worst.max((acc as i64 - exact).abs());
+        for q in 0..Q {
+            for d in 0..D {
+                let mut acc = 0f32;
+                for t in 0..T {
+                    acc += p[(b * Q + q) * T + t] as f32 * v[(b * T + t) * D + d] as f32;
+                }
+                let exact = want[(b * Q + q) * D + d];
+                if acc as i64 != exact {
+                    differ += 1;
+                    worst = worst.max((acc as i64 - exact).abs());
+                }
             }
         }
     }
     assert!(
-        differ > B * D / 4,
+        differ > B * Q * D / 4,
         "an fp32 accumulator agreed with the exact one on all but {differ} of \
          {} lanes -- this data does not exercise the precision the kernel is \
          for, so test 1 proves nothing about exactness",
@@ -203,7 +215,7 @@ fn an_fp32_accumulator_over_the_same_data_disagrees() {
     );
     eprintln!(
         "fp32 accumulation differs on {differ} of {} lanes, worst by {worst}",
-        B * D
+        B * Q * D
     );
 }
 
@@ -223,7 +235,9 @@ fn the_result_does_not_depend_on_summation_order() {
     let mut vr = vec![0i8; v.len()];
     for b in 0..B {
         for t in 0..T {
-            pr[b * T + t] = p[b * T + (T - 1 - t)];
+            for q in 0..Q {
+                pr[(b * Q + q) * T + t] = p[(b * Q + q) * T + (T - 1 - t)];
+            }
             for d in 0..D {
                 vr[(b * T + t) * D + d] = v[(b * T + (T - 1 - t)) * D + d];
             }

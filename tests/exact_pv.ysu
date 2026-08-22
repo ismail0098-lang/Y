@@ -35,26 +35,35 @@
 // `cvt.s64.s32` and still emits `mul.lo.s64`, so the promotion rule makes the
 // annotation redundant rather than the test blind. Both are confirmations of
 // the type system, not holes; U32 is kept because it states the real range.
+// `P` is [B, Q, T] and `V` is [B, T, D]: several query rows share one row of
+// keys, which is what a grouped-query head does. The grid carries the two
+// outer indices -- `q` on x, `b` on y -- rather than one flat block index and
+// a divide, because Y's PTX backend would lower that to a real integer
+// division per thread for an index the launch already knows.
 kernel exact_pv(
     P: GlobalMemory<U32>,
     V: GlobalMemory<I8>,
     Out: GlobalMemory<I64>,
     T: I32,
     D: I32,
+    Q: I32,
     NP: I32,
     NV: I32,
     NO: I32
 ) {
-    let b: I32 = block_idx_x();
+    let q: I32 = block_idx_x();
+    let b: I32 = block_idx_y();
     let d: I32 = thread_idx_x();
+    let prow: I32 = (b * Q + q) * T;
+    let vrow: I32 = b * T;
     let acc: I64 = 0;
     @invariant(t >= 0)
     for t in 0..T {
-        let pv: I64 = block_ptr2d_load(P, 0, b * T + t, NP, 1, NP);
-        let vv: I64 = block_ptr2d_load(V, 0, (b * T + t) * D + d, NV, 1, NV);
+        let pv: I64 = block_ptr2d_load(P, 0, prow + t, NP, 1, NP);
+        let vv: I64 = block_ptr2d_load(V, 0, (vrow + t) * D + d, NV, 1, NV);
         acc = acc + pv * vv;
     }
-    block_ptr2d_store(Out, 0, b * D + d, NO, 1, NO, acc);
+    block_ptr2d_store(Out, 0, (b * Q + q) * D + d, NO, 1, NO, acc);
 }
 
 fn main() {}
