@@ -157,6 +157,31 @@ def digit_width(T, v_levels=None):
 _Y_PV = {}
 
 
+# Registered as a CUSTOM OP, not called directly, and the reason is measured.
+#
+# The first version called `_y_exact_pv` straight from `exact_pv`. It was
+# correct and it destroyed `torch.compile`: a ctypes launch inside `forward` is
+# opaque to dynamo, so the model went from **1 graph / 0 breaks to 18 graphs /
+# 17 breaks**, and compiled throughput went from 240.3 tok/s/seq on the digit
+# split to 38.5 -- i.e. compilation bought the kernel path nothing at all, and
+# a 1.068x win in eager was a 6.2x LOSS in the configuration anyone would ship.
+#
+# `feedback_stateful_optimisations_lose_to_compilers` recorded this exact shape
+# once already, for an O(1) KV cache that was 550x slower under compile. A
+# custom op with a registered fake lets dynamo keep ONE graph: it sees an
+# opaque node with known shape and dtype and traces straight past it.
+@torch.library.custom_op("y::exact_pv", mutates_args=())
+def _y_pv_op(p: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    return _y_exact_pv(p, v)
+
+
+@_y_pv_op.register_fake
+def _(p, v):
+    return torch.empty(
+        (*p.shape[:-1], v.shape[-1]), dtype=torch.float64, device=p.device
+    )
+
+
 def _y_exact_pv(p, v):
     """`p @ v` through tests/exact_pv.ysu -- one launch, int64 accumulation.
 
@@ -240,7 +265,7 @@ def exact_pv(p, v):
     # int8 exists to delete, and would do it silently. Refusing is the fix if
     # the kernel cannot be loaded -- see `_y_exact_pv`.
     if v.dtype == torch.int8:
-        return _y_exact_pv(p, v)
+        return torch.ops.y.exact_pv(p, v)
     T = v.shape[-2]
     dbits = digit_width(T)
     if dbits == 0:                      # absurdly long context; stay correct
