@@ -2717,6 +2717,46 @@ impl ZkEmitter {
             Stmt::Expr(expr) => {
                 self.emit_expr(expr, items)?;
             }
+            // `while` is REFUSED in circuit mode, with or without
+            // `@max_iterations(N)`.
+            //
+            // The bounded form below unrolls `N` times behind an "active mask"
+            // (`active_{i+1} = active_i * cond_{i+1}`, with every mutated
+            // variable muxed on the mask). It does not work, and it fails
+            // three different ways depending on the bound. Measured on
+            // `while i < p0 { acc = acc + 3; i = i + 1; }` for p0 = 0..3:
+            //
+            //     @max_iterations(1)   3, 3, 3, 3    want 0, 3, 3, 3
+            //     @max_iterations(2)   0, 3, 6, 6    correct
+            //     @max_iterations(4)   0, then UNSAT everywhere
+            //
+            // The first row is the dangerous one: the loop body runs when the
+            // condition was false on entry, the circuit is SATISFIABLE, and
+            // Groth16 will prove that arithmetic as readily as the right kind.
+            // The third is merely unusable. That the middle row is correct is
+            // what let this survive -- any single probe at N=2 agrees.
+            //
+            // Refusing is the fix, not a stopgap, and the precedent is the
+            // `tma_load` / `wgmma_async` intrinsics and `@zk_target(scheme =
+            // "plonkish")`: a named gap costs a user five minutes, an artifact
+            // that looks right costs them however long it takes to suspect the
+            // compiler. `for` is fully unrolled and correct, and is the
+            // supported way to write a bounded loop here.
+            //
+            // The dead code below is kept deliberately: it is the starting
+            // point for a correct implementation, and `tests/zk_llvm_differential.rs`
+            // is now the gate that would have caught this. Re-enabling it
+            // without that gate green is not on.
+            Stmt::While { condition, body, max_iterations, span, .. } => {
+                return Err(format!(
+                    "Line {}: error[Z0010]: 'while' is not supported in ZK circuit mode.\n                       The `@max_iterations(N)` unrolling was withdrawn: it ran the body when \
+                     the condition was false on entry (N=1), and produced unsatisfiable \
+                     circuits for ordinary inputs (N=4).\n                       hint: use a `for` loop, which is fully unrolled and checked against the \
+                     LLVM backend by tests/zk_llvm_differential.rs",
+                    span.line
+                ));
+            }
+            #[allow(unreachable_patterns)]
             Stmt::While { condition, body, max_iterations, span, .. } => {
                 let max_iters = match max_iterations {
                     Some(n) if *n > 0 => *n,
@@ -4881,10 +4921,23 @@ mod tests {
         let mut sub_parser = crate::parser::Parser::new(sub_tokens);
         let prog = sub_parser.parse_program().unwrap();
 
+        // This used to assert the emitted text contains "active_mask" and
+        // that some constraints exist -- a string match that PINNED a broken
+        // construct as a regression guard, the same mistake as the
+        // `wgmma...s4` substring test CLAUDE.md records. The active-mask
+        // unrolling ran the body when the condition was false on entry, and
+        // both assertions above hold perfectly for a circuit computing the
+        // wrong function. `while` is refused now; see
+        // `tests/zk_while_is_refused.rs` for the measured evidence.
         let mut emitter = ZkEmitter::new();
-        let r1cs_text = emitter.emit_program(&prog).unwrap();
-        assert!(r1cs_text.contains("active_mask"));
-        assert!(emitter.constraints.len() > 0);
+        let err = emitter
+            .emit_program(&prog)
+            .err()
+            .expect("`@max_iterations` while was accepted");
+        assert!(
+            err.contains("'while' is not supported") && err.contains("max_iterations"),
+            "refusal does not name the construct and the annotation: {err}"
+        );
     }
 
     #[test]
