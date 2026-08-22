@@ -215,10 +215,13 @@ number is true and it was not evidence.
   sequence bound — to the ones the compiler actually emits, instead of
   transcribing them.
 
-**The bridge has not been re-run: that needs the GPU.** The fix is arithmetic
-and the arithmetic is checked on the CPU, but the 12/12 line above should be
-read as unverified until it runs again with a non-uniform softmax underneath
-it.
+**Re-run on the GPU, 2026-08-22 — the fix holds and the counterfactual is
+measured, not inferred.** With the corrected `KFix`: 12/12 bit-identical and
+`max(p)/mean(p) = 110.9`, i.e. a genuinely peaked softmax. Reverting only the
+`kfix` line and re-running: still **12/12 bit-identical, 0 mismatched** — and
+`max(p)/mean(p) = 1.0` exactly, with the new control failing the run. So the
+original result really was a perfect agreement about uniform attention, on the
+real activations, exactly as the algebra predicted.
 
 Finding 05's lesson generalises: a number in a comment is not a check, and a
 **differential whose two arms share a constant is not a check of that

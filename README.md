@@ -855,6 +855,15 @@ transcriptions of them. Checking the conjunction rather than each bound alone
 showed one bound *subsumes* another and surfaced an unwritten hard context
 ceiling (264,208 tokens at V=127). It found two live bugs doing it.
 
+**The compiler's kernel is checked against the torch path on real
+activations** — `tools/ptx_bridge.py` loads the emitted PTX through the CUDA
+driver and runs it on post-RoPE Q/K/V captured from the model: 12/12 layer/head
+pairs bit-identical, at `max(p)/mean(p) = 110.9` where a uniform softmax would
+be 1.0. That second number is the control, and it is not decorative — an earlier
+run of this bridge passed 12/12 on a temperature 65,536x too small, which is to
+say on uniform attention, and the control reproduces that failure exactly when
+the bug is put back.
+
 **The compiler emits the attention kernel itself** — `Y --emit-attention-ptx
 <head_dim> <seq_len>`, in `src/exact_attention.rs`, with an architecture-
 independent integer `exp2` (`src/fixed_exp.rs`, 0.908 ulp proved exhaustively)
@@ -877,11 +886,6 @@ invariance is a different claim and is not made.
   it could reframe the whole result.
 - **One model, one GPU, one stack.** Cross-hardware bit-identity is the strongest
   thing exactness buys and is the headline claim with no evidence behind it.
-- **The `ptx_bridge.py` result is stale as measured.** It reported 12/12
-  bit-identical between the compiler's PTX and the torch path on real
-  activations, while passing the kernel a temperature 65,536x too small — a
-  uniform softmax that both arms of the comparison agreed on perfectly. Fixed and
-  pinned by CPU tests; not yet re-run.
 - **CUDA graphs are worth up to 1.47x and are blocked.** The prerequisites are
   cheap — a static cache costs 5–8% and improves the exact/stock ratio to 1.01x
   — and the property survives them. Capture then segfaults on *both* arms, from
@@ -897,9 +901,7 @@ than extend it:
 1. **Build the fixed-order-float arm.** The missing control, above.
 2. **Run a second GPU.** Cross-hardware bit-identity is the strongest thing
    exactness buys and the only headline claim with no evidence behind it.
-3. **Re-run `ptx_bridge.py`** now that the temperature is right and a
-   non-degeneracy control refuses a uniform softmax.
-4. **Move the pipeline off the prototype** onto compiler-emitted kernels, and
+3. **Move the pipeline off the prototype** onto compiler-emitted kernels, and
    into a serving integration — which is also where CUDA graphs stop being
    blocked.
 
