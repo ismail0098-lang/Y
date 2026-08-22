@@ -92,6 +92,12 @@ const SHAPES: &[(&str, &str, &str)] = &[
         "64, 32, 128",
         "A: GlobalMemory<I8>, B: GlobalMemory<I8>, C: GlobalMemory<I32>",
     ),
+    (
+        "int8 GEMM + scaled epilogue",
+        "64, 32, 128",
+        "A: GlobalMemory<I8>, B: GlobalMemory<I8>, Sa: GlobalMemory<F32>, \
+         Sb: GlobalMemory<F32>, Bias: GlobalMemory<F32>, C: GlobalMemory<F32>",
+    ),
 ];
 
 #[test]
@@ -123,6 +129,7 @@ fn the_rejection_message_names_every_accepted_shape() {
         "scale_a",
         "SwiGLU",
         "Bias",
+        "scaled epilogue",
     ] {
         assert!(
             text.contains(needle),

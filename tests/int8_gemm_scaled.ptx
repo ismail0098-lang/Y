@@ -1,0 +1,140 @@
+.version 8.4
+.target sm_89
+.address_size 64
+
+.visible .entry int8_gemm_scaled(
+    .param .u64 A_0,
+    .param .u64 B_1,
+    .param .u64 Sa_2,
+    .param .u64 Sb_3,
+    .param .u64 Bias_4,
+    .param .u64 C_5
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 103
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 128 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 33.33% (16 active blocks per SM)
+.maxnreg 128
+{
+    .reg .b32 %r<33>;
+    .reg .f32 %f<10>;
+    .reg .b64 %rd<30>;
+    .reg .pred %p<1>;
+
+    ld.param.u64 %rd0, [A_0];
+    ld.param.u64 %rd1, [B_1];
+    ld.param.u64 %rd2, [Sa_2];
+    ld.param.u64 %rd3, [Sb_3];
+    ld.param.u64 %rd4, [Bias_4];
+    ld.param.u64 %rd5, [C_5];
+    // [Y INT8 TENSOR CORE GEMM] M=64 N=32 K=128 | mma.sync.m16n8k32.row.col.s32.s8.s8.s32
+    // one warp per 16x8 tile, grid (4, 4, 1), block (32,1,1)
+    // A row-major [M][K], B [N][K], C row-major [M][N] int32
+    cvta.to.global.u64 %rd6, %rd0;
+    cvta.to.global.u64 %rd7, %rd1;
+    cvta.to.global.u64 %rd8, %rd5;
+    cvta.to.global.u64 %rd9, %rd2;
+    cvta.to.global.u64 %rd10, %rd3;
+    cvta.to.global.u64 %rd11, %rd4;
+    mov.u32 %r0, %tid.x;
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ctaid.y;
+    shr.u32 %r3, %r0, 2;
+    and.b32 %r4, %r0, 3;
+    mul.lo.u32 %r5, %r4, 4;
+    mul.lo.u32 %r6, %r2, 16;
+    add.u32 %r6, %r6, %r3;
+    mul.lo.u32 %r7, %r6, 128;
+    add.u32 %r7, %r7, %r5;
+    cvt.u64.u32 %rd12, %r7;
+    add.u64 %rd13, %rd6, %rd12;
+    mul.lo.u32 %r8, %r1, 8;
+    add.u32 %r8, %r8, %r3;
+    mul.lo.u32 %r9, %r8, 128;
+    add.u32 %r9, %r9, %r5;
+    cvt.u64.u32 %rd14, %r9;
+    add.u64 %rd15, %rd7, %rd14;
+    mov.u32 %r10, 0;
+    mov.u32 %r11, 0;
+    mov.u32 %r12, 0;
+    mov.u32 %r13, 0;
+    mov.u32 %r14, %ctaid.z;
+    mov.u32 %r15, %nctaid.z;
+    mul.lo.u32 %r16, %r14, 32;
+    cvt.u64.u32 %rd16, %r16;
+    add.u64 %rd13, %rd13, %rd16;
+    add.u64 %rd15, %rd15, %rd16;
+    mul.lo.u32 %r17, %r15, 32;
+    cvt.u64.u32 %rd17, %r17;
+    mov.u32 %r18, %r16;
+$int8_gemm_k_0:
+    setp.ge.u32 %p0, %r18, 128;
+    @%p0 bra $int8_gemm_end_1;
+    ld.global.u32 %r19, [%rd13];
+    ld.global.u32 %r20, [%rd13+1024];
+    ld.global.u32 %r21, [%rd13+16];
+    ld.global.u32 %r22, [%rd13+1040];
+    ld.global.u32 %r23, [%rd15];
+    ld.global.u32 %r24, [%rd15+16];
+    mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%r10, %r11, %r12, %r13}, {%r19, %r20, %r21, %r22}, {%r23, %r24}, {%r10, %r11, %r12, %r13};
+    add.u64 %rd13, %rd13, %rd17;
+    add.u64 %rd15, %rd15, %rd17;
+    add.u32 %r18, %r18, %r17;
+    bra $int8_gemm_k_0;
+$int8_gemm_end_1:
+    mul.lo.u32 %r25, %r2, 16;
+    add.u32 %r25, %r25, %r3;
+    mul.lo.u32 %r26, %r25, 32;
+    mul.lo.u32 %r27, %r1, 8;
+    add.u32 %r26, %r26, %r27;
+    mul.lo.u32 %r28, %r4, 2;
+    add.u32 %r26, %r26, %r28;
+    mul.lo.u32 %r26, %r26, 4;
+    cvt.u64.u32 %rd18, %r26;
+    add.u64 %rd19, %rd8, %rd18;
+    add.u32 %r29, %r25, 0;
+    mul.lo.u32 %r29, %r29, 4;
+    cvt.u64.u32 %rd20, %r29;
+    add.u64 %rd21, %rd9, %rd20;
+    ld.global.f32 %f0, [%rd21];
+    add.u32 %r30, %r25, 8;
+    mul.lo.u32 %r30, %r30, 4;
+    cvt.u64.u32 %rd22, %r30;
+    add.u64 %rd23, %rd9, %rd22;
+    ld.global.f32 %f1, [%rd23];
+    add.u32 %r31, %r27, %r28;
+    add.u32 %r31, %r31, 0;
+    mul.lo.u32 %r31, %r31, 4;
+    cvt.u64.u32 %rd24, %r31;
+    add.u64 %rd25, %rd10, %rd24;
+    ld.global.f32 %f2, [%rd25];
+    add.u64 %rd26, %rd11, %rd24;
+    ld.global.f32 %f3, [%rd26];
+    add.u32 %r32, %r27, %r28;
+    add.u32 %r32, %r32, 1;
+    mul.lo.u32 %r32, %r32, 4;
+    cvt.u64.u32 %rd27, %r32;
+    add.u64 %rd28, %rd10, %rd27;
+    ld.global.f32 %f4, [%rd28];
+    add.u64 %rd29, %rd11, %rd27;
+    ld.global.f32 %f5, [%rd29];
+    cvt.rn.f32.s32 %f6, %r10;
+    mul.f32 %f6, %f6, %f0;
+    mul.f32 %f6, %f6, %f2;
+    add.f32 %f6, %f6, %f3;
+    st.global.f32 [%rd19], %f6;
+    cvt.rn.f32.s32 %f7, %r11;
+    mul.f32 %f7, %f7, %f0;
+    mul.f32 %f7, %f7, %f4;
+    add.f32 %f7, %f7, %f5;
+    st.global.f32 [%rd19+4], %f7;
+    cvt.rn.f32.s32 %f8, %r12;
+    mul.f32 %f8, %f8, %f1;
+    mul.f32 %f8, %f8, %f2;
+    add.f32 %f8, %f8, %f3;
+    st.global.f32 [%rd19+1024], %f8;
+    cvt.rn.f32.s32 %f9, %r13;
+    mul.f32 %f9, %f9, %f1;
+    mul.f32 %f9, %f9, %f4;
+    add.f32 %f9, %f9, %f5;
+    st.global.f32 [%rd19+1028], %f9;
+}
