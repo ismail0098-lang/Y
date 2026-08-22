@@ -1060,7 +1060,13 @@ impl TypeChecker {
 
         if (kernel.params.len() != 3 && kernel.params.len() != 4) || !bad_params.is_empty() {
             self.errors.push(format!(
-                "Line {}: Kernel-level @tile(M, N, K) on `{}` requires 3 parameters (A, B: GlobalMemory<F16>, C: GlobalMemory<F32>) for a plain GEMM, 4 (A, B: GlobalMemory<F16>, Bias, C: GlobalMemory<F32>) for a fused GEMM+Bias+ReLU epilogue, or 4 (X, W_gate, W_up: GlobalMemory<F16>, Out: GlobalMemory<F32>) for a fused Linear+SwiGLU epilogue, in that order - tile-aware GEMM codegen binds them positionally and supports no other shape. Found {} parameter(s){}.",
+                "Line {}: Kernel-level @tile(M, N, K) on `{}` accepts these shapes, and codegen binds them POSITIONALLY:\n\
+                 \x20 3  (A, B: GlobalMemory<F16>, C: GlobalMemory<F32>)                                  plain GEMM\n\
+                 \x20 4  (A, B: GlobalMemory<F16>, Bias, C: GlobalMemory<F32>)                            fused GEMM+Bias+ReLU\n\
+                 \x20 4  (X, W_gate, W_up: GlobalMemory<F16>, Out: GlobalMemory<F32>)                     fused Linear+SwiGLU\n\
+                 \x20 3  (A, B: GlobalMemory<I8>, C: GlobalMemory<I32>)                                   int8 Tensor Core GEMM\n\
+                 \x20 5  (A, B: GlobalMemory<F32>, scale_a, scale_b: F32, C: GlobalMemory<F32>)           fused FP8 (e4m3) GEMM\n\
+                 Found {} parameter(s){}.",
                 tile.span.line,
                 kernel.name,
                 kernel.params.len(),
@@ -3780,9 +3786,18 @@ mod tests {
         );
         let mut tc = TypeChecker::new();
         tc.check_program(&program);
+        // Assert the SUBSTANCE, not the phrasing. This used to match on
+        // "requires 3 parameters", so rewriting the message to list every
+        // accepted shape broke a test that had no opinion about shapes -- the
+        // diagnostic was still correct and still rejected the program. What
+        // the test actually cares about is that the offending parameter is
+        // named and that the message tells the user what IS accepted.
         assert!(
-            tc.errors.iter().any(|e| e.contains("requires 3 parameters")),
-            "expected a validation error for a non-GlobalMemory<F16> param, got: {:?}",
+            tc.errors.iter().any(|e| e.contains("@tile")
+                && e.contains("M (expected")
+                && e.contains("GlobalMemory<F16>")),
+            "expected a validation error naming the non-GlobalMemory<F16> param \
+             and the accepted shapes, got: {:?}",
             tc.errors
         );
     }
