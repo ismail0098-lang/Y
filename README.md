@@ -829,6 +829,16 @@ integer `exp2`. The determinism and accuracy numbers below are the prototype's.
 Replacing the rest of the prototype with compiler output is the remaining work,
 not a detail.
 
+**`0/16` is also what a broken arm scores**, and that is not hypothetical: the
+fixed-order control's first version returned its tensor in the wrong layout, did
+not crash, emitted fluent-looking garbage, and got a number reported for it. An
+arm broken *consistently* would have scored the winning 0/16. Every arm in every
+harness now passes a sanity gate before it is counted — a factual-prompt canary
+plus a degeneracy check on its own generation — and the gate's logic is
+mutation-verified on CPU (`python3 tools/exact_ragged_batch.py --check-gate`).
+The throughput tool is the sharpest case: it never decodes a token, so a broken
+arm was invisible there, and several ways of being broken are *faster*.
+
 Model: Qwen2.5-0.5B-Instruct · RTX 4070 Ti SUPER · measured 2026-08-18.
 
 | | result | control |

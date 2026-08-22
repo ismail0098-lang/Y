@@ -61,6 +61,20 @@ and each of these is a real chance to break:
 `stock` must FAIL this. A test that both arms pass is measuring the harness, not
 the property - and bf16 attention is genuinely sensitive to padding, so a
 green-across-the-board result means the comparison is broken.
+
+## And an arm must be COMPUTING something before its score means anything
+
+`0/16` is what this harness prints when an arm is invariant. It is also what it
+prints when an arm is **broken in a way that does not depend on the batch**,
+which is most ways of being broken. Found the hard way: `fixed_order_float`'s
+first version returned `[b, nh, q, d]` where the caller expects `[b, q, nh, d]`.
+It did not crash. The model ran, emitted fluent-looking garbage in the wrong
+script (`' الساد الساد ...'`), and this harness reported a number for it - and a
+consistently-wrong arm would have reported the winning number.
+
+So every arm now passes `sanity_verdict` before its cases run, on two
+independent checks (see that function). `--check-gate` exercises the verdict on
+synthetic outputs with no GPU and no model.
 """
 import _nospace
 
@@ -211,7 +225,12 @@ def main():
     # too-short generation makes a broken comparison look like a clean pass.
     ap.add_argument("--tokens", type=int, default=160)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--check-gate", action="store_true",
+                    help="exercise sanity_verdict on synthetic outputs and "
+                         "exit; needs no GPU and no model")
     a = ap.parse_args()
+    if a.check_gate:
+        return D.check_gate_logic()
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     tok = AutoTokenizer.from_pretrained(MODEL)
@@ -231,11 +250,20 @@ def main():
         print(f"\n--- {label} ---")
         base = None
         n_diff = 0
+        canary = D.canary_text(model, tok, a.device)
         for name, others, pos in cases():
             got = decode_target(model, tok, others, pos, a.tokens, a.device)
             if base is None:
                 base = got
-                print(f"  {name:<22} reference")
+                ok, reason = D.sanity_verdict(canary, got)
+                print(f"  {name:<22} reference -- {reason}")
+                if not ok:
+                    print(f"\n  *** ARM {arm!r} IS NOT COMPUTING THE MODEL'S "
+                          f"FUNCTION. Its invariance score would\n      be "
+                          f"meaningless - a broken arm that is broken the same "
+                          f"way every time\n      scores 0/16, which is the "
+                          f"passing number. Refusing to report it. ***")
+                    return 1
                 continue
             same = got == base
             n_diff += 0 if same else 1
