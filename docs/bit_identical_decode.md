@@ -502,6 +502,45 @@ writes it.
 
 ---
 
+## Finding 12 — most of the cross-architecture claim does not need a second GPU
+
+Finding 11 left an obvious challenge open: if a *fixed-order float* path is
+batch-invariant too, why not write a fast fixed-order float kernel and skip the
+quantisation? The answer is portability — a float softmax still needs a
+transcendental, and `ex2.approx.f32` is specified by a **tolerance, not a
+value**, so which result inside that tolerance you get belongs to the SM
+generation.
+
+That argument can be made almost entirely on one card, because it is a property
+of the *instruction stream*: if every instruction is exactly specified by the
+ISA, the result is determined. Assembling both probes from `tests/ptx_fixed_exp.rs`
+and disassembling the cubin:
+
+| kernel | transcendental unit | floating-point ops | instructions |
+|---|---|---|---|
+| `hw_exp_probe` (`ex2.approx.f32`) | **`MUFU` × 1** | FMUL×4, FSETP, FSEL, F2I | 32 |
+| `fixed_exp_probe` (integer) | **none** | **none** | 72 — IMAD, SHF, IADD3, ISETP |
+
+**The integer path contains nothing two architectures are permitted to disagree
+about.** Integer multiply-add, shift, add and compare are exactly specified;
+`MUFU` is not. That is now a test — `the_integer_exp_compiles_to_no_architecture_defined_instruction`
+— and it needs `ptxas` and `cuobjdump` but **no GPU**, so it runs on an ordinary
+machine.
+
+Its control is the second row: the float probe must show a `MUFU`, or the
+detector is blind and a clean integer result means nothing. Mutation-verified
+both ways — blinding the detector fails it, and removing the `ex2.approx.f32`
+from the float probe fails it.
+
+**What this is and is not.** It does not measure two architectures agreeing;
+that still needs a second GPU and remains the one headline claim without a
+measurement. It proves the weaker and more useful thing: the integer path has no
+instruction whose result the ISA leaves open, which is the premise the
+cross-architecture claim rests on. The float path has exactly one, and it is
+unavoidable in a softmax.
+
+---
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
