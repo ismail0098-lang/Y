@@ -306,6 +306,46 @@ at their defaults.
 
 ---
 
+## Finding 09 — the acceptance harness exited 0 without a GPU, and tested one key length
+
+`tools/exact_selftest.py` is what stands behind "the fast path computes the same
+function". Its header says every check has a control, because a check that
+cannot fail is not evidence. Its `main` opened with `if not
+torch.cuda.is_available(): print("SKIP: no CUDA"); return 0`.
+
+* **Ten of the thirteen checks need only torch** — including
+  `check_batch_invariance`, the property the whole project is about. They run on
+  CPU now, and the four that cannot are named: three launch Triton, and
+  `check_pad_is_load_bearing` asserts a CUDA-specific `_int_mm` refusal that does
+  not hold on CPU. `9/9` on CPU, `13/13` on CUDA.
+* **`check_batch_invariance` ran at one key length, `T = 96`.** Two batch-shape
+  dependencies live inside the exact path and it reached neither properly: the
+  GEMM tiles by row count, and `exact_pv` picks its digit width from the
+  **padded** key length — so a sequence's own answer depends on what the rest of
+  the batch made `T`. The boundaries are `T = 519, 1041, 2097, 4262`. It now
+  sweeps four lengths across those and adds the production-shaped case: the same
+  400-key sequence answered alone (width 8) and inside a batch padded to 600
+  (width 7).
+* **The mutation run found the two masking sites hide each other.** Including
+  padded keys in the softmax max is caught by two checks. But *not* forcing
+  blocked positions to `tq = 2^30`, and deleting the `p = where(blocked, 0, p)`
+  that follows, are each invisible alone — the exp already returns 0 for
+  `2^30`, and the zeroing already covers a missing clamp. Remove **both** and
+  the new ragged case fails on all three pad lengths (deltas 0.15–0.39) while
+  the identical-rows case stays green. Defence in depth, and the harness cannot
+  separate the two layers.
+* **And the new case is deliberately not the digit-width gate.** Forcing a
+  too-wide digit on the padded side only leaves row 0 bit-identical at widths 7,
+  10, 12 and 14; the output first moves at 16, by 7.5e-9 on 7 of 896 elements.
+  The bound is worst-case and a real softmax is nowhere near it except at the
+  argmax, so an off-by-one in `digit_width` is invisible end to end. `check_pv`
+  and `check_pv_bound_is_load_bearing` are the gate, with uniform random `p` up
+  to the inclusive bound. Moving that coverage here would be a weaker test
+  wearing the same name — worth stating, because "make the end-to-end test
+  cover it too" is the obvious and wrong instinct.
+
+---
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
