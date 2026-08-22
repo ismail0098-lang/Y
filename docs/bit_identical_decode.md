@@ -849,6 +849,41 @@ split that predicts the end-to-end number to within half a point is the
 strongest evidence that the attribution was right -- and it is also the reason
 not to oversell the kernel's own 5.04x: Amdahl caps it at 8.1%.
 
+#### And in the configuration anyone would ship, the first version LOST 6.2x
+
+Measured only after the eager number was already written down:
+
+| compiled | s | tok/s/seq |
+|---|---|---|
+| float32 V, digit split | 0.266 | **240.3** |
+| int8 V, Y kernel (first version) | 1.662 | **38.5** |
+
+`torch.compile` gave the digit split 6.3x and the kernel path **nothing** --
+38.5 compiled against 37.2 eager. A ctypes launch inside `forward` is opaque to
+dynamo, so the model went from **1 graph / 0 breaks to 18 graphs / 17 breaks**,
+and shattering the graph costs far more than the kernel saves.
+
+`feedback_stateful_optimisations_lose_to_compilers` recorded this exact shape
+already, for an O(1) KV cache that measured 550x slower under compile. **A
+kernel-level win measured in eager is not a result**, and the eager number
+above was true and would have been published as though it meant something.
+
+The fix is a `torch.library.custom_op` with a registered fake: dynamo sees one
+opaque node of known shape and dtype and traces straight past it. Back to **1
+graph, 0 breaks**.
+
+**That recovers most of the loss and does not close it.** Interleaved
+round-robin, compiled, with the custom op in place: float32 V 244.4 tok/s/seq
+against int8 V + Y kernel 171.3, i.e. **0.70x** where the eager measurement said
+1.068x. So the graph breaks were roughly 4.4x of the 6.2x and something else is
+the remaining 1.43x -- most likely that the digit split's fp32 matmuls are
+themselves fused into the compiled graph, while an opaque custom op cannot be.
+**These two numbers were taken while another process held the GPU**, so read the
+ratio and not the absolute figures, and re-measure on an idle card before
+quoting either. The conclusion that survives contention is the sign, and the
+sign is negative: on this stack the kernel path is not currently worth shipping,
+whatever the census predicted from launch counts alone.
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
