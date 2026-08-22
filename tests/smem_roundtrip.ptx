@@ -1,0 +1,88 @@
+.version 8.4
+.target sm_89
+.address_size 64
+
+.shared .align 16 .b32 __y_smem_0[2048];
+.visible .entry smem_roundtrip(
+    .param .u64 Out_0,
+    .param .b32 N_1
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 71
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 128 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 33.33% (2 active blocks per SM)
+.maxnreg 128
+{
+    .reg .b32 %r<49>;
+    .reg .f32 %f<1>;
+    .reg .b64 %rd<11>;
+    .reg .pred %p<3>;
+
+    ld.param.u64 %rd0, [Out_0];
+    ld.param.u32 %r0, [N_1];
+    // [Y SHARED ALLOC] 2048 u32 = 8192 bytes
+    mov.u64 %rd1, __y_smem_0;
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, 256;
+    mul.lo.s32 %r4, %r2, %r3;
+    add.s32 %r5, %r4, %r1;
+    mov.u32 %r6, 0;
+    mov.u32 %r7, %r6;
+    mov.u32 %r8, %r1;
+    cvt.u64.u32 %rd2, %r8;
+    shl.b64 %rd3, %rd2, 4;
+    add.u64 %rd4, %rd1, %rd3;
+    mov.u32 %r9, 4;
+    mul.lo.s32 %r10, %r5, %r9;
+    mov.u32 %r11, 0;
+    add.s32 %r12, %r10, %r11;
+    mov.u32 %r13, %r12;
+    mov.u32 %r14, 4;
+    mul.lo.s32 %r15, %r5, %r14;
+    mov.u32 %r16, 1;
+    add.s32 %r17, %r15, %r16;
+    mov.u32 %r18, %r17;
+    mov.u32 %r19, 4;
+    mul.lo.s32 %r20, %r5, %r19;
+    mov.u32 %r21, 2;
+    add.s32 %r22, %r20, %r21;
+    mov.u32 %r23, %r22;
+    mov.u32 %r24, 4;
+    mul.lo.s32 %r25, %r5, %r24;
+    mov.u32 %r26, 3;
+    add.s32 %r27, %r25, %r26;
+    mov.u32 %r28, %r27;
+    st.shared.v4.u32 [%rd4], {%r13, %r18, %r23, %r28};
+    // [BARRIER HOISTING] Found barrier stall of 205.25 cycles.
+    // [BARRIER HOISTING] Hoisted 1 independent ALU instructions into the shadow.
+    mov.u32 %r29, 255;
+    sub.s32 %r30, %r29, %r1;
+    bar.sync 0;
+    mov.u32 %r31, %r30;
+    cvt.u64.u32 %rd5, %r31;
+    shl.b64 %rd6, %rd5, 4;
+    add.u64 %rd7, %rd1, %rd6;
+    ld.shared.v4.u32 {%r32, %r33, %r34, %r35}, [%rd7];
+    mov.u32 %r36, 7;
+    mov.u32 %r37, %r36;
+    add.u32 %r38, %r32, %r37;
+    mov.u32 %r7, %r38;
+    mov.u32 %r39, 0;
+    mov.u32 %r40, 4;
+    mul.lo.s32 %r41, %r5, %r40;
+    mov.u32 %r42, 4;
+    mul.lo.s32 %r43, %r42, %r0;
+    mov.u32 %r44, 1;
+    mov.u32 %r45, 4;
+    mul.lo.s32 %r46, %r45, %r0;
+    // [Y 2D BLOCK POINTER STORE - 128-BIT VECTOR]
+    mul.lo.s32 %r47, %r39, %r43;
+    add.s32 %r48, %r47, %r41;
+    cvt.u64.u32 %rd8, %r48;
+    shl.b64 %rd9, %rd8, 2;
+    add.u64 %rd10, %rd0, %rd9;
+    setp.lt.u32 %p0, %r39, %r44;
+    setp.lt.u32 %p1, %r41, %r46;
+    and.pred %p2, %p0, %p1;
+    @%p2 st.global.v4.u32 [%rd10], {%r7, %r33, %r34, %r35};
+}

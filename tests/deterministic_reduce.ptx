@@ -1,0 +1,89 @@
+.version 8.4
+.target sm_89
+.address_size 64
+
+.visible .entry deterministic_reduce(
+    .param .u64 Src_0,
+    .param .u64 Out_1,
+    .param .u64 Mx_2,
+    .param .b32 N_3
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 61
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 64 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 66.67% (4 active blocks per SM)
+.maxnreg 64
+{
+    .reg .b32 %r<31>;
+    .reg .f32 %f<1>;
+    .reg .b64 %rd<15>;
+    .reg .pred %p<6>;
+
+    ld.param.u64 %rd0, [Src_0];
+    ld.param.u64 %rd1, [Out_1];
+    ld.param.u64 %rd2, [Mx_2];
+    ld.param.u32 %r0, [N_3];
+    mov.u32 %r1, %ctaid.z;
+    mov.u32 %r2, %nctaid.x;
+    mul.lo.s32 %r3, %r1, %r2;
+    mov.u32 %r4, %ctaid.x;
+    add.s32 %r5, %r3, %r4;
+    mov.u32 %r6, %ntid.x;
+    mul.lo.s32 %r7, %r5, %r6;
+    mov.u32 %r8, %tid.x;
+    add.s32 %r9, %r7, %r8;
+    mov.u32 %r10, %nctaid.z;
+    mov.u32 %r11, %nctaid.x;
+    mul.lo.s32 %r12, %r10, %r11;
+    mov.u32 %r13, %ntid.x;
+    mul.lo.s32 %r14, %r12, %r13;
+    mov.u32 %r15, 0;
+    cvt.s64.s32 %rd3, %r15;
+    mov.u32 %r16, 2147483647;
+    neg.s32 %r17, %r16;
+    // for i in ...
+    mov.u32 %r20, %r14;
+    mov.u32 %r18, %r9;
+    mov.u32 %r19, %r0;
+    $LOOP_START_0:
+    setp.ge.u32 %p0, %r18, %r19;
+    @%p0 bra $LOOP_END_1;
+    mov.u32 %r21, 0;
+    mov.u32 %r22, 1;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r24, %r21, %r0;
+    add.s32 %r23, %r24, %r18;
+    cvt.u64.u32 %rd5, %r23;
+    shl.b64 %rd4, %rd5, 2;
+    add.u64 %rd6, %rd0, %rd4;
+    setp.lt.u32 %p1, %r21, %r22;
+    setp.lt.u32 %p2, %r18, %r0;
+    and.pred %p3, %p1, %p2;
+    @%p3 ld.global.u32 %r25, [%rd6];
+    @!%p3 mov.u32 %r25, 0;
+    cvt.s64.s32 %rd7, %r25;
+    add.s64 %rd8, %rd3, %rd7;
+    mov.u64 %rd3, %rd8;
+    setp.gt.s32 %p4, %r25, %r17;
+    selp.u32 %r26, 1, 0, %p4;
+    // [HEURISTIC] Branch Divergence Penalty is 4.53 cycles.
+    // if: emitting BRANCH execution (block cost 1 cy).
+    setp.eq.u32 %p5, %r26, 0;
+    @%p5 bra $IF_END_3;
+    mov.u32 %r17, %r25;
+    $IF_END_3:
+    add.u32 %r18, %r18, %r20;
+    bra $LOOP_START_0;
+    $LOOP_END_1:
+    mov.u32 %r27, 0;
+    mov.u32 %r28, %r27;
+    cvt.u64.u32 %rd9, %r28;
+    shl.b64 %rd10, %rd9, 3;
+    add.u64 %rd11, %rd1, %rd10;
+    red.global.add.u64 [%rd11], %rd3;
+    mov.u32 %r29, 0;
+    mov.u32 %r30, %r29;
+    cvt.u64.u32 %rd12, %r30;
+    shl.b64 %rd13, %rd12, 2;
+    add.u64 %rd14, %rd2, %rd13;
+    red.global.max.s32 [%rd14], %r17;
+}

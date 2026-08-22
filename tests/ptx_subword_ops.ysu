@@ -1,0 +1,59 @@
+// Sub-word buffer element types: 1- and 2-byte strides, and sign extension.
+//
+// Two things go silently wrong here and neither is visible to `ptxas`:
+//
+//   1. **The stride.** An element type is also a stride. If the address
+//      computation shifts by a hardcoded log2(4), an `I8` array is read every
+//      FOURTH element and reported as the array — a wrong answer that
+//      assembles, launches and returns plausible numbers.
+//   2. **The extension.** `ld.global.s8` sign-extends and `ld.global.u8`
+//      zero-extends. Confusing them turns every negative int8 into a large
+//      positive number, which again assembles and runs.
+//
+// So the outputs below are deliberately arranged to expose both: the inputs
+// span the full signed and unsigned byte range, and each element's own index
+// is written back so a stride error shows up as data from the wrong slot.
+kernel subword_ops(
+    A8:  GlobalMemory<I8>,
+    B8:  GlobalMemory<U8>,
+    A16: GlobalMemory<I16>,
+    B16: GlobalMemory<U16>,
+    OS8:  GlobalMemory<I32>,   // signed byte, sign-extended
+    OU8:  GlobalMemory<I32>,   // unsigned byte, zero-extended
+    OS16: GlobalMemory<I32>,   // signed half, sign-extended
+    OU16: GlobalMemory<I32>,   // unsigned half, zero-extended
+    OSum: GlobalMemory<I32>,   // arithmetic happens at 32 bits, no wraparound
+    OBack8: GlobalMemory<I8>,  // round-trip: store truncates back to a byte
+    OShr: GlobalMemory<I32>,   // signedness of the PROMOTED type, observed inline
+    N: I32
+) {
+    let i: I32 = block_idx_x() * 256 + thread_idx_x();
+
+    let a8:  I32 = block_ptr2d_load(A8,  0, i, N, 1, N);
+    let b8:  I32 = block_ptr2d_load(B8,  0, i, N, 1, N);
+    let a16: I32 = block_ptr2d_load(A16, 0, i, N, 1, N);
+    let b16: I32 = block_ptr2d_load(B16, 0, i, N, 1, N);
+
+    block_ptr2d_store(OS8,  0, i, N, 1, N, a8);
+    block_ptr2d_store(OU8,  0, i, N, 1, N, b8);
+    block_ptr2d_store(OS16, 0, i, N, 1, N, a16);
+    block_ptr2d_store(OU16, 0, i, N, 1, N, b16);
+
+    // A sum that overflows a byte many times over. Under the promotion rule
+    // this is exact 32-bit arithmetic; if anything truncated it to 8 bits on
+    // the way through a register, this disagrees.
+    block_ptr2d_store(OSum, 0, i, N, 1, N, a8 * b8 + a16 - b16);
+
+    // And the round trip: storing back to an I8 buffer must truncate, so this
+    // is the low byte of the sum.
+    block_ptr2d_store(OBack8, 0, i, N, 1, N, a8 + b8);
+
+    // The signedness of the promoted type, observed WITHOUT an intervening
+    // `let x: I32`. Every load above is bound to an explicitly-typed local,
+    // which converts and therefore hides what `promoted()` decided — a
+    // mutation making `I8` promote to `U32` passed the entire file. Used
+    // inline, the shift takes its signedness from the loaded register itself:
+    // a negative byte sign-extends to 0xFFFFFF80, and `>> 2` gives -32 signed
+    // against 0x3FFFFFE0 unsigned.
+    block_ptr2d_store(OShr, 0, i, N, 1, N, block_ptr2d_load(A8, 0, i, N, 1, N) >> 2);
+}

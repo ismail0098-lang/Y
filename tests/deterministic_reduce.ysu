@@ -1,0 +1,52 @@
+// A reduction written in Y whose answer does not depend on how it was
+// launched.
+//
+// Every thread walks a grid-stride slice of `Src`, accumulates in a 64-bit
+// integer register, and folds its partial into `Out[0]` with `atomic_add`.
+// The maximum goes into `Mx[0]` the same way.
+//
+// The partition therefore changes with blockDim.x, gridDim.x and gridDim.z,
+// the CTAs finish in whatever order the scheduler picks, and the atomics
+// interleave differently on every launch -- and the answer is bit-identical
+// regardless, because integer addition and integer max are associative and
+// commutative exactly.
+//
+// The float version of this kernel cannot be written: `atomic_add` refuses a
+// floating-point buffer, because `red.global.add.f32` is the instruction that
+// makes GPU results irreproducible in the first place.
+//
+// Checked on the device by tests/ptx_deterministic_reduce.rs.
+
+kernel deterministic_reduce(
+    Src: GlobalMemory<I32>,
+    Out: GlobalMemory<I64>,
+    Mx: GlobalMemory<I32>,
+    N: I32
+) {
+    let ctaflat: I32 = block_idx_z() * grid_dim_x() + block_idx_x();
+    let worker: I32 = ctaflat * block_dim_x() + thread_idx_x();
+    let nworkers: I32 = grid_dim_z() * grid_dim_x() * block_dim_x();
+
+    let acc: I64 = 0;
+    let best: I32 = -2147483647;
+
+    // A grid-stride loop: `worker` and `nworkers` are both runtime values, so
+    // the partition is a launch parameter rather than part of the kernel's
+    // meaning. That is the whole point -- the answer below must not depend on
+    // it.
+    @invariant(i >= 0)
+    for i in worker..N step nworkers {
+        let v: I32 = block_ptr2d_load(Src, 0, i, N, 1, N);
+        let w: I64 = v;
+        acc = acc + w;
+        if v > best {
+            best = v;
+        }
+    }
+
+    // The two order-independent folds. Integer addition and integer max are
+    // associative AND commutative exactly, so whatever order the CTAs finish
+    // in, and however the atomics interleave, the result is the same bits.
+    atomic_add(Out, 0, acc);
+    atomic_max(Mx, 0, best);
+}

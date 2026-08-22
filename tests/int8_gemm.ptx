@@ -1,0 +1,89 @@
+.version 8.4
+.target sm_89
+.address_size 64
+
+.visible .entry int8_gemm(
+    .param .u64 A_0,
+    .param .u64 B_1,
+    .param .u64 C_2
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 57
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 64 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 66.67% (32 active blocks per SM)
+.maxnreg 64
+{
+    .reg .b32 %r<29>;
+    .reg .f32 %f<1>;
+    .reg .b64 %rd<14>;
+    .reg .pred %p<1>;
+
+    ld.param.u64 %rd0, [A_0];
+    ld.param.u64 %rd1, [B_1];
+    ld.param.u64 %rd2, [C_2];
+    // [Y INT8 TENSOR CORE GEMM] M=64 N=32 K=128 | mma.sync.m16n8k32.row.col.s32.s8.s8.s32
+    // one warp per 16x8 tile, grid (4, 4, 1), block (32,1,1)
+    // A row-major [M][K], B [N][K], C row-major [M][N] int32
+    cvta.to.global.u64 %rd3, %rd0;
+    cvta.to.global.u64 %rd4, %rd1;
+    cvta.to.global.u64 %rd5, %rd2;
+    mov.u32 %r0, %tid.x;
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %ctaid.y;
+    shr.u32 %r3, %r0, 2;
+    and.b32 %r4, %r0, 3;
+    mul.lo.u32 %r5, %r4, 4;
+    mul.lo.u32 %r6, %r2, 16;
+    add.u32 %r6, %r6, %r3;
+    mul.lo.u32 %r7, %r6, 128;
+    add.u32 %r7, %r7, %r5;
+    cvt.u64.u32 %rd6, %r7;
+    add.u64 %rd7, %rd3, %rd6;
+    mul.lo.u32 %r8, %r1, 8;
+    add.u32 %r8, %r8, %r3;
+    mul.lo.u32 %r9, %r8, 128;
+    add.u32 %r9, %r9, %r5;
+    cvt.u64.u32 %rd8, %r9;
+    add.u64 %rd9, %rd4, %rd8;
+    mov.u32 %r10, 0;
+    mov.u32 %r11, 0;
+    mov.u32 %r12, 0;
+    mov.u32 %r13, 0;
+    mov.u32 %r14, %ctaid.z;
+    mov.u32 %r15, %nctaid.z;
+    mul.lo.u32 %r16, %r14, 32;
+    cvt.u64.u32 %rd10, %r16;
+    add.u64 %rd7, %rd7, %rd10;
+    add.u64 %rd9, %rd9, %rd10;
+    mul.lo.u32 %r17, %r15, 32;
+    cvt.u64.u32 %rd11, %r17;
+    mov.u32 %r18, %r16;
+$int8_gemm_k_0:
+    setp.ge.u32 %p0, %r18, 128;
+    @%p0 bra $int8_gemm_end_1;
+    ld.global.u32 %r19, [%rd7];
+    ld.global.u32 %r20, [%rd7+1024];
+    ld.global.u32 %r21, [%rd7+16];
+    ld.global.u32 %r22, [%rd7+1040];
+    ld.global.u32 %r23, [%rd9];
+    ld.global.u32 %r24, [%rd9+16];
+    mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%r10, %r11, %r12, %r13}, {%r19, %r20, %r21, %r22}, {%r23, %r24}, {%r10, %r11, %r12, %r13};
+    add.u64 %rd7, %rd7, %rd11;
+    add.u64 %rd9, %rd9, %rd11;
+    add.u32 %r18, %r18, %r17;
+    bra $int8_gemm_k_0;
+$int8_gemm_end_1:
+    mul.lo.u32 %r25, %r2, 16;
+    add.u32 %r25, %r25, %r3;
+    mul.lo.u32 %r26, %r25, 32;
+    mul.lo.u32 %r27, %r1, 8;
+    add.u32 %r26, %r26, %r27;
+    mul.lo.u32 %r28, %r4, 2;
+    add.u32 %r26, %r26, %r28;
+    mul.lo.u32 %r26, %r26, 4;
+    cvt.u64.u32 %rd12, %r26;
+    add.u64 %rd13, %rd5, %rd12;
+    red.global.add.s32 [%rd13], %r10;
+    red.global.add.s32 [%rd13+4], %r11;
+    red.global.add.s32 [%rd13+1024], %r12;
+    red.global.add.s32 [%rd13+1028], %r13;
+}

@@ -1,0 +1,16 @@
+// Exact int8 Tensor Core GEMM: C[64][32] = A[64][128] * B[32][128]^T
+//
+// `mma.sync.m16n8k32.row.col.s32.s8.s8.s32` accumulates int8 products into an
+// int32 accumulator EXACTLY, so the reduction is associative and the result
+// does not depend on how K was split across warps, CTAs or launches. That is
+// the GPU half of what docs/deterministic_inference.md M0 established on the
+// CPU.
+//
+// B is [N][K], not [K][N] — that is what `.col` means for this instruction,
+// and it is the natural layout for an inference weight matrix. Passing a
+// [K][N] buffer computes a different function with no diagnostic.
+@tile(64, 32, 128)
+kernel int8_gemm(A: GlobalMemory<I8>, B: GlobalMemory<I8>, C: GlobalMemory<I32>) {
+}
+
+fn main() {}

@@ -1,0 +1,205 @@
+.version 8.4
+.target sm_89
+.address_size 64
+
+.visible .entry subword_ops(
+    .param .u64 A8_0,
+    .param .u64 B8_1,
+    .param .u64 A16_2,
+    .param .u64 B16_3,
+    .param .u64 OS8_4,
+    .param .u64 OU8_5,
+    .param .u64 OS16_6,
+    .param .u64 OU16_7,
+    .param .u64 OSum_8,
+    .param .u64 OBack8_9,
+    .param .u64 OShr_10,
+    .param .b32 N_11
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 163
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 255 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 16.67% (1 active blocks per SM)
+.maxnreg 255
+{
+    .reg .b32 %r<69>;
+    .reg .f32 %f<1>;
+    .reg .b64 %rd<47>;
+    .reg .pred %p<36>;
+
+    ld.param.u64 %rd0, [A8_0];
+    ld.param.u64 %rd1, [B8_1];
+    ld.param.u64 %rd2, [A16_2];
+    ld.param.u64 %rd3, [B16_3];
+    ld.param.u64 %rd4, [OS8_4];
+    ld.param.u64 %rd5, [OU8_5];
+    ld.param.u64 %rd6, [OS16_6];
+    ld.param.u64 %rd7, [OU16_7];
+    ld.param.u64 %rd8, [OSum_8];
+    ld.param.u64 %rd9, [OBack8_9];
+    ld.param.u64 %rd10, [OShr_10];
+    ld.param.u32 %r0, [N_11];
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, 256;
+    mul.lo.s32 %r3, %r1, %r2;
+    mov.u32 %r4, %tid.x;
+    add.s32 %r5, %r3, %r4;
+    mov.u32 %r6, 0;
+    mov.u32 %r7, 1;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r9, %r6, %r0;
+    add.s32 %r8, %r9, %r5;
+    cvt.u64.u32 %rd12, %r8;
+    shl.b64 %rd11, %rd12, 0;
+    add.u64 %rd13, %rd0, %rd11;
+    setp.lt.u32 %p0, %r6, %r7;
+    setp.lt.u32 %p1, %r5, %r0;
+    and.pred %p2, %p0, %p1;
+    @%p2 ld.global.s8 %r10, [%rd13];
+    @!%p2 mov.u32 %r10, 0;
+    mov.u32 %r11, 0;
+    mov.u32 %r12, 1;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r14, %r11, %r0;
+    add.s32 %r13, %r14, %r5;
+    cvt.u64.u32 %rd15, %r13;
+    shl.b64 %rd14, %rd15, 0;
+    add.u64 %rd16, %rd1, %rd14;
+    setp.lt.u32 %p3, %r11, %r12;
+    setp.lt.u32 %p4, %r5, %r0;
+    and.pred %p5, %p3, %p4;
+    @%p5 ld.global.u8 %r15, [%rd16];
+    @!%p5 mov.u32 %r15, 0;
+    mov.u32 %r16, %r15;
+    mov.u32 %r17, 0;
+    mov.u32 %r18, 1;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r20, %r17, %r0;
+    add.s32 %r19, %r20, %r5;
+    cvt.u64.u32 %rd18, %r19;
+    shl.b64 %rd17, %rd18, 1;
+    add.u64 %rd19, %rd2, %rd17;
+    setp.lt.u32 %p6, %r17, %r18;
+    setp.lt.u32 %p7, %r5, %r0;
+    and.pred %p8, %p6, %p7;
+    @%p8 ld.global.s16 %r21, [%rd19];
+    @!%p8 mov.u32 %r21, 0;
+    mov.u32 %r22, 0;
+    mov.u32 %r23, 1;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r25, %r22, %r0;
+    add.s32 %r24, %r25, %r5;
+    cvt.u64.u32 %rd21, %r24;
+    shl.b64 %rd20, %rd21, 1;
+    add.u64 %rd22, %rd3, %rd20;
+    setp.lt.u32 %p9, %r22, %r23;
+    setp.lt.u32 %p10, %r5, %r0;
+    and.pred %p11, %p9, %p10;
+    @%p11 ld.global.u16 %r26, [%rd22];
+    @!%p11 mov.u32 %r26, 0;
+    mov.u32 %r27, %r26;
+    mov.u32 %r28, 0;
+    mov.u32 %r29, 1;
+    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r31, %r28, %r0;
+    add.s32 %r30, %r31, %r5;
+    cvt.u64.u32 %rd24, %r30;
+    shl.b64 %rd23, %rd24, 2;
+    add.u64 %rd25, %rd4, %rd23;
+    setp.lt.u32 %p12, %r28, %r29;
+    setp.lt.u32 %p13, %r5, %r0;
+    and.pred %p14, %p12, %p13;
+    @%p14 st.global.u32 [%rd25], %r10;
+    mov.u32 %r32, 0;
+    mov.u32 %r33, 1;
+    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r35, %r32, %r0;
+    add.s32 %r34, %r35, %r5;
+    cvt.u64.u32 %rd27, %r34;
+    shl.b64 %rd26, %rd27, 2;
+    add.u64 %rd28, %rd5, %rd26;
+    setp.lt.u32 %p15, %r32, %r33;
+    setp.lt.u32 %p16, %r5, %r0;
+    and.pred %p17, %p15, %p16;
+    @%p17 st.global.u32 [%rd28], %r16;
+    mov.u32 %r36, 0;
+    mov.u32 %r37, 1;
+    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r39, %r36, %r0;
+    add.s32 %r38, %r39, %r5;
+    cvt.u64.u32 %rd30, %r38;
+    shl.b64 %rd29, %rd30, 2;
+    add.u64 %rd31, %rd6, %rd29;
+    setp.lt.u32 %p18, %r36, %r37;
+    setp.lt.u32 %p19, %r5, %r0;
+    and.pred %p20, %p18, %p19;
+    @%p20 st.global.u32 [%rd31], %r21;
+    mov.u32 %r40, 0;
+    mov.u32 %r41, 1;
+    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r43, %r40, %r0;
+    add.s32 %r42, %r43, %r5;
+    cvt.u64.u32 %rd33, %r42;
+    shl.b64 %rd32, %rd33, 2;
+    add.u64 %rd34, %rd7, %rd32;
+    setp.lt.u32 %p21, %r40, %r41;
+    setp.lt.u32 %p22, %r5, %r0;
+    and.pred %p23, %p21, %p22;
+    @%p23 st.global.u32 [%rd34], %r27;
+    mov.u32 %r44, 0;
+    mov.u32 %r45, 1;
+    mul.lo.s32 %r46, %r10, %r16;
+    add.s32 %r47, %r46, %r21;
+    sub.s32 %r48, %r47, %r27;
+    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r50, %r44, %r0;
+    add.s32 %r49, %r50, %r5;
+    cvt.u64.u32 %rd36, %r49;
+    shl.b64 %rd35, %rd36, 2;
+    add.u64 %rd37, %rd8, %rd35;
+    setp.lt.u32 %p24, %r44, %r45;
+    setp.lt.u32 %p25, %r5, %r0;
+    and.pred %p26, %p24, %p25;
+    @%p26 st.global.u32 [%rd37], %r48;
+    mov.u32 %r51, 0;
+    mov.u32 %r52, 1;
+    add.s32 %r53, %r10, %r16;
+    cvt.u8.u32 %r54, %r53;
+    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r56, %r51, %r0;
+    add.s32 %r55, %r56, %r5;
+    cvt.u64.u32 %rd39, %r55;
+    shl.b64 %rd38, %rd39, 0;
+    add.u64 %rd40, %rd9, %rd38;
+    setp.lt.u32 %p27, %r51, %r52;
+    setp.lt.u32 %p28, %r5, %r0;
+    and.pred %p29, %p27, %p28;
+    @%p29 st.global.s8 [%rd40], %r54;
+    mov.u32 %r57, 0;
+    mov.u32 %r58, 1;
+    mov.u32 %r59, 0;
+    mov.u32 %r60, 1;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r62, %r59, %r0;
+    add.s32 %r61, %r62, %r5;
+    cvt.u64.u32 %rd42, %r61;
+    shl.b64 %rd41, %rd42, 0;
+    add.u64 %rd43, %rd0, %rd41;
+    setp.lt.u32 %p30, %r59, %r60;
+    setp.lt.u32 %p31, %r5, %r0;
+    and.pred %p32, %p30, %p31;
+    @%p32 ld.global.s8 %r63, [%rd43];
+    @!%p32 mov.u32 %r63, 0;
+    mov.u32 %r64, 2;
+    mov.u32 %r65, %r64;
+    shr.s32 %r66, %r63, %r65;
+    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r68, %r57, %r0;
+    add.s32 %r67, %r68, %r5;
+    cvt.u64.u32 %rd45, %r67;
+    shl.b64 %rd44, %rd45, 2;
+    add.u64 %rd46, %rd10, %rd44;
+    setp.lt.u32 %p33, %r57, %r58;
+    setp.lt.u32 %p34, %r5, %r0;
+    and.pred %p35, %p33, %p34;
+    @%p35 st.global.u32 [%rd46], %r66;
+}

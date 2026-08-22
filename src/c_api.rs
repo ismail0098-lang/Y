@@ -166,6 +166,17 @@ pub unsafe extern "C" fn y_interpret_kernel(source_ptr: *const c_char, error_out
     let mut cpu_emitter = crate::cpu_emitter::CpuEmitter::new();
     let _code = cpu_emitter.emit_program(&ast);
 
+    // The emitter's refusals were discarded here, so a program it could not
+    // lower returned 0 (success) to the C caller.
+    if !cpu_emitter.emit_errors.is_empty() {
+        if !error_out.is_null() {
+            *error_out = CString::new(cpu_emitter.emit_errors.join("\n"))
+                .unwrap()
+                .into_raw();
+        }
+        return -1;
+    }
+
     if !error_out.is_null() {
         *error_out = ptr::null_mut();
     }

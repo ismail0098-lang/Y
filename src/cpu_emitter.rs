@@ -15,6 +15,10 @@ use std::fmt::Write;
 pub struct CpuEmitter {
     pub host_buffer: String,
     indent_level: usize,
+    /// Constructs this backend cannot lower. Mirrors `PtxEmitter::emit_errors`
+    /// and `LlvmEmitter::emit_errors`: a named gap costs the user a line
+    /// number, a plausible-looking blob costs them a debugging session.
+    pub emit_errors: Vec<String>,
 }
 
 impl CpuEmitter {
@@ -57,6 +61,7 @@ impl CpuEmitter {
         Self {
             host_buffer: buffer,
             indent_level: 0,
+            emit_errors: Vec::new(),
         }
     }
 
@@ -246,17 +251,21 @@ impl CpuEmitter {
                 Stmt::Let { name, init, .. } => {
                     self.indent();
                     write!(&mut self.host_buffer, "let mut {} = ", name).unwrap();
+                    // The two placeholder arms below wrote their own `;` and the
+                    // real arm did not, so every `let` this backend has ever
+                    // emitted for an actual expression was a syntax error. The
+                    // terminator belongs to the statement, not to the arm.
                     if let Some(expr) = init {
                         let expr_str = self.emit_expr(expr);
                         if expr_str.is_empty() {
-                            write!(&mut self.host_buffer, "0; // placeholder").unwrap();
+                            write!(&mut self.host_buffer, "0").unwrap();
                         } else {
                             write!(&mut self.host_buffer, "{}", expr_str).unwrap();
                         }
                     } else {
-                        write!(&mut self.host_buffer, "0; // uninit").unwrap();
+                        write!(&mut self.host_buffer, "Default::default()").unwrap();
                     }
-                    writeln!(&mut self.host_buffer, "").unwrap();
+                    writeln!(&mut self.host_buffer, ";").unwrap();
                 }
                 Stmt::For {
                     loop_var,
@@ -319,8 +328,119 @@ impl CpuEmitter {
                         writeln!(&mut self.host_buffer, "return;").unwrap();
                     }
                 }
-                _ => {}
+                Stmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    let cond = self.emit_expr(condition);
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "if {} {{", cond).unwrap();
+                    self.indent_level += 1;
+                    self.emit_block(then_block);
+                    self.indent_level -= 1;
+                    if let Some(eb) = else_block {
+                        self.indent();
+                        writeln!(&mut self.host_buffer, "}} else {{").unwrap();
+                        self.indent_level += 1;
+                        self.emit_block(eb);
+                        self.indent_level -= 1;
+                    }
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "}}").unwrap();
+                }
+                Stmt::While {
+                    condition, body, ..
+                } => {
+                    let cond = self.emit_expr(condition);
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "while {} {{", cond).unwrap();
+                    self.indent_level += 1;
+                    self.emit_block(body);
+                    self.indent_level -= 1;
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "}}").unwrap();
+                }
+                Stmt::CompoundAssign {
+                    target, op, value, ..
+                } => {
+                    let t = self.emit_expr(target);
+                    let v = self.emit_expr(value);
+                    let o = self.binop_to_rust(op);
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "{} {}= {};", t, o, v).unwrap();
+                }
+                Stmt::Break { .. } => {
+                    self.indent();
+                    writeln!(&mut self.host_buffer, "break;").unwrap();
+                }
+                Stmt::SafeBlock(b, _) | Stmt::GhostBlock(b, _) => {
+                    // `@safe` and `@ghost` are front-end obligations; on the host
+                    // the body is ordinary code and must still be emitted.
+                    self.emit_block(b);
+                }
+                Stmt::TypeAlias { .. } => {}
+                // Everything else is REFUSED rather than dropped. Skipping a
+                // statement emits a function that computes a different program
+                // than the source describes - the failure this repo's design
+                // rule exists to prevent, found here for the eighth time.
+                Stmt::Match { span, .. } => {
+                    self.unsupported_stmt("`match`", span);
+                }
+                Stmt::Chisel(_, span) => {
+                    self.unsupported_stmt("a `chisel` block", span);
+                }
+                Stmt::ClockDomainBlock { span, .. } => {
+                    self.unsupported_stmt("an `@clock_domain` block", span);
+                }
+                // Checked by the front end; carries no host-code obligation.
+                Stmt::CompileTimeAssert { .. } => {}
+                Stmt::HintBlock { span, .. } => {
+                    self.unsupported_stmt("an `@hint` block", span);
+                }
             }
+        }
+    }
+
+    /// Records a construct this backend cannot lower, at the position it
+    /// appears. Returns nothing to splice - the caller must not emit anything
+    /// in its place.
+    fn unsupported_stmt(&mut self, what: &str, span: &Span) {
+        self.emit_errors.push(format!(
+            "[CPU Backend] {} (line {}, col {}) cannot be lowered to host code.",
+            what, span.line, span.col
+        ));
+    }
+
+    fn unsupported_expr(&mut self, what: &str, span: &Span) -> String {
+        self.emit_errors.push(format!(
+            "[CPU Backend] {} (line {}, col {}) cannot be lowered to host code.",
+            what, span.line, span.col
+        ));
+        "/* unsupported */".into()
+    }
+
+    fn binop_to_rust(&self, op: &BinaryOp) -> &'static str {
+        match op {
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Mod => "%",
+            BinaryOp::Eq => "==",
+            BinaryOp::NotEq => "!=",
+            BinaryOp::Lt => "<",
+            BinaryOp::Gt => ">",
+            BinaryOp::Le => "<=",
+            BinaryOp::Ge => ">=",
+            BinaryOp::And => "&&",
+            BinaryOp::Or => "||",
+            BinaryOp::BitAnd => "&",
+            BinaryOp::BitOr => "|",
+            BinaryOp::BitXor => "^",
+            BinaryOp::Shl => "<<",
+            BinaryOp::Shr => ">>",
         }
     }
 
@@ -354,6 +474,29 @@ impl CpuEmitter {
         match expr {
             Expr::Ident(name, _) => name.clone(),
             Expr::IntLit(val, _) => val.to_string(),
+            // `{:?}` rather than `{}` so `1.0` does not print as `1` and get
+            // re-typed as an integer by rustc.
+            Expr::FloatLit(val, _) => format!("{:?}", val),
+            Expr::BoolLit(val, _) => val.to_string(),
+            Expr::StringLit(val, _) => format!("{:?}", val),
+            Expr::CharLit(val, _) => format!("{:?}", val),
+            Expr::SelfLit(_) => "self".into(),
+            Expr::BinaryOp {
+                op, left, right, ..
+            } => {
+                let l = self.emit_expr(left);
+                let r = self.emit_expr(right);
+                format!("({} {} {})", l, self.binop_to_rust(op), r)
+            }
+            Expr::UnaryOp { op, operand, .. } => {
+                let v = self.emit_expr(operand);
+                match op {
+                    UnaryOp::Neg => format!("(-{})", v),
+                    UnaryOp::Not => format!("(!{})", v),
+                    UnaryOp::Ref => format!("(&{})", v),
+                    UnaryOp::Deref => format!("(*{})", v),
+                }
+            }
             Expr::Call { func, args, .. } => self.emit_call(func, args),
             Expr::GenericCall { func, args, .. } => self.emit_call(func, args),
             Expr::Index { base, index, span } => {
@@ -378,7 +521,9 @@ impl CpuEmitter {
                 format!("{}.add({} as usize)", base_expr, index_expr)
             }
             Expr::Path {
-                namespace, member, ..
+                namespace,
+                member,
+                span,
             } => {
                 if namespace == "Fragment" && member == "zero" {
                     return "Y256f32::zero".into();
@@ -396,15 +541,39 @@ impl CpuEmitter {
                 if namespace == "barrier" && member == "sync" {
                     return "y_barrier_sync".into();
                 }
-                "".into()
+                // An unknown path used to return the EMPTY STRING, which callers
+                // splice straight into the generated Rust - the same defect as
+                // `ptx_emitter`'s `emit_expr` returning `""` for a name it does
+                // not know.
+                let what = format!("`{}::{}`", namespace, member);
+                let span = span.clone();
+                self.unsupported_expr(&what, &span)
             }
-            Expr::MemberAccess { member, .. } => {
+            Expr::MemberAccess { base, member, span } => {
                 if member == "wait" {
                     return "y_pipe_wait".into();
                 }
-                "".into()
+                let b = self.emit_expr(base);
+                let _ = span;
+                format!("{}.{}", b, member)
             }
-            _ => "0 // Fallback".into(),
+            // `_ => "0 // Fallback"` used to live here, and it was the worst
+            // substitution in the repo on two counts: `a + b` became the
+            // CONSTANT 0, and the trailing `//` commented out the rest of the
+            // emitted line - including the statement's own terminator.
+            Expr::BlockExpr(_, span) => {
+                let span = span.clone();
+                self.unsupported_expr("a block expression", &span)
+            }
+            Expr::StructLit { name, span, .. } => {
+                let what = format!("a `{}` struct literal", name);
+                let span = span.clone();
+                self.unsupported_expr(&what, &span)
+            }
+            Expr::ZeroInit(span) => {
+                let span = span.clone();
+                self.unsupported_expr("`ZeroInit`", &span)
+            }
         }
     }
 

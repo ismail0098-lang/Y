@@ -78,19 +78,46 @@ fuzz_target!(|data: &[u8]| {
 
     let (witness, fully_solved) = solve_r1cs_witness(&circuit.constraints, &witness_ir, circuit.num_variables, &pub_inputs, &priv_inputs);
 
+    // These were `eprintln!`s, which meant this target COULD NOT FAIL. libFuzzer
+    // only registers a finding on a panic or a sanitizer trap, so a run over a
+    // backend emitting unsatisfiable circuits printed warnings into the log and
+    // exited 0. A fuzz target that cannot fail is a fuzz target that is not
+    // testing anything - the same shape as the `_ =>` arms in CLAUDE.md's design
+    // rule, one layer out: the obligation was reported to a channel nobody
+    // checks.
     if fully_solved {
         if let Err(e) = check_r1cs_satisfiability(&circuit.constraints, &witness) {
-            eprintln!("[ZK SATISFIABILITY ERROR] {}", e);
+            panic!(
+                "the witness solver reported success but the witness does not \
+                 satisfy its own circuit: {}\n--- program ---\n{}",
+                e, source
+            );
         }
     }
 
-    if let Err(e) = check_underconstrained_signals(
+    // `check_underconstrained_signals` returns `Ok(count)` on every path and
+    // never `Err`, so the `if let Err(..)` this replaces was dead code: the
+    // count was computed and thrown away, and the scan had never reported
+    // anything in its life.
+    //
+    // It is still not a failure condition, and that is deliberate rather than
+    // unfinished. A signal that can be perturbed while the circuit stays
+    // satisfiable is not necessarily a bug - some wires are legitimately free -
+    // so gating on a non-zero count needs a measured baseline for what this
+    // corpus produces, which nothing has established. Reporting it keeps the
+    // number visible without asserting a threshold nobody has justified.
+    let underconstrained = check_underconstrained_signals(
         &circuit.constraints,
         &witness,
         circuit.num_variables,
         &circuit.public_inputs,
         &circuit.outputs,
-    ) {
-        eprintln!("[ZK SOUNDNESS WARNING] {}", e);
+    )
+    .unwrap_or(0);
+    if underconstrained > 0 {
+        eprintln!(
+            "[ZK SOUNDNESS] {} under-constrained signals (not gated - see comment)",
+            underconstrained
+        );
     }
 });

@@ -1,0 +1,92 @@
+.version 8.4
+.target sm_89
+.address_size 64
+
+.visible .entry y_cpu_matmul_kernel(
+    .param .u64 A_0,
+    .param .u64 B_1,
+    .param .u64 C_2,
+    .param .b32 M_3,
+    .param .b32 N_4,
+    .param .b32 K_5
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 44
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 64 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 66.67% (4 active blocks per SM)
+.maxnreg 64
+{
+    .reg .b32 %r<15>;
+    .reg .f32 %f<5>;
+    .reg .b64 %rd<12>;
+    .reg .pred %p<12>;
+
+    ld.param.u64 %rd0, [A_0];
+    ld.param.u64 %rd1, [B_1];
+    ld.param.u64 %rd2, [C_2];
+    ld.param.u32 %r0, [M_3];
+    ld.param.u32 %r1, [N_4];
+    ld.param.u32 %r2, [K_5];
+    // for i in ...
+    mov.u32 %r3, 0;
+    mov.u32 %r4, %r0;
+    $LOOP_START_0:
+    setp.ge.u32 %p0, %r3, %r4;
+    @%p0 bra $LOOP_END_1;
+    // for j in ...
+    mov.u32 %r5, 0;
+    mov.u32 %r6, %r1;
+    $LOOP_START_2:
+    setp.ge.u32 %p1, %r5, %r6;
+    @%p1 bra $LOOP_END_3;
+    mov.f32 %f0, 0.0;
+    // for k in ...
+    mov.u32 %r7, 0;
+    mov.u32 %r8, %r2;
+    $LOOP_START_4:
+    setp.ge.u32 %p2, %r7, %r8;
+    @%p2 bra $LOOP_END_5;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r10, %r3, %r2;
+    add.s32 %r9, %r10, %r7;
+    cvt.u64.u32 %rd4, %r9;
+    shl.b64 %rd3, %rd4, 2;
+    add.u64 %rd5, %rd0, %rd3;
+    setp.lt.u32 %p3, %r3, %r0;
+    setp.lt.u32 %p4, %r7, %r2;
+    and.pred %p5, %p3, %p4;
+    @%p5 ld.global.f32 %f1, [%rd5];
+    @!%p5 mov.f32 %f1, 0.0;
+    // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r12, %r7, %r1;
+    add.s32 %r11, %r12, %r5;
+    cvt.u64.u32 %rd7, %r11;
+    shl.b64 %rd6, %rd7, 2;
+    add.u64 %rd8, %rd1, %rd6;
+    setp.lt.u32 %p6, %r7, %r2;
+    setp.lt.u32 %p7, %r5, %r1;
+    and.pred %p8, %p6, %p7;
+    @%p8 ld.global.f32 %f2, [%rd8];
+    @!%p8 mov.f32 %f2, 0.0;
+    mul.f32 %f3, %f1, %f2;
+    add.f32 %f4, %f0, %f3;
+    mov.f32 %f0, %f4;
+    add.u32 %r7, %r7, 1;
+    bra $LOOP_START_4;
+    $LOOP_END_5:
+    // [Y 2D TENSOR BLOCK POINTER STORE - 2D STRIDED MASKED ACCESS]
+    mul.lo.s32 %r14, %r3, %r1;
+    add.s32 %r13, %r14, %r5;
+    cvt.u64.u32 %rd10, %r13;
+    shl.b64 %rd9, %rd10, 2;
+    add.u64 %rd11, %rd2, %rd9;
+    setp.lt.u32 %p9, %r3, %r0;
+    setp.lt.u32 %p10, %r5, %r1;
+    and.pred %p11, %p9, %p10;
+    @%p11 st.global.f32 [%rd11], %f0;
+    add.u32 %r5, %r5, 1;
+    bra $LOOP_START_2;
+    $LOOP_END_3:
+    add.u32 %r3, %r3, 1;
+    bra $LOOP_START_0;
+    $LOOP_END_1:
+}

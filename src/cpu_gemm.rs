@@ -14,6 +14,7 @@
 #![allow(dead_code)]
 
 use crate::ast::*;
+use crate::zero_drift::OperandBounds;
 use std::fmt::Write;
 
 /// Register-blocking and cache-blocking parameters.
@@ -143,7 +144,23 @@ pub fn tl() -> Tile {
 }
 
 /// The GEMM shape a recognised loop nest computes: `C = A * B` with the
-/// operand names and the three extents, all as Y identifiers.
+/// operand names, the three extents and the three leading dimensions, all as
+/// Y identifiers.
+///
+/// `lda`/`ldb`/`ldc` are the row strides the nest actually indexes with. They
+/// are usually the same identifiers as `k`/`n`/`n` — that is what a packed
+/// row-major matmul writes, and what every shape measured in
+/// `docs/cpu_gemm_tuning.md` uses — but they are recorded SEPARATELY so a
+/// submatrix (`lda > K`) is a legal, fast input rather than a silent fallback
+/// to scalar lowering. Without that distinction this kernel cannot implement
+/// `sgemm` at all, since the BLAS API is defined in terms of leading
+/// dimensions.
+///
+/// The recogniser deliberately does NOT check `lda >= K`: the strides are
+/// runtime values, and that is the caller's precondition exactly as it is in
+/// BLAS. What it does still enforce is the *indexing order* — A by `[i, k]`
+/// and B by `[k, j]` — so a transposed operand is refused rather than
+/// reinterpreted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GemmShape {
     pub a: String,
@@ -152,6 +169,623 @@ pub struct GemmShape {
     pub m: String,
     pub n: String,
     pub k: String,
+    pub lda: String,
+    pub ldb: String,
+    pub ldc: String,
+    /// Set when the accumulator carries `@ZeroDrift`, in which case the
+    /// reduction must be EXACT and the f32 kernel is not a legal lowering.
+    pub drift: Option<DriftAccumulator>,
+}
+
+/// A `@ZeroDrift` accumulator's declared type and stated range, carried from
+/// the recognised nest to the emitter so it can pick a representation.
+///
+/// The range is the load-bearing part. An exact fixed-point format buys
+/// order-independence — integer addition is associative, so a tiled, threaded,
+/// K-split reduction produces a bit-identical result to the naive loop — and it
+/// pays for that with a bounded range. `@bounds(min, max)` is what makes the
+/// choice satisfiable, so a missing range is not a detail: it is the
+/// difference between a representation that can be selected and one that
+/// cannot. See `docs/proof_carrying_kernels.md`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DriftAccumulator {
+    /// Declared type of the accumulator, e.g. `F32`.
+    pub ty: String,
+    /// `@bounds(min, max)` resolved to constants, when the source gave one.
+    pub bounds: Option<(f64, f64)>,
+    /// `@bounds` on the statement loading the A operand, when the source gave
+    /// one. See [`DriftAccumulator::operand_bounds`] for why the accumulator's
+    /// own bound cannot stand in for this.
+    pub a_bounds: Option<(f64, f64)>,
+    /// `@bounds` on the statement loading the B operand.
+    pub b_bounds: Option<(f64, f64)>,
+}
+
+impl DriftAccumulator {
+    /// The magnitude bound on the operands, which is what an exact `vpdpwssd`
+    /// kernel actually needs licensed — and which is **not** implied by
+    /// [`Self::bounds`].
+    ///
+    /// `@bounds` on the accumulator constrains `C[i, j]`, the *sum*. The
+    /// overflow obligation is about `A[i, k]` and `B[k, j]`, the *terms*, and a
+    /// bound on a sum implies nothing about its terms because they cancel: a
+    /// result bounded by 1.0 is perfectly consistent with operands of 1e9. So
+    /// this returns `None` unless BOTH operands were bounded at their load, and
+    /// the caller must refuse rather than substitute a guess.
+    ///
+    /// The two bounds are combined by taking the larger magnitude, because the
+    /// overflow derivation in [`crate::zero_drift::VnniExact`] assumes a single
+    /// bound covering both operands (`m^2` per product). Using the larger is
+    /// the conservative direction; using the smaller, or their product, would
+    /// licence a nest that can overflow.
+    pub fn operand_bounds(&self) -> Option<OperandBounds> {
+        let mag = |(lo, hi): (f64, f64)| lo.abs().max(hi.abs());
+        match (self.a_bounds, self.b_bounds) {
+            (Some(a), Some(b)) => Some(OperandBounds {
+                max_magnitude: mag(a).max(mag(b)),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Whether the exact `vpdpwssd` GEMM kernel may be emitted for a recognised
+/// `@ZeroDrift` nest.
+///
+/// **`Unavailable` is not an error, and conflating the two would break working
+/// programs.** A nest that cannot use the fast path is still compiled exactly —
+/// scalar lowering honours `@ZeroDrift` by selecting an exact representation
+/// (`llvm_emitter.rs`, `Stmt::Let` with `zero_drift`), it is simply slower. The
+/// distinction the emitter has to preserve is:
+///
+/// - **no exact representation exists at all** → `emit_errors`, the build fails,
+///   because the guarantee the source asked for cannot be delivered;
+/// - **the exact representation exists but this one fast kernel is not licensed
+///   for it** → `drift_report`, an advisory, because the guarantee *is*
+///   delivered and only the speed is lost.
+///
+/// Reporting the second as an error would refuse programs that compile
+/// correctly today.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExactGemmPlan {
+    /// The exact `vpdpwssd` kernel is sound for this nest.
+    Vnni {
+        scheme: crate::zero_drift::VnniExact,
+        /// The operand magnitude the licence was granted against.
+        operand_magnitude: f64,
+    },
+    /// The fast path is unavailable, with the reason. The nest remains valid.
+    Unavailable(String),
+}
+
+/// Decide whether the exact `vpdpwssd` kernel may be emitted for `drift`.
+///
+/// The whole decision is delegated to [`crate::zero_drift::license_vnni_exact`]
+/// so that there is exactly ONE place that knows when the scheme is sound. A
+/// second copy of the overflow arithmetic here is the failure the `optimize_circuit`
+/// and constant-folding rows of `CLAUDE.md`'s design-rule table both describe:
+/// two implementations of one rule, drifting apart, with the looser one
+/// deciding what actually ships.
+pub fn plan_exact_gemm(drift: &DriftAccumulator) -> ExactGemmPlan {
+    let operands = drift.operand_bounds();
+    match crate::zero_drift::license_vnni_exact(
+        operands,
+        crate::zero_drift::VnniExact::DEFAULT_FLUSH_K_PAIRS,
+    ) {
+        Ok(scheme) => ExactGemmPlan::Vnni {
+            scheme,
+            // `license_vnni_exact` only returns `Ok` when `operands` was `Some`,
+            // so this cannot be reached with `None` - but it is written as a
+            // fallible match rather than an `unwrap` because that coupling is
+            // an invariant of another function, not of this one.
+            operand_magnitude: operands.map(|o| o.max_magnitude).unwrap_or(0.0),
+        },
+        Err(reason) => ExactGemmPlan::Unavailable(reason),
+    }
+}
+
+// ── Exact VNNI micro-kernel ─────────────────────────────────
+
+/// Name of the emitted exact micro-kernel.
+pub const VNNI_MICRO_NAME: &str = "__y_gemm_micro_vnni";
+
+/// Rows of C the micro-kernel holds in registers.
+pub const VNNI_MR: usize = 6;
+
+/// `<16 x i32>` accumulator groups per row. 4 groups = 64 columns, which is the
+/// same 24-register footprint as the f32 kernel's `mr=6, nr=64` — the point of
+/// `vpdpwssd` over the int64 formulation is that an int32 accumulator holds 16
+/// lanes like a float, so the tile does NOT have to halve.
+pub const VNNI_NRV: usize = 4;
+
+/// Columns of C the micro-kernel covers.
+pub const VNNI_NR: usize = VNNI_NRV * 16;
+
+/// The LLVM intrinsic, with the signature **derived from clang**, not assumed.
+///
+/// Note the operand types: the accumulator is `<16 x i32>` but the multiplicands
+/// are `<32 x i16>`. Writing `<16 x i32>` for the operands — the obvious guess,
+/// since that is what `_mm512_dpwssd_epi32` takes in C — produces IR that fails
+/// to verify. Established by compiling `tests/probes/vnni_kernels.c` with
+/// `clang -mavx512vnni -emit-llvm` and reading the `declare` it generated.
+const VPDPWSSD: &str =
+    "declare <16 x i32> @llvm.x86.avx512.vpdpwssd.512(<16 x i32>, <32 x i16>, <32 x i16>)";
+
+/// Emit the flush: widen every int32 accumulator to int64, add it into `C`, and
+/// zero it.
+///
+/// **This is what makes the kernel exact, and it is not an optimisation
+/// detail.** `vpdpwssd` accumulates into int32, which overflows; the licence in
+/// [`crate::zero_drift::VnniExact`] is precisely the promise that it cannot do
+/// so *within one flush interval*. Widening into an int64 running sum is what
+/// makes the interval bound sufficient rather than merely likely.
+///
+/// The int64 sum is where order-independence lives: int64 addition is
+/// associative, so however the k-range is split across tiles or threads, the
+/// partial sums combine to the same value.
+fn emit_vnni_flush(out: &mut String, prefix: &str) {
+    for i in 0..VNNI_MR {
+        writeln!(out, "  %{p}row{i} = mul i64 %ldc, {i}", p = prefix, i = i).unwrap();
+        for v in 0..VNNI_NRV {
+            let acc = format!("%acc{}_{}", i, v);
+            let t = format!("%{}f{}_{}", prefix, i, v);
+            writeln!(out, "  {t}a = load <16 x i32>, ptr {acc}, align 64").unwrap();
+            // Split the 16 int32 lanes into two halves and sign-extend each to
+            // int64. `sext` is mandatory: these are signed products, and a
+            // `zext` would turn every negative partial sum into a huge positive
+            // one - a wrong answer that still runs.
+            writeln!(
+                out,
+                "  {t}lo = shufflevector <16 x i32> {t}a, <16 x i32> poison, \
+                 <8 x i32> <i32 0, i32 1, i32 2, i32 3, i32 4, i32 5, i32 6, i32 7>"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "  {t}hi = shufflevector <16 x i32> {t}a, <16 x i32> poison, \
+                 <8 x i32> <i32 8, i32 9, i32 10, i32 11, i32 12, i32 13, i32 14, i32 15>"
+            )
+            .unwrap();
+            writeln!(out, "  {t}lo64 = sext <8 x i32> {t}lo to <8 x i64>").unwrap();
+            writeln!(out, "  {t}hi64 = sext <8 x i32> {t}hi to <8 x i64>").unwrap();
+
+            writeln!(
+                out,
+                "  {t}off = add i64 %{p}row{i}, {c}",
+                p = prefix,
+                i = i,
+                c = v * 16
+            )
+            .unwrap();
+            writeln!(out, "  {t}p = getelementptr inbounds i64, ptr %C, i64 {t}off").unwrap();
+            writeln!(out, "  {t}c0 = load <8 x i64>, ptr {t}p, align 8").unwrap();
+            writeln!(out, "  {t}s0 = add <8 x i64> {t}c0, {t}lo64").unwrap();
+            writeln!(out, "  store <8 x i64> {t}s0, ptr {t}p, align 8").unwrap();
+            writeln!(out, "  {t}p8 = getelementptr inbounds i64, ptr {t}p, i64 8").unwrap();
+            writeln!(out, "  {t}c1 = load <8 x i64>, ptr {t}p8, align 8").unwrap();
+            writeln!(out, "  {t}s1 = add <8 x i64> {t}c1, {t}hi64").unwrap();
+            writeln!(out, "  store <8 x i64> {t}s1, ptr {t}p8, align 8").unwrap();
+            writeln!(out, "  store <16 x i32> zeroinitializer, ptr {acc}, align 64").unwrap();
+        }
+    }
+}
+
+/// The exact `vpdpwssd` micro-kernel, as a standalone LLVM IR module.
+///
+/// Computes `C[0..MR][0..NR] += A^T B` over `kpairs` k-pairs, where every
+/// operand is int16 and the result is int64. Layouts, which the packing must
+/// match exactly:
+///
+/// - `Ap`: `i32`, indexed `Ap[p * MR + i]`. Each `i32` is **two int16 k-values**
+///   for row `i`, because `vpdpwssd` consumes a k-pair per lane. This is why
+///   the loop counts k-*pairs* rather than k.
+/// - `Bp`: `i16`, indexed `Bp[p * NR * 2 + ..]`, four `<32 x i16>` vectors per
+///   k-pair.
+/// - `C`: `i64`, row stride `ldc`. Accumulated INTO, not overwritten, so a
+///   caller may split the k-range across calls and sum the pieces — which is
+///   exactly the order-independence being sold.
+///
+/// `kpairs` is not required to be a multiple of `flush_k_pairs`: the loop
+/// flushes on the interval boundary and again at exit, so a partial final
+/// interval is carried out correctly rather than dropped.
+pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
+    let mut out = String::new();
+    writeln!(out, "; Exact vpdpwssd micro-kernel, MR={VNNI_MR} NR={VNNI_NR}, flush every {flush_k_pairs} k-pairs.").unwrap();
+    writeln!(out, "; See docs/deterministic_inference.md M0.").unwrap();
+    writeln!(out, "{VPDPWSSD}\n").unwrap();
+    writeln!(
+        out,
+        "define void @{VNNI_MICRO_NAME}(ptr noalias %Ap, ptr noalias %Bp, ptr noalias %C, \
+         i64 %ldc, i64 %kpairs) #0 {{"
+    )
+    .unwrap();
+    writeln!(out, "entry:").unwrap();
+    for i in 0..VNNI_MR {
+        for v in 0..VNNI_NRV {
+            writeln!(out, "  %acc{i}_{v} = alloca <16 x i32>, align 64").unwrap();
+            writeln!(
+                out,
+                "  store <16 x i32> zeroinitializer, ptr %acc{i}_{v}, align 64"
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "  br label %ohead\n").unwrap();
+
+    // The flush lives in the OUTER loop, and that placement is the whole
+    // performance story. See `emit_vnni_micro_module`'s doc comment.
+    writeln!(out, "ohead:").unwrap();
+    writeln!(out, "  %c = phi i64 [ 0, %entry ], [ %cnext, %olatch ]").unwrap();
+    writeln!(out, "  %ogo = icmp slt i64 %c, %kpairs").unwrap();
+    writeln!(out, "  br i1 %ogo, label %obody, label %done\n").unwrap();
+
+    writeln!(out, "obody:").unwrap();
+    writeln!(out, "  %cend0 = add i64 %c, {flush_k_pairs}").unwrap();
+    writeln!(out, "  %clt = icmp slt i64 %cend0, %kpairs").unwrap();
+    writeln!(
+        out,
+        "  %cend = select i1 %clt, i64 %cend0, i64 %kpairs"
+    )
+    .unwrap();
+    for i in 0..VNNI_MR {
+        for v in 0..VNNI_NRV {
+            writeln!(
+                out,
+                "  store <16 x i32> zeroinitializer, ptr %acc{i}_{v}, align 64"
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "  br label %head\n").unwrap();
+
+    writeln!(out, "head:").unwrap();
+    writeln!(out, "  %p = phi i64 [ %c, %obody ], [ %pnext, %body ]").unwrap();
+    writeln!(out, "  %go = icmp slt i64 %p, %cend").unwrap();
+    writeln!(out, "  br i1 %go, label %body, label %flush\n").unwrap();
+
+    writeln!(out, "body:").unwrap();
+    // B: four <32 x i16> vectors at Bp + p * NR * 2 int16 elements.
+    writeln!(out, "  %bidx = mul i64 %p, {}", VNNI_NR * 2).unwrap();
+    writeln!(out, "  %bp = getelementptr inbounds i16, ptr %Bp, i64 %bidx").unwrap();
+    for v in 0..VNNI_NRV {
+        writeln!(
+            out,
+            "  %bp{v} = getelementptr inbounds i16, ptr %bp, i64 {}",
+            v * 32
+        )
+        .unwrap();
+        writeln!(out, "  %b{v} = load <32 x i16>, ptr %bp{v}, align 2").unwrap();
+    }
+    // A: one i32 per row, broadcast across all 16 lanes then reinterpreted as
+    // 32 int16 - the pattern clang generates for `_mm512_set1_epi32`.
+    writeln!(out, "  %aidx = mul i64 %p, {VNNI_MR}").unwrap();
+    for i in 0..VNNI_MR {
+        writeln!(out, "  %ai{i} = add i64 %aidx, {i}").unwrap();
+        writeln!(out, "  %ap{i} = getelementptr inbounds i32, ptr %Ap, i64 %ai{i}").unwrap();
+        writeln!(out, "  %a{i} = load i32, ptr %ap{i}, align 4").unwrap();
+        writeln!(
+            out,
+            "  %av{i} = insertelement <16 x i32> poison, i32 %a{i}, i64 0"
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "  %as{i} = shufflevector <16 x i32> %av{i}, <16 x i32> poison, \
+             <16 x i32> zeroinitializer"
+        )
+        .unwrap();
+        writeln!(out, "  %ab{i} = bitcast <16 x i32> %as{i} to <32 x i16>").unwrap();
+        for v in 0..VNNI_NRV {
+            writeln!(
+                out,
+                "  %old{i}_{v} = load <16 x i32>, ptr %acc{i}_{v}, align 64"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "  %new{i}_{v} = call <16 x i32> @llvm.x86.avx512.vpdpwssd.512(\
+                 <16 x i32> %old{i}_{v}, <32 x i16> %ab{i}, <32 x i16> %b{v})"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "  store <16 x i32> %new{i}_{v}, ptr %acc{i}_{v}, align 64"
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "  %pnext = add i64 %p, 1").unwrap();
+    writeln!(out, "  br label %head\n").unwrap();
+
+    // One flush per chunk, after the inner loop has finished. `cend` is clamped
+    // to `kpairs`, so the final partial chunk is flushed by this same code -
+    // there is no separate tail case to forget.
+    writeln!(out, "flush:").unwrap();
+    emit_vnni_flush(&mut out, "F");
+    writeln!(out, "  br label %olatch\n").unwrap();
+
+    writeln!(out, "olatch:").unwrap();
+    writeln!(out, "  %cnext = add i64 %c, {flush_k_pairs}").unwrap();
+    writeln!(out, "  br label %ohead\n").unwrap();
+
+    writeln!(out, "done:").unwrap();
+    writeln!(out, "  ret void").unwrap();
+    writeln!(out, "}}\n").unwrap();
+    writeln!(
+        out,
+        "attributes #0 = {{ \"target-features\"=\"+avx512f,+avx512bw,+avx512vnni\" }}"
+    )
+    .unwrap();
+    out
+}
+
+/// Name of the emitted exact blocked GEMM.
+pub const VNNI_GEMM_NAME: &str = "__y_gemm_exact_vnni";
+
+/// Pack an `MR x kc` panel of int16 `A` into the micro-kernel's `Ap` layout.
+///
+/// `Ap[(p * MR + i) * 2 + h] = A[i][2p + h]` — two consecutive k-values of one
+/// row, adjacent, so the pair reads back as the single `i32` that `vpdpwssd`
+/// broadcasts. Rows past `mrows` and k past `kc` are written as **zero**, which
+/// is exact rather than approximate: a zero operand contributes a zero product,
+/// so padding cannot perturb the sum. That is a property of exact accumulation
+/// specifically — with a float accumulator, padding still perturbs nothing, but
+/// nothing else about the reduction would be reproducible either.
+fn emit_vnni_pack_a() -> String {
+    let mut b = IrBuilder::new();
+    let (src, lda, mrows, kc, dst) = ("%src", "%lda", "%mrows", "%kc", "%dst");
+
+    // kpairs = ceil(kc / 2). An odd kc leaves the final high half zero.
+    let kc1 = b.add(kc, "1");
+    let kpairs = b.t();
+    b.w(&format!("{} = sdiv i64 {}, 2", kpairs, kc1));
+
+    let pl = b.loop_begin("va.p", "0", &kpairs, "1");
+    let p = b.iv(&pl);
+    let k0 = b.mul(&p, "2");
+    let dbase = b.mul(&p, &(VNNI_MR * 2).to_string());
+
+    for i in 0..VNNI_MR {
+        let ic = i.to_string();
+        let in_row = b.t();
+        b.w(&format!("{} = icmp slt i64 {}, {}", in_row, ic, mrows));
+        let row_off = b.mul(&ic, lda);
+        for h in 0..2usize {
+            let k = b.add(&k0, &h.to_string());
+            let in_k = b.t();
+            b.w(&format!("{} = icmp slt i64 {}, {}", in_k, k, kc));
+            let ok = b.t();
+            b.w(&format!("{} = and i1 {}, {}", ok, in_row, in_k));
+
+            let off = b.add(&row_off, &k);
+            let safe = b.t();
+            b.w(&format!("{} = select i1 {}, i64 {}, i64 0", safe, ok, off));
+            let sp = b.gep("i16", src, &safe);
+            let raw = b.t();
+            b.w(&format!("{} = load i16, ptr {}, align 2", raw, sp));
+            let val = b.t();
+            b.w(&format!(
+                "{} = select i1 {}, i16 {}, i16 0",
+                val, ok, raw
+            ));
+
+            let doff = b.add(&dbase, &(i * 2 + h).to_string());
+            let dp = b.gep("i16", dst, &doff);
+            b.w(&format!("store i16 {}, ptr {}, align 2", val, dp));
+        }
+    }
+    b.loop_end(pl);
+    b.finish(&format!(
+        "define internal void @__y_gemm_vnni_pack_a(ptr noalias {}, i64 {}, i64 {}, i64 {}, \
+         ptr noalias {})",
+        src, lda, mrows, kc, dst
+    ))
+}
+
+/// Pack a `kc x NR` panel of int16 `B` into the micro-kernel's `Bp` layout.
+///
+/// `Bp[p * NR * 2 + (j / 16) * 32 + (j % 16) * 2 + h] = B[2p + h][j]`.
+///
+/// The `(j / 16, j % 16)` split is not cosmetic: it is the lane layout
+/// `vpdpwssd` imposes. Accumulator group `v = j / 16` is one `<32 x i16>`
+/// vector, and within it lane `l = j % 16` consumes int16 elements `2l` and
+/// `2l + 1` — so the two k-values for a column must be **adjacent**, and
+/// consecutive columns are 2 int16 apart rather than 1. Getting this wrong
+/// produces a kernel that runs at full speed and computes a different function;
+/// `tests/cpu_gemm_vnni_micro.rs` mutates the stride to prove the tests see it.
+fn emit_vnni_pack_b() -> String {
+    let mut b = IrBuilder::new();
+    let (src, ldb, kc, ncols, dst) = ("%src", "%ldb", "%kc", "%ncols", "%dst");
+
+    let kc1 = b.add(kc, "1");
+    let kpairs = b.t();
+    b.w(&format!("{} = sdiv i64 {}, 2", kpairs, kc1));
+
+    let pl = b.loop_begin("vb.p", "0", &kpairs, "1");
+    let p = b.iv(&pl);
+    let k0 = b.mul(&p, "2");
+    let dbase = b.mul(&p, &(VNNI_NR * 2).to_string());
+
+    let jl = b.loop_begin("vb.j", "0", &VNNI_NR.to_string(), "1");
+    let j = b.iv(&jl);
+    let in_col = b.t();
+    b.w(&format!("{} = icmp slt i64 {}, {}", in_col, j, ncols));
+
+    // v = j >> 4, l = j & 15  ->  lane offset v*32 + l*2
+    let v = b.t();
+    b.w(&format!("{} = lshr i64 {}, 4", v, j));
+    let l = b.t();
+    b.w(&format!("{} = and i64 {}, 15", l, j));
+    let v32 = b.mul(&v, "32");
+    let l2 = b.mul(&l, "2");
+    let lane = b.add(&v32, &l2);
+    let dlane = b.add(&dbase, &lane);
+
+    for h in 0..2usize {
+        let k = b.add(&k0, &h.to_string());
+        let in_k = b.t();
+        b.w(&format!("{} = icmp slt i64 {}, {}", in_k, k, kc));
+        let ok = b.t();
+        b.w(&format!("{} = and i1 {}, {}", ok, in_col, in_k));
+
+        let row_off = b.mul(&k, ldb);
+        let off = b.add(&row_off, &j);
+        let safe = b.t();
+        b.w(&format!("{} = select i1 {}, i64 {}, i64 0", safe, ok, off));
+        let sp = b.gep("i16", src, &safe);
+        let raw = b.t();
+        b.w(&format!("{} = load i16, ptr {}, align 2", raw, sp));
+        let val = b.t();
+        b.w(&format!("{} = select i1 {}, i16 {}, i16 0", val, ok, raw));
+
+        let doff = b.add(&dlane, &h.to_string());
+        let dp = b.gep("i16", dst, &doff);
+        b.w(&format!("store i16 {}, ptr {}, align 2", val, dp));
+    }
+
+    b.loop_end(jl);
+    b.loop_end(pl);
+    b.finish(&format!(
+        "define internal void @__y_gemm_vnni_pack_b(ptr noalias {}, i64 {}, i64 {}, i64 {}, \
+         ptr noalias {})",
+        src, ldb, kc, ncols, dst
+    ))
+}
+
+/// The blocked exact GEMM: `C += A * B`, int16 in, int64 out.
+///
+/// `C` is **accumulated into, not overwritten**, and that is the whole
+/// interface. It is what lets a caller split the k-range across calls, tiles or
+/// threads and sum the pieces — the partial sums are int64, whose addition is
+/// associative, so every such split yields the identical result. Overwriting
+/// would force one call to own the whole reduction and throw the property away.
+///
+/// Scratch is passed in rather than allocated:
+///
+/// - `Apanel`: `ceil(M/MR) * ceil(K/2) * MR * 2` int16 — **the whole of A**,
+///   packed once before either loop.
+/// - `Bpanel`: `ceil(K/2) * NR * 2` int16 — one column panel, repacked per `j`.
+/// - `Ctile`: `MR * NR` int64.
+///
+/// Making the caller own them keeps this function free of an allocation policy
+/// it is not yet ready to have — the `mc`/`nc` blocking that would cap
+/// `Apanel` at a cache-resident size is a later step, not this one.
+fn emit_vnni_gemm_driver() -> String {
+    let mut b = IrBuilder::new();
+    let (a, bb, c) = ("%A", "%B", "%C");
+    let (m, n, k) = ("%M", "%N", "%K");
+    let (lda, ldb, ldc) = ("%lda", "%ldb", "%ldc");
+    let (ap, bp, ct) = ("%Apanel", "%Bpanel", "%Ctile");
+
+    let kc1 = b.add(k, "1");
+    let kpairs = b.t();
+    b.w(&format!("{} = sdiv i64 {}, 2", kpairs, kc1));
+
+    // Pack ALL of A once, before either loop.
+    //
+    // The first version packed A inside the i-loop and B inside the j-loop
+    // nested within it, so B was re-packed once per ROW panel — `M/MR` times
+    // over, which is `M*N*K/MR` packing work against the `M*N*K` of arithmetic.
+    // At MR=6 that is a sixth of the total run spent copying B. Packing A once
+    // up front and B once per column panel makes packing `M*K + N*K`, i.e.
+    // asymptotically free.
+    let panel_stride = b.mul(&kpairs, &(VNNI_MR * 2).to_string());
+    let pal = b.loop_begin("vg.pa", "0", m, &VNNI_MR.to_string());
+    let pai = b.iv(&pal);
+    let pa_rem = b.sub(m, &pai);
+    let pa_mw = b.imin(&pa_rem, &VNNI_MR.to_string());
+    let pa_row = b.mul(&pai, lda);
+    let pa_src = b.gep("i16", a, &pa_row);
+    let pa_idx = b.t();
+    b.w(&format!(
+        "{} = sdiv i64 {}, {}",
+        pa_idx, pai, VNNI_MR
+    ));
+    let pa_off = b.mul(&pa_idx, &panel_stride);
+    let pa_dst = b.gep("i16", ap, &pa_off);
+    b.w(&format!(
+        "call void @__y_gemm_vnni_pack_a(ptr {}, i64 {}, i64 {}, i64 {}, ptr {})",
+        pa_src, lda, pa_mw, k, pa_dst
+    ));
+    b.loop_end(pal);
+
+    let jl = b.loop_begin("vg.j", "0", n, &VNNI_NR.to_string());
+    let j0 = b.iv(&jl);
+    let rem_n = b.sub(n, &j0);
+    let nw = b.imin(&rem_n, &VNNI_NR.to_string());
+    let bsub = b.gep("i16", bb, &j0);
+    b.w(&format!(
+        "call void @__y_gemm_vnni_pack_b(ptr {}, i64 {}, i64 {}, i64 {}, ptr {})",
+        bsub, ldb, k, nw, bp
+    ));
+
+    let il = b.loop_begin("vg.i", "0", m, &VNNI_MR.to_string());
+    let i0 = b.iv(&il);
+    let rem_m = b.sub(m, &i0);
+    let mw = b.imin(&rem_m, &VNNI_MR.to_string());
+    let ai_idx = b.t();
+    b.w(&format!("{} = sdiv i64 {}, {}", ai_idx, i0, VNNI_MR));
+    let ai_off = b.mul(&ai_idx, &panel_stride);
+    let apan = b.gep("i16", ap, &ai_off);
+
+    // The micro-kernel always writes a full MR x NR tile, so it accumulates
+    // into scratch and only the live part is folded back. Letting it write C
+    // directly would run past the last row and column whenever M or N is not a
+    // multiple of the tile - an out-of-bounds WRITE, not a wrong number.
+    let zl = b.loop_begin("vg.z", "0", &(VNNI_MR * VNNI_NR).to_string(), "1");
+    let z = b.iv(&zl);
+    let zp = b.gep("i64", ct, &z);
+    b.w(&format!("store i64 0, ptr {}, align 8", zp));
+    b.loop_end(zl);
+
+    b.w(&format!(
+        "call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {})",
+        VNNI_MICRO_NAME, apan, bp, ct, VNNI_NR, kpairs
+    ));
+
+    let fl = b.loop_begin("vg.fi", "0", &mw, "1");
+    let fi = b.iv(&fl);
+    let crow = b.add(&i0, &fi);
+    let coff = b.mul(&crow, ldc);
+    let coff2 = b.add(&coff, &j0);
+    let trow = b.mul(&fi, &VNNI_NR.to_string());
+
+    let fjl = b.loop_begin("vg.fj", "0", &nw, "1");
+    let fj = b.iv(&fjl);
+    let cidx = b.add(&coff2, &fj);
+    let cp = b.gep("i64", c, &cidx);
+    let tidx = b.add(&trow, &fj);
+    let tp = b.gep("i64", ct, &tidx);
+    let cv = b.t();
+    b.w(&format!("{} = load i64, ptr {}, align 8", cv, cp));
+    let tv = b.t();
+    b.w(&format!("{} = load i64, ptr {}, align 8", tv, tp));
+    let sv = b.add(&cv, &tv);
+    b.w(&format!("store i64 {}, ptr {}, align 8", sv, cp));
+    b.loop_end(fjl);
+    b.loop_end(fl);
+
+    b.loop_end(il);
+    b.loop_end(jl);
+
+    b.finish(&format!(
+        "define void @{}(ptr noalias {}, ptr noalias {}, ptr noalias {}, \
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, \
+         ptr noalias {}, ptr noalias {}, ptr noalias {}) #0",
+        VNNI_GEMM_NAME, a, bb, c, m, n, k, lda, ldb, ldc, ap, bp, ct
+    ))
+}
+
+/// The complete exact GEMM module: micro-kernel, both packers, and the driver.
+pub fn emit_vnni_gemm_module(flush_k_pairs: u32) -> String {
+    let mut out = emit_vnni_micro_module(flush_k_pairs);
+    out.push('\n');
+    out.push_str(&emit_vnni_pack_a());
+    out.push('\n');
+    out.push_str(&emit_vnni_pack_b());
+    out.push('\n');
+    out.push_str(&emit_vnni_gemm_driver());
+    out
 }
 
 // ── Recognition ─────────────────────────────────────────────
@@ -252,6 +886,8 @@ pub fn recognize_gemm(body: &Block) -> Option<GemmShape> {
         name: sum,
         init: Some(sum_init),
         zero_drift,
+        ty: sum_ty,
+        bounds: sum_bounds,
         ..
     }, Stmt::For {
         loop_var: k,
@@ -267,26 +903,54 @@ pub fn recognize_gemm(body: &Block) -> Option<GemmShape> {
     if !is_zero_lit(sum_init) || !is_zero_lit(k_start) || !is_unit_step(k_step) {
         return None;
     }
-    // A `@ZeroDrift` accumulator has different semantics — an exact
-    // fixed-point accumulation — and this kernel accumulates in f32.
-    // Substituting it would silently discard the guarantee.
-    if zero_drift.is_some() {
-        return None;
-    }
-
+    // A `@ZeroDrift` accumulator asks for an EXACT reduction, which the f32
+    // kernel cannot provide — substituting it would silently discard the
+    // guarantee, so this used to refuse outright. It is recorded instead now,
+    // and `try_emit_gemm_kernel` selects a representation and dispatches to an
+    // exact kernel; refusing still happens there if no representation is
+    // satisfiable. The property that makes this worth doing is that integer
+    // addition is associative, so the tiled, threaded, K-split reduction is
+    // bit-identical to the naive loop rather than merely close to it.
+    // See `docs/proof_carrying_kernels.md`.
     // sum = sum + load(A,i,k,K,..) * load(B,k,j,N,..)
+    //
+    // The operand loads' own `@bounds` are captured here, not just the
+    // accumulator's. An exact `vpdpwssd` kernel's overflow obligation is stated
+    // over A and B, and the accumulator's bound does not imply it — see
+    // `DriftAccumulator::operand_bounds`.
     let [Stmt::Let {
         name: a_val,
         init: Some(a_init),
+        bounds: a_bounds_attr,
         ..
     }, Stmt::Let {
         name: b_val,
         init: Some(b_init),
+        bounds: b_bounds_attr,
         ..
     }, Stmt::Assign { target, value, .. }] = k_body.stmts.as_slice()
     else {
         return None;
     };
+
+    let const_bounds = |b: &Option<BoundsAttr>| -> Option<(f64, f64)> {
+        b.as_ref().and_then(|b| {
+            match (const_f64_of(&b.min), const_f64_of(&b.max)) {
+                (Some(lo), Some(hi)) => Some((lo, hi)),
+                _ => None,
+            }
+        })
+    };
+
+    let drift = zero_drift.as_ref().map(|_| DriftAccumulator {
+        ty: match sum_ty {
+            Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => n.clone(),
+            _ => "F32".to_string(),
+        },
+        bounds: const_bounds(sum_bounds),
+        a_bounds: const_bounds(a_bounds_attr),
+        b_bounds: const_bounds(b_bounds_attr),
+    });
 
     let (a_buf, a_row, a_col, a_stride) = match_load(a_init)?;
     let (b_buf, b_row, b_col, b_stride) = match_load(b_init)?;
@@ -342,14 +1006,20 @@ pub fn recognize_gemm(body: &Block) -> Option<GemmShape> {
     }
     let c_stride = ident_of(&sargs[3])?;
 
-    // The strides must be the extents they are supposed to be, or the buffers
-    // are not the matrices this kernel assumes.
     let m = ident_of(i_end)?;
     let n = ident_of(j_end)?;
     let k_ext = ident_of(k_end)?;
-    if a_stride != k_ext || b_stride != n || c_stride != n {
-        return None;
-    }
+
+    // The strides are RECORDED, not required to equal the extents. A row
+    // stride larger than the extent is a submatrix, which is a legal and
+    // common BLAS input; requiring `lda == K` here is what used to send every
+    // such call to scalar lowering. The indexing order was already checked
+    // above (A by `[i, k]`, B by `[k, j]`), which is the part that would
+    // change the computation rather than just its addressing.
+    //
+    // A stride must still be a plain identifier — `match_load` and
+    // `ident_of` enforce that — so an expression like `K + 1` is refused
+    // rather than evaluated here, where there is no scope to evaluate it in.
 
     Some(GemmShape {
         a: a_buf.to_string(),
@@ -358,7 +1028,25 @@ pub fn recognize_gemm(body: &Block) -> Option<GemmShape> {
         m: m.to_string(),
         n: n.to_string(),
         k: k_ext.to_string(),
+        lda: a_stride.to_string(),
+        ldb: b_stride.to_string(),
+        ldc: c_stride.to_string(),
+        drift,
     })
+}
+
+/// Constant-folds the literals `@bounds(min, max)` accepts. Deliberately tiny:
+/// a bound that is not a literal cannot be resolved here, and guessing one
+/// would licence a representation whose range was never established.
+fn const_f64_of(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::IntLit(v, _) => Some(*v as f64),
+        Expr::FloatLit(v, _) => Some(*v),
+        Expr::UnaryOp { op: crate::ast::UnaryOp::Neg, operand, .. } => {
+            const_f64_of(operand).map(|v| -v)
+        }
+        _ => None,
+    }
 }
 
 // ── IR emission ─────────────────────────────────────────────
@@ -749,7 +1437,12 @@ pub fn emit_globals() -> String {
     let _ = writeln!(&mut s, "; --- Y CPU GEMM: shared state ---");
     let _ = writeln!(
         &mut s,
-        "%y_gemm_task = type {{ ptr, ptr, ptr, i64, i64, i64, i64, i64, i64, i64, ptr, i64, i64, i64, i64, i64, i64 }}"
+        // Fields 17-19 (lda, ldb, ldc) are APPENDED rather than placed next to
+        // M/N/K, so every existing index in `emit_worker` and the task-fill
+        // loop keeps its meaning. A struct whose field numbering shifts is the
+        // one change here that would compile, run, and silently pass the wrong
+        // value to a worker.
+        "%y_gemm_task = type {{ ptr, ptr, ptr, i64, i64, i64, i64, i64, i64, i64, ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64 }}"
     );
     let _ = writeln!(
         &mut s,
@@ -1297,6 +1990,10 @@ fn emit_small_m() -> String {
     let (a, bb, c, _m, n, k, ldc, m0, m1, n0, n1, k0, k1) = (
         "%A", "%B", "%C", "%M", "%N", "%K", "%ldc", "%m0", "%m1", "%n0", "%n1", "%k0", "%k1",
     );
+    // This path reads A and B IN PLACE — it is the copy-free small-M kernel,
+    // so there is no packing step to absorb a stride and these must be used
+    // directly at every address computation.
+    let (lda, ldb) = ("%lda", "%ldb");
 
     // C is accumulated into across all of K, so this thread's slice of it
     // starts at zero. Only the owned columns are cleared: another thread may
@@ -1402,7 +2099,7 @@ fn emit_small_m() -> String {
                 let live = b.t();
                 b.w(&format!("{} = icmp slt i64 {}, {}", live, ic, mw));
                 let row = b.add(&i0, &ic);
-                let ro = b.mul(&row, k);
+                let ro = b.mul(&row, lda);
                 let off = b.add(&ro, &pu_);
                 // Rows past mw read element 0 and are then zeroed, so they
                 // contribute nothing and the load stays in bounds.
@@ -1419,7 +2116,7 @@ fn emit_small_m() -> String {
                 row_av.push(splat(&mut b, &val));
             }
             av.push(row_av);
-            let brow_off = b.mul(&pu_, n);
+            let brow_off = b.mul(&pu_, ldb);
             brow.push(b.gep("float", bb, &brow_off));
         }
 
@@ -1510,8 +2207,8 @@ fn emit_small_m() -> String {
     b.finish(&format!(
         "define internal void @__y_gemm_small_m(ptr noalias {}, ptr noalias {}, \
          ptr {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, \
-         i64 {}, i64 {})",
-        a, bb, c, _m, n, k, ldc, m0, m1, n0, n1, k0, k1
+         i64 {}, i64 {}, i64 {}, i64 {})",
+        a, bb, c, _m, n, k, ldc, m0, m1, n0, n1, k0, k1, lda, ldb
     ))
 }
 
@@ -1542,6 +2239,10 @@ fn emit_small_m() -> String {
 fn emit_tiny() -> String {
     let mut b = IrBuilder::new();
     let (a, bb, c, m, n, k) = ("%A", "%B", "%C", "%M", "%N", "%K");
+    // Copy-free: A, B and C are all the caller's memory, read and written in
+    // place, so all three strides are live here. `n` remains the EXTENT that
+    // selects which specialised body runs.
+    let (lda, ldb, ldc) = ("%lda", "%ldb", "%ldc");
 
     for (nv, mrv) in TINY_BLOCK {
         for i in 0..mrv {
@@ -1601,8 +2302,8 @@ fn emit_tiny() -> String {
         let pl = b.loop_begin("ty.p", "0", k, "1");
         let p = b.iv(&pl);
 
-        // One row of B, in place: N contiguous floats at row stride N.
-        let bo = b.mul(&p, n);
+        // One row of B, in place: N contiguous floats at row stride ldb.
+        let bo = b.mul(&p, ldb);
         let brow = b.gep("float", bb, &bo);
         let mut bv = Vec::new();
         for v in 0..nv {
@@ -1626,7 +2327,7 @@ fn emit_tiny() -> String {
             let live = b.t();
             b.w(&format!("{} = icmp slt i64 {}, {}", live, ic, mw));
             let row = b.add(&i0, &ic);
-            let ro = b.mul(&row, k);
+            let ro = b.mul(&row, lda);
             let off = b.add(&ro, &p);
             // A dead row reads element 0 and is zeroed, so the load stays in
             // bounds and the FMA below contributes nothing.
@@ -1667,7 +2368,7 @@ fn emit_tiny() -> String {
             b.w(&format!("br i1 {}, label %{}, label %{}", live, st_l, sk_l));
             b.out.push_str(&format!("{}:\n", st_l));
             let row = b.add(&i0, &ic);
-            let ro = b.mul(&row, n);
+            let ro = b.mul(&row, ldc);
             for v in 0..nv {
                 let off = b.add(&ro, &(v * 16).to_string());
                 let q = b.gep("float", c, &off);
@@ -1698,8 +2399,8 @@ fn emit_tiny() -> String {
         // outside the K loop, so no B load can be clobbered by one — and a
         // `noalias` the caller does not honour is a silent miscompile.
         "define internal void @__y_gemm_tiny(ptr noalias {}, ptr noalias {}, \
-         ptr {}, i64 {}, i64 {}, i64 {})",
-        a, bb, c, m, n, k
+         ptr {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k, lda, ldb, ldc
     ))
 }
 
@@ -1713,6 +2414,7 @@ fn emit_small_reduce() -> String {
     let mut b = IrBuilder::new();
     let (base, c, n, m0, m1, n0, n1, nthr) =
         ("%base", "%C", "%N", "%m0", "%m1", "%n0", "%n1", "%nthr");
+    let ldc = "%ldc";
 
     let span = b.sub(n1, n0);
     let span_full = b.t();
@@ -1722,7 +2424,12 @@ fn emit_small_reduce() -> String {
 
     let il = b.loop_begin("sr.i", m0, m1, "1");
     let i = b.iv(&il);
+    // Two DIFFERENT row strides, and conflating them is the whole hazard here.
+    // The per-thread panels are freshly packed `M x N` blocks in scratch, so
+    // their stride is `n`; C belongs to the caller and may be a submatrix, so
+    // its stride is `ldc`. They coincided before leading dimensions existed.
     let roff = b.mul(&i, n);
+    let croff = b.mul(&i, ldc);
 
     for (masked, tag) in [(false, "sr.j"), (true, "sr.t")] {
         let (start, end) = if masked {
@@ -1739,6 +2446,7 @@ fn emit_small_reduce() -> String {
             None
         };
         let coff = b.add(&roff, &j);
+        let ccoff = b.add(&croff, &j);
 
         // acc = sum over t of base[t*SCRATCH_FLOATS + i*N + j]
         b.w("store <16 x float> zeroinitializer, ptr %sr.acc, align 64");
@@ -1774,7 +2482,7 @@ fn emit_small_reduce() -> String {
             "{} = load <16 x float>, ptr %sr.acc, align 64",
             fin
         ));
-        let cq = b.gep("float", c, &coff);
+        let cq = b.gep("float", c, &ccoff);
         match &mask {
             Some(mk) => b.w(&format!(
                 "call void @llvm.masked.store.v16f32.p0(<16 x float> {}, ptr {}, \
@@ -1789,8 +2497,8 @@ fn emit_small_reduce() -> String {
 
     b.finish(&format!(
         "define internal void @__y_gemm_small_reduce(ptr noalias {}, ptr {}, i64 {}, \
-         i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
-        base, c, n, m0, m1, n0, n1, nthr
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+        base, c, n, m0, m1, n0, n1, nthr, ldc
     ))
 }
 
@@ -1801,6 +2509,12 @@ fn emit_driver() -> String {
         "%A", "%B", "%C", "%M", "%N", "%K", "%m0", "%m1", "%n0", "%n1", "%scratch",
         "%tid", "%nthr", "%shared", "%k0", "%k1", "%ksplit",
     );
+    // The row strides of A, B and C. These are the ONLY thing that may be used
+    // to address the caller's memory; `k` and `n` are extents and describe how
+    // much of each row is live, not how far apart two rows are. Before leading
+    // dimensions existed the two coincided, so the distinction is easy to lose
+    // — every place below that indexes A, B or C must use these.
+    let (lda, ldb_c, ldc) = ("%lda", "%ldb", "%ldc");
 
     // Nothing to do, and — importantly — no barrier to enter. A pool slot past
     // the active thread count must return before the cooperative section, or
@@ -1886,20 +2600,26 @@ fn emit_driver() -> String {
     b.w(&format!("br i1 {}, label %{}, label %{}", ks, ksp_l, nsp_l));
 
     b.out.push_str(&format!("{}:\n", nsp_l));
+    // Writes the caller's C directly, so C's stride is the caller's `ldc`.
     b.w(&format!(
         "call void @__y_gemm_small_m(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 0, i64 {})",
-        a, bb, c, m, n, k, n, m0, m1, n0, n1, k
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 0, i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k, ldc, m0, m1, n0, n1, k, lda, ldb_c
     ));
     b.w("ret void");
 
     b.out.push_str(&format!("{}:\n", ksp_l));
     // Private panel: the thread's own packing scratch, which this path does not
     // otherwise use. `emit_entry` has already checked `M*N <= SCRATCH_FLOATS`.
+    // Accumulates into this thread's PRIVATE `M x N` scratch panel, which is
+    // freshly packed and therefore `n`-strided. Passing the caller's `ldc`
+    // here would stride a buffer that has nothing to do with C — and since
+    // `ldc >= n` it would run off the end of the thread's scratch slot into
+    // the next thread's. A and B are still the caller's, so they keep theirs.
     b.w(&format!(
         "call void @__y_gemm_small_m(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-         i64 {}, i64 0, i64 {}, i64 0, i64 {}, i64 {}, i64 {})",
-        a, bb, scratch, m, n, k, n, m, n, k0, k1
+         i64 {}, i64 0, i64 {}, i64 0, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+        a, bb, scratch, m, n, k, n, m, n, k0, k1, lda, ldb_c
     ));
     b.w(&format!(
         "call i32 @pthread_barrier_wait(ptr {})",
@@ -1909,8 +2629,8 @@ fn emit_driver() -> String {
     b.w(&format!("{} = load ptr, ptr {}, align 8", sbase, SCRATCH));
     b.w(&format!(
         "call void @__y_gemm_small_reduce(ptr {}, ptr {}, i64 {}, i64 0, i64 {}, \
-         i64 {}, i64 {}, i64 {})",
-        sbase, c, n, m, n0, n1, nthr
+         i64 {}, i64 {}, i64 {}, i64 {})",
+        sbase, c, n, m, n0, n1, nthr, ldc
     ));
     b.w("ret void");
 
@@ -1966,7 +2686,7 @@ fn emit_driver() -> String {
     // every row and revisiting each page once per panel. Small M is handled by
     // `__y_gemm_small_m` instead, which changes the loop order rather than the
     // packing.
-    let bro = b.mul(&pc, n);
+    let bro = b.mul(&pc, ldb_c);
     let bo = b.add(&bro, &jc);
     let bsrc = b.gep("float", bb, &bo);
     // Cooperative: each thread packs every nthr'th panel of the shared block,
@@ -1977,7 +2697,7 @@ fn emit_driver() -> String {
     b.w(&format!("{} = select i1 {}, i64 {}, i64 1", pk_n, coop, nthr));
     b.w(&format!(
         "call void @__y_gemm_pack_b(ptr {}, i64 {}, i64 {}, i64 {}, ptr {}, i64 {}, i64 {})",
-        bsrc, n, kc, nc, packb, pk_t, pk_n
+        bsrc, ldb_c, kc, nc, packb, pk_t, pk_n
     ));
     let bar1_l = b.l("g.bar1");
     let after1_l = b.l("g.after1");
@@ -1998,13 +2718,13 @@ fn emit_driver() -> String {
     let rm = b.sub(m1, &ic);
     let mc = b.imin(&rm, &tl().mc.to_string());
 
-    // packA(A + ic*K + pc, K, mc, kc)
-    let aro = b.mul(&ic, k);
+    // packA(A + ic*lda + pc, lda, mc, kc)
+    let aro = b.mul(&ic, lda);
     let ao = b.add(&aro, &pc);
     let asrc = b.gep("float", a, &ao);
     b.w(&format!(
         "call void @__y_gemm_pack_a(ptr {}, i64 {}, i64 {}, i64 {}, ptr {})",
-        asrc, k, mc, kc, packa
+        asrc, lda, mc, kc, packa
     ));
 
     let jrl = b.loop_begin("g.jr", "0", &nc, &tl().nr.to_string());
@@ -2027,7 +2747,7 @@ fn emit_driver() -> String {
     // C column is jc + jr: `jc` is the absolute start of this NC block and
     // `jr` the offset of the micro-panel within it.
     let crow = b.add(&ic, &ir);
-    let cro = b.mul(&crow, n);
+    let cro = b.mul(&crow, ldc);
     let cc1 = b.add(&cro, &jc);
     let cc2 = b.add(&cc1, &jr);
     let cp = b.gep("float", c, &cc2);
@@ -2035,7 +2755,7 @@ fn emit_driver() -> String {
     b.w(&format!(
         "call void @__y_gemm_micro(ptr {}, ptr {}, i64 {}, ptr {}, i64 {}, i64 {}, i64 {}, \
          i64 {}, i1 {})",
-        app, bpp, bld, cp, n, kc, mw, jw, first
+        app, bpp, bld, cp, ldc, kc, mw, jw, first
     ));
 
     b.loop_end(irl);
@@ -2061,8 +2781,9 @@ fn emit_driver() -> String {
     b.finish(&format!(
         "define internal void @__y_gemm_run(ptr noalias {}, ptr noalias {}, ptr {}, \
          i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, ptr noalias {}, \
-         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
-        a, bb, c, m, n, k, m0, m1, n0, n1, scratch, tid, nthr, shared, k0, k1, ksplit
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k, m0, m1, n0, n1, scratch, tid, nthr, shared, k0, k1, ksplit,
+        lda, ldb_c, ldc
     ))
 }
 
@@ -2072,7 +2793,8 @@ fn emit_worker() -> String {
     let mut b = IrBuilder::new();
     let t = "%t";
 
-    // %y_gemm_task = { A, B, C, M, N, K, m0, m1, n0, n1, scratch }
+    // %y_gemm_task = { A, B, C, M, N, K, m0, m1, n0, n1, scratch, tid, nthr,
+    //                  shared, k0, k1, ksplit, lda, ldb, ldc }
     let names = [
         ("a", "ptr", 0),
         ("bb", "ptr", 1),
@@ -2091,6 +2813,9 @@ fn emit_worker() -> String {
         ("k0", "i64", 14),
         ("k1", "i64", 15),
         ("ksplit", "i64", 16),
+        ("lda", "i64", 17),
+        ("ldb", "i64", 18),
+        ("ldc", "i64", 19),
     ];
     let mut vals = Vec::new();
     for (_, ty, idx) in names {
@@ -2107,9 +2832,10 @@ fn emit_worker() -> String {
     b.w(&format!(
         "call void @__y_gemm_run(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
          i64 {}, i64 {}, i64 {}, i64 {}, ptr {}, i64 {}, i64 {}, i64 {}, i64 {}, \
-         i64 {}, i64 {})",
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
         vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8],
-        vals[9], vals[10], vals[11], vals[12], vals[13], vals[14], vals[15], vals[16]
+        vals[9], vals[10], vals[11], vals[12], vals[13], vals[14], vals[15], vals[16],
+        vals[17], vals[18], vals[19]
     ));
     b.w("ret ptr null");
 
@@ -2425,6 +3151,12 @@ fn emit_pool_worker() -> String {
 fn emit_entry() -> String {
     let mut b = IrBuilder::new();
     let (a, bb, c, m, n, k) = ("%A", "%B", "%C", "%M", "%N", "%K");
+    // Every dispatch decision below (tiny/small-M/threaded, the partition, the
+    // thread count) is made from the EXTENTS. A leading dimension changes only
+    // how memory is addressed, never how much arithmetic there is, so it must
+    // not enter any of those tests — a submatrix of a 4096-wide buffer is the
+    // same amount of work as a packed one.
+    let (lda, ldb_c, ldc) = ("%lda", "%ldb", "%ldc");
 
     // The copy-free path, before anything else looks at this shape.
     //
@@ -2457,8 +3189,9 @@ fn emit_entry() -> String {
     ));
     b.out.push_str(&format!("{}:\n", tiny_l));
     b.w(&format!(
-        "call void @__y_gemm_tiny(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {})",
-        a, bb, c, m, n, k
+        "call void @__y_gemm_tiny(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
+         i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k, lda, ldb_c, ldc
     ));
     b.w("ret void");
     b.out.push_str(&format!("{}:\n", notiny_l));
@@ -2489,8 +3222,9 @@ fn emit_entry() -> String {
     ));
     b.w(&format!(
         "call void @__y_gemm_run(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-         i64 0, i64 {}, i64 0, i64 {}, ptr {}, i64 0, i64 1, i64 0, i64 0, i64 {}, i64 0)",
-        a, bb, c, m, n, k, m, n, scr0, k
+         i64 0, i64 {}, i64 0, i64 {}, ptr {}, i64 0, i64 1, i64 0, i64 0, i64 {}, i64 0, \
+         i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k, m, n, scr0, k, lda, ldb_c, ldc
     ));
     b.w("ret void");
 
@@ -2528,8 +3262,9 @@ fn emit_entry() -> String {
     // GEMM costs more than the whole kernel at small sizes.
     b.w(&format!(
         "call void @__y_gemm_run(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-         i64 0, i64 {}, i64 0, i64 {}, ptr {}, i64 0, i64 1, i64 0, i64 0, i64 {}, i64 0)",
-        a, bb, c, m, n, k, m, n, FALLBACK, k
+         i64 0, i64 {}, i64 0, i64 {}, ptr {}, i64 0, i64 1, i64 0, i64 0, i64 {}, i64 0, \
+         i64 {}, i64 {}, i64 {})",
+        a, bb, c, m, n, k, m, n, FALLBACK, k, lda, ldb_c, ldc
     ));
     b.w("ret void");
 
@@ -3002,6 +3737,9 @@ fn emit_entry() -> String {
         (14, "i64", kfrom),
         (15, "i64", kto),
         (16, "i64", ksplit.clone()),
+        (17, "i64", lda.to_string()),
+        (18, "i64", ldb_c.to_string()),
+        (19, "i64", ldc.to_string()),
     ] {
         let f = b.t();
         b.w(&format!(
@@ -3064,8 +3802,8 @@ fn emit_entry() -> String {
 
     b.finish(&format!(
         "define internal void @{}(ptr noalias {}, ptr noalias {}, ptr noalias {}, \
-         i64 {}, i64 {}, i64 {})",
-        KERNEL_NAME, a, bb, c, m, n, k
+         i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
+        KERNEL_NAME, a, bb, c, m, n, k, lda, ldb_c, ldc
     ))
 }
 
@@ -3141,6 +3879,158 @@ kernel mm(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, M: I
 }
 "#;
 
+    /// `@bounds` on the operand loads reaches the emitter, and BOTH are needed.
+    ///
+    /// This is the front-end half of the exact-VNNI licence. The overflow
+    /// obligation is stated over `A[i,k]` and `B[k,j]`, so the recogniser has
+    /// to carry the bound from the statement that loads each of them — the
+    /// accumulator's own `@bounds` describes the sum and cannot substitute.
+    #[test]
+    fn operand_bounds_are_carried_from_the_loads() {
+        let bounded = CANONICAL
+            .replace(
+                "            let mut sum: F32 = 0.0;",
+                "            @ZeroDrift\n            let mut sum: F32 = 0.0;",
+            )
+            .replace(
+                "                let a_val: F32 = block_ptr2d_load(A, i, k, K, M, K);",
+                "                @bounds(min=-1024, max=1024)\n                let a_val: F32 = block_ptr2d_load(A, i, k, K, M, K);",
+            )
+            .replace(
+                "                let b_val: F32 = block_ptr2d_load(B, k, j, N, K, N);",
+                "                @bounds(min=-512, max=768)\n                let b_val: F32 = block_ptr2d_load(B, k, j, N, K, N);",
+            );
+
+        let shape = recognize_gemm(&kernel_body(&bounded)).expect("still a GEMM");
+        let d = shape.drift.expect("@ZeroDrift must reach the emitter");
+        assert_eq!(d.a_bounds, Some((-1024.0, 1024.0)));
+        assert_eq!(d.b_bounds, Some((-512.0, 768.0)));
+
+        // Combined by the LARGER magnitude: the overflow derivation uses one
+        // bound covering both operands (`m^2` per product), so taking the
+        // smaller — or their product — would licence a nest that can overflow.
+        let ob = d.operand_bounds().expect("both operands are bounded");
+        assert_eq!(ob.max_magnitude, 1024.0);
+
+        // And that licences the measured probe configuration.
+        crate::zero_drift::license_vnni_exact(
+            Some(ob),
+            crate::zero_drift::VnniExact::DEFAULT_FLUSH_K_PAIRS,
+        )
+        .expect("operands bounded by 1024 are licensed at the default interval");
+    }
+
+    /// `plan_exact_gemm` distinguishes "not licensed" from "not exact", and the
+    /// caller must be able to tell them apart.
+    ///
+    /// An `Unavailable` plan is not an error condition: the nest still compiles
+    /// and still gets an exact accumulator through scalar lowering. Only the
+    /// fast kernel is lost. The emitter routes this to `drift_report`, and
+    /// routing it to `emit_errors` instead would fail programs that are
+    /// correct — which is why the two are separate variants rather than an
+    /// `Option`.
+    #[test]
+    fn an_unlicensed_plan_is_not_an_error() {
+        let unbounded = DriftAccumulator {
+            ty: "F32".into(),
+            bounds: Some((-1000.0, 1000.0)),
+            a_bounds: None,
+            b_bounds: None,
+        };
+        match plan_exact_gemm(&unbounded) {
+            ExactGemmPlan::Unavailable(reason) => {
+                assert!(reason.contains("cancel"), "must say why: {reason}");
+            }
+            ExactGemmPlan::Vnni { .. } => {
+                panic!("an unbounded nest must not be licensed")
+            }
+        }
+
+        let bounded = DriftAccumulator {
+            ty: "F32".into(),
+            bounds: None,
+            a_bounds: Some((-1024.0, 1024.0)),
+            b_bounds: Some((-1024.0, 1024.0)),
+        };
+        match plan_exact_gemm(&bounded) {
+            ExactGemmPlan::Vnni { scheme, operand_magnitude } => {
+                assert_eq!(scheme.flush_k_pairs, 64);
+                assert_eq!(operand_magnitude, 1024.0);
+            }
+            ExactGemmPlan::Unavailable(r) => panic!("1024 must be licensed: {r}"),
+        }
+
+        // Note the second case has NO accumulator bound and is still licensed:
+        // the licence is about the operands only. That is not an oversight, it
+        // is the separation this whole path exists to enforce.
+    }
+
+    /// One bounded operand is not enough, and the missing one is a REFUSAL.
+    ///
+    /// Bounding only A says nothing about B, and `m^2` per product needs both.
+    /// Treating the stated one as covering the pair is the silent-approximation
+    /// failure the design rule exists for.
+    #[test]
+    fn one_bounded_operand_does_not_licence_the_pair() {
+        let half = CANONICAL
+            .replace(
+                "            let mut sum: F32 = 0.0;",
+                "            @ZeroDrift\n            let mut sum: F32 = 0.0;",
+            )
+            .replace(
+                "                let a_val: F32 = block_ptr2d_load(A, i, k, K, M, K);",
+                "                @bounds(min=-1024, max=1024)\n                let a_val: F32 = block_ptr2d_load(A, i, k, K, M, K);",
+            );
+
+        let shape = recognize_gemm(&kernel_body(&half)).expect("still a GEMM");
+        let d = shape.drift.expect("@ZeroDrift must reach the emitter");
+        assert_eq!(d.a_bounds, Some((-1024.0, 1024.0)));
+        assert_eq!(d.b_bounds, None);
+        assert!(
+            d.operand_bounds().is_none(),
+            "one bounded operand must not licence the pair"
+        );
+
+        let err = crate::zero_drift::license_vnni_exact(
+            d.operand_bounds(),
+            crate::zero_drift::VnniExact::DEFAULT_FLUSH_K_PAIRS,
+        )
+        .expect_err("an unbounded operand must refuse");
+        assert!(err.contains("cancel"), "must explain why: {err}");
+    }
+
+    /// Operands too large for the int32 accumulator are refused, not truncated.
+    #[test]
+    fn oversized_operand_bounds_are_refused() {
+        let big = CANONICAL
+            .replace(
+                "            let mut sum: F32 = 0.0;",
+                "            @ZeroDrift\n            let mut sum: F32 = 0.0;",
+            )
+            .replace(
+                "                let a_val: F32 = block_ptr2d_load(A, i, k, K, M, K);",
+                "                @bounds(min=-30000, max=30000)\n                let a_val: F32 = block_ptr2d_load(A, i, k, K, M, K);",
+            )
+            .replace(
+                "                let b_val: F32 = block_ptr2d_load(B, k, j, N, K, N);",
+                "                @bounds(min=-30000, max=30000)\n                let b_val: F32 = block_ptr2d_load(B, k, j, N, K, N);",
+            );
+
+        let shape = recognize_gemm(&kernel_body(&big)).expect("still a GEMM");
+        let d = shape.drift.expect("@ZeroDrift must reach the emitter");
+        let ob = d.operand_bounds().expect("both bounded");
+        assert_eq!(ob.max_magnitude, 30000.0);
+
+        // 30000 fits int16 but not the flush interval's product budget, so the
+        // refusal must be the overflow one and must suggest a real fix.
+        let err = crate::zero_drift::license_vnni_exact(
+            Some(ob),
+            crate::zero_drift::VnniExact::DEFAULT_FLUSH_K_PAIRS,
+        )
+        .expect_err("30000 overflows int32 at 64 k-pairs");
+        assert!(err.contains("overflow"), "expected the overflow reason: {err}");
+    }
+
     #[test]
     fn canonical_matmul_is_recognized() {
         let shape = recognize_gemm(&kernel_body(CANONICAL)).expect("should recognize");
@@ -3150,6 +4040,70 @@ kernel mm(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, M: I
         assert_eq!(shape.m, "M");
         assert_eq!(shape.n, "N");
         assert_eq!(shape.k, "K");
+        // The packed case: the strides ARE the extents, and are recorded as
+        // such rather than assumed.
+        assert_eq!(shape.lda, "K");
+        assert_eq!(shape.ldb, "N");
+        assert_eq!(shape.ldc, "N");
+    }
+
+    /// A `@ZeroDrift` accumulator is RECORDED now rather than refused, so an
+    /// exact kernel can be selected for it. The refusal used to live in the
+    /// recogniser, which meant the request never reached the emitter at all.
+    ///
+    /// The bounds matter as much as the flag: an exact fixed-point format buys
+    /// order-independence and pays for it with a bounded range, so the stated
+    /// range is what makes a representation selectable.
+    #[test]
+    fn a_zero_drift_accumulator_is_recorded_with_its_bounds() {
+        let drifted = CANONICAL.replace(
+            "            let mut sum: F32 = 0.0;",
+            "            @bounds(min=-1000, max=1000)\n            @ZeroDrift\n            let mut sum: F32 = 0.0;",
+        );
+        let shape = recognize_gemm(&kernel_body(&drifted)).expect("a drifted nest is still a GEMM");
+        let d = shape.drift.expect("the @ZeroDrift request must reach the emitter");
+        assert_eq!(d.ty, "F32");
+        assert_eq!(d.bounds, Some((-1000.0, 1000.0)));
+
+        // Control: without the directive there is no obligation to carry, and
+        // the ordinary f32 kernel remains a legal lowering.
+        let plain = recognize_gemm(&kernel_body(CANONICAL)).expect("should recognize");
+        assert!(plain.drift.is_none());
+
+        // The accumulator's own bound is NOT an operand bound, and stating only
+        // it must not licence anything. See `DriftAccumulator::operand_bounds`.
+        assert!(
+            d.operand_bounds().is_none(),
+            "an accumulator bound alone must not stand in for operand bounds"
+        );
+    }
+
+    /// A row stride larger than the extent is a submatrix — a legal, common
+    /// BLAS input, and the whole reason this kernel can implement `sgemm`.
+    /// It must be RECOGNISED with the stride recorded, not refused.
+    ///
+    /// This replaced a near-miss test asserting the opposite. That test was
+    /// pinning the restriction, not a correctness property: requiring
+    /// `lda == K` sent every submatrix call to scalar lowering, which is a
+    /// ~100x slowdown with no diagnostic.
+    #[test]
+    fn a_leading_dimension_is_recorded_not_refused() {
+        let strided = CANONICAL
+            .replace(
+                "kernel mm(A: GlobalMemory<F32>, B: GlobalMemory<F32>, \
+                 C: GlobalMemory<F32>, M: I32, N: I32, K: I32)",
+                "kernel mm(A: GlobalMemory<F32>, B: GlobalMemory<F32>, \
+                 C: GlobalMemory<F32>, M: I32, N: I32, K: I32, LDA: I32)",
+            )
+            .replace(
+                "block_ptr2d_load(A, i, k, K, M, K)",
+                "block_ptr2d_load(A, i, k, LDA, M, K)",
+            );
+        let shape = recognize_gemm(&kernel_body(&strided)).expect("submatrix A is legal");
+        assert_eq!(shape.lda, "LDA");
+        // The extent is still K — only the addressing changed.
+        assert_eq!(shape.k, "K");
+        assert_eq!(shape.ldb, "N");
     }
 
     /// The recogniser decides to compute something *different* from what was
@@ -3173,12 +4127,16 @@ kernel mm(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, M: I
         let step2 = CANONICAL.replace("for k in 0..K step 1", "for k in 0..K step 2");
         assert!(recognize_gemm(&kernel_body(&step2)).is_none());
 
-        // A stride that is not the matching extent means a different layout.
-        let stride = CANONICAL.replace(
+        // A stride that is not a plain identifier cannot be lowered: there is
+        // no scope here to evaluate an expression in, and guessing a value
+        // would address the wrong memory. (A stride that IS an identifier but
+        // differs from the extent is a submatrix and is now accepted — see
+        // `a_leading_dimension_is_recorded_not_refused`.)
+        let expr_stride = CANONICAL.replace(
             "block_ptr2d_load(A, i, k, K, M, K)",
-            "block_ptr2d_load(A, i, k, M, M, K)",
+            "block_ptr2d_load(A, i, k, K + 1, M, K)",
         );
-        assert!(recognize_gemm(&kernel_body(&stride)).is_none());
+        assert!(recognize_gemm(&kernel_body(&expr_stride)).is_none());
 
         // An accumulator that starts from something other than zero.
         let init = CANONICAL.replace("let mut sum: F32 = 0.0;", "let mut sum: F32 = 1.0;");
