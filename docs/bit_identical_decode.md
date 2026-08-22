@@ -446,6 +446,62 @@ library bug rather than on anything here.
 
 ---
 
+## Finding 11 — the missing control was built, and it changes what the claim is
+
+The control this document has named since its first draft: **a float kernel
+whose reduction order is pinned should be deterministic without quantizing
+anything.** If that is true and cheap, exactness is unnecessary and the pitch is
+wrong. `tools/fixed_order_float.py` is that arm — fp32 throughout, with both
+reductions (`q·k` over head_dim, `Σ p·v` over the key axis) done in fixed-size
+chunks accumulated in a fixed sequence, and the key-axis chunks anchored at the
+**end** so left padding cannot regroup a row's real keys. The linear layers are
+pinned the same way, because the exact arm converts them too.
+
+It faces the same 16 batch compositions as the other arms, in the same harness.
+
+| arm | compositions changed |
+|---|---|
+| stock bf16 | 16 / 16 |
+| exact int8 | **0 / 16** |
+| **fixed-order fp32** | **0 / 16** |
+
+**So determinism does not require exactness.** A pinned reduction order gives
+batch invariance too, and that has to be said plainly because this document
+spent several drafts implying otherwise.
+
+What it costs is the other half, measured on the same box, interleaved, best of
+3, spreads 0.2–0.8%:
+
+| arm | tok/s/seq, no compile | tok/s/seq, `torch.compile` | vs stock |
+|---|---:|---:|---:|
+| stock bf16 + SDPA | 174.3 | **246.3** | — |
+| exact int8 | 54.7 | **238.5** | 1.03x slower |
+| fixed-order fp32 | 37.7 | **36.0** | **6.85x slower** |
+
+**The interesting column is the compiler's.** `torch.compile` takes the exact
+arm from 54.7 to 238.5 tok/s/seq — a 4.4x gain — and takes the fixed-order arm
+from 37.7 to 36.0, i.e. nothing. That is not an accident of this
+implementation's shape; it is the mechanism. **Pinning a reduction order is
+precisely a constraint on how the reduction may be executed**, so the fusions
+and kernel choices that make the float path fast are exactly what the pinning
+forbids. Integer accumulation needs no pinning, so the compiler stays free.
+
+The honest restatement of what this work buys:
+
+> Exactness does not buy determinism. Exactness buys determinism **while
+> leaving the compiler and the kernel autotuner free**, which is why it costs
+> 1.03x where pinning the order costs 6.85x.
+
+**What is not proven.** This arm pins the order with chunked loops in Python,
+which is the naive construction. A hand-written fixed-order CUDA kernel would be
+far faster than 6.85x slower, and nothing here rules out a fast one existing. So
+`0/16` is a solid result and the 6.85x is an upper bound on *this* construction,
+not a lower bound on the idea. What does generalise is the compiler column: any
+fixed-order implementation forbids the same class of optimisation, whoever
+writes it.
+
+---
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries

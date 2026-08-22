@@ -812,6 +812,16 @@ batch. Every reduction whose order changes with batch shape is made integer, and
 integer addition is associative — so tile shape, K-split, atomic completion
 order and batch size cannot change the answer. That is the whole mechanism.
 
+**And exactness is not what buys the determinism — it is what makes the
+determinism affordable.** The control that settles this was built and measured:
+a float32 path with the reduction *order* pinned instead of the arithmetic made
+exact is **also 0/16**. It just costs **6.85x**, where the exact path costs
+1.03x. The reason is the one that generalises past this implementation:
+`torch.compile` takes the exact arm from 54.7 to 238.5 tok/s/seq and the
+fixed-order arm from 37.7 to 36.0 — pinning an order *is* a constraint on how
+the reduction may execute, so it forbids exactly the fusions that make float
+fast. Integer accumulation needs no pinning, so the compiler stays free.
+
 **This is unfinished work, and it is here because the finished parts are
 measured.** What exists is a PyTorch + Triton **prototype** carrying the whole
 pipeline, plus one kernel the compiler itself emits (exact attention) and its
@@ -881,9 +891,6 @@ invariance is a different claim and is not made.
 
 ### What this does not yet claim
 
-- **No fixed-order-float control arm.** A float kernel with a pinned reduction
-  order might get determinism without quantization. It is the missing control and
-  it could reframe the whole result.
 - **One model, one GPU, one stack.** Cross-hardware bit-identity is the strongest
   thing exactness buys and is the headline claim with no evidence behind it.
 - **CUDA graphs are worth up to 1.47x and are blocked.** The prerequisites are
@@ -898,8 +905,7 @@ invariance is a different claim and is not made.
 Ranked, and the first item is the one that could invalidate the framing rather
 than extend it:
 
-1. **Build the fixed-order-float arm.** The missing control, above.
-2. **Run a second GPU.** Cross-hardware bit-identity is the strongest thing
+1. **Run a second GPU.** Cross-hardware bit-identity is the strongest thing
    exactness buys and the only headline claim with no evidence behind it.
 3. **Move the pipeline off the prototype** onto compiler-emitted kernels, and
    into a serving integration — which is also where CUDA graphs stop being

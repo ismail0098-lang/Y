@@ -67,6 +67,7 @@ import _nospace
 _nospace.guard()
 
 import argparse  # noqa: E402
+import os  # noqa: E402
 
 import torch  # noqa: E402
 import transformers.models.qwen2.modeling_qwen2 as qwen2  # noqa: E402
@@ -122,6 +123,18 @@ MEDIUM = [
 
 
 def build(arm, device):
+    if arm == "fixedfloat":
+        # The control for the CONTROL: does float need quantising to be
+        # batch-invariant, or only a pinned reduction order? See
+        # tools/fixed_order_float.py.
+        import fixed_order_float
+        qwen2.eager_attention_forward = fixed_order_float.fixed_order_attention
+        m = AutoModelForCausalLM.from_pretrained(
+            MODEL, dtype=torch.float32, attn_implementation="eager"
+        ).to(device).eval()
+        # The linears too, or this is not the same work the exact arm does.
+        fixed_order_float.convert(m)
+        return m
     if arm == "exact":
         qwen2.eager_attention_forward = D.exact_attention
         m = AutoModelForCausalLM.from_pretrained(
@@ -186,6 +199,10 @@ def cases():
     ]
 
 
+ARMS_TO_RUN = tuple(
+    os.environ.get("Y_RAGGED_ARMS", "stock,exact").split(","))
+
+
 def main():
     ap = argparse.ArgumentParser()
     # 160, matching the demo. At 24 tokens the CONTROL FAILED - stock was
@@ -207,7 +224,7 @@ def main():
     print("  The SAME prompt is decoded in batches of different size, different")
     print("  neighbour lengths and different positions. Its output must not move.")
     results = {}
-    for arm in ("stock", "exact"):
+    for arm in ARMS_TO_RUN:
         model = build(arm, a.device)
         label = ("stock  bf16 + SDPA" if arm == "stock"
                  else "exact  int8, order-independent")
@@ -252,15 +269,15 @@ def main():
               "these batches, and the output still does not move")
 
     print("\n" + "=" * 74)
-    for arm in ("stock", "exact"):
+    for arm in ARMS_TO_RUN:
         d, t = results[arm]
         print(f"  {arm:<6}: {d}/{t} compositions changed the target's output")
     print("=" * 74)
-    if results["stock"][0] == 0:
+    if "stock" in results and results["stock"][0] == 0:
         print("  *** CONTROL FAILED: stock is invariant too, so this test is not "
               "exercising the property. Do not read the exact result. ***")
         return 1
-    if results["exact"][0] != 0:
+    if "exact" in results and results["exact"][0] != 0:
         print("  *** exact is NOT ragged-batch invariant - the central claim does "
               "not hold under production batching. ***")
         return 1
