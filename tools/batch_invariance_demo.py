@@ -154,6 +154,64 @@ def digit_width(T, v_levels=None):
     return dbits
 
 
+_Y_PV = {}
+
+
+def _y_exact_pv(p, v):
+    """`p @ v` through tests/exact_pv.ysu -- one launch, int64 accumulation.
+
+    `p` is [..., Q, T] and `v` is [..., T, D]; the leading dimensions flatten
+    into the grid's `b`. Returns float64, matching the digit split, so callers
+    and their `assert_exact_range` checks are unchanged.
+
+    Loads the PTX once per process. If it cannot be loaded this RAISES rather
+    than falling back to the digit split: a fallback would silently reinstate
+    the whole-cache cast and quietly halve the throughput this path exists for,
+    and a silent fallback to a slower-but-correct route is exactly the shape
+    CLAUDE.md's design rule is about -- the build stays green and the claim
+    stops being true.
+    """
+    import ptx_bridge as PB
+
+    dev = p.device
+    if "fn" not in _Y_PV:
+        import subprocess
+        from pathlib import Path
+        repo = Path(__file__).resolve().parent.parent
+        ybin = repo / "target" / "release" / "Y"
+        if not ybin.exists():
+            raise RuntimeError(
+                f"Y_EXACT_V_INT8 needs the compiler at {ybin}; build it with "
+                "`cargo build --release`. Not falling back to the digit split: "
+                "that would cast the whole cache every step and report a "
+                "number for a path nobody asked for."
+            )
+        torch.zeros(1, device=dev)          # torch makes its context lazily
+        subprocess.run([str(ybin), str(repo / "tests" / "exact_pv.ysu"),
+                        "--emit-ptx"], capture_output=True, check=True, cwd=repo)
+        ptx = (repo / "tests" / "exact_pv.ptx").read_text()
+        _Y_PV["mod"] = PB.Module(ptx)
+        _Y_PV["fn"] = _Y_PV["mod"].fn("exact_pv")
+
+    import ctypes
+    lead = p.shape[:-2]
+    B = 1
+    for x in lead:
+        B *= x
+    Qn, T = p.shape[-2], p.shape[-1]
+    Dh = v.shape[-1]
+    assert v.shape[-2] == T, f"key length disagrees: p has {T}, v has {v.shape[-2]}"
+    p32 = p.reshape(B, Qn, T).to(torch.int32).contiguous()
+    v8 = v.reshape(B, T, Dh).contiguous()
+    out = torch.empty(B * Qn * Dh, dtype=torch.int64, device=dev)
+    PB.launch(_Y_PV["fn"], (Qn, B, 1), (Dh, 1, 1),
+              [PB.dptr(p32), PB.dptr(v8), PB.dptr(out),
+               ctypes.c_uint(T), ctypes.c_uint(Dh), ctypes.c_uint(Qn),
+               ctypes.c_uint(B * Qn * T), ctypes.c_uint(B * T * Dh),
+               ctypes.c_uint(B * Qn * Dh)])
+    return out.view(*lead, Qn, Dh).to(torch.float64)
+
+
 def exact_pv(p, v):
     """`p @ v` with p a non-negative integer < 2^29 and v an int8 value, exact.
 
@@ -176,6 +234,13 @@ def exact_pv(p, v):
     the constant here instead would keep the digit count and silently start
     rounding.
     """
+    # An int8 `v` means the cache is storing V as int8 (`Y_EXACT_V_INT8`), and
+    # the ONLY correct route for that is the compiler's kernel: converting it
+    # to float32 here would reinstate the O(T) whole-cache cast that storing
+    # int8 exists to delete, and would do it silently. Refusing is the fix if
+    # the kernel cannot be loaded -- see `_y_exact_pv`.
+    if v.dtype == torch.int8:
+        return _y_exact_pv(p, v)
     T = v.shape[-2]
     dbits = digit_width(T)
     if dbits == 0:                      # absurdly long context; stay correct
