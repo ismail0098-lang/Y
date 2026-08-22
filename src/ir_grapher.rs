@@ -362,8 +362,69 @@ impl DependencyGrapher {
                         .alloc_node(pipeline, label, expr.span().clone(), cycles);
                 self.wire_expr_dependencies(node_id, expr);
             }
-            _ => {}
+            // `x += f()` is `x = x op f()`: the node depends on BOTH the value
+            // and whatever last produced the target, and it becomes the new
+            // producer of the target. This arm did not exist, so the whole
+            // statement was invisible -- measured on `--emit-coprocessor`,
+            // `b = bvh_traverse(a)` gave RT 2 / cross-pipe 1 / 412 cycles and
+            // `b += bvh_traverse(a)` gave RT 1 / cross-pipe **0** / 212. Zero
+            // cross-pipe edges tells the scheduler the tensor consumer has no
+            // dependency on the RT producer, and overlapping those two
+            // pipelines is the entire purpose of this pass.
+            Stmt::CompoundAssign { target, value, span, .. } => {
+                let (pipeline, label) = self.classify_expr(value);
+                let cycles = self.estimate_expr_cycles(value, pipeline);
+                let node_id =
+                    self.graph
+                        .alloc_node(pipeline, label, span.clone(), cycles);
+                self.apply_mappings(node_id, value);
+                self.wire_expr_dependencies(node_id, value);
+                // the read of the old value is a real dependency
+                self.wire_expr_dependencies(node_id, target);
+                if let Expr::Ident(name, _) = target {
+                    self.var_producers.insert(name.clone(), node_id);
+                }
+            }
+            // A match arm's body is an ordinary expression and may hold an RT
+            // or Tensor op. Not walking them made the op absent from the graph
+            // entirely (RT 2 -> 1 on a probe), which is the same hole the
+            // linear tracker had for `match`: every sibling control-flow
+            // statement was wired and this one was not.
+            Stmt::Match { scrutinee, arms, .. } => {
+                let (pipeline, label) = self.classify_expr(scrutinee);
+                let cycles = self.estimate_expr_cycles(scrutinee, pipeline);
+                let node_id = self.graph.alloc_node(
+                    pipeline, label, scrutinee.span().clone(), cycles);
+                self.wire_expr_dependencies(node_id, scrutinee);
+                for arm in arms {
+                    self.analyze_expr_as_node(&arm.body);
+                }
+            }
+            // `return f(x)` -- the expression still executes.
+            Stmt::Return(Some(expr), _) => self.analyze_expr_as_node(expr),
+            Stmt::Return(None, _) => {}
+            // Every other block-carrying statement above is walked; this one
+            // was skipped, so a `@clock_domain` body was invisible.
+            Stmt::ClockDomainBlock { body, .. } => self.analyze_block(body),
+            // Genuinely nothing to graph, written out so that adding a Stmt
+            // variant is a compile error rather than a silently dropped
+            // dependency. `Break` transfers control and computes nothing;
+            // the other two are erased before codegen.
+            Stmt::Break { .. } => {}
+            Stmt::TypeAlias { .. } => {}
+            Stmt::CompileTimeAssert { .. } => {}
         }
+    }
+
+    /// Allocate a node for a free-standing expression and wire its inputs.
+    fn analyze_expr_as_node(&mut self, expr: &Expr) {
+        let (pipeline, label) = self.classify_expr(expr);
+        let cycles = self.estimate_expr_cycles(expr, pipeline);
+        let node_id =
+            self.graph
+                .alloc_node(pipeline, label, expr.span().clone(), cycles);
+        self.apply_mappings(node_id, expr);
+        self.wire_expr_dependencies(node_id, expr);
     }
 
     /// Classify an expression into its target pipeline.
@@ -549,7 +610,106 @@ impl DependencyGrapher {
             Expr::UnaryOp { operand, .. } => {
                 self.wire_expr_dependencies(consumer, operand);
             }
-            _ => {}
+            // The four sub-expression carriers this walk used to drop. Each one
+            // can hold an `Ident` naming a produced variable, and a dropped
+            // Ident is a dependency edge that never gets built -- the consumer
+            // is then free to be scheduled before its producer. `StructLit` is
+            // the same variant that hid the `takes_reference` gap in the type
+            // checker; a value reaching a callee through a field is still a
+            // read of that value.
+            Expr::GenericCall { args, .. } => {
+                for arg in args {
+                    self.wire_expr_dependencies(consumer, arg);
+                }
+            }
+            Expr::MemberAccess { base, .. } => {
+                self.wire_expr_dependencies(consumer, base);
+            }
+            Expr::StructLit { fields, .. } => {
+                for (_, value) in fields {
+                    self.wire_expr_dependencies(consumer, value);
+                }
+            }
+            Expr::BlockExpr(block, _) => {
+                for stmt in &block.stmts {
+                    self.wire_stmt_dependencies(consumer, stmt);
+                }
+            }
+            // Leaves: no sub-expression, so nothing to wire. Written out with
+            // no `_ =>` arm so a new Expr variant is a compile error here.
+            Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::BoolLit(..)
+            | Expr::CharLit(..)
+            | Expr::StringLit(..)
+            | Expr::SelfLit(..)
+            | Expr::ZeroInit(..)
+            | Expr::Path { .. } => {}
+        }
+    }
+
+    /// Wire the reads performed by a statement inside a block expression.
+    ///
+    /// Only the reads: a nested statement's *writes* are not registered as
+    /// producers, because `wire_expr_dependencies` is called while building one
+    /// consumer node and has no node of its own to attribute them to. Over-
+    /// approximating the reads is the safe direction -- an extra edge delays a
+    /// node, a missing one lets it run early.
+    fn wire_stmt_dependencies(&mut self, consumer: NodeId, stmt: &Stmt) {
+        match stmt {
+            Stmt::Let { init, .. } => {
+                if let Some(e) = init {
+                    self.wire_expr_dependencies(consumer, e);
+                }
+            }
+            Stmt::Assign { target, value, .. } => {
+                self.wire_expr_dependencies(consumer, target);
+                self.wire_expr_dependencies(consumer, value);
+            }
+            Stmt::CompoundAssign { target, value, .. } => {
+                self.wire_expr_dependencies(consumer, target);
+                self.wire_expr_dependencies(consumer, value);
+            }
+            Stmt::Expr(e) => self.wire_expr_dependencies(consumer, e),
+            Stmt::Return(Some(e), _) => self.wire_expr_dependencies(consumer, e),
+            Stmt::Return(None, _) => {}
+            Stmt::If { condition, then_block, else_block, .. } => {
+                self.wire_expr_dependencies(consumer, condition);
+                for st in &then_block.stmts {
+                    self.wire_stmt_dependencies(consumer, st);
+                }
+                if let Some(eb) = else_block {
+                    for st in &eb.stmts {
+                        self.wire_stmt_dependencies(consumer, st);
+                    }
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                for st in &body.stmts {
+                    self.wire_stmt_dependencies(consumer, st);
+                }
+            }
+            Stmt::Match { scrutinee, arms, .. } => {
+                self.wire_expr_dependencies(consumer, scrutinee);
+                for arm in arms {
+                    self.wire_expr_dependencies(consumer, &arm.body);
+                }
+            }
+            Stmt::SafeBlock(b, _)
+            | Stmt::GhostBlock(b, _)
+            | Stmt::Chisel(b, _) => {
+                for st in &b.stmts {
+                    self.wire_stmt_dependencies(consumer, st);
+                }
+            }
+            Stmt::HintBlock { body, .. } | Stmt::ClockDomainBlock { body, .. } => {
+                for st in &body.stmts {
+                    self.wire_stmt_dependencies(consumer, st);
+                }
+            }
+            Stmt::Break { .. } => {}
+            Stmt::TypeAlias { .. } => {}
+            Stmt::CompileTimeAssert { .. } => {}
         }
     }
 
