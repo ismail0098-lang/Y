@@ -12,6 +12,13 @@ The reference implementations below are deliberate transcriptions of the code
 as it stood *before* the optimisation - float64 everywhere, K/V widened with
 `repeat_interleave`, one matmul for `p @ V`. They are slow on purpose.
 
+## It runs without a GPU, partially
+
+Ten of the thirteen checks need only torch, so `python3 tools/exact_selftest.py`
+on a CPU box runs those and says which four it skipped. It used to print
+"SKIP: no CUDA" and exit 0 having checked nothing - a green exit that is exactly
+the failure the next paragraph is about.
+
 ## Every check has a control
 
 The repo's own history is full of tests that passed with the mechanism deleted
@@ -523,29 +530,118 @@ def check_batch_invariance(dev, fail):
     Row 0 of a batch of identical rows must equal the batch-of-one answer, for
     every batch size. This is not implied by agreeing with the float64
     reference - the reference could be batch-dependent too.
+
+    Two batch-shape dependencies exist inside the exact path and the first
+    version of this check exercised neither, because it ran at one fixed
+    `T = 96`:
+
+      * the GEMM tiles differently at a different row count (varied by `b`), and
+      * `exact_pv` picks its digit width from the PADDED key length, so a
+        sequence's own answer depends on what the rest of the batch made `T`.
+        The boundaries are at T = 519, 1041, 2097, 4262 for V_LEVELS=127.
+
+    The second is the interesting one and the ragged case below is what reaches
+    it: the same 400-key sequence is answered alone (width 8) and inside a batch
+    padded to 600 (width 7), and must give the same bits.
+
+    **This is NOT the gate on the digit-width derivation, and it must not be
+    mistaken for one.** Measured by forcing a too-wide digit on the padded side
+    only, at this shape: widths 7, 10, 12 and 14 all still produce a
+    bit-identical row 0, and the output only moves at 16 (7 of 896 elements,
+    7.5e-9). The bound `T * (2^dbits - 1) * V_LEVELS < 2^24` is worst-case, and
+    a real softmax's weights are nowhere near 2^28 except at the argmax, so an
+    off-by-one in `digit_width` is invisible from here. `check_pv` and
+    `check_pv_bound_is_load_bearing` are the gate - they use uniform random `p`
+    up to the inclusive bound, which is the worst case. Do not "strengthen" this
+    check by moving that coverage into it; it would be a weaker test wearing the
+    same name.
+
+    Mutation-verified over the three masking sites in `exact_attention`:
+
+      * including padded keys in the softmax MAX - caught, by 2 checks.
+      * not forcing blocked positions to `tq = 2^30`, and deleting the
+        `p = where(blocked, 0, p)` that follows it - **neither is caught alone,
+        because each masks the other**; the exp already returns 0 for
+        `tq = 2^30`, and the zeroing already covers a missing clamp. Remove BOTH
+        and part (b) fails on all three pad lengths (deltas 0.15-0.39) while
+        part (a) stays green. So the pair is genuine defence in depth, the
+        harness cannot separate them, and the ragged case is what sees them at
+        all.
     """
     torch.manual_seed(7)
-    nh, nkv, d, T = 14, 2, 64, 96
-    q1 = torch.randn(1, nh, 1, d, device=dev)
-    k1 = torch.randn(1, nkv, T, d, device=dev)
-    v1 = torch.randn(1, nkv, T, d, device=dev)
-    base = D.exact_attention(None, q1, k1, v1, None)[0]
-    for b in (2, 3, 8, 17, 32, 64):
-        o = D.exact_attention(None, q1.repeat(b, 1, 1, 1), k1.repeat(b, 1, 1, 1),
-                              v1.repeat(b, 1, 1, 1), None)[0]
-        if not torch.equal(base[0], o[0]):
-            fail(f"row 0 changed at batch {b}: {(base[0] - o[0]).abs().max():.3e}")
-    return "attention row 0 is bit-identical at batch 1, 2, 3, 8, 17, 32, 64"
+    nh, nkv, d = 14, 2, 64
+    # (a) identical rows, several batch sizes, on both sides of a digit-width
+    #     boundary so the two arms do not always take the same path.
+    for T in (96, 400, 600, 1100):
+        q1 = torch.randn(1, nh, 1, d, device=dev)
+        k1 = torch.randn(1, nkv, T, d, device=dev)
+        v1 = torch.randn(1, nkv, T, d, device=dev)
+        base = D.exact_attention(None, q1, k1, v1, None)[0]
+        for b in (2, 3, 8, 17, 32, 64):
+            o = D.exact_attention(None, q1.repeat(b, 1, 1, 1),
+                                  k1.repeat(b, 1, 1, 1),
+                                  v1.repeat(b, 1, 1, 1), None)[0]
+            if not torch.equal(base[0], o[0]):
+                fail(f"T={T}: row 0 changed at batch {b}: "
+                     f"{(base[0] - o[0]).abs().max():.3e}")
+
+    # (b) the production-shaped case: a sequence padded to a NEIGHBOUR's length,
+    #     crossing a digit-width boundary, with the padding masked out.
+    for (t_true, t_pad) in ((400, 600), (500, 1100), (96, 600)):
+        q = torch.randn(1, nh, 1, d, device=dev)
+        k = torch.randn(1, nkv, t_true, d, device=dev)
+        v = torch.randn(1, nkv, t_true, d, device=dev)
+        alone = D.exact_attention(None, q, k, v, None)[0]
+
+        kb = torch.randn(2, nkv, t_pad, d, device=dev)
+        vb = torch.randn(2, nkv, t_pad, d, device=dev)
+        kb[0, :, :t_true], vb[0, :, :t_true] = k[0], v[0]
+        qb = torch.randn(2, nh, 1, d, device=dev)
+        qb[0] = q[0]
+        mask = torch.zeros(2, 1, 1, t_pad, device=dev)
+        mask[0, :, :, t_true:] = torch.finfo(torch.float32).min
+        batched = D.exact_attention(None, qb, kb, vb, mask)[0]
+        if not torch.equal(alone[0], batched[0]):
+            fail(f"a {t_true}-key sequence answered differently when padded to "
+                 f"{t_pad} (digit width {D.digit_width(t_true)} vs "
+                 f"{D.digit_width(t_pad)}): "
+                 f"{(alone[0] - batched[0]).abs().max():.3e}")
+    return ("attention row 0 is bit-identical across 6 batch sizes at 4 key "
+            "lengths, and across 3 pad-to-neighbour lengths")
+
+
+# Which checks need a GPU, and which only ever needed torch.
+#
+# This file used to print "SKIP: no CUDA" and `return 0` -- a GREEN EXIT that
+# checked nothing, on every machine without a GPU. That is the same failure the
+# header warns about two paragraphs up: a check that cannot fail. Ten of the
+# thirteen run on CPU, including `check_batch_invariance`, which is the property
+# the whole project is about.
+#
+# The four that genuinely cannot: three launch Triton kernels, and
+# `check_pad_is_load_bearing` asserts that `torch._int_mm` REFUSES M=1 -- a
+# CUDA-specific restriction the padding exists to work around. On CPU it does
+# not refuse, so running it there reports a failure that says nothing about the
+# GPU path.
+NEEDS_GPU = {
+    "check_quantiser_at_volume",
+    "check_all_gemm_configs_agree",
+    "check_hilo_gemm_configs_agree",
+    "check_pad_is_load_bearing",
+}
 
 
 def main():
-    if not torch.cuda.is_available():
-        print("SKIP: no CUDA")
-        return 0
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    have_cuda = torch.cuda.is_available()
+    dev = "cuda" if have_cuda else "cpu"
+    if have_cuda:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    else:
+        print("no CUDA: running the device-independent checks on CPU.")
+        print("This is a PARTIAL gate -- the Triton GEMM and the _int_mm "
+              "padding are not covered.\n")
     torch.manual_seed(0)
-    dev = "cuda"
     bad = []
     checks = [check_exp2, check_pv, check_pv_bound_is_load_bearing,
               check_linear, check_bias_is_not_fused, check_quantiser_at_volume,
@@ -553,6 +649,10 @@ def main():
               check_digit_split_is_exact, check_hilo_gemm_configs_agree,
               check_attention,
               check_kv_cache_matches_stateless, check_batch_invariance]
+    skipped = 0
+    if not have_cuda:
+        checks = [f for f in checks if f.__name__ not in NEEDS_GPU]
+        skipped = len(NEEDS_GPU)
     for fn in checks:
         errs = []
         try:
@@ -571,6 +671,11 @@ def main():
     if bad:
         print(f"{len(bad)} FAILURES - the fast path is not the same function")
         return 1
+    if skipped:
+        print(f"{len(checks)} checks passed on CPU; {skipped} GPU-only checks "
+              f"were not run.")
+        print("Run this on a CUDA box before believing the whole claim.")
+        return 0
     print("The optimised exact path computes exactly the same function as the "
           "float64 reference,\nand is batch-invariant on its own account.")
     return 0
