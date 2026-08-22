@@ -381,12 +381,20 @@ impl ScalarTy {
     }
 
     /// Element size in bytes - i.e. the stride of an array of this type.
+    ///
+    /// **Exhaustive on purpose, with no `_` arm.** The `_ => 4` this replaced
+    /// was correct for every variant that existed when it was written, and
+    /// that is exactly the problem: adding `F16` or `F64` to `ScalarTy` would
+    /// have given it a 4-byte stride silently, which is gotcha #7's bug -- an
+    /// index scaled by the wrong power of two, in PTX that assembles and
+    /// launches. A compile error is the cheapest possible version of that
+    /// conversation.
     fn bytes(self) -> u32 {
         match self {
             ScalarTy::U8 | ScalarTy::I8 => 1,
             ScalarTy::U16 | ScalarTy::I16 => 2,
+            ScalarTy::F32 | ScalarTy::U32 | ScalarTy::I32 => 4,
             ScalarTy::U64 | ScalarTy::I64 => 8,
-            _ => 4,
         }
     }
 
@@ -401,8 +409,9 @@ impl ScalarTy {
         match self.bytes() {
             1 => 0,
             2 => 1,
+            4 => 2,
             8 => 3,
-            _ => 2,
+            other => unreachable!("no power-of-two shift for a {other}-byte element"),
         }
     }
 

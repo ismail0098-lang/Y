@@ -83,7 +83,7 @@ impl CpuEmitter {
         self.host_buffer.clone()
     }
 
-    fn emit_type(&self, ty: &Type) -> String {
+    fn emit_type(&mut self, ty: &Type) -> String {
         match ty {
             Type::Primitive(name, _) => {
                 match name.as_str() {
@@ -123,10 +123,13 @@ impl CpuEmitter {
             }
             Type::Array { element, size, .. } => {
                 let elem_str = self.emit_type(element);
+                // `_ => "0"` used to live here, and a zero-length array is not
+                // a conservative default -- it is a different type, whose every
+                // element access is out of bounds. Rust accepts `[f32; 0]`.
                 let size_str = match size.as_ref() {
                     Expr::IntLit(v, _) => v.to_string(),
                     Expr::Ident(s, _) => s.clone(),
-                    _ => "0".into(),
+                    other => self.unsupported_type_size("an array length", other),
                 };
                 format!("[{}; {}]", elem_str, size_str)
             }
@@ -140,10 +143,12 @@ impl CpuEmitter {
             }
             Type::BlockTile { element, size, .. } => {
                 let elem_str = self.emit_type(element);
+                // Same shape as the array arm, with a magic 128 instead of a
+                // magic 0 -- a tile that is not the size the source asked for.
                 let size_str = match size.as_ref() {
                     Expr::IntLit(v, _) => v.to_string(),
                     Expr::Ident(s, _) => s.clone(),
-                    _ => "128".into(),
+                    other => self.unsupported_type_size("a `BlockTile` size", other),
                 };
                 format!("[{}; {}]", elem_str, size_str)
             }
@@ -411,6 +416,21 @@ impl CpuEmitter {
             "[CPU Backend] {} (line {}, col {}) cannot be lowered to host code.",
             what, span.line, span.col
         ));
+    }
+
+    /// A length or size expression the host backend cannot evaluate.
+    ///
+    /// Refusing is the only sound answer: a length is part of the TYPE, so a
+    /// guessed one produces a different type that still compiles. The two
+    /// call sites used to guess `0` and `128`.
+    fn unsupported_type_size(&mut self, what: &str, expr: &Expr) -> String {
+        let sp = expr.span();
+        self.emit_errors.push(format!(
+            "[CPU Backend] {} (line {}, col {}) is not a literal or a named \
+             constant, so the host type cannot be built.",
+            what, sp.line, sp.col
+        ));
+        "/* unsupported size */".into()
     }
 
     fn unsupported_expr(&mut self, what: &str, span: &Span) -> String {

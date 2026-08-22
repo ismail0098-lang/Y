@@ -2002,7 +2002,7 @@ impl TypeChecker {
                     SemanticType::Unknown
                 }
             }
-            Type::Generic { base, args, .. } => {
+            Type::Generic { base, args, span, .. } => {
                 if base == "Fragment" && args.len() >= 3 {
                     let mut op = "Unknown".to_string();
                     let mut role = "Unknown".to_string();
@@ -2078,17 +2078,31 @@ impl TypeChecker {
 
                 if base == "BlockTile" {
                     let mut elem_resolved = SemanticType::Primitive("F32".into());
-                    let mut sz = 128;
                     if !args.is_empty() {
                         if let GenericArg::Type(t) = &args[0] {
                             elem_resolved = self.resolve_type(t);
                         }
                     }
-                    if args.len() >= 2 {
-                        if let GenericArg::Value(Expr::IntLit(v, _)) = &args[1] {
-                            sz = *v as usize;
+                    // A tile's SIZE is part of its type, and `SemanticType`
+                    // derives `PartialEq`, so `types_are_compatible` compares
+                    // it. A guessed size therefore does not merely lose
+                    // information -- it makes two differently-sized tiles
+                    // compare EQUAL, and an assignment between them legal.
+                    // This used to default to 128 for a missing or
+                    // non-literal argument.
+                    let sz = match args.get(1) {
+                        Some(GenericArg::Value(Expr::IntLit(v, _))) => *v as usize,
+                        _ => {
+                            self.errors.push(format!(
+                                "Line {}: a `BlockTile` needs a literal size as its \
+                                 second generic argument; a size the compiler cannot \
+                                 evaluate would make tiles of different sizes compare \
+                                 equal.",
+                                span.line
+                            ));
+                            return SemanticType::Unknown;
                         }
-                    }
+                    };
                     return SemanticType::BlockTile {
                         element: Box::new(elem_resolved),
                         size: sz,
@@ -2110,10 +2124,22 @@ impl TypeChecker {
             }
             Type::BlockTile { element, size, .. } => {
                 let elem_resolved = self.resolve_type(element);
-                let mut sz = 128;
-                if let Expr::IntLit(val, _) = &**size {
-                    sz = *val as usize;
-                }
+                // See the `BlockTile` path in the generic-application arm
+                // above: a guessed size is not a lossy answer, it is a wrong
+                // type-equality.
+                let sz = match &**size {
+                    Expr::IntLit(val, _) => *val as usize,
+                    other => {
+                        let sp = other.span();
+                        self.errors.push(format!(
+                            "Line {}: a `BlockTile` size must be a literal; a size \
+                             the compiler cannot evaluate would make tiles of \
+                             different sizes compare equal.",
+                            sp.line
+                        ));
+                        return SemanticType::Unknown;
+                    }
+                };
                 SemanticType::BlockTile {
                     element: Box::new(elem_resolved),
                     size: sz,
