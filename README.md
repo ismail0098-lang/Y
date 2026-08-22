@@ -842,6 +842,13 @@ recovers 102%. And the winning fix does not fight the invariant, where group
 scales would have — they recombine partial sums with *float* weights, which is
 the exact thing being prevented.
 
+**You can check most of this without a GPU.** `python3 tools/exact_selftest.py`
+runs 9 of its 13 checks on CPU — including batch invariance itself — and names
+the four it skips (three launch Triton, one asserts a CUDA-specific `_int_mm`
+refusal). It used to print `SKIP: no CUDA` and exit 0 having checked nothing.
+`python3 tools/exact_bounds_check.py` needs only z3 and runs all 22 of its
+checks on CPU.
+
 **The exactness argument is machine-checked.** `tools/exact_bounds_check.py`
 puts every bound to Z3 and then exhausts the real selectors rather than
 transcriptions of them. Checking the conjunction rather than each bound alone
@@ -903,8 +910,19 @@ checked against themselves, and a checker asserting a copy of the rule it was
 checking. None of those changed a number above; all four changed what the
 numbers are worth.
 
+**A note on how the caveats above were found.** Five of the nine findings in the
+write-up are not about the kernels at all — they are about the tooling that
+measures them: a differential whose two arms shared a wrong constant and so
+agreed perfectly on a uniform softmax; two implementations checked against
+transcriptions of themselves rather than against the compiler; a checker
+asserting a copy of the rule it was checking; an acceptance harness that exited
+0 on any machine without a GPU; and a coverage claim that turned out to rest on
+a code path the test could not fail on. None of them moved a number. All of them
+changed what the numbers are worth, which is the reason they are written down at
+the same length as the results.
+
 Full write-ups: [bit-identical decode](docs/bit_identical_decode.md) (findings,
-controls, and eight bugs found by turning this process on the tooling itself)
+controls, and the bugs found by turning this process on the tooling itself)
 and [deterministic inference](docs/deterministic_inference.md) (the design).
 
 ---
