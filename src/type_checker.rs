@@ -54,6 +54,13 @@ pub enum SemanticType {
     },
     TransferObligation,
     Pipeline,
+    /// `&T` / `&mut T`. This used to resolve to `Unknown`, and `Unknown` is
+    /// exempted from the assignment mismatch check, so `let r: &F32 = &x;`
+    /// with `x: I32` compiled clean.
+    Reference {
+        inner: Box<SemanticType>,
+        mutable: bool,
+    },
     Unknown,
 }
 
@@ -1929,7 +1936,28 @@ impl TypeChecker {
                 }
                 let operand_ty = self.check_expr(operand);
                 self.reject_transfer_escape(&operand_ty, &operand.span(), "in a unary expression");
-                SemanticType::Unknown
+                // Every unary expression used to be `Unknown`, which is the
+                // same hole as `Type::Reference` above and had to be closed
+                // with it: fixing only the annotation leaves the initialiser
+                // untyped, and `Unknown` on EITHER side suppresses the
+                // mismatch check. `&x` is what makes an annotated reference
+                // binding checkable at all.
+                match op {
+                    crate::ast::UnaryOp::Neg | crate::ast::UnaryOp::Not => operand_ty,
+                    crate::ast::UnaryOp::Ref => SemanticType::Reference {
+                        inner: Box::new(operand_ty),
+                        mutable: false,
+                    },
+                    // Dereferencing a reference yields what it points at.
+                    // A raw pointer is NOT a `Reference` here and stays
+                    // `Unknown` -- it is already refused outside `unsafe`, and
+                    // widening this arm would start reporting type errors in
+                    // `unsafe` code that nothing has ever checked.
+                    crate::ast::UnaryOp::Deref => match operand_ty {
+                        SemanticType::Reference { inner, .. } => *inner,
+                        _ => SemanticType::Unknown,
+                    },
+                }
             }
             Expr::BlockExpr(block, _) => {
                 self.check_block(block);
@@ -2145,10 +2173,10 @@ impl TypeChecker {
                     size: sz,
                 }
             }
-            Type::Reference { .. } => {
-                // Reference types not yet semantically checked in prototype
-                SemanticType::Unknown
-            }
+            Type::Reference { inner, mutable, .. } => SemanticType::Reference {
+                inner: Box::new(self.resolve_type(inner)),
+                mutable: *mutable,
+            },
         }
     }
 
