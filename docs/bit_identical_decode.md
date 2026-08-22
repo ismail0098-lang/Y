@@ -541,6 +541,33 @@ unavoidable in a softmax.
 
 ---
 
+### Finding 12, resolved: the exp IS measured across two architectures now
+
+Written while a background job held the card, run once it was free. The device
+test was a ~100k structured sample; the reachable domain is 1,966,080 arguments
+and 8 MB in each direction, so there was no reason to sample it. Exhaustively:
+
+    device == host on all 1,966,085 arguments, bit for bit
+    846,328 distinct results, so the agreement is not over a constant
+
+**x86-64 against sm_89 is a wider architectural gap than two NVIDIA cards.** For
+this kernel the cross-architecture claim is measured rather than argued, and the
+degeneracy control rides along in the same line — the 846,328 figure
+independently matches what `exact_bounds_check.py` computes for the same domain
+in Python, which is two implementations agreeing on the shape of the function as
+well as its values.
+
+The same run prices the alternative: the device's `ex2.approx.f32` against the
+host's `exp2` differs on **46,301 of 100,427** arguments, worst gap 32 ulp of
+Q0.28, and is 32.88 ulp from correctly rounded. That is the instruction a float
+softmax would have to use.
+
+Mutation-verified: flipping a single host value out of 1,966,085 fails it.
+
+What is still unmeasured is the **pipeline**, not the exp — the whole decode path
+producing identical tokens on two different cards. That needs a second GPU and
+stays the headline claim without a measurement.
+
 ## Finding 13 — `0/16` is also what a broken arm scores
 
 Finding 11's fixed-order-float arm read **12/16** on its first run. Two of my own
