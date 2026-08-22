@@ -90,11 +90,29 @@ impl DriftRepr {
     }
 
     /// Fractional bits, for the fixed-point representations.
+    ///
+    /// **Zero means two different things here, and callers branch on it.**
+    /// `llvm_emitter` and `ptx_emitter` both test `repr.frac_bits() == 0` to
+    /// decide whether to emit the scale/unscale pair, so for `Int64` the zero
+    /// is a correct instruction ("accumulate in plain integers"). For the two
+    /// float representations it is meaningless -- they are not fixed point and
+    /// have no fractional-bit count -- and the old `_ => 0` made them
+    /// indistinguishable from `Int64`.
+    ///
+    /// That is latent rather than live: `select_repr` refuses any repr failing
+    /// `is_exact`, so `Float64` and `KahanF32` never reach an emitter. They are
+    /// constructed only so the rejection report can name them. Written out
+    /// exhaustively so that adding a representation is a compile error here
+    /// instead of silently inheriting an integer lowering.
     pub fn frac_bits(self) -> u32 {
         match self {
             DriftRepr::FixedQ16_16 => 16,
             DriftRepr::FixedQ32_32 => 32,
-            _ => 0,
+            // Exact and genuinely has no fractional part.
+            DriftRepr::Int64 => 0,
+            // Not fixed point at all. Reached only by the rejection report,
+            // which prints this beside "not exact"; never by a lowering.
+            DriftRepr::Float64 | DriftRepr::KahanF32 => 0,
         }
     }
 
@@ -197,6 +215,16 @@ impl Requirement {
                     Requirement { max_magnitude: 3.4028235e38, resolution: Some(2f64.powi(-24)) }
                 }
             }
+            // An unrecognised type name gets F32's requirement, and that is
+            // DELIBERATE rather than a guess: no exact representation can hold
+            // 3.4e38 at 2^-24, so an unknown type is REFUSED by `select_repr`
+            // unless `@bounds` narrows it. That is the design rule's first
+            // option -- over-approximate so the obligation becomes harder --
+            // and it is why this arm is not a `smt_unmodellable`-style error.
+            //
+            // Pinned by `an_unknown_type_name_is_refused_not_guessed`, because
+            // a fail-closed default that nothing checks is one edit away from
+            // becoming a fail-open one.
             _ => Requirement { max_magnitude: 3.4028235e38, resolution: Some(2f64.powi(-24)) },
         }
     }
@@ -753,6 +781,50 @@ pub fn parse_costs(contents: &str, gpu: &str) -> CostTable {
 
 #[cfg(test)]
 mod tests {
+    /// The `_ =>` in `Requirement::for_type` is a fail-closed default, and
+    /// nothing checked that it stayed one.
+    ///
+    /// An unrecognised type name inherits F32's requirement. That is only safe
+    /// because no exact representation can hold 3.4e38 at 2^-24, so the unknown
+    /// type is refused rather than accumulated in something too narrow. Both
+    /// halves are asserted: that F32 itself is unsatisfiable (which is the
+    /// property doing the work), and that an unknown name behaves identically.
+    ///
+    /// If someone ever narrows that default -- to F16's range, say -- this
+    /// fails, instead of the compiler quietly accepting a `@ZeroDrift`
+    /// accumulator over a type it could not identify.
+    #[test]
+    fn an_unknown_type_name_is_refused_not_guessed() {
+        let costs = CostTable::new();
+        assert!(
+            select_repr(&Requirement::for_type("F32"), &costs).is_none(),
+            "F32's requirement must be unsatisfiable -- the unknown-type \
+             default leans on exactly that"
+        );
+        for name in ["Widget", "", "Q", "Qx.y", "f80", "I128"] {
+            assert!(
+                select_repr(&Requirement::for_type(name), &costs).is_none(),
+                "an unrecognised type name ({name:?}) must be refused, not \
+                 given a representation chosen for a type nobody identified"
+            );
+        }
+        // The control: the default must not be refusing EVERYTHING, or the
+        // assertions above would hold with `for_type` returning garbage.
+        assert!(
+            select_repr(&Requirement::for_type("I32"), &costs).is_some(),
+            "a type that IS representable must still be accepted"
+        );
+        // And `@bounds` is the documented way to make a wide type work.
+        assert!(
+            select_repr(
+                &Requirement::for_type_with_bounds("F32", Some((-1000.0, 1000.0))),
+                &costs
+            )
+            .is_some(),
+            "@bounds must rescue a declared F32 by stating its real range"
+        );
+    }
+
     use super::*;
 
     /// The central claim: only integer/fixed-point accumulation is exact.
