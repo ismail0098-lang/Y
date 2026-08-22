@@ -137,6 +137,27 @@ fn body(r: &mut Rng, indent: usize, locals: u64, depth: u32) -> (String, u64) {
         out.push_str(&format!("{pad}let v{n}: I32 = ({}) & 65535;\n", arith(r, n)));
         n += 1;
     }
+    // Reassignment and compound assignment, because `zk_emitter::emit_stmt`
+    // handled ten `Stmt` variants and swallowed the rest in `_ => {}` -- so
+    // `x = x + 5;` emitted a constraint and `x += 5;` emitted NOTHING, and the
+    // emitter disagreed with itself about what one program meant. Both spell
+    // the same thing and must give the same answer here.
+    if n > 0 && r.below(2) == 0 {
+        let target = r.below(n);
+        if r.below(2) == 0 {
+            out.push_str(&format!(
+                "{pad}v{target} = (v{target} + {}) & 65535;\n",
+                1 + r.below(40)
+            ));
+        } else {
+            // Only `+=`, `-=` and `*=` exist -- the parser rejects `&=`,
+            // `|=` and `^=` outright. `-=` is excluded here for the same
+            // reason plain subtraction is: it can go negative.
+            let op = ["+=", "*="][r.below(2) as usize];
+            out.push_str(&format!("{pad}v{target} {op} {};\n", 1 + r.below(40)));
+            out.push_str(&format!("{pad}v{target} = v{target} & 65535;\n"));
+        }
+    }
     if depth > 0 && r.below(2) == 0 {
         out.push_str(&format!("{pad}if {} {{\n", condition(r, n)));
         let (inner, n2) = body(r, indent + 1, n, depth - 1);

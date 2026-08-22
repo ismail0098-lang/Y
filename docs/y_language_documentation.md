@@ -1993,7 +1993,7 @@ Y supports configurable prime fields defined via the `@zk_target` module directi
 | `@safe` | Function | Enables safe ZK circuit compilation with SSA wire versioning, bounds checking, and invariant verification. |
 | `@zk_safe` | Module / Block | Enables static soundness analysis (lattice-based taint checking) flagging unconstrained host signals (`error[Z0042]`). |
 | `@unsafe` | Function / Block | Explicitly opts out of static constraint safety checks for unconstrained experimental logic. |
-| `@max_iterations(N)` | `while` Loop | Enforces compile-time finite unrolling bound $N$ for dynamic or static `while` loops. |
+| `@max_iterations(N)` | `while` Loop | **Withdrawn — `while` is refused in ZK circuit mode.** The unrolling it enabled computed the wrong function; see §12.4. Parsed and accepted by other backends. |
 | `@max_depth(N)` | Function | Enforces compile-time recursion depth bound $N$ for monomorphized recursive function calls. |
 | `@bounds(min, max)` | Parameter / Var | Emits active range-check constraints (bit-decomposition) verifying $w_i \in [\text{min}, \text{max}]$. |
 | `@invariant(expr)` | Loop / Block | Verifies logic assertions statically or generates equality constraints inside loops. |
@@ -2017,9 +2017,32 @@ Y eliminates post-processing optimization penalties by performing **single-pass 
 
 ---
 
-### 12.4 Bounded `while` Loops & SSA Active-Mask State Multiplexing
+### 12.4 Bounded `while` Loops — **WITHDRAWN, `while` is refused in ZK mode**
 
-To support control flow without incurring dynamic unrolling security vulnerabilities, Y requires all `while` loops in ZK target mode to specify an explicit `@max_iterations(N)` decorator:
+> **`while` does not compile to a circuit, with or without `@max_iterations(N)`.**
+> The active-mask lowering described in the rest of this section was withdrawn
+> because it computed the wrong function. Measured on
+> `while i < p0 { acc = acc + 3; i = i + 1; }`, solved for `p0 = 0, 1, 2, 3`:
+>
+> | bound | result | correct |
+> |---|---|---|
+> | `@max_iterations(1)` | 3, 3, 3, 3 | **0**, 3, 3, 3 |
+> | `@max_iterations(2)` | 0, 3, 6, 6 | correct |
+> | `@max_iterations(4)` | 0, then unsatisfiable | 0, 3, 6, 9 |
+>
+> The first row is the dangerous one: the body ran although the condition was
+> false on entry, the circuit is **satisfiable**, and Groth16 proves that
+> arithmetic as readily as the right kind. That the middle row is correct is
+> how it survived — `N = 2` is what anyone probes first.
+>
+> **Use a `for` loop**, which is fully unrolled, correct, and checked against
+> the LLVM backend on generated programs by `tests/zk_llvm_differential.rs`.
+> The refusal is pinned by `tests/zk_while_is_refused.rs`.
+>
+> The text below describes the withdrawn design and is kept as the starting
+> point for a correct implementation.
+
+To support control flow without incurring dynamic unrolling security vulnerabilities, Y ~~requires~~ *required* all `while` loops in ZK target mode to specify an explicit `@max_iterations(N)` decorator:
 
 ```ysu
 @max_iterations(100)
