@@ -212,3 +212,65 @@ fn main() {
         "`a.x` reads `a`, so member access must wire an edge"
     );
 }
+
+#[test]
+fn a_dropped_edge_costs_a_sync_barrier_and_a_precision_conversion() {
+    // The graph is not the deliverable -- the SCHEDULE is. `schedule()` walks
+    // `graph.cross_pipeline_edges()` to emit `SyncBarrier`s, and the same loop
+    // decides `needs_quantization`. So a dropped edge does not merely spoil a
+    // cycle estimate: it removes the synchronisation between an RT producer and
+    // a Tensor consumer, AND the FP32 -> FP16 conversion the tensor core needs.
+    // Measured on `--emit-coprocessor` with the fix reverted:
+    //
+    //   b  = bvh_traverse(a);   cross-pipe 1   1 sync barrier (FP32 -> FP16, 16 KB)
+    //   b += bvh_traverse(a);   cross-pipe 0   0 sync barriers
+    //
+    // A race and a type reinterpretation, from writing `+=` instead of `=`.
+    // No device is required: `HardwareProfile::default()` is enough, because
+    // the barrier COUNT depends on the graph, not on the timings.
+    fn barriers(src: &str) -> (usize, usize) {
+        let tokens = y::lexer::Lexer::new(src).tokenize();
+        let prog = y::parser::Parser::new(tokens)
+            .parse_program()
+            .expect("probe did not parse");
+        let mut g = DependencyGrapher::new();
+        let graph = g.analyze_program(&prog).clone();
+        let hw = y::sentinel::HardwareProfile::default();
+        let mut s = y::coprocessor_scheduler::CoprocessorScheduler::new();
+        s.schedule(&graph, &hw);
+        let quantising = s
+            .schedule
+            .sync_barriers
+            .iter()
+            .filter(|b| b.needs_quantization)
+            .count();
+        (s.schedule.sync_barriers.len(), quantising)
+    }
+
+    let assign = r#"
+@unsafe
+fn main() {
+    let a: I32 = rt_nearest_neighbor(128, 8);
+    let b: I32 = 0;
+    b = bvh_traverse(a);
+    let frag_A: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(b);
+}
+"#;
+    let compound = assign.replace("b = bvh_traverse(a);", "b += bvh_traverse(a);");
+
+    let want = barriers(assign);
+    // Control: the `=` form must actually produce a barrier, or "the two agree"
+    // is satisfied by a scheduler that emits none for anything.
+    assert_eq!(
+        want,
+        (1, 1),
+        "the `=` form must emit one barrier, and it must be the quantising one"
+    );
+    assert_eq!(
+        barriers(&compound),
+        want,
+        "`+=` must schedule the same barriers as `=`; dropping them leaves the \
+         Tensor consumer reading the RT producer's shared memory unsynchronised \
+         and unconverted"
+    );
+}
