@@ -445,18 +445,47 @@ the pipeline so less data crosses the RT/Tensor boundary at once.",
         first_mma: &mut bool,
         barrier: Option<&SyncBarrier>,
     ) {
+        // The `_ => ("f16", "f32")` that used to close this match is the design
+        // rule's shape in an emitter: an unhandled precision pair became an f16
+        // MMA, so INT8 or FP8 operands would be read as halves and the emitted
+        // kernel would compute nonsense from well-formed PTX.
+        //
+        // It is UNREACHABLE today, and that is stated rather than assumed:
+        // `TensorCoreMapping` is constructed at exactly one site
+        // (`ir_grapher.rs`, `input_precision: Precision::FP16`), three of the
+        // four callers below hardcode `(FP16, FP32)`, and the fourth forwards
+        // that mapping. So this is a landmine, not a live bug -- which is
+        // precisely when closing it is free.
+        //
+        // Refusing is also the honest answer for a second reason: `a_bytes` and
+        // `b_bytes` below are `m * k * 2`, hardcoding a 2-byte element. Adding
+        // INT8 needs those offsets and the `ldmatrix` shapes changed too, so a
+        // new row in this table alone would still be wrong.
         let (in_type, acc_type) = match (input_prec, acc_prec) {
             (Precision::FP16, Precision::FP32) => ("f16", "f32"),
             (Precision::BF16, Precision::FP32) => ("bf16", "f32"),
             (Precision::TF32, Precision::FP32) => ("tf32", "f32"),
             (Precision::FP16, Precision::FP16) => ("f16", "f16"),
-            _ => ("f16", "f32"),
+            (i, a) => panic!(
+                "co-processor MMA has no lowering for {i:?} inputs with a {a:?}                  accumulator. This used to emit an f16 MMA instead, which                  assembles and computes the wrong thing. Adding it means the                  type suffix AND the m*k*2 shared-memory offsets AND the                  ldmatrix fragment shapes, not just a row in this table."
+            ),
         };
 
         let latency = match input_prec {
             Precision::FP16 => hw.hmma_f16_latency_cycles,
+            Precision::BF16 => hw.hmma_f16_latency_cycles,
             Precision::TF32 => hw.tf32_latency_cycles,
-            _ => hw.hmma_f16_latency_cycles,
+            // A cost-model fallback, not a codegen one: the pairs that reach
+            // here are already filtered by the match above, so this only ever
+            // sees FP16/BF16/TF32. Written out so a new row there is a compile
+            // error here as well.
+            Precision::FP32
+            | Precision::FP8
+            | Precision::FP4
+            | Precision::INT8
+            | Precision::INT4 => unreachable!(
+                "unsupported precision reached the latency model after the                  type match refused it"
+            ),
         };
 
         // Zero-initialize accumulator on first MMA
