@@ -2137,6 +2137,41 @@ impl TypeChecker {
                     };
                 }
 
+                // An unrecognised generic base is REFUSED rather than resolved
+                // to `Unknown`. `Unknown` is not a neutral answer here: the
+                // `let` arm adopts the annotation and the assignment arm skips
+                // the mismatch check, and downstream `llvm_emitter::emit_type`
+                // ends its `Type::Generic` match with `_ => "ptr"`. So
+                // `let a: Nonsense<F32, 8> = ...` compiled clean and became a
+                // POINTER -- a legal LLVM type, so nothing further could
+                // object. (The `Type::Ident` spelling of the same typo is at
+                // least caught eventually, by clang, as "Cannot allocate
+                // unsized type" pointing at generated IR rather than at the
+                // user's line.)
+                //
+                // The list is every base any part of this compiler models. It
+                // is deliberately a whitelist: a new generic type must be
+                // taught to the checker before it can be written, which is the
+                // opposite of the previous arrangement.
+                const KNOWN_GENERIC_BASES: [&str; 9] = [
+                    "Vec",
+                    "Option",
+                    "Box",
+                    "GlobalMemory",
+                    "SharedMemory",
+                    "SmemLayout",
+                    "Fragment",
+                    "Transfer",
+                    "BlockTile",
+                ];
+                if !KNOWN_GENERIC_BASES.contains(&base.as_str()) {
+                    self.errors.push(format!(
+                        "Line {}: unknown generic type `{}`. Known generic types are: {}.",
+                        span.line,
+                        base,
+                        KNOWN_GENERIC_BASES.join(", ")
+                    ));
+                }
                 SemanticType::Unknown
             }
             Type::Array { element, size, .. } => {
