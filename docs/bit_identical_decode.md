@@ -769,6 +769,54 @@ loop is a compile-time-bounded `for` over `ceil(29/dbits)` steps.
 `_w8a8_gemm`'s 145 launches are ~6 per layer, i.e. one per linear. That is not
 redundancy, it is the work; its 8.54 us each is arithmetic, not overhead.
 
+## The first kernel taken off the prototype: `exact_pv`
+
+The census said `exact_pv`'s digit loop was 96 of 748 launches per decode step
+and the plan was to fuse four matmuls into one. **The better answer is that they
+should not exist.** The split is a workaround for the *accumulator* -- a Q0.28
+weight times an int8 activation is 35 bits and an fp32 mantissa holds 24 -- and
+a kernel accumulating in int64 has nothing to split.
+
+`tests/exact_pv.ysu`: 21 registers, zero spill, zero local. Measured against the
+digit split at batch 32 x 14 KV heads = 448 rows, head_dim 64, best of 30-40
+interleaved rounds (`tools/exact_pv_bridge.py`), **bit-identical at every key
+length**:
+
+| T | dbits | matmuls | kernel alone | with the cast charged |
+|---|---|---|---|---|
+| 67 | 8 | 4 | 3.9–5.1x | ~3.0x |
+| 1024 | 7 | 5 | 4.0–6.4x | 2.3–2.7x |
+| 4096 | 5 | 6 | **4.66x** | **2.50x** |
+
+T = 4096 reproduced to three digits across three runs; the small-T rows vary
+because the kernels are 0.03–0.3 ms and this machine's absolute timings drift
+between windows. Read the interleaved ratios, not the milliseconds.
+
+### Two columns, because the first version of this benchmark was biased both ways
+
+`quantize_rows` returns `vi` as **float32 carrying integers in [-127, 127]**, so
+the digit split consumes it with no conversion. The first version of the tool
+built `v` as int64 and converted *inside the timed digit arm* -- charging it for
+work the model never does -- while letting the Y arm skip the float32 -> int8
+cast it genuinely owes. That inflated the result to 4.2–6.7x. Both are priced
+now, separately, the way the MSM numbers separate cold from fixed-base from
+kernel.
+
+**The cast is not a rounding error: 0.945 ms against the kernel's 1.095 at
+T = 4096, i.e. 86% of the kernel again.** Which points at something bigger than
+this kernel -- `vi` is a tensor of small integers stored at four bytes each, so
+the KV cache moves four times the bytes it needs to. A genuinely int8 cache
+deletes the cast *and* three quarters of the read traffic. That is a change to
+the cache, not to this comparison, and it is now the ranked next item.
+
+### And it moves a documented ceiling
+
+The fp32 route needs `T * 2^28 * V_LEVELS < 2^53` overall, which is 264k tokens
+at `V_LEVELS = 127`. Accumulating in int64 needs `< 2^63`: about **2.7e8
+tokens**. The hard context ceiling recorded in
+[[feedback-check-bound-conjunctions-with-z3]] was a property of the accumulator,
+not of the method.
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
