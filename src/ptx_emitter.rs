@@ -1446,8 +1446,14 @@ impl PtxEmitter {
         // below - see that computation's doc comment for why this matters.
         let tile_gemm_threads_per_cta = if let Some((m, n, k, a_ptr, b_ptr, c_ptr, bias_ptr)) = self.tile_gemm_operands(kernel) {
             Some(self.emit_tensor_core_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &c_ptr, bias_ptr.as_deref(), hw_profile, &kernel.name))
+        } else if let Some((m, n, k, a, b, sa, sb, bi, c)) =
+            self.tile_gemm_int8_scaled_operands(kernel)
+        {
+            Some(self.emit_int8_gemm_kernel(
+                m, n, k, &a, &b, &c, &kernel.name, Some((&sa, &sb, &bi)),
+            ))
         } else if let Some((m, n, k, a_ptr, b_ptr, c_ptr)) = self.tile_gemm_int8_operands(kernel) {
-            Some(self.emit_int8_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &c_ptr, &kernel.name))
+            Some(self.emit_int8_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &c_ptr, &kernel.name, None))
         } else if let Some((m, n, k, a_ptr, b_ptr, scale_a_reg, scale_b_reg, c_ptr)) = self.tile_gemm_fp8_operands(kernel) {
             Some(self.emit_fp8_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &scale_a_reg, &scale_b_reg, &c_ptr, &kernel.name))
         } else if let Some((m, n, k, x_ptr, wgate_ptr, wup_ptr, out_ptr)) = self.tile_gemm_swiglu_operands(kernel) {
@@ -4316,6 +4322,12 @@ declare it as a Q format.",
     /// - `C`: row-major `[M][N]` int32, **overwritten**, not accumulated.
     ///
     /// Returns the thread count per CTA.
+    /// `epi` is `Some((scale_a, scale_b, bias))` for the fused scaled shape.
+    ///
+    /// The mainloop is shared with the plain int8 GEMM deliberately: the two
+    /// differ only in what happens to the four accumulators at the end, and a
+    /// second copy of a tensor-core mainloop is the kind of duplicate the
+    /// design-rule table is full of.
     fn emit_int8_gemm_kernel(
         &mut self,
         m: u32,
@@ -4325,6 +4337,7 @@ declare it as a Q format.",
         b_ptr: &str,
         c_ptr: &str,
         kernel_name: &str,
+        epi: Option<(&str, &str, &str)>,
     ) -> u32 {
         // Refused rather than padded: a partial tile would need predication on
         // every fragment load, and silently rounding the shape up would compute
@@ -4353,6 +4366,13 @@ declare it as a Q format.",
         writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", ga, a_ptr).unwrap();
         writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", gb, b_ptr).unwrap();
         writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", gc, c_ptr).unwrap();
+        let epi_g = epi.map(|(sa, sb, bi)| {
+            let (gsa, gsb, gbi) = (self.alloc_reg64(), self.alloc_reg64(), self.alloc_reg64());
+            writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", gsa, sa).unwrap();
+            writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", gsb, sb).unwrap();
+            writeln!(&mut self.ptx_buffer, "    cvta.to.global.u64 {}, {};", gbi, bi).unwrap();
+            (gsa, gsb, gbi)
+        });
 
         let tid = self.alloc_reg32();
         let cx = self.alloc_reg32();
@@ -4492,6 +4512,77 @@ declare it as a Q format.",
         // The cost is that **C must be zero-initialised by the caller**. This
         // kernel accumulates into it rather than overwriting it, which is the
         // same contract the CPU exact GEMM has and for the same reason.
+        if let Some((gsa, gsb, gbi)) = epi_g {
+            // C[row][col] = acc * scale_a[row] * scale_b[col] + bias[col], f32.
+            //
+            // A plain `st`, not a `red.add`: the grid is 2-D, so K is not split
+            // across CTAs and this lane owns its four output elements outright
+            // after the loop. That is what makes a float epilogue sound at all
+            // -- scaling PARTIAL sums and adding them in f32 would reintroduce
+            // exactly the order dependence the int32 accumulator exists to
+            // remove. If this kernel ever gains a %ctaid.z K-split, the
+            // epilogue has to move to a separate pass over the finished int32
+            // matrix; it cannot stay here.
+            //
+            // The four accumulators sit at rows {crow, crow+8} and columns
+            // {cbase+2t, cbase+2t+1} -- `d[i]` is row +8*(i/2), col +(i%2) --
+            // so there are only two distinct rows and two distinct columns to
+            // fetch, not eight loads.
+            let rows = [0u32, 8];
+            let mut sa = Vec::new();
+            for r in rows {
+                let off32 = self.alloc_reg32();
+                let off64 = self.alloc_reg64();
+                let addr = self.alloc_reg64();
+                let v = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", off32, crow, r).unwrap();
+                writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", off32, off32).unwrap();
+                writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", off64, off32).unwrap();
+                writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr, gsa, off64).unwrap();
+                writeln!(&mut self.ptx_buffer, "    ld.global.f32 {}, [{}];", v, addr).unwrap();
+                sa.push(v);
+            }
+            let mut sb = Vec::new();
+            let mut bi = Vec::new();
+            for c in [0u32, 1] {
+                let off32 = self.alloc_reg32();
+                let off64 = self.alloc_reg64();
+                let a1 = self.alloc_reg64();
+                let a2 = self.alloc_reg64();
+                let v1 = self.alloc_regf32();
+                let v2 = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", off32, cbase, t2).unwrap();
+                writeln!(&mut self.ptx_buffer, "    add.u32 {}, {}, {};", off32, off32, c).unwrap();
+                writeln!(&mut self.ptx_buffer, "    mul.lo.u32 {}, {}, 4;", off32, off32).unwrap();
+                writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", off64, off32).unwrap();
+                writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", a1, gsb, off64).unwrap();
+                writeln!(&mut self.ptx_buffer, "    ld.global.f32 {}, [{}];", v1, a1).unwrap();
+                writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", a2, gbi, off64).unwrap();
+                writeln!(&mut self.ptx_buffer, "    ld.global.f32 {}, [{}];", v2, a2).unwrap();
+                sb.push(v1);
+                bi.push(v2);
+            }
+            for (idx, reg) in d.iter().enumerate() {
+                let f = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.s32 {}, {};", f, reg).unwrap();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", f, f, sa[idx / 2]).unwrap();
+                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", f, f, sb[idx % 2]).unwrap();
+                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", f, f, bi[idx % 2]).unwrap();
+                let byte = (idx / 2) * (8 * n as usize * 4) + (idx % 2) * 4;
+                if byte == 0 {
+                    writeln!(&mut self.ptx_buffer, "    st.global.f32 [{}], {};", clane, f).unwrap();
+                } else {
+                    writeln!(
+                        &mut self.ptx_buffer,
+                        "    st.global.f32 [{}+{}], {};",
+                        clane, byte, f
+                    )
+                    .unwrap();
+                }
+            }
+            return 32;
+        }
+
         for (idx, reg) in d.iter().enumerate() {
             let byte = (idx / 2) * (8 * n as usize * 4) + (idx % 2) * 4;
             if byte == 0 {
@@ -4557,6 +4648,58 @@ declare it as a Q format.",
         let b_reg = self.variables.get(&kernel.params[1].name)?.clone();
         let c_reg = self.variables.get(&kernel.params[2].name)?.clone();
         Some((m, n, k, a_reg, b_reg, c_reg))
+    }
+
+    /// Recognise the fused SCALED int8 tensor-core GEMM:
+    /// `@tile(M, N, K) kernel f(A, B: GlobalMemory<I8>, Sa, Sb, Bias,
+    /// C: GlobalMemory<F32>)`.
+    ///
+    /// `Sa` is per-row (length M), `Sb` and `Bias` per-column (length N), which
+    /// is what per-token activation quantisation and per-channel weight
+    /// quantisation give you. Told apart from the plain int8 shape by its
+    /// parameter COUNT; both start with two `I8` buffers, and no other
+    /// recogniser accepts an `I8` buffer at all.
+    ///
+    /// Per-ROW activation scaling is the only kind that keeps this exact: a row
+    /// scale factors out of the dot product, so the accumulation stays integer
+    /// and stays associative. A per-K-channel scale would sit inside the sum
+    /// and turn it back into an order-dependent float reduction -- the same
+    /// constraint `exact_kv::quantize_rows` documents on the host side.
+    fn tile_gemm_int8_scaled_operands(
+        &self,
+        kernel: &KernelDecl,
+    ) -> Option<(u32, u32, u32, String, String, String, String, String, String)> {
+        let tile = kernel.tile.as_ref()?;
+
+        fn as_positive_u32(e: &Expr) -> Option<u32> {
+            match e {
+                Expr::IntLit(v, _) if *v > 0 => u32::try_from(*v).ok(),
+                _ => None,
+            }
+        }
+        let m = as_positive_u32(&tile.block_m)?;
+        let n = as_positive_u32(&tile.block_n)?;
+        let k = as_positive_u32(tile.block_k.as_deref()?)?;
+
+        fn is_global_memory_of(ty: &Type, elem: &str) -> bool {
+            matches!(
+                ty,
+                Type::Generic { base, args, .. }
+                    if base == "GlobalMemory"
+                        && matches!(args.as_slice(), [GenericArg::Type(Type::Primitive(p, _))] if p == elem)
+            )
+        }
+
+        if kernel.params.len() != 6
+            || !is_global_memory_of(&kernel.params[0].ty, "I8")
+            || !is_global_memory_of(&kernel.params[1].ty, "I8")
+            || !(2..6).all(|i| is_global_memory_of(&kernel.params[i].ty, "F32"))
+        {
+            return None;
+        }
+
+        let r = |i: usize| self.variables.get(&kernel.params[i].name).cloned();
+        Some((m, n, k, r(0)?, r(1)?, r(2)?, r(3)?, r(4)?, r(5)?))
     }
 
     fn tile_gemm_fp8_operands(&self, kernel: &KernelDecl) -> Option<(u32, u32, u32, String, String, String, String, String)> {

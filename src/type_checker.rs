@@ -1048,6 +1048,19 @@ impl TypeChecker {
             return;
         }
 
+        // - (A, B: I8, Sa, Sb, Bias, C: F32): the same int8 mma with a fused
+        //   scaled epilogue, `C = acc * Sa[row] * Sb[col] + Bias[col]`. Told
+        //   apart from the plain int8 shape by its parameter COUNT, matching
+        //   `ptx_emitter::tile_gemm_int8_scaled_operands`, which is tried
+        //   first in the dispatch chain for the same reason.
+        if kernel.params.len() == 6
+            && is_global_memory_of(&kernel.params[0].ty, "I8")
+            && is_global_memory_of(&kernel.params[1].ty, "I8")
+            && (2..6).all(|i| is_global_memory_of(&kernel.params[i].ty, "F32"))
+        {
+            return;
+        }
+
         let is_swiglu_shape = kernel.params.len() == 4 && is_global_memory_of(&kernel.params[2].ty, "F16");
         let expected_elem = |i: usize| if i < 2 || (is_swiglu_shape && i == 2) { "F16" } else { "F32" };
         let bad_params: Vec<String> = kernel
@@ -1066,6 +1079,7 @@ impl TypeChecker {
                  \x20 4  (X, W_gate, W_up: GlobalMemory<F16>, Out: GlobalMemory<F32>)                     fused Linear+SwiGLU\n\
                  \x20 3  (A, B: GlobalMemory<I8>, C: GlobalMemory<I32>)                                   int8 Tensor Core GEMM\n\
                  \x20 5  (A, B: GlobalMemory<F32>, scale_a, scale_b: F32, C: GlobalMemory<F32>)           fused FP8 (e4m3) GEMM\n\
+                 \x20 6  (A, B: GlobalMemory<I8>, Sa, Sb, Bias, C: GlobalMemory<F32>)                     int8 GEMM + scaled epilogue\n\
                  Found {} parameter(s){}.",
                 tile.span.line,
                 kernel.name,

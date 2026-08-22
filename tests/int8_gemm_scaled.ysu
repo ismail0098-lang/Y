@@ -1,0 +1,29 @@
+// int8 Tensor Core GEMM with a fused scaled epilogue:
+//
+//     C[m][n] = acc[m][n] * Sa[m] * Sb[n] + Bias[n]      (f32 out)
+//
+// `acc` is the exact int32 `mma.sync.m16n8k32.s32.s8.s8.s32` accumulation, so
+// the reduction is associative and the answer does not depend on how K was
+// walked. The epilogue then applies per-ROW activation scales and per-COLUMN
+// weight scales, which is what per-token and per-channel quantisation give you.
+//
+// Per-row is the only activation scaling that keeps this exact: a row scale
+// factors out of the dot product and leaves the accumulation integer. A
+// per-K-channel scale would sit inside the sum and turn it back into an
+// order-dependent float reduction -- the same constraint `quantize_rows`
+// documents on the host side.
+//
+// This is the shape `w8a8_matmul` needs, and it is the census's largest single
+// item: `_w8a8_gemm` is 145 launches and 38.7% of a decode step.
+@tile(64, 32, 128)
+kernel int8_gemm_scaled(
+    A: GlobalMemory<I8>,
+    B: GlobalMemory<I8>,
+    Sa: GlobalMemory<F32>,
+    Sb: GlobalMemory<F32>,
+    Bias: GlobalMemory<F32>,
+    C: GlobalMemory<F32>
+) {
+}
+
+fn main() {}
