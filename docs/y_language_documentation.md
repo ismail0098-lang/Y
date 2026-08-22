@@ -362,7 +362,7 @@ Attr            = "@require" , "(" , Expr , ")"
                 | "@zk_target" , "(" , KeyValList , ")"
                 | "@zk_safe" | "@zk_allow_unconstrained"
                 | "@max_iterations" , "(" , IntLiteral , ")"
-                | "@max_depth" , "(" , IntLiteral , ")" ;
+                (* "@max_depth" was listed here and is NOT lexed -- see the annotation table. *) ;
 
 Expr            = BinaryExpr | UnaryExpr | PrimaryExpr ;
 BinaryExpr      = Expr , BinaryOp , Expr ;
@@ -1994,7 +1994,7 @@ Y supports configurable prime fields defined via the `@zk_target` module directi
 | `@zk_safe` | Module / Block | Enables static soundness analysis (lattice-based taint checking) flagging unconstrained host signals (`error[Z0042]`). |
 | `@unsafe` | Function / Block | Explicitly opts out of static constraint safety checks for unconstrained experimental logic. |
 | `@max_iterations(N)` | `while` Loop | **Withdrawn — `while` is refused in ZK circuit mode.** The unrolling it enabled computed the wrong function; see §12.4. Parsed and accepted by other backends. |
-| `@max_depth(N)` | Function | Enforces compile-time recursion depth bound $N$ for monomorphized recursive function calls. |
+| `@max_depth(N)` | Function | **Does not exist.** The lexer has no such token, so writing it is a syntax error. Recursion itself works and is unbounded. |
 | `@bounds(min, max)` | Parameter / Var | Emits active range-check constraints (bit-decomposition) verifying $w_i \in [\text{min}, \text{max}]$. |
 | `@invariant(expr)` | Loop / Block | Verifies logic assertions statically or generates equality constraints inside loops. |
 
@@ -2072,7 +2072,6 @@ When loop conditions depend on dynamic witness inputs (`val < witness`), Y emits
 Y supports compile-time finite recursion for ZK targets via monomorphization:
 
 ```ysu
-@max_depth(100)
 fn recursive_pow(x: Field, n: u32) -> Field {
     if n == 0 {
         return 1;
@@ -2081,7 +2080,11 @@ fn recursive_pow(x: Field, n: u32) -> Field {
 }
 ```
 
-* **Call Stack Depth Verification**: The compiler tracks call stack depth during monomorphization. If recursion exceeds `@max_depth(N)`, compilation aborts with a static error (`error[Z0011]: recursion depth limit exceeded`).
+> **`@max_depth(N)` is not part of the language.** The lexer has no such token,
+> so writing the line this example used to carry is a syntax error
+> (`Unexpected top-level item`). The example above is the working form.
+
+* **Call Stack Depth Verification**: The compiler tracks call stack depth during monomorphization and aborts with `error[Z0011]` past a **hardcoded 256** (`self.active_calls.len() > 256` in `src/zk_emitter.rs`). The limit is not settable per function; a deeper recursion is refused rather than truncated, which is the fail-closed direction.
 * **Unrolled Call Graph**: Recursive calls are expanded into flat call graphs with zero runtime stack overhead.
 * **Performance**: Compiles a 100-depth recursion tree in **`0.005s`** (**2.0x faster than Circom**, **22x faster than Noir**).
 
@@ -2208,7 +2211,8 @@ module BoundedWhileDynamic {
 ```ysu
 @zk_target(field = "bn254", scheme = "r1cs", opt_level = 1)
 module StaticRec {
-    @max_depth(100)
+    // `@max_depth(100)` used to appear here and is not a real annotation --
+    // the depth bound is a hardcoded 256 in `zk_emitter`. See section 12.5.
     fn fib(n: Field) -> Field {
         if n == 0 {
             return 0;
@@ -4298,25 +4302,40 @@ This section documents the major high-performance compiler optimizations added t
 * **Implementation**: Implemented `emit_warp_butterfly_shuffle`, `emit_warp_reduce_sum`, `emit_warp_reduce_max`, and `emit_warp_reduce_var` in `src/ptx_emitter.rs`.
 * **Impact**: Reduces a 32-element warp vector in **5 GPU cycles** (1.02 cycles per shuffle stage).
 
-### 33.3 Hopper Tensor Memory Accelerator (TMA) Descriptor Generation (`sm_90a`)
-* **Overview**: Generates compile-time 2D/3D TMA global descriptors for Hopper hardware bulk memory copies.
-* **Implementation**: Added `emit_tma_descriptor_gen` (`.global .align 64 .b8 tma_desc[128];`) and lowered `cp.async.bulk.tensor.2d.global.shared::cta.bulk_group` in `src/ptx_emitter.rs`.
-* **Impact**: Enables hardware-driven 2D/3D tensor tile streaming from VRAM to shared memory with **0 register consumption**.
+### 33.3 – 33.5 Hopper TMA, `mbarrier` pipelining and WGMMA — **REMOVED, never worked**
 
-### 33.4 3+ Stage Asynchronous `mbarrier` Pipelining
-* **Overview**: Upgrades software-pipelined loops to 3+ asynchronous stages backed by Hopper hardware transaction counters.
-* **Implementation**: Emits `mbarrier.init.shared.b64`, `mbarrier.arrive.expect_tx.shared.b64`, and `mbarrier.try_wait.parity.shared.b64` in `src/ptx_emitter.rs`.
-* **Impact**: Completely hides VRAM latency by overlapping memory reads with Tensor Core matrix calculations.
+> These three sections described `emit_tma_descriptor_gen`,
+> `mbarrier.init/arrive.expect_tx/try_wait.parity`, and
+> `wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16` as implemented features
+> of `src/ptx_emitter.rs`. **The entire surface has been deleted.**
+>
+> Extending the assemble gate to the intrinsic surface
+> (`tests/ptx_intrinsics_assemble.rs`) found that **16 of 19 `emit_*` methods
+> in that family produced PTX `ptxas` rejects at their own target arch** — all
+> four WGMMA variants, the TMA descriptor and bulk/multicast loads, the
+> 3-stage mbarrier pipeline, the warp-specialised producer/consumer pipeline,
+> 2:4 sparse MMA, and more. Every one was reachable from no backend path and
+> covered only by substring tests, one of which pinned a `wgmma...s4` that
+> exists on no hardware as a regression guard.
+>
+> A working TMA path needs host-built `cuTensorMapEncodeTiled` descriptors
+> plumbed in as `.grid_constant` params, mbarrier completion, and shared-memory
+> matrix descriptors — a feature to design, not a typo to correct. The
+> reachable `mma.sync` path (`emit_fp8_gemm_kernel`,
+> `emit_tensor_core_gemm_kernel`, and `coprocessor_scheduler`'s own
+> `emit_mma_sync`) was never affected and still works.
+>
+> **Do not re-add any of it without a `ptxas` gate and hardware to run it on.**
+> A second copy of the WGMMA emission survived in
+> `src/coprocessor_scheduler.rs` — behind a `TensorCoreMapping::Wgmma` variant
+> that nothing ever constructed — and was found while auditing this section.
+> It is gone too.
 
-### 33.5 Hopper 128-Thread Warp-Group Matrix Multiply (WGMMA)
-* **Overview**: Implements Hopper 128-thread Warp-Group Matrix Multiply-Accumulate (`wgmma`) instructions.
-* **Implementation**: Emits `wgmma.fence.sync.aligned`, `wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16`, `wgmma.commit_group`, and `wgmma.wait_group 0` in `src/ptx_emitter.rs`.
-* **Impact**: Delivers peak Hopper Tensor Core throughput for large matrix operations.
+### 33.6 Automated Operator Fusion Pass (`OperatorFusionPass`) — **not wired in**
 
-### 33.6 Automated Operator Fusion Pass (`OperatorFusionPass`)
 * **Overview**: Topologically scans the DAG IR to detect sequential patterns (MatMul $\rightarrow$ RMSNorm $\rightarrow$ SwiGLU) and merges them into unified fused IR nodes.
-* **Implementation**: Implemented `OperatorFusionPass` in `src/ir_grapher.rs` and added fused PTX emitter generator `emit_fused_matmul_rmsnorm_swiglu` in `src/ptx_emitter.rs`.
-* **Impact**: Eliminates global memory writebacks between back-to-back neural network operators.
+* **Status**: `OperatorFusionPass` exists in `src/ir_grapher.rs` and its **only caller is its own unit test** — no compilation path runs it. The `emit_fused_matmul_rmsnorm_swiglu` this section used to name **does not exist**; a fused node is lowered by `coprocessor_scheduler`'s ordinary `emit_mma_sync`, which is real. So the pass is dead rather than broken, and the elementwise half of the fusion is not emitted at all.
+* **Impact**: none today. Read `feedback-fusion-value-measured` before reviving it: in this repo epilogue fusions win and mainloop fusions that add accumulator pressure measure 1.00x against the same compiler's own unfused path.
 
 ### 33.7 2D Tensor Block Pointers (`make_block_ptr2d` / `BlockPtr2D`)
 * **Overview**: Implements Triton 3.0-style 2D Block Pointers for strided multi-dimensional matrix tiling.
@@ -4444,11 +4463,11 @@ This section provides a formal technical architectural comparison between **Open
 | :--- | :--- | :--- |
 | **Primary Design Focus** | High-level GPU deep learning block compiler | Hardware-sentient systems language (GPU + CPU SIMD + ZK R1CS) |
 | **PyTorch `torch.compile` Backend** | Native default Inductor backend | Custom backend target (`y_lang.inductor`) |
-| **Hardware Targets** | NVIDIA GPUs, AMD ROCm, Intel XPU | NVIDIA PTX (`sm_80`/`sm_90a`), Native x86 CPU, R1CS Circuits |
+| **Hardware Targets** | NVIDIA GPUs, AMD ROCm, Intel XPU | NVIDIA PTX (`sm_80`–`sm_89`; **Hopper `sm_90a` features were removed**, §33.3–33.5), Native x86 CPU, R1CS Circuits |
 | **Compiler Framework** | LLVM / MLIR Dialect Pipeline | Rust-based IR Grapher & Native PTX Emitter |
 | **Block Masking** | Automatic elementwise tensor predicate masking | 2D & 3D Block Pointer predicates (`BlockPtr2D` & `BlockPtr3D`) |
 | **Autotuning Infrastructure** | Built-in MLIR-level `@triton.autotune` | Static Sentinel Probe + Python `autotune` decorator |
-| **Warp & PTX Granularity** | Abstracted via Block Layout IR | Direct PTX intrinsics (`shfl`, `wgmma`, `mbarrier`) |
+| **Warp & PTX Granularity** | Abstracted via Block Layout IR | Direct PTX intrinsics (`shfl`, `ldmatrix`, `mma.sync`, `cp.async`). **No `wgmma` or `mbarrier`** — see §33.3–33.5. |
 | **Zero-Knowledge (ZK) Backend** | ❌ None | ✅ Built-in R1CS & GPU PTX Witness Generator |
 | **CPU SIMD Execution** | ❌ GPU Only | ✅ LLVM AVX-512 Native Lowering |
 | **Cold JIT Compilation Latency** | ~200 – 500 ms | **0.055 ms (55 $\mu$s)** |
