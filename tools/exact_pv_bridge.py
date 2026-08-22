@@ -66,15 +66,19 @@ def emit_pv_ptx():
     return (REPO / "tests" / "exact_pv.ptx").read_text()
 
 
-def kernel_pv(p_u32, v_i8, B, T, Dh, fn):
-    """One launch. `p_u32` is [B, T], `v_i8` is [B, T, Dh]; returns [B, Dh] i64."""
-    out = torch.empty(B * Dh, dtype=torch.int64, device=p_u32.device)
-    PB.launch(fn, (B, 1, 1), (Dh, 1, 1),
+def kernel_pv(p_u32, v_i8, B, Qn, T, Dh, fn):
+    """One launch. `p_u32` is [B, Qn, T], `v_i8` [B, T, Dh]; -> [B, Qn, Dh] i64.
+
+    `Qn` query rows share one row of keys, which is what a grouped-query head
+    does; the grid carries `q` on x and `b` on y.
+    """
+    out = torch.empty(B * Qn * Dh, dtype=torch.int64, device=p_u32.device)
+    PB.launch(fn, (Qn, B, 1), (Dh, 1, 1),
               [PB.dptr(p_u32), PB.dptr(v_i8), PB.dptr(out),
-               ctypes.c_uint(T), ctypes.c_uint(Dh),
-               ctypes.c_uint(B * T), ctypes.c_uint(B * T * Dh),
-               ctypes.c_uint(B * Dh)])
-    return out.view(B, Dh)
+               ctypes.c_uint(T), ctypes.c_uint(Dh), ctypes.c_uint(Qn),
+               ctypes.c_uint(B * Qn * T), ctypes.c_uint(B * T * Dh),
+               ctypes.c_uint(B * Qn * Dh)])
+    return out.view(B, Qn, Dh)
 
 
 def main():
@@ -84,6 +88,9 @@ def main():
     ap.add_argument("--head-dim", type=int, default=64)
     ap.add_argument("--keys", type=int, nargs="+", default=[67, 512, 1024, 4096])
     ap.add_argument("--reps", type=int, default=30)
+    ap.add_argument("--q", type=int, default=2,
+                    help="query rows per KV row (nh/nkv); 1 would leave the\n"
+                         "shared-V indexing untested")
     a = ap.parse_args()
     if not torch.cuda.is_available():
         print("SKIP: no CUDA device.")
@@ -99,18 +106,18 @@ def main():
 
     print(f"\nexact_pv: Y kernel (one launch, int64) vs the digit split "
           f"(ceil(29/dbits) fp32 matmuls)")
-    print(f"  B = {a.batch} x {a.kv_heads} heads = {B} rows, head_dim {Dh}, "
-          f"best of {a.reps} interleaved\n")
+    print(f"  B = {a.batch} x {a.kv_heads} KV heads = {B} rows, {a.q} query "
+          f"rows each, head_dim {Dh}, best of {a.reps} interleaved\n")
     print(f"{'T':>6}{'dbits':>7}{'matmuls':>9}{'digit ms':>11}{'Y ms':>9}"
           f"{'+cast ms':>10}{'kernel':>9}{'w/cast':>9}   identical")
 
     g = torch.Generator(device=dev).manual_seed(20260822)
     all_ok = True
     for T in a.keys:
-        p = torch.randint(0, (1 << D.P_BITS) + 1, (B, T), generator=g,
+        p = torch.randint(0, (1 << D.P_BITS) + 1, (B, a.q, T), generator=g,
                           dtype=torch.int64, device=dev)
-        p[:, 0] = 1 << D.P_BITS          # the top bit, explicitly
-        p[:, 1] = 0
+        p[:, :, 0] = 1 << D.P_BITS       # the top bit, explicitly
+        p[:, :, 1] = 0
         v = torch.randint(-127, 128, (B, T, Dh), generator=g,
                           dtype=torch.int64, device=dev)
 
@@ -121,8 +128,8 @@ def main():
         v8 = v_f32.to(torch.int8).contiguous()
 
         # Correctness first, before anything is timed.
-        want = D.exact_pv(p.unsqueeze(1), v_f32).squeeze(1)
-        got = kernel_pv(p32, v8, B, T, Dh, fn).to(torch.float64)
+        want = D.exact_pv(p, v_f32)
+        got = kernel_pv(p32, v8, B, a.q, T, Dh, fn).to(torch.float64)
         torch.cuda.synchronize()
         identical = bool(torch.equal(got, want))
         all_ok &= identical
@@ -130,16 +137,14 @@ def main():
         dbits = D.digit_width(T)
         matmuls = (D.P_BITS + 1 + dbits - 1) // dbits if dbits else 0
 
-        p1 = p.unsqueeze(1)
-
         def t_digit():
-            D.exact_pv(p1, v_f32)         # no cast: this is what the model has
+            D.exact_pv(p, v_f32)          # no cast: this is what the model has
 
         def t_y():
-            kernel_pv(p32, v8, B, T, Dh, fn)
+            kernel_pv(p32, v8, B, a.q, T, Dh, fn)
 
         def t_y_cast():
-            kernel_pv(p32, v_f32.to(torch.int8), B, T, Dh, fn)
+            kernel_pv(p32, v_f32.to(torch.int8), B, a.q, T, Dh, fn)
 
         arms = (("digit", t_digit), ("y", t_y), ("ycast", t_y_cast))
         for _, f in arms:                 # warm up all three
