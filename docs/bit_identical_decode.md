@@ -366,6 +366,48 @@ torch.cuda.is_available(): print("SKIP: no CUDA"); return 0`.
 
 ---
 
+## Finding 10 — the accuracy harness validated the path that is not the headline
+
+`exact_task_accuracy.py` produces the two accuracy numbers in this document, and
+its header states the discipline plainly: *"a harness that cannot detect damage
+proves nothing"*, with `crude4` — the same weights on a 4-bit grid — as the
+control, and *"assert the control fails"*.
+
+* **It printed the verdict and returned 0.** A run whose control did not fire
+  printed `*** the harness cannot see a deliberately damaged model ***` and
+  exited **successfully**, so anything reading the status saw a pass. The same
+  shape as the fuzz target that reported findings with `eprintln!` and never
+  panicked. Its two sibling harnesses, `exact_accuracy.py` and
+  `exact_ragged_batch.py`, both `return 1` on a failed control — this was the
+  one file out of step with a convention the directory otherwise keeps.
+* **The control checked perplexity, and the headline is the multiple-choice
+  paired net.** Those are separate code paths. If the MC scorer collapsed —
+  always picking option 0, or the length normalisation going flat — every arm
+  would score alike, *"net +40 of 3,000 items"* would read as a clean null, and
+  the perplexity control would fire anyway, because perplexity is computed
+  somewhere else entirely. `crude4` must now be visible in **both**, and in the
+  MC case through the same paired statistic the conclusion is drawn from.
+* **The control's own logic is now checkable without a GPU.** The real harness
+  needs three 0.5B models, so the thing that decides whether a run is believable
+  could not be exercised on an ordinary machine. `--check-control` runs five
+  synthetic scenarios in milliseconds:
+
+  ```
+  ok    crude4 clearly worse in both         exit 0 (want 0)
+  ok    multiple-choice scorer collapsed     exit 1 (want 1)
+  ok    perplexity path blind                exit 1 (want 1)
+  ok    both blind                           exit 1 (want 1)
+  ok    control arms not run                 exit 0 (want 0)
+  ```
+
+  Mutation-verified: reverting to the perplexity-only control turns the second
+  line into `WRONG ... exit 0 (want 1)` and fails the run.
+
+Neither fix moves the +0.12% or the +40-of-3,000. They change what those numbers
+would have survived.
+
+---
+
 ## Where the remaining cost is, and one lead that is not there
 
 Counting work rather than timing it, so this holds on a contended machine.
