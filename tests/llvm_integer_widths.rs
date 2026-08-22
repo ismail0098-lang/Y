@@ -156,3 +156,64 @@ fn main() -> I32 {
         None => eprintln!("SKIP cmp_is_zero: could not build (clang missing?)"),
     }
 }
+
+#[test]
+fn widening_an_unsigned_value_does_not_invent_a_sign_bit() {
+    // The same `emit_coerce` arm as the comparison bug above, and the same
+    // gotcha as #7 in CLAUDE.md -- which that document records as FIXED in the
+    // PTX backend ("typed I32 it is negative, and widening it to 64 bits
+    // sign-extends to 0xFFFFFFFF_F0000001") and which was still live here.
+    // LLVM has no unsigned types, so `emit_type` maps both `U32` and `I32` to
+    // `i32` and erases the one bit that chooses between `zext` and `sext`.
+    //
+    //     let x: U32 = 3000000000;
+    //     let y: U64 = x;            // 0xFFFFFFFF_B2D05E00, not 0xB2D05E00
+    //
+    // `expr_is_unsigned` recovers it from `locals_ast_type`.
+    let src = "\
+fn main() -> I32 {
+    let x: U32 = 3000000000;
+    let y: U64 = x;
+    let z: I32 = (y >> 32) & 255;
+    return z;
+}
+";
+    match run_program("u32_widen", src) {
+        Some(v) => assert_eq!(v, 0, "the top word of a widened U32 must be zero"),
+        None => eprintln!("SKIP u32_widen: could not build (clang missing?)"),
+    }
+
+    // The narrow case, where the wrong answer is not merely a high word:
+    // `sext i8` turns 200 into -56, and `(-56 >> 4) & 255` is 252.
+    let narrow = "\
+fn main() -> I32 {
+    let x: U8 = 200;
+    let y: U32 = x;
+    let z: I32 = (y >> 4) & 255;
+    return z;
+}
+";
+    match run_program("u8_widen", narrow) {
+        Some(v) => assert_eq!(v, 12, "200 >> 4 is 12"),
+        None => eprintln!("SKIP u8_widen: could not build (clang missing?)"),
+    }
+}
+
+#[test]
+fn widening_a_signed_value_still_sign_extends() {
+    // The control, and it is the whole reason the fix had to look at the Y
+    // type rather than just switching the instruction: "use zext everywhere"
+    // passes both cases above and breaks every negative number.
+    let src = "\
+fn main() -> I32 {
+    let x: I32 = 0 - 3;
+    let y: I64 = x;
+    let z: I32 = (y >> 32) & 255;
+    return z;
+}
+";
+    match run_program("i32_widen", src) {
+        Some(v) => assert_eq!(v, 255, "-3 widened to i64 must keep its sign bits"),
+        None => eprintln!("SKIP i32_widen: could not build (clang missing?)"),
+    }
+}

@@ -501,7 +501,43 @@ impl LlvmEmitter {
         self.emit_coerce(&v, &t, "double")
     }
 
+    /// Is this expression's Y-level type unsigned?
+    ///
+    /// LLVM has no unsigned integer types -- `U32` and `I32` are both `i32` --
+    /// so `emit_type` erases the one bit that decides between `zext` and
+    /// `sext`. `locals_ast_type` still has it for a binding, which is enough
+    /// for the shapes that matter: a named value, a unary or binary
+    /// expression over named values, and a parenthesised form of either.
+    ///
+    /// Defaults to `false` (signed), which is the previous behaviour, so an
+    /// expression this cannot classify is no worse off than before.
+    fn expr_is_unsigned(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Ident(name, _) => self
+                .locals_ast_type
+                .get(name)
+                .is_some_and(|t| matches!(t.as_str(), "U8" | "U16" | "U32" | "U64" | "usize")),
+            // If either side is unsigned the value is being computed in
+            // unsigned terms; widening it must not invent a sign bit.
+            Expr::BinaryOp { left, right, .. } => {
+                self.expr_is_unsigned(left) || self.expr_is_unsigned(right)
+            }
+            Expr::UnaryOp { operand, .. } => self.expr_is_unsigned(operand),
+            _ => false,
+        }
+    }
+
     fn emit_coerce(&mut self, val: &str, src_ty: &str, dst_ty: &str) -> String {
+        self.emit_coerce_from(val, src_ty, dst_ty, false)
+    }
+
+    fn emit_coerce_from(
+        &mut self,
+        val: &str,
+        src_ty: &str,
+        dst_ty: &str,
+        src_unsigned: bool,
+    ) -> String {
         if src_ty == dst_ty {
             return val.to_string();
         }
@@ -617,7 +653,18 @@ impl LlvmEmitter {
                 // backend answers 1, and so do the ZK backend (whose condition
                 // carries a booleanity constraint) and `cpu_emitter` (which
                 // emits a Rust `bool`), so LLVM was the only one disagreeing.
-                let how = if src_ty == "i1" { "zext" } else { "sext" };
+                // `i1` is a boolean and is ALWAYS zero-extended -- see the
+                // comparison bug below. An unsigned Y type is zero-extended
+                // too: `let x: U32 = 3000000000; let y: U64 = x;` used to
+                // emit `sext i32 to i64` and produce 0xFFFFFFFF_B2D05E00.
+                // That is gotcha #7's bug, which CLAUDE.md documents as fixed
+                // in the PTX backend and which was still live here -- the
+                // third backend to have it.
+                let how = if src_ty == "i1" || src_unsigned {
+                    "zext"
+                } else {
+                    "sext"
+                };
                 writeln!(
                     &mut self.output,
                     "  {} = {} {} {} to {}",
@@ -1702,7 +1749,9 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                     if matches!(init_expr, Expr::ZeroInit(_)) {
                         // For ZeroInit, the target pointer has already been memset. No further store needed.
                     } else {
-                        let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
+                        let src_unsigned = self.expr_is_unsigned(init_expr);
+                        let coerced =
+                            self.emit_coerce_from(&val, &val_ty, &dst_ty, src_unsigned);
 
                         // ==========================================
                         // ARCHITECTURAL NOTE: Aggregate Memory Handling
@@ -1771,7 +1820,8 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 if matches!(value, Expr::ZeroInit(_)) {
                     // ZeroInit handles memset directly into target_addr.
                 } else {
-                    let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
+                    let src_unsigned = self.expr_is_unsigned(value);
+                    let coerced = self.emit_coerce_from(&val, &val_ty, &dst_ty, src_unsigned);
 
                     // See ARCHITECTURAL NOTE in Stmt::Let for aggregate vs primitive logic.
                     if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
@@ -1819,7 +1869,8 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 if let Some(e) = expr {
                     let val = self.emit_expr(e, None, None);
                     let val_ty = self.infer_type(e);
-                    let coerced = self.emit_coerce(&val, &val_ty, ret_type);
+                    let src_unsigned = self.expr_is_unsigned(e);
+                    let coerced = self.emit_coerce_from(&val, &val_ty, ret_type, src_unsigned);
                     writeln!(&mut self.output, "  ret {} {}", ret_type, coerced).unwrap();
                 } else {
                     self.wln("  ret void");
@@ -2681,7 +2732,9 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                             && arg_ty != "ptr"
                             && llvm_param_ty != "ptr"
                         {
-                            arg_val = self.emit_coerce(&arg_val, &arg_ty, &llvm_param_ty);
+                            let u = self.expr_is_unsigned(arg);
+                            arg_val =
+                                self.emit_coerce_from(&arg_val, &arg_ty, &llvm_param_ty, u);
                         }
 
                         if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
@@ -2823,7 +2876,8 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                     };
 
                     if llvm_param_ty != "ptr" && !llvm_param_ty.starts_with('%') {
-                        arg_val = self.emit_coerce(&arg_val, &arg_ty, &llvm_param_ty);
+                        let u = self.expr_is_unsigned(a);
+                        arg_val = self.emit_coerce_from(&arg_val, &arg_ty, &llvm_param_ty, u);
                     }
 
                     if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
