@@ -343,6 +343,26 @@ torch.cuda.is_available(): print("SKIP: no CUDA"); return 0`.
   to the inclusive bound. Moving that coverage here would be a weaker test
   wearing the same name — worth stating, because "make the end-to-end test
   cover it too" is the obvious and wrong instinct.
+* **The same measurement retracts a claim in `exact_ragged_batch.py`.** That
+  harness names three implementation-level dependencies on batch composition and
+  said of the first, the digit width, that "it is safe by argument, and this test
+  is what turns the argument into evidence". Forcing a wrong width on the padded
+  side at the key lengths it actually uses (`t_true` 173–500, `t_pad` 519–744,
+  true width 7):
+
+  | width | 7 | 8 | 10 | 12 | 14 | 16 | 20 |
+  |---|---|---|---|---|---|---|---|
+  | row 0 | = | = | = | = | = | **moved** | **moved** |
+
+  Double the correct width, bit-identical output, at every shape tried. So that
+  test does *not* evidence dependency #1. It evidences #3 strongly — the masking
+  mutation above fails there with deltas of 0.15–0.39 — and #2 through batch
+  size. A previous pass had already corrected this file once, for claiming a
+  digit boundary was crossed when it was not; the crossing is real now, and the
+  crossing has no teeth. **"The path is exercised" and "the test can fail on it"
+  are different properties, and only the second one is coverage.**
+  None of this moves the 0/16 determinism result, which is measured directly —
+  it corrects what that result is attributed to.
 
 ---
 
