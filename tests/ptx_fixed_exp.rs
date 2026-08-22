@@ -164,6 +164,22 @@ HEND:
 /// Every argument that matters: all 2^16 fractional values (so the table and
 /// the series are covered exhaustively), every integer part (so the shift and
 /// the saturation are covered), and the boundaries.
+/// Every argument the integer exp can be reached with, not a sample.
+///
+/// `exact_attention` clamps its Q16.16 input to [0, 2^30] and the function
+/// zeroes everything with `n = t >> 16 >= 30`, so the reachable domain is
+/// `0 .. 30 * 65536` -- 1,966,080 values, plus the above-domain edges. That is
+/// 8 MB in and 8 MB out; there is no reason to sample it.
+///
+/// `arguments()` below is the ~100k structured sample, kept for the host-only
+/// comparisons where 2M host-side `exp2` calls would dominate the test's
+/// runtime for no extra coverage.
+fn every_reachable_argument() -> Vec<u32> {
+    let mut t: Vec<u32> = (0..(30u32 << 16)).collect();
+    t.extend_from_slice(&[30 << 16, (30 << 16) + 1, (1u32 << 30) - 1, 1 << 30, u32::MAX]);
+    t
+}
+
 fn arguments() -> Vec<u32> {
     let mut t: Vec<u32> = (0..(1u32 << 16)).collect();
     for n in 0..34u32 {
@@ -191,7 +207,10 @@ fn the_device_integer_exp_agrees_with_the_host_bit_for_bit() {
         eprintln!("SKIP: no CUDA driver — cross-architecture exp was not demonstrated.");
         return;
     };
-    let t = arguments();
+    // EXHAUSTIVE, not a sample. This is the cross-architecture claim, and it
+    // is cheap: x86-64 and sm_89 are far more different than two NVIDIA cards,
+    // so agreeing on every reachable argument is the stronger measurement.
+    let t = every_reachable_argument();
     let n = t.len();
     let module = ctx
         .load_ptx(&ptx(n), "fixed_exp_probe")

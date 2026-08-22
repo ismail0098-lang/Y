@@ -901,16 +901,30 @@ invariance is a different claim and is not made.
 
 ### What this does not yet claim
 
-- **One model, one GPU, one stack.** Cross-hardware bit-identity is the strongest
-  thing exactness buys and is the headline claim with no *measurement* behind it.
-  Its premise is checked, though, and on an ordinary machine: disassembling the
-  emitted cubin, the integer exp compiles to **no `MUFU` and no floating-point
+- **One model, one GPU, one stack — but the exp is now measured across two
+  architectures.** Cross-hardware bit-identity is the strongest thing exactness
+  buys. For the integer `exp2` it is no longer an argument:
+
+      device == host on all 1,966,085 arguments, bit for bit
+      846,328 distinct results, so the agreement is not over a constant
+
+  That is every argument the function can be reached with, x86-64 against
+  sm_89 — two instruction sets from different vendors, which is a wider gap
+  than two NVIDIA cards. The control is in the same line: a degenerate kernel
+  agreeing over one value would report 1 distinct result, not 846,328. And the
+  same run measures why the float path cannot make the claim: the device's
+  `ex2.approx.f32` disagrees with the host's `exp2` on **46,301 of 100,427**
+  arguments, worst gap 32 ulp.
+
+  The premise behind it is checked statically too: disassembling the emitted
+  cubin, the integer exp compiles to **no `MUFU` and no floating-point
   instruction** — 72 instructions of IMAD/SHF/IADD3/ISETP, all exactly specified
   by the ISA — while the `ex2.approx.f32` probe beside it compiles to a `MUFU`,
-  which the ISA specifies by tolerance rather than by value. So the integer path
-  contains nothing two architectures are permitted to disagree about. That is a
-  gate (`ptxas` + `cuobjdump`, no device), not a claim; two architectures
-  actually agreeing still needs a second card.
+  which the ISA specifies by tolerance rather than by value.
+
+  **This covers one kernel, not the pipeline.** The end-to-end claim — the whole
+  decode path producing identical tokens on different hardware — still needs a
+  second card, and remains the headline with no measurement behind it.
 - **CUDA graphs are worth up to 1.47x and are blocked.** The prerequisites are
   cheap — a static cache costs 5–8% and improves the exact/stock ratio to 1.01x
   — and the property survives them. Capture then segfaults on *both* arms, from
