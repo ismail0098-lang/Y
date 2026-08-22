@@ -367,6 +367,109 @@ def exact_attention(module, query, key, value, attention_mask, scaling=None,
     return out, None
 
 
+# A factual prompt with a one-word answer no broken arm reaches by accident.
+# Deliberately NOT one of the measured prompts: the point is to ask whether the
+# arm computes the model's function at all, which a prompt chosen for a narrow
+# top-2 margin is the worst possible way to ask.
+CANARY = "The capital of France is"
+CANARY_MUST_CONTAIN = "Paris"
+CANARY_TOKENS = 10
+# 160 greedy tokens from this model run 60-110 distinct. A collapsed arm runs
+# 1-4. The threshold is nowhere near either, because a false failure here stops
+# a 20-minute run.
+MIN_DISTINCT = 8
+
+
+def sanity_verdict(canary, ref_tokens):
+    """Is this arm computing the model's function? -> (ok, reason).
+
+    Pure: no model, no GPU, no torch. `canary` is the decoded continuation of
+    `CANARY`; `ref_tokens` is the arm's own reference generation, the one every
+    later comparison is made against.
+
+    Two checks, and they are independent on purpose:
+
+      * **the canary** catches an arm that computes the WRONG FUNCTION - the
+        layout bug in the docstring above answered this prompt in Arabic.
+      * **degeneracy** catches an arm that computes the right function up to
+        some length and then collapses. The canary is 10 tokens on a different
+        prompt, so it cannot see that; this reads the 160-token generation the
+        result is actually derived from.
+
+    Either alone leaves a gap that `--check-gate` demonstrates rather than
+    asserts: scenario 3 passes degeneracy and fails the canary, scenario 4 the
+    reverse.
+    """
+    if CANARY_MUST_CONTAIN not in canary:
+        return False, (f"canary {CANARY!r} -> {canary!r}, which does not "
+                       f"contain {CANARY_MUST_CONTAIN!r}")
+    n = len(set(ref_tokens))
+    if len(ref_tokens) >= MIN_DISTINCT * 4 and n < MIN_DISTINCT:
+        return False, (f"reference generation collapsed: {n} distinct tokens "
+                       f"in {len(ref_tokens)}")
+    return True, f"canary ok, {n} distinct tokens in reference"
+
+
+def canary_text(model, tok, device):
+    # No `padding=True`: one sequence needs none, and asking for it makes
+    # this fail on a tokenizer with no `pad_token` set - which the
+    # throughput tool's is, since it never batches ragged input.
+    enc = tok(CANARY, return_tensors="pt").to(device)
+    with torch.no_grad():
+        out = model.generate(
+            input_ids=enc.input_ids, attention_mask=enc.attention_mask,
+            max_new_tokens=CANARY_TOKENS, do_sample=False, num_beams=1,
+            use_cache=True, pad_token_id=tok.eos_token_id,
+        )
+    return tok.decode(out[0, enc.input_ids.shape[1]:])
+
+
+def check_gate_logic():
+    """Exercise `sanity_verdict` on synthetic outputs. No GPU, no model.
+
+        python3 tools/exact_ragged_batch.py --check-gate
+    """
+    healthy = list(range(90)) * 2
+    collapsed = [11, 11, 12, 11] * 40
+    scenarios = [
+        ("healthy arm", " Paris. It was founded in 789 AD by", healthy, True),
+        ("wrong tensor layout (the real bug)",
+         " \u0627\u0644\u0633\u0627\u062f \u0627\u0644\u0633\u0627\u062f \u0627\u0644\u0633\u0627\u062f", [772, 773] * 80, False),
+        ("fluent, wrong function", " Berlin, a city in Germany", healthy, False),
+        ("canary ok but generation collapsed", " Paris.", collapsed, False),
+        ("short reference, not enough to judge", " Paris.", [5, 5], True),
+    ]
+    bad = 0
+    for name, canary, toks, want in scenarios:
+        ok, reason = sanity_verdict(canary, toks)
+        bad += ok != want
+        print(f"  {'ok  ' if ok == want else 'WRONG'}  {name:<38} "
+              f"{'pass' if ok else 'FAIL'} (want {'pass' if want else 'FAIL'})"
+              f"\n          {reason}")
+    if bad:
+        print(f"\n{bad} scenario(s) wrong: the gate's own logic is broken.")
+        return 1
+    print("\ngate logic behaves on all 5 scenarios; 3 and 4 show the two "
+          "checks are\nindependent - neither alone catches both.")
+    return 0
+
+
+def sanity_reference(model, tok, args):
+    """The arm's own batch-1 generation of PROMPTS[0], for the degeneracy half.
+
+    Reuses the run's own token budget so the check reads the same length of
+    output the verdict is drawn from, rather than a shorter proxy.
+    """
+    ids = tok(PROMPTS[0], return_tensors="pt").to(args.device)
+    with torch.no_grad():
+        g = model.generate(
+            input_ids=ids.input_ids, attention_mask=ids.attention_mask,
+            max_new_tokens=args.tokens, do_sample=False, num_beams=1,
+            use_cache=True, pad_token_id=tok.eos_token_id,
+        )
+    return g[0, ids.input_ids.shape[1]:].tolist()
+
+
 def decode(model, tok, prompt, batch, n_new, device, static_cache=False):
     ids = tok(prompt, return_tensors="pt").to(device)
     inp = ids.input_ids.repeat(batch, 1)
@@ -443,6 +546,19 @@ def main():
                            ("exact  (int8, order-independent reductions)", True)):
         print(f"--- {name} ---")
         model = build(args.device, is_exact)
+        # Before anything is counted. This loop reports `diverged`, and it
+        # prints the generated text ONLY when a prompt diverges - so an arm
+        # that is uniformly broken scores 0/8, prints no text at all, and is
+        # declared the winner. See `sanity_verdict`.
+        ok, reason = sanity_verdict(canary_text(model, tok, args.device),
+                                    sanity_reference(model, tok, args))
+        print(f"  sanity: {reason}")
+        if not ok:
+            print(f"\n  *** THIS ARM IS NOT COMPUTING THE MODEL'S FUNCTION. A "
+                  f"uniformly broken arm\n      diverges on nothing and scores "
+                  f"0/{len(PROMPTS)}, which is the passing number. "
+                  f"Refusing to report it. ***")
+            return 1
         diverged = 0
         for pi, prompt in enumerate(PROMPTS):
             ids = tok(prompt, return_tensors="pt").to(args.device)

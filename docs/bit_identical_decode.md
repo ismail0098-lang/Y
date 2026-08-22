@@ -541,6 +541,80 @@ unavoidable in a softmax.
 
 ---
 
+## Finding 13 — `0/16` is also what a broken arm scores
+
+Finding 11's fixed-order-float arm read **12/16** on its first run. Two of my own
+errors, both caught before reporting — but the second is the interesting one: the
+arm returned `[b, nh, q, d]` where `eager_attention_forward` returns
+`[b, q, nh, d]`.
+
+**It did not crash.** The model ran end to end, produced fluent-looking text in the
+wrong script (`' الساد الساد ...'`), and the invariance harness reported a number
+for it. I caught it by generating text and reading it, which is not a check.
+
+The direction that matters is not the one I hit. A broken arm that is broken
+*consistently* — the same wrong answer regardless of who else is in the batch —
+scores **0/16**, and 0/16 is the passing number. Every harness here would have
+declared it the winner.
+
+Three sites, and the ones I had not hit were worse than the one I had:
+
+| harness | what it shows a human | so a broken arm |
+|---|---|---|
+| `exact_ragged_batch.py` | text only when a case **differs** | prints nothing, scores 0/16, passes |
+| `batch_invariance_demo.py` | text only when a prompt **diverges** | prints nothing, scores 0/8, **is the headline** |
+| `exact_throughput.py` | never decodes a token at all | reports a throughput — and several ways of being broken are **faster** |
+
+That last row is where the 1.03x of finding 11 comes from. A cost figure for a
+model that is not computing the right thing is not a cost.
+
+### The gate
+
+`sanity_verdict(canary, ref_tokens)` runs per arm before any score is counted, on
+two checks that are independent on purpose:
+
+* **a canary** — the arm must continue `"The capital of France is"` with something
+  containing `"Paris"`. Deliberately *not* one of the measured prompts: those were
+  chosen for a narrow top-2 margin, which is the worst possible way to ask whether
+  an arm computes the model's function at all.
+* **degeneracy** — the arm's own 160-token reference generation must not collapse
+  to fewer than 8 distinct tokens. The canary is 10 tokens on a different prompt,
+  so it cannot see an arm that is right for a while and then falls over.
+
+It lives in `batch_invariance_demo.py` and the other two import it, because
+duplicating a rule across three files is how the constant-folding family in
+`zk_emitter` happened.
+
+### Verified on CPU, which is the point
+
+`--check-gate` exercises the verdict on five synthetic outputs with no GPU and no
+model, and **scenarios 3 and 4 are the ones that earn their place**: "fluent but
+wrong function" passes degeneracy and fails the canary; "canary ok but generation
+collapsed" does the reverse. Neither check alone catches both.
+
+Mutation-verified, three mutations, all caught:
+
+| mutation | caught by |
+|---|---|
+| canary check deleted | scenario 3 only |
+| degeneracy check deleted | scenario 4 only |
+| `MIN_DISTINCT` 8 → 200 (threshold too tight) | scenario 1 — a false failure stops a 20-minute run |
+
+**Deleting the canary flips only one of the five scenarios, not two** — scenario 2,
+the real layout bug, is caught by *either* check. That is defence in depth rather
+than a hole, and it is exactly why scenario 3 had to be written: without an arm
+that is fluent *and* wrong, the canary's own test would have passed with the canary
+deleted.
+
+The canary constant itself is the one thing that could turn this gate into a wall,
+so it was run against the real model — on CPU, fp32 eager, the configuration both
+the exact and fixed-order arms are built from:
+
+    CANARY -> ' Paris. It was founded in 789'
+
+Not yet run against the bf16+SDPA stock arm or the int8 exact arm; both need the
+card.
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries

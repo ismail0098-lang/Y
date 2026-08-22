@@ -93,6 +93,29 @@ def build(arm, device, compile_it, graphs=False):
     return m
 
 
+def gate(models, tok, device):
+    """Refuse to time an arm that is not computing the model's function.
+
+    This tool never decodes a token - it calls `generate` for the clock and
+    throws the ids away - so a broken arm is invisible here in a way it is not
+    even in the invariance harnesses. And the direction is dangerous: several
+    ways of being broken are FASTER. The 1.03x that finding 11 rests on is a
+    cost figure, and a cost figure for a model that is not computing the right
+    thing is not a cost.
+    """
+    for name, m in models.items():
+        canary = D.canary_text(m, tok, device)
+        ref = D.sanity_reference(m, tok, argparse.Namespace(device=device, tokens=64))
+        ok, reason = D.sanity_verdict(canary, ref)
+        print(f"  sanity {name:<12} {reason}")
+        if not ok:
+            print(f"\n  *** ARM {name!r} IS NOT COMPUTING THE MODEL'S FUNCTION; "
+                  f"several ways of being\n      broken are FASTER. Refusing to "
+                  f"report a throughput for it. ***")
+            return False
+    return True
+
+
 def one_run(model, inp, att, kw):
     torch.cuda.synchronize()
     t = time.perf_counter()
@@ -170,6 +193,9 @@ def main():
     models = {}
     for name in arms:
         models[name] = build(name, a.device, a.compile, a.graphs)
+    if not gate(models, tok, a.device):
+        qwen2.eager_attention_forward = D._orig
+        return 1
     res = run_interleaved(models, tok, a.batch,
                           a.tokens, a.device, a.reps, a.graphs, a.static_cache)
     LABELS = {"stock": "stock  bf16 + SDPA (what ships)",
