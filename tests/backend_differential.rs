@@ -65,6 +65,29 @@ const OPS: [&str; 16] = [
     "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", "<", "<=", ">", ">=", "==", "!=",
 ];
 
+/// Builds one straight-line integer expression over the locals `v0..vn`.
+fn expr(r: &mut Rng, upto: u64, depth: u32) -> String {
+    if depth == 0 || r.below(3) == 0 {
+        return if r.below(2) == 0 && upto > 0 {
+            format!("v{}", r.below(upto))
+        } else {
+            format!("{}", 1 + r.below(90))
+        };
+    }
+    let op = OPS[r.below(OPS.len() as u64) as usize];
+    let lhs = expr(r, upto, depth - 1);
+    // A zero divisor traps rather than disagreeing, and a shift wider than the
+    // type is undefined in LLVM and merely wraps on x86 -- a real difference,
+    // but one about UB rather than about this compiler. Both are pinned to a
+    // safe literal, which is also why the right operand is not recursive here.
+    let rhs = match op {
+        "/" | "%" => format!("{}", 1 + r.below(20)),
+        "<<" | ">>" => format!("{}", r.below(8)),
+        _ => expr(r, upto, depth - 1),
+    };
+    format!("({lhs} {op} {rhs})")
+}
+
 /// Builds one straight-line integer program.
 ///
 /// Values are kept small on purpose. The point is to compare the two
@@ -74,38 +97,56 @@ const OPS: [&str; 16] = [
 /// disagreements that say nothing about the operator.
 fn program(seed: u64) -> (String, u32) {
     let mut r = Rng(seed);
+
+    // Zero to two helper functions, each taking up to the six integer
+    // parameters System V passes in registers. `native_emitter`'s recorded bug
+    // was that "a function with parameters read stack garbage; nothing stored
+    // rdi/rsi/... anywhere", so the call boundary is the part of its subset
+    // most worth differentiating -- and the generator could not write a call
+    // at all until now.
+    let nfuncs = r.below(3) as usize;
+    let mut prelude = String::new();
+    let mut arities = Vec::new();
+    for f in 0..nfuncs {
+        let arity = 1 + r.below(6) as usize;
+        arities.push(arity);
+        let params = (0..arity)
+            .map(|i| format!("p{i}: I32"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // The body sees its parameters as `p0..`, which `expr` names `v0..`.
+        let body = expr(&mut r, arity as u64, 2).replace('v', "p");
+        prelude.push_str(&format!("fn f{f}({params}) -> I32 {{\n    return {body};\n}}\n\n"));
+    }
+
     let nlocals = 2 + r.below(3) as usize;
     let mut body = String::new();
     for i in 0..nlocals {
-        if i == 0 || r.below(3) == 0 {
-            body.push_str(&format!("    let v{i}: I32 = {};\n", 1 + r.below(90)));
+        if i == 0 {
+            body.push_str(&format!("    let v0: I32 = {};\n", 1 + r.below(90)));
+        } else if !arities.is_empty() && r.below(3) == 0 {
+            let f = r.below(arities.len() as u64) as usize;
+            let args = (0..arities[f])
+                .map(|_| expr(&mut r, i as u64, 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push_str(&format!("    let v{i}: I32 = f{f}({args});\n"));
         } else {
-            let op = OPS[r.below(OPS.len() as u64) as usize];
-            let lhs = format!("v{}", r.below(i as u64));
-            // A zero divisor traps rather than disagreeing, and a shift wider
-            // than the type is undefined in LLVM and merely wraps in x86 --
-            // a genuine difference, but one about UB rather than about this
-            // compiler. Both are pinned to a safe literal.
-            let rhs = match op {
-                "/" | "%" => format!("{}", 1 + r.below(20)),
-                "<<" | ">>" => format!("{}", r.below(8)),
-                _ => {
-                    if r.below(2) == 0 {
-                        format!("v{}", r.below(i as u64))
-                    } else {
-                        format!("{}", 1 + r.below(30))
-                    }
-                }
-            };
-            body.push_str(&format!("    let v{i}: I32 = {lhs} {op} {rhs};\n"));
+            body.push_str(&format!("    let v{i}: I32 = {};\n", expr(&mut r, i as u64, 2)));
         }
     }
+
+    // A process exit status carries 8 bits, so one program compares one byte
+    // of a 32-bit answer; the shift spreads the comparison over the word.
     let shift = [0u32, 8, 16, 24][r.below(4) as usize];
     body.push_str(&format!(
         "    let out: I32 = (v{} >> {shift}) & 255;\n    return out;\n",
         nlocals - 1
     ));
-    (format!("fn main() -> I32 {{\n{body}}}\n"), shift)
+    (
+        format!("{prelude}fn main() -> I32 {{\n{body}}}\n"),
+        shift,
+    )
 }
 
 enum Outcome {
@@ -197,6 +238,26 @@ fn sweep(count: u64) -> Tally {
         }
     }
     t
+}
+
+/// A deep sweep, off by default because it costs two compiles per program.
+/// `cargo test --test backend_differential -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn a_deep_sweep_finds_nothing_more() {
+    let t = sweep(400);
+    eprintln!(
+        "deep sweep: {} compared, {} refused, {} disagreements",
+        t.compared,
+        t.native_refused,
+        t.disagreements.len()
+    );
+    assert!(
+        t.disagreements.is_empty(),
+        "{} disagreements:\n\n{}",
+        t.disagreements.len(),
+        t.disagreements.join("\n---\n")
+    );
 }
 
 #[test]

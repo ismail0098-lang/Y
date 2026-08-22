@@ -35,7 +35,25 @@ fn run_program(name: &str, src: &str) -> Option<i32> {
         .output()
         .expect("run Y");
     if !out.status.success() || !bin.exists() {
-        return None;                       // no clang, or the build failed
+        // `return None` used to cover BOTH "this machine has no clang" and
+        // "clang REJECTED the emitted IR", so every case in this file skipped
+        // vacuously whenever the emitter produced an invalid module. That is
+        // not hypothetical: mutating away the `i1` promotion in `infer_type`
+        // makes the emitter write `zext i1 %t` on an i32 register, clang
+        // refuses the module, and the whole file went green. Exactly the
+        // weakness `tests/llvm_control_flow.rs` records finding by mutation.
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if Command::new("clang").arg("--version").output().is_ok() {
+            panic!(
+                "`{name}` produced no binary although clang is installed, so \
+                 the emitted IR was rejected:\n{text}"
+            );
+        }
+        return None;
     }
     Command::new(&bin).status().ok().and_then(|s| s.code())
 }
@@ -215,5 +233,52 @@ fn main() -> I32 {
     match run_program("i32_widen", src) {
         Some(v) => assert_eq!(v, 255, "-3 widened to i64 must keep its sign bits"),
         None => eprintln!("SKIP i32_widen: could not build (clang missing?)"),
+    }
+}
+
+#[test]
+fn a_comparison_in_an_operand_position_is_not_compared_as_one_bit() {
+    // The second-order form of the `sext i1` bug, and it survived the fix for
+    // the first: the promotion that widens mismatched operands only ran when
+    // the two types DIFFERED, so two comparisons combined by a third operator
+    // stayed at `i1` -- where LLVM's signed reading of `1` is **-1**.
+    //
+    //     ((v == v) < (v > v))   ->   icmp slt i1 1, 0   ->   TRUE
+    //
+    // Found by `tests/backend_differential.rs` only after its generator
+    // started producing NESTED expressions; 400 flat programs had already
+    // passed clean, because a flat one cannot put a comparison in an operand
+    // position at all.
+    for (src, want, why) in [
+        ("let v: I32 = 63;\n    return ((v == v) < (v > v));", 0, "1 < 0 is false"),
+        ("return ((8 > 38) <= (2 <= 71));", 1, "0 <= 1 is true"),
+        ("return ((19 <= 38) <= (5 == 34));", 0, "1 <= 0 is false"),
+    ] {
+        let program = format!("fn main() -> I32 {{\n    {src}\n}}\n");
+        match run_program("nested_cmp", &program) {
+            Some(v) => assert_eq!(v, want, "{why}, in:\n{program}"),
+            None => eprintln!("SKIP nested_cmp: could not build (clang missing?)"),
+        }
+    }
+}
+
+#[test]
+fn arithmetic_on_booleans_is_done_at_a_real_width() {
+    // `add i1` wraps mod 2, so `(a > b) + (c > d)` could only ever be 0 or 1
+    // -- and this case is what proved the fix needs TWO sites. Widening the
+    // operands in the emitter alone left `infer_type` still reporting `i1` for
+    // the sum, so the caller emitted `zext i1 %t` on an i32 register and clang
+    // rejected the module outright. A silent wrong answer became a hard error
+    // in between, which is why it is pinned here rather than assumed.
+    for (src, want) in [
+        ("return (5 > 3) + (9 > 1);", 2),
+        ("return (5 > 3) + (1 > 9);", 1),
+        ("return (5 > 3) * 7;", 7),
+    ] {
+        let program = format!("fn main() -> I32 {{\n    {src}\n}}\n");
+        match run_program("bool_arith", &program) {
+            Some(v) => assert_eq!(v, want, "in:\n{program}"),
+            None => eprintln!("SKIP bool_arith: could not build (clang missing?)"),
+        }
     }
 }
