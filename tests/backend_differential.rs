@@ -245,7 +245,13 @@ fn sweep(count: u64) -> Tally {
 #[test]
 #[ignore]
 fn a_deep_sweep_finds_nothing_more() {
-    let t = sweep(400);
+    // `Y_DIFF_PROGRAMS=5000` to push it further. Each program costs two
+    // compiles and two runs, so ~11 per second here.
+    let n = std::env::var("Y_DIFF_PROGRAMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400);
+    let t = sweep(n);
     eprintln!(
         "deep sweep: {} compared, {} refused, {} disagreements",
         t.compared,
