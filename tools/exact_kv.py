@@ -131,6 +131,37 @@ def _levels_from_env(name, default, floor):
 
 K_LEVELS = _levels_from_env("Y_EXACT_K_LEVELS", 1023, 127)
 V_LEVELS = _levels_from_env("Y_EXACT_V_LEVELS", 127, 1)
+
+# Store V as real int8 rather than float32 carrying integers.
+#
+# `quantize_rows`' docstring gives the reason it was float32: "every consumer
+# wants floats and a per-step cast of the whole cache would put back the O(T)
+# pass this file exists to remove." The first half is what changed -- V's
+# consumer is `exact_pv`, and the int64 kernel in tests/exact_pv.ysu wants int8.
+# The second half never applied to STORAGE: the cache appends only the new rows,
+# so quantising at append is O(1) per decode step. The O(T) cast appears only if
+# a float32 consumer reads an int8 cache, which is why this flag and the
+# `exact_pv` dispatch are one decision and not two.
+#
+# Worth 4x the read traffic on V and, measured through tools/exact_pv_bridge.py,
+# takes exact_pv from 2.75x to 5.04x at T=4096 by deleting the cast.
+#
+# **V only.** V_LEVELS is 127 and fits int8 exactly; K's width is
+# `k_levels_for(head_dim, q_levels)`, which is 1023 at head_dim 64 and needs 16
+# bits. Asserted below rather than left as a comment.
+V_INT8 = os.environ.get("Y_EXACT_V_INT8", "0") != "0"
+if V_INT8 and V_LEVELS > 127:
+    raise ValueError(
+        f"Y_EXACT_V_INT8 needs V_LEVELS <= 127 to be exact; it is {V_LEVELS}. "
+        "Widening V past int8 is a real choice with a real cost -- it is not "
+        "something to absorb with a silent clamp."
+    )
+
+
+def v_store_dtype():
+    """The dtype the V side of the cache is held in."""
+    import torch
+    return torch.int8 if V_INT8 else torch.float32
 SCORE_BUDGET = 1 << 24          # fp32 holds every integer below this exactly
 
 
@@ -240,7 +271,7 @@ class QuantKVCache:
         cap = max(need, max(64, cap * 2))
         ki = torch.empty((b, nkv, cap, d), dtype=torch.float32, device=device)
         sk = torch.empty((b, nkv, cap, 1), dtype=torch.float32, device=device)
-        vi = torch.empty((b, nkv, cap, d), dtype=torch.float32, device=device)
+        vi = torch.empty((b, nkv, cap, d), dtype=v_store_dtype(), device=device)
         sv = torch.empty((b, nkv, cap, 1), dtype=torch.float32, device=device)
         if self.t:
             ki[:, :, : self.t] = self.ki[:, :, : self.t]
@@ -263,7 +294,7 @@ class QuantKVCache:
             self.t = 0
             self.ki = torch.empty((b, nkv, 0, d), dtype=torch.float32, device=k.device)
             self.sk = torch.empty((b, nkv, 0, 1), dtype=torch.float32, device=k.device)
-            self.vi = torch.empty((b, nkv, 0, d), dtype=torch.float32, device=k.device)
+            self.vi = torch.empty((b, nkv, 0, d), dtype=v_store_dtype(), device=k.device)
             self.sv = torch.empty((b, nkv, 0, 1), dtype=torch.float32, device=k.device)
         if t_new > self.t:
             self._grow(b, nkv, t_new, d, k.device)
@@ -290,6 +321,8 @@ def quantize_kv(module, k, v, q_levels=127):
     if module is None or not USE_CACHE:
         ki, sk = quantize_rows(k, k_lv)
         vi, sv = quantize_rows(v, V_LEVELS)
+        if V_INT8:
+            vi = vi.to(torch.int8)
         return ki, sk, vi, sv, k_lv, V_LEVELS
     cache = getattr(module, "_y_qkv", None)
     if cache is None:

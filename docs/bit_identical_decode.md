@@ -817,6 +817,38 @@ tokens**. The hard context ceiling recorded in
 [[feedback-check-bound-conjunctions-with-z3]] was a property of the accumulator,
 not of the method.
 
+### Wired in: the int8 V cache, and what the census predicted
+
+`Y_EXACT_V_INT8=1` stores V as real int8 and routes `exact_pv` to the compiler's
+kernel. **The dtype is the switch** -- `exact_pv` dispatches on what it is
+handed, so storage and consumer cannot disagree, and the int8 branch RAISES if
+the kernel will not load rather than casting back to float32. A fallback there
+would silently reinstate the whole-cache cast and report a number for a path
+nobody chose.
+
+Correct first, at every level:
+
+* the two routes are **bit-identical** on four shapes including head_dim 128
+  and Q = 1;
+* `exact_selftest.py` is 13/13 in both modes;
+* the model emits **identical tokens**, 0 of 64 differing, and coherent text --
+  checked by reading it, after finding 13.
+
+End to end at batch 32, 64 tokens, arms interleaved across rounds because the
+flag is read at import and they cannot share a process:
+
+| | best s | tok/s/seq |
+|---|---|---|
+| float32 V, digit split | 1.836 | 34.9 |
+| int8 V, Y kernel | **1.719** | **37.2** |
+
+**1.068x, and the census predicted 1.064x.** `exact_pv`'s digit matmuls were
+258 us of a 3,201 us step (8.1%); a 5x kernel removes four fifths of that, i.e.
+6.4%. Measured 6.8%, the remainder plausibly the 72 deleted launches. A phase
+split that predicts the end-to-end number to within half a point is the
+strongest evidence that the attribution was right -- and it is also the reason
+not to oversell the kernel's own 5.04x: Amdahl caps it at 8.1%.
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
