@@ -1,0 +1,60 @@
+// `out[b][d] = sum_t P[b][t] * V[b][t][d]`, accumulated exactly in int64.
+//
+// This is the softmax-weight times value product from the deterministic decode
+// path. In the PyTorch prototype it is `exact_pv`, and it is computed as
+// `ceil(29/dbits)` SEPARATE fp32 matmuls: a Q0.28 weight times an int8
+// activation is 35 bits before anything is summed, which overflows fp32's
+// 24-bit mantissa, so `p` is split into base-2^dbits digits, each digit matmul
+// is exact, and the digits recombine in float64.
+//
+// The split is a workaround for the accumulator, not for the arithmetic. A
+// kernel that accumulates in int64 has nothing to split:
+//
+//   * `ceil(29/dbits)` launches per layer collapse to ONE. At the key lengths
+//     a decode step reaches, `digit_width(T)` is 8, so that is 4 cuBLAS
+//     matmuls per layer -- 96 of the 748 kernel launches in a decode step,
+//     measured by tools/exact_kernel_census.py.
+//   * The partial sums stop round-tripping through global memory between
+//     digits; the accumulator stays in a register.
+//   * The context ceiling moves. The fp32 route needs
+//     `T * (2^dbits - 1) * V_LEVELS < 2^24` per digit and `T * 2^28 * V_LEVELS
+//     < 2^53` overall, which is 264k tokens at V_LEVELS = 127. Accumulating in
+//     int64 needs `T * 2^28 * V_LEVELS < 2^63`, i.e. about 2.7e8 tokens.
+//
+// Exactness is unchanged and is the whole point: integer addition is
+// associative, so the answer does not depend on the order `t` is summed in.
+//
+// V is int8 and must SIGN-extend: declaring it U8 assembles, launches, and
+// turns every negative activation into a large positive one. That is caught.
+//
+// P's signedness, by contrast, is NOT observable and the first version of this
+// comment claimed it was. A Q0.28 weight is in [0, 2^28] and 2^28 < 2^31, so
+// sign- and zero-extension agree on the entire reachable domain; declaring it
+// I32 passes every test, correctly. Mutation-checked, along with annotating
+// the loaded value `I32` instead of `I64` -- the emitter inserts a
+// `cvt.s64.s32` and still emits `mul.lo.s64`, so the promotion rule makes the
+// annotation redundant rather than the test blind. Both are confirmations of
+// the type system, not holes; U32 is kept because it states the real range.
+kernel exact_pv(
+    P: GlobalMemory<U32>,
+    V: GlobalMemory<I8>,
+    Out: GlobalMemory<I64>,
+    T: I32,
+    D: I32,
+    NP: I32,
+    NV: I32,
+    NO: I32
+) {
+    let b: I32 = block_idx_x();
+    let d: I32 = thread_idx_x();
+    let acc: I64 = 0;
+    @invariant(t >= 0)
+    for t in 0..T {
+        let pv: I64 = block_ptr2d_load(P, 0, b * T + t, NP, 1, NP);
+        let vv: I64 = block_ptr2d_load(V, 0, (b * T + t) * D + d, NV, 1, NV);
+        acc = acc + pv * vv;
+    }
+    block_ptr2d_store(Out, 0, b * D + d, NO, 1, NO, acc);
+}
+
+fn main() {}
