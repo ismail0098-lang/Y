@@ -615,6 +615,99 @@ the exact and fixed-order arms are built from:
 Not yet run against the bf16+SDPA stock arm or the int8 exact arm; both need the
 card.
 
+## Finding 14 — the bound checks had the same shape, and one of them had never checked anything
+
+Finding 13's lesson is not about invariance. It is about **any metric whose
+passing value is zero**, and `exact_bounds_check.py` is full of them: every
+exhaustive sweep reports "0 violations over N configurations", and 0 is what a
+predicate that cannot fire reports too.
+
+Three things came out of applying it there.
+
+### 1. A bound check that a dead function passes
+
+`exhaust_exp_range` verified `p <= 2^28` over the whole 2M-value domain. Stubbing
+`exp2_neg_q16_16` to return **zero everywhere**:
+
+    [ok ] p <= 2^28 over the entire reachable domain
+          max p = 0 at t=-1 (2^28 = 268,435,456), ...
+
+Green, with `max p = 0` printed in its own detail line and gating nothing. This
+is finding 06's uniform-softmax bug in a different file — a bound is satisfied
+most comfortably by a function that computes nothing.
+
+The check now requires the bound to be **attained**, and three more things that
+each kill a different mutation:
+
+| requirement | kills |
+|---|---|
+| `worst == 2^P_BITS` | exp2 returning 0 everywhere |
+| exact dyadic anchors, `exp2(-k) == 2^(28-k)` for k in 0..28 | exp2 returning the constant 2^28, which passes the row above |
+| ≥ 2^16 distinct outputs (real figure: **846,328**) | a table collapsed to a handful of values that hits every anchor and is wrong between them |
+| `min == 0` reached inside the domain | the decay being clipped |
+
+### 2. A guard that was mathematically incapable of firing
+
+`exhaust_digit_loop` had two branches. The second, described as *"the shift loop
+must cover all 29 bits of p"*, was
+
+    ceil(29 / dbits) * dbits < 29
+
+`ceil(a/b)*b >= a` is an identity. **It is false for every `dbits >= 1`, so it
+had never fired and never could** — one of the two things this file claimed to
+check about the digit loop had never been checked. Extracting the predicate so a
+self-test could feed it a violation is what found it: there was no violation to
+feed.
+
+It was also asking the wrong question. Coverage is a property of `exact_pv`'s
+loop *condition*, not of a formula, and recomputing the formula here compares the
+transcription against itself. Deleted, with the real guard named:
+`differential_exact_pv`, which drives `p` to exactly `2^P_BITS` and compares
+against an integer reference. **Verified rather than asserted** — mutating the
+loop to stop one bit early:
+
+    [ok ] digit width keeps every fp32 matmul exact (4131 values of T)   <- blind
+    [BAD] exact_pv == integer p@v ... mismatches: [(519, 7, 30), (1024, 7, 30), ...]
+
+### 3. `while shift < 29` was a transcription of a module constant
+
+Found on the way. `exact_pv`'s digit loop was written against a literal `29`
+while the constant it means is `P_BITS + 1`. Nothing links them, so raising
+`P_BITS` would leave the one loop whose job is to cover the top bit silently
+dropping it — with every bound in this file still holding, because a narrower `p`
+satisfies every bound. It reads `P_BITS + 1` now. Same disease as
+`feedback_constants_encode_old_structure`, and the same as the mirrored score
+budget that finding 08 removed.
+
+### The predicates are extracted, and the width rule was written twice
+
+`width_violation` and `digit_violation` are pure functions now.
+`--check-sweeps` feeds them 15 cases with no z3, no torch and no GPU — one per
+reason they can return, plus the near-misses that must still be accepted.
+
+The extraction also collapsed a **duplicate implementation**: the width rule was
+written out once in `exhaust_k_levels_for` and again inside the off-axis sweep,
+which is the shape that produced the `zk_emitter` constant-folding family.
+
+Mutation-verified, six mutations, all caught:
+
+| mutation | cases that go wrong |
+|---|---|
+| `2^n-1` branch deleted | 1 |
+| budget branch deleted | 3 |
+| non-positive-width branch deleted | 2 |
+| the 127-floor exemption dropped | 1 |
+| digit budget branch deleted | 2 |
+| `dbits < 1` branch deleted | 1 |
+
+**Two of my own expectations were wrong on the first run, and the predicate was
+right** — `2^24-1` *is* a `2^n-1`, and `2·(2^23-1)` is one short of the budget.
+That is the direction you want a self-test to fail in, and the corrected cases
+now straddle the boundary by exactly one.
+
+After all of it: bounds check **22/22**, exact self-test **13/13**, Rust suite
+**615 passed / 0 failed / 30 ignored** across 69 binaries.
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
