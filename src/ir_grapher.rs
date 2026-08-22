@@ -84,12 +84,6 @@ pub enum TensorCoreMapping {
         k: u32,
         quant_bits: u32,
     },
-    /// Hopper Warp-Group WGMMA matrix multiply
-    Wgmma {
-        m: u32,
-        n: u32,
-        k: u32,
-    },
     /// Fused operator sequence (e.g. MatMul + RMSNorm + SwiGLU)
     FusedOp {
         kind: FusedOpKind,

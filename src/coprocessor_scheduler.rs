@@ -384,13 +384,6 @@ the pipeline so less data crosses the RT/Tensor boundary at once.",
                                     first_barrier,
                                 );
                             }
-                            TensorCoreMapping::Wgmma { m, n, k } => {
-                                writeln!(&mut out, "    // [HOPPER WGMMA WARP-GROUP MATRIX MULTIPLY] {}x{}x{}", m, n, k).unwrap();
-                                writeln!(&mut out, "    wgmma.fence.sync.aligned;").unwrap();
-                                writeln!(&mut out, "    wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16 {{%f0, %f1, %f2, %f3}}, %r0, %r1;").unwrap();
-                                writeln!(&mut out, "    wgmma.commit_group.sync.aligned;").unwrap();
-                                writeln!(&mut out, "    wgmma.wait_group.sync.aligned 0;").unwrap();
-                            }
                             TensorCoreMapping::FusedOp { kind, m, n, k } => {
                                 writeln!(&mut out, "    // [FUSED OPERATOR KERNEL: {:?}] {}x{}x{}", kind, m, n, k).unwrap();
                                 self.emit_mma_sync(
