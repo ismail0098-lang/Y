@@ -366,6 +366,41 @@ torch.cuda.is_available(): print("SKIP: no CUDA"); return 0`.
 
 ---
 
+## Where the remaining cost is, and one lead that is not there
+
+Counting work rather than timing it, so this holds on a contended machine.
+
+`exact_pv` is the structural multiplier in the attention path: it splits the
+Q0.28 softmax weight into base-`2^dbits` digits and runs one fp32 matmul per
+digit, where a float path runs one matmul total.
+
+| T | digit width | `p@V` matmuls |
+|---|---|---|
+| ≤ 518 | 8 | 4 |
+| ≤ 1040 | 7 | 5 |
+| ≤ 2096 | 6 | 5 |
+| ≤ 4261 | 5 | 6 |
+| > 4261 | 4 | **8** |
+
+**The obvious lead is that the width is conservative — and it is not
+exploitable.** Finding 09 measured widths up to 14 giving bit-identical output
+at T = 600, which would be 3 matmuls instead of 5. Checked before proposing it:
+the bound `T · (2^dbits − 1) · V_LEVELS < 2^24` is **tight in the worst case**.
+The low digit's sum is `Σ (p_i mod 2^w)`, on which the denominator `l` gives no
+bound at all; and the high digits are bounded by `l / 2^s`, which in the worst
+case (`l = T · 2^28`, every score equal) reduces to exactly the same inequality.
+So the slack is a property of real softmax weights and there is no sound static
+version of it. A data-dependent width would also make the *number of matmuls*
+depend on the data, which is a different kind of variability from the one this
+project removes but not one worth introducing.
+
+What that leaves is the cost already attributed: device time is **0.97x** stock
+and wall clock is **1.09x**, so the deficit is launch count (1.45x), not
+arithmetic — and the fix for launch count is CUDA graphs, which is blocked on a
+library bug rather than on anything here.
+
+---
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries
