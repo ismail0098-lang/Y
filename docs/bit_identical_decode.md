@@ -735,6 +735,40 @@ now straddle the boundary by exactly one.
 After all of it: bounds check **22/22**, exact self-test **13/13**, Rust suite
 **615 passed / 0 failed / 30 ignored** across 69 binaries.
 
+## Where the launches go, attributed
+
+748 kernels/step, 3.201 ms device, batch 32, one decode step, `torch.compile` on
+(`tools/exact_kernel_census.py`). A kernel COUNT is invariant under contention,
+unlike every timing here, so the left column is the trustworthy one.
+
+| kernel | launches/step | us/step | share |
+|---|---|---|---|
+| `_w8a8_gemm` | 145 | 1238 | 38.7% |
+| `_w8a8_gemm_splitk` | 24 | 356 | 11.1% |
+| cuBLAS `gemmSN_NN` | 96 | 258 | 8.1% |
+| cuBLAS `gemmSN_TN` | 24 | 110 | 3.4% |
+| ~18 elementwise Triton kernels | ~435 | ~1240 | 38% |
+
+**The two cuBLAS rows are `exact_pv` and QK^T, and that is arithmetic rather
+than a guess.** At every key length this workload reaches, `digit_width(T) = 8`,
+so the digit loop runs `ceil(29/8) = 4` matmuls; 4 x 24 layers = **exactly 96**,
+and the remaining 24 TN calls are one QK^T per layer.
+
+### The lever
+
+`exact_pv` issues **four separate cuBLAS matmuls per layer** over the same `p`
+and `V`, round-tripping partial sums through global memory between them. One
+kernel running the digit loop internally deletes **72 of 96 launches** (12.8% of
+every launch in the step) and keeps the accumulator in registers.
+
+It is also the natural next kernel for Y to emit, which is why this sits at the
+junction of the launch-count work and the get-off-the-prototype work: `p` is
+integer, `V` is int8, the accumulation is exact by construction, and the digit
+loop is a compile-time-bounded `for` over `ceil(29/dbits)` steps.
+
+`_w8a8_gemm`'s 145 launches are ~6 per layer, i.e. one per linear. That is not
+redundancy, it is the work; its 8.54 us each is arithmetic, not overhead.
+
 ## What this does not yet claim
 
 Written at the same length as the findings, because a status report that buries

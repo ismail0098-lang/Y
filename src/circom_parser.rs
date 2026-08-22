@@ -473,7 +473,19 @@ impl Parser {
                         Tok::ShrAssign => BinOp::Shr,
                         Tok::AndAssign => BinOp::BitAnd,
                         Tok::OrAssign => BinOp::BitOr,
-                        _ => BinOp::BitXor,
+                        Tok::XorAssign => BinOp::BitXor,
+                        // Correct today only because the outer `op @ (..)`
+                        // pattern admits exactly these eleven tokens, so the
+                        // old `_ => BinOp::BitXor` WAS `XorAssign`. Add a
+                        // twelfth to that list and forget this match, and the
+                        // new operator silently becomes an XOR -- a wrong
+                        // operator in a front end whose output is a circuit,
+                        // which is the `Lt|Le|Gt|Ge => NotEq` bug in
+                        // zk_emitter. Named explicitly so that is a panic
+                        // rather than a proof of the wrong statement.
+                        other => unreachable!(
+                            "compound assignment {other:?} reached the operator                              table without a lowering; add it here as well as to                              the pattern above"
+                        ),
                     };
                     Stmt::Substitution {
                         lhs: lhs.clone(),
