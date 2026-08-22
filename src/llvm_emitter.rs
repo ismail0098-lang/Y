@@ -2496,7 +2496,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 let mut l = self.emit_expr(left, None, None);
                 let mut r = self.emit_expr(right, None, None);
                 let mut l_ty = self.infer_type(left);
-                let r_ty = self.infer_type(right);
+                let mut r_ty = self.infer_type(right);
 
                 // ==========================================
                 // ARCHITECTURAL NOTE: BinaryOp Type Promotion
@@ -2510,6 +2510,32 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 // 2. If one is float and the other is int, promote the int to the float type.
                 // 3. If both are ints, promote to the larger integer bitwidth.
                 // ==========================================
+
+                // 4. `i1` is NEVER an operand width. A comparison produces
+                //    `i1`, and the promotion below only runs when the two
+                //    types DIFFER -- so two comparisons combined with a third
+                //    operator were left at `i1`, where LLVM's signed
+                //    interpretation of `1` is **-1**:
+                //
+                //        ((v == v) < (v > v))   ->  icmp slt i1 1, 0  ->  TRUE
+                //
+                //    Arithmetic is no better: `add i1` wraps mod 2, so
+                //    `(a > b) + (c > d)` could only ever be 0 or 1. Both are
+                //    fixed by widening a boolean to a real integer first, and
+                //    zero-extension is what makes `true` 1 rather than -1.
+                //
+                //    Found by `tests/backend_differential.rs` once its
+                //    generator produced NESTED expressions -- flat ones cannot
+                //    put a comparison in an operand position, so 400 programs
+                //    had already passed clean.
+                if l_ty == "i1" {
+                    l = self.emit_coerce_from(&l, "i1", "i32", true);
+                    l_ty = "i32".to_string();
+                }
+                if r_ty == "i1" {
+                    r = self.emit_coerce_from(&r, "i1", "i32", true);
+                    r_ty = "i32".to_string();
+                }
 
                 // Promote types if there's a mismatch
                 if l_ty != r_ty {
@@ -3713,8 +3739,16 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 | BinaryOp::Le
                 | BinaryOp::Ge => "i1".into(),
                 _ => {
-                    let l_ty = self.infer_type(left);
-                    let r_ty = self.infer_type(right);
+                    // `i1` is never an operand width -- see the matching
+                    // promotion in the emission path. This must agree with it
+                    // exactly: the emitter widens the operands and emits
+                    // `add i32`, so reporting `i1` here makes the CALLER emit
+                    // `zext i1 %t` on an i32 register and clang rejects the
+                    // module. `(5 > 3) + (9 > 1)` was the case that caught it,
+                    // and it is the reason the fix is two sites and not one.
+                    let widen = |t: String| if t == "i1" { "i32".to_string() } else { t };
+                    let l_ty = widen(self.infer_type(left));
+                    let r_ty = widen(self.infer_type(right));
                     if l_ty == r_ty {
                         l_ty
                     } else {
