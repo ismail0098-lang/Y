@@ -183,7 +183,15 @@ def exact_pv(p, v):
     vf = v.to(torch.float32)
     acc = None
     shift = 0
-    while shift < 29:                   # p can be exactly 2^28, so 29 bits
+    # `P_BITS + 1`, not a literal 29: `p` can be exactly 2^P_BITS, so the top
+    # bit needs one more position than P_BITS names. It was written `29` -- a
+    # transcription of a module constant into the one loop whose job is to
+    # cover it, so raising P_BITS would have left this silently dropping the
+    # top bit while every bound in exact_bounds_check still held. The guard
+    # that catches a short loop is `differential_exact_pv`, which drives p to
+    # exactly 2^P_BITS; the formula check that looked like it covered this
+    # could not fire (see `digit_violation`).
+    while shift < P_BITS + 1:
         digit = ((p >> shift) & ((1 << dbits) - 1)).to(torch.float32)
         r = torch.matmul(digit, vf).to(torch.float64)
         r = r * float(1 << shift)       # a power of two: exact in float64

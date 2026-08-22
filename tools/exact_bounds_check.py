@@ -72,6 +72,133 @@ def report(name, ok, detail=""):
 
 
 # ---------------------------------------------------------------------------
+# The violation predicates, extracted.
+#
+# The width rule was written out TWICE - once in `exhaust_k_levels_for` and
+# again inside the off-axis sweep - which is the shape that produced the
+# `zk_emitter` constant-folding family: a rule with two implementations gets
+# fixed in one of them. It is one function now, and `--check-sweeps` feeds it
+# values that must be rejected.
+#
+# The reason that matters here specifically: every sweep below reports "0
+# violations over N configurations", and 0 is also what a predicate that cannot
+# fire reports. Extracting them is what makes that checkable at all.
+# ---------------------------------------------------------------------------
+
+def width_violation(d, q, k, budget=TWO24, floor=127):
+    """Is this (head_dim, q_levels, k_levels) triple outside the spec?
+
+    Returns a reason string, or None if it is fine. Pure: no torch, no module
+    state, so `--check-sweeps` can hand it whatever it likes.
+    """
+    if k < 1:
+        return "non-positive width"
+    if (k + 1) & k:
+        return "not 2^n-1"
+    if d * q * k >= budget and k != floor:
+        return "over budget and not the floor"
+    return None
+
+
+def digit_violation(t, dbits, v, budget=TWO24, pbits=None):
+    """Does `exact_pv`'s digit split stay exact at this key length?
+
+    `dbits == 0` is the float64 fallback and is governed by bound C elsewhere,
+    so it is not this predicate's business; the caller skips it.
+    """
+    pbits = D.P_BITS if pbits is None else pbits
+    if dbits < 1:
+        return "no digit width"
+    if t * ((1 << dbits) - 1) * v >= budget:
+        return "digit product exceeds the fp32 exact-integer budget"
+    # There WAS a second branch here, `ceil(29/dbits)*dbits < 29`, described as
+    # "the shift loop must cover all 29 bits of p". It is unreachable for every
+    # dbits >= 1 -- `ceil(a/b)*b >= a` is an identity -- so it had never fired
+    # and never could. Extracting this predicate so `--check-sweeps` could feed
+    # it a violation is what surfaced that; there was no violation to feed.
+    #
+    # It was also checking the wrong thing. Coverage is not a property of the
+    # formula, it is a property of `exact_pv`'s loop CONDITION, and recomputing
+    # the formula here compares the transcription against itself. The real
+    # guard is `differential_exact_pv`, which drives `p` to exactly 2^P_BITS
+    # and compares against an integer reference -- a behavioural check that
+    # fails if the loop stops one digit early.
+    return None
+
+
+def check_sweep_predicates():
+    """Can the sweeps' predicates FIRE? No z3, no torch, no GPU.
+
+        python3 tools/exact_bounds_check.py --check-sweeps
+
+    Every exhaustive check in this file reports "0 violations over N
+    configurations". `0` is also what a predicate that cannot fire reports, and
+    that is not hypothetical here: `digit_violation` shipped with a branch
+    (`ceil(29/dbits)*dbits < 29`) that is false for every dbits, so one of the
+    two things this file said it checked about the digit loop had never been
+    checked at all. Writing these cases is what found it - there was no
+    violation to feed it.
+
+    Each case below is a value the predicate MUST reject, one per reason it can
+    return, plus the near-misses that must still be accepted.
+    """
+    cases = [
+        # (d, q, k, expected reason or None)
+        (128, 127, 255, None),                    # ordinary, well inside budget
+        (128, 127, 256, "not 2^n-1"),             # a width that is not 2^n-1
+        (128, 127, 0, "non-positive width"),
+        (128, 127, -1, "non-positive width"),
+        (4096, 127, 511, "over budget and not the floor"),
+        (4096, 127, 127, None),                   # the floor IS allowed
+        # The budget boundary, straddled. `d*q*k` of 2^24-1 is fine and 2^24 is
+        # not, so these two differ by ONE in the product. Both were wrong in the
+        # first version of this list -- I wrote 2^24-1 as an example of "not a
+        # 2^n-1" when it is exactly one, and 2*(2^23-1) as over budget when it
+        # is one short. The predicate was right and the test was wrong, which is
+        # the direction you want a self-test to fail in.
+        (1, 1, (1 << 24) - 1, None),                 # product = 2^24 - 1, ok
+        (2, 1, (1 << 24) - 1, "over budget and not the floor"),   # 2*(2^24-1)
+        (1, 3, 8388607, "over budget and not the floor"),         # 3*(2^23-1)
+        (1, 1, 8388607, None),
+    ]
+    bad = 0
+    print("\n--- can width_violation fire? ---")
+    for d, q, k, want in cases:
+        got = width_violation(d, q, k)
+        okc = got == want
+        bad += not okc
+        print(f"  {'ok  ' if okc else 'WRONG'}  d={d:<5} q={q:<4} k={k:<9} "
+              f"-> {got!r} (want {want!r})")
+
+    print("\n--- can digit_violation fire? ---")
+    dcases = [
+        (100, 7, 127, None),
+        (1 << 20, 7, 127,
+         "digit product exceeds the fp32 exact-integer budget"),
+        (100, 0, 127, "no digit width"),
+        # The boundary: T*(2^dbits-1)*V just under and just over 2^24.
+        (TWO24 // (127 * 127) - 1, 7, 127, None),
+        (TWO24 // (127 * 127) + 2, 7, 127,
+         "digit product exceeds the fp32 exact-integer budget"),
+    ]
+    for t, db, v, want in dcases:
+        got = digit_violation(t, db, v)
+        okc = got == want
+        bad += not okc
+        print(f"  {'ok  ' if okc else 'WRONG'}  T={t:<10} dbits={db:<3} v={v:<5} "
+              f"-> {got!r} (want {want!r})")
+
+    if bad:
+        print(f"\n{bad} case(s) wrong: a sweep predicate does not do what the "
+              f"sweeps report about it.")
+        return 1
+    print(f"\nboth predicates reject every violation and accept every "
+          f"near-miss ({len(cases) + len(dcases)} cases).")
+    print("The sweeps' '0 violations' therefore means something.")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Part 1: Z3 over the derivations.
 # ---------------------------------------------------------------------------
 
@@ -330,17 +457,11 @@ def exhaust_k_levels_for():
     bad_spec, floor_at = [], None
     for d in range(1, MAX_D + 1):
         k = exact_kv.k_levels_for(d, D.Q_LEVELS)
-        # It must be a 2^n - 1 ...
-        if (k + 1) & k:
-            bad_spec.append((d, k, "not 2^n-1"))
-            continue
-        # ... and either within budget, or the 127 floor (which the caller's
-        # assert then refuses).
-        if d * D.Q_LEVELS * k >= TWO24:
-            if k != 127:
-                bad_spec.append((d, k, "over budget and not the floor"))
-            elif floor_at is None:
-                floor_at = d
+        why = width_violation(d, D.Q_LEVELS, k)
+        if why:
+            bad_spec.append((d, k, why))
+        elif d * D.Q_LEVELS * k >= TWO24 and floor_at is None:
+            floor_at = d           # the 127 floor, which the caller refuses
     report("k_levels_for returns a power-of-two width within budget",
            not bad_spec,
            f"{len(bad_spec)} violations, first {bad_spec[:3]}" if bad_spec
@@ -374,10 +495,9 @@ def exhaust_k_levels_for():
         for q in (1, 7, 15, 63, 127, 128, 255, 1023):
             for d in range(1, MAX_D + 1):
                 k = klv(d, q, kmax)
-                if (k + 1) & k:
-                    off_axis.append((d, q, kmax, k, "not 2^n-1"))
-                elif d * q * k >= TWO24 and k != 127:
-                    off_axis.append((d, q, kmax, k, "over budget, not the floor"))
+                why = width_violation(d, q, k)
+                if why:
+                    off_axis.append((d, q, kmax, k, why))
     report("the same holds off the default axes (K_LEVELS x q_levels x head_dim)",
            agree and not off_axis,
            f"{len(off_axis)} violations, first {off_axis[:2]}" if off_axis
@@ -403,11 +523,9 @@ def exhaust_digit_loop():
         dbits = D.digit_width(t)        # the REAL selector, not a transcription
         if dbits == 0:
             continue                       # float64 fallback, bound C governs
-        if t * ((1 << dbits) - 1) * v >= TWO24:
-            bad.append((t, dbits))
-        # the shift loop must cover all 29 bits of p
-        if ((29 + dbits - 1) // dbits) * dbits < 29:
-            bad.append((t, dbits, "digit loop does not cover 29 bits"))
+        why = digit_violation(t, dbits, v)
+        if why:
+            bad.append((t, dbits, why))
     report(f"digit width keeps every fp32 matmul exact ({len(probes)} values of T)",
            not bad, f"violations: {bad[:5]}" if bad else "")
 
@@ -468,13 +586,17 @@ def exhaust_exp_range():
     hi = 30 * 65536
     worst, worst_at, mono_breaks = 0, -1, 0
     prev_last = None
+    seen, floor_reached = set(), False
     for lo in range(0, hi, 1 << 20):
         t = torch.arange(lo, min(lo + (1 << 20), hi), dtype=torch.int64, device=dev)
         p = D.exp2_neg_q16_16(t, table)
         mx = int(p.max())
         if mx > worst:
             worst, worst_at = mx, int(t[int(p.argmax())])
-        if int(p.min()) < 0:
+        seen.update(int(x) for x in torch.unique(p).tolist())
+        lo_v = int(p.min())
+        floor_reached = floor_reached or lo_v == 0
+        if lo_v < 0:
             report("exp2 is non-negative", False, "negative weight")
             return
         # 2^-t is decreasing, so the integer approximation should be too. A
@@ -488,10 +610,36 @@ def exhaust_exp_range():
     # Above the domain: the caller clamps to 2^30 and the function zeroes n>=30.
     t = torch.tensor([hi, hi + 1, (1 << 30) - 1, 1 << 30], dtype=torch.int64, device=dev)
     tail = int(D.exp2_neg_q16_16(t, table).max())
-    report(f"p <= 2^{D.P_BITS} over the entire reachable domain",
-           worst <= (1 << D.P_BITS) and tail == 0,
+    distinct = len(seen)
+    # `worst <= 2^28` is ALSO what an exp2 returning zero everywhere produces,
+    # and this check reported `[ok]` under exactly that mutation, with `max p =
+    # 0` printed in its own detail line and gating nothing. A bound is not a
+    # test; the bound must be ATTAINED and the function must be alive:
+    #
+    #   * `worst == 2^P_BITS` - exp2(0) is 1.0, so the maximum is not merely
+    #     below the ceiling, it IS the ceiling. Kills the all-zeros mutation.
+    #   * exact dyadic anchors - exp2(-k) must be exactly 2^(P_BITS-k) for every
+    #     integer k in the domain. Kills a constant-2^28 mutation, which passes
+    #     the first check, and pins the scale rather than just the range.
+    #   * distinct outputs - a table that has collapsed to a handful of values
+    #     satisfies every anchor at the anchors and is useless between them.
+    #     Same degeneracy check the arm gate uses; 846,328 is the real figure.
+    #   * `p.min() == 0` - it decays to zero inside the domain, so the clamp at
+    #     the top is a real edge and not the whole function.
+    anchors = []
+    for k in range(0, D.P_BITS + 1):
+        got = int(D.exp2_neg_q16_16(
+            torch.tensor([k << 16], dtype=torch.int64, device=dev), table)[0])
+        if got != (1 << (D.P_BITS - k)):
+            anchors.append((k, got, 1 << (D.P_BITS - k)))
+    alive = (worst == (1 << D.P_BITS) and not anchors
+             and distinct >= 1 << 16 and floor_reached)
+    report(f"p <= 2^{D.P_BITS} over the entire reachable domain, and attains it",
+           alive and tail == 0,
            f"max p = {worst:,} at t={worst_at} (2^{D.P_BITS} = {1 << D.P_BITS:,}), "
-           f"above-domain max = {tail}, {mono_breaks} non-monotone steps")
+           f"above-domain max = {tail}, {mono_breaks} non-monotone steps, "
+           f"{distinct:,} distinct values, {len(anchors)} bad dyadic anchors"
+           + (f" {anchors[:3]}" if anchors else ""))
 
 
 def check_asserts_refuse():
@@ -554,6 +702,8 @@ def check_asserts_refuse():
 
 
 def main():
+    if "--check-sweeps" in sys.argv:
+        return check_sweep_predicates()
     print("Exactness-bound conjunction check")
     print(f"  constants: Q_LEVELS={D.Q_LEVELS} P_BITS={D.P_BITS} "
           f"K_LEVELS={exact_kv.K_LEVELS} V_LEVELS={exact_kv.V_LEVELS}")
