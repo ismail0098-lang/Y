@@ -13,7 +13,7 @@
 
 #![allow(dead_code)]
 
-use crate::ast::*;
+
 
 /// Execution regime for CPU matrix operations based on shape and memory bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,68 +92,6 @@ impl CpuShapeDispatcher {
         CpuMatrixRegime::NiceSquare
     }
 }
-
-/// AST Transformation Pass that annotates and transforms CPU matrix kernels.
-pub struct CpuSpecializerPass {
-    pub dispatcher: CpuShapeDispatcher,
-    pub shapes_classified: usize,
-    pub small_direct_count: usize,
-    pub decode_gemv_count: usize,
-    pub deep_k_count: usize,
-    pub irregular_count: usize,
-    pub nice_square_count: usize,
-}
-
-impl CpuSpecializerPass {
-    pub fn new(profile: CpuHardwareProfile) -> Self {
-        CpuSpecializerPass {
-            dispatcher: CpuShapeDispatcher::new(profile),
-            shapes_classified: 0,
-            small_direct_count: 0,
-            decode_gemv_count: 0,
-            deep_k_count: 0,
-            irregular_count: 0,
-            nice_square_count: 0,
-        }
-    }
-
-    /// Processes a full program AST to annotate and optimize CPU matrix kernel calls.
-    pub fn run(&mut self, prog: &mut Program) {
-        for item in &mut prog.items {
-            if let Item::Kernel(kernel) = item {
-                self.process_kernel(kernel);
-            }
-        }
-    }
-
-    fn process_kernel(&mut self, kernel: &mut KernelDecl) {
-        if let Some(tile) = &kernel.tile {
-            let m_opt = self.extract_usize_lit(&tile.block_m);
-            let n_opt = self.extract_usize_lit(&tile.block_n);
-            let k_opt = tile.block_k.as_ref().and_then(|expr| self.extract_usize_lit(expr));
-
-            if let (Some(m), Some(n), Some(k)) = (m_opt, n_opt, k_opt) {
-                let regime = self.dispatcher.classify_shape(m, n, k, 4);
-                self.shapes_classified += 1;
-                match regime {
-                    CpuMatrixRegime::SmallDirect => self.small_direct_count += 1,
-                    CpuMatrixRegime::DecodeGEMV => self.decode_gemv_count += 1,
-                    CpuMatrixRegime::DeepK => self.deep_k_count += 1,
-                    CpuMatrixRegime::IrregularMasked => self.irregular_count += 1,
-                    CpuMatrixRegime::NiceSquare => self.nice_square_count += 1,
-                }
-            }
-        }
-    }
-
-    fn extract_usize_lit(&self, expr: &Expr) -> Option<usize> {
-        match expr {
-            Expr::IntLit(v, _) if *v > 0 => Some(*v as usize),
-            _ => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

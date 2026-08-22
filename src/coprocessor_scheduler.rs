@@ -310,7 +310,7 @@ the pipeline so less data crosses the RT/Tensor boundary at once.",
                     barrier.smem_offset,
                     barrier.smem_bytes,
                     hw,
-                );
+                )?;
                 out.push_str(&quant_code);
             }
 

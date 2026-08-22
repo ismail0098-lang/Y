@@ -87,8 +87,20 @@ impl QuantizationPass {
         smem_offset: u32,
         smem_bytes: u32,
         hw: &HardwareProfile,
-    ) -> String {
+    ) -> Result<String, String> {
         let mut out = String::new();
+
+        // An identity conversion is a legitimate no-op, not an unsupported
+        // pair: the bits already have the destination's meaning.
+        if src == dst {
+            writeln!(
+                &mut out,
+                "    // -- NO QUANTIZATION NEEDED: already {:?} --",
+                src
+            )
+            .unwrap();
+            return Ok(out);
+        }
 
         writeln!(
             &mut out,
@@ -112,31 +124,24 @@ impl QuantizationPass {
             (Precision::FP32, Precision::BF16) => {
                 self.emit_fp32_to_bf16(&mut out, smem_offset, smem_bytes, hw);
             }
-            (Precision::FP32, Precision::FP8) => {
-                self.emit_fp32_to_fp8(&mut out, smem_offset, smem_bytes, hw);
-            }
-            (Precision::FP32, Precision::INT8) => {
-                self.emit_fp32_to_int8(&mut out, smem_offset, smem_bytes, hw);
-            }
-            (Precision::FP32, Precision::FP4) | (Precision::FP32, Precision::INT4) => {
-                self.emit_fp32_to_4bit(&mut out, smem_offset, smem_bytes, hw);
-            }
-            (Precision::FP16, Precision::FP32) => {
-                self.emit_fp16_to_fp32(&mut out, smem_offset, smem_bytes, hw);
-            }
+            // Every other pair is REFUSED, not approximated. This arm used to
+            // call `emit_scalar_fallback`, which emitted two PTX comments and
+            // no instructions -- so the conversion silently did not happen and
+            // the consumer read the source precision's bits as the destination
+            // type. That is a reinterpretation, not a fallback, and it sits on
+            // the cross-pipeline barrier path where the tensor core is the
+            // consumer. 7 of the 64 ordered pairs are implemented; naming the
+            // gap costs a line number, guessing costs a wrong kernel.
             _ => {
-                writeln!(
-                    &mut out,
-                    "    // WARNING: No optimized quantization path for {:?} -> {:?}",
+                return Err(format!(
+                    "[Y COPROCESSOR] No quantization path from {:?} to {:?}. \
+                     Implemented: FP32 -> FP16 and FP32 -> BF16, plus any identity conversion.",
                     src, dst
-                )
-                .unwrap();
-                writeln!(&mut out, "    // Falling back to scalar conversion").unwrap();
-                self.emit_scalar_fallback(&mut out, src, dst, smem_offset, smem_bytes);
+                ));
             }
         }
 
-        out
+        Ok(out)
     }
 
     /// FP32 → FP16 with half2 packing.
@@ -407,259 +412,6 @@ impl QuantizationPass {
         writeln!(out, "        @{} bra {};", pred, loop_start).unwrap();
         writeln!(out, "        {}:", loop_end).unwrap();
         writeln!(out, "    }}").unwrap();
-    }
-
-    /// FP32 → FP8 (E4M3) conversion for Hopper+ architectures.
-    fn emit_fp32_to_fp8(
-        &mut self,
-        out: &mut String,
-        smem_offset: u32,
-        smem_bytes: u32,
-        _hw: &HardwareProfile,
-    ) {
-        let num_elements = smem_bytes / 4;
-        writeln!(
-            out,
-            "    // FP32 -> FP8 E4M3: {} elements (4x compression)",
-            num_elements
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    // Requires sm_89+ (Hopper). Pack 4 FP8 values per 32-bit register."
-        )
-        .unwrap();
-
-        // Scalar loop with manual E4M3 conversion
-        let loop_start = self.alloc_label("FP8_CVT");
-        let loop_end = self.alloc_label("FP8_DONE");
-        let iter = self.alloc_u32();
-        let limit = self.alloc_u32();
-        let quads = num_elements / 4;
-
-        writeln!(out, "    mov.u32 {}, 0;", iter).unwrap();
-        writeln!(out, "    mov.u32 {}, {};", limit, quads).unwrap();
-        writeln!(out, "    {}:", loop_start).unwrap();
-
-        // Load 4 FP32 values
-        for i in 0..4 {
-            let val = self.alloc_f32();
-            writeln!(
-                out,
-                "    ld.shared.f32 {}, [coprocessor_smem+{}];  // fp32[{}]",
-                val,
-                smem_offset + i * 4,
-                i
-            )
-            .unwrap();
-        }
-
-        // Pack 4 FP8 values into a single 32-bit register
-        let packed = self.alloc_u32();
-        writeln!(
-            out,
-            "    // E4M3 pack: clamp + truncate + shift into 32-bit register"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    mov.u32 {}, 0;  // packed FP8x4 (placeholder for cvt.rn.satfinite.e4m3x4)",
-            packed
-        )
-        .unwrap();
-
-        let pred = format!("%qp{}", self.reg_pred);
-        self.reg_pred += 1;
-        writeln!(out, "    add.u32 {}, {}, 1;", iter, iter).unwrap();
-        writeln!(out, "    setp.lt.u32 {}, {}, {};", pred, iter, limit).unwrap();
-        writeln!(out, "    @{} bra {};", pred, loop_start).unwrap();
-        writeln!(out, "    {}:", loop_end).unwrap();
-    }
-
-    /// FP32 → INT8 symmetric quantization.
-    fn emit_fp32_to_int8(
-        &mut self,
-        out: &mut String,
-        _smem_offset: u32,
-        smem_bytes: u32,
-        _hw: &HardwareProfile,
-    ) {
-        let num_elements = smem_bytes / 4;
-        writeln!(
-            out,
-            "    // FP32 -> INT8 symmetric quantization ({} elements)",
-            num_elements
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    // scale = max(abs(tensor)) / 127.0; quant = round(val / scale)"
-        )
-        .unwrap();
-
-        // Find absmax for scaling factor
-        let absmax = self.alloc_f32();
-        let scale = self.alloc_f32();
-        writeln!(
-            out,
-            "    mov.f32 {}, 0f00000000;  // absmax = 0.0",
-            absmax
-        )
-        .unwrap();
-
-        // Scale: 127.0 / absmax
-        writeln!(
-            out,
-            "    div.approx.f32 {}, 0f42FE0000, {};  // scale = 127.0 / absmax",
-            scale, absmax
-        )
-        .unwrap();
-
-        let loop_start = self.alloc_label("INT8_QUANT");
-        let loop_end = self.alloc_label("INT8_DONE");
-        let iter = self.alloc_u32();
-        let limit = self.alloc_u32();
-
-        writeln!(out, "    mov.u32 {}, 0;", iter).unwrap();
-        writeln!(out, "    mov.u32 {}, {};", limit, num_elements / 4).unwrap();
-        writeln!(out, "    {}:", loop_start).unwrap();
-
-        // Load, scale, round, clamp to [-128, 127], pack 4 INT8 into U32
-        let val = self.alloc_f32();
-        let scaled = self.alloc_f32();
-        let rounded = self.alloc_u32();
-        writeln!(out, "    ld.shared.f32 {}, [coprocessor_smem];", val).unwrap();
-        writeln!(
-            out,
-            "    mul.f32 {}, {}, {};  // val * scale",
-            scaled, val, scale
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    cvt.rni.s32.f32 {}, {};  // round to nearest int",
-            rounded, scaled
-        )
-        .unwrap();
-
-        let pred = format!("%qp{}", self.reg_pred);
-        self.reg_pred += 1;
-        writeln!(out, "    add.u32 {}, {}, 1;", iter, iter).unwrap();
-        writeln!(out, "    setp.lt.u32 {}, {}, {};", pred, iter, limit).unwrap();
-        writeln!(out, "    @{} bra {};", pred, loop_start).unwrap();
-        writeln!(out, "    {}:", loop_end).unwrap();
-    }
-
-    /// FP32 → 4-bit quantization (FP4/INT4).
-    fn emit_fp32_to_4bit(
-        &mut self,
-        out: &mut String,
-        _smem_offset: u32,
-        smem_bytes: u32,
-        _hw: &HardwareProfile,
-    ) {
-        let num_elements = smem_bytes / 4;
-        writeln!(
-            out,
-            "    // FP32 -> 4-bit quantization ({} elements, 8x compression)",
-            num_elements
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    // Pack 8 * 4-bit values into each 32-bit register"
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    // Uses LOP3.LUT for efficient bit-field manipulation"
-        )
-        .unwrap();
-
-        let packed = self.alloc_u32();
-        writeln!(
-            out,
-            "    mov.u32 {}, 0;  // placeholder for 4-bit packed quantization",
-            packed
-        )
-        .unwrap();
-    }
-
-    /// FP16 → FP32 dequantization (for reading back from Tensor Core output).
-    fn emit_fp16_to_fp32(
-        &mut self,
-        out: &mut String,
-        _smem_offset: u32,
-        smem_bytes: u32,
-        _hw: &HardwareProfile,
-    ) {
-        let num_half2 = smem_bytes / 4;
-        writeln!(
-            out,
-            "    // FP16 -> FP32 dequantization: {} half2 pairs -> {} FP32",
-            num_half2,
-            num_half2 * 2
-        )
-        .unwrap();
-
-        let loop_start = self.alloc_label("DEQUANT");
-        let loop_end = self.alloc_label("DEQUANT_DONE");
-        let iter = self.alloc_u32();
-        let limit = self.alloc_u32();
-
-        writeln!(out, "    mov.u32 {}, 0;", iter).unwrap();
-        writeln!(out, "    mov.u32 {}, {};", limit, num_half2).unwrap();
-        writeln!(out, "    {}:", loop_start).unwrap();
-
-        let packed = self.alloc_u32();
-        let val_lo = self.alloc_f32();
-        let val_hi = self.alloc_f32();
-
-        writeln!(out, "    ld.shared.b32 {}, [coprocessor_smem];", packed).unwrap();
-        writeln!(
-            out,
-            "    cvt.f32.f16 {}, {};  // unpack lo half",
-            val_lo, packed
-        )
-        .unwrap();
-
-        let hi_bits = self.alloc_u32();
-        writeln!(out, "    shr.u32 {}, {}, 16;", hi_bits, packed).unwrap();
-        writeln!(
-            out,
-            "    cvt.f32.f16 {}, {};  // unpack hi half",
-            val_hi, hi_bits
-        )
-        .unwrap();
-
-        let pred = format!("%qp{}", self.reg_pred);
-        self.reg_pred += 1;
-        writeln!(out, "    add.u32 {}, {}, 1;", iter, iter).unwrap();
-        writeln!(out, "    setp.lt.u32 {}, {}, {};", pred, iter, limit).unwrap();
-        writeln!(out, "    @{} bra {};", pred, loop_start).unwrap();
-        writeln!(out, "    {}:", loop_end).unwrap();
-    }
-
-    /// Scalar fallback for unsupported conversion paths.
-    fn emit_scalar_fallback(
-        &mut self,
-        out: &mut String,
-        src: Precision,
-        dst: Precision,
-        _smem_offset: u32,
-        smem_bytes: u32,
-    ) {
-        writeln!(
-            out,
-            "    // Scalar fallback: {:?} -> {:?} ({} bytes)",
-            src, dst, smem_bytes
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "    // TODO: Implement optimized path for this conversion"
-        )
-        .unwrap();
     }
 
     /// Emits single-pass epilogue fusion directly on accumulator registers (%f0..%f3).
