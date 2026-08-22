@@ -965,8 +965,10 @@ integers. **The demo's numbers are the kernel's numbers.**
 > 65536x too small, i.e. a **uniform** softmax, and both arms of the comparison
 > shared the mistake so 12/12 was reported anyway. The convention is fixed and
 > pinned by CPU tests, and a `max(p)/mean(p)` control now refuses a uniform
-> result, but the bridge has not been re-run — it needs the GPU. See
-> `docs/bit_identical_decode.md` finding 06.
+> result. **Re-run 2026-08-22: 12/12 bit-identical at `max(p)/mean(p) = 110.9`.
+> Reverting only the `kfix` line reproduces the old run exactly — 12/12, and
+> `max(p)/mean(p) = 1.0` — so the figure above was agreement about uniform
+> attention.** See `docs/bit_identical_decode.md` finding 06.
 
 **Throughput, stated plainly because it was unflattering: 6.7x slower.**
 Qwen2.5-0.5B, 64 tokens, batch 32, 24.7 tok/s/seq against stock's 165.9. That
