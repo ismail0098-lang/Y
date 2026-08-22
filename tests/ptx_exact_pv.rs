@@ -85,7 +85,7 @@ fn inputs(seed: u64) -> (Vec<u32>, Vec<i8>) {
     let mut s = seed;
     let mut p: Vec<u32> =
         (0..B * Q * T).map(|_| (lcg(&mut s) % ((1u64 << P_BITS) + 1)) as u32).collect();
-    let mut v: Vec<i8> = (0..B * T * D).map(|_| (lcg(&mut s) % 255) as i64 as i8 - 127).collect();
+    let mut v: Vec<i8> = (0..B * T * D).map(|_| ((lcg(&mut s) % 255) as i64 - 127) as i8).collect();
     for b in 0..B {
         for q in 0..Q {
             p[(b * Q + q) * T] = 1 << P_BITS; // exactly 2^28
