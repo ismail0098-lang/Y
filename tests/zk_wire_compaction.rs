@@ -169,10 +169,16 @@ fn cases() -> Vec<Case> {
             shrinks: false,
         },
         Case {
+            // `y` is unused and must survive - that is what
+            // `unused_boundary_signals_survive` pins. It DOES shrink by one now:
+            // the pure-copy rename collapses `mul_tmp * 1 = out`, leaving
+            // `mul_tmp` dead for compaction to drop. The boundary is untouched,
+            // and `multiplier.circom` and `unused_input.circom` still exercise
+            // the `shrinks: false` arm.
             name: "y/unused_param",
             src: Src::Y("@unsafe\nfn main(x: I32, y: I32) -> I32 {\n    return x * x;\n}\n"),
             inputs: &[6, 99],
-            shrinks: false,
+            shrinks: true,
         },
         // Y native. `x*y` twice is a CSE pair, so the loser is dead and the
         // output wire is allocated after it - exactly the arrangement that makes

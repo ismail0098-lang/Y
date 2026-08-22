@@ -62,11 +62,17 @@ entry:
   %_t4 = sext i32 %_t3 to i64
   %_t5 = load i32, ptr %K
   %_t6 = sext i32 %_t5 to i64
-  %_t7 = load ptr, ptr %A
-  %_t8 = load ptr, ptr %B
-  %_t9 = load ptr, ptr %C
-  call void @__y_sgemm_f32_avx512(ptr %_t7, ptr %_t8, ptr %_t9, i64 %_t2, i64 %_t4, i64 %_t6)
-  ; [Y CPU GEMM] GemmShape { a: "A", b: "B", c: "C", m: "M", n: "N", k: "K" }
+  %_t7 = load i32, ptr %K
+  %_t8 = sext i32 %_t7 to i64
+  %_t9 = load i32, ptr %N
+  %_t10 = sext i32 %_t9 to i64
+  %_t11 = load i32, ptr %N
+  %_t12 = sext i32 %_t11 to i64
+  %_t13 = load ptr, ptr %A
+  %_t14 = load ptr, ptr %B
+  %_t15 = load ptr, ptr %C
+  call void @__y_sgemm_f32_avx512(ptr %_t13, ptr %_t14, ptr %_t15, i64 %_t2, i64 %_t4, i64 %_t6, i64 %_t8, i64 %_t10, i64 %_t12)
+  ; [Y CPU GEMM] GemmShape { a: "A", b: "B", c: "C", m: "M", n: "N", k: "K", lda: "K", ldb: "N", ldc: "N" }
   ret void
 }
 
@@ -78,7 +84,7 @@ entry:
 
 
 ; --- Y CPU GEMM: shared state ---
-%y_gemm_task = type { ptr, ptr, ptr, i64, i64, i64, i64, i64, i64, i64, ptr, i64, i64, i64, i64, i64, i64 }
+%y_gemm_task = type { ptr, ptr, ptr, i64, i64, i64, i64, i64, i64, i64, ptr, i64, i64, i64, i64, i64, i64, i64, i64, i64 }
 @__y_gemm_scratch = internal global ptr null, align 8   ; per-thread packing scratch
 @__y_gemm_scratch_threads = internal global i64 0, align 8      ; threads the scratch was sized for
 @__y_gemm_nthreads = internal global i64 0, align 8      ; 0 = not yet resolved
@@ -1086,7 +1092,7 @@ mk.done.209:
   ret void
 }
 
-define internal void @__y_gemm_small_m(ptr noalias %A, ptr noalias %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %ldc, i64 %m0, i64 %m1, i64 %n0, i64 %n1, i64 %k0, i64 %k1) #0 {
+define internal void @__y_gemm_small_m(ptr noalias %A, ptr noalias %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %ldc, i64 %m0, i64 %m1, i64 %n0, i64 %n1, i64 %k0, i64 %k1, i64 %lda, i64 %ldb) #0 {
 entry:
   %iv3 = alloca i64, align 8
   %iv26 = alloca i64, align 8
@@ -1152,7 +1158,7 @@ sm.pu.body.39:
   %g44 = add nsw i64 %g43, 0
   %g45 = icmp slt i64 0, %g35
   %g46 = add nsw i64 %g32, 0
-  %g47 = mul nsw i64 %g46, %K
+  %g47 = mul nsw i64 %g46, %lda
   %g48 = add nsw i64 %g47, %g44
   %g49 = select i1 %g45, i64 %g48, i64 0
   %g50 = getelementptr inbounds float, ptr %A, i64 %g49
@@ -1162,7 +1168,7 @@ sm.pu.body.39:
   %g54 = shufflevector <16 x float> %g53, <16 x float> poison, <16 x i32> zeroinitializer
   %g55 = icmp slt i64 1, %g35
   %g56 = add nsw i64 %g32, 1
-  %g57 = mul nsw i64 %g56, %K
+  %g57 = mul nsw i64 %g56, %lda
   %g58 = add nsw i64 %g57, %g44
   %g59 = select i1 %g55, i64 %g58, i64 0
   %g60 = getelementptr inbounds float, ptr %A, i64 %g59
@@ -1172,7 +1178,7 @@ sm.pu.body.39:
   %g64 = shufflevector <16 x float> %g63, <16 x float> poison, <16 x i32> zeroinitializer
   %g65 = icmp slt i64 2, %g35
   %g66 = add nsw i64 %g32, 2
-  %g67 = mul nsw i64 %g66, %K
+  %g67 = mul nsw i64 %g66, %lda
   %g68 = add nsw i64 %g67, %g44
   %g69 = select i1 %g65, i64 %g68, i64 0
   %g70 = getelementptr inbounds float, ptr %A, i64 %g69
@@ -1182,7 +1188,7 @@ sm.pu.body.39:
   %g74 = shufflevector <16 x float> %g73, <16 x float> poison, <16 x i32> zeroinitializer
   %g75 = icmp slt i64 3, %g35
   %g76 = add nsw i64 %g32, 3
-  %g77 = mul nsw i64 %g76, %K
+  %g77 = mul nsw i64 %g76, %lda
   %g78 = add nsw i64 %g77, %g44
   %g79 = select i1 %g75, i64 %g78, i64 0
   %g80 = getelementptr inbounds float, ptr %A, i64 %g79
@@ -1192,7 +1198,7 @@ sm.pu.body.39:
   %g84 = shufflevector <16 x float> %g83, <16 x float> poison, <16 x i32> zeroinitializer
   %g85 = icmp slt i64 4, %g35
   %g86 = add nsw i64 %g32, 4
-  %g87 = mul nsw i64 %g86, %K
+  %g87 = mul nsw i64 %g86, %lda
   %g88 = add nsw i64 %g87, %g44
   %g89 = select i1 %g85, i64 %g88, i64 0
   %g90 = getelementptr inbounds float, ptr %A, i64 %g89
@@ -1202,7 +1208,7 @@ sm.pu.body.39:
   %g94 = shufflevector <16 x float> %g93, <16 x float> poison, <16 x i32> zeroinitializer
   %g95 = icmp slt i64 5, %g35
   %g96 = add nsw i64 %g32, 5
-  %g97 = mul nsw i64 %g96, %K
+  %g97 = mul nsw i64 %g96, %lda
   %g98 = add nsw i64 %g97, %g44
   %g99 = select i1 %g95, i64 %g98, i64 0
   %g100 = getelementptr inbounds float, ptr %A, i64 %g99
@@ -1212,7 +1218,7 @@ sm.pu.body.39:
   %g104 = shufflevector <16 x float> %g103, <16 x float> poison, <16 x i32> zeroinitializer
   %g105 = icmp slt i64 6, %g35
   %g106 = add nsw i64 %g32, 6
-  %g107 = mul nsw i64 %g106, %K
+  %g107 = mul nsw i64 %g106, %lda
   %g108 = add nsw i64 %g107, %g44
   %g109 = select i1 %g105, i64 %g108, i64 0
   %g110 = getelementptr inbounds float, ptr %A, i64 %g109
@@ -1222,7 +1228,7 @@ sm.pu.body.39:
   %g114 = shufflevector <16 x float> %g113, <16 x float> poison, <16 x i32> zeroinitializer
   %g115 = icmp slt i64 7, %g35
   %g116 = add nsw i64 %g32, 7
-  %g117 = mul nsw i64 %g116, %K
+  %g117 = mul nsw i64 %g116, %lda
   %g118 = add nsw i64 %g117, %g44
   %g119 = select i1 %g115, i64 %g118, i64 0
   %g120 = getelementptr inbounds float, ptr %A, i64 %g119
@@ -1230,12 +1236,12 @@ sm.pu.body.39:
   %g122 = select i1 %g115, float %g121, float 0.0
   %g123 = insertelement <16 x float> poison, float %g122, i32 0
   %g124 = shufflevector <16 x float> %g123, <16 x float> poison, <16 x i32> zeroinitializer
-  %g125 = mul nsw i64 %g44, %N
+  %g125 = mul nsw i64 %g44, %ldb
   %g126 = getelementptr inbounds float, ptr %B, i64 %g125
   %g127 = add nsw i64 %g43, 1
   %g128 = icmp slt i64 0, %g35
   %g129 = add nsw i64 %g32, 0
-  %g130 = mul nsw i64 %g129, %K
+  %g130 = mul nsw i64 %g129, %lda
   %g131 = add nsw i64 %g130, %g127
   %g132 = select i1 %g128, i64 %g131, i64 0
   %g133 = getelementptr inbounds float, ptr %A, i64 %g132
@@ -1245,7 +1251,7 @@ sm.pu.body.39:
   %g137 = shufflevector <16 x float> %g136, <16 x float> poison, <16 x i32> zeroinitializer
   %g138 = icmp slt i64 1, %g35
   %g139 = add nsw i64 %g32, 1
-  %g140 = mul nsw i64 %g139, %K
+  %g140 = mul nsw i64 %g139, %lda
   %g141 = add nsw i64 %g140, %g127
   %g142 = select i1 %g138, i64 %g141, i64 0
   %g143 = getelementptr inbounds float, ptr %A, i64 %g142
@@ -1255,7 +1261,7 @@ sm.pu.body.39:
   %g147 = shufflevector <16 x float> %g146, <16 x float> poison, <16 x i32> zeroinitializer
   %g148 = icmp slt i64 2, %g35
   %g149 = add nsw i64 %g32, 2
-  %g150 = mul nsw i64 %g149, %K
+  %g150 = mul nsw i64 %g149, %lda
   %g151 = add nsw i64 %g150, %g127
   %g152 = select i1 %g148, i64 %g151, i64 0
   %g153 = getelementptr inbounds float, ptr %A, i64 %g152
@@ -1265,7 +1271,7 @@ sm.pu.body.39:
   %g157 = shufflevector <16 x float> %g156, <16 x float> poison, <16 x i32> zeroinitializer
   %g158 = icmp slt i64 3, %g35
   %g159 = add nsw i64 %g32, 3
-  %g160 = mul nsw i64 %g159, %K
+  %g160 = mul nsw i64 %g159, %lda
   %g161 = add nsw i64 %g160, %g127
   %g162 = select i1 %g158, i64 %g161, i64 0
   %g163 = getelementptr inbounds float, ptr %A, i64 %g162
@@ -1275,7 +1281,7 @@ sm.pu.body.39:
   %g167 = shufflevector <16 x float> %g166, <16 x float> poison, <16 x i32> zeroinitializer
   %g168 = icmp slt i64 4, %g35
   %g169 = add nsw i64 %g32, 4
-  %g170 = mul nsw i64 %g169, %K
+  %g170 = mul nsw i64 %g169, %lda
   %g171 = add nsw i64 %g170, %g127
   %g172 = select i1 %g168, i64 %g171, i64 0
   %g173 = getelementptr inbounds float, ptr %A, i64 %g172
@@ -1285,7 +1291,7 @@ sm.pu.body.39:
   %g177 = shufflevector <16 x float> %g176, <16 x float> poison, <16 x i32> zeroinitializer
   %g178 = icmp slt i64 5, %g35
   %g179 = add nsw i64 %g32, 5
-  %g180 = mul nsw i64 %g179, %K
+  %g180 = mul nsw i64 %g179, %lda
   %g181 = add nsw i64 %g180, %g127
   %g182 = select i1 %g178, i64 %g181, i64 0
   %g183 = getelementptr inbounds float, ptr %A, i64 %g182
@@ -1295,7 +1301,7 @@ sm.pu.body.39:
   %g187 = shufflevector <16 x float> %g186, <16 x float> poison, <16 x i32> zeroinitializer
   %g188 = icmp slt i64 6, %g35
   %g189 = add nsw i64 %g32, 6
-  %g190 = mul nsw i64 %g189, %K
+  %g190 = mul nsw i64 %g189, %lda
   %g191 = add nsw i64 %g190, %g127
   %g192 = select i1 %g188, i64 %g191, i64 0
   %g193 = getelementptr inbounds float, ptr %A, i64 %g192
@@ -1305,7 +1311,7 @@ sm.pu.body.39:
   %g197 = shufflevector <16 x float> %g196, <16 x float> poison, <16 x i32> zeroinitializer
   %g198 = icmp slt i64 7, %g35
   %g199 = add nsw i64 %g32, 7
-  %g200 = mul nsw i64 %g199, %K
+  %g200 = mul nsw i64 %g199, %lda
   %g201 = add nsw i64 %g200, %g127
   %g202 = select i1 %g198, i64 %g201, i64 0
   %g203 = getelementptr inbounds float, ptr %A, i64 %g202
@@ -1313,12 +1319,12 @@ sm.pu.body.39:
   %g205 = select i1 %g198, float %g204, float 0.0
   %g206 = insertelement <16 x float> poison, float %g205, i32 0
   %g207 = shufflevector <16 x float> %g206, <16 x float> poison, <16 x i32> zeroinitializer
-  %g208 = mul nsw i64 %g127, %N
+  %g208 = mul nsw i64 %g127, %ldb
   %g209 = getelementptr inbounds float, ptr %B, i64 %g208
   %g210 = add nsw i64 %g43, 2
   %g211 = icmp slt i64 0, %g35
   %g212 = add nsw i64 %g32, 0
-  %g213 = mul nsw i64 %g212, %K
+  %g213 = mul nsw i64 %g212, %lda
   %g214 = add nsw i64 %g213, %g210
   %g215 = select i1 %g211, i64 %g214, i64 0
   %g216 = getelementptr inbounds float, ptr %A, i64 %g215
@@ -1328,7 +1334,7 @@ sm.pu.body.39:
   %g220 = shufflevector <16 x float> %g219, <16 x float> poison, <16 x i32> zeroinitializer
   %g221 = icmp slt i64 1, %g35
   %g222 = add nsw i64 %g32, 1
-  %g223 = mul nsw i64 %g222, %K
+  %g223 = mul nsw i64 %g222, %lda
   %g224 = add nsw i64 %g223, %g210
   %g225 = select i1 %g221, i64 %g224, i64 0
   %g226 = getelementptr inbounds float, ptr %A, i64 %g225
@@ -1338,7 +1344,7 @@ sm.pu.body.39:
   %g230 = shufflevector <16 x float> %g229, <16 x float> poison, <16 x i32> zeroinitializer
   %g231 = icmp slt i64 2, %g35
   %g232 = add nsw i64 %g32, 2
-  %g233 = mul nsw i64 %g232, %K
+  %g233 = mul nsw i64 %g232, %lda
   %g234 = add nsw i64 %g233, %g210
   %g235 = select i1 %g231, i64 %g234, i64 0
   %g236 = getelementptr inbounds float, ptr %A, i64 %g235
@@ -1348,7 +1354,7 @@ sm.pu.body.39:
   %g240 = shufflevector <16 x float> %g239, <16 x float> poison, <16 x i32> zeroinitializer
   %g241 = icmp slt i64 3, %g35
   %g242 = add nsw i64 %g32, 3
-  %g243 = mul nsw i64 %g242, %K
+  %g243 = mul nsw i64 %g242, %lda
   %g244 = add nsw i64 %g243, %g210
   %g245 = select i1 %g241, i64 %g244, i64 0
   %g246 = getelementptr inbounds float, ptr %A, i64 %g245
@@ -1358,7 +1364,7 @@ sm.pu.body.39:
   %g250 = shufflevector <16 x float> %g249, <16 x float> poison, <16 x i32> zeroinitializer
   %g251 = icmp slt i64 4, %g35
   %g252 = add nsw i64 %g32, 4
-  %g253 = mul nsw i64 %g252, %K
+  %g253 = mul nsw i64 %g252, %lda
   %g254 = add nsw i64 %g253, %g210
   %g255 = select i1 %g251, i64 %g254, i64 0
   %g256 = getelementptr inbounds float, ptr %A, i64 %g255
@@ -1368,7 +1374,7 @@ sm.pu.body.39:
   %g260 = shufflevector <16 x float> %g259, <16 x float> poison, <16 x i32> zeroinitializer
   %g261 = icmp slt i64 5, %g35
   %g262 = add nsw i64 %g32, 5
-  %g263 = mul nsw i64 %g262, %K
+  %g263 = mul nsw i64 %g262, %lda
   %g264 = add nsw i64 %g263, %g210
   %g265 = select i1 %g261, i64 %g264, i64 0
   %g266 = getelementptr inbounds float, ptr %A, i64 %g265
@@ -1378,7 +1384,7 @@ sm.pu.body.39:
   %g270 = shufflevector <16 x float> %g269, <16 x float> poison, <16 x i32> zeroinitializer
   %g271 = icmp slt i64 6, %g35
   %g272 = add nsw i64 %g32, 6
-  %g273 = mul nsw i64 %g272, %K
+  %g273 = mul nsw i64 %g272, %lda
   %g274 = add nsw i64 %g273, %g210
   %g275 = select i1 %g271, i64 %g274, i64 0
   %g276 = getelementptr inbounds float, ptr %A, i64 %g275
@@ -1388,7 +1394,7 @@ sm.pu.body.39:
   %g280 = shufflevector <16 x float> %g279, <16 x float> poison, <16 x i32> zeroinitializer
   %g281 = icmp slt i64 7, %g35
   %g282 = add nsw i64 %g32, 7
-  %g283 = mul nsw i64 %g282, %K
+  %g283 = mul nsw i64 %g282, %lda
   %g284 = add nsw i64 %g283, %g210
   %g285 = select i1 %g281, i64 %g284, i64 0
   %g286 = getelementptr inbounds float, ptr %A, i64 %g285
@@ -1396,12 +1402,12 @@ sm.pu.body.39:
   %g288 = select i1 %g281, float %g287, float 0.0
   %g289 = insertelement <16 x float> poison, float %g288, i32 0
   %g290 = shufflevector <16 x float> %g289, <16 x float> poison, <16 x i32> zeroinitializer
-  %g291 = mul nsw i64 %g210, %N
+  %g291 = mul nsw i64 %g210, %ldb
   %g292 = getelementptr inbounds float, ptr %B, i64 %g291
   %g293 = add nsw i64 %g43, 3
   %g294 = icmp slt i64 0, %g35
   %g295 = add nsw i64 %g32, 0
-  %g296 = mul nsw i64 %g295, %K
+  %g296 = mul nsw i64 %g295, %lda
   %g297 = add nsw i64 %g296, %g293
   %g298 = select i1 %g294, i64 %g297, i64 0
   %g299 = getelementptr inbounds float, ptr %A, i64 %g298
@@ -1411,7 +1417,7 @@ sm.pu.body.39:
   %g303 = shufflevector <16 x float> %g302, <16 x float> poison, <16 x i32> zeroinitializer
   %g304 = icmp slt i64 1, %g35
   %g305 = add nsw i64 %g32, 1
-  %g306 = mul nsw i64 %g305, %K
+  %g306 = mul nsw i64 %g305, %lda
   %g307 = add nsw i64 %g306, %g293
   %g308 = select i1 %g304, i64 %g307, i64 0
   %g309 = getelementptr inbounds float, ptr %A, i64 %g308
@@ -1421,7 +1427,7 @@ sm.pu.body.39:
   %g313 = shufflevector <16 x float> %g312, <16 x float> poison, <16 x i32> zeroinitializer
   %g314 = icmp slt i64 2, %g35
   %g315 = add nsw i64 %g32, 2
-  %g316 = mul nsw i64 %g315, %K
+  %g316 = mul nsw i64 %g315, %lda
   %g317 = add nsw i64 %g316, %g293
   %g318 = select i1 %g314, i64 %g317, i64 0
   %g319 = getelementptr inbounds float, ptr %A, i64 %g318
@@ -1431,7 +1437,7 @@ sm.pu.body.39:
   %g323 = shufflevector <16 x float> %g322, <16 x float> poison, <16 x i32> zeroinitializer
   %g324 = icmp slt i64 3, %g35
   %g325 = add nsw i64 %g32, 3
-  %g326 = mul nsw i64 %g325, %K
+  %g326 = mul nsw i64 %g325, %lda
   %g327 = add nsw i64 %g326, %g293
   %g328 = select i1 %g324, i64 %g327, i64 0
   %g329 = getelementptr inbounds float, ptr %A, i64 %g328
@@ -1441,7 +1447,7 @@ sm.pu.body.39:
   %g333 = shufflevector <16 x float> %g332, <16 x float> poison, <16 x i32> zeroinitializer
   %g334 = icmp slt i64 4, %g35
   %g335 = add nsw i64 %g32, 4
-  %g336 = mul nsw i64 %g335, %K
+  %g336 = mul nsw i64 %g335, %lda
   %g337 = add nsw i64 %g336, %g293
   %g338 = select i1 %g334, i64 %g337, i64 0
   %g339 = getelementptr inbounds float, ptr %A, i64 %g338
@@ -1451,7 +1457,7 @@ sm.pu.body.39:
   %g343 = shufflevector <16 x float> %g342, <16 x float> poison, <16 x i32> zeroinitializer
   %g344 = icmp slt i64 5, %g35
   %g345 = add nsw i64 %g32, 5
-  %g346 = mul nsw i64 %g345, %K
+  %g346 = mul nsw i64 %g345, %lda
   %g347 = add nsw i64 %g346, %g293
   %g348 = select i1 %g344, i64 %g347, i64 0
   %g349 = getelementptr inbounds float, ptr %A, i64 %g348
@@ -1461,7 +1467,7 @@ sm.pu.body.39:
   %g353 = shufflevector <16 x float> %g352, <16 x float> poison, <16 x i32> zeroinitializer
   %g354 = icmp slt i64 6, %g35
   %g355 = add nsw i64 %g32, 6
-  %g356 = mul nsw i64 %g355, %K
+  %g356 = mul nsw i64 %g355, %lda
   %g357 = add nsw i64 %g356, %g293
   %g358 = select i1 %g354, i64 %g357, i64 0
   %g359 = getelementptr inbounds float, ptr %A, i64 %g358
@@ -1471,7 +1477,7 @@ sm.pu.body.39:
   %g363 = shufflevector <16 x float> %g362, <16 x float> poison, <16 x i32> zeroinitializer
   %g364 = icmp slt i64 7, %g35
   %g365 = add nsw i64 %g32, 7
-  %g366 = mul nsw i64 %g365, %K
+  %g366 = mul nsw i64 %g365, %lda
   %g367 = add nsw i64 %g366, %g293
   %g368 = select i1 %g364, i64 %g367, i64 0
   %g369 = getelementptr inbounds float, ptr %A, i64 %g368
@@ -1479,7 +1485,7 @@ sm.pu.body.39:
   %g371 = select i1 %g364, float %g370, float 0.0
   %g372 = insertelement <16 x float> poison, float %g371, i32 0
   %g373 = shufflevector <16 x float> %g372, <16 x float> poison, <16 x i32> zeroinitializer
-  %g374 = mul nsw i64 %g293, %N
+  %g374 = mul nsw i64 %g293, %ldb
   %g375 = getelementptr inbounds float, ptr %B, i64 %g374
   store i64 %n0, ptr %iv376
   br label %sm.j.cond.377
@@ -1783,7 +1789,7 @@ sm.p1.body.610:
   %g615 = add nsw i64 %g614, 0
   %g616 = icmp slt i64 0, %g35
   %g617 = add nsw i64 %g32, 0
-  %g618 = mul nsw i64 %g617, %K
+  %g618 = mul nsw i64 %g617, %lda
   %g619 = add nsw i64 %g618, %g615
   %g620 = select i1 %g616, i64 %g619, i64 0
   %g621 = getelementptr inbounds float, ptr %A, i64 %g620
@@ -1793,7 +1799,7 @@ sm.p1.body.610:
   %g625 = shufflevector <16 x float> %g624, <16 x float> poison, <16 x i32> zeroinitializer
   %g626 = icmp slt i64 1, %g35
   %g627 = add nsw i64 %g32, 1
-  %g628 = mul nsw i64 %g627, %K
+  %g628 = mul nsw i64 %g627, %lda
   %g629 = add nsw i64 %g628, %g615
   %g630 = select i1 %g626, i64 %g629, i64 0
   %g631 = getelementptr inbounds float, ptr %A, i64 %g630
@@ -1803,7 +1809,7 @@ sm.p1.body.610:
   %g635 = shufflevector <16 x float> %g634, <16 x float> poison, <16 x i32> zeroinitializer
   %g636 = icmp slt i64 2, %g35
   %g637 = add nsw i64 %g32, 2
-  %g638 = mul nsw i64 %g637, %K
+  %g638 = mul nsw i64 %g637, %lda
   %g639 = add nsw i64 %g638, %g615
   %g640 = select i1 %g636, i64 %g639, i64 0
   %g641 = getelementptr inbounds float, ptr %A, i64 %g640
@@ -1813,7 +1819,7 @@ sm.p1.body.610:
   %g645 = shufflevector <16 x float> %g644, <16 x float> poison, <16 x i32> zeroinitializer
   %g646 = icmp slt i64 3, %g35
   %g647 = add nsw i64 %g32, 3
-  %g648 = mul nsw i64 %g647, %K
+  %g648 = mul nsw i64 %g647, %lda
   %g649 = add nsw i64 %g648, %g615
   %g650 = select i1 %g646, i64 %g649, i64 0
   %g651 = getelementptr inbounds float, ptr %A, i64 %g650
@@ -1823,7 +1829,7 @@ sm.p1.body.610:
   %g655 = shufflevector <16 x float> %g654, <16 x float> poison, <16 x i32> zeroinitializer
   %g656 = icmp slt i64 4, %g35
   %g657 = add nsw i64 %g32, 4
-  %g658 = mul nsw i64 %g657, %K
+  %g658 = mul nsw i64 %g657, %lda
   %g659 = add nsw i64 %g658, %g615
   %g660 = select i1 %g656, i64 %g659, i64 0
   %g661 = getelementptr inbounds float, ptr %A, i64 %g660
@@ -1833,7 +1839,7 @@ sm.p1.body.610:
   %g665 = shufflevector <16 x float> %g664, <16 x float> poison, <16 x i32> zeroinitializer
   %g666 = icmp slt i64 5, %g35
   %g667 = add nsw i64 %g32, 5
-  %g668 = mul nsw i64 %g667, %K
+  %g668 = mul nsw i64 %g667, %lda
   %g669 = add nsw i64 %g668, %g615
   %g670 = select i1 %g666, i64 %g669, i64 0
   %g671 = getelementptr inbounds float, ptr %A, i64 %g670
@@ -1843,7 +1849,7 @@ sm.p1.body.610:
   %g675 = shufflevector <16 x float> %g674, <16 x float> poison, <16 x i32> zeroinitializer
   %g676 = icmp slt i64 6, %g35
   %g677 = add nsw i64 %g32, 6
-  %g678 = mul nsw i64 %g677, %K
+  %g678 = mul nsw i64 %g677, %lda
   %g679 = add nsw i64 %g678, %g615
   %g680 = select i1 %g676, i64 %g679, i64 0
   %g681 = getelementptr inbounds float, ptr %A, i64 %g680
@@ -1853,7 +1859,7 @@ sm.p1.body.610:
   %g685 = shufflevector <16 x float> %g684, <16 x float> poison, <16 x i32> zeroinitializer
   %g686 = icmp slt i64 7, %g35
   %g687 = add nsw i64 %g32, 7
-  %g688 = mul nsw i64 %g687, %K
+  %g688 = mul nsw i64 %g687, %lda
   %g689 = add nsw i64 %g688, %g615
   %g690 = select i1 %g686, i64 %g689, i64 0
   %g691 = getelementptr inbounds float, ptr %A, i64 %g690
@@ -1861,7 +1867,7 @@ sm.p1.body.610:
   %g693 = select i1 %g686, float %g692, float 0.0
   %g694 = insertelement <16 x float> poison, float %g693, i32 0
   %g695 = shufflevector <16 x float> %g694, <16 x float> poison, <16 x i32> zeroinitializer
-  %g696 = mul nsw i64 %g615, %N
+  %g696 = mul nsw i64 %g615, %ldb
   %g697 = getelementptr inbounds float, ptr %B, i64 %g696
   store i64 %n0, ptr %iv698
   br label %sm.j.cond.699
@@ -2124,7 +2130,7 @@ sm.s1.body.885:
   %g890 = add nsw i64 %g889, 0
   %g891 = icmp slt i64 0, %g881
   %g892 = add nsw i64 %g878, 0
-  %g893 = mul nsw i64 %g892, %K
+  %g893 = mul nsw i64 %g892, %lda
   %g894 = add nsw i64 %g893, %g890
   %g895 = select i1 %g891, i64 %g894, i64 0
   %g896 = getelementptr inbounds float, ptr %A, i64 %g895
@@ -2134,7 +2140,7 @@ sm.s1.body.885:
   %g900 = shufflevector <16 x float> %g899, <16 x float> poison, <16 x i32> zeroinitializer
   %g901 = icmp slt i64 1, %g881
   %g902 = add nsw i64 %g878, 1
-  %g903 = mul nsw i64 %g902, %K
+  %g903 = mul nsw i64 %g902, %lda
   %g904 = add nsw i64 %g903, %g890
   %g905 = select i1 %g901, i64 %g904, i64 0
   %g906 = getelementptr inbounds float, ptr %A, i64 %g905
@@ -2144,7 +2150,7 @@ sm.s1.body.885:
   %g910 = shufflevector <16 x float> %g909, <16 x float> poison, <16 x i32> zeroinitializer
   %g911 = icmp slt i64 2, %g881
   %g912 = add nsw i64 %g878, 2
-  %g913 = mul nsw i64 %g912, %K
+  %g913 = mul nsw i64 %g912, %lda
   %g914 = add nsw i64 %g913, %g890
   %g915 = select i1 %g911, i64 %g914, i64 0
   %g916 = getelementptr inbounds float, ptr %A, i64 %g915
@@ -2154,7 +2160,7 @@ sm.s1.body.885:
   %g920 = shufflevector <16 x float> %g919, <16 x float> poison, <16 x i32> zeroinitializer
   %g921 = icmp slt i64 3, %g881
   %g922 = add nsw i64 %g878, 3
-  %g923 = mul nsw i64 %g922, %K
+  %g923 = mul nsw i64 %g922, %lda
   %g924 = add nsw i64 %g923, %g890
   %g925 = select i1 %g921, i64 %g924, i64 0
   %g926 = getelementptr inbounds float, ptr %A, i64 %g925
@@ -2164,7 +2170,7 @@ sm.s1.body.885:
   %g930 = shufflevector <16 x float> %g929, <16 x float> poison, <16 x i32> zeroinitializer
   %g931 = icmp slt i64 4, %g881
   %g932 = add nsw i64 %g878, 4
-  %g933 = mul nsw i64 %g932, %K
+  %g933 = mul nsw i64 %g932, %lda
   %g934 = add nsw i64 %g933, %g890
   %g935 = select i1 %g931, i64 %g934, i64 0
   %g936 = getelementptr inbounds float, ptr %A, i64 %g935
@@ -2174,7 +2180,7 @@ sm.s1.body.885:
   %g940 = shufflevector <16 x float> %g939, <16 x float> poison, <16 x i32> zeroinitializer
   %g941 = icmp slt i64 5, %g881
   %g942 = add nsw i64 %g878, 5
-  %g943 = mul nsw i64 %g942, %K
+  %g943 = mul nsw i64 %g942, %lda
   %g944 = add nsw i64 %g943, %g890
   %g945 = select i1 %g941, i64 %g944, i64 0
   %g946 = getelementptr inbounds float, ptr %A, i64 %g945
@@ -2184,7 +2190,7 @@ sm.s1.body.885:
   %g950 = shufflevector <16 x float> %g949, <16 x float> poison, <16 x i32> zeroinitializer
   %g951 = icmp slt i64 6, %g881
   %g952 = add nsw i64 %g878, 6
-  %g953 = mul nsw i64 %g952, %K
+  %g953 = mul nsw i64 %g952, %lda
   %g954 = add nsw i64 %g953, %g890
   %g955 = select i1 %g951, i64 %g954, i64 0
   %g956 = getelementptr inbounds float, ptr %A, i64 %g955
@@ -2194,7 +2200,7 @@ sm.s1.body.885:
   %g960 = shufflevector <16 x float> %g959, <16 x float> poison, <16 x i32> zeroinitializer
   %g961 = icmp slt i64 7, %g881
   %g962 = add nsw i64 %g878, 7
-  %g963 = mul nsw i64 %g962, %K
+  %g963 = mul nsw i64 %g962, %lda
   %g964 = add nsw i64 %g963, %g890
   %g965 = select i1 %g961, i64 %g964, i64 0
   %g966 = getelementptr inbounds float, ptr %A, i64 %g965
@@ -2202,7 +2208,7 @@ sm.s1.body.885:
   %g968 = select i1 %g961, float %g967, float 0.0
   %g969 = insertelement <16 x float> poison, float %g968, i32 0
   %g970 = shufflevector <16 x float> %g969, <16 x float> poison, <16 x i32> zeroinitializer
-  %g971 = mul nsw i64 %g890, %N
+  %g971 = mul nsw i64 %g890, %ldb
   %g972 = getelementptr inbounds float, ptr %B, i64 %g971
   store i64 %n0, ptr %iv973
   br label %sm.j.cond.974
@@ -2445,14 +2451,14 @@ sm.pu.end.25:
   ret void
 }
 
-define internal void @__y_gemm_small_reduce(ptr noalias %base, ptr %C, i64 %N, i64 %m0, i64 %m1, i64 %n0, i64 %n1, i64 %nthr) #0 {
+define internal void @__y_gemm_small_reduce(ptr noalias %base, ptr %C, i64 %N, i64 %m0, i64 %m1, i64 %n0, i64 %n1, i64 %nthr, i64 %ldc) #0 {
 entry:
   %sr.acc = alloca <16 x float>, align 64
   %iv4 = alloca i64, align 8
-  %iv12 = alloca i64, align 8
-  %iv20 = alloca i64, align 8
-  %iv39 = alloca i64, align 8
-  %iv51 = alloca i64, align 8
+  %iv13 = alloca i64, align 8
+  %iv22 = alloca i64, align 8
+  %iv41 = alloca i64, align 8
+  %iv54 = alloca i64, align 8
   %g1 = sub nsw i64 %n1, %n0
   %g2 = and i64 %g1, -16
   %g3 = add nsw i64 %n0, %g2
@@ -2465,95 +2471,98 @@ sr.i.cond.5:
 sr.i.body.6:
   %g10 = load i64, ptr %iv4
   %g11 = mul nsw i64 %g10, %N
-  store i64 %n0, ptr %iv12
-  br label %sr.j.cond.13
-sr.j.cond.13:
-  %g16 = load i64, ptr %iv12
-  %g17 = icmp slt i64 %g16, %g3
-  br i1 %g17, label %sr.j.body.14, label %sr.j.end.15
-sr.j.body.14:
-  %g18 = load i64, ptr %iv12
-  %g19 = add nsw i64 %g11, %g18
+  %g12 = mul nsw i64 %g10, %ldc
+  store i64 %n0, ptr %iv13
+  br label %sr.j.cond.14
+sr.j.cond.14:
+  %g17 = load i64, ptr %iv13
+  %g18 = icmp slt i64 %g17, %g3
+  br i1 %g18, label %sr.j.body.15, label %sr.j.end.16
+sr.j.body.15:
+  %g19 = load i64, ptr %iv13
+  %g20 = add nsw i64 %g11, %g19
+  %g21 = add nsw i64 %g12, %g19
   store <16 x float> zeroinitializer, ptr %sr.acc, align 64
-  store i64 0, ptr %iv20
-  br label %sr.t2.cond.21
-sr.t2.cond.21:
-  %g24 = load i64, ptr %iv20
-  %g25 = icmp slt i64 %g24, %nthr
-  br i1 %g25, label %sr.t2.body.22, label %sr.t2.end.23
-sr.t2.body.22:
-  %g26 = load i64, ptr %iv20
-  %g27 = mul nsw i64 %g26, 2572288
-  %g28 = getelementptr inbounds float, ptr %base, i64 %g27
-  %g29 = getelementptr inbounds float, ptr %g28, i64 %g19
-  %g30 = load <16 x float>, ptr %g29, align 4
-  %g31 = load <16 x float>, ptr %sr.acc, align 64
-  %g32 = fadd <16 x float> %g31, %g30
-  store <16 x float> %g32, ptr %sr.acc, align 64
-  %g33 = load i64, ptr %iv20
-  %g34 = add i64 %g33, 1
-  store i64 %g34, ptr %iv20
-  br label %sr.t2.cond.21
-sr.t2.end.23:
-  %g35 = load <16 x float>, ptr %sr.acc, align 64
-  %g36 = getelementptr inbounds float, ptr %C, i64 %g19
-  store <16 x float> %g35, ptr %g36, align 4
-  %g37 = load i64, ptr %iv12
-  %g38 = add i64 %g37, 16
-  store i64 %g38, ptr %iv12
-  br label %sr.j.cond.13
-sr.j.end.15:
-  store i64 %g3, ptr %iv39
-  br label %sr.t.cond.40
-sr.t.cond.40:
-  %g43 = load i64, ptr %iv39
-  %g44 = icmp slt i64 %g43, %n1
-  br i1 %g44, label %sr.t.body.41, label %sr.t.end.42
-sr.t.body.41:
-  %g45 = load i64, ptr %iv39
-  %g46 = sub nsw i64 %n1, %g45
-  %g47 = insertelement <16 x i64> poison, i64 %g46, i32 0
-  %g48 = shufflevector <16 x i64> %g47, <16 x i64> poison, <16 x i32> zeroinitializer
-  %g49 = icmp slt <16 x i64> <i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15>, %g48
-  %g50 = add nsw i64 %g11, %g45
+  store i64 0, ptr %iv22
+  br label %sr.t2.cond.23
+sr.t2.cond.23:
+  %g26 = load i64, ptr %iv22
+  %g27 = icmp slt i64 %g26, %nthr
+  br i1 %g27, label %sr.t2.body.24, label %sr.t2.end.25
+sr.t2.body.24:
+  %g28 = load i64, ptr %iv22
+  %g29 = mul nsw i64 %g28, 2572288
+  %g30 = getelementptr inbounds float, ptr %base, i64 %g29
+  %g31 = getelementptr inbounds float, ptr %g30, i64 %g20
+  %g32 = load <16 x float>, ptr %g31, align 4
+  %g33 = load <16 x float>, ptr %sr.acc, align 64
+  %g34 = fadd <16 x float> %g33, %g32
+  store <16 x float> %g34, ptr %sr.acc, align 64
+  %g35 = load i64, ptr %iv22
+  %g36 = add i64 %g35, 1
+  store i64 %g36, ptr %iv22
+  br label %sr.t2.cond.23
+sr.t2.end.25:
+  %g37 = load <16 x float>, ptr %sr.acc, align 64
+  %g38 = getelementptr inbounds float, ptr %C, i64 %g21
+  store <16 x float> %g37, ptr %g38, align 4
+  %g39 = load i64, ptr %iv13
+  %g40 = add i64 %g39, 16
+  store i64 %g40, ptr %iv13
+  br label %sr.j.cond.14
+sr.j.end.16:
+  store i64 %g3, ptr %iv41
+  br label %sr.t.cond.42
+sr.t.cond.42:
+  %g45 = load i64, ptr %iv41
+  %g46 = icmp slt i64 %g45, %n1
+  br i1 %g46, label %sr.t.body.43, label %sr.t.end.44
+sr.t.body.43:
+  %g47 = load i64, ptr %iv41
+  %g48 = sub nsw i64 %n1, %g47
+  %g49 = insertelement <16 x i64> poison, i64 %g48, i32 0
+  %g50 = shufflevector <16 x i64> %g49, <16 x i64> poison, <16 x i32> zeroinitializer
+  %g51 = icmp slt <16 x i64> <i64 0, i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15>, %g50
+  %g52 = add nsw i64 %g11, %g47
+  %g53 = add nsw i64 %g12, %g47
   store <16 x float> zeroinitializer, ptr %sr.acc, align 64
-  store i64 0, ptr %iv51
-  br label %sr.t2.cond.52
-sr.t2.cond.52:
-  %g55 = load i64, ptr %iv51
-  %g56 = icmp slt i64 %g55, %nthr
-  br i1 %g56, label %sr.t2.body.53, label %sr.t2.end.54
-sr.t2.body.53:
-  %g57 = load i64, ptr %iv51
-  %g58 = mul nsw i64 %g57, 2572288
-  %g59 = getelementptr inbounds float, ptr %base, i64 %g58
-  %g60 = getelementptr inbounds float, ptr %g59, i64 %g50
-  %g61 = call <16 x float> @llvm.masked.load.v16f32.p0(ptr %g60, i32 4, <16 x i1> %g49, <16 x float> zeroinitializer)
-  %g62 = load <16 x float>, ptr %sr.acc, align 64
-  %g63 = fadd <16 x float> %g62, %g61
-  store <16 x float> %g63, ptr %sr.acc, align 64
-  %g64 = load i64, ptr %iv51
-  %g65 = add i64 %g64, 1
-  store i64 %g65, ptr %iv51
-  br label %sr.t2.cond.52
-sr.t2.end.54:
-  %g66 = load <16 x float>, ptr %sr.acc, align 64
-  %g67 = getelementptr inbounds float, ptr %C, i64 %g50
-  call void @llvm.masked.store.v16f32.p0(<16 x float> %g66, ptr %g67, i32 4, <16 x i1> %g49)
-  %g68 = load i64, ptr %iv39
-  %g69 = add i64 %g68, 16
-  store i64 %g69, ptr %iv39
-  br label %sr.t.cond.40
-sr.t.end.42:
-  %g70 = load i64, ptr %iv4
-  %g71 = add i64 %g70, 1
-  store i64 %g71, ptr %iv4
+  store i64 0, ptr %iv54
+  br label %sr.t2.cond.55
+sr.t2.cond.55:
+  %g58 = load i64, ptr %iv54
+  %g59 = icmp slt i64 %g58, %nthr
+  br i1 %g59, label %sr.t2.body.56, label %sr.t2.end.57
+sr.t2.body.56:
+  %g60 = load i64, ptr %iv54
+  %g61 = mul nsw i64 %g60, 2572288
+  %g62 = getelementptr inbounds float, ptr %base, i64 %g61
+  %g63 = getelementptr inbounds float, ptr %g62, i64 %g52
+  %g64 = call <16 x float> @llvm.masked.load.v16f32.p0(ptr %g63, i32 4, <16 x i1> %g51, <16 x float> zeroinitializer)
+  %g65 = load <16 x float>, ptr %sr.acc, align 64
+  %g66 = fadd <16 x float> %g65, %g64
+  store <16 x float> %g66, ptr %sr.acc, align 64
+  %g67 = load i64, ptr %iv54
+  %g68 = add i64 %g67, 1
+  store i64 %g68, ptr %iv54
+  br label %sr.t2.cond.55
+sr.t2.end.57:
+  %g69 = load <16 x float>, ptr %sr.acc, align 64
+  %g70 = getelementptr inbounds float, ptr %C, i64 %g53
+  call void @llvm.masked.store.v16f32.p0(<16 x float> %g69, ptr %g70, i32 4, <16 x i1> %g51)
+  %g71 = load i64, ptr %iv41
+  %g72 = add i64 %g71, 16
+  store i64 %g72, ptr %iv41
+  br label %sr.t.cond.42
+sr.t.end.44:
+  %g73 = load i64, ptr %iv4
+  %g74 = add i64 %g73, 1
+  store i64 %g74, ptr %iv4
   br label %sr.i.cond.5
 sr.i.end.7:
   ret void
 }
 
-define internal void @__y_gemm_tiny(ptr noalias %A, ptr noalias %B, ptr %C, i64 %M, i64 %N, i64 %K) #0 {
+define internal void @__y_gemm_tiny(ptr noalias %A, ptr noalias %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %lda, i64 %ldb, i64 %ldc) #0 {
 entry:
   %ty1a0_0 = alloca <16 x float>, align 64
   %ty1a1_0 = alloca <16 x float>, align 64
@@ -2679,13 +2688,13 @@ ty.p.cond.27:
   br i1 %g31, label %ty.p.body.28, label %ty.p.end.29
 ty.p.body.28:
   %g32 = load i64, ptr %iv26
-  %g33 = mul nsw i64 %g32, %N
+  %g33 = mul nsw i64 %g32, %ldb
   %g34 = getelementptr inbounds float, ptr %B, i64 %g33
   %g35 = getelementptr inbounds float, ptr %g34, i64 0
   %g36 = call <16 x float> @llvm.masked.load.v16f32.p0(ptr %g35, i32 4, <16 x i1> %g15, <16 x float> zeroinitializer)
   %g37 = icmp slt i64 0, %g25
   %g38 = add nsw i64 %g22, 0
-  %g39 = mul nsw i64 %g38, %K
+  %g39 = mul nsw i64 %g38, %lda
   %g40 = add nsw i64 %g39, %g32
   %g41 = select i1 %g37, i64 %g40, i64 0
   %g42 = getelementptr inbounds float, ptr %A, i64 %g41
@@ -2698,7 +2707,7 @@ ty.p.body.28:
   store <16 x float> %g48, ptr %ty1a0_0, align 64
   %g49 = icmp slt i64 1, %g25
   %g50 = add nsw i64 %g22, 1
-  %g51 = mul nsw i64 %g50, %K
+  %g51 = mul nsw i64 %g50, %lda
   %g52 = add nsw i64 %g51, %g32
   %g53 = select i1 %g49, i64 %g52, i64 0
   %g54 = getelementptr inbounds float, ptr %A, i64 %g53
@@ -2711,7 +2720,7 @@ ty.p.body.28:
   store <16 x float> %g60, ptr %ty1a1_0, align 64
   %g61 = icmp slt i64 2, %g25
   %g62 = add nsw i64 %g22, 2
-  %g63 = mul nsw i64 %g62, %K
+  %g63 = mul nsw i64 %g62, %lda
   %g64 = add nsw i64 %g63, %g32
   %g65 = select i1 %g61, i64 %g64, i64 0
   %g66 = getelementptr inbounds float, ptr %A, i64 %g65
@@ -2724,7 +2733,7 @@ ty.p.body.28:
   store <16 x float> %g72, ptr %ty1a2_0, align 64
   %g73 = icmp slt i64 3, %g25
   %g74 = add nsw i64 %g22, 3
-  %g75 = mul nsw i64 %g74, %K
+  %g75 = mul nsw i64 %g74, %lda
   %g76 = add nsw i64 %g75, %g32
   %g77 = select i1 %g73, i64 %g76, i64 0
   %g78 = getelementptr inbounds float, ptr %A, i64 %g77
@@ -2737,7 +2746,7 @@ ty.p.body.28:
   store <16 x float> %g84, ptr %ty1a3_0, align 64
   %g85 = icmp slt i64 4, %g25
   %g86 = add nsw i64 %g22, 4
-  %g87 = mul nsw i64 %g86, %K
+  %g87 = mul nsw i64 %g86, %lda
   %g88 = add nsw i64 %g87, %g32
   %g89 = select i1 %g85, i64 %g88, i64 0
   %g90 = getelementptr inbounds float, ptr %A, i64 %g89
@@ -2750,7 +2759,7 @@ ty.p.body.28:
   store <16 x float> %g96, ptr %ty1a4_0, align 64
   %g97 = icmp slt i64 5, %g25
   %g98 = add nsw i64 %g22, 5
-  %g99 = mul nsw i64 %g98, %K
+  %g99 = mul nsw i64 %g98, %lda
   %g100 = add nsw i64 %g99, %g32
   %g101 = select i1 %g97, i64 %g100, i64 0
   %g102 = getelementptr inbounds float, ptr %A, i64 %g101
@@ -2763,7 +2772,7 @@ ty.p.body.28:
   store <16 x float> %g108, ptr %ty1a5_0, align 64
   %g109 = icmp slt i64 6, %g25
   %g110 = add nsw i64 %g22, 6
-  %g111 = mul nsw i64 %g110, %K
+  %g111 = mul nsw i64 %g110, %lda
   %g112 = add nsw i64 %g111, %g32
   %g113 = select i1 %g109, i64 %g112, i64 0
   %g114 = getelementptr inbounds float, ptr %A, i64 %g113
@@ -2776,7 +2785,7 @@ ty.p.body.28:
   store <16 x float> %g120, ptr %ty1a6_0, align 64
   %g121 = icmp slt i64 7, %g25
   %g122 = add nsw i64 %g22, 7
-  %g123 = mul nsw i64 %g122, %K
+  %g123 = mul nsw i64 %g122, %lda
   %g124 = add nsw i64 %g123, %g32
   %g125 = select i1 %g121, i64 %g124, i64 0
   %g126 = getelementptr inbounds float, ptr %A, i64 %g125
@@ -2789,7 +2798,7 @@ ty.p.body.28:
   store <16 x float> %g132, ptr %ty1a7_0, align 64
   %g133 = icmp slt i64 8, %g25
   %g134 = add nsw i64 %g22, 8
-  %g135 = mul nsw i64 %g134, %K
+  %g135 = mul nsw i64 %g134, %lda
   %g136 = add nsw i64 %g135, %g32
   %g137 = select i1 %g133, i64 %g136, i64 0
   %g138 = getelementptr inbounds float, ptr %A, i64 %g137
@@ -2802,7 +2811,7 @@ ty.p.body.28:
   store <16 x float> %g144, ptr %ty1a8_0, align 64
   %g145 = icmp slt i64 9, %g25
   %g146 = add nsw i64 %g22, 9
-  %g147 = mul nsw i64 %g146, %K
+  %g147 = mul nsw i64 %g146, %lda
   %g148 = add nsw i64 %g147, %g32
   %g149 = select i1 %g145, i64 %g148, i64 0
   %g150 = getelementptr inbounds float, ptr %A, i64 %g149
@@ -2815,7 +2824,7 @@ ty.p.body.28:
   store <16 x float> %g156, ptr %ty1a9_0, align 64
   %g157 = icmp slt i64 10, %g25
   %g158 = add nsw i64 %g22, 10
-  %g159 = mul nsw i64 %g158, %K
+  %g159 = mul nsw i64 %g158, %lda
   %g160 = add nsw i64 %g159, %g32
   %g161 = select i1 %g157, i64 %g160, i64 0
   %g162 = getelementptr inbounds float, ptr %A, i64 %g161
@@ -2828,7 +2837,7 @@ ty.p.body.28:
   store <16 x float> %g168, ptr %ty1a10_0, align 64
   %g169 = icmp slt i64 11, %g25
   %g170 = add nsw i64 %g22, 11
-  %g171 = mul nsw i64 %g170, %K
+  %g171 = mul nsw i64 %g170, %lda
   %g172 = add nsw i64 %g171, %g32
   %g173 = select i1 %g169, i64 %g172, i64 0
   %g174 = getelementptr inbounds float, ptr %A, i64 %g173
@@ -2841,7 +2850,7 @@ ty.p.body.28:
   store <16 x float> %g180, ptr %ty1a11_0, align 64
   %g181 = icmp slt i64 12, %g25
   %g182 = add nsw i64 %g22, 12
-  %g183 = mul nsw i64 %g182, %K
+  %g183 = mul nsw i64 %g182, %lda
   %g184 = add nsw i64 %g183, %g32
   %g185 = select i1 %g181, i64 %g184, i64 0
   %g186 = getelementptr inbounds float, ptr %A, i64 %g185
@@ -2854,7 +2863,7 @@ ty.p.body.28:
   store <16 x float> %g192, ptr %ty1a12_0, align 64
   %g193 = icmp slt i64 13, %g25
   %g194 = add nsw i64 %g22, 13
-  %g195 = mul nsw i64 %g194, %K
+  %g195 = mul nsw i64 %g194, %lda
   %g196 = add nsw i64 %g195, %g32
   %g197 = select i1 %g193, i64 %g196, i64 0
   %g198 = getelementptr inbounds float, ptr %A, i64 %g197
@@ -2867,7 +2876,7 @@ ty.p.body.28:
   store <16 x float> %g204, ptr %ty1a13_0, align 64
   %g205 = icmp slt i64 14, %g25
   %g206 = add nsw i64 %g22, 14
-  %g207 = mul nsw i64 %g206, %K
+  %g207 = mul nsw i64 %g206, %lda
   %g208 = add nsw i64 %g207, %g32
   %g209 = select i1 %g205, i64 %g208, i64 0
   %g210 = getelementptr inbounds float, ptr %A, i64 %g209
@@ -2880,7 +2889,7 @@ ty.p.body.28:
   store <16 x float> %g216, ptr %ty1a14_0, align 64
   %g217 = icmp slt i64 15, %g25
   %g218 = add nsw i64 %g22, 15
-  %g219 = mul nsw i64 %g218, %K
+  %g219 = mul nsw i64 %g218, %lda
   %g220 = add nsw i64 %g219, %g32
   %g221 = select i1 %g217, i64 %g220, i64 0
   %g222 = getelementptr inbounds float, ptr %A, i64 %g221
@@ -2900,7 +2909,7 @@ ty.p.end.29:
   br i1 %g231, label %ty.st.232, label %ty.sk.233
 ty.st.232:
   %g234 = add nsw i64 %g22, 0
-  %g235 = mul nsw i64 %g234, %N
+  %g235 = mul nsw i64 %g234, %ldc
   %g236 = add nsw i64 %g235, 0
   %g237 = getelementptr inbounds float, ptr %C, i64 %g236
   %g238 = load <16 x float>, ptr %ty1a0_0, align 64
@@ -2911,7 +2920,7 @@ ty.sk.233:
   br i1 %g239, label %ty.st.240, label %ty.sk.241
 ty.st.240:
   %g242 = add nsw i64 %g22, 1
-  %g243 = mul nsw i64 %g242, %N
+  %g243 = mul nsw i64 %g242, %ldc
   %g244 = add nsw i64 %g243, 0
   %g245 = getelementptr inbounds float, ptr %C, i64 %g244
   %g246 = load <16 x float>, ptr %ty1a1_0, align 64
@@ -2922,7 +2931,7 @@ ty.sk.241:
   br i1 %g247, label %ty.st.248, label %ty.sk.249
 ty.st.248:
   %g250 = add nsw i64 %g22, 2
-  %g251 = mul nsw i64 %g250, %N
+  %g251 = mul nsw i64 %g250, %ldc
   %g252 = add nsw i64 %g251, 0
   %g253 = getelementptr inbounds float, ptr %C, i64 %g252
   %g254 = load <16 x float>, ptr %ty1a2_0, align 64
@@ -2933,7 +2942,7 @@ ty.sk.249:
   br i1 %g255, label %ty.st.256, label %ty.sk.257
 ty.st.256:
   %g258 = add nsw i64 %g22, 3
-  %g259 = mul nsw i64 %g258, %N
+  %g259 = mul nsw i64 %g258, %ldc
   %g260 = add nsw i64 %g259, 0
   %g261 = getelementptr inbounds float, ptr %C, i64 %g260
   %g262 = load <16 x float>, ptr %ty1a3_0, align 64
@@ -2944,7 +2953,7 @@ ty.sk.257:
   br i1 %g263, label %ty.st.264, label %ty.sk.265
 ty.st.264:
   %g266 = add nsw i64 %g22, 4
-  %g267 = mul nsw i64 %g266, %N
+  %g267 = mul nsw i64 %g266, %ldc
   %g268 = add nsw i64 %g267, 0
   %g269 = getelementptr inbounds float, ptr %C, i64 %g268
   %g270 = load <16 x float>, ptr %ty1a4_0, align 64
@@ -2955,7 +2964,7 @@ ty.sk.265:
   br i1 %g271, label %ty.st.272, label %ty.sk.273
 ty.st.272:
   %g274 = add nsw i64 %g22, 5
-  %g275 = mul nsw i64 %g274, %N
+  %g275 = mul nsw i64 %g274, %ldc
   %g276 = add nsw i64 %g275, 0
   %g277 = getelementptr inbounds float, ptr %C, i64 %g276
   %g278 = load <16 x float>, ptr %ty1a5_0, align 64
@@ -2966,7 +2975,7 @@ ty.sk.273:
   br i1 %g279, label %ty.st.280, label %ty.sk.281
 ty.st.280:
   %g282 = add nsw i64 %g22, 6
-  %g283 = mul nsw i64 %g282, %N
+  %g283 = mul nsw i64 %g282, %ldc
   %g284 = add nsw i64 %g283, 0
   %g285 = getelementptr inbounds float, ptr %C, i64 %g284
   %g286 = load <16 x float>, ptr %ty1a6_0, align 64
@@ -2977,7 +2986,7 @@ ty.sk.281:
   br i1 %g287, label %ty.st.288, label %ty.sk.289
 ty.st.288:
   %g290 = add nsw i64 %g22, 7
-  %g291 = mul nsw i64 %g290, %N
+  %g291 = mul nsw i64 %g290, %ldc
   %g292 = add nsw i64 %g291, 0
   %g293 = getelementptr inbounds float, ptr %C, i64 %g292
   %g294 = load <16 x float>, ptr %ty1a7_0, align 64
@@ -2988,7 +2997,7 @@ ty.sk.289:
   br i1 %g295, label %ty.st.296, label %ty.sk.297
 ty.st.296:
   %g298 = add nsw i64 %g22, 8
-  %g299 = mul nsw i64 %g298, %N
+  %g299 = mul nsw i64 %g298, %ldc
   %g300 = add nsw i64 %g299, 0
   %g301 = getelementptr inbounds float, ptr %C, i64 %g300
   %g302 = load <16 x float>, ptr %ty1a8_0, align 64
@@ -2999,7 +3008,7 @@ ty.sk.297:
   br i1 %g303, label %ty.st.304, label %ty.sk.305
 ty.st.304:
   %g306 = add nsw i64 %g22, 9
-  %g307 = mul nsw i64 %g306, %N
+  %g307 = mul nsw i64 %g306, %ldc
   %g308 = add nsw i64 %g307, 0
   %g309 = getelementptr inbounds float, ptr %C, i64 %g308
   %g310 = load <16 x float>, ptr %ty1a9_0, align 64
@@ -3010,7 +3019,7 @@ ty.sk.305:
   br i1 %g311, label %ty.st.312, label %ty.sk.313
 ty.st.312:
   %g314 = add nsw i64 %g22, 10
-  %g315 = mul nsw i64 %g314, %N
+  %g315 = mul nsw i64 %g314, %ldc
   %g316 = add nsw i64 %g315, 0
   %g317 = getelementptr inbounds float, ptr %C, i64 %g316
   %g318 = load <16 x float>, ptr %ty1a10_0, align 64
@@ -3021,7 +3030,7 @@ ty.sk.313:
   br i1 %g319, label %ty.st.320, label %ty.sk.321
 ty.st.320:
   %g322 = add nsw i64 %g22, 11
-  %g323 = mul nsw i64 %g322, %N
+  %g323 = mul nsw i64 %g322, %ldc
   %g324 = add nsw i64 %g323, 0
   %g325 = getelementptr inbounds float, ptr %C, i64 %g324
   %g326 = load <16 x float>, ptr %ty1a11_0, align 64
@@ -3032,7 +3041,7 @@ ty.sk.321:
   br i1 %g327, label %ty.st.328, label %ty.sk.329
 ty.st.328:
   %g330 = add nsw i64 %g22, 12
-  %g331 = mul nsw i64 %g330, %N
+  %g331 = mul nsw i64 %g330, %ldc
   %g332 = add nsw i64 %g331, 0
   %g333 = getelementptr inbounds float, ptr %C, i64 %g332
   %g334 = load <16 x float>, ptr %ty1a12_0, align 64
@@ -3043,7 +3052,7 @@ ty.sk.329:
   br i1 %g335, label %ty.st.336, label %ty.sk.337
 ty.st.336:
   %g338 = add nsw i64 %g22, 13
-  %g339 = mul nsw i64 %g338, %N
+  %g339 = mul nsw i64 %g338, %ldc
   %g340 = add nsw i64 %g339, 0
   %g341 = getelementptr inbounds float, ptr %C, i64 %g340
   %g342 = load <16 x float>, ptr %ty1a13_0, align 64
@@ -3054,7 +3063,7 @@ ty.sk.337:
   br i1 %g343, label %ty.st.344, label %ty.sk.345
 ty.st.344:
   %g346 = add nsw i64 %g22, 14
-  %g347 = mul nsw i64 %g346, %N
+  %g347 = mul nsw i64 %g346, %ldc
   %g348 = add nsw i64 %g347, 0
   %g349 = getelementptr inbounds float, ptr %C, i64 %g348
   %g350 = load <16 x float>, ptr %ty1a14_0, align 64
@@ -3065,7 +3074,7 @@ ty.sk.345:
   br i1 %g351, label %ty.st.352, label %ty.sk.353
 ty.st.352:
   %g354 = add nsw i64 %g22, 15
-  %g355 = mul nsw i64 %g354, %N
+  %g355 = mul nsw i64 %g354, %ldc
   %g356 = add nsw i64 %g355, 0
   %g357 = getelementptr inbounds float, ptr %C, i64 %g356
   %g358 = load <16 x float>, ptr %ty1a15_0, align 64
@@ -3118,7 +3127,7 @@ ty.p.cond.376:
   br i1 %g380, label %ty.p.body.377, label %ty.p.end.378
 ty.p.body.377:
   %g381 = load i64, ptr %iv375
-  %g382 = mul nsw i64 %g381, %N
+  %g382 = mul nsw i64 %g381, %ldb
   %g383 = getelementptr inbounds float, ptr %B, i64 %g382
   %g384 = getelementptr inbounds float, ptr %g383, i64 0
   %g385 = load <16 x float>, ptr %g384, align 4
@@ -3126,7 +3135,7 @@ ty.p.body.377:
   %g387 = call <16 x float> @llvm.masked.load.v16f32.p0(ptr %g386, i32 4, <16 x i1> %g364, <16 x float> zeroinitializer)
   %g388 = icmp slt i64 0, %g374
   %g389 = add nsw i64 %g371, 0
-  %g390 = mul nsw i64 %g389, %K
+  %g390 = mul nsw i64 %g389, %lda
   %g391 = add nsw i64 %g390, %g381
   %g392 = select i1 %g388, i64 %g391, i64 0
   %g393 = getelementptr inbounds float, ptr %A, i64 %g392
@@ -3142,7 +3151,7 @@ ty.p.body.377:
   store <16 x float> %g401, ptr %ty2a0_1, align 64
   %g402 = icmp slt i64 1, %g374
   %g403 = add nsw i64 %g371, 1
-  %g404 = mul nsw i64 %g403, %K
+  %g404 = mul nsw i64 %g403, %lda
   %g405 = add nsw i64 %g404, %g381
   %g406 = select i1 %g402, i64 %g405, i64 0
   %g407 = getelementptr inbounds float, ptr %A, i64 %g406
@@ -3158,7 +3167,7 @@ ty.p.body.377:
   store <16 x float> %g415, ptr %ty2a1_1, align 64
   %g416 = icmp slt i64 2, %g374
   %g417 = add nsw i64 %g371, 2
-  %g418 = mul nsw i64 %g417, %K
+  %g418 = mul nsw i64 %g417, %lda
   %g419 = add nsw i64 %g418, %g381
   %g420 = select i1 %g416, i64 %g419, i64 0
   %g421 = getelementptr inbounds float, ptr %A, i64 %g420
@@ -3174,7 +3183,7 @@ ty.p.body.377:
   store <16 x float> %g429, ptr %ty2a2_1, align 64
   %g430 = icmp slt i64 3, %g374
   %g431 = add nsw i64 %g371, 3
-  %g432 = mul nsw i64 %g431, %K
+  %g432 = mul nsw i64 %g431, %lda
   %g433 = add nsw i64 %g432, %g381
   %g434 = select i1 %g430, i64 %g433, i64 0
   %g435 = getelementptr inbounds float, ptr %A, i64 %g434
@@ -3190,7 +3199,7 @@ ty.p.body.377:
   store <16 x float> %g443, ptr %ty2a3_1, align 64
   %g444 = icmp slt i64 4, %g374
   %g445 = add nsw i64 %g371, 4
-  %g446 = mul nsw i64 %g445, %K
+  %g446 = mul nsw i64 %g445, %lda
   %g447 = add nsw i64 %g446, %g381
   %g448 = select i1 %g444, i64 %g447, i64 0
   %g449 = getelementptr inbounds float, ptr %A, i64 %g448
@@ -3206,7 +3215,7 @@ ty.p.body.377:
   store <16 x float> %g457, ptr %ty2a4_1, align 64
   %g458 = icmp slt i64 5, %g374
   %g459 = add nsw i64 %g371, 5
-  %g460 = mul nsw i64 %g459, %K
+  %g460 = mul nsw i64 %g459, %lda
   %g461 = add nsw i64 %g460, %g381
   %g462 = select i1 %g458, i64 %g461, i64 0
   %g463 = getelementptr inbounds float, ptr %A, i64 %g462
@@ -3222,7 +3231,7 @@ ty.p.body.377:
   store <16 x float> %g471, ptr %ty2a5_1, align 64
   %g472 = icmp slt i64 6, %g374
   %g473 = add nsw i64 %g371, 6
-  %g474 = mul nsw i64 %g473, %K
+  %g474 = mul nsw i64 %g473, %lda
   %g475 = add nsw i64 %g474, %g381
   %g476 = select i1 %g472, i64 %g475, i64 0
   %g477 = getelementptr inbounds float, ptr %A, i64 %g476
@@ -3238,7 +3247,7 @@ ty.p.body.377:
   store <16 x float> %g485, ptr %ty2a6_1, align 64
   %g486 = icmp slt i64 7, %g374
   %g487 = add nsw i64 %g371, 7
-  %g488 = mul nsw i64 %g487, %K
+  %g488 = mul nsw i64 %g487, %lda
   %g489 = add nsw i64 %g488, %g381
   %g490 = select i1 %g486, i64 %g489, i64 0
   %g491 = getelementptr inbounds float, ptr %A, i64 %g490
@@ -3261,7 +3270,7 @@ ty.p.end.378:
   br i1 %g502, label %ty.st.503, label %ty.sk.504
 ty.st.503:
   %g505 = add nsw i64 %g371, 0
-  %g506 = mul nsw i64 %g505, %N
+  %g506 = mul nsw i64 %g505, %ldc
   %g507 = add nsw i64 %g506, 0
   %g508 = getelementptr inbounds float, ptr %C, i64 %g507
   %g509 = load <16 x float>, ptr %ty2a0_0, align 64
@@ -3276,7 +3285,7 @@ ty.sk.504:
   br i1 %g513, label %ty.st.514, label %ty.sk.515
 ty.st.514:
   %g516 = add nsw i64 %g371, 1
-  %g517 = mul nsw i64 %g516, %N
+  %g517 = mul nsw i64 %g516, %ldc
   %g518 = add nsw i64 %g517, 0
   %g519 = getelementptr inbounds float, ptr %C, i64 %g518
   %g520 = load <16 x float>, ptr %ty2a1_0, align 64
@@ -3291,7 +3300,7 @@ ty.sk.515:
   br i1 %g524, label %ty.st.525, label %ty.sk.526
 ty.st.525:
   %g527 = add nsw i64 %g371, 2
-  %g528 = mul nsw i64 %g527, %N
+  %g528 = mul nsw i64 %g527, %ldc
   %g529 = add nsw i64 %g528, 0
   %g530 = getelementptr inbounds float, ptr %C, i64 %g529
   %g531 = load <16 x float>, ptr %ty2a2_0, align 64
@@ -3306,7 +3315,7 @@ ty.sk.526:
   br i1 %g535, label %ty.st.536, label %ty.sk.537
 ty.st.536:
   %g538 = add nsw i64 %g371, 3
-  %g539 = mul nsw i64 %g538, %N
+  %g539 = mul nsw i64 %g538, %ldc
   %g540 = add nsw i64 %g539, 0
   %g541 = getelementptr inbounds float, ptr %C, i64 %g540
   %g542 = load <16 x float>, ptr %ty2a3_0, align 64
@@ -3321,7 +3330,7 @@ ty.sk.537:
   br i1 %g546, label %ty.st.547, label %ty.sk.548
 ty.st.547:
   %g549 = add nsw i64 %g371, 4
-  %g550 = mul nsw i64 %g549, %N
+  %g550 = mul nsw i64 %g549, %ldc
   %g551 = add nsw i64 %g550, 0
   %g552 = getelementptr inbounds float, ptr %C, i64 %g551
   %g553 = load <16 x float>, ptr %ty2a4_0, align 64
@@ -3336,7 +3345,7 @@ ty.sk.548:
   br i1 %g557, label %ty.st.558, label %ty.sk.559
 ty.st.558:
   %g560 = add nsw i64 %g371, 5
-  %g561 = mul nsw i64 %g560, %N
+  %g561 = mul nsw i64 %g560, %ldc
   %g562 = add nsw i64 %g561, 0
   %g563 = getelementptr inbounds float, ptr %C, i64 %g562
   %g564 = load <16 x float>, ptr %ty2a5_0, align 64
@@ -3351,7 +3360,7 @@ ty.sk.559:
   br i1 %g568, label %ty.st.569, label %ty.sk.570
 ty.st.569:
   %g571 = add nsw i64 %g371, 6
-  %g572 = mul nsw i64 %g571, %N
+  %g572 = mul nsw i64 %g571, %ldc
   %g573 = add nsw i64 %g572, 0
   %g574 = getelementptr inbounds float, ptr %C, i64 %g573
   %g575 = load <16 x float>, ptr %ty2a6_0, align 64
@@ -3366,7 +3375,7 @@ ty.sk.570:
   br i1 %g579, label %ty.st.580, label %ty.sk.581
 ty.st.580:
   %g582 = add nsw i64 %g371, 7
-  %g583 = mul nsw i64 %g582, %N
+  %g583 = mul nsw i64 %g582, %ldc
   %g584 = add nsw i64 %g583, 0
   %g585 = getelementptr inbounds float, ptr %C, i64 %g584
   %g586 = load <16 x float>, ptr %ty2a7_0, align 64
@@ -3425,7 +3434,7 @@ ty.p.cond.607:
   br i1 %g611, label %ty.p.body.608, label %ty.p.end.609
 ty.p.body.608:
   %g612 = load i64, ptr %iv606
-  %g613 = mul nsw i64 %g612, %N
+  %g613 = mul nsw i64 %g612, %ldb
   %g614 = getelementptr inbounds float, ptr %B, i64 %g613
   %g615 = getelementptr inbounds float, ptr %g614, i64 0
   %g616 = load <16 x float>, ptr %g615, align 4
@@ -3435,7 +3444,7 @@ ty.p.body.608:
   %g620 = call <16 x float> @llvm.masked.load.v16f32.p0(ptr %g619, i32 4, <16 x i1> %g595, <16 x float> zeroinitializer)
   %g621 = icmp slt i64 0, %g605
   %g622 = add nsw i64 %g602, 0
-  %g623 = mul nsw i64 %g622, %K
+  %g623 = mul nsw i64 %g622, %lda
   %g624 = add nsw i64 %g623, %g612
   %g625 = select i1 %g621, i64 %g624, i64 0
   %g626 = getelementptr inbounds float, ptr %A, i64 %g625
@@ -3454,7 +3463,7 @@ ty.p.body.608:
   store <16 x float> %g636, ptr %ty3a0_2, align 64
   %g637 = icmp slt i64 1, %g605
   %g638 = add nsw i64 %g602, 1
-  %g639 = mul nsw i64 %g638, %K
+  %g639 = mul nsw i64 %g638, %lda
   %g640 = add nsw i64 %g639, %g612
   %g641 = select i1 %g637, i64 %g640, i64 0
   %g642 = getelementptr inbounds float, ptr %A, i64 %g641
@@ -3473,7 +3482,7 @@ ty.p.body.608:
   store <16 x float> %g652, ptr %ty3a1_2, align 64
   %g653 = icmp slt i64 2, %g605
   %g654 = add nsw i64 %g602, 2
-  %g655 = mul nsw i64 %g654, %K
+  %g655 = mul nsw i64 %g654, %lda
   %g656 = add nsw i64 %g655, %g612
   %g657 = select i1 %g653, i64 %g656, i64 0
   %g658 = getelementptr inbounds float, ptr %A, i64 %g657
@@ -3492,7 +3501,7 @@ ty.p.body.608:
   store <16 x float> %g668, ptr %ty3a2_2, align 64
   %g669 = icmp slt i64 3, %g605
   %g670 = add nsw i64 %g602, 3
-  %g671 = mul nsw i64 %g670, %K
+  %g671 = mul nsw i64 %g670, %lda
   %g672 = add nsw i64 %g671, %g612
   %g673 = select i1 %g669, i64 %g672, i64 0
   %g674 = getelementptr inbounds float, ptr %A, i64 %g673
@@ -3511,7 +3520,7 @@ ty.p.body.608:
   store <16 x float> %g684, ptr %ty3a3_2, align 64
   %g685 = icmp slt i64 4, %g605
   %g686 = add nsw i64 %g602, 4
-  %g687 = mul nsw i64 %g686, %K
+  %g687 = mul nsw i64 %g686, %lda
   %g688 = add nsw i64 %g687, %g612
   %g689 = select i1 %g685, i64 %g688, i64 0
   %g690 = getelementptr inbounds float, ptr %A, i64 %g689
@@ -3530,7 +3539,7 @@ ty.p.body.608:
   store <16 x float> %g700, ptr %ty3a4_2, align 64
   %g701 = icmp slt i64 5, %g605
   %g702 = add nsw i64 %g602, 5
-  %g703 = mul nsw i64 %g702, %K
+  %g703 = mul nsw i64 %g702, %lda
   %g704 = add nsw i64 %g703, %g612
   %g705 = select i1 %g701, i64 %g704, i64 0
   %g706 = getelementptr inbounds float, ptr %A, i64 %g705
@@ -3556,7 +3565,7 @@ ty.p.end.609:
   br i1 %g719, label %ty.st.720, label %ty.sk.721
 ty.st.720:
   %g722 = add nsw i64 %g602, 0
-  %g723 = mul nsw i64 %g722, %N
+  %g723 = mul nsw i64 %g722, %ldc
   %g724 = add nsw i64 %g723, 0
   %g725 = getelementptr inbounds float, ptr %C, i64 %g724
   %g726 = load <16 x float>, ptr %ty3a0_0, align 64
@@ -3575,7 +3584,7 @@ ty.sk.721:
   br i1 %g733, label %ty.st.734, label %ty.sk.735
 ty.st.734:
   %g736 = add nsw i64 %g602, 1
-  %g737 = mul nsw i64 %g736, %N
+  %g737 = mul nsw i64 %g736, %ldc
   %g738 = add nsw i64 %g737, 0
   %g739 = getelementptr inbounds float, ptr %C, i64 %g738
   %g740 = load <16 x float>, ptr %ty3a1_0, align 64
@@ -3594,7 +3603,7 @@ ty.sk.735:
   br i1 %g747, label %ty.st.748, label %ty.sk.749
 ty.st.748:
   %g750 = add nsw i64 %g602, 2
-  %g751 = mul nsw i64 %g750, %N
+  %g751 = mul nsw i64 %g750, %ldc
   %g752 = add nsw i64 %g751, 0
   %g753 = getelementptr inbounds float, ptr %C, i64 %g752
   %g754 = load <16 x float>, ptr %ty3a2_0, align 64
@@ -3613,7 +3622,7 @@ ty.sk.749:
   br i1 %g761, label %ty.st.762, label %ty.sk.763
 ty.st.762:
   %g764 = add nsw i64 %g602, 3
-  %g765 = mul nsw i64 %g764, %N
+  %g765 = mul nsw i64 %g764, %ldc
   %g766 = add nsw i64 %g765, 0
   %g767 = getelementptr inbounds float, ptr %C, i64 %g766
   %g768 = load <16 x float>, ptr %ty3a3_0, align 64
@@ -3632,7 +3641,7 @@ ty.sk.763:
   br i1 %g775, label %ty.st.776, label %ty.sk.777
 ty.st.776:
   %g778 = add nsw i64 %g602, 4
-  %g779 = mul nsw i64 %g778, %N
+  %g779 = mul nsw i64 %g778, %ldc
   %g780 = add nsw i64 %g779, 0
   %g781 = getelementptr inbounds float, ptr %C, i64 %g780
   %g782 = load <16 x float>, ptr %ty3a4_0, align 64
@@ -3651,7 +3660,7 @@ ty.sk.777:
   br i1 %g789, label %ty.st.790, label %ty.sk.791
 ty.st.790:
   %g792 = add nsw i64 %g602, 5
-  %g793 = mul nsw i64 %g792, %N
+  %g793 = mul nsw i64 %g792, %ldc
   %g794 = add nsw i64 %g793, 0
   %g795 = getelementptr inbounds float, ptr %C, i64 %g794
   %g796 = load <16 x float>, ptr %ty3a5_0, align 64
@@ -3712,7 +3721,7 @@ ty.p.cond.820:
   br i1 %g824, label %ty.p.body.821, label %ty.p.end.822
 ty.p.body.821:
   %g825 = load i64, ptr %iv819
-  %g826 = mul nsw i64 %g825, %N
+  %g826 = mul nsw i64 %g825, %ldb
   %g827 = getelementptr inbounds float, ptr %B, i64 %g826
   %g828 = getelementptr inbounds float, ptr %g827, i64 0
   %g829 = load <16 x float>, ptr %g828, align 4
@@ -3724,7 +3733,7 @@ ty.p.body.821:
   %g835 = call <16 x float> @llvm.masked.load.v16f32.p0(ptr %g834, i32 4, <16 x i1> %g808, <16 x float> zeroinitializer)
   %g836 = icmp slt i64 0, %g818
   %g837 = add nsw i64 %g815, 0
-  %g838 = mul nsw i64 %g837, %K
+  %g838 = mul nsw i64 %g837, %lda
   %g839 = add nsw i64 %g838, %g825
   %g840 = select i1 %g836, i64 %g839, i64 0
   %g841 = getelementptr inbounds float, ptr %A, i64 %g840
@@ -3746,7 +3755,7 @@ ty.p.body.821:
   store <16 x float> %g853, ptr %ty4a0_3, align 64
   %g854 = icmp slt i64 1, %g818
   %g855 = add nsw i64 %g815, 1
-  %g856 = mul nsw i64 %g855, %K
+  %g856 = mul nsw i64 %g855, %lda
   %g857 = add nsw i64 %g856, %g825
   %g858 = select i1 %g854, i64 %g857, i64 0
   %g859 = getelementptr inbounds float, ptr %A, i64 %g858
@@ -3768,7 +3777,7 @@ ty.p.body.821:
   store <16 x float> %g871, ptr %ty4a1_3, align 64
   %g872 = icmp slt i64 2, %g818
   %g873 = add nsw i64 %g815, 2
-  %g874 = mul nsw i64 %g873, %K
+  %g874 = mul nsw i64 %g873, %lda
   %g875 = add nsw i64 %g874, %g825
   %g876 = select i1 %g872, i64 %g875, i64 0
   %g877 = getelementptr inbounds float, ptr %A, i64 %g876
@@ -3790,7 +3799,7 @@ ty.p.body.821:
   store <16 x float> %g889, ptr %ty4a2_3, align 64
   %g890 = icmp slt i64 3, %g818
   %g891 = add nsw i64 %g815, 3
-  %g892 = mul nsw i64 %g891, %K
+  %g892 = mul nsw i64 %g891, %lda
   %g893 = add nsw i64 %g892, %g825
   %g894 = select i1 %g890, i64 %g893, i64 0
   %g895 = getelementptr inbounds float, ptr %A, i64 %g894
@@ -3819,7 +3828,7 @@ ty.p.end.822:
   br i1 %g910, label %ty.st.911, label %ty.sk.912
 ty.st.911:
   %g913 = add nsw i64 %g815, 0
-  %g914 = mul nsw i64 %g913, %N
+  %g914 = mul nsw i64 %g913, %ldc
   %g915 = add nsw i64 %g914, 0
   %g916 = getelementptr inbounds float, ptr %C, i64 %g915
   %g917 = load <16 x float>, ptr %ty4a0_0, align 64
@@ -3842,7 +3851,7 @@ ty.sk.912:
   br i1 %g927, label %ty.st.928, label %ty.sk.929
 ty.st.928:
   %g930 = add nsw i64 %g815, 1
-  %g931 = mul nsw i64 %g930, %N
+  %g931 = mul nsw i64 %g930, %ldc
   %g932 = add nsw i64 %g931, 0
   %g933 = getelementptr inbounds float, ptr %C, i64 %g932
   %g934 = load <16 x float>, ptr %ty4a1_0, align 64
@@ -3865,7 +3874,7 @@ ty.sk.929:
   br i1 %g944, label %ty.st.945, label %ty.sk.946
 ty.st.945:
   %g947 = add nsw i64 %g815, 2
-  %g948 = mul nsw i64 %g947, %N
+  %g948 = mul nsw i64 %g947, %ldc
   %g949 = add nsw i64 %g948, 0
   %g950 = getelementptr inbounds float, ptr %C, i64 %g949
   %g951 = load <16 x float>, ptr %ty4a2_0, align 64
@@ -3888,7 +3897,7 @@ ty.sk.946:
   br i1 %g961, label %ty.st.962, label %ty.sk.963
 ty.st.962:
   %g964 = add nsw i64 %g815, 3
-  %g965 = mul nsw i64 %g964, %N
+  %g965 = mul nsw i64 %g964, %ldc
   %g966 = add nsw i64 %g965, 0
   %g967 = getelementptr inbounds float, ptr %C, i64 %g966
   %g968 = load <16 x float>, ptr %ty4a3_0, align 64
@@ -3917,7 +3926,7 @@ ty.done.1:
   ret void
 }
 
-define internal void @__y_gemm_run(ptr noalias %A, ptr noalias %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %m0, i64 %m1, i64 %n0, i64 %n1, ptr noalias %scratch, i64 %tid, i64 %nthr, i64 %shared, i64 %k0, i64 %k1, i64 %ksplit) #0 {
+define internal void @__y_gemm_run(ptr noalias %A, ptr noalias %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %m0, i64 %m1, i64 %n0, i64 %n1, ptr noalias %scratch, i64 %tid, i64 %nthr, i64 %shared, i64 %k0, i64 %k1, i64 %ksplit, i64 %lda, i64 %ldb, i64 %ldc) #0 {
 entry:
   %iv18 = alloca i64, align 8
   %iv34 = alloca i64, align 8
@@ -3942,13 +3951,13 @@ g.small.12:
   %g14 = icmp ne i64 %ksplit, 0
   br i1 %g14, label %g.ksplit.15, label %g.nsplit.16
 g.nsplit.16:
-  call void @__y_gemm_small_m(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %N, i64 %m0, i64 %m1, i64 %n0, i64 %n1, i64 0, i64 %K)
+  call void @__y_gemm_small_m(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %ldc, i64 %m0, i64 %m1, i64 %n0, i64 %n1, i64 0, i64 %K, i64 %lda, i64 %ldb)
   ret void
 g.ksplit.15:
-  call void @__y_gemm_small_m(ptr %A, ptr %B, ptr %scratch, i64 %M, i64 %N, i64 %K, i64 %N, i64 0, i64 %M, i64 0, i64 %N, i64 %k0, i64 %k1)
+  call void @__y_gemm_small_m(ptr %A, ptr %B, ptr %scratch, i64 %M, i64 %N, i64 %K, i64 %N, i64 0, i64 %M, i64 0, i64 %N, i64 %k0, i64 %k1, i64 %lda, i64 %ldb)
   call i32 @pthread_barrier_wait(ptr @__y_pool_barrier)
   %g17 = load ptr, ptr @__y_gemm_scratch, align 8
-  call void @__y_gemm_small_reduce(ptr %g17, ptr %C, i64 %N, i64 0, i64 %M, i64 %n0, i64 %n1, i64 %nthr)
+  call void @__y_gemm_small_reduce(ptr %g17, ptr %C, i64 %N, i64 0, i64 %M, i64 %n0, i64 %n1, i64 %nthr, i64 %ldc)
   ret void
 g.big.13:
   store i64 %n0, ptr %iv18
@@ -3979,12 +3988,12 @@ g.pc.body.36:
   %g41 = sub nsw i64 %K, %g40
   %g42 = icmp slt i64 %g41, %g33
   %g43 = select i1 %g42, i64 %g41, i64 %g33
-  %g44 = mul nsw i64 %g40, %N
+  %g44 = mul nsw i64 %g40, %ldb
   %g45 = add nsw i64 %g44, %g24
   %g46 = getelementptr inbounds float, ptr %B, i64 %g45
   %g47 = select i1 %g9, i64 %tid, i64 0
   %g48 = select i1 %g9, i64 %nthr, i64 1
-  call void @__y_gemm_pack_b(ptr %g46, i64 %N, i64 %g43, i64 %g27, ptr %g10, i64 %g47, i64 %g48)
+  call void @__y_gemm_pack_b(ptr %g46, i64 %ldb, i64 %g43, i64 %g27, ptr %g10, i64 %g47, i64 %g48)
   br i1 %g9, label %g.bar1.49, label %g.after1.50
 g.bar1.49:
   call i32 @pthread_barrier_wait(ptr @__y_pool_barrier)
@@ -4002,10 +4011,10 @@ g.ic.body.54:
   %g59 = sub nsw i64 %m1, %g58
   %g60 = icmp slt i64 %g59, 192
   %g61 = select i1 %g60, i64 %g59, i64 192
-  %g62 = mul nsw i64 %g58, %K
+  %g62 = mul nsw i64 %g58, %lda
   %g63 = add nsw i64 %g62, %g40
   %g64 = getelementptr inbounds float, ptr %A, i64 %g63
-  call void @__y_gemm_pack_a(ptr %g64, i64 %K, i64 %g61, i64 %g43, ptr %scratch)
+  call void @__y_gemm_pack_a(ptr %g64, i64 %lda, i64 %g61, i64 %g43, ptr %scratch)
   store i64 0, ptr %iv65
   br label %g.jr.cond.66
 g.jr.cond.66:
@@ -4033,11 +4042,11 @@ g.ir.body.79:
   %g87 = mul nsw i64 %g83, %g43
   %g88 = getelementptr inbounds float, ptr %scratch, i64 %g87
   %g89 = add nsw i64 %g58, %g83
-  %g90 = mul nsw i64 %g89, %N
+  %g90 = mul nsw i64 %g89, %ldc
   %g91 = add nsw i64 %g90, %g24
   %g92 = add nsw i64 %g91, %g71
   %g93 = getelementptr inbounds float, ptr %C, i64 %g92
-  call void @__y_gemm_micro(ptr %g88, ptr %g76, i64 64, ptr %g93, i64 %N, i64 %g43, i64 %g86, i64 %g74, i1 %g51)
+  call void @__y_gemm_micro(ptr %g88, ptr %g76, i64 64, ptr %g93, i64 %ldc, i64 %g43, i64 %g86, i64 %g74, i1 %g51)
   %g94 = load i64, ptr %iv77
   %g95 = add i64 %g94, 6
   store i64 %g95, ptr %iv77
@@ -4107,7 +4116,13 @@ entry:
   %g32 = load i64, ptr %g31, align 8
   %g33 = getelementptr inbounds %y_gemm_task, ptr %t, i64 0, i32 16
   %g34 = load i64, ptr %g33, align 8
-  call void @__y_gemm_run(ptr %g2, ptr %g4, ptr %g6, i64 %g8, i64 %g10, i64 %g12, i64 %g14, i64 %g16, i64 %g18, i64 %g20, ptr %g22, i64 %g24, i64 %g26, i64 %g28, i64 %g30, i64 %g32, i64 %g34)
+  %g35 = getelementptr inbounds %y_gemm_task, ptr %t, i64 0, i32 17
+  %g36 = load i64, ptr %g35, align 8
+  %g37 = getelementptr inbounds %y_gemm_task, ptr %t, i64 0, i32 18
+  %g38 = load i64, ptr %g37, align 8
+  %g39 = getelementptr inbounds %y_gemm_task, ptr %t, i64 0, i32 19
+  %g40 = load i64, ptr %g39, align 8
+  call void @__y_gemm_run(ptr %g2, ptr %g4, ptr %g6, i64 %g8, i64 %g10, i64 %g12, i64 %g14, i64 %g16, i64 %g18, i64 %g20, ptr %g22, i64 %g24, i64 %g26, i64 %g28, i64 %g30, i64 %g32, i64 %g34, i64 %g36, i64 %g38, i64 %g40)
   ret ptr null
 }
 
@@ -4218,12 +4233,12 @@ w.work.6:
   br label %w.outer.4
 }
 
-define internal void @__y_sgemm_f32_avx512(ptr noalias %A, ptr noalias %B, ptr noalias %C, i64 %M, i64 %N, i64 %K) #0 {
+define internal void @__y_sgemm_f32_avx512(ptr noalias %A, ptr noalias %B, ptr noalias %C, i64 %M, i64 %N, i64 %K, i64 %lda, i64 %ldb, i64 %ldc) #0 {
 entry:
   %.tid = alloca i64, align 8
   %iv27 = alloca i64, align 8
   %iv435 = alloca i64, align 8
-  %iv512 = alloca i64, align 8
+  %iv515 = alloca i64, align 8
   %g1 = mul nsw i64 %M, %N
   %g2 = mul nsw i64 %g1, %K
   %g3 = icmp sle i64 %g2, 131072
@@ -4233,7 +4248,7 @@ entry:
   %g7 = and i1 %g6, %g5
   br i1 %g7, label %e.tiny.8, label %e.notiny.9
 e.tiny.8:
-  call void @__y_gemm_tiny(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K)
+  call void @__y_gemm_tiny(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %lda, i64 %ldb, i64 %ldc)
   ret void
 e.notiny.9:
   %g10 = call i64 @__y_gemm_threads(i64 %M, i64 %N, i64 %K)
@@ -4243,7 +4258,7 @@ e.solo.12:
   %g14 = load ptr, ptr @__y_gemm_scratch, align 8
   %g15 = icmp ne ptr %g14, null
   %g16 = select i1 %g15, ptr %g14, ptr @__y_gemm_fallback
-  call void @__y_gemm_run(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 0, i64 %M, i64 0, i64 %N, ptr %g16, i64 0, i64 1, i64 0, i64 0, i64 %K, i64 0)
+  call void @__y_gemm_run(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 0, i64 %M, i64 0, i64 %N, ptr %g16, i64 0, i64 1, i64 0, i64 0, i64 %K, i64 0, i64 %lda, i64 %ldb, i64 %ldc)
   ret void
 e.par.13:
   %g17 = load i64, ptr @__y_pool_n, align 8
@@ -4257,7 +4272,7 @@ e.start.19:
   %g24 = icmp ne ptr %g23, null
   br i1 %g24, label %e.spawn0.26, label %e.oom.25
 e.oom.25:
-  call void @__y_gemm_run(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 0, i64 %M, i64 0, i64 %N, ptr @__y_gemm_fallback, i64 0, i64 1, i64 0, i64 0, i64 %K, i64 0)
+  call void @__y_gemm_run(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 0, i64 %M, i64 0, i64 %N, ptr @__y_gemm_fallback, i64 0, i64 1, i64 0, i64 0, i64 %K, i64 0, i64 %lda, i64 %ldb, i64 %ldc)
   ret void
 e.spawn0.26:
   call i32 @pthread_mutex_init(ptr @__y_pool_mutex, ptr null)
@@ -4776,42 +4791,48 @@ e.fill.body.437:
   store i64 %g487, ptr %g505, align 8
   %g506 = getelementptr inbounds %y_gemm_task, ptr %g478, i64 0, i32 16
   store i64 %g52, ptr %g506, align 8
-  %g507 = load i64, ptr %iv435
-  %g508 = add i64 %g507, 1
-  store i64 %g508, ptr %iv435
+  %g507 = getelementptr inbounds %y_gemm_task, ptr %g478, i64 0, i32 17
+  store i64 %lda, ptr %g507, align 8
+  %g508 = getelementptr inbounds %y_gemm_task, ptr %g478, i64 0, i32 18
+  store i64 %ldb, ptr %g508, align 8
+  %g509 = getelementptr inbounds %y_gemm_task, ptr %g478, i64 0, i32 19
+  store i64 %ldc, ptr %g509, align 8
+  %g510 = load i64, ptr %iv435
+  %g511 = add i64 %g510, 1
+  store i64 %g511, ptr %iv435
   br label %e.fill.cond.436
 e.fill.end.438:
-  %g509 = load i64, ptr @__y_pool_gen, align 8
-  %g510 = add nsw i64 %g509, 1
+  %g512 = load i64, ptr @__y_pool_gen, align 8
+  %g513 = add nsw i64 %g512, 1
   call i32 @pthread_mutex_lock(ptr @__y_pool_mutex)
-  store atomic i64 %g510, ptr @__y_pool_gen release, align 8
+  store atomic i64 %g513, ptr @__y_pool_gen release, align 8
   call i32 @pthread_cond_broadcast(ptr @__y_pool_cond)
   call i32 @pthread_mutex_unlock(ptr @__y_pool_mutex)
-  %g511 = getelementptr inbounds [16 x %y_gemm_task], ptr @__y_pool_task, i64 0, i64 0
-  call void @__y_gemm_worker(ptr %g511)
-  store i64 1, ptr %iv512
-  br label %e.join.cond.513
-e.join.cond.513:
-  %g516 = load i64, ptr %iv512
-  %g517 = icmp slt i64 %g516, %g37
-  br i1 %g517, label %e.join.body.514, label %e.join.end.515
-e.join.body.514:
-  %g518 = load i64, ptr %iv512
-  %g519 = getelementptr inbounds [16 x i64], ptr @__y_pool_done, i64 0, i64 %g518
-  br label %e.spinwait.520
-e.spinwait.520:
-  %g522 = load atomic i64, ptr %g519 acquire, align 8
-  %g523 = icmp eq i64 %g522, %g510
-  br i1 %g523, label %e.done.521, label %e.again.524
-e.again.524:
+  %g514 = getelementptr inbounds [16 x %y_gemm_task], ptr @__y_pool_task, i64 0, i64 0
+  call void @__y_gemm_worker(ptr %g514)
+  store i64 1, ptr %iv515
+  br label %e.join.cond.516
+e.join.cond.516:
+  %g519 = load i64, ptr %iv515
+  %g520 = icmp slt i64 %g519, %g37
+  br i1 %g520, label %e.join.body.517, label %e.join.end.518
+e.join.body.517:
+  %g521 = load i64, ptr %iv515
+  %g522 = getelementptr inbounds [16 x i64], ptr @__y_pool_done, i64 0, i64 %g521
+  br label %e.spinwait.523
+e.spinwait.523:
+  %g525 = load atomic i64, ptr %g522 acquire, align 8
+  %g526 = icmp eq i64 %g525, %g513
+  br i1 %g526, label %e.done.524, label %e.again.527
+e.again.527:
   call void @llvm.x86.sse2.pause()
-  br label %e.spinwait.520
-e.done.521:
-  %g525 = load i64, ptr %iv512
-  %g526 = add i64 %g525, 1
-  store i64 %g526, ptr %iv512
-  br label %e.join.cond.513
-e.join.end.515:
+  br label %e.spinwait.523
+e.done.524:
+  %g528 = load i64, ptr %iv515
+  %g529 = add i64 %g528, 1
+  store i64 %g529, ptr %iv515
+  br label %e.join.cond.516
+e.join.end.518:
   ret void
 }
 !0 = !{i32 1}

@@ -178,17 +178,25 @@ fn division_by_zero_is_unprovable() {
 fn operator_costs_are_what_we_think() {
     let cases: [(&str, usize); 12] = [
         ("x + y", 1),
-        ("x * y", 2),
-        ("x == y", 3),
+        ("x * y", 1),
+        ("x == y", 2),
         ("x < y", 101),
         ("x & y", 99),
         ("x | y", 99),
         ("x ^ y", 99),
         ("x << 3", 34),
         ("x >> 3", 34),
-        ("x / y", 136),
-        ("x % y", 136),
-        ("(x < y) && (y < 9)", 204),
+        // 136 -> 134 when the pass learned to pin a wire from a constraint
+        // whose `C` is a constant (`k * lin = c0`), then -> 133 with the
+        // pure-copy rename that collapses `<intermediate> * 1 = out`. The same
+        // rename is why `x * y` and `x == y` each lost one.
+        //
+        // The gadget's SOUNDNESS is pinned separately by
+        // `forged_quotient_is_rejected`, which is what makes a drop here safe
+        // to accept rather than a reason to investigate.
+        ("x / y", 133),
+        ("x % y", 133),
+        ("(x < y) && (y < 9)", 203),
     ];
     for (expr, expected) in cases {
         let src = format!(
@@ -232,17 +240,17 @@ fn forged_quotient_is_rejected() {
     );
     assert!(ok, "honest witness should solve");
 
-    // Find the quotient and remainder wires by name and forge them.
-    let q = circuit
-        .variables
-        .iter()
-        .position(|n| n.starts_with("intdiv_q"))
-        .expect("quotient wire");
-    let r = circuit
-        .variables
-        .iter()
-        .position(|n| n.starts_with("intdiv_r"))
-        .expect("remainder wire");
+    // Find the quotient and remainder wires and forge them.
+    //
+    // `x % y` returns the remainder, so the pure-copy rename in
+    // `substitute_linear_constraints` collapses `intdiv_r * 1 = out` and the
+    // remainder IS the output wire - it no longer exists under its own name.
+    // Falling back to the output is not a weakening of the test: the wire being
+    // forged is the same one, and the property under test is that the range
+    // check on `q` rejects the forgery either way.
+    let by_name = |prefix: &str| circuit.variables.iter().position(|n| n.starts_with(prefix));
+    let q = by_name("intdiv_q").expect("quotient wire");
+    let r = by_name("intdiv_r").unwrap_or_else(|| circuit.outputs[0]);
     assert_eq!(witness[q].to_decimal_string(), "3", "honest quotient");
     assert_eq!(witness[r].to_decimal_string(), "1", "honest remainder");
 

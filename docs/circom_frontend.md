@@ -70,9 +70,9 @@ what the other 26 do.
 
 | | |
 |---|---|
-| compiles | **Y 29/31, circom 31/31** |
-| size, geomean circom/Y | **1.043x — a tie** (win 5 / tie 21 / loss 3, band 0.95–1.05) |
-| totals over the 29 | circom 46,684, Y 37,512 |
+| compiles | **Y 31/31, circom 31/31** |
+| size, geomean circom/Y | **1.341x** (win 11 / tie 20 / loss 0, band 0.95–1.05) |
+| totals over the 31 | circom 95,415, Y 70,809 |
 
 Where Y wins it wins large:
 
@@ -102,16 +102,10 @@ Every size figure this repo published before 2026-08-11 was measured on
 The honest one-line claim is **"compiles most of circomlib, same size as circom,
 occasionally much smaller"**, not "1.86x smaller".
 
-Still refused, by cause:
-
-| circuit | what it needs |
-|---|---|
-| `Sha256` | `var outCalc[256] = sha256compression(hin, inp);` — a circom `function` called on signal ARRAYS |
-| `EdDSA` | `var x = sqrt((1-y2)/(a - d*y2)); if (in[255]==1) x = -x; out[0] <-- x;` — signal-dependent `var`s, a function over them, and a branch on a signal |
-
-Both are the same gap: **a `var` holding a value that is not compile-time
-constant.** Note what they have in common downstream — the result reaches only a
-`<--`, never a `<==` or `===`. See [Known gaps](#known-gaps).
+**`Sha256` and `EdDSA` are the two that used not to compile, and coverage is now
+31/31.** They were one gap, not two — a `var` holding a value that is not
+compile-time constant — and the fix is
+[the witness domain](#the-witness-domain-values-the-compiler-cannot-compute).
 
 ## Against circom's `--O2`, Y loses on size
 
@@ -123,8 +117,8 @@ better than Y's best:
 
 | across 29 circomlib circuits | geomean circom/Y | win / tie / loss | totals |
 |---|---|---|---|
-| vs `--O1` (default) | **1.04x — a tie** | 5 / 21 / 3 | circom 46,684, Y 37,512 |
-| vs `--O2` (best) | **0.69x — Y loses** | 0 / 13 / 15 | circom 25,666, Y 37,511 |
+| vs `--O1` (default) | **1.341x — Y wins, no losses** | 11 / 20 / 0 | circom 95,415, Y 70,809 |
+| vs `--O2` (best) | **0.895x — Y loses** | 0 / 20 / 10 | circom 62,234, Y 70,808 |
 
 circom `--O2` reduces `EscalarMulFix` to 21 constraints where Y emits 147,
 `Pedersen(8)` to 13 where Y emits 92, and `Bits2Num(64)` to **zero** — it is
@@ -366,40 +360,117 @@ wrote.** Nothing downstream records the difference.
   back-propagation sweep to rediscover it. All three coefficients must now be 1,
   and anything else falls through to `lc_by_output`, which keeps them.
 
+## The witness domain: values the compiler cannot compute
+
+circom `var`s are **not** restricted to compile-time constants. A template may
+write `var y2 = out[1] * out[1];` over a signal, a `function` may be called on
+signal arrays, and the result may be shifted, xored and compared — none of which
+has an R1CS form. Y refused all of it, and that refusal cost exactly the two
+most-used circuits in the ecosystem, `Sha256` and `EdDSA`. They were one gap, not
+two.
+
+Such a value is now `Val::Opaque`, carrying the position where it became
+unknown. **The rule that makes it safe is that an opaque value may only ever
+reach a `<--`.** `<--` emits no constraint, so the `.r1cs` is exactly what a
+compiler that *could* evaluate the expression would emit; a `<==`, a `===`, an
+array index, an array dimension, a template argument or an `assert` refuses, and
+names the origin rather than the use site:
+
+```
+5:5: non-quadratic: a `<==` constraint cannot use a value the compiler was unable
+to compute — it became unknown at 4:15: `BitAnd` over signals, which has no R1CS
+form […]. Only a `<--` may take one, because it emits no constraint.
+```
+
+Two mechanisms carry it.
+
+**Signal arrays reach `function`s.** `sha256compression(hin, inp)` hands a
+function 256 and 512 input signals; evaluating that as a scalar is what produced
+`hin is an array; expected a single value`. A signal slot now maps to a value
+slot of one-term linear combinations, shape preserved.
+
+**A condition the compiler cannot evaluate havocs instead of failing.** Neither
+branch runs and every variable a branch might assign becomes opaque — the sound
+over-approximation, since "unknown" is true whichever way the branch would have
+gone. `sqrt` in `pointbits.circom` is five branches and two `while` loops over
+the value being rooted, so nothing less would have worked. A `return` inside a
+skipped body makes the enclosing function return opaque *immediately*: it may
+have returned there with an unknown value or fallen through to return something
+else, and opaque is the join.
+
+**The guard that makes havoc sound is `constraint_effect`.** Before skipping a
+body, Y checks it cannot emit a constraint, declare a signal or instantiate a
+component; if it can, the program is refused with circom's own reasoning, since
+which constraints a circuit emits may not depend on a witness value. It is
+matched exhaustively with no `_ =>` arm — without the check this would be
+precisely the silent-approximation bug CLAUDE.md's design rule exists to
+prevent, and worse than usual, because the result still proves.
+
+### What it costs
+
+Only the witness, and only sometimes. **Y still solves a `<--` signal whenever
+the author's own constraints determine it** — `Sha256` is exactly that case, all
+256 digest bits are `<--` advice and every one is pinned by an
+`out[31-k] === fsum[0].out[k]` below it. Where the constraints do *not* determine
+it (a square root), satisfiability comes back false and `--witness` refuses to
+write a `.wtns` rather than passing off the solver's default zero. A `[Warning]`
+naming the count and the origin is printed at compile time either way.
+
+### What checks it
+
+`tests/circom_witness_domain.rs`, in two halves. **Does it work**: `Sha256(64)`
+compiled from unmodified circomlib produces the real SHA-256 digest for two
+messages, through Y's own witness solver and its own satisfiability check — a
+published vector, the same standard the Poseidon interop test sets, and worth
+more than a constraint count because a self-consistently wrong circuit has one
+of those too. **Is it sound**: six refusal sites, three constraint-emitting
+branches that may not be skipped, and the fail-closed witness behaviour.
+
+Verified by mutation, 8 mutations of the lowering, all caught — and **three of
+them were not caught by the first version of the tests**, which is the reason to
+run it:
+
+- Deleting the template-argument check changed nothing, because every fixture
+  was *also* refused by a later check. The cases now assert the phrase belonging
+  to their own site, not merely that something failed.
+- Ignoring a `return` inside a skipped branch changed nothing, because the
+  fixture's fall-through returned an unknown too. The case that separates them
+  has both arms returning **constants**, so falling through produces a confident
+  `7` for a function that could equally have returned `5` — a wrong circuit that
+  compiles, not a refusal.
+- Reversing a signal array passed to a function changed nothing — and that one is
+  a *confirmation*, not just a hole: the digest is produced by the constraint
+  circuit, so the opaque path genuinely cannot affect the `.r1cs`, exactly as
+  claimed. Pinning it needed a separate circuit where a signal array reaches a
+  function and comes back into a real constraint, weighted by position because
+  an unweighted sum is commutative.
+
+### Where Y lands on the two new circuits
+
+Both near parity with circom's default, so they lower the geomean rather than
+raise it — 1.352x → 1.341x vs `--O1` — which is the honest outcome:
+
+| circuit | circom `--O1` | circom `--O2` | Y |
+|---|---|---|---|
+| `Sha256(64)` | 31,264 | 29,014 | 30,729 |
+| `EdDSAVerifier(80)` | 17,467 | 7,554 | 12,565 |
+
+`Sha256` is a tie on every axis (wires 31,017 vs 30,482; non-zero terms 174,226
+vs 179,454 — 3% denser, the usual two-axis trade). `EdDSA` is 1.39x smaller than
+the default and 0.60x against `--O2`, its worst remaining loss.
+
+circomlib's `sha256/` is vendored (upstream `35e54ea`) so the digest test is
+hermetic; `EdDSA`'s include chain is not, and is covered by
+`tools/circomlib_coverage.py` plus small fixtures for the `sqrt` shape.
+
 ## Known gaps
 
 - **Input JSON does not accept arrays.** `mini_json::parse_scalar_map` is
   scalar-only, but circom inputs are routinely `{"in": ["1", "2"]}`. The
-  `--witness` path therefore works only for scalar inputs today.
-- **`Sha256` and `EdDSA` do not compile**, and both want the same feature: a
-  `var` that holds a value which is not compile-time constant, so that a circom
-  `function` can be evaluated at *witness* time. Re-measure with
-  `tools/circomlib_coverage.py` after touching the front end.
-
-  The shape of the fix is worth writing down, because it is smaller than
-  "implement circom's witness calculator" and the reason is a property of both
-  circuits: **the non-constant value reaches only a `<--`.** In
-  `sha256compression.circom` the whole constrained SHA-256 circuit is built
-  below the call, and `outCalc` is used exactly once — `out[i] <-- outCalc[i]` —
-  as advice so circom's witness calculator does not have to derive the digest
-  through the circuit. Same in `Bits2Point_Strict`: `sqrt` picks a square root
-  and the sign bit picks which, then `<--`, and `BabyCheck` + `Num2Bits` +
-  `AliasCheck` do the constraining.
-
-  So a value Y cannot compute could be modelled as *opaque* and allowed to
-  propagate only into a `<--`, becoming `WitnessOp::Unknown`; reaching a `<==`,
-  a `===`, an array index or a loop bound stays a hard error. **The emitted
-  `.r1cs` would then be complete and correct**, because `<--` contributes no
-  constraints — byte-identical to what a perfect witness recipe would produce.
-  What Y would lose is the ability to produce a `.wtns` for those circuits by
-  itself, which is fail-closed and visible: an unsolved wire stays zero and the
-  satisfiability check reports it.
-
-  This is a deliberate open decision, not an oversight. It trades this repo's
-  "refuse rather than half-do" default for coverage of the two most-used circuits
-  in the ecosystem, and the trade is only defensible because the artifact that
-  gets weaker (`.wtns`) is not the artifact users of a circom compiler mainly
-  want (`.r1cs`).
+  `--witness` path therefore works only for scalar inputs today — which now
+  matters more, because both newly-supported circuits take array inputs.
+- **Input names carry the `main` prefix.** `signal input a` is keyed `maina`,
+  not `a`, so a circom `input.json` does not transfer as-is.
 - `Y_ZK_COMPACT=off` disables wire compaction. It is a differential baseline, not
   a safety valve — with it off, Y carries 1.49x *more* wires than circom on a
   200-hash Poseidon chain.

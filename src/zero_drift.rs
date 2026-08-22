@@ -327,6 +327,218 @@ pub fn select_repr(req: &Requirement, costs: &CostTable) -> Option<Decision> {
     best
 }
 
+// ── Exact VNNI accumulation ─────────────────────────────────
+//
+// See `docs/deterministic_inference.md`, milestone M0, and
+// `docs/proof_carrying_kernels.md`'s Phase 0 measurement, which is what makes
+// this scheme worth licensing at all: exact `vpdpwssd` + int64 flush measured
+// 314.5 G MAC/s against f32 FMA's 166.9, i.e. **1.88x faster than float**,
+// verified exact against a scalar reference. Exactness here costs range, not
+// speed.
+
+/// The exact `vpdpwssd` accumulation scheme: int16 operands, products
+/// accumulated in int32, flushed into an int64 accumulator every
+/// `flush_k_pairs` k-pairs so the narrow accumulator can never overflow.
+///
+/// The reference implementation this describes is
+/// `tests/probes/vnni_kernels.c::micro_vnni_exact`, which is measured and
+/// verified exact. This type is the *licensing* half: it answers whether a
+/// given nest's operands are small enough that the scheme is sound, so that a
+/// nest which would overflow is refused with a reason instead of silently
+/// producing a wrong answer.
+///
+/// **Why the check has to exist before the kernel does.** An int32 accumulator
+/// that overflows does not signal; it wraps. The result is a plausible number
+/// that is simply wrong, from a kernel whose entire purpose is to be exact —
+/// the exact failure shape `CLAUDE.md`'s design rule is written against. So the
+/// obligation is discharged at compile time, or the representation is not
+/// selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VnniExact {
+    /// k-pairs accumulated in int32 between flushes into int64.
+    pub flush_k_pairs: u32,
+}
+
+impl VnniExact {
+    /// The interval the measured probe uses.
+    ///
+    /// **Powers of two only, and the reason changed.** The C probe
+    /// (`tests/probes/vnni_kernels.c`) tests `(p & (T-1)) == T-1` inside its
+    /// hot loop, which is only an "every T iterations" test when T is a power
+    /// of two. Y's emitted kernel no longer works that way — the flush was
+    /// lifted into an outer chunk loop, so any positive T would encode
+    /// correctly. The restriction is kept as a **canonical form**, not a
+    /// hardware or encoding necessity: [`Self::flush_interval_for`] returns
+    /// powers of two, so allowing others would mean two shapes of interval in
+    /// circulation and one of them never generated.
+    pub const DEFAULT_FLUSH_K_PAIRS: u32 = 64;
+
+    /// int16 operands, so this bounds the magnitude regardless of the flush
+    /// interval. `i16::MIN` is not representable as a positive magnitude, so
+    /// the usable bound is `i16::MAX`.
+    pub const OPERAND_WIDTH_LIMIT: f64 = 32767.0;
+
+    pub fn new(flush_k_pairs: u32) -> Option<Self> {
+        if flush_k_pairs == 0 || !flush_k_pairs.is_power_of_two() {
+            return None;
+        }
+        Some(VnniExact { flush_k_pairs })
+    }
+
+    /// Largest operand magnitude for which the int32 accumulator provably
+    /// cannot overflow between two flushes.
+    ///
+    /// Derivation, and it is worth writing out because every term matters:
+    ///
+    /// - `vpdpwssd` computes, per int32 lane,
+    ///   `acc += a[2i]*b[2i] + a[2i+1]*b[2i+1]` — **two** MACs per lane per
+    ///   instruction, not one.
+    /// - The accumulator is zeroed at every flush, so the worst case is one
+    ///   full flush interval starting from zero: `2 * flush_k_pairs` products.
+    /// - With both operands bounded by `m`, each product is at most `m^2`.
+    /// - Signed int32 holds up to `2^31 - 1`.
+    ///
+    /// So the obligation is `2 * flush_k_pairs * m^2 <= 2^31 - 1`, giving
+    /// `m <= sqrt((2^31 - 1) / (2 * flush_k_pairs))`, and the int16 operand
+    /// width caps it independently.
+    ///
+    /// At the default 64 k-pairs this yields **4095**, not the 1024 quoted in
+    /// the probe's header comment. 1024 is sound - it is 4x inside this bound -
+    /// but it is not the limit, and a licensing check that refuses a legal nest
+    /// is a bug in the direction that merely costs performance rather than
+    /// correctness. The derived figure is used, and the discrepancy is recorded
+    /// here rather than silently reconciled.
+    ///
+    /// **The int16 operand width does not need to be applied here, and a
+    /// `.min(OPERAND_WIDTH_LIMIT)` that was originally written into this
+    /// function was dead code.** `flush_k_pairs >= 1`, so `products >= 2`, so
+    /// the derivation is at most `sqrt((2^31 - 1) / 2) = 32767.99...`, which
+    /// floors to exactly `i16::MAX`. The overflow bound is therefore always at
+    /// least as tight as the width bound, and clamping to the width can never
+    /// change the answer. Mutation testing is what established this - removing
+    /// the clamp passed every test, because no reachable interval distinguishes
+    /// the two. `the_derivation_can_never_exceed_int16` pins the invariant that
+    /// makes the omission safe; [`Self::license`] still checks the width
+    /// separately, because a *caller-supplied* magnitude is unconstrained and
+    /// deserves the width-specific message.
+    pub fn max_operand_magnitude(&self) -> f64 {
+        let products = 2.0 * f64::from(self.flush_k_pairs);
+        (f64::from(i32::MAX) / products).sqrt().floor()
+    }
+
+    /// Whether operands bounded by `m` in magnitude are licensed.
+    ///
+    /// `m` is in the scheme's own integer domain - the int16 operand values
+    /// actually fed to `vpdpwssd` - **not** the real-valued range of the source
+    /// matrices. Converting one to the other is the quantization scale, and it
+    /// is the caller's job precisely because getting it wrong is a wrong answer
+    /// rather than a slow one.
+    pub fn licenses(&self, m: f64) -> bool {
+        m.is_finite() && m >= 0.0 && m <= self.max_operand_magnitude()
+    }
+
+    /// Licence the scheme for operands bounded by `m`, or say why not.
+    pub fn license(&self, m: f64) -> Result<(), String> {
+        if !m.is_finite() || m < 0.0 {
+            return Err(format!(
+                "operand bound {m} is not a usable magnitude: exact VNNI accumulation needs a \
+                 finite non-negative bound on both operands"
+            ));
+        }
+        if m > Self::OPERAND_WIDTH_LIMIT {
+            return Err(format!(
+                "operands bounded by {m} do not fit int16 (limit {}): `vpdpwssd` reads its \
+                 operands as pairs of int16, so a wider operand is a different instruction, not \
+                 a wider accumulator",
+                Self::OPERAND_WIDTH_LIMIT
+            ));
+        }
+        let limit = self.max_operand_magnitude();
+        if m > limit {
+            return Err(format!(
+                "operands bounded by {m} can overflow the int32 accumulator: {} k-pairs between \
+                 flushes is {} products of up to {m}^2, which exceeds i32::MAX. Reduce the flush \
+                 interval to at most {}, or state a tighter `@bounds` on the operands (limit at \
+                 this interval is {limit})",
+                self.flush_k_pairs,
+                2 * self.flush_k_pairs,
+                self.flush_interval_for(m),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Largest power-of-two flush interval that licenses operands bounded by
+    /// `m`. Zero when no interval does - i.e. when a single product already
+    /// overflows, which int16 operands cannot actually reach, but the caller
+    /// should not have to know that to read the number.
+    pub fn flush_interval_for(&self, m: f64) -> u32 {
+        if !m.is_finite() || m <= 0.0 {
+            return Self::DEFAULT_FLUSH_K_PAIRS;
+        }
+        let max_products = f64::from(i32::MAX) / (m * m);
+        let max_pairs = (max_products / 2.0).floor();
+        if max_pairs < 1.0 {
+            return 0;
+        }
+        // Round down to a power of two: the flush test is a bitmask.
+        let p = max_pairs.min(f64::from(u32::MAX)) as u32;
+        1u32 << (31 - p.leading_zeros())
+    }
+}
+
+impl Default for VnniExact {
+    fn default() -> Self {
+        VnniExact { flush_k_pairs: Self::DEFAULT_FLUSH_K_PAIRS }
+    }
+}
+
+/// What a `@ZeroDrift` GEMM must state before the exact VNNI kernel can be
+/// selected for it.
+///
+/// **The accumulator's `@bounds` is necessary but NOT sufficient, and this is
+/// the finding that shapes M0.** `@bounds(min, max)` on the accumulator states
+/// the range of the *result*, `C[i,j]`. What licenses the representation is the
+/// range of the *operands*, `A[i,k]` and `B[k,j]` — and a bound on the sum
+/// implies nothing about a bound on the terms, because the terms can cancel.
+/// A result bounded by 1.0 is perfectly consistent with operands of 1e9.
+///
+/// So a nest carrying only an accumulator bound cannot be licensed, and saying
+/// so is the whole value of this type: the alternative is to guess an operand
+/// range, which is the "silent approximation" the design rule forbids.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OperandBounds {
+    /// Magnitude bound on both operands, in the scheme's integer domain.
+    pub max_magnitude: f64,
+}
+
+/// Decide whether the exact VNNI kernel may be emitted for a nest.
+///
+/// Returns the licensed scheme, or the reason it cannot be. `operands` being
+/// `None` is itself a refusal rather than a default, for the reason in
+/// [`OperandBounds`].
+pub fn license_vnni_exact(
+    operands: Option<OperandBounds>,
+    flush_k_pairs: u32,
+) -> Result<VnniExact, String> {
+    let Some(scheme) = VnniExact::new(flush_k_pairs) else {
+        return Err(format!(
+            "flush interval {flush_k_pairs} is not a positive power of two: the flush test is a \
+             bitmask, so a non-power-of-two interval would flush at the wrong iterations"
+        ));
+    };
+    let Some(b) = operands else {
+        return Err(
+            "no operand bounds: `@bounds` on the accumulator states the range of the RESULT, and \
+             a bound on a sum implies no bound on its terms - they can cancel. Exact VNNI \
+             accumulation needs a stated magnitude bound on A and B themselves."
+                .to_string(),
+        );
+    };
+    scheme.license(b.max_magnitude)?;
+    Ok(scheme)
+}
+
 /// A dependent-accumulate loop in `repr`, as a standalone PTX kernel.
 ///
 /// The chain is deliberately serial - each add consumes the previous result -
@@ -702,5 +914,168 @@ mod tests {
         assert!(ptx.contains(".target sm_89"));
         let ptx32 = accumulate_probe_ptx(DriftRepr::FixedQ16_16, 8);
         assert_eq!(ptx32.matches("add.s32").count(), 8);
+    }
+
+    // ── Exact VNNI licensing ────────────────────────────────
+
+    /// The bound is DERIVED from the flush interval, not hardcoded.
+    ///
+    /// This is the arithmetic the whole scheme rests on, so it is asserted
+    /// against a hand-computed value rather than against the implementation:
+    /// at 64 k-pairs there are 128 products, and `sqrt((2^31 - 1) / 128)` is
+    /// 4095.999..., which floors to 4095.
+    #[test]
+    fn the_operand_bound_is_derived_from_the_flush_interval() {
+        let v = VnniExact::default();
+        assert_eq!(v.flush_k_pairs, 64);
+        assert_eq!(v.max_operand_magnitude(), 4095.0);
+
+        // Halving the interval doubles the product budget, so the magnitude
+        // bound grows by sqrt(2).
+        let half = VnniExact::new(32).unwrap();
+        assert_eq!(half.max_operand_magnitude(), 5792.0);
+
+        // And a long enough interval drives it below the probe's stated 1024.
+        let long = VnniExact::new(1024).unwrap();
+        assert!(
+            long.max_operand_magnitude() < 1024.0,
+            "1024 k-pairs must not license operands of 1024: {}",
+            long.max_operand_magnitude()
+        );
+    }
+
+    /// **The overflow bound is always at least as tight as the int16 width
+    /// bound, at every legal flush interval.**
+    ///
+    /// This is the invariant that lets [`VnniExact::max_operand_magnitude`]
+    /// omit a width clamp. It is not obvious and it was not asserted at first:
+    /// mutation testing removed the clamp and every test still passed, because
+    /// the smallest legal interval makes the two bounds *exactly equal* rather
+    /// than making one redundant by a margin. `products = 2 * flush_k_pairs`,
+    /// so the loosest possible derivation is `sqrt((2^31 - 1) / 2)`, which
+    /// floors to 32767 = `i16::MAX`.
+    ///
+    /// If the scheme ever changes so a `vpdpwssd` lane carries a different
+    /// number of MACs, this test fails and the clamp has to come back.
+    #[test]
+    fn the_derivation_can_never_exceed_int16() {
+        // The boundary case: one k-pair, the loosest interval that exists.
+        let loosest = VnniExact::new(1).unwrap();
+        assert_eq!(
+            loosest.max_operand_magnitude(),
+            VnniExact::OPERAND_WIDTH_LIMIT,
+            "the smallest interval must land exactly on i16::MAX, not above it"
+        );
+
+        // And every other legal interval is tighter still.
+        for shift in 0..20 {
+            let v = VnniExact::new(1u32 << shift).unwrap();
+            assert!(
+                v.max_operand_magnitude() <= VnniExact::OPERAND_WIDTH_LIMIT,
+                "interval {} derives {}, above int16",
+                v.flush_k_pairs,
+                v.max_operand_magnitude()
+            );
+        }
+    }
+
+    /// A caller-supplied magnitude above int16 gets the WIDTH message, not the
+    /// overflow one.
+    ///
+    /// This is the reachable half of the width check. `max_operand_magnitude`
+    /// never produces such a value, but nothing stops a caller passing one, and
+    /// "does not fit int16" points at a different fix than "reduce the flush
+    /// interval" - the latter cannot help at any interval.
+    #[test]
+    fn an_operand_wider_than_int16_is_refused_for_the_right_reason() {
+        let v = VnniExact::default();
+        let err = v.license(40000.0).expect_err("40000 does not fit int16");
+        assert!(
+            err.contains("int16"),
+            "must name the width, not just the overflow: {err}"
+        );
+        assert!(
+            !err.contains("Reduce the flush interval"),
+            "a narrower interval cannot make 40000 fit int16, so it must not be suggested: {err}"
+        );
+    }
+
+    /// A nest that would overflow is REFUSED, and the refusal names the fix.
+    #[test]
+    fn an_overflowing_nest_is_refused_with_a_workable_reason() {
+        let v = VnniExact::default();
+        assert!(v.licenses(4095.0));
+        assert!(!v.licenses(4096.0));
+
+        let err = v.license(8192.0).expect_err("8192 must not be licensed at 64 k-pairs");
+        assert!(err.contains("overflow"), "must say what goes wrong: {err}");
+        // The suggested interval must actually license the operand.
+        let suggested = v.flush_interval_for(8192.0);
+        assert!(suggested > 0 && suggested.is_power_of_two(), "got {suggested}");
+        let fixed = VnniExact::new(suggested).unwrap();
+        assert!(
+            fixed.licenses(8192.0),
+            "the interval the error suggests ({suggested}) must license the operand it was \
+             computed for, or the message sends the user in a circle"
+        );
+    }
+
+    /// A non-power-of-two flush interval is refused, not rounded.
+    ///
+    /// The probe flushes on `(p & (FLUSH_T - 1)) == FLUSH_T - 1`. At
+    /// `FLUSH_T = 48` that mask is `0b101111`, which fires on a set of
+    /// iterations that is not "every 48th" - so the accumulator would run
+    /// longer than the licence assumed. Silently rounding would be a licence
+    /// computed for one schedule applied to another.
+    #[test]
+    fn a_non_power_of_two_flush_interval_is_refused() {
+        assert!(VnniExact::new(48).is_none());
+        assert!(VnniExact::new(0).is_none());
+        assert!(VnniExact::new(64).is_some());
+
+        let b = Some(OperandBounds { max_magnitude: 100.0 });
+        let err = license_vnni_exact(b, 48).expect_err("48 must be refused");
+        assert!(err.contains("power of two"), "must name the reason: {err}");
+    }
+
+    /// **The finding that shapes M0: missing operand bounds are a REFUSAL.**
+    ///
+    /// `@bounds` on the accumulator constrains the result. The licence needs
+    /// the operands, and a bound on a sum implies nothing about its terms
+    /// because they cancel - a result bounded by 1.0 is consistent with
+    /// operands of 1e9. Defaulting to any operand range here would be exactly
+    /// the silent approximation the design rule forbids, so it must refuse.
+    #[test]
+    fn missing_operand_bounds_are_a_refusal_not_a_default() {
+        let err = license_vnni_exact(None, VnniExact::DEFAULT_FLUSH_K_PAIRS)
+            .expect_err("no operand bounds must refuse");
+        assert!(
+            err.contains("cancel"),
+            "the refusal must explain why the accumulator's own bound does not transfer: {err}"
+        );
+
+        // With bounds, the same call succeeds - so the refusal is about the
+        // missing information, not a path that never licenses anything.
+        let ok = license_vnni_exact(
+            Some(OperandBounds { max_magnitude: 1024.0 }),
+            VnniExact::DEFAULT_FLUSH_K_PAIRS,
+        )
+        .expect("bounded operands must be licensed");
+        assert_eq!(ok.flush_k_pairs, 64);
+    }
+
+    /// The probe's own stated bound must be licensed by this checker.
+    ///
+    /// `tests/probes/vnni_kernels.c` is measured, exact-verified, and states
+    /// `|a|,|b| <= 1024` at `FLUSH_T = 64`. If the licensing logic refused the
+    /// configuration that was actually validated on hardware, the logic would
+    /// be wrong rather than the probe.
+    #[test]
+    fn the_measured_probe_configuration_is_licensed() {
+        let v = VnniExact::new(64).expect("the probe's FLUSH_T");
+        assert!(
+            v.licenses(1024.0),
+            "the configuration measured at 1.88x must be licensed by its own checker"
+        );
     }
 }

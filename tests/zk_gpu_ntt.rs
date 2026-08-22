@@ -356,6 +356,626 @@ fn gpu_ntt4(ctx: &CudaContext, module: &KernelModule, a: &[Fr], w: &Fr) -> Vec<F
     from_planar(&read_u32(ctx, &d_x, n * 8), n)
 }
 
+// ── Shared-memory stage fusion ───────────────────────────────────────────
+//
+// `bn254_ntt4_fused` runs FUSED_LOG radix-4 stages inside one launch, keeping
+// the intermediates in shared memory. These must agree with the constants in
+// `tools/gen_bn254_kernels.py`; the kernel's own comment header prints them,
+// and `the_fused_kernel_agrees_with_its_generator` checks the pair.
+const FUSED_LOG: u32 = 5;
+const FUSED_ELEMS: usize = 1 << (2 * FUSED_LOG); // 1024 elements per CTA
+const FUSED_THREADS: u32 = (FUSED_ELEMS / 4) as u32;
+const TW_TOTAL: usize = ((1 << (2 * FUSED_LOG)) - 1) / 3; // 341
+
+/// The concatenated twiddle tables the fused kernel indexes, stage `t` at
+/// offset `(4^t - 1)/3` with `4^t` entries.
+///
+/// Identical values to `radix4_plan`'s first FUSED_LOG stages — the same `w^p`,
+/// `w^2p`, `w^3p` in Montgomery form — just laid end to end so one buffer
+/// serves five stages instead of five buffers serving one each.
+fn fused_twiddles(ctx: &CudaContext, n: usize, w: &Fr) -> [DeviceBuffer; 3] {
+    let r = r_mod_p();
+    let (mut a1, mut a2, mut a3) = (Vec::new(), Vec::new(), Vec::new());
+    for t in 0..FUSED_LOG {
+        let q = 1usize << (2 * t);
+        let m = q * 4;
+        let wm = w.pow_limbs(&[(n / m) as u64, 0, 0, 0]);
+        let mut cur = Fr::one();
+        for _ in 0..q {
+            let c2 = cur.mul(&cur);
+            a1.push(cur.mul(&r));
+            a2.push(c2.mul(&r));
+            a3.push(c2.mul(&cur).mul(&r));
+            cur = cur.mul(&wm);
+        }
+    }
+    assert_eq!(a1.len(), TW_TOTAL, "fused twiddle table is the wrong length");
+    let mk = |v: &[Fr]| {
+        let f = to_planar(v, TW_TOTAL);
+        let d = ctx.alloc(TW_TOTAL * 8 * 4).unwrap();
+        ctx.memcpy_htod_at(&d, 0, as_bytes(&f)).unwrap();
+        d
+    };
+    [mk(&a1), mk(&a2), mk(&a3)]
+}
+
+/// The transform with the low FUSED_LOG stages fused, the rest as before.
+///
+/// At N = 2^22 that is 1 + 6 = 7 passes over DRAM instead of 11. The tail
+/// stages have quarter-strides larger than a CTA's slice, so their butterflies
+/// reach outside it and they cannot be fused this way — see BENCHMARKS.md for
+/// what fusing them would take.
+fn gpu_ntt4_fused(
+    ctx: &CudaContext,
+    fused: &KernelModule,
+    stage: &KernelModule,
+    a: &[Fr],
+    w: &Fr,
+) -> Vec<Fr> {
+    let n = a.len();
+    let log_n = n.trailing_zeros();
+    assert_eq!(log_n % 2, 0, "radix-4 needs N = 4^k");
+    assert!(n >= FUSED_ELEMS, "below one CTA's slice; use gpu_ntt4");
+
+    let flat = to_planar(&digit_reverse4(a, log_n), n);
+    let d_x = ctx.alloc(n * 8 * 4).unwrap();
+    ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
+
+    let plan = radix4_plan(ctx, n, log_n, w);
+    let tw = fused_twiddles(ctx, n, w);
+
+    let args = vec![
+        d_x.device_ptr(),
+        tw[0].device_ptr(),
+        tw[1].device_ptr(),
+        tw[2].device_ptr(),
+        plan.i_root.device_ptr(),
+        n as u64,
+    ];
+    ctx.launch(
+        fused,
+        ((n / FUSED_ELEMS) as u32, 1, 1),
+        (FUSED_THREADS, 1, 1),
+        0,
+        &args,
+    )
+    .expect("fused launch failed");
+    ctx.synchronize().expect("fused stage did not complete");
+
+    // The stages the fusion could not absorb, unchanged.
+    let butterflies = n / 4;
+    let block = 256u32.min(butterflies as u32);
+    let grid = (butterflies as u32).div_ceil(block);
+    for (q, t1, t2, t3) in plan.stages.iter().skip(FUSED_LOG as usize) {
+        let args = vec![
+            d_x.device_ptr(), t1.device_ptr(), t2.device_ptr(), t3.device_ptr(),
+            plan.i_root.device_ptr(), *q as u64, n as u64,
+        ];
+        ctx.launch(stage, (grid, 1, 1), (block, 1, 1), 0, &args)
+            .expect("tail stage launch failed");
+        ctx.synchronize().expect("tail stage did not complete");
+    }
+    from_planar(&read_u32(ctx, &d_x, n * 8), n)
+}
+
+// ── Strided stage fusion, for the stages the contiguous kernel cannot reach ──
+//
+// `bn254_ntt4_fused_high{h}` fuses `h` stages of quarter `Q0 * 4^t`. `Q0` is a
+// runtime parameter so the same kernel can run at a size a naive DFT can check
+// (see `high_fusion_matches_a_naive_dft`), and `h` is generated at several
+// depths so that `log4(N) - FUSED_LOG` never leaves a remainder that has to
+// fall back to one launch per stage.
+const HIGH_MAX: u32 = 4;
+const HIGH_DEPTHS: [u32; 3] = [2, 3, 4];
+const HIGH_ELEMS: usize = 1024; // same 32 KB slice as the contiguous kernel
+const HIGH_THREADS: u32 = (HIGH_ELEMS / 4) as u32;
+
+fn twh_total(h: u32) -> usize {
+    (((1u64 << (2 * h)) - 1) / 3) as usize
+}
+
+/// How the stages above the contiguous group are cut up.
+///
+/// Returns `(groups, singles)`: each group is `(depth, q0)` and runs one
+/// launch; `singles` counts stages left over that run `bn254_ntt4_stage`
+/// one at a time.
+///
+/// Depth 1 is never emitted as a group on purpose — fusing a single stage is
+/// the unfused kernel plus a shared-memory round trip, i.e. strictly worse.
+fn high_schedule(log_n: u32) -> (Vec<(u32, usize)>, usize) {
+    let stages = (log_n / 2) as usize;
+    let mut rem = stages.saturating_sub(FUSED_LOG as usize);
+    let mut q0 = FUSED_ELEMS;
+    let mut groups = Vec::new();
+    while rem >= 2 {
+        let h = (HIGH_MAX as usize).min(rem);
+        groups.push((h as u32, q0));
+        q0 <<= 2 * h;
+        rem -= h;
+    }
+    (groups, rem)
+}
+
+/// Twiddles for one strided group, concatenated: stage `t` at offset
+/// `Q0 * (4^t - 1)/3` with `Q0 * 4^t` entries.
+fn high_twiddles(ctx: &CudaContext, n: usize, w: &Fr, q0: usize, h: u32) -> [DeviceBuffer; 3] {
+    let r = r_mod_p();
+    let (mut a1, mut a2, mut a3) = (Vec::new(), Vec::new(), Vec::new());
+    for t in 0..h {
+        let q = q0 << (2 * t);
+        let m = q * 4;
+        let wm = w.pow_limbs(&[(n / m) as u64, 0, 0, 0]);
+        let mut cur = Fr::one();
+        for _ in 0..q {
+            let c2 = cur.mul(&cur);
+            a1.push(cur.mul(&r));
+            a2.push(c2.mul(&r));
+            a3.push(c2.mul(&cur).mul(&r));
+            cur = cur.mul(&wm);
+        }
+    }
+    let len = q0 * twh_total(h);
+    assert_eq!(a1.len(), len, "strided twiddle table is the wrong length");
+    let mk = |v: &[Fr]| {
+        let f = to_planar(v, len);
+        let d = ctx.alloc(len * 8 * 4).unwrap();
+        ctx.memcpy_htod_at(&d, 0, as_bytes(&f)).unwrap();
+        d
+    };
+    [mk(&a1), mk(&a2), mk(&a3)]
+}
+
+/// The strided kernels, one per generated depth.
+struct HighModules {
+    by_depth: Vec<(u32, KernelModule)>,
+}
+
+impl HighModules {
+    fn load(ctx: &CudaContext) -> Self {
+        HighModules {
+            by_depth: HIGH_DEPTHS
+                .iter()
+                .map(|h| (*h, load_kernel(ctx, &format!("bn254_ntt4_fused_high{}", h))))
+                .collect(),
+        }
+    }
+    fn get(&self, h: u32) -> &KernelModule {
+        &self
+            .by_depth
+            .iter()
+            .find(|(d, _)| *d == h)
+            .unwrap_or_else(|| panic!("no strided kernel generated at depth {}", h))
+            .1
+    }
+}
+
+/// Everything the fused schedule needs, built once.
+struct FusedPlan {
+    plan: Radix4Plan,
+    low_tw: [DeviceBuffer; 3],
+    /// One entry per strided group: (depth, q0, twiddles).
+    groups: Vec<(u32, usize, [DeviceBuffer; 3])>,
+    /// Index into `plan.stages` of the first stage no kernel covers.
+    tail_from: usize,
+}
+
+fn fused_plan(ctx: &CudaContext, n: usize, log_n: u32, w: &Fr) -> FusedPlan {
+    let plan = radix4_plan(ctx, n, log_n, w);
+    let (sched, singles) = high_schedule(log_n);
+    let low_tw = fused_twiddles(ctx, n, w);
+    let mut covered = FUSED_LOG as usize;
+    let mut groups = Vec::new();
+    for (h, q0) in sched {
+        groups.push((h, q0, high_twiddles(ctx, n, w, q0, h)));
+        covered += h as usize;
+    }
+    debug_assert_eq!(covered + singles, plan.stages.len());
+    FusedPlan { plan, low_tw, groups, tail_from: covered }
+}
+
+/// The transform with every fusion applied.
+///
+/// At N = 2^22 that is 1 + 2 + 0 = 3 passes over DRAM instead of 11.
+fn gpu_ntt4_fused2(
+    ctx: &CudaContext,
+    fused: &KernelModule,
+    high: &HighModules,
+    stage: &KernelModule,
+    a: &[Fr],
+    w: &Fr,
+) -> Vec<Fr> {
+    let n = a.len();
+    let log_n = n.trailing_zeros();
+    assert_eq!(log_n % 2, 0, "radix-4 needs N = 4^k");
+    assert!(n >= FUSED_ELEMS, "below one CTA's slice; use gpu_ntt4");
+
+    let flat = to_planar(&digit_reverse4(a, log_n), n);
+    let d_x = ctx.alloc(n * 8 * 4).unwrap();
+    ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
+
+    let fp = fused_plan(ctx, n, log_n, w);
+    run_fused_schedule(ctx, fused, high, stage, &fp, &d_x, n);
+    from_planar(&read_u32(ctx, &d_x, n * 8), n)
+}
+
+/// Launch the whole schedule over an already-resident array. Shared by the
+/// correctness path and the benchmark so they cannot drift apart.
+fn run_fused_schedule(
+    ctx: &CudaContext,
+    fused: &KernelModule,
+    high: &HighModules,
+    stage: &KernelModule,
+    fp: &FusedPlan,
+    d_x: &DeviceBuffer,
+    n: usize,
+) {
+    let ctas = (n / FUSED_ELEMS) as u32;
+    ctx.launch(
+        fused,
+        (ctas, 1, 1),
+        (FUSED_THREADS, 1, 1),
+        0,
+        &[
+            d_x.device_ptr(), fp.low_tw[0].device_ptr(), fp.low_tw[1].device_ptr(),
+            fp.low_tw[2].device_ptr(), fp.plan.i_root.device_ptr(), n as u64,
+        ],
+    )
+    .expect("low fused launch failed");
+
+    for (h, q0, tw) in &fp.groups {
+        ctx.launch(
+            high.get(*h),
+            (ctas, 1, 1),
+            (HIGH_THREADS, 1, 1),
+            0,
+            &[
+                d_x.device_ptr(), tw[0].device_ptr(), tw[1].device_ptr(),
+                tw[2].device_ptr(), fp.plan.i_root.device_ptr(),
+                *q0 as u64, n as u64,
+            ],
+        )
+        .unwrap_or_else(|e| panic!("strided launch (depth {}) failed: {}", h, e));
+    }
+
+    let butterflies = n / 4;
+    let block = 256u32.min(butterflies as u32);
+    let grid = (butterflies as u32).div_ceil(block);
+    for (q, t1, t2, t3) in fp.plan.stages.iter().skip(fp.tail_from) {
+        ctx.launch(
+            stage,
+            (grid, 1, 1),
+            (block, 1, 1),
+            0,
+            &[
+                d_x.device_ptr(), t1.device_ptr(), t2.device_ptr(), t3.device_ptr(),
+                fp.plan.i_root.device_ptr(), *q as u64, n as u64,
+            ],
+        )
+        .expect("tail stage launch failed");
+    }
+    ctx.synchronize().expect("the fused schedule did not complete");
+}
+
+/// The strided kernel against the naive DFT — the test the runtime `Q0`
+/// exists for.
+///
+/// In production `Q0` is 1024, which needs N >= 4^9 for a depth-4 group's
+/// stages to exist, and a naive DFT at 2^18 is ~7e10 field multiplies. Run the
+/// SAME kernel at `Q0 = 4` and N = 4096 and the oracle costs 16.7M instead,
+/// while every line of the index derivation is still exercised: the CTA
+/// decomposition, the `u` coalescing group, the j-space butterfly and the
+/// twiddle offset `p0 + u + Q0*jpos`.
+///
+/// The stage schedule at that size is `q = 1` unfused, the strided kernel over
+/// `q = 4, 16, 64, 256`, then `q = 1024` unfused — so the fused group is
+/// bracketed on both sides and cannot pass by being run on the wrong stages.
+#[test]
+fn high_fusion_matches_a_naive_dft() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — the strided NTT kernels were not executed.");
+        return;
+    };
+    let high = HighModules::load(&ctx);
+    let stage = load_kernel(&ctx, "bn254_ntt4_stage");
+
+    const LOG_N: u32 = 12;
+    const N: usize = 1 << LOG_N;
+    const Q0: usize = 4;
+    let w = root_of_unity(LOG_N);
+    let mut state = 0xC0FFEE_1234u64;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state >> 1
+    };
+    let a: Vec<Fr> = (0..N)
+        .map(|_| Fr::from_limbs_reduce([next(), next(), next(), next()]))
+        .collect();
+
+    let flat = to_planar(&digit_reverse4(&a, LOG_N), N);
+    let d_x = ctx.alloc(N * 8 * 4).unwrap();
+    ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
+    let plan = radix4_plan(&ctx, N, LOG_N, &w);
+    let tw = high_twiddles(&ctx, N, &w, Q0, HIGH_MAX);
+
+    let butterflies = N / 4;
+    let block = 256u32.min(butterflies as u32);
+    let grid = (butterflies as u32).div_ceil(block);
+    let run_stage = |i: usize| {
+        let (q, t1, t2, t3) = &plan.stages[i];
+        ctx.launch(
+            &stage,
+            (grid, 1, 1),
+            (block, 1, 1),
+            0,
+            &[
+                d_x.device_ptr(), t1.device_ptr(), t2.device_ptr(), t3.device_ptr(),
+                plan.i_root.device_ptr(), *q as u64, N as u64,
+            ],
+        )
+        .expect("stage launch failed");
+        ctx.synchronize().unwrap();
+    };
+
+    run_stage(0); // q = 1
+    ctx.launch(
+        high.get(HIGH_MAX),
+        ((N / HIGH_ELEMS) as u32, 1, 1),
+        (HIGH_THREADS, 1, 1),
+        0,
+        &[
+            d_x.device_ptr(), tw[0].device_ptr(), tw[1].device_ptr(),
+            tw[2].device_ptr(), plan.i_root.device_ptr(), Q0 as u64, N as u64,
+        ],
+    )
+    .expect("strided launch failed");
+    ctx.synchronize().unwrap();
+    run_stage(5); // q = 1024
+
+    let got = from_planar(&read_u32(&ctx, &d_x, N * 8), N);
+    let want = naive_dft(&a, &w);
+    for k in 0..N {
+        assert_eq!(
+            got[k].to_decimal_string(),
+            want[k].to_decimal_string(),
+            "strided-fusion output {} disagrees with the DFT",
+            k
+        );
+    }
+}
+
+/// Every generated depth against the naive DFT.
+///
+/// `high_fusion_matches_a_naive_dft` only exercises depth HIGH_MAX. The
+/// shallower variants are the ones that absorb the remainder — at N = 2^22 the
+/// schedule is depth 4 then depth **2** — so a depth-2 bug would show up only
+/// at full size, where the DFT cannot reach.
+///
+/// **`Q0` cannot simply be 4 for every depth**, which is what a first version
+/// of this test assumed and what CUDA rejected outright rather than silently.
+/// A depth-`h` CTA lays its 1024 elements out as `4^h` j-values across
+/// `U = 1024/4^h` consecutive base values, and `p0 = pg*U` only enumerates
+/// anything if `Q0 >= U`. The smallest legal choice is `Q0 = U = 4^(5-h)`,
+/// which puts the fused group at stages `5-h .. 4` — still inside N = 4096,
+/// still bracketed by unfused stages on both sides, and still checkable
+/// against a 16.7M-multiply DFT.
+#[test]
+fn every_strided_depth_matches_a_naive_dft() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let high = HighModules::load(&ctx);
+    let stage = load_kernel(&ctx, "bn254_ntt4_stage");
+
+    const LOG_N: u32 = 12;
+    const N: usize = 1 << LOG_N;
+
+    for h in HIGH_DEPTHS {
+        let first = FUSED_LOG - h; // first stage index the group covers
+        let q0 = 1usize << (2 * first);
+        assert!(
+            q0 >= HIGH_ELEMS >> (2 * h),
+            "depth {} needs Q0 >= {}, which this configuration does not give it",
+            h,
+            HIGH_ELEMS >> (2 * h)
+        );
+
+        let w = root_of_unity(LOG_N);
+        let a: Vec<Fr> = (0..N).map(|i| Fr::from_u64((i as u64) * 31 + 7)).collect();
+
+        let flat = to_planar(&digit_reverse4(&a, LOG_N), N);
+        let d_x = ctx.alloc(N * 8 * 4).unwrap();
+        ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
+        let plan = radix4_plan(&ctx, N, LOG_N, &w);
+        let tw = high_twiddles(&ctx, N, &w, q0, h);
+
+        let butterflies = N / 4;
+        let block = 256u32.min(butterflies as u32);
+        let grid = (butterflies as u32).div_ceil(block);
+        let run_stage = |i: usize| {
+            let (q, t1, t2, t3) = &plan.stages[i];
+            ctx.launch(
+                &stage, (grid, 1, 1), (block, 1, 1), 0,
+                &[
+                    d_x.device_ptr(), t1.device_ptr(), t2.device_ptr(), t3.device_ptr(),
+                    plan.i_root.device_ptr(), *q as u64, N as u64,
+                ],
+            )
+            .expect("stage launch failed");
+            ctx.synchronize().unwrap();
+        };
+
+        for i in 0..first as usize {
+            run_stage(i);
+        }
+        ctx.launch(
+            high.get(h),
+            ((N / HIGH_ELEMS) as u32, 1, 1),
+            (HIGH_THREADS, 1, 1),
+            0,
+            &[
+                d_x.device_ptr(), tw[0].device_ptr(), tw[1].device_ptr(),
+                tw[2].device_ptr(), plan.i_root.device_ptr(), q0 as u64, N as u64,
+            ],
+        )
+        .unwrap_or_else(|e| panic!("depth-{} strided launch failed: {}", h, e));
+        ctx.synchronize().unwrap();
+        for i in (first + h) as usize..plan.stages.len() {
+            run_stage(i);
+        }
+
+        let got = from_planar(&read_u32(&ctx, &d_x, N * 8), N);
+        let want = naive_dft(&a, &w);
+        for k in 0..N {
+            assert_eq!(
+                got[k].to_decimal_string(),
+                want[k].to_decimal_string(),
+                "depth-{} strided fusion (Q0 = {}) disagrees with the DFT at {}",
+                h,
+                q0,
+                k
+            );
+        }
+    }
+}
+
+/// Every fusion composed, against the unfused radix-4 path element for element.
+///
+/// Run at two sizes because the SCHEDULE differs: 2^20 leaves one stage over
+/// (low, depth-4, one unfused) and 2^22 leaves none (low, depth-4, depth-2).
+/// A test at one size only would leave one of those arms unexercised, and the
+/// assertion on the schedule is what stops it passing by silently taking the
+/// other branch.
+#[test]
+fn every_fusion_agrees_with_the_unfused_path() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let fused = load_kernel(&ctx, "bn254_ntt4_fused");
+    let high = HighModules::load(&ctx);
+    let stage = load_kernel(&ctx, "bn254_ntt4_stage");
+
+    for (log_n, want_groups, want_singles) in [(20u32, 1usize, 1usize), (22, 2, 0)] {
+        let (groups, singles) = high_schedule(log_n);
+        assert_eq!(
+            (groups.len(), singles),
+            (want_groups, want_singles),
+            "the stage schedule at 2^{} is not the one this test means to cover",
+            log_n
+        );
+
+        let n = 1usize << log_n;
+        let w = root_of_unity(log_n);
+        let a: Vec<Fr> = (0..n).map(|i| Fr::from_u64((i as u64) * 7919 + 13)).collect();
+        let plain = gpu_ntt4(&ctx, &stage, &a, &w);
+        let all = gpu_ntt4_fused2(&ctx, &fused, &high, &stage, &a, &w);
+        for k in 0..n {
+            assert_eq!(
+                plain[k].to_decimal_string(),
+                all[k].to_decimal_string(),
+                "the fully fused transform disagrees with the unfused one at 2^{}, index {}",
+                log_n,
+                k
+            );
+        }
+    }
+}
+
+/// The fused path against the naive DFT.
+///
+/// N = 4^6, so it exercises both halves: one fused launch of five stages and
+/// one tail stage. A size of exactly 4^5 would run the fused kernel alone and
+/// never test that the two agree on where the transform is up to.
+#[test]
+fn fused_ntt_matches_a_naive_dft() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — bn254_ntt4_fused.ysu was not executed.");
+        return;
+    };
+    let fused = load_kernel(&ctx, "bn254_ntt4_fused");
+    let stage = load_kernel(&ctx, "bn254_ntt4_stage");
+
+    const LOG_N: u32 = 12;
+    const N: usize = 1 << LOG_N;
+    let w = root_of_unity(LOG_N);
+    let mut state = 0x5EED_F0_5EDu64;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state >> 1
+    };
+    let a: Vec<Fr> = (0..N)
+        .map(|_| Fr::from_limbs_reduce([next(), next(), next(), next()]))
+        .collect();
+
+    let want = naive_dft(&a, &w);
+    let got = gpu_ntt4_fused(&ctx, &fused, &stage, &a, &w);
+    for k in 0..N {
+        assert_eq!(
+            got[k].to_decimal_string(),
+            want[k].to_decimal_string(),
+            "fused output {} disagrees with the DFT",
+            k
+        );
+    }
+}
+
+/// And element for element against the unfused radix-4 path.
+///
+/// The DFT check above is the real oracle; this one localises a failure. If
+/// both fail the butterfly is wrong, if only this one fails the fusion moved
+/// something — a swizzle that is not a bijection, a barrier in the wrong
+/// place, a twiddle read at the wrong concatenation offset.
+#[test]
+fn fused_and_unfused_radix4_agree() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let fused = load_kernel(&ctx, "bn254_ntt4_fused");
+    let stage = load_kernel(&ctx, "bn254_ntt4_stage");
+    const LOG_N: u32 = 14;
+    const N: usize = 1 << LOG_N;
+    let w = root_of_unity(LOG_N);
+    let a: Vec<Fr> = (0..N).map(|i| Fr::from_u64((i * 11 + 5) as u64)).collect();
+    let plain = gpu_ntt4(&ctx, &stage, &a, &w);
+    let f = gpu_ntt4_fused(&ctx, &fused, &stage, &a, &w);
+    for k in 0..N {
+        assert_eq!(
+            plain[k].to_decimal_string(),
+            f[k].to_decimal_string(),
+            "fused and unfused radix-4 disagree at {}",
+            k
+        );
+    }
+}
+
+/// The host's fusion constants and the generator's must be the same numbers.
+///
+/// They live in two languages and nothing links them: get FUSED_LOG wrong here
+/// and the host runs the tail stages from the wrong index, which produces a
+/// wrong transform that still looks like a transform. The kernel prints its
+/// own geometry in its header, so compare against that rather than against a
+/// second copy of the constant.
+#[test]
+fn the_fused_kernel_agrees_with_its_generator() {
+    let src = std::fs::read_to_string(repo().join("tests/bn254_ntt4_fused.ysu"))
+        .expect("the generated fused kernel is missing — run tools/gen_bn254_kernels.py");
+    assert!(
+        src.contains(&format!("// {} radix-4 stages fused through shared memory:", FUSED_LOG)),
+        "the kernel was generated for a different fusion depth than this file assumes"
+    );
+    assert!(
+        src.contains(&format!("shared_alloc_u32({})", FUSED_ELEMS * 8)),
+        "the kernel allocates a different amount of shared memory than {} elements needs",
+        FUSED_ELEMS
+    );
+    assert!(
+        src.contains(&format!("({} total)", TW_TOTAL)),
+        "the concatenated twiddle table length disagrees with the kernel's"
+    );
+}
+
 /// The radix-4 transform, against the same naive DFT. Nothing about halving
 /// the pass count is allowed to change the answer.
 #[test]
@@ -568,10 +1188,37 @@ fn what_the_gpu_ntt_costs() {
     }
 
     // ── the device work: 20 stage launches over a resident array ──
-    let reps = 5;
+    let reps = 20;
     let pairs = N / 2;
     let grid = (pairs / 256) as u32;
+
+    // Warm the clock BEFORE timing. This GPU idles at ~210 MHz and needs
+    // seconds of load to reach ~2670 MHz, and everything above this point --
+    // building 20 twiddle tables on the CPU and pushing them over PCIe --
+    // leaves it idle long enough to drop all the way back.
+    //
+    // Measured: without this warmup the test reported **28.92 ms and an 18.0x
+    // speedup**; warm it is **1.32 ms and 393x**. A 22x error, and it reported
+    // the kernel as bandwidth-starved when it is nothing of the sort. The
+    // sibling `is_the_gpu_actually_winning` in this same file already carried
+    // the warmup and a comment describing this exact failure ("the first timed
+    // rep absorbed the whole ramp and reported 30.6 ms against a warm 8.4") --
+    // this benchmark simply never got it. A ramp can only ever make a run
+    // slower, which is why this repo ranks GPU timings by the minimum.
+    let launch_all = |ctx: &CudaContext| {
+        for (half, d_tw) in &stages {
+            let args = vec![
+                d_x.device_ptr(), d_tw.device_ptr(),
+                *half as u64, pairs as u64, N as u64,
+            ];
+            ctx.launch(&module, (grid, 1, 1), (256, 1, 1), 0, &args).unwrap();
+        }
+    };
+    for _ in 0..40 {
+        launch_all(&ctx);
+    }
     ctx.synchronize().unwrap();
+
     let t0 = std::time::Instant::now();
     for _ in 0..reps {
         for (half, d_tw) in &stages {
@@ -941,4 +1588,155 @@ fn is_the_gpu_actually_winning() {
     println!("  PCIe round trip is {:.2} ms of that, {:.0}% of the offloaded time.",
              gpu_offload_ms - gpu_resident_ms,
              (gpu_offload_ms - gpu_resident_ms) / gpu_offload_ms * 100.0);
+}
+
+/// What the shared-memory stage fusion buys, in device time.  `--ignored`.
+///
+/// Only the launches are timed: the array is already resident, the twiddle
+/// tables are already built and uploaded, and the digit-reversal permutation
+/// is outside the region for both arms. That is the honest boundary for a
+/// comparison between two schedules of the same butterflies — and it is the
+/// same boundary `crates/y-gpu/BENCHMARKS.md` uses for the icicle figures, so
+/// the numbers can be read against each other.
+///
+/// **Ranked by MINIMUM across interleaved rounds, not by mean.** A GPU timing
+/// distribution has a hard floor and a long tail (clock ramp, another process,
+/// an interrupt), so the minimum is the estimate of the kernel and the tail is
+/// the estimate of the machine's noise. Interleaving the arms within a round
+/// keeps a slow patch of wall-clock from landing entirely on one of them.
+#[test]
+#[ignore]
+fn what_stage_fusion_buys() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let stage = load_kernel(&ctx, "bn254_ntt4_stage");
+    let fused = load_kernel(&ctx, "bn254_ntt4_fused");
+    let high = HighModules::load(&ctx);
+
+    // ── ramp the clock ONCE, before the first size ──
+    //
+    // The per-size warmup below is 20 iterations, which at 2^20 is ~12 ms of
+    // load — nowhere near the ~3 s this GPU needs to climb from its 210 MHz
+    // idle to 2670. So the first size in the loop absorbs the ramp and reads
+    // high: measured 0.93 ms on a cold process against 0.66 on a warm one, a
+    // 1.4x error landing entirely on one row. The same mistake as the one
+    // `what_the_gpu_ntt_costs` carried for its whole life, one level up.
+    {
+        let n = 1usize << 22;
+        let w = root_of_unity(22);
+        let a: Vec<Fr> = (0..n).map(|i| Fr::from_u64(i as u64 + 1)).collect();
+        let flat = to_planar(&digit_reverse4(&a, 22), n);
+        let d = ctx.alloc(n * 8 * 4).unwrap();
+        ctx.memcpy_htod_at(&d, 0, as_bytes(&flat)).unwrap();
+        let fp = fused_plan(&ctx, n, 22, &w);
+        for _ in 0..400 {
+            run_fused_schedule(&ctx, &fused, &high, &stage, &fp, &d, n);
+        }
+        ctx.synchronize().unwrap();
+    }
+
+    println!("\nBN254 radix-4 NTT: stage fusion, device time only");
+    println!(
+        "{:>6}  {:>10}  {:>10}  {:>10}  {:>7}  {:>10}  {:>12}",
+        "log2 N", "unfused", "low only", "all", "speedup", "passes", "schedule"
+    );
+
+    for log_n in [20u32, 22] {
+        let n = 1usize << log_n;
+        let w = root_of_unity(log_n);
+        let a: Vec<Fr> = (0..n).map(|i| Fr::from_u64((i as u64) * 2654435761 + 1)).collect();
+
+        let flat = to_planar(&digit_reverse4(&a, log_n), n);
+        let d_x = ctx.alloc(n * 8 * 4).unwrap();
+        ctx.memcpy_htod_at(&d_x, 0, as_bytes(&flat)).unwrap();
+
+        let fp = fused_plan(&ctx, n, log_n, &w);
+        let butterflies = n / 4;
+        let block = 256u32.min(butterflies as u32);
+        let grid = (butterflies as u32).div_ceil(block);
+        let ctas = (n / FUSED_ELEMS) as u32;
+
+        let run_stage = |from: usize| {
+            for (q, t1, t2, t3) in fp.plan.stages.iter().skip(from) {
+                ctx.launch(
+                    &stage, (grid, 1, 1), (block, 1, 1), 0,
+                    &[
+                        d_x.device_ptr(), t1.device_ptr(), t2.device_ptr(), t3.device_ptr(),
+                        fp.plan.i_root.device_ptr(), *q as u64, n as u64,
+                    ],
+                )
+                .unwrap();
+            }
+        };
+        let run_low = || {
+            ctx.launch(
+                &fused, (ctas, 1, 1), (FUSED_THREADS, 1, 1), 0,
+                &[
+                    d_x.device_ptr(), fp.low_tw[0].device_ptr(), fp.low_tw[1].device_ptr(),
+                    fp.low_tw[2].device_ptr(), fp.plan.i_root.device_ptr(), n as u64,
+                ],
+            )
+            .unwrap();
+        };
+        // The full schedule goes through the SAME function the correctness
+        // tests use, so the thing being timed cannot drift from the thing
+        // being checked.
+        let run_all = || run_fused_schedule(&ctx, &fused, &high, &stage, &fp, &d_x, n);
+
+        // The clock idles at ~210 MHz and needs seconds of load to reach
+        // ~2670. Everything above this point ran on the CPU.
+        for _ in 0..20 {
+            run_stage(0);
+            run_low();
+            run_stage(FUSED_LOG as usize);
+            run_all();
+        }
+        ctx.synchronize().unwrap();
+
+        let (mut best_plain, mut best_low, mut best_all) = (f64::MAX, f64::MAX, f64::MAX);
+        for _ in 0..12 {
+            let t = std::time::Instant::now();
+            run_stage(0);
+            ctx.synchronize().unwrap();
+            best_plain = best_plain.min(t.elapsed().as_secs_f64() * 1e3);
+
+            let t = std::time::Instant::now();
+            run_low();
+            run_stage(FUSED_LOG as usize);
+            ctx.synchronize().unwrap();
+            best_low = best_low.min(t.elapsed().as_secs_f64() * 1e3);
+
+            let t = std::time::Instant::now();
+            run_all();
+            best_all = best_all.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+
+        let stages = fp.plan.stages.len();
+        let singles = stages - fp.tail_from;
+        let passes = 1 + fp.groups.len() + singles;
+        let sched = format!(
+            "low+{}{}",
+            fp.groups
+                .iter()
+                .map(|(h, _, _)| h.to_string())
+                .collect::<Vec<_>>()
+                .join("+"),
+            if singles > 0 { format!("+{}x1", singles) } else { String::new() }
+        );
+        println!(
+            "{:>6}  {:>8.2} ms  {:>8.2} ms  {:>8.2} ms  {:>6.2}x  {:>4} -> {:<4}  {:>12}",
+            log_n, best_plain, best_low, best_all,
+            best_plain / best_all, stages, passes, sched
+        );
+    }
+    println!(
+        "\nA pass is one read + one write of the whole array. The contiguous\n\
+         kernel replaces {} stages with one pass; a strided kernel of depth h\n\
+         replaces h more, and depths {:?} are generated so no remainder is\n\
+         left to run one stage at a time. Speedup is against the fully\n\
+         unfused radix-4 path.",
+        FUSED_LOG, HIGH_DEPTHS
+    );
 }

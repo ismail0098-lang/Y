@@ -345,6 +345,56 @@ fn the_msm_oracle_is_not_vacuous() {
     assert_eq!(b - a, points[N / 2], "the difference is not the perturbed point");
 }
 
+/// Binning is **byte-identical whatever the scatter's thread count is**, and
+/// that is a much stronger check than "the MSM still comes out right".
+///
+/// It holds for a reason rather than by luck: a scatter thread owns a
+/// contiguous range of POINTS and fills each bucket in point order, and the
+/// thread ranges are in point order too, so every bucket ends up in point
+/// order no matter how the points were cut up. Grouping several histogram
+/// chunks under one scatter thread — which is what `scatter_threads` does, and
+/// the only new arithmetic in this path — cannot change that unless it gets
+/// the cursors or the base index wrong, in which case this fails immediately.
+///
+/// It matters because the failure mode is otherwise quiet: an entry placed in
+/// the wrong bucket still yields a valid curve point, so the MSM tests catch
+/// it only through the final sum, and only if the error survives to it.
+#[test]
+fn binning_does_not_depend_on_the_thread_count() {
+    let n = 40_000;
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0x5CA7);
+    let scalars: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+
+    for nw in [20usize, 25, 31] {
+        let g = Geom::new(nw);
+
+        // One writer: every bucket is filled in plain point order, which is
+        // the reference the rest have to reproduce.
+        msm::set_scatter_threads(Some(1));
+        let (idx1, off1) = msm::bin_by_digit(&scalars, &g);
+        msm::set_scatter_threads(None);
+
+        // The control: a geometry where every bucket holds at most one entry
+        // would make the comparisons below vacuous.
+        let deepest = (0..g.nb).map(|b| off1[b + 1] - off1[b]).max().unwrap_or(0);
+        assert!(
+            deepest > 4,
+            "nw = {}: deepest bucket holds {} entries, too few to exercise \
+             ordering",
+            nw,
+            deepest
+        );
+
+        for thr in [2usize, 3, 6, 12, 32] {
+            msm::set_scatter_threads(Some(thr));
+            let (idx, off) = msm::bin_by_digit(&scalars, &g);
+            msm::set_scatter_threads(None);
+            assert_eq!(off, off1, "nw = {}, {} threads: offsets disagree", nw, thr);
+            assert_eq!(idx, idx1, "nw = {}, {} threads: Idx disagrees", nw, thr);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // What it costs
 // ---------------------------------------------------------------------------
@@ -654,5 +704,219 @@ fn the_dispatch_thresholds_are_still_true() {
     assert!(
         !gpu_is_worth_it(small, false) && gpu_is_worth_it(large, false),
         "gpu_is_worth_it disagrees with the constants it is built from"
+    );
+}
+
+/// What the bucket kernel's block size costs.  `--ignored`.
+///
+/// NCU said the kernel is latency-bound, not bandwidth- or throughput-bound:
+/// 70% of stalls are `wait` (a dependent ALU result), DRAM sits under 9% of
+/// peak and SM throughput under 27%. A kernel in that state wants more warps
+/// in flight, and at 136 registers per thread a 256-thread CTA needs 34,816
+/// registers — one block per SM out of 65,536, capping occupancy at 16.7%.
+///
+/// Halving the block halves the registers per block and doubles the blocks
+/// that fit. This sweep is what chose `BUCKET_BLOCK_DEFAULT`.
+///
+/// **Only the kernel column is meaningful across rows.** The block size also
+/// constrains which window geometries are legal (`Geom::new` requires the
+/// bucket count to be a whole multiple of it), so the host phases and the
+/// chosen `nw` move with it for reasons that have nothing to do with
+/// occupancy.
+#[test]
+#[ignore]
+fn what_the_msm_block_size_costs() {
+    if !require_release_build("what_the_msm_block_size_costs") {
+        return;
+    }
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver.");
+        return;
+    };
+    let module = load_kernel(&ctx, "bn254_msm_bucket");
+
+    const LOG_N: usize = 20;
+    let n = 1usize << LOG_N;
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0xB10CC);
+    let points: Vec<G1Projective> = (0..n).map(|_| G1Projective::rand(&mut rng)).collect();
+    let scalars: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+
+    println!("\nbn254_msm_bucket block size, n = 2^{}", LOG_N);
+    println!(
+        "{:>3} {:>9} {:>8}  {:>9} {:>9} {:>9} {:>9}  {:>8}",
+        "nw", "buckets", "thr/SM", "b=256", "b=128", "b=64", "b=32", "best"
+    );
+
+    // Sweep the GEOMETRY as well as the block size. The two interact, and
+    // measuring one geometry is what made the first version of this benchmark
+    // report a flat 1.00x while the end-to-end run showed 1.18x.
+    for nw in [20usize, 22, 25, 28, 31] {
+        let g = msm::Geom::new(nw);
+        let mut row = Vec::new();
+        for block in [256usize, 128, 64, 32] {
+            msm::set_bucket_block(Some(block));
+            // Warm the clock and the JIT; a cold first row would read as a win
+            // for whatever ran last.
+            for _ in 0..2 {
+                let _ = msm::gpu_msm(&ctx, &module, &points, &scalars, &g);
+            }
+            let mut k = f64::MAX;
+            for _ in 0..5 {
+                let (_, tm) = msm::gpu_msm(&ctx, &module, &points, &scalars, &g);
+                k = k.min(tm.kernel * 1e3);
+            }
+            row.push(k);
+        }
+        let best = row.iter().cloned().fold(f64::MAX, f64::min);
+        println!(
+            "{:>3} {:>9} {:>8.0}  {:>9.2} {:>9.2} {:>9.2} {:>9.2}  {:>7.2}x",
+            nw,
+            g.nb,
+            g.nb as f64 / 66.0,
+            row[0], row[1], row[2], row[3],
+            row[0] / best
+        );
+    }
+    msm::set_bucket_block(None);
+    println!(
+        "\n`thr/SM` is buckets divided by SM count -- the threads this geometry\n\
+         has to offer each SM. Where it is small the kernel is THREAD-STARVED\n\
+         and no block size helps; where it is large the kernel is\n\
+         REGISTER-limited and a smaller block buys occupancy. Default is {}.",
+        msm::bucket_block()
+    );
+}
+
+/// Where binning's time actually goes.  `--ignored`.
+///
+/// Binning is the largest host phase at every window geometry and it is what
+/// forces the MSM to a narrower `nw` than the kernel wants. The repo's stated
+/// reason — "an `O(threads * nb)` cursor table" — was an attribution nobody
+/// had measured, and a phase split is the cheapest way to find out whether it
+/// is true before rewriting anything.
+/// Two explanations fit the scatter's cost, and the default thread count
+/// cannot tell them apart.
+///
+///   - **Capacity.** A thread holds `nb` open destinations — 8.9 MB of lines
+///     at nw = 20 against a 1 MB L2 — so nearly every write misses.
+///   - **False sharing.** A thread's slice of a bucket is
+///     `n / (threads * buckets_per_window)` entries, about FOUR u32 at nw = 20.
+///     Consecutive threads' slices of the same bucket are adjacent in `Idx`,
+///     so a 64-byte line is written by three or four cores at once.
+///
+/// Both predict the observed 3x gap between nw = 20 and nw = 31. Cutting the
+/// THREAD count separates them: capacity is unchanged by it (the destination
+/// set is the same `nb` lines however many threads walk it), while sharing
+/// falls linearly, because halving the threads doubles each slice.
+///
+/// Read the `ns/entry/thread` column, not the wall clock — fewer threads is
+/// slower in absolute terms no matter what the answer is.
+#[test]
+#[ignore]
+fn what_the_scatter_is_actually_bound_by() {
+    if !require_release_build("what_the_scatter_is_actually_bound_by") {
+        return;
+    }
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0xB12);
+    let big: Vec<Fr> = (0..1usize << 22).map(|_| Fr::rand(&mut rng)).collect();
+
+    println!("\none-pass scatter vs thread count");
+    println!(
+        "{:>4} {:>3} {:>9} {:>5}  {:>8} {:>12} {:>9}",
+        "log n", "nw", "buckets", "thr", "scatter", "slice(bytes)", "ns/entry"
+    );
+    for log_n in [18usize, 20, 22] {
+        let n = 1usize << log_n;
+        let scalars = &big[..n];
+        for nw in [20usize, 22, 25, 31] {
+            let g = msm::Geom::new(nw);
+            let entries = n * nw; // upper bound; digit 0 is skipped
+            for thr in [32usize, 16, 12, 8, 6, 4] {
+                msm::set_scatter_threads(Some(thr));
+                let mut best = f64::MAX;
+                for _ in 0..3 {
+                    let _ = msm::bin_by_digit(scalars, &g);
+                    best = best.min(msm::last_bin_trace().scatter);
+                }
+                msm::set_scatter_threads(None);
+                let per_thread = entries as f64 / thr as f64;
+                let slice = 4.0 * n as f64 / (thr as f64 * (g.nb as f64 / nw as f64));
+                println!(
+                    "{:>4} {:>3} {:>9} {:>5}  {:>7.1}m {:>12.0} {:>8.1}",
+                    log_n,
+                    nw,
+                    g.nb,
+                    thr,
+                    best * 1e3,
+                    slice,
+                    best * 1e9 / per_thread
+                );
+            }
+        }
+    }
+    println!(
+        "\n`slice(bytes)` is one thread's run inside one bucket. Where it is\n\
+         under 64 the line is shared between cores; where it is well over, it\n\
+         is not."
+    );
+}
+
+#[test]
+#[ignore]
+fn where_binning_spends_its_time() {
+    if !require_release_build("where_binning_spends_its_time") {
+        return;
+    }
+    const LOG_N: usize = 20;
+    let n = 1usize << LOG_N;
+    let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0xB11);
+    let scalars: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+    let threads = std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1);
+
+    let run = |g: &msm::Geom| {
+        // Best of 3: the allocator and the page cache both warm up.
+        let mut best = (f64::MAX, msm::BinTrace::default());
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let _ = msm::bin_by_digit(&scalars, g);
+            let el = t.elapsed().as_secs_f64();
+            if el < best.0 {
+                best = (el, msm::last_bin_trace());
+            }
+        }
+        best
+    };
+
+    println!(
+        "\nbin_by_digit phase split, n = 2^{}, {} threads (scatter uses fewer)",
+        LOG_N, threads
+    );
+    println!(
+        "{:>3} {:>9} {:>9}  {:>8} {:>8} {:>9} {:>9}  {:>9}",
+        "nw", "buckets", "entries", "hist", "prefix", "scatter", "was(32t)", "TOTAL"
+    );
+    for nw in [20usize, 22, 25, 28, 31] {
+        let g = msm::Geom::new(nw);
+        msm::set_scatter_threads(Some(32));
+        let (_, wide) = run(&g);
+        msm::set_scatter_threads(None);
+        let (tot, tr) = run(&g);
+        println!(
+            "{:>3} {:>9} {:>8.1}M  {:>7.1}m {:>7.1}m {:>8.1}m {:>8.1}m  {:>8.1}m",
+            nw,
+            g.nb,
+            (n * nw) as f64 / 1e6,
+            tr.histogram * 1e3,
+            tr.prefix * 1e3,
+            tr.scatter * 1e3,
+            wide.scatter * 1e3,
+            tot * 1e3
+        );
+    }
+    println!(
+        "\n`entries` is the work: (point, window) pairs with a non-zero digit.\n\
+         Note the scatter gets SLOWER as the entry count FALLS — it tracks the\n\
+         BUCKET count, not the work. `was(32t)` is the same scatter run on\n\
+         every core, which is what it did before the thread count was measured."
     );
 }

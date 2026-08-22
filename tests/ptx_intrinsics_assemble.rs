@@ -142,7 +142,7 @@ fn supported_intrinsics_emit_assemblable_ptx() {
         // what makes this case cover `pipe.wait`.
         ("i_cp_async", "let tok: AsyncToken = cp_async(A, B, 16);\n    pipe.wait(tok);"),
         ("i_block_cdiv", "let c: I32 = block_cdiv(N, 128);"),
-        ("i_block_arange", "let r: I32 = block_arange(0, 128);"),
+        ("i_block_arange", "let r: I32 = block_arange();"),
         ("i_tile_load", "let v: F32 = tile_load(A, N, 128);"),
         ("i_tile_store", "tile_store(A, N, B);"),
         ("i_block_tile_load", "let v: F32 = block_tile_load(A, N, 128);"),
@@ -150,8 +150,6 @@ fn supported_intrinsics_emit_assemblable_ptx() {
         ("i_vec_add_v4", "vec_add_v4(A, B, A);"),
         ("i_swiglu_v4", "swiglu_v4(A, B, A);"),
         ("i_rmsnorm_v4", "rmsnorm_v4(A, B, A);"),
-        ("i_mbarrier_init", "mbarrier_init(A, 128);"),
-        ("i_mbarrier_arrive", "mbarrier_arrive(A);"),
     ];
 
     let mut passed = 0;
@@ -199,6 +197,27 @@ fn unlowerable_intrinsics_fail_the_build() {
         ("u_cp_async_bulk", "cp_async_bulk(A, B);", "cp_async_bulk"),
         ("u_wgmma_async", "wgmma_async();", "wgmma_async"),
         ("u_wgmma_mma_async", "wgmma_mma_async();", "wgmma_mma_async"),
+        // Moved here from the SUPPORTED list, where it had been passing.
+        // `block_arange(0, 128)` ignored both arguments and returned
+        // `%tid.x`, which assembles perfectly and is the wrong value -
+        // so an assemble-only gate cannot see it. That is the limit of
+        // this test and the reason the repo also keeps differential and
+        // on-device checks.
+        ("u_block_arange", "let r: I32 = block_arange(0, 128);", "block_arange"),
+        // The NULLARY form stays supported - see the supported list below.
+        // Discarded its three fragment arguments and emitted a fixed
+        // `mma.sync` with the wrong register counts - `%f1` outside the
+        // declared `.reg .f32 %f<1>` pool, two accumulator registers
+        // where m16n8k16 needs four. Four ptxas errors, after exit 0.
+        ("u_mma_sync", "mma_sync(A, A, A);", "mma_sync"),
+        // Also moved from the SUPPORTED list. `mbarrier_arrive(A)` was passing
+        // there with ONE argument against a `args.len() >= 2` guard, so it
+        // matched no branch and emitted NOTHING - and empty PTX assembles, so
+        // an assemble-only gate called a missing barrier "supported". Same
+        // shape as the `barrier_sync()` and `pipe.wait(t)` bugs in gotcha #8.
+        ("u_mbarrier_init", "mbarrier_init(A, 128);", "mbarrier_init"),
+        ("u_mbarrier_arrive", "mbarrier_arrive(A, 128);", "mbarrier_arrive"),
+        ("u_mbarrier_try_wait", "mbarrier_try_wait(A, 0);", "mbarrier_try_wait"),
     ] {
         let (log, ptx) = compile(name, body);
         assert!(
@@ -311,4 +330,135 @@ fn cp_async_honours_its_byte_count_and_rejects_illegal_ones() {
         "cp_async with an illegal 12-byte width must fail the build:\n{}",
         log
     );
+}
+
+/// A short intrinsic call must be REFUSED, not filled in from a live register.
+///
+/// Every one of these lowerings reads its operands as
+/// `if args.len() >= N { emit(args[N-1]) } else { "%r0".into() }`, so a missing
+/// argument used to be substituted with *whatever happens to live in `%r0` /
+/// `%rd0` / `%f0`* - another variable in the same kernel.
+///
+/// Found by hand, not by any existing gate: `block_ptr2d_store(Out, 0, tid, N,
+/// 1.0)` - five arguments where seven are needed - promoted the value being
+/// stored to the bounds limit and emitted `setp.lt.u32 %p0, %r6, %f0`, a u32
+/// compared against an f32 register. The compiler printed a green success
+/// banner, exited 0, and wrote a `.ptx` that `ptxas` rejects. That is the exact
+/// failure mode gotcha #8 documents for `tma_load`, in a live intrinsic that
+/// real kernels call.
+///
+/// **The correct-arity control is the half that matters.** Refusing everything
+/// would pass the first assertion and break every kernel in `tests/`, so the
+/// second case pins that the full call still compiles AND still assembles.
+#[test]
+fn short_intrinsic_calls_are_refused_not_guessed() {
+    // (name, body, expected arity in the message)
+    for (name, body, want) in [
+        ("a_store2d_short", "block_ptr2d_store(A, 0, N, N, 1.0);", "7"),
+        ("a_store3d_short", "block_ptr3d_store(A, 0, N);", "4"),
+        ("a_ptr2dload_short", "let v: F32 = block_ptr2d_load(A, 0);", "3"),
+        ("a_tile_load_short", "let t: F32 = block_tile_load(A);", "2"),
+    ] {
+        let (log, ptx) = compile(name, body);
+        assert!(
+            log.contains("arguments") && log.contains(want),
+            "{} was not refused with an arity message (expected {} args):\n{}",
+            name,
+            want,
+            log
+        );
+        // NOT asserted: the absence of a "Compilation Successful!" banner.
+        // `main` prints that BEFORE any backend emitter runs, so a refused
+        // kernel prints the green banner, then the refusal, then exits 1 - in
+        // that order. That is a real wart and it is left alone deliberately:
+        // eleven assertions in `safe_invariant_enforcement.rs` and elsewhere
+        // use the string as a proxy for "the front end accepted this", and on
+        // the default LLVM path a GPU kernel never reaches the end of `main`
+        // anyway (it fails to link `block_idx_x`). Moving the banner is a
+        // separate change with its own blast radius. What matters here is that
+        // no artifact is produced and the build fails.
+        assert!(
+            ptx.is_none(),
+            "{} wrote a .ptx despite being refused - the file cannot be \
+             assembled, so writing it only defers the error to the user:\n{}",
+            name,
+            log
+        );
+    }
+
+    // The SAME gate on the other match arm. `Namespace::member(...)` callees
+    // are handled by a separate arm with its own register-aliasing fallbacks,
+    // and the first version of the gate covered only bare identifiers - so
+    // these stayed open while the test above passed. Two arms, one bug.
+    for (name, body, want) in [
+        ("a_bt_store_short", "BlockTile::store(A, 0);", "3"),
+        ("a_bt_load_short", "let v: F32 = BlockTile::load(A);", "2"),
+    ] {
+        let (log, ptx) = compile(name, body);
+        assert!(
+            log.contains("arguments") && log.contains(want),
+            "{} was not refused with an arity message (expected {}):\n{}",
+            name,
+            want,
+            log
+        );
+        assert!(ptx.is_none(), "{} wrote a .ptx despite being refused:\n{}", name, log);
+    }
+
+    // An unhandled `Namespace::member` must be named, not silently emptied.
+    // `Fragment::zero()` reached the emitter and produced nothing, which the
+    // caller then spliced in as an empty operand.
+    let (log, ptx) = compile("a_unknown_path", "let z: F32 = Fragment::zero();");
+    assert!(
+        log.contains("Fragment::zero"),
+        "an unhandled path was not named in the refusal:\n{}",
+        log
+    );
+    assert!(ptx.is_none(), "unhandled path still wrote a .ptx:\n{}", log);
+
+    // ... and an unknown bare NAME, which is the typo case and the one a user
+    // hits. It used to emit `setp.lt.u32 %p1, , %r0;` - a missing operand -
+    // under a green success banner.
+    let (log, ptx) = compile(
+        "a_unknown_name",
+        "block_ptr2d_store(A, 0, totally_made_up(N), N, 1, N, 1.0);",
+    );
+    assert!(
+        log.contains("totally_made_up"),
+        "an unknown intrinsic name was not named in the refusal:\n{}",
+        log
+    );
+    assert!(ptx.is_none(), "unknown name still wrote a .ptx:\n{}", log);
+
+    // Controls for this arm too: the full-arity path calls must still work.
+    for (name, body) in [
+        ("a_bt_load_full", "let v: F32 = BlockTile::load(A, 0, N);"),
+        ("a_barrier_sync", "barrier::sync();"),
+    ] {
+        let (log, ptx) = compile(name, body);
+        assert!(
+            !log.contains("cannot be lowered"),
+            "{} was refused but is a supported call:\n{}",
+            name,
+            log
+        );
+        assert!(ptx.is_some(), "{} wrote no PTX:\n{}", name, log);
+    }
+
+    // The control. Seven arguments is the real signature; it must survive.
+    let (log, ptx) = compile(
+        "a_store2d_full",
+        "block_ptr2d_store(A, 0, N, N, 1, N, 1.0);",
+    );
+    let ptx = ptx.unwrap_or_else(|| panic!("full-arity call wrote no PTX:\n{}", log));
+    assert!(
+        !log.contains("cannot be lowered"),
+        "full-arity call was refused:\n{}",
+        log
+    );
+    if ptxas_present() {
+        if let Err(e) = assemble("a_store2d_full", &ptx) {
+            panic!("full-arity block_ptr2d_store does not assemble:\n{}", e);
+        }
+    }
 }

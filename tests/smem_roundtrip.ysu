@@ -1,0 +1,30 @@
+// Probe for the shared-memory intrinsics. Driven by tests/ptx_shared_memory.rs.
+//
+// Every thread writes its OWN four values and then reads the slot belonging to
+// thread `255 - t`. Reading someone else's slot is the point: a kernel where
+// each thread reads back what it just wrote produces the right answer with the
+// barrier deleted, with the store deleted and folded into a register, or with
+// shared memory not existing at all.
+//
+// `acc = v0 + 7;` exists to pin the barrier-hoisting pass. It is an
+// `Assign` whose value is a `BinaryOp` over a value that only exists AFTER the
+// barrier, which is exactly the shape that pass used to move above it.
+kernel smem_roundtrip(Out: GlobalMemory<U32>, N: I32) {
+    let smem: U64 = shared_alloc_u32(2048);
+    let t: I32 = thread_idx_x();
+    let base: I32 = block_idx_x() * 256 + t;
+    let acc: U32 = 0;
+    shared_store_v4(smem, t, base * 4 + 0, base * 4 + 1, base * 4 + 2, base * 4 + 3);
+    barrier_sync();
+    let peer: I32 = 255 - t;
+    let v: U32x4 = shared_load_v4(smem, peer);
+    let v0: U32 = v.x;
+    let v1: U32 = v.y;
+    let v2: U32 = v.z;
+    let v3: U32 = v.w;
+    acc = v0 + 7;
+    block_ptr2d_store_v4(Out, 0, base * 4, 4 * N, 1, 4 * N, acc, v1, v2, v3);
+}
+
+fn main() {
+}

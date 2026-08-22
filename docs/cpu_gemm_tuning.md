@@ -1107,6 +1107,93 @@ Spreads are 0.5–2% on most of these, an order of magnitude tighter than the
 1.50 against OpenBLAS, Y ahead on 7 of 18** — the 1-thread standing barely
 moves, and it should not, because nothing this change touches runs there.
 
+## Leading dimensions, and why a packed-only kernel cannot be a BLAS
+
+`recognize_gemm` used to require each operand's row stride to equal the
+matching loop extent — `lda == K`, `ldb == N`, `ldc == N`. Anything else fell
+through to scalar lowering: correct, roughly 100x slower, and silent.
+
+That is not a missing feature, it is a blocker on the whole packaging goal.
+**The BLAS API is defined in terms of leading dimensions**, so `sgemm` cannot
+be implemented on top of a packed-only kernel without copying every operand at
+the boundary — which costs more than the kernel saves on exactly the
+low-arithmetic-intensity shapes (GEMV, decode) where this kernel wins. A row
+block of a weight matrix, a column slice of an activation batch, and any
+`A[i0:i1, :]` view are all submatrices.
+
+The strides are now recorded by the recogniser and threaded to every site that
+addresses A, B or C. Two things made this much smaller than it looks: `pack_a`
+and `pack_b` already took `lda`/`ldb` as parameters (the callers simply passed
+`K` and `N`), and `__y_gemm_small_m` already took `ldc`. The indexing *order*
+check is unchanged, so a transposed operand is still refused rather than
+reinterpreted — only the addressing generalised.
+
+**The hazard is that `lda == K` makes every site correct by coincidence.** With
+the stride and the extent equal, all ~12 address computations work whichever
+one they use, so no existing test could distinguish them. Two places must keep
+using the **extent**, and both are easy to get wrong in the other direction:
+
+- `__y_gemm_small_m` under the K-split accumulates into a **private, freshly
+  packed `M x N` scratch panel**, so that buffer's stride is `n`. Passing the
+  caller's `ldc` there strides past the thread's scratch slot into the next
+  thread's — a wrong answer *and* a data race.
+- `__y_gemm_small_reduce` indexes both kinds in the same loop: `n`-strided
+  panels, `ldc`-strided C. It carries two row offsets now for that reason.
+
+Every dispatch decision (tiny / small-M / threaded, the partition, the thread
+count) is still made from the extents. A leading dimension changes how memory
+is addressed, never how much arithmetic there is.
+
+### The test, and the two gaps mutation testing found in it
+
+`tests/cpu_gemm_leading_dimensions.rs` pads each operand, fills the padding
+with a sentinel, and checks both the result norm and that **C's padding is
+byte-for-byte untouched**. The sentinel is load-bearing: a norm over the live
+region cannot see a kernel that writes *past* `N`, because every element it was
+asked to produce is still right.
+
+Both tests passed on the first run, and both were then found to be partly
+vacuous by mutating each stride site in turn (12 mutations, script in the
+session log). Two survived:
+
+1. **`small_reduce` was never reached.** The thread-count heuristic treats a
+   call more than `HOT_WINDOW_NS` (100 µs) after the previous one as cold and
+   runs it single-threaded — and the driver computes a reference between
+   shapes, which takes far longer than that. Every call in the test was
+   therefore single-threaded, with `Y_NUM_THREADS=16` set and ignored. Fixed by
+   calling each shape in a tight 24-iteration loop.
+2. **B's row offset was never exercised.** `pc * ldb` is only evaluated at
+   `pc = 0` unless `K > kc`, and `kc` defaults to 1024 while the largest K in
+   the shape set was 512. At `pc = 0` every stride gives 0. Fixed by adding
+   three shapes with `K` of 1500–3000.
+
+Both are the same lesson as the throughput-harness gap recorded above: **a test
+that never enters a code path passes for the wrong reason**, and only a
+deliberate mutation says which. Neither was visible from the assertions.
+
+### Cost: none measurable
+
+Strict A/B against the previous revision, arms interleaved and rotated, four
+launches, ranked by the best — the packed case (`lda == K`) must be unchanged,
+since it is what every number in this file was measured on.
+
+| | geomean after/before | range |
+|---|---|---|
+| 1 thread | **0.993** | 0.901 – 1.035 |
+| 16 threads | 0.969 | 0.826 – 1.050 |
+
+**Read the 1-thread row; the 16-thread one is noise.** Its spreads are 12–25%,
+and at 1 thread the low-spread shapes resolve to well under 2%: `256³` 0.998
+(0.8% spread), `512³` 0.995 (1.0%), `1024³` 0.997 (1.4%), `333x777x64` 0.998
+(0.7%), `128³` 1.000 (0.8%), `256x64x256` 0.999 (1.1%). Every row that the
+instrument can actually resolve is inside ±1%. The rows that look worse
+(`decode 4x4096x4096` 0.901, `flatK` 0.962) carry 33% and 23% spreads.
+
+That is what the object code predicts: 5,319 → 5,358 instructions (+0.7%) and
+1,055 → 1,057 vector ops, i.e. the three extra loads and arguments in the call
+chain and nothing in the mainloop. Those are paid **once per GEMM call**, so
+they cannot register against a kernel that runs for a millisecond.
+
 ## Known gaps
 
 Ordered by measured size against the AVX-512 baseline, not by guess.

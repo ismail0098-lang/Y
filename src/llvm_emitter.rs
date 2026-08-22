@@ -719,8 +719,14 @@ impl LlvmEmitter {
     fn emit_type(&self, ty: &Type) -> String {
         let res: String = match ty {
             Type::Primitive(name, _) => match name.as_str() {
-                "I32" | "u32" | "i32" => "i32".into(),
-                "I64" | "usize" | "i64" => "i64".into(),
+                // `U64`/`u64` were absent and fell to the `_ => "i32"` arm
+                // below, so `let x: U64 = ...` allocated an **i32**. The PTX
+                // backend takes these types seriously (gotcha #7); this one
+                // silently halved their width.
+                "I32" | "U32" | "u32" | "i32" => "i32".into(),
+                "I64" | "U64" | "u64" | "usize" | "isize" | "i64" => "i64".into(),
+                "U8" | "I8" => "i8".into(),
+                "U16" => "i16".into(),
                 "F16" | "f16" => "half".into(),
                 "F32" | "f32" => "float".into(),
                 "F64" | "f64" => "double".into(),
@@ -731,8 +737,10 @@ impl LlvmEmitter {
                 _ => "i32".into(),
             },
             Type::Ident(name, _) => match name.as_str() {
-                "I32" | "u32" | "i32" => "i32".into(),
-                "I64" | "usize" | "i64" => "i64".into(),
+                "I32" | "U32" | "u32" | "i32" => "i32".into(),
+                "I64" | "U64" | "u64" | "usize" | "isize" | "i64" => "i64".into(),
+                "U8" | "I8" => "i8".into(),
+                "U16" => "i16".into(),
                 "F32" | "f32" => "float".into(),
                 "F64" | "f64" => "double".into(),
                 "bool" => "i1".into(),
@@ -1522,9 +1530,67 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
             }
         }
 
-        // The extents arrive as i32 parameters; the kernel indexes in i64.
+        // A `@ZeroDrift` accumulator demands an EXACT reduction. The packed
+        // kernel below accumulates in f32, which is not exact, so substituting
+        // it here would hand back a fast kernel that quietly fails the
+        // guarantee the source asked for — the exact failure mode this
+        // repository's design rule exists to prevent.
+        //
+        // `recognize_gemm` used to refuse such a nest outright; it now records
+        // the request so an exact kernel can be selected. Until that kernel
+        // exists, returning None falls through to ordinary scalar lowering,
+        // which honours `@ZeroDrift` correctly (see `Stmt::Let` with
+        // `zero_drift` in `emit_alloca_for_block`). Slow and right, rather than
+        // fast and wrong. See `docs/proof_carrying_kernels.md`, Phase 0, and
+        // `docs/deterministic_inference.md`, M0.
+        //
+        // The licence is consulted and REPORTED even though no exact kernel is
+        // emitted yet, because the two outcomes are already distinguishable and
+        // the user can act on the difference: an unlicensed nest is on the slow
+        // path for a stated reason it can fix (tighter `@bounds` on the
+        // operands), while a licensed one is merely waiting on the kernel. A
+        // silent `return None` tells them neither. Both are `drift_report`
+        // advisories rather than `emit_errors` - see `ExactGemmPlan`, where the
+        // distinction between "cannot be exact" and "cannot be exact AND fast"
+        // is written down.
+        if let Some(drift) = &shape.drift {
+            match crate::cpu_gemm::plan_exact_gemm(drift) {
+                crate::cpu_gemm::ExactGemmPlan::Vnni { scheme, operand_magnitude } => {
+                    self.drift_report.push(format!(
+                        "matmul {}x{}: exact vpdpwssd kernel is LICENSED (operands |x| <= {}, \
+                         flush every {} k-pairs) but not yet implemented - using scalar lowering, \
+                         which is exact and slow",
+                        shape.m, shape.n, operand_magnitude, scheme.flush_k_pairs
+                    ));
+                }
+                crate::cpu_gemm::ExactGemmPlan::Unavailable(reason) => {
+                    self.drift_report.push(format!(
+                        "matmul {}x{}: using scalar lowering, which is still EXACT. The fast \
+                         vpdpwssd kernel is unavailable because {}",
+                        shape.m, shape.n, reason
+                    ));
+                }
+            }
+            return None;
+        }
+
+        // The extents and the three leading dimensions arrive as i32
+        // parameters; the kernel indexes in i64.
+        //
+        // The strides are loaded SEPARATELY even when they name the same
+        // variables as the extents (the packed case, where `lda` is `K`).
+        // Reusing the extent's register would be correct today and would
+        // silently stop being correct the moment the recogniser accepts a
+        // stride the extent does not equal — which is now the whole point.
         let mut ext = Vec::new();
-        for name in [&shape.m, &shape.n, &shape.k] {
+        for name in [
+            &shape.m,
+            &shape.n,
+            &shape.k,
+            &shape.lda,
+            &shape.ldb,
+            &shape.ldc,
+        ] {
             let ty = self.locals.get(name)?.clone();
             let tmp = self.fresh_tmp();
             writeln!(&mut self.output, "  {} = load {}, ptr %{}", tmp, ty, name).unwrap();
@@ -1546,14 +1612,18 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
 
         writeln!(
             &mut self.output,
-            "  call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {})",
+            "  call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
+             i64 {}, i64 {}, i64 {})",
             crate::cpu_gemm::KERNEL_NAME,
             ptrs[0],
             ptrs[1],
             ptrs[2],
             ext[0],
             ext[1],
-            ext[2]
+            ext[2],
+            ext[3],
+            ext[4],
+            ext[5]
         )
         .unwrap();
         Some(shape)
@@ -3463,7 +3533,23 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
 
     fn infer_type(&self, expr: &Expr) -> String {
         match expr {
-            Expr::IntLit(_, _) => "i32".into(),
+            // **Typed by VALUE, not fixed at i32.** This is the same bug the PTX
+            // backend had and fixed (see CLAUDE.md gotcha #7): a literal above
+            // `i32::MAX` typed as i32 is NEGATIVE, and widening it sign-extends.
+            // Measured before the fix, both compiling cleanly and running:
+            //   `let a: I64 = 4294967296; if a > 0 { 1 } else { 0 }`  ->  0
+            //   `let a: I64 = 3000000000; if a > 0 { 1 } else { 0 }`  ->  0
+            // The first truncates to zero, the second sign-extends to a negative
+            // i64. Nothing in the pipeline rejects `store i32 4294967296` or
+            // `sext i32 4294967296 to i64` - clang accepts both and the program
+            // runs, which is why this survived.
+            Expr::IntLit(v, _) => {
+                if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                    "i64".into()
+                } else {
+                    "i32".into()
+                }
+            }
             Expr::FloatLit(_, _) => "double".into(),
             Expr::BoolLit(_, _) => "i1".into(),
             Expr::CharLit(_, _) => "i8".into(),

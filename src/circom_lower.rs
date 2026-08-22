@@ -42,6 +42,28 @@ pub enum Val {
     Lin(LinearCombination),
     /// `a * b + c`
     Quad(LinearCombination, LinearCombination, LinearCombination),
+    /// A value the compiler cannot compute, carrying the id of the reason it
+    /// could not — see `Lowerer::opaque_reasons`.
+    ///
+    /// circom's `var`s are not restricted to compile-time constants: a template
+    /// may write `var y2 = out[1] * out[1];` and then compute with it, and a
+    /// `function` may be called on signal arrays. The results are *witness*
+    /// values, and circom's own compiler carries them as unknowns.
+    ///
+    /// **The rule that makes this safe is that an `Opaque` may only ever reach
+    /// a `<--`.** `<--` emits no constraint, so nothing about the `.r1cs`
+    /// depends on a value Y did not compute — the emitted circuit is exactly
+    /// what a compiler that *could* compute it would emit. Reaching a `<==`, a
+    /// `===`, an array index, an array dimension, a template argument or an
+    /// `assert` is refused, and the refusal names the position where the value
+    /// first became unknown rather than the position where it was used.
+    ///
+    /// What is given up is Y's ability to solve the witness for those signals
+    /// by itself: they get `WitnessOp::Unknown`, and `lower` reports how many.
+    /// That is fail-closed — an unsolved wire stays zero and the satisfiability
+    /// check says so — and it is the artifact users of a circom compiler want
+    /// least, which is the whole reason the trade is worth making.
+    Opaque(u32),
 }
 
 impl Val {
@@ -57,7 +79,7 @@ impl Val {
         match self {
             Val::Const(c) => Some(LinearCombination::constant(c)),
             Val::Lin(l) => Some(l),
-            Val::Quad(..) => None,
+            Val::Quad(..) | Val::Opaque(_) => None,
         }
     }
 
@@ -75,7 +97,7 @@ impl Val {
                 dst.add_linear(l, scale);
                 true
             }
-            Val::Quad(..) => false,
+            Val::Quad(..) | Val::Opaque(_) => false,
         }
     }
 
@@ -83,7 +105,7 @@ impl Val {
         match self {
             Val::Const(c) => Some(LinearCombination::constant(*c)),
             Val::Lin(l) => Some(l.clone()),
-            Val::Quad(..) => None,
+            Val::Quad(..) | Val::Opaque(_) => None,
         }
     }
 
@@ -94,11 +116,19 @@ impl Val {
         }
     }
 
+    fn opaque_id(&self) -> Option<u32> {
+        match self {
+            Val::Opaque(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     fn kind(&self) -> &'static str {
         match self {
             Val::Const(_) => "constant",
             Val::Lin(_) => "linear",
             Val::Quad(..) => "quadratic",
+            Val::Opaque(_) => "not computable at compile time",
         }
     }
 }
@@ -169,6 +199,21 @@ pub struct Lowerer<'a> {
     /// literals, and `Poseidon(2)` calls it once per instantiation. A 200-hash
     /// chain therefore rebuilt those tables 200 times over.
     fn_cache: HashMap<(String, Vec<Fr>), VarSlot>,
+    /// Why each `Val::Opaque` is opaque, already formatted as `line:col: text`.
+    ///
+    /// A value that cannot be computed is refused at the point it is *used*,
+    /// which is usually far from the point it became unknown - in
+    /// `Bits2Point_Strict` the two are a `sqrt` call apart. Carrying the origin
+    /// with the value means the message names the cause rather than the symptom.
+    opaque_reasons: Vec<String>,
+    /// Wires whose `<--` recipe came out `WitnessOp::Unknown`, with the reason
+    /// id. Reported at the end of `lower`, because a silently unsolvable
+    /// witness is exactly the kind of quiet degradation this repo refuses.
+    opaque_witness: Vec<(usize, u32)>,
+    /// Set by `witness_only_recipe` when it emits `WitnessOp::Unknown`, read
+    /// and cleared by `substitute`, which is the only caller that knows the
+    /// wire being assigned.
+    last_opaque: Option<u32>,
 }
 
 const MAX_DEPTH: usize = 256;
@@ -182,6 +227,62 @@ impl<'a> Lowerer<'a> {
             instances: Vec::new(),
             depth: 0,
             fn_cache: HashMap::new(),
+            opaque_reasons: Vec::new(),
+            opaque_witness: Vec::new(),
+            last_opaque: None,
+        }
+    }
+
+    // ────────────────────────────────────────────────────
+    // Values the compiler cannot compute
+    // ────────────────────────────────────────────────────
+
+    /// Mint an opaque value, recording why.
+    fn opaque(&mut self, pos: Pos, what: impl std::fmt::Display) -> Val {
+        self.opaque_reasons.push(format!("{}:{}: {}", pos.line, pos.col, what));
+        Val::Opaque((self.opaque_reasons.len() - 1) as u32)
+    }
+
+    /// `" (it became unknown at ...)"`, or `""` for a value that is known.
+    ///
+    /// Appended to the existing refusals rather than replacing them, so a
+    /// diagnostic that was already good stays word for word what it was and
+    /// merely gains the origin.
+    fn why_unknown(&self, v: &Val) -> String {
+        match v {
+            Val::Opaque(id) => {
+                format!(" (this value became unknown at {})", self.opaque_reasons[*id as usize])
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Refuse an opaque value at a site where the circuit depends on it.
+    ///
+    /// Every caller of this is a place where using an unknown would change the
+    /// emitted `.r1cs` - which is the one thing the opaque model promises it
+    /// cannot do.
+    fn require_known(&self, v: &Val, pos: Pos, ctx: &str) -> LResult<()> {
+        match v {
+            Val::Opaque(id) => Err(err(
+                pos,
+                format!(
+                    "{} cannot use a value the compiler was unable to compute{}. Only a `<--` \
+                     may take one, because it emits no constraint.",
+                    ctx,
+                    format_args!(" — it became unknown at {}", self.opaque_reasons[*id as usize]),
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn require_known_slot(&self, s: &VarSlot, pos: Pos, ctx: &str) -> LResult<()> {
+        match s {
+            Slot::Leaf(v) => self.require_known(v, pos, ctx),
+            Slot::Array(items) => {
+                items.iter().try_for_each(|i| self.require_known_slot(i, pos, ctx))
+            }
         }
     }
 
@@ -255,8 +356,45 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        self.report_unsolved_witness();
         self.emitter.run_optimizer();
         Ok(self.emitter)
+    }
+
+    /// Say out loud which signals Y cannot solve a witness for.
+    ///
+    /// The `.r1cs` is complete either way - a `<--` emits no constraint - so
+    /// nothing about the circuit is weaker, and a proof built from a witness
+    /// obtained elsewhere (circom's own calculator, snarkjs) is unaffected. But
+    /// `--witness` will fail the satisfiability check on these circuits, and
+    /// finding that out from a satisfiability error rather than from the
+    /// compiler is exactly the quiet degradation this repo refuses.
+    fn report_unsolved_witness(&self) {
+        if self.opaque_witness.is_empty() {
+            return;
+        }
+        // Grouped by the reason TEXT, not by the id: every evaluation of the
+        // same expression mints a fresh id, so a loop that shifts 256 signals
+        // produces 256 ids all saying the same thing.
+        let mut by_reason: HashMap<&str, usize> = HashMap::new();
+        for (_, id) in &self.opaque_witness {
+            *by_reason.entry(self.opaque_reasons[*id as usize].as_str()).or_insert(0) += 1;
+        }
+        let mut reasons: Vec<_> = by_reason.into_iter().collect();
+        reasons.sort_unstable();
+        eprintln!(
+            "[Warning] {} signal(s) are assigned with `<--` from a value this compiler cannot \
+             evaluate. The emitted .r1cs is complete and correct - `<--` emits no constraint. \
+             The witness may still solve: where the author's own constraints determine the \
+             signal, Y derives it anyway (circomlib's Sha256 is exactly this - all 256 digest \
+             bits are `<--` advice and every one is pinned by a `===` below it). Where they do \
+             not, `--witness` reports that no satisfying witness exists rather than writing a \
+             zero.",
+            self.opaque_witness.len()
+        );
+        for (reason, n) in reasons {
+            eprintln!("          {:>6} from {}", n, reason);
+        }
     }
 
     fn flatten_signal(&self, inst: usize, name: &str) -> Vec<usize> {
@@ -290,6 +428,12 @@ impl<'a> Lowerer<'a> {
                 pos,
                 format!("template instantiation nested more than {} deep; recursive templates have no finite circuit", MAX_DEPTH),
             ));
+        }
+        // A template argument sizes arrays and picks loop counts, so it decides
+        // the shape of the circuit itself. An unknown one is refused here
+        // rather than deep inside the body where the symptom appears.
+        for a in &args {
+            self.require_known_slot(a, pos, "a template argument")?;
         }
         let tmpl = self
             .program
@@ -335,6 +479,178 @@ impl<'a> Lowerer<'a> {
     // ────────────────────────────────────────────────────
     // Statements
     // ────────────────────────────────────────────────────
+
+    /// What in this statement would change the emitted circuit, if anything.
+    ///
+    /// **This is the guard that makes havoc sound.** When a condition cannot be
+    /// evaluated, Y runs neither branch — so it must first be certain that
+    /// running neither cannot change the `.r1cs`. If a skipped body could emit
+    /// a constraint, declare a signal or instantiate a component, then the set
+    /// of constraints would depend on a witness value, and that is refused.
+    /// circom refuses the same programs for the same reason.
+    ///
+    /// Matched exhaustively with no `_ =>` arm, per the design rule in
+    /// CLAUDE.md: a new statement kind must be classified deliberately, because
+    /// the failure mode of guessing "no effect" is a circuit quietly missing
+    /// the constraints its source describes.
+    fn constraint_effect(s: &Stmt) -> Option<&'static str> {
+        match s {
+            Stmt::Block(stmts, _) => stmts.iter().find_map(Self::constraint_effect),
+            Stmt::DeclSignal { .. } => Some("a `signal` declaration"),
+            Stmt::DeclComponent { .. } => Some("a `component` declaration"),
+            Stmt::Substitution { op, .. } => match op {
+                AssignOp::SignalConstrain => Some("a `<==` constraint"),
+                // `<--` emits no constraint, so skipping one cannot change the
+                // `.r1cs`. It is refused anyway: skipping it leaves the signal
+                // with no witness recipe at all, which is a strictly worse
+                // outcome than a named refusal, and no circuit here needs it.
+                AssignOp::SignalOnly => Some("a `<--` witness assignment to a signal"),
+                AssignOp::Var => None,
+            },
+            Stmt::ConstraintEq(..) => Some("a `===` constraint"),
+            Stmt::If { then_branch, else_branch, .. } => Self::constraint_effect(then_branch)
+                .or_else(|| else_branch.as_deref().and_then(Self::constraint_effect)),
+            Stmt::For { init, step, body, .. } => Self::constraint_effect(init)
+                .or_else(|| Self::constraint_effect(step))
+                .or_else(|| Self::constraint_effect(body)),
+            Stmt::While { body, .. } => Self::constraint_effect(body),
+            // A `var` declared inside the branch is scoped to it, so skipping
+            // the branch cannot leave a stale value behind; and a `var` emits
+            // no constraint whatever it holds.
+            Stmt::DeclVar { .. } => None,
+            Stmt::Return(..) | Stmt::Assert(..) | Stmt::Log(..) => None,
+        }
+    }
+
+    /// Every variable name a statement might assign to.
+    ///
+    /// Over-collection is harmless — a name not in scope is skipped, and a name
+    /// that is in scope merely becomes unknown, which is the whole point.
+    /// Under-collection is not: it would leave a variable holding the value it
+    /// had before a branch that may have changed it.
+    fn assigned_vars(s: &Stmt, out: &mut Vec<String>) {
+        match s {
+            Stmt::Block(stmts, _) => stmts.iter().for_each(|x| Self::assigned_vars(x, out)),
+            Stmt::DeclVar { name, .. } => out.push(name.clone()),
+            Stmt::Substitution { lhs, op, .. } => {
+                if let (AssignOp::Var, Some(n)) = (op, Self::base_name(lhs)) {
+                    out.push(n);
+                }
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                Self::assigned_vars(then_branch, out);
+                if let Some(e) = else_branch {
+                    Self::assigned_vars(e, out);
+                }
+            }
+            Stmt::For { init, step, body, .. } => {
+                Self::assigned_vars(init, out);
+                Self::assigned_vars(step, out);
+                Self::assigned_vars(body, out);
+            }
+            Stmt::While { body, .. } => Self::assigned_vars(body, out),
+            Stmt::DeclSignal { .. }
+            | Stmt::DeclComponent { .. }
+            | Stmt::ConstraintEq(..)
+            | Stmt::Return(..)
+            | Stmt::Assert(..)
+            | Stmt::Log(..) => {}
+        }
+    }
+
+    fn contains_return(s: &Stmt) -> bool {
+        match s {
+            Stmt::Block(stmts, _) => stmts.iter().any(Self::contains_return),
+            Stmt::Return(..) => true,
+            Stmt::If { then_branch, else_branch, .. } => {
+                Self::contains_return(then_branch)
+                    || else_branch.as_deref().is_some_and(Self::contains_return)
+            }
+            Stmt::For { init, step, body, .. } => {
+                Self::contains_return(init)
+                    || Self::contains_return(step)
+                    || Self::contains_return(body)
+            }
+            Stmt::While { body, .. } => Self::contains_return(body),
+            Stmt::DeclSignal { .. }
+            | Stmt::DeclVar { .. }
+            | Stmt::DeclComponent { .. }
+            | Stmt::Substitution { .. }
+            | Stmt::ConstraintEq(..)
+            | Stmt::Assert(..)
+            | Stmt::Log(..) => false,
+        }
+    }
+
+    /// Replace every leaf of a variable slot with the same opaque value.
+    fn blank_slot(slot: &mut VarSlot, id: u32) {
+        match slot {
+            Slot::Leaf(v) => *v = Val::Opaque(id),
+            Slot::Array(items) => items.iter_mut().for_each(|i| Self::blank_slot(i, id)),
+        }
+    }
+
+    /// Execute an `if` / `for` / `while` whose condition Y cannot evaluate.
+    ///
+    /// Neither branch runs, and every variable a branch might assign becomes
+    /// opaque. That is the sound over-approximation in the sense CLAUDE.md's
+    /// design rule means: "this value is unknown" is true whichever way the
+    /// branch would have gone, so nothing downstream can rely on a guess. The
+    /// precondition is `constraint_effect`; without it this would be the
+    /// silent-approximation bug the rule exists to prevent.
+    ///
+    /// A `return` inside a skipped body makes the enclosing function return
+    /// opaque immediately: the function may have returned there with an unknown
+    /// value, or fallen through to return something else, and opaque is the
+    /// join of those two. That is what lets circomlib's `sqrt` — five branches
+    /// and two `while` loops over the value being rooted — be called at all.
+    fn havoc_branch(
+        &mut self,
+        cond: &Val,
+        bodies: &[&Stmt],
+        f: &mut Frame,
+        pos: Pos,
+    ) -> LResult<Flow> {
+        let id = match cond.opaque_id() {
+            Some(id) => id,
+            None => {
+                // A `Lin` or `Quad` condition: the value is a signal expression,
+                // known to the witness and not to the compiler.
+                let v = self.opaque(
+                    pos,
+                    format!("a condition whose value is {}, i.e. known only at witness time", cond.kind()),
+                );
+                v.opaque_id().unwrap()
+            }
+        };
+        for b in bodies {
+            if let Some(what) = Self::constraint_effect(b) {
+                return Err(err(
+                    pos,
+                    format!(
+                        "this condition cannot be evaluated at compile time, and the branch \
+                         contains {}. Which constraints a circuit emits may not depend on a \
+                         witness value; use a multiplexer (`sel * a + (1 - sel) * b`) instead. \
+                         The condition became unknown at {}",
+                        what, self.opaque_reasons[id as usize]
+                    ),
+                ));
+            }
+        }
+        let mut names = Vec::new();
+        for b in bodies {
+            Self::assigned_vars(b, &mut names);
+        }
+        for n in &names {
+            if let Some(slot) = f.lookup_var_mut(n) {
+                Self::blank_slot(slot, id);
+            }
+        }
+        if bodies.iter().any(|b| Self::contains_return(b)) {
+            return Ok(Flow::Return(Slot::Leaf(Val::Opaque(id))));
+        }
+        Ok(Flow::Normal)
+    }
 
     fn exec_stmt(&mut self, stmt: &Stmt, f: &mut Frame) -> LResult<Flow> {
         match stmt {
@@ -407,23 +723,21 @@ impl<'a> Lowerer<'a> {
             Stmt::ConstraintEq(a, b, pos) => {
                 let va = self.eval_expr(a, f)?;
                 let vb = self.eval_expr(b, f)?;
+                self.require_known(&va, *pos, "non-quadratic: a `===` constraint")?;
+                self.require_known(&vb, *pos, "non-quadratic: a `===` constraint")?;
                 self.constrain_equal(va, vb, *pos)?;
                 Ok(Flow::Normal)
             }
 
             Stmt::If { cond, then_branch, else_branch, pos } => {
-                let c = self.eval_expr(cond, f)?;
-                let c = c.as_const().ok_or_else(|| {
-                    err(
-                        *pos,
-                        format!(
-                            "an `if` condition must be known at compile time, but this one is {}. \
-                             The branch decides which constraints exist, so it cannot depend on a \
-                             signal's value; use a multiplexer (`sel * a + (1 - sel) * b`) instead.",
-                            c.kind()
-                        ),
-                    )
-                })?;
+                let cv = self.eval_expr(cond, f)?;
+                let Some(c) = cv.as_const() else {
+                    let mut bodies: Vec<&Stmt> = vec![then_branch];
+                    if let Some(e) = else_branch {
+                        bodies.push(e);
+                    }
+                    return self.havoc_branch(&cv, &bodies, f, *pos);
+                };
                 if !c.is_zero() {
                     self.exec_stmt(then_branch, f)
                 } else if let Some(e) = else_branch {
@@ -438,10 +752,15 @@ impl<'a> Lowerer<'a> {
                 self.exec_stmt(init, f)?;
                 let mut iters = 0usize;
                 loop {
-                    let c = self.eval_expr(cond, f)?;
-                    let c = c.as_const().ok_or_else(|| {
-                        err(*pos, format!("a `for` condition must be known at compile time, but this one is {}", c.kind()))
-                    })?;
+                    let cv = self.eval_expr(cond, f)?;
+                    let Some(c) = cv.as_const() else {
+                        // The trip count is a witness value. Run no iteration
+                        // and make everything the body or step could assign
+                        // unknown - see `havoc_branch`.
+                        let r = self.havoc_branch(&cv, &[body, step], f, *pos);
+                        f.pop_scope();
+                        return r;
+                    };
                     if c.is_zero() {
                         break;
                     }
@@ -463,10 +782,10 @@ impl<'a> Lowerer<'a> {
             Stmt::While { cond, body, pos } => {
                 let mut iters = 0usize;
                 loop {
-                    let c = self.eval_expr(cond, f)?;
-                    let c = c.as_const().ok_or_else(|| {
-                        err(*pos, format!("a `while` condition must be known at compile time, but this one is {}", c.kind()))
-                    })?;
+                    let cv = self.eval_expr(cond, f)?;
+                    let Some(c) = cv.as_const() else {
+                        return self.havoc_branch(&cv, &[body], f, *pos);
+                    };
                     if c.is_zero() {
                         return Ok(Flow::Normal);
                     }
@@ -491,9 +810,12 @@ impl<'a> Lowerer<'a> {
                     Some(_) => Err(err(*pos, "assertion failed at compile time")),
                     None => Err(err(
                         *pos,
-                        "`assert` over signal values is not supported by Y's circom front end. \
-                         It is a constraint on the witness, so ignoring it would emit a circuit \
-                         weaker than the source; write it as `===` to make it explicit.",
+                        format!(
+                            "`assert` over signal values is not supported by Y's circom front end. \
+                             It is a constraint on the witness, so ignoring it would emit a circuit \
+                             weaker than the source; write it as `===` to make it explicit.{}",
+                            self.why_unknown(&v)
+                        ),
                     )),
                 }
             }
@@ -540,11 +862,16 @@ impl<'a> Lowerer<'a> {
                     // irrelevant, because a `<--` right-hand side never becomes
                     // a constraint. It is a witness computation, checked
                     // afterwards by the `===` the author writes.
+                    self.last_opaque = None;
                     let recipe = self.witness_only_recipe(rhs, f, pos)?;
+                    if let Some(id) = self.last_opaque.take() {
+                        self.opaque_witness.push((wire, id));
+                    }
                     self.emitter.set_witness_recipe(wire, recipe);
                     return Ok(());
                 }
                 let v = self.eval_expr(rhs, f)?;
+                self.require_known(&v, pos, "non-quadratic: a `<==` constraint")?;
                 let target = LinearCombination::variable(wire);
 
                 match op {
@@ -578,6 +905,13 @@ impl<'a> Lowerer<'a> {
                                     WitnessOp::MulAddLc(a.clone(), b.clone(), c.clone()),
                                 );
                             }
+                            // Rejected by `require_known` above, ten lines up.
+                            // Spelled out rather than folded into an `_` arm so
+                            // that a future `Val` variant is a compile error
+                            // here, where it would silently emit no constraint.
+                            Val::Opaque(_) => unreachable!(
+                                "`require_known` rejects an opaque `<==` right-hand side"
+                            ),
                         }
                     }
                     // `<--` returned above: it emits NO constraint, and turning
@@ -713,6 +1047,14 @@ impl<'a> Lowerer<'a> {
                 LinearCombination::constant(Fr::one()),
             )),
             Val::Quad(a, b, c) => Ok(WitnessOp::MulAddLc(a.clone(), b.clone(), c.clone())),
+            // The one position where an opaque value is legal, and the reason
+            // it is legal is that this emits no constraint: the `.r1cs` is
+            // byte-for-byte what a compiler that could evaluate the expression
+            // would produce. Only the witness is poorer, and `lower` says so.
+            Val::Opaque(id) => {
+                self.last_opaque = Some(*id);
+                Ok(WitnessOp::Unknown)
+            }
         }
     }
 
@@ -760,7 +1102,10 @@ impl<'a> Lowerer<'a> {
         for d in dims {
             let v = self.eval_expr(d, f)?;
             let c = v.as_const().ok_or_else(|| {
-                err(d.pos(), "array dimensions must be known at compile time")
+                err(
+                    d.pos(),
+                    format!("array dimensions must be known at compile time{}", self.why_unknown(&v)),
+                )
             })?;
             let n = c.to_u64().ok_or_else(|| err(d.pos(), "array dimension does not fit in 64 bits"))?;
             out.push(n as usize);
@@ -801,9 +1146,16 @@ impl<'a> Lowerer<'a> {
             Expr::Index(base, idx, pos) => {
                 let (b, mut idxs) = self.split_indices(base, f)?;
                 let v = self.eval_expr(idx, f)?;
-                let c = v
-                    .as_const()
-                    .ok_or_else(|| err(*pos, "array indices must be known at compile time; a signal-dependent index needs an explicit multiplexer"))?;
+                let c = v.as_const().ok_or_else(|| {
+                    err(
+                        *pos,
+                        format!(
+                            "array indices must be known at compile time; a signal-dependent \
+                             index needs an explicit multiplexer{}",
+                            self.why_unknown(&v)
+                        ),
+                    )
+                })?;
                 let n = c.to_u64().ok_or_else(|| err(*pos, "array index does not fit in 64 bits"))?;
                 idxs.push(n as usize);
                 Ok((b, idxs))
@@ -1000,18 +1352,72 @@ impl<'a> Lowerer<'a> {
             Expr::Var(name, _) if f.lookup_var(name).is_some() => {
                 Ok(f.lookup_var(name).unwrap().clone())
             }
+            // A whole signal ARRAY, passed by name. circom allows this and
+            // circomlib relies on it: `sha256compression(hin, inp)` hands a
+            // function 256 and 512 input signals. Evaluating it as a scalar is
+            // what produced "hin is an array; expected a single value".
+            Expr::Var(name, _) if f.signals.contains_key(name) => {
+                Ok(Self::sig_slot_to_vals(&f.signals[name]))
+            }
             Expr::Index(..) => {
-                // Could be a whole sub-array of a var.
+                // Could be a whole sub-array of a var or of a signal.
                 let (base, idxs) = self.split_indices(e, f)?;
                 if let Expr::Var(name, _) = &base {
                     if let Some(slot) = f.lookup_var(name) {
                         let sub = Self::index_slot(slot, &idxs, e.pos())?;
                         return Ok(sub.clone());
                     }
+                    if let Some(slot) = f.signals.get(name) {
+                        let sub = Self::index_slot(slot, &idxs, e.pos())?;
+                        return Ok(Self::sig_slot_to_vals(sub));
+                    }
+                }
+                if let Expr::Member(obj, field, p) = &base {
+                    if let Some(sub) = self.member_signal_slot(obj, field, &idxs, f, *p)? {
+                        return Ok(sub);
+                    }
+                }
+                Ok(Slot::Leaf(self.eval_expr(e, f)?))
+            }
+            Expr::Member(obj, field, p) => {
+                if let Some(sub) = self.member_signal_slot(obj, field, &[], f, *p)? {
+                    return Ok(sub);
                 }
                 Ok(Slot::Leaf(self.eval_expr(e, f)?))
             }
             _ => Ok(Slot::Leaf(self.eval_expr(e, f)?)),
+        }
+    }
+
+    /// A signal slot read as values: every wire becomes a one-term linear
+    /// combination, preserving the array shape.
+    fn sig_slot_to_vals(s: &SigSlot) -> VarSlot {
+        match s {
+            Slot::Leaf(w) => Slot::Leaf(Val::Lin(LinearCombination::variable(*w))),
+            Slot::Array(items) => {
+                Slot::Array(items.iter().map(Self::sig_slot_to_vals).collect())
+            }
+        }
+    }
+
+    /// `c.out` / `c.out[i]` as a value slot, or `None` if it is a single wire
+    /// (which the ordinary scalar path already handles).
+    fn member_signal_slot(
+        &mut self,
+        obj: &Expr,
+        field: &str,
+        idxs: &[usize],
+        f: &mut Frame,
+        pos: Pos,
+    ) -> LResult<Option<VarSlot>> {
+        let inst = self.resolve_component(obj, f, pos)?;
+        let Some(slot) = self.instances[inst].signals.get(field) else {
+            return Ok(None);
+        };
+        let sub = Self::index_slot(slot, idxs, pos)?;
+        match sub {
+            Slot::Leaf(_) => Ok(None),
+            Slot::Array(_) => Ok(Some(Self::sig_slot_to_vals(sub))),
         }
     }
 
@@ -1136,15 +1542,15 @@ impl<'a> Lowerer<'a> {
                 match op {
                     UnOp::Neg => self.mul_vals(Val::Const(Fr::zero().sub(&Fr::one())), v, *pos),
                     UnOp::Not => {
-                        let c = v.as_const().ok_or_else(|| {
-                            err(*pos, "`!` needs a compile-time value; it is not expressible as a constraint")
-                        })?;
+                        let Some(c) = v.as_const() else {
+                            return Ok(self.opaque(*pos, "`!` applied to a value that is not a compile-time constant; it has no constraint form"));
+                        };
                         Ok(Val::Const(if c.is_zero() { Fr::one() } else { Fr::zero() }))
                     }
                     UnOp::BitNot => {
-                        let c = v.as_const().ok_or_else(|| {
-                            err(*pos, "`~` needs a compile-time value")
-                        })?;
+                        let Some(c) = v.as_const() else {
+                            return Ok(self.opaque(*pos, "`~` applied to a value that is not a compile-time constant"));
+                        };
                         // circom's ~ is over 254-bit two's complement in Fr.
                         let l = c.to_limbs();
                         let inv = [!l[0], !l[1], !l[2], !l[3]];
@@ -1155,9 +1561,26 @@ impl<'a> Lowerer<'a> {
 
             Expr::Ternary(c, a, b, pos) => {
                 let cv = self.eval_expr(c, f)?;
-                let cc = cv.as_const().ok_or_else(|| {
-                    err(*pos, format!("a `? :` condition must be known at compile time, but this one is {}. Use `sel * a + (1 - sel) * b`.", cv.kind()))
-                })?;
+                let Some(cc) = cv.as_const() else {
+                    // Neither branch is evaluated. An expression cannot emit a
+                    // constraint in this front end - only statements can - so
+                    // unlike `Stmt::If` there is nothing to check first.
+                    // `<--` has its own richer handling of `? :` in
+                    // `witness_only_recipe`, which runs before this and is
+                    // what `IsZero` needs; this is the fallback for every
+                    // other position, where the value is refused anyway.
+                    if let Some(id) = cv.opaque_id() {
+                        return Ok(Val::Opaque(id));
+                    }
+                    return Ok(self.opaque(
+                        *pos,
+                        format!(
+                            "a `? :` whose condition is {}, i.e. known only at witness time. \
+                             As a constraint, use `sel * a + (1 - sel) * b`",
+                            cv.kind()
+                        ),
+                    ));
+                };
                 if cc.is_zero() {
                     self.eval_expr(b, f)
                 } else {
@@ -1198,6 +1621,12 @@ impl<'a> Lowerer<'a> {
 
     fn binary(&mut self, op: &BinOp, a: Val, b: Val, pos: Pos) -> LResult<Val> {
         let neg_one = Fr::zero().sub(&Fr::one());
+        // An unknown operand makes the result unknown, whatever the operator.
+        // The reason travels with the value so that the eventual refusal names
+        // where it first became unknown, not where it was finally used.
+        if let Some(id) = a.opaque_id().or_else(|| b.opaque_id()) {
+            return Ok(Val::Opaque(id));
+        }
         match op {
             BinOp::Add => self.add_vals(a, b, pos),
             BinOp::Sub => {
@@ -1206,19 +1635,27 @@ impl<'a> Lowerer<'a> {
             }
             BinOp::Mul => self.mul_vals(a, b, pos),
             BinOp::Div => {
-                let d = b.as_const().ok_or_else(|| {
-                    err(pos, "non-quadratic: `/` by a signal cannot be expressed as an R1CS constraint. \
-                              Compute the inverse with `<--` and constrain it with `===`.")
-                })?;
+                // A signal divisor has no constraint form, but it does have a
+                // witness value - which is exactly what `<--` is for, and what
+                // `Bits2Point_Strict` writes. Carry it as unknown and let the
+                // use site decide: `<--` accepts it, `<==` and `===` refuse it
+                // with this message quoted back.
+                let Some(d) = b.as_const() else {
+                    return Ok(self.opaque(
+                        pos,
+                        "`/` by a signal, which has no R1CS form - the quotient is a witness \
+                         value, so it can be computed with `<--` and constrained with `===`",
+                    ));
+                };
                 if d.is_zero() {
                     return Err(err(pos, "division by zero"));
                 }
                 self.mul_vals(Val::Const(d.inv()), a, pos)
             }
             BinOp::Pow => {
-                let e = b
-                    .as_const()
-                    .ok_or_else(|| err(pos, "the exponent of `**` must be known at compile time"))?;
+                let Some(e) = b.as_const() else {
+                    return Ok(self.opaque(pos, "`**` with an exponent that is not known at compile time"));
+                };
                 let n = e.to_u64().ok_or_else(|| err(pos, "exponent too large"))?;
                 if let Some(base) = a.as_const() {
                     return Ok(Val::Const(base.pow_limbs(&[n, 0, 0, 0])));
@@ -1238,13 +1675,21 @@ impl<'a> Lowerer<'a> {
             _ => {
                 let (ca, cb) = match (a.as_const(), b.as_const()) {
                     (Some(x), Some(y)) => (x, y),
+                    // Over signals these are gadgets, not operators: there is no
+                    // R1CS form, and building one is what `comparators.circom`
+                    // and `bitify.circom` are. There IS a witness value though,
+                    // and circom's own `var`s carry it - `sha256compression`
+                    // shifts and xors 768 input signals into a digest and feeds
+                    // the result to `<--`. So this is unknown rather than an
+                    // error, and the error appears if it reaches a constraint.
                     _ => {
-                        return Err(err(
+                        return Ok(self.opaque(
                             pos,
                             format!(
-                                "non-quadratic: `{:?}` needs compile-time operands. It has no R1CS \
-                                 form over signals - build it from constraints (circomlib's \
-                                 `comparators.circom`, `bitify.circom`) instead.",
+                                "`{:?}` over signals, which has no R1CS form - over constraints \
+                                 it is a gadget (circomlib's `comparators.circom`, \
+                                 `bitify.circom`), and over the witness it is an ordinary \
+                                 integer operation",
                                 op
                             ),
                         ))
@@ -1309,6 +1754,12 @@ impl<'a> Lowerer<'a> {
     }
 
     fn add_vals(&mut self, a: Val, b: Val, pos: Pos) -> LResult<Val> {
+        // Reachable without going through `binary` (`Sub` builds its negation
+        // here, and `Expr::Unary(Neg)` calls `mul_vals` directly), so the
+        // opaque guard has to be repeated rather than assumed.
+        if let Some(id) = a.opaque_id().or_else(|| b.opaque_id()) {
+            return Ok(Val::Opaque(id));
+        }
         Ok(match (a, b) {
             (Val::Const(x), Val::Const(y)) => Val::Const(x.add(&y)),
             (Val::Quad(qa, qb, qc), other) | (other, Val::Quad(qa, qb, qc)) => {
@@ -1333,6 +1784,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn mul_vals(&mut self, a: Val, b: Val, pos: Pos) -> LResult<Val> {
+        if let Some(id) = a.opaque_id().or_else(|| b.opaque_id()) {
+            return Ok(Val::Opaque(id));
+        }
         Ok(match (a, b) {
             (Val::Const(x), Val::Const(y)) => Val::Const(x.mul(&y)),
             (Val::Const(k), other) | (other, Val::Const(k)) => {
@@ -1340,7 +1794,9 @@ impl<'a> Lowerer<'a> {
                     return Ok(Val::Const(Fr::zero()));
                 }
                 match other {
-                    Val::Const(_) => unreachable!(),
+                    // Both are excluded by the arms above: `Const` by the
+                    // preceding pattern, `Opaque` by the guard at the top.
+                    Val::Const(_) | Val::Opaque(_) => unreachable!(),
                     Val::Lin(mut l) => {
                         l.scale_assign(k);
                         Val::Lin(l)

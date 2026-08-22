@@ -19,6 +19,8 @@ pub mod autotuner;
 pub mod cuda_runtime;
 pub mod empirical_autotune;
 pub mod zero_drift;
+pub mod fixed_exp;
+pub mod exact_attention;
 pub mod c_api;
 pub mod rocm_emitter;
 pub mod layout_pass;
@@ -46,6 +48,8 @@ pub mod zk_poseidon_constants;
 pub mod mini_json;
 #[cfg(feature = "zk")]
 pub mod zk_solidity;
+#[cfg(feature = "zk")]
+pub mod zk_fuzz;
 
 /// Runs all advanced compiler optimization passes on a Program AST.
 pub fn run_all_optimization_passes(prog: &mut ast::Program) {

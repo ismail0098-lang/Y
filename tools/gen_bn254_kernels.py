@@ -52,7 +52,141 @@ def use_field(p):
 use_field(FR)
 
 
-def mont_mul(dst, a, b, ind="    "):
+# ── Carry-chained field arithmetic ────────────────────────────────────────
+#
+# `CARRY = True` selects the versions built on PTX's condition-code
+# instructions (`mad.lo.cc` / `madc.hi.cc` / `add.cc` / `subc`); False selects
+# the original ones, which express every carry as the high half of an explicit
+# 64-bit value. Both are kept because the only honest way to state what the
+# rewrite bought is to measure the same kernel both ways.
+#
+# The reason to do it at all is NCU. With the stage-fused NTT no longer
+# DRAM-bound, its SASS is 2,400 `IMAD.WIDE.U32` against ~10,500 instructions of
+# carry bookkeeping -- the multiplies are 18% of the stream. `mul_wide_u32(a,b)
+# + t + c` costs an IMAD.WIDE, an IADD3/IADD3.X pair and a shift-and-truncate,
+# where `mad.lo.cc` + `madc.hi.cc` is two instructions total.
+#
+# THE ORDER OF THESE STATEMENTS IS SEMANTIC. Each chain talks to the next link
+# through the condition code, which appears in no operand. Nothing may be
+# emitted between links that writes CC -- a `mov` for an immediate or a load
+# does not, another `.cc` instruction does.
+CARRY = True
+
+# Every limb value is 32 bits, so `-x` is written as this minus x when a mask
+# is needed. Spelled out because `~` is not in the language.
+U32_MAX = 0xFFFFFFFF
+
+
+def _mac_row(T, a, bi, ind):
+    """`T += a * bi`, as the two-pass carry-chained accumulate.
+
+    `T` names S+2 accumulator limbs; `a` is a variable prefix and `bi` a single
+    limb name (or an immediate). T[S+1] must be zero on entry.
+
+    Two chains, not one. The `lo` pass adds `lo(a_j * bi)` into `T[j]`, the
+    `hi` pass adds `hi(a_j * bi)` into `T[j+1]` -- the same total as the
+    sequential 64-bit form, but each pass is a single hardware carry chain
+    instead of S separate 64-bit accumulates.
+    """
+    L = [f"{ind}// t += a * b_i  (lo pass, then hi pass one limb up)"]
+    L.append(f"{ind}{T[0]} = mad_lo_cc_u32({a}0, {bi}, {T[0]});")
+    for j in range(1, S):
+        L.append(f"{ind}{T[j]} = madc_lo_cc_u32({a}{j}, {bi}, {T[j]});")
+    L.append(f"{ind}{T[S]} = addc_cc_u32({T[S]}, 0);")
+    L.append(f"{ind}{T[S+1]} = addc_u32({T[S+1]}, 0);")
+    L.append(f"{ind}{T[1]} = mad_hi_cc_u32({a}0, {bi}, {T[1]});")
+    for j in range(1, S):
+        L.append(f"{ind}{T[j+1]} = madc_hi_cc_u32({a}{j}, {bi}, {T[j+1]});")
+    L.append(f"{ind}{T[S+1]} = addc_u32({T[S+1]}, 0);")
+    return L
+
+
+def _cond_sub(dst, T, ind):
+    """`dst = T - p` if `T >= p` else `T`, over S limbs, branch-free.
+
+    `subc_u32(0, 0)` is `0 - 0 - borrow`, i.e. 0 when T >= p and 0xFFFFFFFF
+    when T < p -- the select mask falls straight out of the borrow chain
+    instead of having to be rebuilt from a high half. Confirmed on the device,
+    not assumed: see `tests/ptx_carry_chain.rs`.
+    """
+    L = [f"{ind}// t is below 2p; subtract p once if it is at least p."]
+    L.append(f"{ind}d0 = sub_cc_u32({T[0]}, {P32[0]});")
+    for j in range(1, S):
+        L.append(f"{ind}d{j} = subc_cc_u32({T[j]}, {P32[j]});")
+    L.append(f"{ind}mask = subc_u32(0, 0);")
+    L.append(f"{ind}nmask = mask ^ {U32_MAX};")
+    for j in range(S):
+        L.append(f"{ind}{dst}{j} = (d{j} & nmask) | ({T[j]} & mask);")
+    return L
+
+
+def mont_mul_cc(dst, a, b, ind="    "):
+    """CIOS with the carries in hardware. Same algorithm as `mont_mul_u64`.
+
+    The per-round shift right by one limb is FREE: the accumulator limbs are
+    referred to through a Python list that is rotated at generation time, so
+    "t[j-1] = ..." becomes a renaming rather than S moves.
+    """
+    T = [f"t{j}" for j in range(S + 2)]
+    L = [f"{ind}{t} = 0;" for t in T]
+    for i in range(S):
+        L.append(f"{ind}// --- CIOS round {i} ---")
+        L += _mac_row(T, a, f"{b}{i}", ind)
+        # m makes t + m*p divisible by 2^32, so the low word of that product
+        # cancels t[0] exactly; T[0] is written anyway because the SUBTRACTION
+        # it performs is what sets the carry the rest of the chain needs.
+        L.append(f"{ind}m = {T[0]} * {NP};")
+        L += _mac_row_const(T, P32, "m", ind)
+        # Shift right one limb by rotating the names; the vacated top is zero.
+        T = T[1:] + [T[0]]
+        L.append(f"{ind}{T[S+1]} = 0;")
+    L += _cond_sub(dst, T, ind)
+    return L
+
+
+def _mac_row_const(T, limbs, mult, ind):
+    """`T += limbs * mult` where `limbs` is a list of compile-time constants."""
+    L = [f"{ind}// t += m * p  (lo pass, then hi pass one limb up)"]
+    L.append(f"{ind}{T[0]} = mad_lo_cc_u32({limbs[0]}, {mult}, {T[0]});")
+    for j in range(1, S):
+        L.append(f"{ind}{T[j]} = madc_lo_cc_u32({limbs[j]}, {mult}, {T[j]});")
+    L.append(f"{ind}{T[S]} = addc_cc_u32({T[S]}, 0);")
+    L.append(f"{ind}{T[S+1]} = addc_u32({T[S+1]}, 0);")
+    L.append(f"{ind}{T[1]} = mad_hi_cc_u32({limbs[0]}, {mult}, {T[1]});")
+    for j in range(1, S):
+        L.append(f"{ind}{T[j+1]} = madc_hi_cc_u32({limbs[j]}, {mult}, {T[j+1]});")
+    L.append(f"{ind}{T[S+1]} = addc_u32({T[S+1]}, 0);")
+    return L
+
+
+def add_mod_cc(dst, a, b, ind="    "):
+    L = [f"{ind}t0 = add_cc_u32({a}0, {b}0);"]
+    for j in range(1, S):
+        L.append(f"{ind}t{j} = addc_cc_u32({a}{j}, {b}{j});")
+    # a, b < p < 2^254, so a + b < 2^255 and limb 7 cannot carry out.
+    L += _cond_sub(dst, [f"t{j}" for j in range(S)], ind)
+    return L
+
+
+def sub_mod_cc(dst, a, b, ind="    "):
+    L = [f"{ind}t0 = sub_cc_u32({a}0, {b}0);"]
+    for j in range(1, S):
+        L.append(f"{ind}t{j} = subc_cc_u32({a}{j}, {b}{j});")
+    L.append(f"{ind}mask = subc_u32(0, 0);")
+    L.append(f"{ind}// mask is all-ones exactly when the subtraction went negative.")
+    # Build every masked modulus limb BEFORE the add chain starts. They could
+    # legally be built inside it -- `and` does not write CC -- but keeping the
+    # chain a contiguous run of `.cc` instructions is the property that is easy
+    # to check by eye and easy to preserve.
+    for j in range(S):
+        L.append(f"{ind}d{j} = {P32[j]} & mask;")
+    L.append(f"{ind}{dst}0 = add_cc_u32(t0, d0);")
+    for j in range(1, S):
+        L.append(f"{ind}{dst}{j} = addc_cc_u32(t{j}, d{j});")
+    return L
+
+
+def mont_mul_u64(dst, a, b, ind="    "):
     """CIOS, fully unrolled. `a` and `b` name eight U32 vars each; `dst` names
     eight already-declared U32 vars to receive the result.
 
@@ -105,7 +239,7 @@ def mont_mul(dst, a, b, ind="    "):
     return L
 
 
-def add_mod(dst, a, b, ind="    "):
+def add_mod_u64(dst, a, b, ind="    "):
     """dst = (a + b) mod p, eight limbs, branch-free."""
     L = []
     e = L.append
@@ -129,7 +263,7 @@ def add_mod(dst, a, b, ind="    "):
     return L
 
 
-def sub_mod(dst, a, b, ind="    "):
+def sub_mod_u64(dst, a, b, ind="    "):
     """dst = (a - b) mod p. Add p back when the subtraction borrowed."""
     L = []
     e = L.append
@@ -150,14 +284,31 @@ def sub_mod(dst, a, b, ind="    "):
     return L
 
 
+# The single switch. Every kernel below calls these, so `CARRY` re-generates
+# the whole family either way and `tools/` stays the only place the choice is
+# made.
+def mont_mul(dst, a, b, ind="    "):
+    return (mont_mul_cc if CARRY else mont_mul_u64)(dst, a, b, ind)
+
+
+def add_mod(dst, a, b, ind="    "):
+    return (add_mod_cc if CARRY else add_mod_u64)(dst, a, b, ind)
+
+
+def sub_mod(dst, a, b, ind="    "):
+    return (sub_mod_cc if CARRY else sub_mod_u64)(dst, a, b, ind)
+
+
 def scratch_decls(ind="    "):
     L = [f"{ind}// Scratch, declared once so unrolling does not allocate a",
-         f"{ind}// register per step.  `pr` and `sw` are the 64-bit lanes that",
-         f"{ind}// make carries visible: no operator exposes them.",
-         f"{ind}let pr: U64 = 0;", f"{ind}let sw: U64 = 0;",
-         f"{ind}let c: U32 = 0;", f"{ind}let nc: U32 = 0;",
-         f"{ind}let m: U32 = 0;",
-         f"{ind}let mask: U32 = 0;", f"{ind}let nmask: U32 = 0;"]
+         f"{ind}// register per step."]
+    if not CARRY:
+        # `pr` and `sw` are the 64-bit lanes that make carries visible when
+        # there are no carry-flag intrinsics: no operator exposes them.
+        L += [f"{ind}let pr: U64 = 0;", f"{ind}let sw: U64 = 0;",
+              f"{ind}let c: U32 = 0;", f"{ind}let nc: U32 = 0;"]
+    L += [f"{ind}let m: U32 = 0;",
+          f"{ind}let mask: U32 = 0;", f"{ind}let nmask: U32 = 0;"]
     for j in range(S + 2):
         L.append(f"{ind}let t{j}: U32 = 0;")
     for j in range(S):
@@ -422,6 +573,378 @@ def gen_ntt4():
     return "\n".join(L)
 
 
+# ── Shared-memory stage fusion ────────────────────────────────────────────
+#
+# NCU says `bn254_ntt4_stage` is DRAM-bound at 91% of peak, so there is
+# nothing left to win INSIDE it; the only lever left is running fewer passes
+# over the array. At N = 2^22 radix-4 needs 11 stages and therefore 11
+# read+write passes, 2.95 GB. icicle does the same transform in what works out
+# to ~6.2 equivalent passes, and the difference is entirely that it keeps
+# intermediates in shared memory across several butterfly stages.
+#
+# A CTA that holds FUSED_ELEMS contiguous elements can run every stage whose
+# quarter-stride divides that span, because such a stage's butterflies never
+# reach outside it. FUSED_ELEMS = 4^5 = 1024 elements is 32 KB (each element is
+# eight u32), just under the 48 KB static per-CTA limit, and covers five
+# stages: q = 1, 4, 16, 64, 256.
+FUSED_LOG = 5                       # radix-4 stages fused into one launch
+FUSED_ELEMS = 4 ** FUSED_LOG        # 1024 elements per CTA
+FUSED_THREADS = FUSED_ELEMS // 4    # 256 threads, one 4-point butterfly each
+# Twiddle arrays for the fused stages are CONCATENATED, stage t occupying
+# 4^t entries at this offset. One array rather than five parameters.
+TW_OFF = [(4 ** t - 1) // 3 for t in range(FUSED_LOG)]
+TW_TOTAL = (4 ** FUSED_LOG - 1) // 3
+
+
+def swizzle(dst, src, ind="    "):
+    """`dst = src ^ ((src >> 2) & 7)`, the shared-memory slot permutation.
+
+    Without it the low stages conflict badly. Shared memory is 32 banks of 4
+    bytes, so a 128-bit access is resolved in groups of 8 threads and those 8
+    must land on 8 distinct 16-byte slots (mod 8) to be conflict-free. At
+    q = 1 a thread owns elements 4*tid..4*tid+3, so slot mod 8 is {0, 4} for
+    the whole group -- a 4-way conflict on the very stage that runs first.
+
+    XOR-ing in bits 2..4 fixes every fused stage at once. Checked by hand for
+    q = 1, 4, 16, 64, 256: each gives 8 distinct residues per group. It is a
+    bijection on [0, 1024) because bits 3 and above pass through unchanged, so
+    the map can be inverted bit by bit -- which is what makes it safe to apply
+    on store and load without tracking where anything went.
+    """
+    return [f"{ind}let {dst}: I32 = {src} ^ (({src} >> 2) & 7);"]
+
+
+def sload(var, base, slot, ind="    "):
+    """Read one 8-limb element from shared memory at swizzled slot `slot`.
+
+    Planar, exactly like the global layout: plane 0 holds limbs 0-3 of every
+    element in the first FUSED_ELEMS 16-byte slots, plane 1 holds limbs 4-7 in
+    the next FUSED_ELEMS. Two `ld.shared.v4.u32` per element.
+    """
+    L = []
+    for pl in range(S // 4):
+        L.append(f"{ind}let {var}v{pl}: U32x4 = shared_load_v4("
+                 f"{base}, {slot} + {pl * FUSED_ELEMS});")
+        for lane in range(4):
+            L.append(f"{ind}let {var}{pl * 4 + lane}: U32 = "
+                     f"{var}v{pl}.{'xyzw'[lane]};")
+    return L
+
+
+def sstore(var, base, slot, ind="    "):
+    return [f"{ind}shared_store_v4({base}, {slot} + {pl * FUSED_ELEMS}, "
+            f"{var}{pl*4}, {var}{pl*4+1}, {var}{pl*4+2}, {var}{pl*4+3});"
+            for pl in range(S // 4)]
+
+
+def gen_ntt4_fused():
+    """FUSED_LOG radix-4 stages in one launch, with shared memory between them.
+
+    Same butterfly as `gen_ntt4`, same twiddle convention, same digit-reversed
+    input. The only difference is where the intermediates live: CTA b owns
+    global elements [b*FUSED_ELEMS, (b+1)*FUSED_ELEMS), stages them into shared
+    memory once, runs five stages there, and writes back once. One pass over
+    DRAM instead of five.
+
+    Why one barrier per stage and not two: at every fused stage a thread's four
+    slots are exactly the four it will overwrite, and those quadruples
+    partition the CTA's 1024 slots. So no thread ever reads a slot another
+    thread is writing WITHIN a stage, and the only ordering that needs
+    enforcing is stage t's writes against stage t+1's reads.
+
+    The last stage skips shared memory on the way out. At q = 256 a thread owns
+    slots {tid, tid+256, tid+512, tid+768}, which is precisely the coalesced
+    global pattern the staging loop used on the way in -- so it can store
+    straight to X. The first stage cannot do the mirror of this: at q = 1 a
+    thread owns four CONSECUTIVE elements, and reading those from global would
+    have a warp touching 64-byte-strided addresses in each of its four load
+    instructions.
+
+    Twiddle index. In the unfused kernel it is `i0 mod q`. Here i0 is
+    `b*FUSED_ELEMS + l0`, and FUSED_ELEMS = 4^FUSED_LOG is divisible by every
+    fused q, so `i0 mod q == l0 mod q` and the local index is enough.
+    """
+    L = [HEADER.replace("%d", "N"), "",
+         f"// {FUSED_LOG} radix-4 stages fused through shared memory:",
+         f"// {FUSED_ELEMS} elements/CTA * {S} u32 = "
+         f"{FUSED_ELEMS * S * 4 // 1024} KB, {FUSED_THREADS} threads.",
+         "//",
+         "// Tw1/Tw2/Tw3 are the per-stage twiddle tables CONCATENATED, stage t",
+         f"// at offset {TW_OFF} with 4^t entries ({TW_TOTAL} total).",
+         "kernel bn254_ntt4_fused(",
+         "    X: GlobalMemory<U32>,",
+         "    Tw1: GlobalMemory<U32>,",
+         "    Tw2: GlobalMemory<U32>,",
+         "    Tw3: GlobalMemory<U32>,",
+         "    Iw: GlobalMemory<U32>,",
+         "    NElem: I32",
+         ") {",
+         f"    let smem: U64 = shared_alloc_u32({FUSED_ELEMS * S});",
+         "    let tid: I32 = thread_idx_x();",
+         f"    let chunk: I32 = block_idx_x() * {FUSED_ELEMS};"]
+    for v in "ABCDEFGH":
+        L += [f"    let {v}{j}: U32 = 0;" for j in range(S)]
+    L += scratch_decls()
+
+    # ── stage the CTA's slice into shared memory, coalesced ──
+    L += ["    // Coalesced staging: thread `tid` takes elements",
+          f"    // tid, tid+{FUSED_THREADS}, ... so a warp reads contiguous bytes."]
+    for e in range(FUSED_ELEMS // FUSED_THREADS):
+        L += [f"    let li{e}: I32 = tid + {e * FUSED_THREADS};"]
+        L += swizzle(f"ls{e}", f"li{e}")
+        L += load(f"g{e}", "X", f"chunk + li{e}", "NElem")
+        L += sstore(f"g{e}", "smem", f"ls{e}")
+    L += ["    barrier_sync();"]
+
+    for t in range(FUSED_LOG):
+        q = 4 ** t
+        last = t == FUSED_LOG - 1
+        L += ["", f"    // ── fused stage {t}: quarter = {q} ──"]
+        L += [f"    let pos{t}: I32 = tid & {q - 1};",
+              f"    let l0_{t}: I32 = ((tid >> {2 * t}) * {4 * q}) + pos{t};",
+              f"    let l1_{t}: I32 = l0_{t} + {q};",
+              f"    let l2_{t}: I32 = l1_{t} + {q};",
+              f"    let l3_{t}: I32 = l2_{t} + {q};"]
+        for k in range(4):
+            L += swizzle(f"s{k}_{t}", f"l{k}_{t}")
+
+        L += sload("ld", "smem", f"s0_{t}")
+        L += [f"    A{j} = ld{j};" for j in range(S)]
+        if q == 1:
+            # Stage 0 has ONE twiddle position, and w^0 = 1. Multiplying by
+            # Montgomery one is the identity, so three of this stage's four
+            # CIOS multiplies are computing `x * R * R^-1`. Dropping them is
+            # exact, not an approximation.
+            #
+            # Worth naming because it is 3 of the 20 multiplies in the whole
+            # fused kernel, and NCU says that kernel is SM-bound at 73% -- so
+            # it is 15% of the arithmetic on the critical path, where in the
+            # unfused kernel (DRAM-bound at 91%) the same saving would have
+            # bought nothing at all. The optimisation became worth doing
+            # because the bottleneck moved.
+            L += ["    // w^0 = 1: the three twiddle multiplies here are the identity."]
+            L += sload("qb", "smem", f"s1_{t}")
+            L += [f"    B{j} = qb{j};" for j in range(S)]
+            L += sload("qc", "smem", f"s2_{t}")
+            L += [f"    C{j} = qc{j};" for j in range(S)]
+            L += sload("qd", "smem", f"s3_{t}")
+            L += [f"    D{j} = qd{j};" for j in range(S)]
+        else:
+            L += sload("qb", "smem", f"s1_{t}")
+            L += load("wb", "Tw1", f"{TW_OFF[t]} + pos{t}", str(TW_TOTAL))
+            L += mont_mul("B", "qb", "wb")
+            L += sload("qc", "smem", f"s2_{t}")
+            L += load("wc", "Tw2", f"{TW_OFF[t]} + pos{t}", str(TW_TOTAL))
+            L += mont_mul("C", "qc", "wc")
+            L += sload("qd", "smem", f"s3_{t}")
+            L += load("wd", "Tw3", f"{TW_OFF[t]} + pos{t}", str(TW_TOTAL))
+            L += mont_mul("D", "qd", "wd")
+
+        L += ["    // t0 = A + C, t1 = A - C, t2 = B + D, t3 = (B - D) * i"]
+        L += add_mod("E", "A", "C")
+        L += sub_mod("F", "A", "C")
+        L += add_mod("G", "B", "D")
+        L += sub_mod("A", "B", "D")
+        L += load("iw", "Iw", "0", "1")
+        L += mont_mul("H", "A", "iw")
+
+        L += ["    // X0 = t0 + t2, X1 = t1 + t3, X2 = t0 - t2, X3 = t1 - t3"]
+        L += add_mod("B", "E", "G")
+        L += add_mod("C", "F", "H")
+        L += sub_mod("D", "E", "G")
+        L += sub_mod("E", "F", "H")
+
+        if last:
+            # q == FUSED_THREADS here, so l0..l3 are tid, tid+256, tid+512,
+            # tid+768 -- the coalesced pattern. Straight out to global.
+            for k, v in enumerate("BCDE"):
+                L += store(v, "X", f"chunk + l{k}_{t}", "NElem")
+        else:
+            for k, v in enumerate("BCDE"):
+                L += sstore(v, "smem", f"s{k}_{t}")
+            L += ["    barrier_sync();"]
+
+    L += ["}", "", "fn main() {}", ""]
+    return "\n".join(L)
+
+
+# ── Strided stage fusion, for the stages the contiguous one cannot reach ──
+#
+# After `gen_ntt4_fused` there are still `log4(N) - FUSED_LOG` stages left, and
+# at N = 2^22 they are 73% of the remaining time. Their quarter-stride exceeds
+# a CTA's 1024-element slice, so a CTA of CONTIGUOUS elements cannot hold a
+# whole butterfly.
+#
+# A CTA of STRIDED elements can. With `Q0` the smallest quarter in the group,
+# take the 1024 elements
+#
+#     sb*Q0*256 + p0 + u + j*Q0     for u in [0, 4), j in [0, 256)
+#
+# In j-space a stage of quarter `Q0 * 4^t` is an ordinary radix-4 butterfly of
+# quarter `4^t`, so t = 0..3 fuses HIGH_LOG = 4 of them.
+#
+# The four `u` are what keeps it coalesced. Four consecutive threads take
+# u = 0,1,2,3 at the same j, so they read four CONSECUTIVE elements - 64
+# contiguous bytes per plane, fully-used sectors. Without them a warp would
+# ask for 32 separate 16-byte pieces 16 KB apart and use half of every sector
+# the memory system fetched.
+#
+# `Q0` is a RUNTIME parameter, and that is a testability decision, not a
+# generality one. This kernel only applies when four stages sit above the fused
+# low five, i.e. N >= 4^9, and a naive DFT at 2^18 is ~7e10 field multiplies.
+# With Q0 passed in, the identical kernel runs at Q0 = 4 and N = 4096, where
+# the DFT oracle costs 16.7M multiplies and every line of the index derivation
+# is exercised. Checking it only against Y's own unfused path would share
+# exactly the class of bug the DFT exists to catch.
+# The kernel is generated at several DEPTHS, because after the low five, stages
+# come in groups of HIGH_MAX and `log4(N) - FUSED_LOG` is not a multiple of it.
+# A depth-h variant holds the same 1024 elements as JV = 4^h j-values across
+# U = 1024/JV consecutive base values, so the CTA size, the thread count and
+# the shared-memory footprint are identical whatever h is -- only the shape of
+# the slice changes. Emitting depths 2..HIGH_MAX means every remainder can be
+# fused, which is what takes 11 passes to 3 rather than to 4.
+#
+# Depth 1 is deliberately NOT emitted: fusing one stage is the unfused kernel
+# plus a shared-memory round trip, i.e. strictly worse. A one-stage remainder
+# runs `bn254_ntt4_stage`.
+HIGH_MAX = 4
+HIGH_DEPTHS = list(range(2, HIGH_MAX + 1))
+HIGH_ELEMS = FUSED_ELEMS            # 1024 elements -- same 32 KB as the low one
+HIGH_THREADS = HIGH_ELEMS // 4      # 256, whatever the depth
+
+
+def high_geom(h):
+    """(j-values, consecutive base values) for a depth-`h` strided kernel."""
+    jv = 4 ** h
+    return jv, HIGH_ELEMS // jv
+
+
+def twh_off(h):
+    """Stage t's offset into the concatenated table, as a multiple of Q0."""
+    return [(4 ** t - 1) // 3 for t in range(h)]
+
+
+def twh_total(h):
+    return (4 ** h - 1) // 3
+
+
+def gen_ntt4_fused_high(h):
+    """`h` radix-4 stages of quarter Q0*4^t, fused through shared memory.
+
+    Same butterfly, same twiddle convention and the same shared-memory layout
+    as `gen_ntt4_fused`; only the map from thread to element differs.
+
+    Local slot is `j*U + u`, which mirrors the global order within the CTA and
+    keeps the staging access pattern identical to the low kernel's. The same
+    XOR swizzle applies. It is not quite as clean here - at t = 1 the eight
+    threads of an access group land on six distinct residues rather than eight,
+    a 2-way conflict on one of four stages - but the depth-4 kernel measures
+    1.8% conflicted wavefronts overall against the low kernel's 0.95%, so the
+    headroom is there.
+
+    The last stage writes straight to global for the same reason as the low
+    kernel: at t = h-1 a thread owns `j = bfly + k*4^(h-1)` at its own `u`,
+    which is exactly the coalesced pattern the staging loop read in.
+    """
+    JV, U = high_geom(h)
+    OFF, TOT = twh_off(h), twh_total(h)
+    name = f"bn254_ntt4_fused_high{h}"
+    L = [HEADER.replace("%d", "N"), "",
+         f"// {h} STRIDED radix-4 stages fused through shared memory:",
+         f"// quarters Q0*4^t for t in 0..{h}, {HIGH_ELEMS} elements/CTA",
+         f"// ({HIGH_ELEMS * S * 4 // 1024} KB), {HIGH_THREADS} threads.",
+         "//",
+         f"// A CTA owns  sb*Q0*{JV} + p0 + u + j*Q0  for u in [0,{U}), j in [0,{JV}).",
+         "// Tw1/Tw2/Tw3 are the per-stage tables CONCATENATED, stage t at",
+         f"// offset Q0*{OFF} with Q0*4^t entries (Q0*{TOT} total).",
+         f"kernel {name}(",
+         "    X: GlobalMemory<U32>,",
+         "    Tw1: GlobalMemory<U32>,",
+         "    Tw2: GlobalMemory<U32>,",
+         "    Tw3: GlobalMemory<U32>,",
+         "    Iw: GlobalMemory<U32>,",
+         "    Q0: I32,",
+         "    NElem: I32",
+         ") {",
+         f"    let smem: U64 = shared_alloc_u32({HIGH_ELEMS * S});",
+         "    let tid: I32 = thread_idx_x();",
+         f"    let twlen: I32 = Q0 * {TOT};",
+         f"    let pgn: I32 = Q0 / {U};",
+         "    let cta: I32 = block_idx_x();",
+         "    let pg: I32 = cta % pgn;",
+         "    let sb: I32 = cta / pgn;",
+         f"    let p0: I32 = pg * {U};",
+         f"    let span: I32 = Q0 * {JV};",
+         "    let sbase: I32 = sb * span + p0;",
+         f"    let u: I32 = tid & {U - 1};",
+         "    let pu: I32 = p0 + u;",
+         f"    let bfly: I32 = tid / {U};"]
+    for v in "ABCDEFGH":
+        L += [f"    let {v}{j}: U32 = 0;" for j in range(S)]
+    L += scratch_decls()
+
+    L += [f"    // {U} consecutive threads share a j and take u = 0..{U-1}, so they",
+          f"    // read {U} CONSECUTIVE elements: {U*16} contiguous bytes per plane."]
+    per_thread = HIGH_ELEMS // HIGH_THREADS
+    jstep = JV // per_thread
+    for e in range(per_thread):
+        L += [f"    let hj{e}: I32 = bfly + {e * jstep};",
+              f"    let hl{e}: I32 = hj{e} * {U} + u;"]
+        L += swizzle(f"hs{e}", f"hl{e}")
+        L += load(f"g{e}", "X", f"sbase + u + hj{e} * Q0", "NElem")
+        L += sstore(f"g{e}", "smem", f"hs{e}")
+    L += ["    barrier_sync();"]
+
+    for t in range(h):
+        qj = 4 ** t
+        last = t == h - 1
+        L += ["", f"    // -- strided stage {t}: quarter = Q0 * {qj} --"]
+        L += [f"    let jpos{t}: I32 = bfly & {qj - 1};",
+              f"    let j0_{t}: I32 = ((bfly >> {2 * t}) * {4 * qj}) + jpos{t};",
+              f"    let tw{t}: I32 = pu + Q0 * jpos{t};"]
+        for k in range(4):
+            L += [f"    let l{k}_{t}: I32 = (j0_{t} + {k * qj}) * {U} + u;"]
+            L += swizzle(f"s{k}_{t}", f"l{k}_{t}")
+
+        L += sload("ld", "smem", f"s0_{t}")
+        L += [f"    A{j} = ld{j};" for j in range(S)]
+        L += sload("qb", "smem", f"s1_{t}")
+        L += load("wb", "Tw1", f"{OFF[t]} * Q0 + tw{t}", "twlen")
+        L += mont_mul("B", "qb", "wb")
+        L += sload("qc", "smem", f"s2_{t}")
+        L += load("wc", "Tw2", f"{OFF[t]} * Q0 + tw{t}", "twlen")
+        L += mont_mul("C", "qc", "wc")
+        L += sload("qd", "smem", f"s3_{t}")
+        L += load("wd", "Tw3", f"{OFF[t]} * Q0 + tw{t}", "twlen")
+        L += mont_mul("D", "qd", "wd")
+
+        L += ["    // t0 = A + C, t1 = A - C, t2 = B + D, t3 = (B - D) * i"]
+        L += add_mod("E", "A", "C")
+        L += sub_mod("F", "A", "C")
+        L += add_mod("G", "B", "D")
+        L += sub_mod("A", "B", "D")
+        L += load("iw", "Iw", "0", "1")
+        L += mont_mul("H", "A", "iw")
+
+        L += ["    // X0 = t0 + t2, X1 = t1 + t3, X2 = t0 - t2, X3 = t1 - t3"]
+        L += add_mod("B", "E", "G")
+        L += add_mod("C", "F", "H")
+        L += sub_mod("D", "E", "G")
+        L += sub_mod("E", "F", "H")
+
+        if last:
+            for k, v in enumerate("BCDE"):
+                L += [f"    let gj{k}_{t}: I32 = j0_{t} + {k * qj};"]
+                L += store(v, "X", f"sbase + u + gj{k}_{t} * Q0", "NElem")
+        else:
+            for k, v in enumerate("BCDE"):
+                L += sstore(v, "smem", f"s{k}_{t}")
+            L += ["    barrier_sync();"]
+
+    L += ["}", "", "fn main() {}", ""]
+    return "\n".join(L)
+
+
 def dbl_mod(dst, a, ind="    "):
     """dst = 2a mod p."""
     return add_mod(dst, a, a, ind)
@@ -667,7 +1190,12 @@ def gen_msm_bucket():
          "    NPts: I32,",
          "    NIdx: I32",
          ") {",
-         "    let b: I32 = block_idx_x() * 256 + thread_idx_x();",
+         "    // The block size is NOT hardcoded here. This kernel is",
+         "    // latency-bound (NCU: 70% of stalls are `wait`, DRAM under 9%,",
+         "    // SM under 27%), and at 136 registers a 256-thread CTA fits ONE",
+         "    // block per SM -- 16.7% theoretical occupancy. Smaller blocks",
+         "    // are the cheapest way to raise it, so the host chooses.",
+         "    let b: I32 = block_idx_x() * block_dim_x() + thread_idx_x();",
          "    let nb1: I32 = NB + 1;",
          "    let s: U32 = block_ptr2d_load(Off, 0, b, nb1, 1, nb1);",
          "    let b1: I32 = b + 1;",
@@ -707,6 +1235,7 @@ if __name__ == "__main__":
     for name, text in [("tests/bn254_fr_mul_fast.ysu", gen_mul()),
                        ("tests/bn254_ntt_stage.ysu", gen_ntt()),
                        ("tests/bn254_ntt4_stage.ysu", gen_ntt4()),
+                       ("tests/bn254_ntt4_fused.ysu", gen_ntt4_fused()),
                        ("tests/bn254_g1_add.ysu", gen_g1_add()),
                        ("tests/bn254_g1_dbl.ysu", gen_g1_dbl()),
                        ("tests/bn254_msm_bucket.ysu", gen_msm_bucket()),
@@ -714,6 +1243,12 @@ if __name__ == "__main__":
                        ("tests/bn254_sub_vec.ysu", gen_sub_vec())]:
         path = os.path.join(here, name)
         with open(path, "w") as f:
+            f.write(text)
+        print(f"wrote {name}  ({len(text.splitlines())} lines)")
+    for h in HIGH_DEPTHS:
+        name = f"tests/bn254_ntt4_fused_high{h}.ysu"
+        text = gen_ntt4_fused_high(h)
+        with open(os.path.join(here, name), "w") as f:
             f.write(text)
         print(f"wrote {name}  ({len(text.splitlines())} lines)")
     print(f"p limbs  {[hex(x) for x in P32]}")
