@@ -10900,53 +10900,6 @@ mod tests {
     }
 }
 
-/// Pass 1: Hardware Asynchronous DMA Prefetching Pass (cp.async.cg.shared.global)
-pub struct AsyncPipeliningPass {
-    pub async_copies_emitted: usize,
-}
-
-impl AsyncPipeliningPass {
-    pub fn new() -> Self {
-        AsyncPipeliningPass {
-            async_copies_emitted: 0,
-        }
-    }
-
-    pub fn emit_async_group_copy(&mut self, dest_smem: &str, src_global: &str, num_bytes: usize) -> String {
-        self.async_copies_emitted += 1;
-        format!(
-            "// Y ASYNC PIPELINING PASS (DMA Group Copy)\n\
-             cp.async.cg.shared.global [{}], [{}], {};\n\
-             cp.async.commit_group;\n\
-             cp.async.wait_group 0;\n",
-            dest_smem, src_global, num_bytes
-        )
-    }
-}
-
-/// Pass 4: Calculates live register ranges per warp and emits max register launch directives
-pub struct RegisterPressurePass {
-    pub max_registers_per_thread: u32,
-    pub min_ctas_per_sm: u32,
-}
-
-impl RegisterPressurePass {
-    pub fn new(max_regs: u32, min_ctas: u32) -> Self {
-        RegisterPressurePass {
-            max_registers_per_thread: max_regs,
-            min_ctas_per_sm: min_ctas,
-        }
-    }
-
-    pub fn emit_maxnreg_directive(&self) -> String {
-        format!(
-            "// Y REGISTER PRESSURE PASS (Occupancy Optimization Directive)\n\
-             .pragma \"option nvcc -maxrregcount={}\";\n",
-            self.max_registers_per_thread
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests_3d {
     use super::*;

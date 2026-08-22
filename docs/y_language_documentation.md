@@ -4299,7 +4299,7 @@ This section documents the major high-performance compiler optimizations added t
 
 ### 33.2 In-Register Warp Butterfly Shuffle Reductions (`shfl.sync.bfly.b32`)
 * **Overview**: Performs parallel reductions across 32 threads inside register space without writing to shared memory or global memory.
-* **Implementation**: Implemented `emit_warp_butterfly_shuffle`, `emit_warp_reduce_sum`, `emit_warp_reduce_max`, and `emit_warp_reduce_var` in `src/ptx_emitter.rs`.
+* **Implementation**: Implemented `emit_warp_butterfly_shuffle`, `emit_warp_reduce_sum` and `emit_warp_reduce_max` in `src/ptx_emitter.rs`. (`emit_warp_reduce_var` was listed here and has never existed; there is no warp variance reduction.)
 * **Impact**: Reduces a 32-element warp vector in **5 GPU cycles** (1.02 cycles per shuffle stage).
 
 ### 33.3 – 33.5 Hopper TMA, `mbarrier` pipelining and WGMMA — **REMOVED, never worked**
@@ -4515,24 +4515,38 @@ ptr3d = make_block_ptr3d(
 
 ---
 
-## §37 — 5 Advanced Compiler Optimization Passes Pipeline
+## §37 — Optimization passes: **all five described here were dead, and are removed**
 
-Y Language incorporates 5 domain-specific optimization passes executed prior to PTX emission via `run_all_optimization_passes(&mut Program)` ([`src/lib.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/lib.rs#L27-L40)):
+This section listed five passes "executed prior to PTX emission via
+`run_all_optimization_passes(&mut Program)`". Audited against the source:
 
-1. **`AsyncPipeliningPass`** ([`src/ptx_emitter.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/ptx_emitter.rs#L2334-L2355)):
-   Emits 3-stage asynchronous global-to-shared memory DMA copies (`cp.async.ca.shared.global`, `cp.async.commit_group`, `cp.async.wait_group`) to overlap VRAM fetch latency with SM Tensor Core execution.
+| claimed pass | what it actually was |
+|---|---|
+| `AsyncPipeliningPass` | a string helper emitting `cp.async` → `commit_group` → `wait_group 0` on three consecutive lines, i.e. a **blocking** copy with no overlap at all. No callers. |
+| `SmemBankSwizzlePass` | renamed `load_shared` → `load_shared_swizzled_xor`. **Neither name exists in any backend**, and it emitted no XOR anywhere. No callers. |
+| `EpilogueFusionPass` | `run_fusion` incremented a counter and returned it. Fused nothing. No callers. |
+| `RegisterPressurePass` | emitted `.pragma "option nvcc -maxrregcount=N"`, which **ptxas silently overrides** with the `.maxnreg` this emitter writes into the module. Never emitted `.maxnreg` at all. No callers. |
+| `UnrollAndJamPass` | counted loops. A liveness probe confirms it changes nothing. No callers. |
 
-2. **`SmemBankSwizzlePass`** ([`src/layout_pass.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/layout_pass.rs#L94-L145)):
-   Applies bitwise XOR swizzling ($\text{row} \oplus (\text{col} \gg 2)$) to 2D shared memory fragments, eliminating 32-bank conflict stalls during matrix tile transfers.
+`run_all_optimization_passes` itself had **zero callers** — not `main.rs`, not
+`lib.rs`, not a test — and the five it ran were not the five listed above; only
+two names overlapped. All of it is deleted.
 
-3. **`EpilogueFusionPass`** ([`src/quantization_pass.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/quantization_pass.rs#L797-L818)):
-   Fuses quantization scale factors and non-linear activation functions (SiLU, GELU, ReLU) inline within Tensor Core accumulator registers prior to global memory writeback.
+**What actually optimises the emitted code**, all of it reachable and measured:
 
-4. **`RegisterPressurePass`** ([`src/ptx_emitter.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/ptx_emitter.rs#L2356-L2378)):
-   Analyzes live warp register pressure and emits dynamic PTX `.maxnreg 64` launch bounds to guarantee max SM active CTA occupancy.
-
-5. **`UnrollAndJamPass`** ([`src/auto_vectorize.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/auto_vectorize.rs#L88-L118)):
-   Unrolls inner reduction loops 4x with register accumulation jamming to maximize Instruction Level Parallelism (ILP).
+* `bank_conflict.rs` — the real XOR swizzle solver (`Xor128B` / `Xor64B`),
+  coupled to `ldmatrix` and `cp.async` address generation in `ptx_emitter.rs`.
+* `autotuner.rs` + `empirical_autotune.rs` — CTA tile / warp split / pipeline
+  depth, preferring an on-device measurement over the analytic model.
+* `QuantizationPass::emit_epilogue_fusion` — the real bias + ReLU/GELU/SiLU
+  epilogue, in registers before writeback. (`bias+ReLU` measures 1.06x against
+  cuDNN; the *mainloop* SwiGLU fusion measures 1.00x against Y's own unfused
+  path, which is why fusion is chosen per-case rather than by a pass.)
+* `coprocessor_scheduler.rs` + `ir_grapher.rs` — RT/Tensor overlap scheduling
+  and the cross-pipeline barriers.
+* Real `cp.async` pipelining lives in the GEMM emitters, where the commit and
+  the wait are separated by the mainloop — which is the whole point, and what
+  the deleted "pipelining pass" did not do.
 
 ---
 

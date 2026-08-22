@@ -549,27 +549,6 @@ pub enum ActivationKind {
     SiLU,
 }
 
-/// Pass 3: Fuses activation functions (SiLU, GELU, ReLU) and scale factors directly
-/// into accumulation register writeback loops, avoiding DRAM round-trips.
-pub struct EpilogueFusionPass {
-    pub fused_epilogues: usize,
-}
-
-impl EpilogueFusionPass {
-    pub fn new() -> Self {
-        EpilogueFusionPass {
-            fused_epilogues: 0,
-        }
-    }
-
-    pub fn run_fusion(&mut self, activation: ActivationKind) -> usize {
-        if activation != ActivationKind::None {
-            self.fused_epilogues += 1;
-        }
-        self.fused_epilogues
-    }
-}
-
 // ────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────
