@@ -1,0 +1,69 @@
+.version 7.8
+.target sm_89
+.address_size 64
+
+.visible .entry drift_demo(
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 29
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 32 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 100.00% (6 active blocks per SM)
+.maxnreg 32
+{
+    .reg .b32 %r<16>;
+    .reg .f32 %f<5>;
+    .reg .b64 %rd<4>;
+    .reg .pred %p<3>;
+    .reg .f64 %fd<12>;
+
+    // [Y ZERO DRIFT] acc: Q32.32 accumulated exactly as Q32.32
+    mov.f32 %f0, 0.0;
+    cvt.f64.f32 %fd0, %f0;
+    mul.f64 %fd1, %fd0, 0d41F0000000000000;
+    setp.lt.f64 %p0, %fd1, 0d0000000000000000;
+    selp.f64 %fd2, 0dBFE0000000000000, 0d3FE0000000000000, %p0;
+    add.f64 %fd3, %fd1, %fd2;
+    cvt.rzi.s64.f64 %rd1, %fd3;
+    mov.u64 %rd0, %rd1;
+    // [Y ZERO DRIFT] fast_acc: F16 accumulated exactly as Q32.32
+    mov.f32 %f1, 0.0;
+    cvt.f64.f32 %fd4, %f1;
+    mul.f64 %fd5, %fd4, 0d41F0000000000000;
+    setp.lt.f64 %p1, %fd5, 0d0000000000000000;
+    selp.f64 %fd6, 0dBFE0000000000000, 0d3FE0000000000000, %p1;
+    add.f64 %fd7, %fd5, %fd6;
+    cvt.rzi.s64.f64 %rd3, %fd7;
+    mov.u64 %rd2, %rd3;
+    mov.u32 %r0, 1;
+    // [HEURISTIC] Branch Divergence Penalty is 4.53 cycles.
+    // if: emitting BRANCH execution (block cost 3 cy).
+    setp.eq.u32 %p2, %r0, 0;
+    @%p2 bra $IF_ELSE_0;
+    mov.u32 %r1, 10;
+    mov.u32 %r2, %r1;
+    mov.u32 %r3, 20;
+    mov.u32 %r4, %r3;
+    bra $IF_END_1;
+    $IF_ELSE_0:
+    mov.u32 %r5, 30;
+    mov.u32 %r6, %r5;
+    $IF_END_1:
+    cvt.rn.f64.s64 %fd8, %rd0;
+    div.rn.f64 %fd9, %fd8, 0d41F0000000000000;
+    cvt.rn.f32.f64 %f2, %fd9;
+    cvt.rn.f64.s64 %fd10, %rd2;
+    div.rn.f64 %fd11, %fd10, 0d41F0000000000000;
+    cvt.rn.f32.f64 %f3, %fd11;
+    mul.f32 %f4, %f2, %f3;
+    cvt.rzi.u32.f32 %r7, %f4;
+    // [BARRIER HOISTING] Found barrier stall of 205.25 cycles.
+    // [BARRIER HOISTING] Hoisted 2 independent ALU instructions into the shadow.
+    mov.u32 %r8, 10;
+    mov.u32 %r9, 20;
+    add.s32 %r10, %r8, %r9;
+    mov.u32 %r11, %r10;
+    mov.u32 %r12, 30;
+    mov.u32 %r13, 40;
+    mul.lo.s32 %r14, %r12, %r13;
+    mov.u32 %r15, %r14;
+    bar.sync 0;
+}

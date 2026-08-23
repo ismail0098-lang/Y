@@ -206,9 +206,20 @@ impl Requirement {
                     .split('.')
                     .filter_map(|p| p.parse::<u32>().ok())
                     .collect();
-                if digits.len() == 2 {
+                if digits.len() == 2 && digits[0] >= 1 {
+                    // `Q<i>.<f>` counts the SIGN BIT in `i`, so the magnitude
+                    // it can hold is 2^(i-1), not 2^i - which is exactly what
+                    // `DriftRepr::FixedQ32_32` provides (±2^31 in 64 bits).
+                    //
+                    // Asking for 2^i made every Q declaration unsatisfiable BY
+                    // ITS OWN REPRESENTATION, so `@ZeroDrift let acc: Q32.32`
+                    // was refused with a message advising the user to "declare
+                    // it as a Q format" - which they had. Off by one bit, and
+                    // it made the whole Q surface dead: no test built a
+                    // `Requirement` through this path, they all constructed the
+                    // struct directly.
                     Requirement {
-                        max_magnitude: 2f64.powi(digits[0] as i32),
+                        max_magnitude: 2f64.powi(digits[0] as i32 - 1),
                         resolution: Some(2f64.powi(-(digits[1] as i32))),
                     }
                 } else {

@@ -2,11 +2,11 @@
 kernel drift_demo() {
     // Q32.32 is natively supported by our simulated GPU profile
     @ZeroDrift
-    let acc: Q32.32 = Fragment::zero();
+    let acc: Q32.32 = 0.0;
 
     // F16 is not in the drift_free_types list, so it will trigger a warning
     @ZeroDrift
-    let fast_acc: F16 = Fragment::zero();
+    let fast_acc: F16 = 0.0;
 
     // Test heuristic branching vs predication
     if 1 {

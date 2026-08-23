@@ -480,3 +480,121 @@ fn the_llvm_backend_works_from_a_foreign_directory() {
         "the produced binary returned the wrong value"
     );
 }
+
+// ────────────────────────────────────────────────────────
+// The DRIVER floor, which is a separate axis from the arch
+// ────────────────────────────────────────────────────────
+
+/// The `.version` the EMITTER picks per architecture must be the real floor.
+///
+/// A module can be perfectly portable across cards and still refuse to load on
+/// a machine whose *driver* is older, with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`.
+/// `ptx_version_for_sm` used to declare **8.4 on sm_89** -- CUDA 12.4 -- for
+/// every kernel, because FP8 `mma.sync` needs it on that arch. Everything else
+/// needed 7.8 (CUDA 11.8): a whole major version of driver, for nothing. sm_86
+/// was 7.5 against a real 7.1.
+///
+/// **The floor is MEASURED here, not written down**, by bisecting `.version`
+/// under `ptxas -arch=<a>`, and the emitter's own choice is then compared to
+/// it. The first version of this test hardcoded the expected numbers in a
+/// table and so verified the table rather than the compiler -- reverting sm_86
+/// to 7.5 left it green. Found by mutation.
+#[test]
+fn the_emitter_declares_the_real_driver_floor() {
+    let Some(tool) = ptxas() else {
+        eprintln!("ptxas not found; skipping");
+        return;
+    };
+    // Ascending, so the first that assembles is the floor.
+    const CANDIDATES: [&str; 12] =
+        ["6.0", "6.2", "6.3", "6.5", "7.0", "7.1", "7.2", "7.3", "7.5", "7.8", "8.0", "8.7"];
+    let body = ".address_size 64\n.visible .entry k(){ .reg .b32 %r<2>; mov.u32 %r0, 1; ret; }\n";
+
+    for arch in ARCHES {
+        let floor = CANDIDATES
+            .iter()
+            .find(|v| {
+                let ptx = format!(".version {}\n.target {}\n{}", v, arch, body);
+                assembles(&tool, &ptx, arch, &format!("bisect_{}_{}", arch, v)).is_ok()
+            })
+            .unwrap_or_else(|| panic!("{}: no candidate .version assembles at all", arch));
+
+        let declared = emitted_version_for(arch);
+        assert_eq!(
+            &declared.as_str(),
+            floor,
+            "{}: the emitter declares .version {} but the measured floor is {}. \
+             Over-stating it makes every kernel need a newer CUDA driver than it uses; \
+             under-stating it makes the module fail to assemble.",
+            arch,
+            declared,
+            floor
+        );
+    }
+}
+
+/// Compile a trivial kernel with a hardware profile naming `arch`, and return
+/// the `.version` the emitter chose.
+///
+/// Driving the real binary is what makes the caller a test OF THE EMITTER
+/// rather than of a constant repeated in the test file.
+fn emitted_version_for(arch: &str) -> String {
+    let dir = std::env::temp_dir().join(format!(
+        "y_ptxver_{}_{}",
+        std::process::id(),
+        arch
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // `PtxEmitter::new_with_profile` builds its target as
+    // `sm_` + sm_version with the dot stripped, so "8.6" gives sm_86.
+    let sm = arch.trim_start_matches("sm_");
+    let dotted = format!("{}.{}", &sm[..sm.len() - 1], &sm[sm.len() - 1..]);
+    std::fs::write(
+        dir.join(".ysu_hw_profile"),
+        format!("SM_VERSION={}\nGPU_NAME=TestCard\nSM_COUNT=66\n", dotted),
+    )
+    .unwrap();
+
+    let src = dir.join("plain.ysu");
+    std::fs::write(&src, "kernel plain_add() {\n    let a: u32 = 1;\n    let b: u32 = a + 2;\n}\n")
+        .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src)
+        .arg("--emit-ptx")
+        .current_dir(&dir)
+        .output()
+        .expect("run Y");
+    let ptx = std::fs::read_to_string(dir.join("plain.ptx"))
+        .unwrap_or_else(|_| String::from_utf8_lossy(&out.stdout).to_string());
+    let target = declared_target(&ptx).unwrap_or_default();
+    assert_eq!(
+        target, arch,
+        "the profile asked for {} but the emitter targeted {} -- the probe is not \
+         measuring the arch it thinks it is",
+        arch, target
+    );
+    let v = declared_version(&ptx)
+        .unwrap_or_else(|| panic!("no .version line in the emitted PTX:\n{}", ptx));
+    let _ = std::fs::remove_dir_all(&dir);
+    v
+}
+
+/// A kernel with no FP8 in it must not inherit FP8's driver requirement.
+///
+/// The pair is the point. sm_89's floor is 7.8, and FP8 `mma.sync` needs 8.4 on
+/// the very same arch -- so the requirement belongs to the INSTRUCTION, not to
+/// the architecture, and `require_ptx_version` raises the module's floor only
+/// when the instruction is actually emitted.
+#[test]
+fn only_the_kernel_that_needs_a_newer_isa_declares_one() {
+    assert_eq!(
+        emitted_version_for("sm_89"),
+        "7.8",
+        "a kernel with no FP8 in it declared a version above sm_89's own floor of 7.8 \
+         (CUDA 11.8). 8.4 is CUDA 12.4 and is FP8 `mma.sync`'s requirement, not the \
+         architecture's."
+    );
+}
