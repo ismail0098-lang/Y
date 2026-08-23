@@ -389,7 +389,14 @@ impl<'a> Lowerer<'a> {
             args.push(self.eval_to_slot(a, &mut root)?);
         }
 
-        let inst_id = self.instantiate(&main.template, args, "main", main.pos)?;
+        // The prefix ends in a DOT, exactly as a nested component's does
+        // (`format!("{}{}.", f.prefix, name)`). It used to be bare `"main"`, so
+        // a top-level `signal input a` was named `maina` while a nested one was
+        // `mainc.x` - inconsistent with Y's own convention as well as with
+        // circom's, and the reason a circom `input.json` could not be read:
+        // `{"a": "5"}`, which circom's own witness calculator takes, was
+        // rejected with `input "maina" is missing`.
+        let inst_id = self.instantiate(&main.template, args, "main.", main.pos)?;
 
         // Public inputs are the ones `{public [...]}` names; everything else
         // declared `signal input` is private. Outputs are always public.
