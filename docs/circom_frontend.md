@@ -480,12 +480,14 @@ hermetic; `EdDSA`'s include chain is not, and is covered by
 
 ## Known gaps
 
-- **Input JSON does not accept arrays.** `mini_json::parse_scalar_map` is
-  scalar-only, but circom inputs are routinely `{"in": ["1", "2"]}`. The
-  `--witness` path therefore works only for scalar inputs today — which now
-  matters more, because both newly-supported circuits take array inputs.
-- **Input names carry the `main` prefix.** `signal input a` is keyed `maina`,
-  not `a`, so a circom `input.json` does not transfer as-is.
+- ~~Input JSON does not accept arrays~~ / ~~input names carry the `main`
+  prefix~~ — **both fixed.** `--witness` reads circom's own `input.json`
+  verbatim (bare names, arrays, nested arrays) and also accepts the
+  fully-qualified `main.a` spelling that appears in the `.sym`. The witness it
+  produces agrees with circom's own calculator element for element, and
+  `snarkjs wtns check` accepts the pair. Public inputs are bound too — they
+  were being solved at zero, which is the only one of the three that was not
+  fail-closed.
 - `Y_ZK_COMPACT=off` disables wire compaction. It is a differential baseline, not
   a safety valve — with it off, Y carries 1.49x *more* wires than circom on a
   200-hash Poseidon chain.
