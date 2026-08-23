@@ -162,6 +162,26 @@ fn as_u64s_or_big(v: &[Fr]) -> Vec<String> {
     v.iter().map(|f| f.to_decimal_string()).collect()
 }
 
+
+/// A descending loop must terminate - the same bug, and the one that blocks
+/// real circuits.
+///
+/// `for (var j = k-1; j >= 0; j--)` is how `circom-ecdsa` and `zk-email/rsa`
+/// walk a limb array. Under the canonical order `j--` past zero reaches `p-1`,
+/// which is `>= 0`, so the loop never ends: before the fix this hit the
+/// 20,000,000-iteration guard and the circuit could not be compiled at all.
+///
+/// Unlike the comparison case this one is fail-CLOSED - a non-terminating
+/// unroll is loud - which is why it is asserted separately. It is also the
+/// half with the larger consequence, so a regression here must not be able to
+/// hide behind the value assertions above.
+#[test]
+fn a_descending_loop_terminates_and_matches_circom() {
+    // circom 2.2.3 on the same source: out = 3210.
+    let got = as_u64s(&outputs_of("descending_loop.circom"));
+    assert_eq!(got, vec![3210], "descending loop did not produce circom's value");
+}
+
 // ────────────────────────────────────────────────────────
 // Scope: the signed rule is circom's, not Y's
 // ────────────────────────────────────────────────────────
