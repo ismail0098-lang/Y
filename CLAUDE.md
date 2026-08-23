@@ -29,7 +29,7 @@ The codebase consists of:
 - **LLVM Backend (Default)**: `cargo run -- tests/hello.ysu`
 - **Host CPU Backend** (prints a Rust/AVX blob, does not compile it): `cargo run -- tests/hello.ysu --emit-cpu`
 - **There is no C backend.** `--emit-c` / `--target=c` / `--c` all report that it was removed and exit 1. `src/c_emitter.rs` is an ORPHAN FILE - `mod c_emitter` appears in neither `lib.rs` nor `main.rs`, so it is not even compiled. Do not fix bugs in it; it has no consumer. (`--c` used to be *silently ignored*, so the command this line documented ran the LLVM backend instead.)
-- **PTX Emitter Backend**: `cargo run -- tests/test_drift.ysu --ptx`
+- **PTX Emitter Backend**: `cargo run -- tests/test_drift.ysu --emit-ptx` (this line said `--ptx`, which is not a flag; it was *silently ignored* and the command ran the LLVM backend — the same trap as `--c`, and unrecognised options are a hard error now)
 - **Paged Decode Attention**: `cargo run -- tests/paged_decode_attention_128_32_8_16.ysu --emit-ptx`
 - **Empirical GEMM Autotuning** (`@tile`d kernels, PTX backend):
   ```bash
