@@ -220,9 +220,9 @@ Y is at circom's default speed on Poseidon and 1.3–2.6x faster elsewhere,
 because its *simplification* is cheap — not its front end. circom `--O0` lowers
 Poseidon faster than Y does with reduction off (0.415 s vs 0.879 s).
 
-Still refused: `Sha256` and `EdDSA`. Both need the same thing — `var`s that
-hold signal-dependent values, so that a circom `function` can be evaluated at
-witness time. See [docs/circom_frontend.md](docs/circom_frontend.md#known-gaps).
+(That paragraph used to end "Still refused: `Sha256` and `EdDSA`", which had
+been true and stopped being true two sections earlier in the same file. Both
+compile.)
 
 **Read the geomean, not the best row.** Where Y wins it wins large — `Poseidon(2)`
 1.81x, `SMTProcessor` 1.71x, `SMTVerifier` 1.64x, `EscalarMul` 1.53x — but on
@@ -264,6 +264,44 @@ neither renumbers, which left Y at 153,605 wires against circom's 103,403 on thi
 circuit even while emitting 1.86x fewer constraints. Compacting takes that to
 55,611 — 1.86x fewer than circom on both axes — for ~1.6% of compile time, and
 shrinks the Groth16 proving key from **25.4 MB to 10.5 MB**.
+
+**Coverage on circuits people actually deploy, not just circomlib.** circomlib
+is a gadget library; the circuits above it are where a front end either works or
+does not:
+
+| suite | before | now |
+|---|---|---|
+| circomlib (31 gadgets) | 31/31 | 31/31 |
+| [circom-ecdsa](https://github.com/0xPARC/circom-ecdsa) (17 circuits) | **0/17** | **17/17** |
+| zk-email `RSAVerifier65537(121, 17)` | did not compile | 189,271 constraints vs circom's 190,945 (**0.991x**) |
+| zk-email `Sha256Bytes(64)` | did not compile | 32,334 vs 33,136 |
+| semaphore, rln, zk-kit, withdraw | did not compile | compile; sizes at or below circom `--O1` |
+
+**Almost every one of those was Y refusing a WITNESS-domain construct because
+the CONSTRAINT domain could not hold it** — `assert` over signals, over-quadratic
+arithmetic accumulated in a `var`, an unknown array index. None of them emits a
+constraint, so refusing them was over-strict rather than safe. The boundary is
+at the USE (`o <-- t[u]` is fine, `o <== t[u]` is not), and it was established by
+probing circom itself rather than read off the documentation.
+
+Two were not refusals at all. **circom compares `var`s as SIGNED and Y compared
+them canonically**, so `var a = 0 - 1; if (a < 1)` produced a circuit computing
+`111` under circom and `222` under Y — both valid, both provable, differing
+silently, and cross-compiler. The same bug's other face is that
+`for (var j = k-1; j >= 0; j--)` never terminates canonically, which is the shape
+`circom-ecdsa` and `zk-email/rsa` are built on. And **circom 2.1's anonymous
+components** (`Poseidon(2)([a,b])`, `(x, y) = BabyPbk()(s)`, `_` to discard) were
+genuinely missing; they are a desugaring, and the acceptance test is that
+`o <== T()(i)` emits **byte-identical** `.r1cs` to the explicit form — a property
+circom itself satisfies, checked before anything was written.
+
+**`--witness` reads circom's own `input.json`,** and the witness it produces
+agrees with circom's calculator element for element — verified further through
+`snarkjs wtns check` and a full `groth16 setup/prove/verify` on Y's artifacts.
+Three separate bugs had to be fixed for that, and only one was fail-closed: the
+public inputs were never bound, so every signal in a `{public [...]}` list was
+solved at **zero**. Y's own language has no `public` keyword, which is why
+nothing internal could see it.
 
 Detail, subset, and the constructs that are refused by name:
 [docs/circom_frontend.md](docs/circom_frontend.md).
@@ -726,6 +764,68 @@ successfully!", exited 0, and wrote a file `ptxas` rejects with five distinct
 errors. Both now refuse and fail the build. Prefer extending this gate to adding
 another substring assertion.
 
+### Portability: the artifact must not name the build machine
+
+A compiler that probes the local machine will bake that machine into its output
+unless something stops it. Y did, in seven places, and the failure is not subtle:
+a `.target` above the running device is a **hard load failure**
+(`CUDA_ERROR_NO_BINARY_FOR_GPU`) — the kernel does not run, on a machine nobody
+tested. PTX is forward compatible and never backward, so the correct target is
+the *lowest* architecture the instructions require. Guess down.
+
+**You can check this without owning the cards.** `ptxas -arch=sm_80|sm_86|sm_89|
+sm_120` assembles for architectures that are not plugged in, so "will this run on
+a 3060" is answerable locally — which is the whole reason `tests/ptx_portability.rs`
+exists. **93 of 97 committed `.ptx` files assembled at sm_80 unchanged**, so the
+over-specification was ~96% gratuitous.
+
+**`.version` is a separate requirement from `.target`: it is what the DRIVER must
+support**, and over-stating it makes a kernel unloadable on a machine whose driver
+is merely older (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`) — invisible to any assemble
+gate, because `ptxas` is perfectly happy to assemble an over-stated version. The
+floors are measured by bisecting `.version` under `ptxas -arch=<a>`, not read off
+a release table:
+
+```
+sm_75 6.3   sm_80 7.0   sm_86 7.1   sm_87 7.5   sm_89 7.8   sm_90 8.0   sm_120 8.7
+```
+
+Four of the seven were over-stated. sm_89 was **8.4** — a whole CUDA major — for
+every kernel, because FP8 `mma.sync` needs 8.4 *on that arch*. That is a
+**per-instruction** requirement and now lives on the module: a plain sm_89 kernel
+declares 7.8, an FP8 one raises the floor to 8.4 through `require_ptx_version`.
+sm_90 keeps 8.0 although `ptxas` 13.3 accepts 7.8, because sm_90 arrived in CUDA
+12.0 and this assembler is merely being lenient — guess down, but not below spec.
+
+**Fixing the artifacts is not fixing the compiler, and this took three passes to
+learn.** The first corrected the committed `.ptx` files; the emitter still
+over-stated. The second fixed the emitter; `--emit-coprocessor`, which builds its
+own module header rather than going through `emit_program`, still wrote
+`.version 8.0` by hand — over-stated on Ada, and **rejected outright by `ptxas`
+on Blackwell** while the backend printed "generated successfully!" and exited 0.
+The gate that should have caught it hardcoded `-arch=sm_89`, the one architecture
+where 8.0 is legal.
+
+There are therefore two source-level gates as well as the artifact ones: no source
+file may hardcode a `.target` above the floor, and none may hardcode a `.version`
+above it. A literal in a Rust format string cannot be prevented from coming back
+by assembling the current output.
+
+**The CPU side had the same bug and it was worse — a SIGILL rather than a load
+failure.** `CpuHardwareProfile::default()` guessed *up* (AVX-512 masking, 16
+floats) and `--emit-cpu` used that default as its only profile, so it emitted
+AVX-512 dispatch on every machine; most consumer Intel since Alder Lake has none.
+Meanwhile the real CPUID probe existed and **had zero callers**. Two more
+portability failures had nothing to do with hardware at all: `c_src/runtime.c` was
+a CWD-relative path, so the LLVM backend linked only from inside its own source
+tree, and `-lX11` was linked unconditionally, so a headless machine could not
+build any Y program.
+
+The one genuine hardware requirement **refuses** rather than emitting: FP8
+`e4m3` really is Ada and later, so below sm_89 it fails by name and points at the
+int8/f16 path. Asserted as a biconditional — "refuse FP8 always" satisfies half of
+it and deletes a working path on the hardware that has it.
+
 ---
 
 ## CPU: AVX-512 GEMM
@@ -1187,8 +1287,8 @@ throughout.
 | `--emit-ptx` | NVIDIA PTX | real |
 | `--emit-native` | standalone x86-64 ELF | **straight-line integer subset only**; refuses the rest by name |
 | `--emit-cpu` | prints Rust/AVX source **for you to paste** — Y never compiles it | real, but not a build step |
-| `--emit-attention-ptx <head_dim> <seq_len>` | the exact-attention kernel, to stdout | real |
-| `--emit-coprocessor` | RT + Tensor Core fused schedule | **a scheduling simulation** — see "What is real" |
+| `--emit-attention-ptx <head_dim> <seq_len>` | the exact-attention kernel, to stdout | real; both positional arguments are required and refused by name if absent |
+| `--emit-coprocessor` | RT + Tensor Core fused schedule | **a scheduling simulation** — see "What is real". It writes a complete module whose `.version`/`.target` are gated against the PTX backend's |
 | `--emit-c`, `--c`, `--target=c` | removed; reports so and exits 1 | gone |
 | `--target=r1cs` / `--emit-r1cs` | R1CS `.r1cs` / `.sym` / `.r1cs.txt` | real, needs `--features zk` |
 | `--witness <in.json>` | also solve and write `.wtns` (iden3 format) | real |
