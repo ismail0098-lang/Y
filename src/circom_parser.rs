@@ -578,6 +578,52 @@ impl Parser {
                 pos.line, pos.col
             ));
         }
+        // `signal (a, b[n]) <== T()(x);` -- circom 2.1 declares a tuple of
+        // signals and drives them in one statement. Exactly
+        // `signal a; signal b[n]; (a, b) <== T()(x);`, and circom's own two
+        // forms serialize to byte-identical `.r1cs`, so it is lowered as that
+        // desugaring rather than given a meaning of its own.
+        if matches!(self.peek(), Tok::LParen) {
+            self.bump();
+            let mut stmts = Vec::new();
+            let mut targets = Vec::new();
+            loop {
+                let n = self.ident()?;
+                let d = self.parse_dims()?;
+                // `_` discards an output; there is no signal to declare for it.
+                if n != "_" {
+                    stmts.push(Stmt::DeclSignal {
+                        kind,
+                        name: n.clone(),
+                        dims: d,
+                        init: None,
+                        pos,
+                    });
+                }
+                targets.push(Expr::Var(n, pos));
+                if self.eat(&Tok::Comma) {
+                    continue;
+                }
+                self.expect(&Tok::RParen, "`)` closing the signal tuple")?;
+                break;
+            }
+            let op = match self.peek() {
+                Tok::AssignConstrainL => AssignOp::SignalConstrain,
+                Tok::AssignL => AssignOp::SignalOnly,
+                other => {
+                    return Err(format!(
+                        "{}:{}: a `signal (a, b)` declaration must be driven immediately, \
+                         with `<==`; found {:?}",
+                        pos.line, pos.col, other
+                    ))
+                }
+            };
+            self.bump();
+            let rhs = self.parse_expr()?;
+            self.expect(&Tok::Semi, "`;` after the signal declaration")?;
+            stmts.push(Stmt::Substitution { lhs: Expr::Tuple(targets, pos), op, rhs, pos });
+            return Ok(Stmt::Seq(stmts, pos));
+        }
         let name = self.ident()?;
         let dims = self.parse_dims()?;
         let init = match self.peek().clone() {

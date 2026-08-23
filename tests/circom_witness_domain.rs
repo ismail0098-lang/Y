@@ -183,7 +183,14 @@ fn an_unknown_value_is_refused_wherever_the_circuit_depends_on_it() {
     for (name, site) in [
         ("opaque_into_constrain.circom", "`<==` constraint"),
         ("opaque_into_equality.circom", "`===` constraint"),
-        ("opaque_into_index.circom", "array indices"),
+        // `opaque_into_index.circom` used to live here. An unknown index into
+        // a `var` array is witness-domain now (circom accepts it too), so the
+        // program is still refused but at the `<==` rather than at the index.
+        // It is asserted in `circom_opaque_index_value.rs`, along with the two
+        // fixtures that DO gate the index site -- an lvalue and a component
+        // index, both of which decide which wires a constraint mentions.
+        ("opaque_index_into_lvalue.circom", "array indices"),
+        ("opaque_index_into_component.circom", "array indices"),
         ("opaque_into_dim.circom", "array dimensions"),
         ("opaque_into_template_arg.circom", "a template argument"),
     ] {

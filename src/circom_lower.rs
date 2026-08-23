@@ -1417,27 +1417,93 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Split `a[i][j]` into the base name and the evaluated indices.
-    fn split_indices(&mut self, e: &Expr, f: &mut Frame) -> LResult<(Expr, Vec<usize>)> {
+    /// Split `a[i][j]` into its base and its indices, reporting rather than
+    /// refusing an index that cannot be evaluated.
+    ///
+    /// **An unknown index is an error in the CONSTRAINT domain and ordinary in
+    /// the WITNESS domain**, which is the same split `Val::Opaque` already
+    /// makes everywhere else. Which wire a constraint mentions may not depend
+    /// on a witness value, so `split_indices` (below) refuses for the three
+    /// callers that resolve signals and components. But a `var` array read or
+    /// written at an unknown index is just a value the compiler cannot
+    /// compute, and `require_known` refuses it at the point of use.
+    ///
+    /// The motivating case is zk-email's `long_div` in `bigint-func.circom`:
+    ///
+    /// ```text
+    /// while (b[k-1] == 0) { out[1][k] = 0; k--; assert(k > 0); }
+    /// ...
+    /// out[1][k] = 0;
+    /// ```
+    ///
+    /// `b` is signal-derived, so the loop is havoc'd and `k` becomes unknown -
+    /// and `k` is then an index. circom's calculator runs this at WITNESS time
+    /// with concrete values; Y evaluates symbolically at compile time and
+    /// cannot. The result only ever reaches a `<--`, so the `.r1cs` is
+    /// identical either way.
+    ///
+    /// When the third element is `Some(id)` the indices are meaningless and
+    /// the caller must use the id, not them.
+    fn split_indices_opt(
+        &mut self,
+        e: &Expr,
+        f: &mut Frame,
+    ) -> LResult<(Expr, Vec<usize>, Option<u32>)> {
         match e {
             Expr::Index(base, idx, pos) => {
-                let (b, mut idxs) = self.split_indices(base, f)?;
+                let (b, mut idxs, opaque) = self.split_indices_opt(base, f)?;
+                if opaque.is_some() {
+                    return Ok((b, idxs, opaque));
+                }
                 let v = self.eval_expr(idx, f)?;
-                let c = v.as_const().ok_or_else(|| {
-                    err(
-                        *pos,
-                        format!(
-                            "array indices must be known at compile time; a signal-dependent \
-                             index needs an explicit multiplexer{}",
-                            self.why_unknown(&v)
-                        ),
-                    )
-                })?;
+                let Some(c) = v.as_const() else {
+                    // Carry the id so the eventual message names where the
+                    // value became unknown, not where it was finally indexed.
+                    let id = v.opaque_id().unwrap_or_else(|| {
+                        self.opaque_reasons.push(err(*pos, "an array index that is not a compile-time value"));
+                        (self.opaque_reasons.len() - 1) as u32
+                    });
+                    return Ok((b, idxs, Some(id)));
+                };
                 let n = c.to_u64().ok_or_else(|| err(*pos, "array index does not fit in 64 bits"))?;
                 idxs.push(n as usize);
-                Ok((b, idxs))
+                Ok((b, idxs, None))
             }
-            other => Ok((other.clone(), Vec::new())),
+            other => Ok((other.clone(), Vec::new(), None)),
         }
+    }
+
+    /// Is `base` something that can be indexed at all?
+    ///
+    /// Consulted only when the INDEX is unknown, to keep a genuine typo -
+    /// `nonexistent[k]` - an error rather than absorbing it into the opaque
+    /// value. A component member is accepted without resolving the component,
+    /// because resolving it can itself fail for reasons this arm should not
+    /// pre-empt; the value is opaque either way.
+    fn indexable_base(base: &Expr, f: &Frame) -> bool {
+        match base {
+            Expr::Var(name, _) => f.lookup_var(name).is_some() || f.signals.contains_key(name),
+            Expr::Member(..) => true,
+            _ => false,
+        }
+    }
+
+    /// `split_indices_opt` for the constraint domain: an index that is not a
+    /// compile-time value is refused by name.
+    fn split_indices(&mut self, e: &Expr, f: &mut Frame) -> LResult<(Expr, Vec<usize>)> {
+        let pos = e.pos();
+        let (b, idxs, opaque) = self.split_indices_opt(e, f)?;
+        if let Some(id) = opaque {
+            return Err(err(
+                pos,
+                format!(
+                    "array indices must be known at compile time; a signal-dependent \
+                     index needs an explicit multiplexer (this value became unknown at {})",
+                    self.opaque_reasons[id as usize]
+                ),
+            ));
+        }
+        Ok((b, idxs))
     }
 
     /// Indexing an UNKNOWN yields an unknown.
@@ -1785,12 +1851,21 @@ impl<'a> Lowerer<'a> {
     }
 
     fn assign_var(&mut self, lhs: &Expr, v: VarSlot, f: &mut Frame, pos: Pos) -> LResult<()> {
-        let (base, idxs) = self.split_indices(lhs, f)?;
+        let (base, idxs, opaque) = self.split_indices_opt(lhs, f)?;
         // `c[i] = T(...)` assigns into a component array.
         if let Expr::Var(name, _) = &base {
             let slot = f
                 .lookup_var_mut(name)
                 .ok_or_else(|| err(pos, format!("`{}` is not a variable in scope", name)))?;
+            // Storing at an index the compiler cannot evaluate: some element
+            // changed and there is no way to say which, so the WHOLE array
+            // becomes unknown. Over-approximating in this direction is the
+            // safe one - it can only make more values opaque, and an opaque
+            // value is refused at every site that emits a constraint.
+            if let Some(id) = opaque {
+                Self::blank_slot(slot, id);
+                return Ok(());
+            }
             return Self::store_slot(slot, &idxs, v, pos);
         }
         Err(err(pos, "left-hand side of `=` must be a variable"))
@@ -1863,7 +1938,19 @@ impl<'a> Lowerer<'a> {
             }
             Expr::Index(..) => {
                 // Could be a whole sub-array of a var or of a signal.
-                let (base, idxs) = self.split_indices(e, f)?;
+                let (base, idxs, opaque) = self.split_indices_opt(e, f)?;
+                // An unknown index over a KNOWN array yields an unknown value,
+                // the same rule `opaque_through_index` applies to an unknown
+                // BASE. The base is still resolved, so `nonexistent[k]` stays
+                // an error rather than being absorbed.
+                if let Some(id) = opaque {
+                    if Self::indexable_base(&base, f) {
+                        return Ok(Slot::Leaf(Val::Opaque(id)));
+                    }
+                    // Not indexable at all - a typo, not a witness value. Fall
+                    // through so the BASE's own error is reported ("`nope` is
+                    // not defined") rather than one about the index.
+                }
                 if let Expr::Var(name, _) = &base {
                     if let Some(slot) = f.lookup_var(name) {
                         if let Some(id) = Self::opaque_through_index(slot, &idxs) {
@@ -2004,8 +2091,14 @@ impl<'a> Lowerer<'a> {
             }
 
             Expr::Index(..) => {
-                let (base, idxs) = self.split_indices(e, f)?;
+                let (base, idxs, opaque) = self.split_indices_opt(e, f)?;
                 let pos = e.pos();
+                if let Some(id) = opaque {
+                    if Self::indexable_base(&base, f) {
+                        return Ok(Val::Opaque(id));
+                    }
+                    // See `eval_to_slot`: report the base, not the index.
+                }
                 if let Expr::Var(name, _) = &base {
                     if let Some(slot) = f.lookup_var(name) {
                         if let Some(id) = Self::opaque_through_index(slot, &idxs) {
