@@ -457,11 +457,22 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let profile_path = ".ysu_hw_profile";
 
     if Path::new(profile_path).exists() {
-        println!(
-            "[*] Found existing {}, skipping Sentinel Probe.",
-            profile_path
-        );
         let contents = fs::read_to_string(profile_path).unwrap_or_default();
+        // Name the CARD, not just the file. The profile fixes the `.target` of
+        // every kernel emitted from here, and a `.target` above the device that
+        // is actually installed is a hard load failure, not a slowdown - so a
+        // stale profile from a previous card is invisible until a kernel
+        // refuses to launch. This line is what makes it visible; nothing here
+        // queries the driver, because that would cost every CPU-only compile.
+        // If it names a card you are not on, delete the file.
+        println!(
+            "[*] Found existing {}, skipping Sentinel Probe (assuming {} / {}).",
+            profile_path,
+            parse_profile_value(&contents, "GPU_NAME").unwrap_or("unknown GPU"),
+            parse_profile_value(&contents, "SM_VERSION")
+                .map(|v| if v.starts_with("sm_") { v.to_string() } else { format!("sm_{}", v.replace('.', "")) })
+                .unwrap_or_else(|| "unknown arch".to_string()),
+        );
 
         // Parse drift free types list (comma separated)
         let drift_types_str = parse_profile_value(&contents, "DRIFT_FREE_TYPES").unwrap_or("");

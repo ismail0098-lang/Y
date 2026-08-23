@@ -620,7 +620,10 @@ pub fn accumulate_probe_ptx(repr: DriftRepr, iters: u32) -> String {
     // Loads the seed from [out] and stores the result to [out+8], so the seed
     // stays fixed across launches instead of drifting to infinity.
     format!(
-        ".version 7.8\n.target sm_89\n.address_size 64\n\
+        // sm_80, NOT sm_89 - this probe uses nothing newer than Ampere, and a
+        // `.target` above the device is a hard load failure. It is JIT'd for
+        // whatever card is present, so the measurement is still that card's.
+        ".version 7.0\n.target sm_80\n.address_size 64\n\
          .visible .entry drift_probe(.param .u64 out)\n{{\n\
          \x20   .reg .{ty} {acc};\n\
          \x20   .reg .{ty} {step};\n\
@@ -983,7 +986,9 @@ mod tests {
     fn probe_ptx_has_the_requested_chain_length() {
         let ptx = accumulate_probe_ptx(DriftRepr::FixedQ32_32, 16);
         assert_eq!(ptx.matches("add.s64").count(), 16);
-        assert!(ptx.contains(".target sm_89"));
+        // sm_80, deliberately: see `accumulate_probe_ptx`. Targeting the
+        // local card's arch would make the probe unloadable on any older one.
+        assert!(ptx.contains(".target sm_80"));
         let ptx32 = accumulate_probe_ptx(DriftRepr::FixedQ16_16, 8);
         assert_eq!(ptx32.matches("add.s32").count(), 8);
     }

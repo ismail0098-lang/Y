@@ -73,7 +73,15 @@ pub fn attention_ptx(head_dim: usize, seq_len: usize) -> Result<String, String> 
         .replace("$D", &head_dim.to_string())
         .replace("$S", &seq_len.to_string());
     Ok(format!(
-        ".version 7.8\n.target sm_89\n.address_size 64\n{}{}",
+        // sm_80, NOT sm_89. This kernel uses nothing newer than Ampere -
+        // verified by assembling it at every target in
+        // `tests/ptx_portability.rs`. It said sm_89 for no reason, and a
+        // `.target` ABOVE the device is a hard load failure ("SM version
+        // specified by .target is higher than default SM version assumed"),
+        // so that one token locked the exact-attention path out of every
+        // Ampere card: 3060, 3090, A100. PTX is forward compatible, so
+        // sm_80 still runs on Ada and Blackwell.
+        ".version 7.0\n.target sm_80\n.address_size 64\n{}{}",
         ptx_device_function(),
         body
     ))
