@@ -63,6 +63,9 @@ pub enum Tok {
     MinusAssign,
     StarAssign,
     SlashAssign,
+    /// `\=` — compound integer division. circom's `\` is quotient, distinct
+    /// from `/`, which is field division by the modular inverse.
+    IntDivAssign,
     PercentAssign,
     PowAssign,
     ShlAssign,
@@ -315,6 +318,7 @@ impl<'a> Lexer<'a> {
             (b"-=", Tok::MinusAssign),
             (b"*=", Tok::StarAssign),
             (b"/=", Tok::SlashAssign),
+            (b"\\=", Tok::IntDivAssign),
             (b"%=", Tok::PercentAssign),
             (b"&=", Tok::AndAssign),
             (b"|=", Tok::OrAssign),

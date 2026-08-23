@@ -86,6 +86,28 @@ pub enum Expr {
     ArrayInline(Vec<Expr>, Pos),
     /// `T(args)` on the right of a `component` declaration.
     TemplateInst(String, Vec<Expr>, Pos),
+    /// `T(targs)(in1, in2)` — a circom 2.1 anonymous component.
+    ///
+    /// Written in expression position, but circom does NOT let it appear
+    /// inside arithmetic: `o <== One()(i) + 3` is refused with "This is the
+    /// anonymous component whose use is not allowed". The only legal positions
+    /// are the entire right-hand side of a substitution and an argument of
+    /// another anonymous component, so the lowering handles it at those two
+    /// sites and `eval_expr` refuses it everywhere else, matching circom.
+    ///
+    /// An input is `(None, expr)` when passed positionally and
+    /// `(Some(name), expr)` for circom's `T()(a <== x)` form. circom requires
+    /// the count to coincide with the template's inputs either way.
+    AnonComp {
+        template: String,
+        targs: Vec<Expr>,
+        inputs: Vec<(Option<String>, Expr)>,
+        pos: Pos,
+    },
+    /// `(a, b)` on the left of a substitution — circom 2.1 tuple destructuring
+    /// of an anonymous component's outputs. Legal nowhere else, and refused by
+    /// name if it turns up in a value position.
+    Tuple(Vec<Expr>, Pos),
 }
 
 impl Expr {
@@ -100,7 +122,9 @@ impl Expr {
             | Expr::Ternary(_, _, _, p)
             | Expr::Call(_, _, p)
             | Expr::ArrayInline(_, p)
-            | Expr::TemplateInst(_, _, p) => *p,
+            | Expr::TemplateInst(_, _, p)
+            | Expr::AnonComp { pos: p, .. }
+            | Expr::Tuple(_, p) => *p,
         }
     }
 }
@@ -108,6 +132,14 @@ impl Expr {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stmt {
     Block(Vec<Stmt>, Pos),
+    /// Several statements that are NOT a new scope.
+    ///
+    /// `var a, b;` and `signal x, y;` each parse to more than one declaration,
+    /// and putting them in a `Block` made them declare into a scope that was
+    /// popped on the way out - so `var a, b; a = 1;` reported "`a` is not a
+    /// variable in scope". Signals happened to survive because `Frame::signals`
+    /// is not scoped; vars did not.
+    Seq(Vec<Stmt>, Pos),
     /// `signal input in[3];`
     DeclSignal {
         kind: SignalKind,
