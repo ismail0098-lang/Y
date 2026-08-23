@@ -9,7 +9,16 @@ use std::time::Instant;
 
 #[test]
 fn test_cpu_specializer_all_five_regimes_dispatch() {
-    let profile = CpuHardwareProfile::default();
+    // AVX-512 named explicitly. The `IrregularMasked` regime is gated on
+    // `supports_avx512_masking`, and `CpuHardwareProfile::default()` is now
+    // AVX2 - it used to assume AVX-512, which is guessing UP at an ISA whose
+    // absence is a SIGILL. This test is about the five regimes, so it states
+    // the machine that has all five rather than inheriting one.
+    let profile = CpuHardwareProfile {
+        simd_vector_width_floats: 16,
+        supports_avx512_masking: true,
+        ..CpuHardwareProfile::default()
+    };
     let dispatcher = CpuShapeDispatcher::new(profile);
 
     // 1. SmallDirect regime

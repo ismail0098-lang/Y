@@ -47,8 +47,17 @@ impl Default for CpuHardwareProfile {
             l1d_bytes: 32 * 1024,      // 32 KB default L1d
             l2_bytes: 512 * 1024,     // 512 KB default L2
             l3_bytes: 16 * 1024 * 1024,// 16 MB default L3
-            simd_vector_width_floats: 16, // AVX-512 baseline
-            supports_avx512_masking: true,
+            // AVX2, NOT AVX-512. This defaulted to 16 floats and
+            // `masking: true`, i.e. it assumed the WIDEST ISA when it knew
+            // nothing - and an AVX-512 instruction on a CPU without it is
+            // SIGILL, not a slowdown. Most consumer Intel since Alder Lake and
+            // everything before Skylake-X lacks it. Guess DOWN: AVX2 runs
+            // everywhere AVX-512 does, and the reverse is a crash.
+            //
+            // Callers that can probe should, rather than relying on this -
+            // `sentinel::probe_cpu_hardware_profile()` reads CPUID.
+            simd_vector_width_floats: 8,
+            supports_avx512_masking: false,
             logical_cores: 8,
         }
     }
@@ -120,12 +129,40 @@ mod tests {
         assert_eq!(dispatcher.classify_shape(64, 64, 32768, 4), CpuMatrixRegime::DeepK);
     }
 
+    /// The masked regime is AVX-512-ONLY by construction (`classify_shape`
+    /// gates it on `supports_avx512_masking`), so the profile has to say so.
+    /// This used to rely on `Default`, which assumed AVX-512 - hiding both
+    /// that the regime needs it and that the default was guessing UP at an
+    /// ISA whose absence is a SIGILL rather than a slowdown.
     #[test]
     fn test_classify_irregular_masked() {
-        let profile = CpuHardwareProfile::default();
+        let profile = CpuHardwareProfile {
+            simd_vector_width_floats: 16,
+            supports_avx512_masking: true,
+            ..CpuHardwareProfile::default()
+        };
         let dispatcher = CpuShapeDispatcher::new(profile);
         // M=137, N=391, K=1013 (Non-divisible by 16)
         assert_eq!(dispatcher.classify_shape(137, 391, 1013, 4), CpuMatrixRegime::IrregularMasked);
+    }
+
+    /// The control: on a CPU WITHOUT AVX-512 the same shape must not be
+    /// classified into a regime that needs it. Otherwise the guess-down
+    /// default would just be routed around.
+    #[test]
+    fn irregular_shapes_do_not_take_the_masked_path_without_avx512() {
+        let profile = CpuHardwareProfile {
+            simd_vector_width_floats: 8,
+            supports_avx512_masking: false,
+            ..CpuHardwareProfile::default()
+        };
+        let dispatcher = CpuShapeDispatcher::new(profile);
+        assert_ne!(
+            dispatcher.classify_shape(137, 391, 1013, 4),
+            CpuMatrixRegime::IrregularMasked,
+            "an AVX-512 masking regime was selected for a CPU without AVX-512; \
+             the emitted kernel would SIGILL rather than run slowly"
+        );
     }
 
     #[test]

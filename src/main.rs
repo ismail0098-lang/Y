@@ -1478,10 +1478,42 @@ fn main() {
         }
 
         println!("      -> Invoking clang compilation...");
-        let runtime_path = "c_src/runtime.c";
-        let clang_result = std::process::Command::new("clang")
-            .args(&["-O2", "-o", &output_path, &ll_path, runtime_path, "-lm", "-lX11"])
+
+        // `c_src/runtime.c` used to be a bare CWD-relative path, so the LLVM
+        // backend only worked when Y was invoked from its own source tree:
+        // anywhere else clang reported `no such file or directory:
+        // 'c_src/runtime.c'`, which reads as a broken install rather than a
+        // wrong working directory. Search the CWD, then the directory the
+        // compiler binary lives in and its ancestors (target/release/Y ->
+        // repo root), and let `Y_RUNTIME_C` override.
+        let runtime_path = match find_runtime_c() {
+            Some(p) => p,
+            None => {
+                log_error!("could not find the Y runtime (`c_src/runtime.c`).");
+                eprintln!("    Searched $Y_RUNTIME_C, ./c_src/runtime.c, and the");
+                eprintln!("    compiler's own directory upwards. Set Y_RUNTIME_C to its path.");
+                exit(1);
+            }
+        };
+
+        // `-lX11` is needed ONLY by the optional GUI surface, and linking it
+        // unconditionally made every headless machine - CI, containers, a
+        // server without libX11 - unable to compile any Y program at all.
+        // Try with it, and if the LIBRARY is what is missing, link without.
+        let base = ["-O2", "-o", output_path.as_str(), ll_path.as_str(), runtime_path.as_str(), "-lm"];
+        let with_x11 = std::process::Command::new("clang")
+            .args(base)
+            .arg("-lX11")
             .output();
+        let clang_result = match with_x11 {
+            Ok(o) if !o.status.success()
+                && String::from_utf8_lossy(&o.stderr).contains("-lX11") =>
+            {
+                println!("      -> libX11 not present; linking without it (GUI calls will not resolve).");
+                std::process::Command::new("clang").args(base).output()
+            }
+            other => other,
+        };
 
         match clang_result {
             Ok(output) => {
@@ -1508,3 +1540,29 @@ fn main() {
     println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
 }
 
+/// Locate `c_src/runtime.c` without assuming the working directory.
+///
+/// Order: `$Y_RUNTIME_C`, then `./c_src/runtime.c`, then `c_src/runtime.c`
+/// relative to each ancestor of the compiler binary's own directory - which
+/// covers the ordinary `target/release/Y` layout from any CWD.
+fn find_runtime_c() -> Option<String> {
+    if let Ok(p) = std::env::var("Y_RUNTIME_C") {
+        if std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    let rel = std::path::Path::new("c_src").join("runtime.c");
+    if rel.exists() {
+        return Some(rel.to_string_lossy().into_owned());
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent();
+    while let Some(d) = dir {
+        let cand = d.join("c_src").join("runtime.c");
+        if cand.exists() {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+        dir = d.parent();
+    }
+    None
+}

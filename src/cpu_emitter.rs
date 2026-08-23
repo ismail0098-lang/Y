@@ -599,8 +599,14 @@ impl CpuEmitter {
 
     /// Emits CPU shape-adapted kernel dispatch scaffolding into host buffer.
     pub fn emit_specialized_cpu_kernel_dispatch(&mut self, kernel_name: &str, m: usize, n: usize, k: usize) {
-        use crate::cpu_specializer::{CpuHardwareProfile, CpuShapeDispatcher, CpuMatrixRegime};
-        let dispatcher = CpuShapeDispatcher::new(CpuHardwareProfile::default());
+        use crate::cpu_specializer::{CpuShapeDispatcher, CpuMatrixRegime};
+        // The REAL host, not `CpuHardwareProfile::default()`. The default
+        // assumed AVX-512 and this was the only caller, so `--emit-cpu`
+        // emitted AVX-512 dispatch on every machine including those that would
+        // SIGILL on it. `probe_cpu_hardware_profile` reads CPUID and existed
+        // the whole time with no callers.
+        let dispatcher =
+            CpuShapeDispatcher::new(crate::sentinel::probe_cpu_hardware_profile());
         let regime = dispatcher.classify_shape(m, n, k, 4);
 
         writeln!(

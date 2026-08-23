@@ -53,6 +53,21 @@ const FLOOR: &str = "sm_80";
 /// 3060, sm_89 the 4070 Ti SUPER this was developed on, sm_120 Blackwell.
 const ARCHES: [&str; 4] = ["sm_80", "sm_86", "sm_89", "sm_120"];
 
+/// The PTX ISA version shipped artifacts declare.
+///
+/// `.version` is a DRIVER requirement and is independent of `.target`: 8.4
+/// needs CUDA 12.4 or newer, 7.0 needs 11.0. A module can therefore be
+/// perfectly portable across architectures and still refuse to load on a
+/// machine with an older driver, which is the same failure wearing a different
+/// hat. The shipped kernels were 8.4 and needed nothing above 7.0.
+const VERSION_FLOOR: &str = "7.0";
+
+fn declared_version(ptx: &str) -> Option<String> {
+    ptx.lines()
+        .find(|l| l.trim_start().starts_with(".version"))
+        .map(|l| l.trim().trim_start_matches(".version").trim().to_string())
+}
+
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -138,6 +153,16 @@ fn every_shipped_kernel_loads_on_every_supported_card() {
                 name, t, FLOOR
             )),
             None => bad.push(format!("  {} declares no .target at all", name)),
+        }
+        // Independent of the target: `.version` gates the DRIVER.
+        match declared_version(&ptx) {
+            Some(v) if v == VERSION_FLOOR => {}
+            Some(v) => bad.push(format!(
+                "  {} declares .version {} - above the {} floor, so it needs a newer CUDA \
+                 driver than it has any reason to",
+                name, v, VERSION_FLOOR
+            )),
+            None => bad.push(format!("  {} declares no .version at all", name)),
         }
         for arch in ARCHES {
             if let Err(e) = assembles(&tool, &ptx, arch, &name) {
@@ -393,4 +418,65 @@ fn fp8_refuses_below_ada_and_still_works_on_it() {
             );
         }
     }
+}
+
+// ────────────────────────────────────────────────────────
+// Portability that is not about the GPU at all
+// ────────────────────────────────────────────────────────
+
+/// The compiler must work from a directory that is not its own source tree.
+///
+/// The LLVM backend passed `c_src/runtime.c` to clang as a bare CWD-relative
+/// path, so it linked only when Y was invoked from inside the repo. Anywhere
+/// else clang reported `no such file or directory: 'c_src/runtime.c'`, which
+/// reads as a broken install rather than a wrong working directory - and is
+/// exactly the "works on the author's machine" shape this file exists for.
+///
+/// `-lX11` was also linked unconditionally, so any headless machine without
+/// libX11 could not build a Y program at all. It is needed only by the
+/// optional GUI surface and is now dropped when the library is absent.
+#[test]
+fn the_llvm_backend_works_from_a_foreign_directory() {
+    if Command::new("clang").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("SKIP: no clang");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("y_foreign_cwd_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Carry the hardware profile so this does not trigger a GPU probe.
+    let prof = repo().join(".ysu_hw_profile");
+    if prof.exists() {
+        let _ = std::fs::copy(&prof, dir.join(".ysu_hw_profile"));
+    }
+    let src = dir.join("foreign.ysu");
+    std::fs::write(&src, "fn main() -> I32 { let a: I32 = 9; let b: I32 = 2; return a - b; }\n")
+        .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src)
+        .current_dir(&dir)
+        .output()
+        .expect("run Y");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "compiling from a directory outside the repo failed:\n{}",
+        text
+    );
+
+    // ...and the binary it produced must actually run. "clang exited 0" is not
+    // the claim; a linked executable that computes 9 - 2 is.
+    let bin = dir.join("foreign");
+    assert!(bin.exists(), "no binary was produced:\n{}", text);
+    let run = Command::new(&bin).output().expect("run the produced binary");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        run.status.code(),
+        Some(7),
+        "the produced binary returned the wrong value"
+    );
 }
