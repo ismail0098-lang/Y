@@ -1275,6 +1275,38 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Indexing an UNKNOWN yields an unknown.
+    ///
+    /// A `function` whose branch depends on a signal value is havoc'd, and a
+    /// `return` inside a skipped branch makes it return `Val::Opaque` - a
+    /// SCALAR - where the caller declared an array. Indexing that is not the
+    /// user error "too many indices"; it is the opaque value propagating,
+    /// exactly as it already does through `add_vals` and `mul_vals`.
+    ///
+    /// circom-ecdsa's `secp256k1_addunequal_func` is the motivating case:
+    /// `mod_inv` over signal-derived values cannot be evaluated, so the whole
+    /// function comes back opaque and every `out[0][i]` below it looked like a
+    /// mis-indexed scalar.
+    ///
+    /// Sound for the same reason the rest of the opaque model is: the value
+    /// may only reach a site that emits no constraint, and `require_known`
+    /// refuses it everywhere else.
+    ///
+    /// Returns the id when the walk meets an opaque leaf before the indices
+    /// are exhausted. `None` covers the ordinary walk AND a genuine
+    /// too-many-indices, which the caller still reports as before.
+    fn opaque_through_index(slot: &VarSlot, idxs: &[usize]) -> Option<u32> {
+        let mut cur = slot;
+        for i in idxs {
+            match cur {
+                Slot::Leaf(Val::Opaque(id)) => return Some(*id),
+                Slot::Leaf(_) => return None,
+                Slot::Array(items) => cur = items.get(*i)?,
+            }
+        }
+        None
+    }
+
     fn index_slot<'s, T>(slot: &'s Slot<T>, idxs: &[usize], pos: Pos) -> LResult<&'s Slot<T>> {
         let mut cur = slot;
         for (d, i) in idxs.iter().enumerate() {
@@ -1475,6 +1507,9 @@ impl<'a> Lowerer<'a> {
                 let (base, idxs) = self.split_indices(e, f)?;
                 if let Expr::Var(name, _) = &base {
                     if let Some(slot) = f.lookup_var(name) {
+                        if let Some(id) = Self::opaque_through_index(slot, &idxs) {
+                            return Ok(Slot::Leaf(Val::Opaque(id)));
+                        }
                         let sub = Self::index_slot(slot, &idxs, e.pos())?;
                         return Ok(sub.clone());
                     }
@@ -1614,6 +1649,9 @@ impl<'a> Lowerer<'a> {
                 let pos = e.pos();
                 if let Expr::Var(name, _) = &base {
                     if let Some(slot) = f.lookup_var(name) {
+                        if let Some(id) = Self::opaque_through_index(slot, &idxs) {
+                            return Ok(Val::Opaque(id));
+                        }
                         return Ok(Self::index_slot(slot, &idxs, pos)?.leaf(pos, name)?.clone());
                     }
                     if let Some(slot) = f.signals.get(name) {
