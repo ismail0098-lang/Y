@@ -1775,9 +1775,11 @@ impl<'a> Lowerer<'a> {
                     0 => Ok(Val::Const(Fr::one())),
                     1 => Ok(a),
                     2 => self.mul_vals(a.clone(), a, pos),
-                    _ => Err(err(
+                    // Same as the degree>2 product: witness-domain, refused at
+                    // the point of use rather than here.
+                    _ => Ok(self.opaque(
                         pos,
-                        format!("non-quadratic: a signal raised to the power {} exceeds degree 2; introduce intermediate signals", n),
+                        format!("a signal raised to the power {} exceeds degree 2", n),
                     )),
                 }
             }
@@ -1878,10 +1880,22 @@ impl<'a> Lowerer<'a> {
             (Val::Quad(qa, qb, qc), other) | (other, Val::Quad(qa, qb, qc)) => {
                 let mut c = qc;
                 if !other.add_into(&mut c, Fr::one()) {
-                    return Err(err(
+                    // WITNESS-domain, not an error. The value exceeds what one
+                    // R1CS constraint can hold, so it cannot appear IN one -
+                    // but circom `var`s routinely accumulate such sums as
+                    // advice that only ever reaches a `<--`. `BigMult` is the
+                    // canonical case: `prod_val[i+j] += a[i] * b[j]` builds a
+                    // full polynomial product, feeds it to `out[i] <-- ...`,
+                    // and binds `out` with its own `===` identity below.
+                    //
+                    // Refusing here refused the arithmetic; the refusal belongs
+                    // at the point of USE, where `require_known` already names
+                    // both the site and this reason. Same correction as
+                    // `assert` over signals, one layer down.
+                    return Ok(self.opaque(
                         pos,
-                        "non-quadratic: the sum of two quadratic expressions exceeds what one R1CS \
-                         constraint can hold. Assign one to an intermediate signal first.",
+                        "the sum of two quadratic expressions exceeds what one R1CS constraint \
+                         can hold",
                     ));
                 }
                 c.simplify();
@@ -1922,14 +1936,14 @@ impl<'a> Lowerer<'a> {
                 }
             }
             (Val::Lin(x), Val::Lin(y)) => Val::Quad(x, y, LinearCombination::zero()),
-            _ => {
-                return Err(err(
-                    pos,
-                    "non-quadratic: this product has degree greater than 2, which no single R1CS \
-                     constraint can express. Assign the inner product to a signal first \
-                     (`signal t; t <== a * b; ... t * c ...`).",
-                ))
-            }
+            // Degree > 2. Witness-domain for the same reason as the sum above:
+            // it cannot appear in a constraint, and the check that refuses it
+            // there is `require_known`, which names this reason.
+            _ => self.opaque(
+                pos,
+                "this product has degree greater than 2, which no single R1CS constraint can \
+                 express",
+            ),
         })
     }
 }
