@@ -7,12 +7,19 @@
 //! most-used circuits in the ecosystem: `Sha256` and `EdDSA`.
 //!
 //! They are now carried as `Val::Opaque`, and the rule that makes that safe is
-//! that an opaque value may **only** reach a `<--`. `<--` emits no constraint,
-//! so the `.r1cs` is exactly what a compiler that *could* evaluate the
-//! expression would emit; everywhere else - `<==`, `===`, an array index, an
-//! array dimension, a template argument, an `assert` - it is refused, and the
-//! refusal names the position where the value first became unknown rather than
-//! the position where it was finally used.
+//! that an opaque value may only reach a site that emits NO CONSTRAINT. There
+//! are two such sites: `<--`, and `assert`. For both, the `.r1cs` is exactly
+//! what a compiler that *could* evaluate the expression would emit, because
+//! evaluating it would emit nothing either way. Everywhere else - `<==`, `===`,
+//! an array index, an array dimension, a template argument - it is refused, and
+//! the refusal names the position where the value first became unknown rather
+//! than the position where it was finally used.
+//!
+//! `assert` was in the refusal list until 2026-08-23, on the stated premise
+//! that it "is a constraint on the witness". That premise was false and is now
+//! measured: circom emits ZERO constraints for an `assert` over a signal. See
+//! `tests/circom_assert_is_witness_domain.rs`, which owns that boundary; the
+//! case below only pins that this file's census no longer claims otherwise.
 //!
 //! This file is in two halves.
 //!
@@ -179,7 +186,6 @@ fn an_unknown_value_is_refused_wherever_the_circuit_depends_on_it() {
         ("opaque_into_index.circom", "array indices"),
         ("opaque_into_dim.circom", "array dimensions"),
         ("opaque_into_template_arg.circom", "a template argument"),
-        ("opaque_into_assert.circom", "`assert`"),
     ] {
         let e = compile(name).err().unwrap_or_else(|| {
             panic!("{}: an unknown value reached {} and was ACCEPTED", name, site)
@@ -222,6 +228,28 @@ fn a_skipped_branch_may_not_fall_through_to_a_constant() {
         )
     });
     assert!(e.contains("unknown"), "{}", e);
+}
+
+/// ...but `assert` is NOT one of those sites, and that is the exception the
+/// census above must not silently reacquire.
+///
+/// An `assert` emits no constraint - in circom or in Y - so an unknown value
+/// reaching one cannot change the emitted circuit, which is the same argument
+/// that admits `<--`. Keeping this here, beside the refusal census, is what
+/// stops the two lists from drifting: if someone re-adds `assert` to the loop
+/// above, this fails and says why.
+#[test]
+fn an_unknown_value_may_reach_an_assert() {
+    let e = compile("opaque_into_assert.circom").unwrap_or_else(|e| {
+        panic!(
+            "an unknown value reaching `assert` was refused. `assert` emits no \
+             constraint, so this is the `<--` case, not the `<==` case: {}",
+            e
+        )
+    });
+    // And it really did emit a circuit, rather than being accepted into nothing.
+    let c = e.build_circuit();
+    assert_eq!(c.outputs.len(), 1, "the surrounding circuit should still be emitted");
 }
 
 /// A signal array passed to a `function` and used in a constraint.

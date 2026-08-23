@@ -268,6 +268,10 @@ pub struct Lowerer<'a> {
     /// id. Reported at the end of `lower`, because a silently unsolvable
     /// witness is exactly the kind of quiet degradation this repo refuses.
     opaque_witness: Vec<(usize, u32)>,
+    /// `assert`s over witness-domain values, which emit no constraint and
+    /// which Y does not evaluate. Reported at the end of lowering; see
+    /// `report_unchecked_asserts`.
+    unchecked_asserts: Vec<String>,
     /// Set by `witness_only_recipe` when it emits `WitnessOp::Unknown`, read
     /// and cleared by `substitute`, which is the only caller that knows the
     /// wire being assigned.
@@ -287,6 +291,7 @@ impl<'a> Lowerer<'a> {
             fn_cache: HashMap::new(),
             opaque_reasons: Vec::new(),
             opaque_witness: Vec::new(),
+            unchecked_asserts: Vec::new(),
             last_opaque: None,
         }
     }
@@ -415,6 +420,7 @@ impl<'a> Lowerer<'a> {
         }
 
         self.report_unsolved_witness();
+        self.report_unchecked_asserts();
         self.emitter.run_optimizer();
         Ok(self.emitter)
     }
@@ -452,6 +458,41 @@ impl<'a> Lowerer<'a> {
         );
         for (reason, n) in reasons {
             eprintln!("          {:>6} from {}", n, reason);
+        }
+    }
+
+    /// Say out loud which `assert`s Y did not evaluate.
+    ///
+    /// The `.r1cs` is byte-for-byte circom's either way - `assert` emits no
+    /// constraint in circom, measured rather than assumed - so nothing about
+    /// the circuit is weaker and no proof is affected. What differs is that
+    /// circom's witness calculator ABORTS on a false assert and Y's solver does
+    /// not, so a circuit used outside its documented preconditions will produce
+    /// a witness here and be refused there.
+    ///
+    /// Reported for the same reason `report_unsolved_witness` is: learning this
+    /// from a divergence against circom later, rather than from the compiler
+    /// now, is the quiet degradation this repo refuses.
+    fn report_unchecked_asserts(&self) {
+        if self.unchecked_asserts.is_empty() {
+            return;
+        }
+        eprintln!(
+            "[Warning] {} `assert`(s) over witness-domain values were NOT evaluated. \
+             The emitted .r1cs is unaffected - `assert` emits no constraint in circom \
+             either - but circom's witness calculator aborts on a false one and Y's \
+             solver does not, so a precondition violation will be caught there and not \
+             here. Write it as `===` if it is meant to bind the circuit.",
+            self.unchecked_asserts.len()
+        );
+        let mut at = self.unchecked_asserts.clone();
+        at.sort_unstable();
+        at.dedup();
+        for pos in at.iter().take(10) {
+            eprintln!("          at {}", pos);
+        }
+        if at.len() > 10 {
+            eprintln!("          ... and {} more", at.len() - 10);
         }
     }
 
@@ -860,21 +901,33 @@ impl<'a> Lowerer<'a> {
             Stmt::Return(e, _) => Ok(Flow::Return(self.eval_to_slot(e, f)?)),
 
             Stmt::Assert(e, pos) => {
-                // A compile-time assert is checked now. One over signals is a
-                // real constraint, and dropping it would weaken the circuit.
+                // A compile-time `assert` is checked now, and a false one is a
+                // hard error - that is the case circom-ecdsa's `assert(n <=
+                // 252)` template-parameter guards are.
+                //
+                // One over a WITNESS-domain value emits no constraint, and that
+                // is not an approximation: measured against circom 2.2.3, a
+                // circuit with and without `assert(a >= 0)` over a signal has
+                // identical non-linear, linear and wire counts. `assert` is a
+                // witness-time check in circom too - `ModSubThree` in
+                // circom-ecdsa writes `assert(a - b - c + (1 << n) >= 0)` under
+                // a comment reading "assume a - b - c + 2**n >= 0", i.e. it
+                // documents a PRECONDITION on the caller, not a constraint.
+                //
+                // So the emitted `.r1cs` is byte-for-byte what circom emits,
+                // which is exactly the argument that makes `Val::Opaque` inside
+                // a `<--` safe. What is lost is circom's witness-time abort,
+                // and Y says so out loud rather than letting it be discovered
+                // later - see `report_unchecked_asserts`.
                 let v = self.eval_expr(e, f)?;
                 match v.as_const() {
                     Some(c) if !c.is_zero() => Ok(Flow::Normal),
                     Some(_) => Err(err(*pos, "assertion failed at compile time")),
-                    None => Err(err(
-                        *pos,
-                        format!(
-                            "`assert` over signal values is not supported by Y's circom front end. \
-                             It is a constraint on the witness, so ignoring it would emit a circuit \
-                             weaker than the source; write it as `===` to make it explicit.{}",
-                            self.why_unknown(&v)
-                        ),
-                    )),
+                    None => {
+                        self.unchecked_asserts
+                            .push(format!("{}:{}", pos.line, pos.col));
+                        Ok(Flow::Normal)
+                    }
                 }
             }
 
