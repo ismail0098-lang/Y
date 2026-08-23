@@ -1169,7 +1169,13 @@ fn main() {
         output_path = format!("./{}", output_path);
     }
 
-    println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
+    // NOT "Compilation Successful!" - the backend has not run yet. Every arm
+    // of the dispatch below can fail and `exit(1)`, and this banner used to
+    // print above the failure: `--emit-native` on an `if`, or `--target=r1cs`
+    // on an out-of-range comparison operand, both printed success and then a
+    // hard error. The real banner is at the end of `main`, which every
+    // successful path falls through to (no arm exits 0).
+    println!("\n\x1b[1;32mFront-end analysis complete.\x1b[0m\n");
 
     if emit_r1cs {
         #[cfg(not(feature = "zk"))]
@@ -1496,5 +1502,9 @@ fn main() {
             }
         }
     }
+
+    // Reached only when the selected backend produced its artifact. Every
+    // failure path above calls `exit(1)` and none of them exits 0.
+    println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
 }
 

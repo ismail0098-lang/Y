@@ -24,6 +24,20 @@ use std::process::Command;
 /// Runs with a solver when one can be found, so that `@invariant` obligations
 /// inside these programs do not fail for an unrelated reason and mask the
 /// bounds behaviour under test.
+/// These tests assert on "Front-end analysis complete.", NOT on "Compilation
+/// Successful!".
+///
+/// The two used to be the same string: the success banner was printed before
+/// the backend dispatch ran, so it meant "the front end accepted this". It now
+/// means what it says - the selected backend produced its artifact - and these
+/// programs deliberately do not get that far. They call undeclared stubs, use
+/// `match` (which the PTX backend refuses by name), and are compiled without a
+/// linkable runtime, because the property under test is entirely a front-end
+/// one.
+///
+/// The negative assertions got STRONGER in the same move: `!contains(banner)`
+/// used to be satisfied by a program the front end ACCEPTED and a backend then
+/// refused, which would have read as "the front end rejected it".
 fn compile(name: &str, src: &str) -> String {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let dir = std::env::temp_dir().join(format!("y_bounds_{}_{}", std::process::id(), name));
@@ -52,7 +66,7 @@ fn compile(name: &str, src: &str) -> String {
 fn assert_rejected(name: &str, src: &str, why: &str) {
     let out = compile(name, src);
     assert!(
-        !out.contains("Compilation Successful"),
+        !out.contains("Front-end analysis complete"),
         "{} was accepted but must be rejected ({}).\n{}",
         name,
         why,
@@ -112,7 +126,7 @@ fn index_through_an_unmodelled_operator_is_refused() {
         "fn main() {\n    @safe {\n        let arr: [I32; 4] = {};\n        @invariant(i >= 0)\n        for i in 0..4 {\n            let v: I32 = arr[i % 100];\n        }\n    }\n}\n",
     );
     assert!(
-        !out.contains("Compilation Successful"),
+        !out.contains("Front-end analysis complete"),
         "an index the checker cannot bound must not be accepted:\n{}",
         out
     );
@@ -159,7 +173,7 @@ fn provably_safe_access_still_compiles() {
         "fn main() {\n    @safe {\n        let arr: [I32; 8] = {};\n        @invariant(i >= 0)\n        for i in 0..8 {\n            let v: I32 = arr[i];\n        }\n    }\n}\n",
     );
     assert!(
-        out.contains("Compilation Successful"),
+        out.contains("Front-end analysis complete"),
         "an in-range access over a statically known loop must compile:\n{}",
         out
     );
