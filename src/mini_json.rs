@@ -150,21 +150,3 @@ impl<'a> P<'a> {
     }
 }
 
-/// Parses a flat JSON object of scalars into `(key, text)` pairs, in file order.
-///
-/// Used for circuit inputs. Values keep their source text so a 254-bit field
-/// element survives.
-pub fn parse_scalar_map(json: &str) -> Result<Vec<(String, String)>, String> {
-    let root = P { b: json.as_bytes(), i: 0 }.value()?;
-    match root {
-        Json::Obj(fields) => fields
-            .into_iter()
-            .map(|(k, v)| {
-                v.scalar()
-                    .map(|s| (k.clone(), s))
-                    .ok_or_else(|| format!("input {:?} is not a number or string", k))
-            })
-            .collect(),
-        _ => Err("expected a JSON object of circuit inputs, e.g. {\"x\": 3, \"y\": 2}".into()),
-    }
-}
