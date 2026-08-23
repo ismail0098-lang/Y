@@ -4473,6 +4473,26 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
         }
     }
 
+    /// A wire's name with the uniquifying `_<id>` suffix `alloc_wire` appends
+    /// removed, which is the name the SOURCE used.
+    ///
+    /// Exactly ONE trailing `_<digits>` group is removed, and only if the tail
+    /// is entirely digits. So `identity_secret` keeps its underscore, and a
+    /// signal genuinely named `x_1` comes back as `x_1` (its wire is `x_1_7`).
+    /// Matching the id itself would be tighter and does not work: wire
+    /// compaction renumbers, so the suffix records the wire's ORIGINAL id.
+    ///
+    /// circom's `.sym` and its `input.json` both use the source name, which is
+    /// what makes those two files interchangeable with Y's.
+    pub fn display_name(raw: &str) -> String {
+        match raw.rsplit_once('_') {
+            Some((head, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) => {
+                head.to_string()
+            }
+            _ => raw.to_string(),
+        }
+    }
+
     /// The circuit's private input names, in declaration order.
     ///
     /// `new_wire` appends `_<id>` to keep wire names unique, so the suffix is
@@ -4482,10 +4502,21 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
     pub fn private_input_names(&self) -> Vec<String> {
         self.private_inputs
             .iter()
-            .map(|w| {
-                let n = &self.variables[*w];
-                n.rsplit_once('_').map(|(head, _)| head.to_string()).unwrap_or_else(|| n.clone())
-            })
+            .map(|w| Self::display_name(&self.variables[*w]))
+            .collect()
+    }
+
+    /// The circuit's public input names, in declaration order - the order
+    /// `solve_r1cs_witness` consumes its `pub_in` slice.
+    ///
+    /// This had no accessor and no caller, and `--witness` passed `&[]` for the
+    /// public inputs as a result: any circuit with a `{public [...]}` list was
+    /// solved with those signals left at zero. Y's own language has no `public`
+    /// keyword, so the gap was invisible until the circom front end existed.
+    pub fn public_input_names(&self) -> Vec<String> {
+        self.public_inputs
+            .iter()
+            .map(|w| Self::display_name(&self.variables[*w]))
             .collect()
     }
 
@@ -4636,8 +4667,11 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
 
         let mut entries = Vec::new();
         for (&old, &new) in &old_to_new {
-            if old < circuit.variables.len() {
-                entries.push((old, new, &circuit.variables[old]));
+            // Wire 0 is the constant 1. circom emits no row for it and its
+            // `.sym` starts at label 1; a row here made every line differ from
+            // circom's by one and put a `const_1` symbol in front of them.
+            if old != 0 && old < circuit.variables.len() {
+                entries.push((old, new, Self::display_name(&circuit.variables[old])));
             }
         }
         entries.sort_by_key(|e| e.1);

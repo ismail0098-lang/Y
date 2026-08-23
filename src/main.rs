@@ -252,12 +252,83 @@ fn emit_verifier_cli(args: &[String], pos: usize) {
     }
 }
 
+/// Flatten an input file into one `(signal name, value text)` pair per WIRE.
+///
+/// circom's own `input.json` keys a signal by its source name and gives an
+/// array signal a JSON array - `{"in": ["1", "2"], "x": 3}` - while the wires
+/// behind it are `main.in[0]`, `main.in[1]`, `main.x`. Reading circom's file
+/// therefore means flattening it the same way `alloc_signal` flattens a
+/// declaration. `parse_scalar_map`, which this replaces, refused an array
+/// outright, so no circuit taking an array input could be given one.
+///
+/// Values keep their source text: a field element routinely exceeds 2^53 and
+/// parsing through `f64` would round it silently.
+#[cfg(feature = "zk")]
+fn flatten_inputs(prefix: &str, v: &mini_json::Json, out: &mut Vec<(String, String)>) -> Result<(), String> {
+    match v {
+        mini_json::Json::Str(t) | mini_json::Json::Num(t) => {
+            out.push((prefix.to_string(), t.clone()));
+            Ok(())
+        }
+        mini_json::Json::Arr(items) => {
+            for (i, item) in items.iter().enumerate() {
+                flatten_inputs(&format!("{}[{}]", prefix, i), item, out)?;
+            }
+            Ok(())
+        }
+        mini_json::Json::Obj(_) => Err(format!(
+            "input {:?} is a JSON object; circuit inputs are numbers, strings, or \
+             (nested) arrays of them",
+            prefix
+        )),
+        mini_json::Json::Other => Err(format!(
+            "input {:?} is not a number, string or array",
+            prefix
+        )),
+    }
+}
+
+/// Look each wire's signal name up in the supplied file, marking what it used.
+///
+/// Two spellings are accepted for the same signal: the source name circom's
+/// own `input.json` uses (`a`), and the fully-qualified name that appears in
+/// the `.sym` file (`main.a`). Y used to accept only its own third spelling,
+/// `maina`, which is neither.
+#[cfg(feature = "zk")]
+fn bind_inputs(
+    names: &[String],
+    supplied: &[(String, String)],
+    used: &mut [bool],
+    inputs_path: &str,
+    all_names: &[String],
+) -> Result<Vec<zk_emitter::Fr>, String> {
+    use zk_emitter::{BigUint, Fr};
+    let mut ordered = Vec::with_capacity(names.len());
+    for name in names {
+        let bare = name.strip_prefix("main.").unwrap_or(name);
+        let hit = supplied
+            .iter()
+            .position(|(k, _)| k == name || k == bare)
+            .ok_or_else(|| {
+                format!(
+                    "input {:?} is missing from {}; this circuit takes [{}]",
+                    bare,
+                    inputs_path,
+                    all_names.join(", ")
+                )
+            })?;
+        used[hit] = true;
+        ordered.push(Fr::from_biguint(BigUint::from_str(&supplied[hit].1)));
+    }
+    Ok(ordered)
+}
+
 /// Solves the circuit against a JSON input file and writes a `.wtns`.
 ///
-/// Inputs are matched by NAME against `fn main`'s parameters, not by position:
-/// a file listing them in the wrong order would otherwise produce a valid proof
-/// of the wrong statement, which is exactly the class of error this backend
-/// cannot afford. Every parameter must be present and no unknown key is
+/// Inputs are matched by NAME against the circuit's input signals, not by
+/// position: a file listing them in the wrong order would otherwise produce a
+/// valid proof of the wrong statement, which is exactly the class of error this
+/// backend cannot afford. Every input must be present and no unknown key is
 /// accepted.
 #[cfg(feature = "zk")]
 fn solve_and_write_witness(
@@ -265,38 +336,41 @@ fn solve_and_write_witness(
     inputs_path: &str,
     wtns_path: &str,
 ) -> Result<usize, String> {
-    use zk_emitter::{BigUint, Fr};
-
     let json = fs::read_to_string(inputs_path)
         .map_err(|e| format!("Failed to read {}: {}", inputs_path, e))?;
-    let supplied = mini_json::parse_scalar_map(&json)?;
-
-    let names = emitter.private_input_names();
-    let mut ordered = Vec::with_capacity(names.len());
-    for name in &names {
-        let v = supplied
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
-            .ok_or_else(|| {
-                format!(
-                    "input {:?} is missing from {}; this circuit takes [{}]",
-                    name,
-                    inputs_path,
-                    names.join(", ")
-                )
-            })?;
-        ordered.push(Fr::from_biguint(BigUint::from_str(&v)));
+    let root = mini_json::P { b: json.as_bytes(), i: 0 }.value()?;
+    let mini_json::Json::Obj(fields) = &root else {
+        return Err(
+            "expected a JSON object of circuit inputs, e.g. {\"x\": 3, \"in\": [1, 2]}".into(),
+        );
+    };
+    let mut supplied = Vec::new();
+    for (k, v) in fields {
+        flatten_inputs(k, v, &mut supplied)?;
     }
-    for (k, _) in &supplied {
-        if !names.contains(k) {
-            return Err(format!(
-                "{} sets {:?}, which is not an input of this circuit; it takes [{}]",
-                inputs_path,
-                k,
-                names.join(", ")
-            ));
-        }
+    let mut used = vec![false; supplied.len()];
+
+    // BOTH lists, and in this order: `execute_host_witness_ir` consumes
+    // `pub_in` and `priv_in` positionally. Passing `&[]` for the public list -
+    // which is what this did - left every `{public [...]}` signal at zero, so
+    // no circom circuit with a public input could be solved.
+    let pub_names = emitter.public_input_names();
+    let priv_names = emitter.private_input_names();
+    let all: Vec<String> = pub_names
+        .iter()
+        .chain(priv_names.iter())
+        .map(|n| n.strip_prefix("main.").unwrap_or(n).to_string())
+        .collect();
+    let pub_ordered = bind_inputs(&pub_names, &supplied, &mut used, inputs_path, &all)?;
+    let ordered = bind_inputs(&priv_names, &supplied, &mut used, inputs_path, &all)?;
+
+    if let Some((k, _)) = supplied.iter().zip(&used).find(|(_, u)| !**u).map(|(kv, _)| kv) {
+        return Err(format!(
+            "{} sets {:?}, which is not an input of this circuit; it takes [{}]",
+            inputs_path,
+            k,
+            all.join(", ")
+        ));
     }
 
     // Borrowed, not `build_circuit()`: cloning the constraint list to hand it to
@@ -305,7 +379,7 @@ fn solve_and_write_witness(
     let circuit = emitter.view();
     let ir = emitter.build_witness_ir();
     let (witness, satisfied) =
-        zk_witness::solve_r1cs_witness(circuit.constraints, &ir, circuit.num_variables, &[], &ordered);
+        zk_witness::solve_r1cs_witness(circuit.constraints, &ir, circuit.num_variables, &pub_ordered, &ordered);
     if !satisfied {
         return Err(format!(
             "no satisfying witness exists for these inputs. A range check almost \
