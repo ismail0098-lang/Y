@@ -278,8 +278,23 @@ access (`c.out`, `c.out[i]`); `signal input`/`output`/intermediate, including
 multi-dimensional arrays; `var` with arrays and inline array literals; `for`,
 `while`, `if`/`else` over compile-time values; `include` with search paths and
 cycle-safe single parsing; all of `<==`, `==>`, `<--`, `-->`, `===`, `=` and the
-compound assignments; `**`, `\` (integer division) and `/` (field division) kept
-distinct; `assert` and `log`.
+compound assignments (`\=` included); `**`, `\` (integer division) and `/`
+(field division) kept distinct; `assert` and `log`.
+
+**circom 2.1 anonymous components, tuples and whole-array signal assignment**
+are supported: `o <== T(targs)(in1, in2)`, `(a, b) <== T()(x)`,
+`T()(name <== v)` binding by name, `_` to discard an output, `T()(x);` as a
+bare statement when the template has no outputs, and `c.in <== [a, b]` /
+`c.in <== other` driving a whole signal array at once.
+
+They are implemented as a **desugaring**, and that is what the test asserts
+rather than a constraint count: `o <== T()(i)` emits byte-for-byte the same
+`.r1cs` as `component c = T(); c.a <== i; o <== c.out;`. circom satisfies the
+same property, which is what made the choice a decision rather than a guess.
+The positions circom refuses are refused here too, with its error code recorded
+beside each case — an anonymous component inside arithmetic (`TAC01`), under
+`<--` (`TAC01`), a bare statement for a template that *has* outputs (`TAC02`),
+and every arity and input-name mismatch.
 
 ## Refused, by name
 
@@ -476,3 +491,7 @@ hermetic; `EdDSA`'s include chain is not, and is covered by
   200-hash Poseidon chain.
 - `include` resolution is path-based only; there is no package/`node_modules`
   lookup.
+- **A signal-dependent array index is refused**, which is what now blocks
+  zk-email's `RSAVerifier65537` (`fp.circom`). A variable index has no R1CS form
+  without an explicit multiplexer, so this is a design question with a real
+  constraint cost rather than a syntax gap.
