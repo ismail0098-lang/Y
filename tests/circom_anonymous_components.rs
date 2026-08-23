@@ -202,6 +202,34 @@ fn an_underscore_discards_an_output_without_discarding_the_component() {
     assert_eq!(out, Some(36), "keep should be 6*6 = 36");
 }
 
+/// `signal (a, b) <== T()(x)` declares the signals and drives them in one
+/// statement. zk-email's `email-verifier.circom` is written this way, and it
+/// was the last thing in that file Y could not parse.
+///
+/// Asserted as a desugaring again: it must be exactly
+/// `signal a; signal b; (a, b) <== T()(x);`. circom's own two forms are
+/// byte-identical, checked with circom 2.2.3.
+#[test]
+fn a_declaring_tuple_is_the_declaration_plus_the_drive() {
+    let decl = r1cs_bytes("decl", &compile_ok("anon_tuple_decl.circom"));
+    let sep = r1cs_bytes("sep", &compile_ok("anon_tuple_decl_explicit.circom"));
+    assert!(
+        decl == sep,
+        "`signal (p, q) <== T()(..)` did not produce the same circuit as declaring \
+         the signals and driving them separately"
+    );
+}
+
+/// ...with dimensions inside the tuple, which is the form the real circuit
+/// uses (`signal (bhRegexMatch, bhReveal[maxHeadersLength]) <== ...`).
+#[test]
+fn a_declaring_tuple_carries_array_dimensions() {
+    let (sat, out) = solve_one("anon_tuple_decl_array.circom", &[Fr::from_u64(5)]);
+    assert!(sat, "the solved witness does not satisfy its own circuit");
+    // f = 5*5 = 25, r[0] = 5, r[2] = 7  ->  37.
+    assert_eq!(out, Some(37), "o should be 25 + 5 + 7 = 37");
+}
+
 // ────────────────────────────────────────────────────────
 // Refusals. Every one of these is refused by circom 2.2.3 too.
 // ────────────────────────────────────────────────────────
