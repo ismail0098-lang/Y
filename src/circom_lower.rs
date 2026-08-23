@@ -235,6 +235,10 @@ struct Frame {
     output_order: Vec<String>,
     components: HashMap<String, CompSlot>,
     prefix: String,
+    /// Serial number for the components an anonymous instantiation creates.
+    /// Per FRAME rather than per Lowerer so a template's `.sym` names do not
+    /// depend on how many times unrelated templates were instantiated first.
+    anon_count: usize,
 }
 
 enum Flow {
@@ -594,7 +598,9 @@ impl<'a> Lowerer<'a> {
     /// the constraints its source describes.
     fn constraint_effect(s: &Stmt) -> Option<&'static str> {
         match s {
-            Stmt::Block(stmts, _) => stmts.iter().find_map(Self::constraint_effect),
+            Stmt::Block(stmts, _) | Stmt::Seq(stmts, _) => {
+                stmts.iter().find_map(Self::constraint_effect)
+            }
             Stmt::DeclSignal { .. } => Some("a `signal` declaration"),
             Stmt::DeclComponent { .. } => Some("a `component` declaration"),
             Stmt::Substitution { op, .. } => match op {
@@ -629,7 +635,9 @@ impl<'a> Lowerer<'a> {
     /// had before a branch that may have changed it.
     fn assigned_vars(s: &Stmt, out: &mut Vec<String>) {
         match s {
-            Stmt::Block(stmts, _) => stmts.iter().for_each(|x| Self::assigned_vars(x, out)),
+            Stmt::Block(stmts, _) | Stmt::Seq(stmts, _) => {
+                stmts.iter().for_each(|x| Self::assigned_vars(x, out))
+            }
             Stmt::DeclVar { name, .. } => out.push(name.clone()),
             Stmt::Substitution { lhs, op, .. } => {
                 if let (AssignOp::Var, Some(n)) = (op, Self::base_name(lhs)) {
@@ -659,7 +667,7 @@ impl<'a> Lowerer<'a> {
 
     fn contains_return(s: &Stmt) -> bool {
         match s {
-            Stmt::Block(stmts, _) => stmts.iter().any(Self::contains_return),
+            Stmt::Block(stmts, _) | Stmt::Seq(stmts, _) => stmts.iter().any(Self::contains_return),
             Stmt::Return(..) => true,
             Stmt::If { then_branch, else_branch, .. } => {
                 Self::contains_return(then_branch)
@@ -762,6 +770,17 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 f.pop_scope();
+                Ok(Flow::Normal)
+            }
+
+            // Deliberately NOT a scope: `var a, b;` must leave both names in
+            // the scope the declaration was written in.
+            Stmt::Seq(stmts, _) => {
+                for s in stmts {
+                    if let Flow::Return(v) = self.exec_stmt(s, f)? {
+                        return Ok(Flow::Return(v));
+                    }
+                }
                 Ok(Flow::Normal)
             }
 
@@ -948,6 +967,21 @@ impl<'a> Lowerer<'a> {
         f: &mut Frame,
         pos: Pos,
     ) -> LResult<()> {
+        // circom 2.1 anonymous components. Handled before `op` is looked at
+        // because the left may be a tuple, which is not an lvalue in any other
+        // statement.
+        if let Expr::AnonComp { template, targs, inputs, pos: apos } = rhs {
+            return self.substitute_anon(lhs, op, template, targs, inputs, f, *apos);
+        }
+        if let Expr::Tuple(items, tpos) = lhs {
+            if !items.is_empty() {
+                return Err(err(
+                    *tpos,
+                    "a tuple on the left of a substitution needs an anonymous component \
+                     `T(...)(...)` on the right",
+                ));
+            }
+        }
         match op {
             AssignOp::Var => {
                 // `sq[i] = Square();` is a component instantiation, but it is
@@ -963,33 +997,165 @@ impl<'a> Lowerer<'a> {
                 self.assign_var(lhs, v, f, pos)
             }
             AssignOp::SignalConstrain | AssignOp::SignalOnly => {
-                let wire = self.resolve_signal_wire(lhs, f, pos)?;
-                if let AssignOp::SignalOnly = op {
-                    // `<--` must NOT be evaluated through the constraint value
-                    // model. Doing so is what made circomlib's own
-                    // `bitify.circom` uncompilable: `Num2Bits` writes
-                    // `out[i] <-- (in >> i) & 1`, and a shift over a signal was
-                    // refused for having "no R1CS form" - which is true, and
-                    // irrelevant, because a `<--` right-hand side never becomes
-                    // a constraint. It is a witness computation, checked
-                    // afterwards by the `===` the author writes.
-                    self.last_opaque = None;
-                    let recipe = self.witness_only_recipe(rhs, f, pos)?;
-                    if let Some(id) = self.last_opaque.take() {
-                        self.opaque_witness.push((wire, id));
-                    }
-                    self.emitter.set_witness_recipe(wire, recipe);
-                    return Ok(());
-                }
-                let v = self.eval_expr(rhs, f)?;
-                self.require_known(&v, pos, "non-quadratic: a `<==` constraint")?;
-                let target = LinearCombination::variable(wire);
+                // A signal lvalue may name a whole ARRAY: circom 2.1 allows
+                // `c.in <== [a, b]` and `c.in <== other`. `substitute_slot`
+                // is the scalar path when the slot turns out to be a leaf.
+                let slot = self.resolve_signal_slot(lhs, f, pos)?;
+                self.substitute_slot(&slot, op, rhs, f, pos)
+            }
+        }
+    }
 
-                match op {
-                    AssignOp::SignalConstrain => {
-                        // `a * b + c = target`, one constraint.
-                        match &v {
-                            Val::Const(_) | Val::Lin(_) => {
+    /// Drive one signal slot - a single wire or a whole array - from `rhs`.
+    fn substitute_slot(
+        &mut self,
+        slot: &SigSlot,
+        op: AssignOp,
+        rhs: &Expr,
+        f: &mut Frame,
+        pos: Pos,
+    ) -> LResult<()> {
+        // `c.in <== T()(x)`, and the nested `One()(One()(i))` argument form,
+        // both land here. circom allows exactly one output in this position.
+        if let Expr::AnonComp { template, targs, inputs, pos: apos } = rhs {
+            let outs = self.anon_outputs(template, targs, inputs, f, *apos)?;
+            if outs.len() != 1 {
+                return Err(err(
+                    *apos,
+                    format!(
+                        "`{}` has {} output signals; a single value is expected here. Use a \
+                         tuple `(a, b) <== {}(...)(...)` to take them all",
+                        template,
+                        outs.len(),
+                        template
+                    ),
+                ));
+            }
+            let v = Self::sig_slot_to_vals(&outs[0].1);
+            return self.constrain_slot_vals(slot, op, &v, pos);
+        }
+        match slot {
+            Slot::Leaf(w) => self.substitute_wire(*w, op, rhs, f, pos),
+            Slot::Array(items) => match rhs {
+                // Element-wise on the SOURCE EXPRESSIONS, so `<--` keeps its
+                // witness-domain lowering per element rather than being forced
+                // through the constraint value model.
+                Expr::ArrayInline(elems, epos) => {
+                    if elems.len() != items.len() {
+                        return Err(err(
+                            *epos,
+                            format!(
+                                "array literal has {} element(s) but the signal array has {}",
+                                elems.len(),
+                                items.len()
+                            ),
+                        ));
+                    }
+                    for (sub, e) in items.iter().zip(elems) {
+                        self.substitute_slot(sub, op, e, f, pos)?;
+                    }
+                    Ok(())
+                }
+                other => {
+                    let v = self.eval_to_slot(other, f)?;
+                    self.constrain_slot_vals(slot, op, &v, pos)
+                }
+            },
+        }
+    }
+
+    /// Constrain a signal slot against an already-evaluated value slot,
+    /// leaf by leaf. The shapes must agree exactly.
+    fn constrain_slot_vals(
+        &mut self,
+        slot: &SigSlot,
+        op: AssignOp,
+        v: &VarSlot,
+        pos: Pos,
+    ) -> LResult<()> {
+        match (slot, v) {
+            (Slot::Leaf(w), Slot::Leaf(val)) => {
+                if let AssignOp::SignalOnly = op {
+                    // `c.in <-- other` would need a witness recipe per wire,
+                    // and the value model this arm has already gone through is
+                    // the constraint one. Refused by name rather than silently
+                    // promoted to `<==`, which would add a constraint the
+                    // author chose not to write. The literal form
+                    // `c.in <-- [a, b]` recurses on expressions above and is
+                    // unaffected.
+                    return Err(err(
+                        pos,
+                        "`<--` onto a whole signal array is only supported from an array \
+                         literal `[a, b]`; assign the elements individually",
+                    ));
+                }
+                self.constrain_wire_val(*w, val.clone(), pos)
+            }
+            (Slot::Array(ws), Slot::Array(vs)) => {
+                if ws.len() != vs.len() {
+                    return Err(err(
+                        pos,
+                        format!(
+                            "signal array has {} element(s) but the right-hand side has {}",
+                            ws.len(),
+                            vs.len()
+                        ),
+                    ));
+                }
+                for (a, b) in ws.iter().zip(vs) {
+                    self.constrain_slot_vals(a, op, b, pos)?;
+                }
+                Ok(())
+            }
+            (Slot::Array(_), Slot::Leaf(_)) => Err(err(
+                pos,
+                "the left-hand side is a signal array but the right-hand side is a single value",
+            )),
+            (Slot::Leaf(_), Slot::Array(_)) => Err(err(
+                pos,
+                "the left-hand side is a single signal but the right-hand side is an array",
+            )),
+        }
+    }
+
+    /// The scalar substitution: one signal wire, one right-hand expression.
+    fn substitute_wire(
+        &mut self,
+        wire: usize,
+        op: AssignOp,
+        rhs: &Expr,
+        f: &mut Frame,
+        pos: Pos,
+    ) -> LResult<()> {
+        if let AssignOp::SignalOnly = op {
+            // `<--` must NOT be evaluated through the constraint value
+            // model. Doing so is what made circomlib's own
+            // `bitify.circom` uncompilable: `Num2Bits` writes
+            // `out[i] <-- (in >> i) & 1`, and a shift over a signal was
+            // refused for having "no R1CS form" - which is true, and
+            // irrelevant, because a `<--` right-hand side never becomes
+            // a constraint. It is a witness computation, checked
+            // afterwards by the `===` the author writes.
+            self.last_opaque = None;
+            let recipe = self.witness_only_recipe(rhs, f, pos)?;
+            if let Some(id) = self.last_opaque.take() {
+                self.opaque_witness.push((wire, id));
+            }
+            self.emitter.set_witness_recipe(wire, recipe);
+            return Ok(());
+        }
+        let v = self.eval_expr(rhs, f)?;
+        self.constrain_wire_val(wire, v, pos)
+    }
+
+    /// `wire <== value`: one constraint, plus a witness recipe when the value
+    /// is quadratic.
+    fn constrain_wire_val(&mut self, wire: usize, v: Val, pos: Pos) -> LResult<()> {
+        self.require_known(&v, pos, "non-quadratic: a `<==` constraint")?;
+        let target = LinearCombination::variable(wire);
+        // `a * b + c = target`, one constraint.
+        match &v {
+            Val::Const(_) | Val::Lin(_) => {
                                 // No witness recipe. The constraint is `lc * 1 =
                                 // wire`, which is exactly the shape
                                 // `build_witness_ir`'s `lc_by_output` scan
@@ -1020,19 +1186,11 @@ impl<'a> Lowerer<'a> {
                             // Spelled out rather than folded into an `_` arm so
                             // that a future `Val` variant is a compile error
                             // here, where it would silently emit no constraint.
-                            Val::Opaque(_) => unreachable!(
-                                "`require_known` rejects an opaque `<==` right-hand side"
-                            ),
-                        }
-                    }
-                    // `<--` returned above: it emits NO constraint, and turning
-                    // it into `<==` would silently add one the author chose not
-                    // to write.
-                    AssignOp::SignalOnly | AssignOp::Var => unreachable!(),
-                }
-                Ok(())
-            }
+            Val::Opaque(_) => unreachable!(
+                "`require_known` rejects an opaque `<==` right-hand side"
+            ),
         }
+        Ok(())
     }
 
     /// The witness recipe for a `<--` right-hand side.
@@ -1322,17 +1480,19 @@ impl<'a> Lowerer<'a> {
         Ok(cur)
     }
 
-    /// Resolve an lvalue to the wire of a signal, following `c.out[i]` into
-    /// subcomponents.
-    fn resolve_signal_wire(&mut self, e: &Expr, f: &mut Frame, pos: Pos) -> LResult<usize> {
+    /// Resolve an lvalue to the signal SLOT it names, following `c.out[i]`
+    /// into subcomponents. The slot may be a single wire or a whole array;
+    /// circom 2.1 lets both sides of a substitution be arrays.
+    fn resolve_signal_slot(&mut self, e: &Expr, f: &mut Frame, pos: Pos) -> LResult<SigSlot> {
         let (base, idxs) = self.split_indices(e, f)?;
         match &base {
             Expr::Var(name, p) => {
                 let slot = f
                     .signals
                     .get(name)
-                    .ok_or_else(|| err(*p, format!("`{}` is not a signal of this template", name)))?;
-                Ok(*Self::index_slot(slot, &idxs, pos)?.leaf(pos, name)?)
+                    .ok_or_else(|| err(*p, format!("`{}` is not a signal of this template", name)))?
+                    .clone();
+                Ok(Self::index_slot(&slot, &idxs, pos)?.clone())
             }
             Expr::Member(obj, field, p) => {
                 let inst = self.resolve_component(obj, f, *p)?;
@@ -1343,10 +1503,181 @@ impl<'a> Lowerer<'a> {
                         err(*p, format!("component of template `{}` has no signal `{}`", self.instances[inst].template, field))
                     })?
                     .clone();
-                Ok(*Self::index_slot(&slot, &idxs, pos)?.leaf(pos, field)?)
+                Ok(Self::index_slot(&slot, &idxs, pos)?.clone())
             }
             other => Err(err(other.pos(), "left-hand side of a signal assignment must be a signal")),
         }
+    }
+
+    /// Resolve an lvalue to the wire of a signal. `resolve_signal_slot` plus
+    /// the requirement that it name a single one.
+    fn resolve_signal_wire(&mut self, e: &Expr, f: &mut Frame, pos: Pos) -> LResult<usize> {
+        let name = Self::base_name(e).unwrap_or_else(|| "this signal".to_string());
+        Ok(*self.resolve_signal_slot(e, f, pos)?.leaf(pos, &name)?)
+    }
+
+    // ────────────────────────────────────────────────────
+    // circom 2.1 anonymous components
+    // ────────────────────────────────────────────────────
+
+    /// `lhs <== T(targs)(inputs)`, where `lhs` may be a tuple.
+    fn substitute_anon(
+        &mut self,
+        lhs: &Expr,
+        op: AssignOp,
+        template: &str,
+        targs: &[Expr],
+        inputs: &[(Option<String>, Expr)],
+        f: &mut Frame,
+        pos: Pos,
+    ) -> LResult<()> {
+        // circom: "Anonymous components only admit the use of the operator
+        // <==". Matched exactly - accepting `<--` here would bind the outputs
+        // with no constraint while still constraining the inputs, which is a
+        // circuit the author cannot have meant and which circom will not
+        // produce.
+        if let AssignOp::SignalOnly = op {
+            return Err(err(
+                pos,
+                "an anonymous component may only be used with `<==`; `<--` would leave its \
+                 outputs unconstrained",
+            ));
+        }
+        let outs = self.anon_outputs(template, targs, inputs, f, pos)?;
+        let targets: Vec<&Expr> = match lhs {
+            Expr::Tuple(items, _) => items.iter().collect(),
+            other => vec![other],
+        };
+        if targets.len() != outs.len() {
+            return Err(err(
+                pos,
+                format!(
+                    "`{}` has {} output signal(s) but {} target(s) were given",
+                    template,
+                    outs.len(),
+                    targets.len()
+                ),
+            ));
+        }
+        for (t, (_, slot)) in targets.into_iter().zip(outs) {
+            // `_` discards an output. circom spells it the same way, and the
+            // component is still instantiated and its inputs still
+            // constrained - only the binding is dropped.
+            if matches!(t, Expr::Var(n, _) if n == "_") {
+                continue;
+            }
+            let v = Self::sig_slot_to_vals(&slot);
+            self.substitute_val(t, op, v, f, pos)?;
+        }
+        Ok(())
+    }
+
+    /// Bind an already-evaluated value slot to an lvalue.
+    fn substitute_val(
+        &mut self,
+        lhs: &Expr,
+        op: AssignOp,
+        v: VarSlot,
+        f: &mut Frame,
+        pos: Pos,
+    ) -> LResult<()> {
+        match op {
+            AssignOp::Var => self.assign_var(lhs, v, f, pos),
+            AssignOp::SignalConstrain => {
+                let slot = self.resolve_signal_slot(lhs, f, pos)?;
+                self.constrain_slot_vals(&slot, op, &v, pos)
+            }
+            // Refused by `substitute_anon`, the only caller, before it gets
+            // here. Named rather than left to an `_` arm so a second caller
+            // cannot acquire a silent `<--` lowering.
+            AssignOp::SignalOnly => unreachable!("`<--` is refused for anonymous components"),
+        }
+    }
+
+    /// Instantiate `T(targs)`, constrain its inputs from `inputs`, and return
+    /// its output signals in declaration order.
+    ///
+    /// This is a desugaring, and a checkable one: circom's own `.r1cs` for
+    /// `o <== One()(i)` is byte-identical to the one for
+    /// `component c = One(); c.a <== i; o <== c.out;`, which is what
+    /// `tests/circom_anonymous_components.rs` asserts of Y's.
+    fn anon_outputs(
+        &mut self,
+        template: &str,
+        targs: &[Expr],
+        inputs: &[(Option<String>, Expr)],
+        f: &mut Frame,
+        pos: Pos,
+    ) -> LResult<Vec<(String, SigSlot)>> {
+        if self.program.template(template).is_none() {
+            return Err(err(pos, format!("unknown template `{}`", template)));
+        }
+        let mut argv = Vec::new();
+        for a in targs {
+            argv.push(self.eval_to_slot(a, f)?);
+        }
+        let n = f.anon_count;
+        f.anon_count += 1;
+        let prefix = format!("{}anon{}_{}.", f.prefix, n, template);
+        let inst = self.instantiate(template, argv, &prefix, pos)?;
+
+        let input_order = self.instances[inst].input_order.clone();
+        if inputs.len() != input_order.len() {
+            return Err(err(
+                pos,
+                format!(
+                    "the number of template input signals must coincide with the number of \
+                     input parameters: `{}` declares {} input(s), {} given",
+                    template,
+                    input_order.len(),
+                    inputs.len()
+                ),
+            ));
+        }
+
+        // circom takes either an all-positional or an all-named list, never a
+        // mixture, and rejects a repeated or unknown name.
+        let named = inputs.iter().filter(|(n, _)| n.is_some()).count();
+        let bound: Vec<(String, &Expr)> = if named == 0 {
+            input_order.iter().cloned().zip(inputs.iter().map(|(_, e)| e)).collect()
+        } else if named == inputs.len() {
+            let mut seen: Vec<&str> = Vec::new();
+            let mut out = Vec::new();
+            for (name, e) in inputs {
+                let name = name.as_ref().unwrap();
+                if !input_order.iter().any(|s| s == name) {
+                    return Err(err(
+                        e.pos(),
+                        format!("`{}` has no input signal `{}`", template, name),
+                    ));
+                }
+                if seen.contains(&name.as_str()) {
+                    return Err(err(
+                        e.pos(),
+                        format!("input signal `{}` of `{}` is given twice", name, template),
+                    ));
+                }
+                seen.push(name);
+                out.push((name.clone(), e));
+            }
+            out
+        } else {
+            return Err(err(
+                pos,
+                "an anonymous component's inputs must be either all positional or all named",
+            ));
+        };
+
+        for (name, e) in bound {
+            let slot = self.instances[inst].signals[&name].clone();
+            self.substitute_slot(&slot, AssignOp::SignalConstrain, e, f, pos)?;
+        }
+
+        let outs = self.instances[inst].output_order.clone();
+        Ok(outs
+            .iter()
+            .map(|o| (o.clone(), self.instances[inst].signals[o].clone()))
+            .collect())
     }
 
     fn resolve_component(&mut self, e: &Expr, f: &mut Frame, pos: Pos) -> LResult<usize> {
@@ -1482,6 +1813,27 @@ impl<'a> Lowerer<'a> {
 
     fn eval_to_slot(&mut self, e: &Expr, f: &mut Frame) -> LResult<VarSlot> {
         match e {
+            // `var c = Poseidon(2)([a, b]);` — an anonymous component in a
+            // value position. semaphore is written this way. Handled here and
+            // NOT in `eval_expr`, so `o <== One()(i) + 3` is still refused
+            // exactly where circom refuses it: an operand of an arithmetic
+            // expression reaches `eval_expr` directly.
+            Expr::AnonComp { template, targs, inputs, pos } => {
+                let outs = self.anon_outputs(template, targs, inputs, f, *pos)?;
+                if outs.len() != 1 {
+                    return Err(err(
+                        *pos,
+                        format!(
+                            "`{}` has {} output signals; a single value is expected here. Use a \
+                             tuple `(a, b) = {}(...)(...)` to take them all",
+                            template,
+                            outs.len(),
+                            template
+                        ),
+                    ));
+                }
+                Ok(Self::sig_slot_to_vals(&outs[0].1))
+            }
             Expr::ArrayInline(items, _) => {
                 let mut out = Vec::with_capacity(items.len());
                 for i in items {
@@ -1760,6 +2112,26 @@ impl<'a> Lowerer<'a> {
                 format!("`{}(...)` may only appear on the right of a `component` declaration", name),
             )),
 
+            // circom refuses an anonymous component in an arithmetic position
+            // too ("This is the anonymous component whose use is not allowed"),
+            // so this is a match rather than a limitation. The two legal
+            // positions - the whole right-hand side of a substitution, and an
+            // argument of another anonymous component - are handled in
+            // `substitute` and `anon_outputs` before ever reaching here.
+            Expr::AnonComp { template, pos, .. } => Err(err(
+                *pos,
+                format!(
+                    "an anonymous component `{}(...)(...)` may only be the entire right-hand \
+                     side of a substitution, not part of a larger expression",
+                    template
+                ),
+            )),
+
+            Expr::Tuple(_, pos) => Err(err(
+                *pos,
+                "a tuple `(a, b)` may only appear on the left of a substitution",
+            )),
+
             Expr::Binary(op, a, b, pos) => {
                 let va = self.eval_expr(a, f)?;
                 let vb = self.eval_expr(b, f)?;
@@ -1995,6 +2367,7 @@ impl Frame {
             output_order: Vec::new(),
             components: HashMap::new(),
             prefix,
+            anon_count: 0,
         }
     }
 

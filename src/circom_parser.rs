@@ -415,6 +415,29 @@ impl Parser {
             d
         } else {
             let lhs = self.parse_expr()?;
+            // `RangeCheck(n)(a, b);` — an anonymous component as a whole
+            // statement, legal in circom only when the template has no output
+            // signals (otherwise: "This expression must be a tuple or an
+            // anonymous component"). Encoded as a substitution into the EMPTY
+            // tuple, so the output-count check in the lowerer is the same one
+            // every other tuple goes through.
+            if matches!(lhs, Expr::AnonComp { .. })
+                && !matches!(
+                    self.peek(),
+                    Tok::AssignConstrainL | Tok::AssignL | Tok::Assign
+                )
+            {
+                let s = Stmt::Substitution {
+                    lhs: Expr::Tuple(Vec::new(), pos),
+                    op: AssignOp::SignalConstrain,
+                    rhs: lhs,
+                    pos,
+                };
+                if consume_semi {
+                    self.expect(&Tok::Semi, "`;` in the `for` header")?;
+                }
+                return Ok(s);
+            }
             match self.peek().clone() {
                 Tok::AssignConstrainL => {
                     self.bump();
@@ -453,6 +476,7 @@ impl Parser {
                 | Tok::MinusAssign
                 | Tok::StarAssign
                 | Tok::SlashAssign
+                | Tok::IntDivAssign
                 | Tok::PercentAssign
                 | Tok::PowAssign
                 | Tok::ShlAssign
@@ -467,6 +491,7 @@ impl Parser {
                         Tok::MinusAssign => BinOp::Sub,
                         Tok::StarAssign => BinOp::Mul,
                         Tok::SlashAssign => BinOp::Div,
+                        Tok::IntDivAssign => BinOp::IntDiv,
                         Tok::PercentAssign => BinOp::Mod,
                         Tok::PowAssign => BinOp::Pow,
                         Tok::ShlAssign => BinOp::Shl,
@@ -581,7 +606,7 @@ impl Parser {
                 stmts.push(Stmt::DeclSignal { kind, name: n, dims: d, init: None, pos });
             }
             self.expect(&Tok::Semi, "`;` after the signal declaration")?;
-            return Ok(Stmt::Block(stmts, pos));
+            return Ok(Stmt::Seq(stmts, pos));
         }
         self.expect(&Tok::Semi, "`;` after the signal declaration")?;
         Ok(Stmt::DeclSignal { kind, name, dims, init, pos })
@@ -608,7 +633,7 @@ impl Parser {
                 stmts.push(Stmt::DeclVar { name, dims, init, pos });
             }
             self.expect(&Tok::Semi, "`;` after the var declaration")?;
-            return Ok(Stmt::Block(stmts, pos));
+            return Ok(Stmt::Seq(stmts, pos));
         }
         self.expect(&Tok::Semi, "`;` after the var declaration")?;
         Ok(first)
@@ -754,6 +779,38 @@ impl Parser {
         }
     }
 
+    /// The input list of an anonymous component: `(a, b)` or
+    /// `(name1 <== a, name2 <== b)`.
+    ///
+    /// circom accepts either form but not a mixture, and requires the count to
+    /// match the template's inputs; both are checked in the lowerer, where the
+    /// template's signals are known.
+    fn parse_anon_inputs(&mut self) -> PResult<Vec<(Option<String>, Expr)>> {
+        self.expect(&Tok::LParen, "`(` opening the anonymous component inputs")?;
+        let mut inputs = Vec::new();
+        if self.eat(&Tok::RParen) {
+            return Ok(inputs);
+        }
+        loop {
+            let named = matches!(self.peek(), Tok::Ident(_))
+                && matches!(self.peek_at(1), Tok::AssignConstrainL);
+            let name = if named {
+                let n = self.ident()?;
+                self.bump();
+                Some(n)
+            } else {
+                None
+            };
+            inputs.push((name, self.parse_expr()?));
+            if self.eat(&Tok::Comma) {
+                continue;
+            }
+            self.expect(&Tok::RParen, "`)` closing the anonymous component inputs")?;
+            break;
+        }
+        Ok(inputs)
+    }
+
     fn parse_primary(&mut self) -> PResult<Expr> {
         let pos = self.pos_of();
         match self.bump() {
@@ -771,6 +828,14 @@ impl Parser {
                             break;
                         }
                     }
+                    // `T(targs)(inputs)` — a circom 2.1 anonymous component.
+                    // A second argument list can follow nothing else in the
+                    // grammar (circom has no first-class functions), so this is
+                    // unambiguous.
+                    if matches!(self.peek(), Tok::LParen) {
+                        let inputs = self.parse_anon_inputs()?;
+                        return Ok(Expr::AnonComp { template: name, targs: args, inputs, pos });
+                    }
                     Ok(Expr::Call(name, args, pos))
                 } else {
                     Ok(Expr::Var(name, pos))
@@ -778,6 +843,18 @@ impl Parser {
             }
             Tok::LParen => {
                 let e = self.parse_expr()?;
+                // `(a, b) <== T()(x)` — a tuple, legal only on the left of a
+                // substitution. Parsed here because `(a)` and `(a, b)` share a
+                // prefix; a tuple reaching a value position is refused by the
+                // lowerer, by name.
+                if matches!(self.peek(), Tok::Comma) {
+                    let mut items = vec![e];
+                    while self.eat(&Tok::Comma) {
+                        items.push(self.parse_expr()?);
+                    }
+                    self.expect(&Tok::RParen, "`)` closing a tuple")?;
+                    return Ok(Expr::Tuple(items, pos));
+                }
                 self.expect(&Tok::RParen, "`)`")?;
                 Ok(e)
             }
