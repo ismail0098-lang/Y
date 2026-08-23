@@ -41,6 +41,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Two tests calling the same helper for the same arch would otherwise share a
+/// directory and `remove_dir_all` each other's output mid-run - the `.ptx` race
+/// this repo has now hit in four files, hit again while adding the gate below.
+static SALT: AtomicUsize = AtomicUsize::new(0);
 
 /// The floor. Every kernel that does not *need* something newer must load here.
 ///
@@ -540,9 +546,10 @@ fn the_emitter_declares_the_real_driver_floor() {
 /// rather than of a constant repeated in the test file.
 fn emitted_version_for(arch: &str) -> String {
     let dir = std::env::temp_dir().join(format!(
-        "y_ptxver_{}_{}",
+        "y_ptxver_{}_{}_{}",
         std::process::id(),
-        arch
+        arch,
+        SALT.fetch_add(1, Ordering::SeqCst)
     ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -596,5 +603,200 @@ fn only_the_kernel_that_needs_a_newer_isa_declares_one() {
         "a kernel with no FP8 in it declared a version above sm_89's own floor of 7.8 \
          (CUDA 11.8). 8.4 is CUDA 12.4 and is FP8 `mma.sync`'s requirement, not the \
          architecture's."
+    );
+}
+
+// ────────────────────────────────────────────────────────
+// The co-processor backend builds its own module header
+// ────────────────────────────────────────────────────────
+
+/// Emit `--emit-coprocessor` under a crafted profile and return `(version, ptx)`.
+fn coprocessor_module_for(arch: &str) -> (String, String) {
+    let dir = std::env::temp_dir().join(format!(
+        "y_copver_{}_{}_{}",
+        std::process::id(),
+        arch,
+        SALT.fetch_add(1, Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let sm = arch.trim_start_matches("sm_");
+    let dotted = format!("{}.{}", &sm[..sm.len() - 1], &sm[sm.len() - 1..]);
+    std::fs::write(
+        dir.join(".ysu_hw_profile"),
+        format!("SM_VERSION={}\nGPU_NAME=TestCard\nSM_COUNT=66\n", dotted),
+    )
+    .unwrap();
+
+    let fixture = repo().join("tests").join("coprocessor_attention.ysu");
+    let src = dir.join("case.ysu");
+    std::fs::copy(&fixture, &src).expect("the co-processor fixture must exist");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src)
+        .arg("--emit-coprocessor")
+        .current_dir(&dir)
+        .output()
+        .expect("run Y");
+    assert!(
+        out.status.success(),
+        "--emit-coprocessor failed at {}:\n{}{}",
+        arch,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let ptx = std::fs::read_to_string(dir.join("case.coprocessor.ptx"))
+        .expect("no .coprocessor.ptx was written");
+    let target = declared_target(&ptx).unwrap_or_default();
+    assert_eq!(
+        target, arch,
+        "the profile asked for {} but the co-processor backend targeted {}",
+        arch, target
+    );
+    let v = declared_version(&ptx)
+        .unwrap_or_else(|| panic!("no .version line in the co-processor PTX:\n{}", ptx));
+    let _ = std::fs::remove_dir_all(&dir);
+    (v, ptx)
+}
+
+/// `--emit-coprocessor` must declare the same driver floor as `--emit-ptx`.
+///
+/// It does not go through `emit_program`, so it wrote its own header - and the
+/// header hardcoded `.version 8.0`. That one literal is wrong in BOTH
+/// directions at once:
+///
+///   - **over-stated** on sm_80/sm_86/sm_89, whose floors are 7.0/7.1/7.8, so
+///     a co-processor kernel refuses to load on a driver that is merely older
+///     (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION`) - invisible to any assemble-only
+///     gate, because `ptxas` is happy to assemble an over-stated version;
+///   - **under-stated** on Blackwell, where `ptxas` rejects the module outright
+///     ("PTX .version 8.0 does not support .target sm_120") while this backend
+///     printed "Dual-accelerator PTX generated successfully!" and exited 0.
+///
+/// The assertion is an AGREEMENT between the two producers rather than a second
+/// copy of the table: a third site that re-derives the floor is the bug, not
+/// the fix. The existing `coprocessor_ptx_assembles` cannot see any of this -
+/// it hardcodes `-arch=sm_89`, which is exactly the arch where 8.0 is legal.
+#[test]
+fn the_coprocessor_backend_declares_the_same_floor_as_the_ptx_backend() {
+    for arch in ARCHES {
+        let (cop, _) = coprocessor_module_for(arch);
+        let main = emitted_version_for(arch);
+        assert_eq!(
+            cop, main,
+            "at {} the co-processor backend declared .version {} while the PTX backend \
+             declared {}. Both are the same driver requirement for the same card, so a \
+             disagreement means one of them is not consulting `ptx_version_for_sm`.",
+            arch, cop, main
+        );
+    }
+}
+
+/// ...and the module it writes must assemble at the target it names.
+#[test]
+fn the_coprocessor_module_assembles_at_every_supported_target() {
+    let Some(tool) = ptxas() else {
+        eprintln!("skipping: no ptxas on PATH");
+        return;
+    };
+    for arch in ARCHES {
+        let (_, ptx) = coprocessor_module_for(arch);
+        if let Err(e) = assembles(&tool, &ptx, arch, "coprocessor") {
+            panic!(
+                "the co-processor backend wrote a module for {} that ptxas rejects at \
+                 that very target - and reported success and exit 0 while doing it:\n{}",
+                arch, e
+            );
+        }
+    }
+}
+
+/// No source file may hardcode a `.version` above the floor either.
+///
+/// Gotcha 8b's standing lesson is that a literal in a Rust format string cannot
+/// be prevented from coming back by assembling the CURRENT output. That was
+/// written about `.target`, a gate was added for `.target`, and the identical
+/// bug was sitting one line above it in `.version` form the whole time.
+///
+/// `ptx_version_for_sm`'s own body is the table and is exempt by position, not
+/// by pattern - a second exemption has to be deliberate. Everything after a
+/// `#[cfg(test)]` is not shipped and is not scanned.
+#[test]
+fn no_source_file_hardcodes_a_ptx_version_above_the_floor() {
+    let src = repo().join("src");
+    let floor: (u32, u32) = {
+        let mut it = VERSION_FLOOR.split('.');
+        (
+            it.next().unwrap().parse().unwrap(),
+            it.next().unwrap().parse().unwrap(),
+        )
+    };
+    let mut bad = Vec::new();
+    for e in std::fs::read_dir(&src).unwrap().filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.extension().map(|x| x != "rs").unwrap_or(true) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&p).unwrap_or_default();
+
+        // The table itself, exempted by position.
+        let mut exempt: Option<(usize, usize)> = None;
+        if let Some(start) = text.find("pub fn ptx_version_for_sm(") {
+            let before = text[..start].lines().count();
+            let rest = &text[start..];
+            let end = rest.find("\n}\n").map(|o| rest[..o].lines().count()).unwrap_or(0);
+            exempt = Some((before, before + end + 1));
+        }
+
+        for (lineno, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                break;
+            }
+            if let Some((a, b)) = exempt {
+                if lineno >= a && lineno <= b {
+                    continue;
+                }
+            }
+            let l = line.trim();
+            if l.starts_with("//") || l.starts_with("///") || l.starts_with('*') {
+                continue;
+            }
+            if l.contains("assert") || l.contains(".contains(") {
+                continue;
+            }
+            let Some(rest) = line.split(".version ").nth(1) else {
+                continue;
+            };
+            let num: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            let mut it = num.split('.');
+            let (Some(maj), Some(min)) = (
+                it.next().and_then(|x| x.parse::<u32>().ok()),
+                it.next().and_then(|x| x.parse::<u32>().ok()),
+            ) else {
+                continue;
+            };
+            if (maj, min) > floor {
+                bad.push(format!(
+                    "  {}:{}: {}",
+                    p.file_name().unwrap().to_string_lossy(),
+                    lineno + 1,
+                    l.chars().take(90).collect::<String>()
+                ));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a `.version` above {} is hardcoded in source. `.version` is the DRIVER \
+         requirement: over-stating it makes the kernel refuse to load on an older \
+         driver, and under-stating it makes ptxas reject the module on a newer card. \
+         Call `ptx_version_for_sm` instead of writing a literal:\n{}",
+        VERSION_FLOOR,
+        bad.join("\n")
     );
 }

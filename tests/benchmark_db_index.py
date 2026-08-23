@@ -39,8 +39,24 @@ def wrap_ptx(ptx_file, name="y_coprocessor_db_index", param_count=2):
     except Exception:
         target_sm = "sm_90a"
 
-    version_str = ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
+    version_str = src_version or (
+        ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
+    )
     
+    # The compiler now emits a COMPLETE module with a correct header, so the
+    # header it wrote is what gets reused here. Substituting a literal
+    # discarded the measured `.version` floor (gotcha 8b) and re-introduced the
+    # bug in the harness: `.version 8.0` over-states the driver requirement on
+    # sm_80/86/89 and is REJECTED outright on Blackwell.
+    src_version = next(
+        (l.strip() for l in content.splitlines() if l.strip().startswith(".version")),
+        None,
+    )
+    src_target = next(
+        (l.strip() for l in content.splitlines() if l.strip().startswith(".target")),
+        None,
+    )
+
     # Extract module-level shared memory declarations
     shared_decls = []
     body_lines = []

@@ -1,4 +1,4 @@
-.version 8.0
+.version 7.8
 .target sm_89
 .address_size 64
 

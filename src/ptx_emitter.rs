@@ -149,7 +149,16 @@ fn ptx_version_ge(a: &str, b: &str) -> bool {
 /// sm_90 keeps 8.0 although `ptxas` 13.3 accepts 7.8: sm_90 arrived in CUDA
 /// 12.0, so 7.8 is below the documented floor and this assembler is merely
 /// being lenient. Guess down, but not below the spec.
-fn ptx_version_for_sm(sm: &str) -> &'static str {
+///
+/// It is `pub` because `--emit-coprocessor` builds its own PTX module header
+/// in `main.rs` rather than going through `emit_program`, and hardcoded
+/// `.version 8.0` there. That is the SAME literal-in-a-format-string shape
+/// gotcha 8b warns about, and it failed in both directions at once: 8.0
+/// over-states the driver floor by a whole CUDA major on sm_80, and `ptxas`
+/// rejects it outright on sm_100/sm_120 ("PTX .version 8.0 does not support
+/// .target sm_120") - under a success message and exit 0. Any future site
+/// that writes a `.version` line must call this, not a literal.
+pub fn ptx_version_for_sm(sm: &str) -> &'static str {
     let normalized = if sm.starts_with("sm_") {
         sm.to_string()
     } else {
