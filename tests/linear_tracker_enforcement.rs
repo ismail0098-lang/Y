@@ -69,10 +69,24 @@ fn compile(name: &str, body: &str) -> String {
     )
 }
 
+/// These tests assert on "Front-end analysis complete.", NOT on "Compilation
+/// Successful!".
+///
+/// The two used to be the same string: the success banner was printed before
+/// the backend dispatch ran, so it meant "the front end accepted this". It now
+/// means what it says - the selected backend produced its artifact - and these
+/// programs deliberately do not get that far. They call undeclared stubs, use
+/// `match` (which the PTX backend refuses by name), and are compiled without a
+/// linkable runtime, because the property under test is entirely a front-end
+/// one.
+///
+/// The negative assertions got STRONGER in the same move: `!contains(banner)`
+/// used to be satisfied by a program the front end ACCEPTED and a backend then
+/// refused, which would have read as "the front end rejected it".
 fn assert_rejected(name: &str, body: &str, why: &str) {
     let out = compile(name, body);
     assert!(
-        !out.contains("Compilation Successful"),
+        !out.contains("Front-end analysis complete"),
         "{} was accepted but must be rejected ({}).\n{}",
         name,
         why,
@@ -91,7 +105,7 @@ fn assert_rejected(name: &str, body: &str, why: &str) {
 fn assert_accepted(name: &str, body: &str, why: &str) {
     let out = compile(name, body);
     assert!(
-        out.contains("Compilation Successful"),
+        out.contains("Front-end analysis complete"),
         "{} must compile ({}).\n{}",
         name,
         why,
@@ -124,7 +138,7 @@ fn double_consume_is_rejected() {
 fn unbound_obligation_is_rejected() {
     let out = compile("lt_unbound", "    cp_async(A, B, 16);");
     assert!(
-        !out.contains("Compilation Successful"),
+        !out.contains("Front-end analysis complete"),
         "an unbound transfer obligation cannot ever be awaited:\n{}",
         out
     );

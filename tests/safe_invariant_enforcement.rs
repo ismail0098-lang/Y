@@ -65,6 +65,20 @@ fn write_source(name: &str, body: &str) -> PathBuf {
 
 /// Runs the compiler on `src`. `solver_visible` false strips the environment
 /// the solver could be found through.
+/// These tests assert on "Front-end analysis complete.", NOT on "Compilation
+/// Successful!".
+///
+/// The two used to be the same string: the success banner was printed before
+/// the backend dispatch ran, so it meant "the front end accepted this". It now
+/// means what it says - the selected backend produced its artifact - and these
+/// programs deliberately do not get that far. They call undeclared stubs, use
+/// `match` (which the PTX backend refuses by name), and are compiled without a
+/// linkable runtime, because the property under test is entirely a front-end
+/// one.
+///
+/// The negative assertions got STRONGER in the same move: `!contains(banner)`
+/// used to be satisfied by a program the front end ACCEPTED and a backend then
+/// refused, which would have read as "the front end rejected it".
 fn compile(src: &PathBuf, solver_visible: bool, allow_unverified: bool) -> String {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_Y"));
     cmd.arg(src);
@@ -100,7 +114,7 @@ fn unverifiable_invariant_fails_the_build() {
         out
     );
     assert!(
-        !out.contains("Compilation Successful"),
+        !out.contains("Front-end analysis complete"),
         "compilation must not succeed with an undischarged proof obligation.\n{}",
         out
     );
@@ -253,12 +267,12 @@ fn nested_if_cannot_hide_a_false_invariant() {
     let plain_out = compile_with_solver("plain_violation", plain).expect("z3 was found above");
 
     assert!(
-        !plain_out.contains("Compilation Successful"),
+        !plain_out.contains("Front-end analysis complete"),
         "the control must be rejected:\n{}",
         plain_out
     );
     assert!(
-        !hidden_out.contains("Compilation Successful"),
+        !hidden_out.contains("Front-end analysis complete"),
         "a false invariant was accepted because the violating assignment sat inside an `if`. \
          The body tracer is skipping a construct instead of over-approximating it.\n{}",
         hidden_out
@@ -279,7 +293,7 @@ fn ordinary_loop_bodies_still_verify() {
         return;
     };
     assert!(
-        out.contains("Compilation Successful"),
+        out.contains("Front-end analysis complete"),
         "a true invariant over supported constructs must still verify:\n{}",
         out
     );
@@ -298,7 +312,7 @@ fn unencodable_operator_is_refused_not_mistranslated() {
         return;
     };
     assert!(
-        !out.contains("Compilation Successful"),
+        !out.contains("Front-end analysis complete"),
         "an invariant using an operator with no sound encoding must be refused:\n{}",
         out
     );
@@ -363,7 +377,7 @@ fn a_loop_with_variable_bounds_can_be_verified() {
         out
     );
     assert!(
-        out.contains("Compilation Successful"),
+        out.contains("Front-end analysis complete"),
         "a true invariant on a variable-bounded loop was not accepted:\n{}",
         out
     );
@@ -386,7 +400,7 @@ fn a_false_invariant_on_a_variable_bounded_loop_is_still_rejected() {
         out
     );
     assert!(
-        !out.contains("Compilation Successful"),
+        !out.contains("Front-end analysis complete"),
         "the build succeeded despite a false invariant:\n{}",
         out
     );
@@ -437,7 +451,7 @@ fn a_bound_from_a_gpu_index_intrinsic_is_known_non_negative() {
         return;
     }
     assert!(
-        out.contains("Compilation Successful"),
+        out.contains("Front-end analysis complete"),
         "`k >= 0` on `for k in block_idx_x()..hi` was not provable, so a \
          grid-stride loop still cannot carry an invariant:\n{}",
         out
@@ -459,7 +473,7 @@ fn the_intrinsic_range_is_not_over_claimed() {
         return;
     }
     assert!(
-        !out.contains("Compilation Successful"),
+        !out.contains("Front-end analysis complete"),
         "`k > 0` was accepted on a loop starting at `block_idx_x()`, which is \
          zero on the first CTA of every launch. The interval bounds are too \
          strong:\n{}",
@@ -583,7 +597,7 @@ fn calls_that_hand_out_no_reference_still_verify() {
             return;
         };
         assert!(
-            out.contains("Compilation Successful"),
+            out.contains("Front-end analysis complete"),
             "`{}` hands out no reference and its invariant is true, so it must \
              still verify. Refusing every body containing a call would satisfy \
              every negative case in this section and check nothing.\n{}",
@@ -630,7 +644,7 @@ fn phase(name: &str, src: &str) -> Option<&'static str> {
         "initiation"
     } else if out.contains("preservation") {
         "preservation"
-    } else if out.contains("Compilation Successful") {
+    } else if out.contains("Front-end analysis complete") {
         "accepted"
     } else {
         "other"
