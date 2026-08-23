@@ -84,7 +84,11 @@ pub unsafe extern "C" fn y_compile_to_ptx(
         hw_profile.sm_version = sm_str.to_string();
     }
     if hw_profile.sm_version.is_empty() {
-        hw_profile.sm_version = "sm_89".to_string();
+        // sm_80, matching `PtxEmitter`'s own fallback. This said sm_89, so a
+        // machine where the probe found nothing emitted PTX that only Ada and
+        // later can load - and a `.target` above the device is a hard load
+        // failure, not a slowdown. Guess DOWN: PTX is forward compatible.
+        hw_profile.sm_version = "sm_80".to_string();
     }
 
     let mut emitter = PtxEmitter::new_with_profile(&hw_profile);

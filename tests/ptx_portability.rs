@@ -302,3 +302,95 @@ fn no_source_file_hardcodes_a_target_above_the_floor() {
         bad.join("\n")
     );
 }
+
+// ────────────────────────────────────────────────────────
+// The one legitimate exception
+// ────────────────────────────────────────────────────────
+
+/// FP8 genuinely needs sm_89, so it must REFUSE below it, not emit.
+///
+/// This is the only kernel family in the repo whose hardware requirement is
+/// above the floor, and it is a real one: `e4m3` tensor cores are Ada and
+/// later. Below that the instruction does not exist, so the module is rejected
+/// at LOAD time with `CUDA_ERROR_NO_BINARY_FOR_GPU` and nothing says why -
+/// exactly the surprise this file exists to prevent, in the one case that
+/// cannot be fixed by lowering the target.
+///
+/// Asserted as a BICONDITIONAL. "Refuse FP8 always" satisfies half of it and
+/// would delete a working path on the hardware that has it, so the sm_89 arm
+/// is what makes the sm_86 arm mean anything.
+#[test]
+fn fp8_refuses_below_ada_and_still_works_on_it() {
+    let src = repo().join("tests/gemm_fp8_256.ysu");
+    if !src.exists() {
+        eprintln!("SKIP: no FP8 fixture");
+        return;
+    }
+    // A profile is what fixes the target, so writing one is how a card is
+    // simulated. Everything runs in a temp dir; the real profile is untouched.
+    for (cc, want_refusal) in [("8.6", true), ("8.9", false)] {
+        let dir = std::env::temp_dir()
+            .join(format!("y_fp8_arch_{}_{}", std::process::id(), cc.replace('.', "")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = repo().join(".ysu_hw_profile");
+        let mut profile = std::fs::read_to_string(&real).unwrap_or_default();
+        if profile.is_empty() {
+            eprintln!("SKIP: no .ysu_hw_profile to base the simulated card on");
+            return;
+        }
+        profile = profile
+            .lines()
+            .map(|l| {
+                if l.starts_with("SM_VERSION=") {
+                    format!("SM_VERSION={}", cc)
+                } else if l.starts_with("COMPUTE_CAPABILITY=") {
+                    format!("COMPUTE_CAPABILITY={}", cc)
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join(".ysu_hw_profile"), profile).unwrap();
+        let local_src = dir.join("gemm_fp8_256.ysu");
+        std::fs::copy(&src, &local_src).unwrap();
+
+        let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+            .arg(&local_src)
+            .arg("--emit-ptx")
+            .current_dir(&dir)
+            .output()
+            .expect("run Y");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        if want_refusal {
+            assert!(
+                !out.status.success(),
+                "at sm_{} an FP8 kernel was ACCEPTED. The emitted module cannot load on \
+                 that card, and the failure would surface as CUDA_ERROR_NO_BINARY_FOR_GPU \
+                 at run time on someone else's machine:\n{}",
+                cc.replace('.', ""),
+                text
+            );
+            assert!(
+                text.contains("FP8") && text.contains("sm_89"),
+                "refused, but not by the FP8 arch check - so this case is not gating what \
+                 it is named for:\n{}",
+                text
+            );
+        } else {
+            assert!(
+                out.status.success(),
+                "at sm_{} FP8 must still compile - refusing everywhere is sound and \
+                 useless:\n{}",
+                cc.replace('.', ""),
+                text
+            );
+        }
+    }
+}

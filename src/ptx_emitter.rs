@@ -1324,6 +1324,41 @@ impl PtxEmitter {
         ));
     }
 
+    /// The numeric part of `sm_NN`, for comparing architectures.
+    fn sm_level(&self) -> u32 {
+        self.sm_target
+            .trim_start_matches("sm_")
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    /// FP8 (`e4m3`) tensor cores are Ada and later. Below sm_89 the kernel is
+    /// not slow, it does not EXIST - the driver rejects the module with
+    /// `CUDA_ERROR_NO_BINARY_FOR_GPU` and nothing says why.
+    ///
+    /// This is the one place in the emitter where a real hardware requirement
+    /// is above the sm_80 floor everything else targets, so it is the one place
+    /// that has to refuse by name rather than silently emit something a 3060
+    /// cannot load. `tests/ptx_portability.rs` pins the rest of the surface at
+    /// the floor precisely so this stays the only exception.
+    fn require_fp8_hardware(&mut self, kernel: &str) -> bool {
+        if self.sm_level() >= 89 {
+            return true;
+        }
+        let lvl = self.sm_target.clone();
+        self.emit_errors.push(format!(
+            "[PTX] kernel `{}` uses FP8 (e4m3) tensor cores, which exist only on sm_89 \
+             (Ada) and later; this build targets {}. There is no fallback: the \
+             instruction is absent, so the module would be rejected at load time with \
+             CUDA_ERROR_NO_BINARY_FOR_GPU. Use the int8 or f16 GEMM path on this card.",
+            kernel, lvl
+        ));
+        false
+    }
+
     fn unsupported_intrinsic(&mut self, name: &str, reason: &str) {
         self.emit_errors.push(format!(
             "[PTX] `{}(...)` cannot be lowered for target {}: {}.",
@@ -1464,6 +1499,9 @@ impl PtxEmitter {
         } else if let Some((m, n, k, a_ptr, b_ptr, c_ptr)) = self.tile_gemm_int8_operands(kernel) {
             Some(self.emit_int8_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &c_ptr, &kernel.name, None))
         } else if let Some((m, n, k, a_ptr, b_ptr, scale_a_reg, scale_b_reg, c_ptr)) = self.tile_gemm_fp8_operands(kernel) {
+            if !self.require_fp8_hardware(&kernel.name) {
+                return;
+            }
             Some(self.emit_fp8_gemm_kernel(m, n, k, &a_ptr, &b_ptr, &scale_a_reg, &scale_b_reg, &c_ptr, &kernel.name))
         } else if let Some((m, n, k, x_ptr, wgate_ptr, wup_ptr, out_ptr)) = self.tile_gemm_swiglu_operands(kernel) {
             Some(self.emit_gemm_swiglu_kernel(m, n, k, &x_ptr, &wgate_ptr, &wup_ptr, &out_ptr, hw_profile, &kernel.name))
@@ -10671,7 +10709,13 @@ mod tests {
         let mut parser = crate::parser::Parser::new(tokens);
         let ast = parser.parse_program().unwrap();
 
-        let hw = crate::sentinel::HardwareProfile::default();
+        // sm_89 explicitly: FP8 (e4m3) tensor cores are Ada and later, and the
+        // emitter now REFUSES to emit them below that rather than produce a
+        // module the driver rejects at load time. `HardwareProfile::default()`
+        // resolves to the sm_80 floor, so this test was previously exercising
+        // FP8 codegen at a target that cannot run it.
+        let mut hw = crate::sentinel::HardwareProfile::default();
+        hw.sm_version = "sm_89".to_string();
         let mut emitter = PtxEmitter::new_with_profile(&hw);
         let ptx = emitter.emit_program(&ast, &hw);
 
@@ -10702,7 +10746,9 @@ mod tests {
         let mut parser = crate::parser::Parser::new(tokens);
         let ast = parser.parse_program().unwrap();
 
-        let hw = crate::sentinel::HardwareProfile::default();
+        // sm_89 explicitly - FP8 is Ada+, and the emitter refuses below it.
+        let mut hw = crate::sentinel::HardwareProfile::default();
+        hw.sm_version = "sm_89".to_string();
         let mut emitter = PtxEmitter::new_with_profile(&hw);
         let ptx = emitter.emit_program(&ast, &hw);
 
