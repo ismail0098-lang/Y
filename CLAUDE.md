@@ -51,7 +51,14 @@ The codebase consists of:
   binary prints `The ZK Circuit Backend is not compiled into this binary` and
   **exits 0** — a silent no-op that reads as a fast successful run. There is no
   `tests/circuits/` directory; sample circuits are in
-  `fuzz/corpus/fuzz_parser/{heavy_circuit,dot_product}.ysu`.
+  `fuzz/corpus/fuzz_parser/{heavy_circuit,dot_product}.ysu` — and **both need
+  `Y_ZK_MAX_UNROLL` raised** (they loop 100,000 times against a 10,000 default),
+  so the command as written refuses them. Note also that the emitter writes its
+  three output files **next to the input**, i.e. into the fuzz corpus directory;
+  delete them afterwards or libFuzzer will treat them as inputs.
+  ```bash
+  Y_ZK_MAX_UNROLL=200000 ./target/release/Y fuzz/corpus/fuzz_parser/dot_product.ysu --target=r1cs
+  ```
 - **End-to-end ZK proof** (Groth16 over BN254; arkworks is a dev-dependency used
   as an independent oracle, the shipping binary still links nothing):
   ```bash
@@ -60,10 +67,38 @@ The codebase consists of:
 - **ZK compile-speed benchmark vs circom**: `python3 tests/benchmark_zk_vs_circom.py`
 
 ### Python Package & Benchmarks
-- **Run Python Tests**:
+- **Run Python Tests** — **from `src/Y_lang/`, not from `Y/`.** `python/` is a
+  sibling of the cargo project, so this is the one command block here whose
+  working directory differs from the `cargo` ones. There are TWO test
+  directories and `discover` finds only what it is pointed at:
   ```bash
   PYTHONPATH=python python3 -m unittest discover -s python/tests -p "test_*.py"
+  PYTHONPATH=python python3 -m unittest discover -s python/y_lang/tests -p "test_*.py"
   ```
+  - **`_find_liby` used to look in the wrong place, and the failure was
+    silent.** It searched `<package>/../target/release/liby.so`, which is NOT
+    where `cargo build --release` writes — the cargo project is `Y/`. A
+    `liby.so` from an abandoned build layout was sitting at the old path, so
+    the whole Python package ran against a compiler **25 days older than
+    `src/`**. A missing symbol raises; a stale one just answers. Both roots are
+    searched now, newest wins, and `test_ffi_signatures.py` fails if the loaded
+    library is older than `src/c_api.rs`.
+  - **`y_autotune_search_space_json` was declared with three parameters and
+    takes four.** ctypes fills only the registers it is told about, so
+    `is_fp8: bool` was read from an uninitialised register — observed flipping
+    between `True` and `False` across calls **within one process**. An arity
+    mismatch on an ABI boundary cannot be caught by running the code, so
+    `test_ffi_signatures.py` parses `src/c_api.rs` and compares arities. Same
+    shape as the `.target`/`.version` source-literal gates.
+  - **`@y_lang.autotune()` ranked ~30 tile candidates by timing a function that
+    returns instantly**, so it answered at random and the documented command
+    above failed about **one run in four**. It prefers the compiler's own
+    analytic pick (`y_autotune_select_config_json`) unless a measurement beats
+    it by more than the run's own dispersion AND clears a launch-cost floor —
+    a GPU launch plus a synchronise is not a microsecond, so anything faster is
+    the harness timing itself. The rules live in the pure
+    `measurement_beats_model`, because pinning them through real timings caught
+    a dropped floor in only ~4 runs out of 10.
 - **Run Benchmarks**:
   ```bash
   python3 tests/benchmark_y_vs_triton.py
