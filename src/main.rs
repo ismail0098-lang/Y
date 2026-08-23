@@ -568,6 +568,21 @@ fn main() {
     // `bar` - the value was not consumed here, so it was taken as the source
     // file. Consume it in one place so both readings agree.
     let mut cli_output = None;
+    /// Every option this binary reads. An argument starting with `-` that is
+    /// not here, and does not begin with one of `KNOWN_FLAG_PREFIXES`, is a
+    /// hard error -- see the check after the loop.
+    const KNOWN_FLAGS: &[&str] = &[
+        "-o", "--output", "-I", "-l", "--link", "--name", "--witness",
+        "--portable", "--autotune", "--autotune-force", "--no-autotune",
+        "--emit-attention-ptx", "--emit-c", "--emit-coprocessor", "--emit-cpu",
+        "--emit-llvm", "--emit-native", "--emit-ptx", "--emit-r1cs",
+        "--emit-verifier", "--emit-zk-ptx", "--c",
+        "--target=c", "--target=coprocessor", "--target=cpu", "--target=llvm",
+        "--target=native", "--target=ptx", "--target=r1cs", "--target=zk-ptx",
+    ];
+    /// Options that carry their value in the same argument.
+    const KNOWN_FLAG_PREFIXES: &[&str] = &["--output=", "--lib-path=", "-I", "-l"];
+    let mut unknown_flags: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         if (args[i] == "-o" || args[i] == "--output") && i + 1 < args.len() {
@@ -583,6 +598,11 @@ fn main() {
             lib_paths.push(std::path::PathBuf::from(args[i].trim_start_matches("--lib-path=")));
             i += 1;
         } else if args[i].starts_with('-') {
+            if !KNOWN_FLAGS.contains(&args[i].as_str())
+                && !KNOWN_FLAG_PREFIXES.iter().any(|p| args[i].starts_with(p))
+            {
+                unknown_flags.push(args[i].clone());
+            }
             i += 1;
         } else {
             if source_file.is_none() {
@@ -590,6 +610,28 @@ fn main() {
             }
             i += 1;
         }
+    }
+
+    // An unrecognised flag used to be SKIPPED, so `Y foo.ysu --ptx` ran the
+    // LLVM backend and printed "Compiled successfully" over a native ELF. That
+    // exact command is in this repo's own build instructions, and `--ptx` is
+    // not a flag -- the PTX backend is `--emit-ptx`. `--probe` and
+    // `--nonsense-flag` behaved the same way.
+    //
+    // It is the `--c` bug in its general form: CLAUDE.md records that `--c`
+    // "used to be *silently ignored*, so the command this line documented ran
+    // the LLVM backend instead", and that one flag was fixed while the arm
+    // that ignored ALL of them was left in place. Fixing the instance and not
+    // the class is the thing this repo's design rule exists to catch.
+    if !unknown_flags.is_empty() {
+        log_error!(
+            "unrecognised option{}: {}",
+            if unknown_flags.len() == 1 { "" } else { "s" },
+            unknown_flags.join(", ")
+        );
+        eprintln!("    Known options: {}", KNOWN_FLAGS.join(" "));
+        eprintln!("    (did you mean --emit-ptx? there is no --ptx)");
+        exit(1);
     }
 
     // A `.circom` file is a different language and does not go through Y's

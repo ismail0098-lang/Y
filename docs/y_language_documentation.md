@@ -94,7 +94,8 @@ The first time you compile any `.ysu` file, Y automatically runs the hardware pr
 You can also trigger the probe explicitly (e.g. after upgrading hardware, or on a new machine):
 
 ```bash
-./target/release/Y --probe
+# The Hardware Sentinel runs automatically on the first compile; there is no --probe flag.
+./target/release/Y tests/hello.ysu
 ```
 
 Either way, you'll see output like:
@@ -169,10 +170,10 @@ kernel accumulate(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32) {
 
 ```bash
 # Compile to native binary via LLVM backend:
-cargo run -- tests/train_spec.ysu --llvm
+cargo run -- tests/train_spec.ysu --emit-llvm
 
 # Or emit raw PTX directly:
-cargo run -- tests/train_spec.ysu --ptx
+cargo run -- tests/train_spec.ysu --emit-ptx
 ```
 
 Benchmarked against PyTorch on RTX 4070 Ti SUPER:
@@ -224,14 +225,32 @@ See [§11 — Hardware-Sentient Dual-Accelerator Co-Processing Pipeline](#11-har
 
 ### Quick Reference: Compiler Flags
 
+Taken from `src/main.rs`. **`--llvm`, `--ptx` and `--probe` were listed here
+and are not options** — until this was corrected they were *silently ignored*,
+so `Y foo.ysu --ptx` ran the LLVM backend and reported "Compiled successfully"
+over a native ELF. Unrecognised options are a hard error now.
+
 | Flag | Effect |
 | :--- | :--- |
-| *(none)* | Compile with LLVM backend → native binary via clang |
-| `--llvm` | Explicit LLVM IR emission |
-| `--c` | Emit portable C |
-| `--ptx` | Emit raw NVIDIA PTX |
-| `--emit-coprocessor` | Fused RT Core + Tensor Core co-processor PTX |
-| `--probe` | Run Hardware Sentinel Probe and save `.ysu_hw_profile` |
+| *(none)* | Compile with the LLVM backend → native binary via clang |
+| `--emit-llvm` / `--target=llvm` | LLVM IR |
+| `--emit-ptx` / `--target=ptx` | NVIDIA PTX |
+| `--emit-cpu` / `--target=cpu` | Host Rust/AVX source, **printed for you to paste** — Y never compiles it |
+| `--emit-native` / `--target=native` | Direct x86-64 ELF. A straight-line integer subset; anything outside it is refused with a line number |
+| `--emit-coprocessor` / `--target=coprocessor` | Fused RT Core + Tensor Core co-processor PTX |
+| `--emit-attention-ptx` | Paged decode attention PTX |
+| `--emit-r1cs` / `--target=r1cs` | R1CS circuit (**requires `--features zk`**; without it the binary says so and exits 0) |
+| `--emit-zk-ptx` / `--target=zk-ptx` | GPU witness-generation PTX |
+| `--emit-verifier <vkey.json>` | Solidity Groth16 verifier (`--name N` to name the contract) |
+| `--witness <input.json>` | Also solve and write `.wtns` (with `--target=r1cs`) |
+| `--autotune` / `--autotune-force` / `--no-autotune` | Empirical GEMM tile selection; see the autotuner notes |
+| `-o <path>` / `--output <path>` / `--output=<path>` | Output path |
+| `-I <dir>` / `--lib-path=<dir>` | Include path |
+| `--link`, `--portable` | Linking options |
+| `--c` / `--emit-c` / `--target=c` | **Removed.** Reports that the C backend is gone and exits 1 |
+
+There is no `--probe`: the Hardware Sentinel runs automatically on the first
+compile and caches to `.ysu_hw_profile`. Delete that file to force a re-probe.
 
 ### Where to Go Next
 
@@ -2694,8 +2713,8 @@ The swizzle value `330` is a Y-specific compact integer encoding representing th
 | Scenario | Use |
 | :--- | :--- |
 | You have RT Core traversal feeding Tensor Core MMA | `--emit-coprocessor` |
-| Pure Tensor Core kernel (no BVH/ray queries) | `--llvm` or `--ptx` |
-| Pure compute kernel (reductions, FFTs, sorting) | `--llvm` |
+| Pure Tensor Core kernel (no BVH/ray queries) | `--emit-llvm` or `--emit-ptx` |
+| Pure compute kernel (reductions, FFTs, sorting) | `--emit-llvm` |
 | ZK circuit generation | `--emit-r1cs` |
 | CPU-side lock-free data structures | `--llvm` (uses AVX-512 backend) |
 
@@ -4445,7 +4464,7 @@ This section provides a formal technical architectural comparison between **Open
 
 ### 35.3 Dynamic Runtime Autotuning (`@triton.autotune`) vs. Hardware Sentinel Probing
 * **OpenAI Triton**: Built-in `@triton.autotune` dynamically evaluates grid parameter configurations (`BLOCK_SIZE_M`, `num_warps`, `num_stages`) at runtime across input tensor shape variations, caching optimal parameter tuples per shape key.
-* **Y Language**: Relies on compile-time static hardware probing (`--probe` via `Hardware Sentinel`). The sentinel analyzes execution hardware (L1/L2/L3 cycles, SMEM size, FMA latencies) to configure default compiler passes. Runtime autotuning in Y is handled via the Python decorator [`autotune`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/python/y_lang/autotune_decorator.py) (`python/y_lang/autotune_decorator.py`), which benchmarks tile configurations (`AutotuneConfig`).
+* **Y Language**: Relies on compile-time static hardware probing (the `Hardware Sentinel`, run automatically on the first compile and cached in `.ysu_hw_profile`). The sentinel analyzes execution hardware (L1/L2/L3 cycles, SMEM size, FMA latencies) to configure default compiler passes. Runtime autotuning in Y is handled via the Python decorator [`autotune`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/python/y_lang/autotune_decorator.py) (`python/y_lang/autotune_decorator.py`), which benchmarks tile configurations (`AutotuneConfig`).
 
 ### 35.4 Multi-Vendor GPU Compiler Dialects
 * **OpenAI Triton**: Uses an MLIR dialect lowering pipeline (`triton` $\rightarrow$ `triton-gpu` $\rightarrow$ `nvvm` / `hip` / `spirv`), targeting NVIDIA CUDA, AMD ROCm (HIP), and Intel XPU GPUs natively.
