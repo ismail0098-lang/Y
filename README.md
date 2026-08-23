@@ -1262,17 +1262,33 @@ list of **shapes to grep for in the next pass you write.**
 
 ## Building
 
-Requires: Rust toolchain, clang. Optionally: `nvcc` for the GPU probe, `z3` for
-invariant checking, `ptxas` for the PTX assembly gate, `solc` + Node for the
-Solidity verifier test.
+Requires: Rust toolchain, clang.
 
 ```bash
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # 63 test binaries, 415 tests
-cargo test --release --features zk      # 612 tests, ZK included
+cargo test --release                    # 478 tests
+cargo test --release --features zk      # 736 tests, ZK included
 ```
+
+**Four gates are conditional on an external tool, and a missing tool makes them
+SKIP AND REPORT `ok`.** A green run is therefore not by itself evidence that
+they ran — read this list before trusting one:
+
+| tool | gate | what it is the only check for |
+|---|---|---|
+| `z3` | `safe_invariant_enforcement` | that `@safe`'s `@invariant` is discharged at all rather than assumed |
+| `ptxas` | `ptx_portability`, `ptx_intrinsics_assemble`, `coprocessor_ptx_assembles` | that emitted PTX is legal, at architectures this machine does not have |
+| `solc` + Node (`npm install solc`) | `zk_solidity_verifier` | that the generated Groth16 verifier accepts a real proof on a real EVM |
+| `circom` | `circom_frontend`, `tools/circomlib_coverage.py` | that Y agrees with the reference compiler |
+
+That list is here because the third one had been skipping. Installing `solc`
+made it run — and with the G2 coordinate order reverted to `(c0, c1)`, the bug
+the module comment in `src/zk_solidity.rs` exists to prevent, it **failed
+immediately**. Before the install, the same mutation passed the whole suite in
+0.00 s under a green `ok`. `nvcc` is optional and gates only the GPU probe, not
+a correctness claim.
 
 ### The whole command-line surface
 
