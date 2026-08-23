@@ -112,7 +112,43 @@ pub const FP8_GEMM_CTA_K: u32 = 64;
 /// F16 threshold (256) it originally mirrored.
 pub const FP8_GEMM_SMALL_THRESHOLD: u32 = 512;
 
-/// Maps an SM compute capability to the minimum required PTX ISA version.
+/// Compare two `.version` strings (`"8.4"`, or a whole `".version 8.4"` line)
+/// as (major, minor).
+fn ptx_version_ge(a: &str, b: &str) -> bool {
+    fn parse(v: &str) -> (u32, u32) {
+        let v = v.trim().trim_start_matches(".version").trim();
+        let mut it = v.split('.');
+        (
+            it.next().and_then(|x| x.parse().ok()).unwrap_or(0),
+            it.next().and_then(|x| x.parse().ok()).unwrap_or(0),
+        )
+    }
+    parse(a) >= parse(b)
+}
+
+/// Maps an SM compute capability to the minimum PTX ISA version that can
+/// TARGET it -- the floor, not a comfortable margin.
+///
+/// **`.version` is a DRIVER requirement, independent of `.target`** (gotcha 8b),
+/// and over-stating it makes a kernel refuse to load on a machine whose driver
+/// is merely older, with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`. These numbers
+/// are MEASURED, by bisecting `.version` under `ptxas -arch=<a>`, not taken
+/// from a release table:
+///
+/// ```text
+///   sm_75 -> 6.3   sm_80 -> 7.0   sm_86 -> 7.1   sm_87 -> 7.5
+///   sm_89 -> 7.8   sm_90 -> 8.0   sm_120 -> 8.7
+/// ```
+///
+/// sm_89 was **8.4** here, over-stating the requirement by a whole CUDA major
+/// (12.4 against 11.8) for EVERY kernel, because FP8 `mma.sync` needs 8.4 on
+/// that arch. The FP8 path raises the floor itself now, through
+/// `require_ptx_version`, so a kernel that uses no FP8 does not pay for it.
+/// sm_86 was 7.5 against a real 7.1, and sm_75 6.5 against 6.3.
+///
+/// sm_90 keeps 8.0 although `ptxas` 13.3 accepts 7.8: sm_90 arrived in CUDA
+/// 12.0, so 7.8 is below the documented floor and this assembler is merely
+/// being lenient. Guess down, but not below the spec.
 fn ptx_version_for_sm(sm: &str) -> &'static str {
     let normalized = if sm.starts_with("sm_") {
         sm.to_string()
@@ -132,10 +168,11 @@ fn ptx_version_for_sm(sm: &str) -> &'static str {
             // instruction, identical -arch=sm_89, fails on 7.8 with
             // "Feature 'mma with FP8 floating point type' requires PTX ISA
             // .version 8.4 or later", assembles clean on 8.4+.
-            "sm_89" | "sm_8.9" => ".version 8.4",
-            "sm_86" | "sm_87" | "sm_8.6" => ".version 7.5",
+            "sm_89" | "sm_8.9" => ".version 7.8",
+            "sm_87" => ".version 7.5",
+            "sm_86" | "sm_8.6" => ".version 7.1",
             "sm_80" | "sm_8.0" => ".version 7.0",
-            "sm_75" => ".version 6.5",
+            "sm_75" => ".version 6.3",
             "sm_72" => ".version 6.2",
             "sm_70" => ".version 6.3",
             _ => ".version 7.8", // Safe default for CUDA 12+ targets
@@ -510,6 +547,11 @@ impl ScalarTy {
 pub struct PtxEmitter {
     pub ptx_buffer: String,
 
+    /// A PTX ISA version some emitted INSTRUCTION requires, above the target
+    /// arch's own floor. `None` means the arch floor is enough. See
+    /// `require_ptx_version`.
+    required_ptx_version: Option<&'static str>,
+
     // Virtual register counters to maintain uniqueness
     reg_u32_count: u32,
     reg_f32_count: u32,
@@ -653,6 +695,7 @@ impl PtxEmitter {
         writeln!(&mut buffer, "").unwrap();
 
         Self {
+            required_ptx_version: None,
             ptx_buffer: buffer,
             reg_u32_count: 0,
             reg_f32_count: 0,
@@ -1346,6 +1389,14 @@ impl PtxEmitter {
     /// the floor precisely so this stays the only exception.
     fn require_fp8_hardware(&mut self, kernel: &str) -> bool {
         if self.sm_level() >= 89 {
+            // FP8 `mma.sync.aligned.m16n8k32...e4m3.e4m3` needs PTX ISA 8.4
+            // even on the arch that has the hardware - confirmed empirically:
+            // identical instruction, identical `-arch=sm_89`, rejected on 7.8
+            // with "Feature 'mma with FP8 floating point type' requires PTX
+            // ISA .version 8.4 or later". This RAISES the module's floor
+            // rather than the arch's, so a kernel with no FP8 in it still
+            // declares 7.8 and still loads on a CUDA 11.8 driver.
+            self.require_ptx_version("8.4");
             return true;
         }
         let lvl = self.sm_target.clone();
@@ -1424,7 +1475,43 @@ impl PtxEmitter {
                 self.emit_kernel(k, hw_profile);
             }
         }
+        self.finalize_ptx_version();
         self.ptx_buffer.clone()
+    }
+
+    /// Raise the module's `.version` if something emitted needed more than the
+    /// target arch's floor.
+    ///
+    /// The header is written when the emitter is constructed, before any kernel
+    /// is seen, so a feature needing a newer ISA can only be discovered
+    /// afterwards. Rewriting the one line is cheaper than deferring the header,
+    /// and it keeps the floor honest in both directions: a plain kernel on
+    /// sm_89 declares 7.8, an FP8 one declares 8.4.
+    fn finalize_ptx_version(&mut self) {
+        let Some(required) = self.required_ptx_version else { return };
+        let Some(line) = self.ptx_buffer.lines().find(|l| l.starts_with(".version")) else {
+            return;
+        };
+        if ptx_version_ge(line, required) {
+            return;
+        }
+        let line = line.to_string();
+        self.ptx_buffer = self
+            .ptx_buffer
+            .replacen(&line, &format!(".version {}", required), 1);
+    }
+
+    /// Record that the module needs at least this PTX ISA version.
+    ///
+    /// Called by the lowerings whose INSTRUCTIONS need more than their target
+    /// arch does - FP8 `mma.sync` is the only one today. Recording it here
+    /// rather than baking it into `ptx_version_for_sm` is what stops every
+    /// other kernel on the same arch from inheriting the requirement.
+    fn require_ptx_version(&mut self, v: &'static str) {
+        match self.required_ptx_version {
+            Some(cur) if ptx_version_ge(cur, v) => {}
+            _ => self.required_ptx_version = Some(v),
+        }
     }
 
     fn emit_kernel(&mut self, kernel: &KernelDecl, hw_profile: &HardwareProfile) {
