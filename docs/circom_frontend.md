@@ -283,6 +283,7 @@ compound assignments (`\=` included); `**`, `\` (integer division) and `/`
 
 **circom 2.1 anonymous components, tuples and whole-array signal assignment**
 are supported: `o <== T(targs)(in1, in2)`, `(a, b) <== T()(x)`,
+`signal (a, b[n]) <== T()(x)`,
 `T()(name <== v)` binding by name, `_` to discard an output, `T()(x);` as a
 bare statement when the template has no outputs, and `c.in <== [a, b]` /
 `c.in <== other` driving a whole signal array at once.
@@ -493,7 +494,10 @@ hermetic; `EdDSA`'s include chain is not, and is covered by
   200-hash Poseidon chain.
 - `include` resolution is path-based only; there is no package/`node_modules`
   lookup.
-- **A signal-dependent array index is refused**, which is what now blocks
-  zk-email's `RSAVerifier65537` (`fp.circom`). A variable index has no R1CS form
-  without an explicit multiplexer, so this is a design question with a real
-  constraint cost rather than a syntax gap.
+- ~~A signal-dependent array index is refused~~ — **fixed**, and zk-email's
+  `RSAVerifier65537`, `Sha256Bytes` and `Sha256BytesPartial` compile. An unknown
+  index yields an unknown value in the witness domain (`out <-- t[u]`,
+  `out <-- in[u]`, `t[u] = 9`) and is still refused wherever the index would
+  decide which wire a constraint mentions (`out[u] <== 1`, `c[u].x <== 3`) or
+  wherever the value reaches a `<==`. That boundary is circom's, probed case by
+  case rather than assumed.
