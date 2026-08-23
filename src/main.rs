@@ -1150,7 +1150,16 @@ fn main() {
 
         let entry_name = "y_coprocessor_fused";
         let mut full_ptx = String::new();
-        full_ptx.push_str(".version 8.0\n");
+        // The `.version` is the DRIVER requirement and must come from the
+        // measured table, not a literal (gotcha 8b). Hardcoded `.version 8.0`
+        // here was wrong in BOTH directions at once: it over-states the floor
+        // by a whole CUDA major on sm_80 (7.0 is enough), so a kernel refuses
+        // to load on an 11.x driver with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`;
+        // and `ptxas` rejects it outright on Blackwell - "PTX .version 8.0
+        // does not support .target sm_120" - which this path then reported as
+        // "Dual-accelerator PTX generated successfully!" and exit 0.
+        full_ptx.push_str(ptx_emitter::ptx_version_for_sm(&target_sm));
+        full_ptx.push('\n');
         full_ptx.push_str(&format!(".target {}\n", target_sm));
         full_ptx.push_str(".address_size 64\n\n");
         full_ptx.push_str("// =======================================================\n");
@@ -1187,6 +1196,14 @@ fn main() {
             Ok(_) => {
                 println!("      -> Written to: {}", write_path);
                 println!("      \x1b[1;32mDual-accelerator PTX generated successfully!\x1b[0m");
+                // This arm cannot fall through to the banner at the end of
+                // `main` - the dispatch below would then run the default LLVM
+                // backend over the same program - so it prints the banner
+                // itself. Exiting 0 silently made `--emit-coprocessor` the one
+                // successful path that never said so, which is the benign half
+                // of the biconditional `success_banner_means_success` pins, and
+                // it falsified that dispatch's own comment ("no arm exits 0").
+                println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
                 std::process::exit(0);
             }
             Err(e) => {
@@ -1248,7 +1265,9 @@ fn main() {
     // print above the failure: `--emit-native` on an `if`, or `--target=r1cs`
     // on an out-of-range comparison operand, both printed success and then a
     // hard error. The real banner is at the end of `main`, which every
-    // successful path falls through to (no arm exits 0).
+    // successful path below falls through to (no arm here exits 0). The
+    // `--emit-coprocessor` arm ABOVE does exit 0, and prints the banner
+    // itself before it does.
     println!("\n\x1b[1;32mFront-end analysis complete.\x1b[0m\n");
 
     if emit_r1cs {
