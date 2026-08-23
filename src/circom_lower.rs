@@ -33,6 +33,64 @@ fn err(pos: Pos, msg: impl std::fmt::Display) -> String {
 }
 
 // ────────────────────────────────────────────────────────
+// circom's SIGNED comparison of `var`s
+// ────────────────────────────────────────────────────────
+//
+// circom orders field elements by their SIGNED representative: a value above
+// `(p-1)/2` denotes `v - p`, a negative number. Y's `Fr: Ord` is CANONICAL and
+// deliberately so — `zk_emitter` folds Y's own `<`/`<=`/`>`/`>=` through it,
+// where operands carry a 32-bit range check and the canonical order is the
+// intended one. The two disagree on every pair straddling `(p-1)/2`, so this
+// front end must not borrow that ordering.
+//
+// Measured against circom 2.2.3, `var a = 0 - 1; if (a < 1)` takes the TRUE
+// branch there and took the FALSE branch here — the same source, one
+// constraint each, computing different functions. Both compile; both prove.
+//
+// Only the four comparisons are signed. `\`, `%`, `<<`, `>>` and the bitwise
+// operators were probed at `p-1` and all return the UNSIGNED result in circom,
+// so they are left alone.
+
+thread_local! {
+    /// `(p-1)/2` for the active modulus: the largest value circom reads as
+    /// positive. Cached, and keyed on the modulus, because Montgomery form is
+    /// defined relative to it — the same discipline as `POSEIDON_T3_CACHE`.
+    static SIGNED_HALF: std::cell::RefCell<Option<(BigUint, Fr)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn signed_half() -> Fr {
+    let modulus = crate::zk_field::active_modulus();
+    if let Some(hit) = SIGNED_HALF.with(|cell| {
+        cell.borrow().as_ref().filter(|(m, _)| *m == modulus).map(|(_, h)| *h)
+    }) {
+        return hit;
+    }
+    let two = BigUint::from_u64(2);
+    let half = Fr::from_biguint(modulus.sub(&BigUint::from_u64(1)).div_mod(&two).0);
+    SIGNED_HALF.with(|cell| *cell.borrow_mut() = Some((modulus, half)));
+    half
+}
+
+/// True when circom would read `v` as negative, i.e. `v > (p-1)/2`.
+fn is_signed_negative(v: &Fr) -> bool {
+    *v > signed_half()
+}
+
+/// Compare two field elements the way circom compares `var`s.
+///
+/// Within one sign class the canonical order already agrees: for `a, b` both
+/// above `(p-1)/2`, `a - p < b - p` exactly when `a < b`. Only a pair
+/// straddling the boundary needs the explicit case.
+fn signed_cmp(a: &Fr, b: &Fr) -> std::cmp::Ordering {
+    match (is_signed_negative(a), is_signed_negative(b)) {
+        (false, true) => std::cmp::Ordering::Greater,
+        (true, false) => std::cmp::Ordering::Less,
+        _ => a.cmp(b),
+    }
+}
+
+// ────────────────────────────────────────────────────────
 // Values
 // ────────────────────────────────────────────────────────
 
@@ -1712,10 +1770,12 @@ impl<'a> Lowerer<'a> {
                     }
                     BinOp::Eq => bool_val(ca == cb),
                     BinOp::Neq => bool_val(ca != cb),
-                    BinOp::Lt => bool_val(ca < cb),
-                    BinOp::Gt => bool_val(ca > cb),
-                    BinOp::Le => bool_val(ca <= cb),
-                    BinOp::Ge => bool_val(ca >= cb),
+                    // SIGNED, not canonical — see `signed_cmp`. circom reads a
+                    // value above `(p-1)/2` as negative, and `Fr: Ord` does not.
+                    BinOp::Lt => bool_val(signed_cmp(&ca, &cb).is_lt()),
+                    BinOp::Gt => bool_val(signed_cmp(&ca, &cb).is_gt()),
+                    BinOp::Le => bool_val(signed_cmp(&ca, &cb).is_le()),
+                    BinOp::Ge => bool_val(signed_cmp(&ca, &cb).is_ge()),
                     BinOp::And => bool_val(!ca.is_zero() && !cb.is_zero()),
                     BinOp::Or => bool_val(!ca.is_zero() || !cb.is_zero()),
                     BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
