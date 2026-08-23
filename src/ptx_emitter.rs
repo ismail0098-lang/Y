@@ -1419,6 +1419,19 @@ impl PtxEmitter {
         false
     }
 
+    /// A `WitnessOp` the GPU witness generator cannot lower.
+    ///
+    /// Refusing is the fix, not a stopgap. A witness slot silently filled with
+    /// zero produces a kernel that assembles, launches, and hands back an
+    /// assignment satisfying nothing - and the caller has no way to tell that
+    /// from a working one.
+    fn unsupported_witness_op(&mut self, signal: usize, name: &str, reason: &str) {
+        self.emit_errors.push(format!(
+            "[PTX witness generator] signal {} is a `{}`: {}.",
+            signal, name, reason
+        ));
+    }
+
     fn unsupported_intrinsic(&mut self, name: &str, reason: &str) {
         self.emit_errors.push(format!(
             "[PTX] `{}(...)` cannot be lowered for target {}: {}.",
@@ -3997,6 +4010,36 @@ declare it as a Q format.",
         }
     }
 
+    /// The name of a `WitnessOp` variant, for a refusal message.
+    ///
+    /// Exhaustive on purpose, with no `_ =>` arm: a new variant must be a
+    /// compile error here rather than silently reported as "unknown". That is
+    /// the same device `remap_witness_op` uses, and for the same reason.
+    #[cfg(feature = "zk")]
+    fn witness_op_name(op: &WitnessOp) -> &'static str {
+    match op {
+        WitnessOp::Const(_) => "Const",
+        WitnessOp::LoadInput { .. } => "LoadInput",
+        WitnessOp::Add(..) => "Add",
+        WitnessOp::Sub(..) => "Sub",
+        WitnessOp::Mul(..) => "Mul",
+        WitnessOp::Div(..) => "Div",
+        WitnessOp::Inv(_) => "Inv",
+        WitnessOp::AssertEq(..) => "AssertEq",
+        WitnessOp::HintBlock { .. } => "HintBlock",
+        WitnessOp::IsZeroLc(_) => "IsZeroLc (== / !=)",
+        WitnessOp::InvOrZeroLc(_) => "InvOrZeroLc (== / !=)",
+        WitnessOp::BitOfLc { .. } => "BitOfLc (comparison, bitwise, shift, range check)",
+        WitnessOp::IntDivLc(..) => "IntDivLc (integer /)",
+        WitnessOp::IntModLc(..) => "IntModLc (integer %)",
+        WitnessOp::MulAddLc(..) => "MulAddLc (a*b + c)",
+        WitnessOp::DivLc(..) => "DivLc (field /)",
+        WitnessOp::MulLc(..) => "MulLc",
+        WitnessOp::IfZeroLc(..) => "IfZeroLc",
+        WitnessOp::Unknown => "Unknown",
+    }
+}
+
     #[cfg(feature = "zk")]
     pub fn emit_witness_generator_ptx(&mut self, graph: &WitnessIRGraph) -> String {
         let mut buffer = String::new();
@@ -4218,19 +4261,41 @@ declare it as a Q format.",
                     emit_cios_pass(&mut buffer, sa_ref, sb_ref, stmp_ref, "tmp = cios(a, b)");
                     emit_cios_pass(&mut buffer, sr2_ref, stmp_ref, sout_ref, "out = cios(tmp, R2)");
                 }
-                WitnessOp::Inv(a) | WitnessOp::Div(a, _) => {
-                    let a_id = a.0;
-                    writeln!(&mut buffer, "    // 256-bit Field Inversion / Division Hint: s_{}", s_idx).unwrap();
-                    writeln!(&mut buffer, "    mov.u64 %s{}_0, %s{}_0;", s_idx, a_id).unwrap();
-                    writeln!(&mut buffer, "    mov.u64 %s{}_1, %s{}_1;", s_idx, a_id).unwrap();
-                    writeln!(&mut buffer, "    mov.u64 %s{}_2, %s{}_2;", s_idx, a_id).unwrap();
-                    writeln!(&mut buffer, "    mov.u64 %s{}_3, %s{}_3;", s_idx, a_id).unwrap();
+                // Everything below is REFUSED rather than approximated. The
+                // arms above are the whole of what this backend can lower;
+                // five of `WitnessOp`'s seventeen variants.
+                //
+                // `Inv`/`Div` used to emit `mov s_out, s_a` under a comment
+                // reading "256-bit Field Inversion / Division Hint" - the
+                // identity, so `1/x` computed `x`. Everything else fell to
+                // `_ => mov 0`, writing ZERO into the witness slot. Both
+                // assemble perfectly, which is why nothing caught them: a
+                // wrong `mov` is as valid to `ptxas` as a right one.
+                //
+                // The zero arm is the worst of the two, because of WHICH ops
+                // it covered. `BitOfLc` is how every comparison, bitwise
+                // operator, shift, integer division and range check gets its
+                // witness; `IsZeroLc`/`InvOrZeroLc` are `==` and `!=`;
+                // `MulAddLc` is the single most common statement a circom
+                // program compiles to. So for any circuit past straight-line
+                // field arithmetic, this kernel filled most of the witness
+                // with zeros and the CLI printed "compiled successfully".
+                WitnessOp::Inv(_) | WitnessOp::Div(..) | WitnessOp::DivLc(..) => {
+                    self.unsupported_witness_op(
+                        s_idx,
+                        "field inversion",
+                        "needs a Fermat exponentiation chain (x^(p-2)); it was emitting \
+                         the IDENTITY, so 1/x computed x",
+                    );
                 }
-                _ => {
-                    writeln!(&mut buffer, "    mov.u64 %s{}_0, 0;", s_idx).unwrap();
-                    writeln!(&mut buffer, "    mov.u64 %s{}_1, 0;", s_idx).unwrap();
-                    writeln!(&mut buffer, "    mov.u64 %s{}_2, 0;", s_idx).unwrap();
-                    writeln!(&mut buffer, "    mov.u64 %s{}_3, 0;", s_idx).unwrap();
+                other => {
+                    let name = Self::witness_op_name(other);
+                    self.unsupported_witness_op(
+                        s_idx,
+                        name,
+                        "no PTX lowering exists for it, and it was writing ZERO into \
+                         the witness slot - which assembles, launches, and proves nothing",
+                    );
                 }
             }
 

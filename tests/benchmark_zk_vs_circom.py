@@ -21,11 +21,19 @@ Discipline, matching the rest of this repo's benchmarks:
     it every invocation re-runs the full GPU hardware probe. Measuring from the
     wrong directory made Y read 0.694s instead of 0.014s - a 48x error on a
     benchmark that has nothing to do with the GPU.
-  * Fairness gate: the run ABORTS unless Y and circom emit the same number of
-    non-linear constraints for a given size. Comparing compile speed across two
-    tools that built different circuits is meaningless, and constraint
-    deduplication is exactly the kind of optimization that could silently make
-    Y's output smaller and therefore faster.
+  * Fairness gate: a row whose two constraint counts differ by more than ONE is
+    marked "MISMATCHED CIRCUITS" and reports no speedup. Comparing compile speed
+    across two tools that built different circuits is meaningless, and
+    constraint deduplication is exactly the kind of optimization that could
+    silently make Y's output smaller and therefore faster.
+
+    The +-1 is Y binding its return value with one extra constraint (`dot
+    product` is 101 against circom's 100 at every size; `polynomial` is exact),
+    and it is a tolerance rather than an exception because the difference is
+    structural and does not grow with N. Anything larger than that is a
+    different circuit. This docstring used to say the run ABORTS unless the
+    counts are THE SAME - neither half was true of the code, and the mismatch
+    was visible in its own published output.
 
 Requires: `cargo build --release --features zk` (the ZK backend is NOT in a
 default build - without the feature the binary prints "The ZK Circuit Backend
@@ -200,7 +208,10 @@ def main():
     print("-" * len(hdr))
     lines = []
     for label, n, yt, ct, yc, cc, note in rows:
-        sp = f"{ct/yt:.2f}x" if (yt and ct) else "-"
+        # No speedup on an invalid row. It used to print one anyway, so a
+        # reader scanning the column saw "12.57x" beside "comparison invalid"
+        # and the figure went into the results file as well.
+        sp = f"{ct/yt:.2f}x" if (yt and ct and not note) else "-"
         line = (f"{label:<30}{n:>7}{(f'{yt:.4f}' if yt else '-'):>10}"
                 f"{(f'{ct:.4f}' if ct else '-'):>12}{(yc if yc else '-'):>9}"
                 f"{(cc if cc else '-'):>8}{sp:>10}  {note}")
