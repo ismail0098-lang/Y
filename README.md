@@ -1293,19 +1293,38 @@ throughout.
 | `--target=r1cs` / `--emit-r1cs` | R1CS `.r1cs` / `.sym` / `.r1cs.txt` | real, needs `--features zk` |
 | `--witness <in.json>` | also solve and write `.wtns` (iden3 format) | real |
 | `--emit-verifier <vkey.json>` | Groth16 Solidity verifier | real; `--name <N>` sets the contract name |
-| `--emit-zk-ptx` | GPU witness-generator PTX | emits, and `ptxas -arch=sm_89` accepts it — but **no test covers it** (see below) |
+| `--emit-zk-ptx` | GPU witness-generator PTX | **lowers 5 of `WitnessOp`'s 17 variants and refuses the rest by name** — the reachable subset is tiny (see below) |
 | `-l`, `--link <dir>` | circom include path | real |
 | `-o`, `--output <path>` | output path | real |
 | `--autotune` / `--autotune-force` / `--no-autotune` | GEMM tile selection: measure / re-measure / analytic model only | real |
 | `--portable` | clears the probed AVX / AVX-512 feature bits | real |
 
-**`--emit-zk-ptx` is the one line in this table to read sceptically.** It writes
-a `<name>.witness.ptx` that assembles cleanly (`ptxas` exit 0, a 19.6 KB cubin
-on an 8-iteration circuit) and prints "compiled successfully" — and **nothing in
-the test suite runs it or checks what it computes.** This repository's own rule
-is that assembling is not correctness: a missing instruction assembles
-perfectly, which is how a `while` loop that emitted no PTX at all survived here.
-Treat it as unverified.
+**`--emit-zk-ptx` is the one line in this table to read sceptically**, and the
+previous edition of this paragraph — "nothing in the test suite runs it or checks
+what it computes, treat it as unverified" — understated it. Checking found the
+backend lowered **5 of `WitnessOp`'s 17 variants** and did not fail on the other
+twelve:
+
+- `Inv` / `Div` emitted `mov s_out, s_a` under a comment reading "256-bit Field
+  Inversion / Division Hint" — the **identity**, so `1/x` computed `x`;
+- everything else hit `_ => mov 0`, writing **zero** into the witness slot.
+
+Both assemble, which is why the existing gate could not see either: `ptxas`
+cannot tell a wrong `mov` from a right one. Which operations landed in the zero
+arm is what makes it severe rather than partial — `BitOfLc` is how every
+comparison, bitwise operator, shift, integer division and range check gets its
+witness; `IsZeroLc`/`InvOrZeroLc` are `==` and `!=`; `MulAddLc` is the most
+common statement a circom program lowers to. And `MulLc` covers the binding of
+any linear expression, so **`return a + b;` was zeroed too** — the flag printed
+"compiled successfully" for essentially every circuit while filling most of the
+witness with zeros.
+
+It now **refuses by name and writes no file**, and `tests/zk_ptx_witness_refuses.rs`
+gates that in both directions: six constructs must be refused naming the
+`WitnessOp`, the two that do lower must still emit, and what they emit must
+assemble at the target it declares. Use `--target=r1cs --witness <in.json>` —
+the CPU solver handles all seventeen and is checked against circom's own witness
+calculator element for element.
 
 Empirical GEMM autotuning for `@tile`d kernels measures candidates on the real
 GPU and caches per (M, N, K, precision, GPU) in `.ysu_hw_profile`. A cold shape

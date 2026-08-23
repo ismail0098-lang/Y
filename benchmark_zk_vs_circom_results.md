@@ -6,13 +6,13 @@ Compile time only - neither tool proves anything here. For a real Groth16 proof 
 
 | circuit | N | Y (s) | circom (s) | Y constraints | circom constraints | speedup | note |
 |---|---|---|---|---|---|---|---|
-| polynomial (temp = temp * y) | 100 | 0.0015 | 0.0040 | 101 | 100 | 2.75x |  |
-| polynomial (temp = temp * y) | 500 | 0.0017 | 0.0090 | 501 | 500 | 5.32x |  |
-| polynomial (temp = temp * y) | 1000 | 0.0019 | 0.0157 | 1001 | 1000 | 8.34x |  |
-| polynomial (temp = temp * y) | 5000 | 0.0052 | 0.0612 | 5001 | 5000 | 11.84x |  |
-| polynomial (temp = temp * y) | 10000 | 0.0080 | 0.1319 | 10001 | 10000 | 16.49x |  |
-| dot product (sum += a * b) | 100 | 0.0012 | 0.0059 | 101 | 100 | 5.02x |  |
-| dot product (sum += a * b) | 500 | 0.0017 | 0.0197 | 501 | 500 | 11.25x |  |
-| dot product (sum += a * b) | 1000 | 0.0023 | 0.0376 | 1001 | 1000 | 16.64x |  |
-| dot product (sum += a * b) | 5000 | 0.0131 | 0.2175 | 5001 | 5000 | 16.62x |  |
-| dot product (sum += a * b) | 10000 | 0.0377 | 0.5090 | 10001 | 10000 | 13.49x |  |
+| polynomial (temp = temp * y) | 100 | 0.0016 | 0.0044 | 100 | 100 | 2.72x |  |
+| polynomial (temp = temp * y) | 500 | 0.0019 | 0.0096 | 500 | 500 | 5.06x |  |
+| polynomial (temp = temp * y) | 1000 | 0.0026 | 0.0164 | 1000 | 1000 | 6.38x |  |
+| polynomial (temp = temp * y) | 5000 | 0.0059 | 0.0641 | 5000 | 5000 | 10.84x |  |
+| polynomial (temp = temp * y) | 10000 | 0.0090 | 0.1361 | 10000 | 10000 | 15.06x |  |
+| dot product (sum += a * b) | 100 | 0.0014 | 0.0061 | 101 | 100 | 4.43x |  |
+| dot product (sum += a * b) | 500 | 0.0018 | 0.0203 | 501 | 500 | 11.38x |  |
+| dot product (sum += a * b) | 1000 | 0.0022 | 0.0381 | 1001 | 1000 | 17.15x |  |
+| dot product (sum += a * b) | 5000 | 0.0062 | 0.2232 | 5001 | 5000 | 35.88x |  |
+| dot product (sum += a * b) | 10000 | 0.0120 | 0.5144 | 10001 | 10000 | 42.93x |  |

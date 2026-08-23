@@ -1031,6 +1031,25 @@ fn main() {
             let mut ptx_emitter = ptx_emitter::PtxEmitter::new();
             let ptx_code = ptx_emitter.emit_witness_generator_ptx(&graph);
 
+            // Writing the file regardless of what the emitter refused would
+            // hand the user a kernel that assembles and fills most of the
+            // witness with zeros - the same "green build, wrong artifact"
+            // shape the LLVM, PTX and CPU paths were fixed for. This backend
+            // lowers five of `WitnessOp`'s seventeen variants; everything
+            // else, `==`, `<`, `/`, `%`, the bitwise operators and circom's
+            // most common statement among them, is named here rather than
+            // silently zeroed.
+            if !ptx_emitter.emit_errors.is_empty() {
+                for e in &ptx_emitter.emit_errors {
+                    log_error!("{}", e);
+                }
+                eprintln!(
+                    "    The GPU witness generator supports Const, LoadInput, Add, Sub and Mul.\n    \
+                     Use `--target=r1cs --witness <in.json>` for the CPU solver, which handles all of them."
+                );
+                exit(1);
+            }
+
             let write_path = if let Some(ref sf) = source_file {
                 let path = std::path::Path::new(sf);
                 let mut p = path.to_path_buf();
