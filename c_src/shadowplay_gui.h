@@ -4,10 +4,56 @@
 #ifndef SHADOWPLAY_GUI_H
 #define SHADOWPLAY_GUI_H
 
+#include <stdint.h>
+#include <stdio.h>
+
+// ---------------------------------------------------------------------------
+// The entry points below are EXPORTED (non-static) on purpose: `Y` compiles a
+// `.ysu` program to a module that `declare`s them, and a `static` definition
+// emits no symbol at all, so the link fails with `undefined reference to
+// 'init_shadowplay_gui'`. They were made `static inline` at some point to
+// silence a static-after-non-static warning, which fixed the warning and
+// killed the only application that calls them. `shadowplay_api_is_linkable`
+// pins that they stay exported; `tests/shadowplay_builds.rs` builds the app.
+//
+// This header is included by exactly one translation unit (`c_src/runtime.c`),
+// so exporting them cannot produce a duplicate symbol.
+//
+// Y_NO_X11 compiles a stub surface instead. Without it, un-static-ing the
+// implementation would leave every Y binary referencing XOpenDisplay, making
+// libX11 a hard requirement for compiling ANY Y program - the exact
+// regression that removing the unconditional `-lX11` was meant to fix.
+// ---------------------------------------------------------------------------
+
+#if defined(Y_NO_X11)
+
+static void y_no_x11_notice(const char* fn) {
+    fprintf(stderr,
+            "[ShadowPlay] %s: this binary was built without X11 support "
+            "(libX11 was not available at compile time).\n", fn);
+}
+
+int32_t init_shadowplay_gui(void)      { y_no_x11_notice("init_shadowplay_gui"); return -1; }
+int32_t update_shadowplay_gui(void)    { return -1; }
+void    cleanup_shadowplay_gui(void)   { }
+int32_t is_overlay_visible(void)       { return 0; }
+int32_t get_instant_replay_state(void) { return 0; }
+int32_t get_recording_state(void)      { return 0; }
+int32_t get_broadcast_state(void)      { return 0; }
+int32_t get_file_format_state(void)    { return 0; }
+int32_t get_quality_state(void)        { return 0; }
+int32_t get_codec_state(void)          { return 0; }
+int32_t get_replay_duration(void)      { return 0; }
+int32_t get_replay_duration_idx(void)  { return 0; }
+int32_t get_microphone_index(void)     { return 0; }
+int32_t get_indicator_state(void)      { return 0; }
+void    get_microphone_name(char* out_buf) { if (out_buf) out_buf[0] = '\0'; }
+
+#else
+
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -18,6 +64,12 @@
 #include <time.h>
 #include <fcntl.h>
 
+// Window geometry. These were five separate literals (600/480 at the centring
+// site, again at creation, and the footer's y hardcoded against them), so a
+// layout change had to be made in every one of them or the footer fell off.
+#define HUD_W 600
+#define HUD_H 520
+
 // Custom X11 Error Handler to prevent crashes if a key is already grabbed
 static int x11_error_handler(Display* d, XErrorEvent* e) {
     char err_msg[256];
@@ -26,17 +78,27 @@ static int x11_error_handler(Display* d, XErrorEvent* e) {
     return 0;
 }
 
-static inline void cleanup_shadowplay_gui(void);
+void cleanup_shadowplay_gui(void);
 static void draw_ui(void);
 
+static Display* dpy;
+
+// The connection is gone, so every Xlib entry point is now off limits --
+// including the ones cleanup reaches through stop_manual_recording ->
+// show_toast -> update_window_layout/draw_ui. This used to call cleanup with
+// `dpy` still set and recurse straight back into XMoveResizeWindow on the dead
+// connection. Nulling `dpy` FIRST is what makes the teardown X-free:
+// show_toast, update_window_layout and draw_ui all early-return on `!dpy`.
 static int x11_io_error_handler(Display* d) {
+    (void)d;
+    dpy = NULL;
     fprintf(stderr, "[X11 Fatal] X connection lost/IO Error occurred.\n");
     cleanup_shadowplay_gui();
-    exit(1);
+    fflush(NULL);
+    _exit(1);
 }
 
 // ShadowPlay Overlay States
-static Display* dpy = NULL;
 static Window win = 0;
 static Window root = 0;
 static int screen = 0;
@@ -52,10 +114,21 @@ static int broadcast = 0;       // 0 = OFF, 1 = ON
 static int file_format = 0;     // 0 = MP4, 1 = MKV
 static int quality = 1;         // 0 = 720p, 1 = 1080p, 2 = 4K
 static int video_codec = 2;     // 0 = H264, 1 = HEVC, 2 = AV1
+static int show_indicator = 1;  // 0 = hide the on-screen recording dot, 1 = show it
 
 // Keyboard navigation
-static int selected_idx = 0;    // 0=Replay, 1=Record, 2=Broadcast, 3=Format, 4=Quality, 5=Codec, 6=ReplayLength, 7=Keybind, 8=Mic
-#define NUM_ITEMS 9
+static int selected_idx = 0;    // 0=Replay, 1=Record, 2=Broadcast, 3=Format, 4=Quality,
+                                // 5=Codec, 6=ReplayLength, 7=Keybind, 8=Mic, 9=Indicator
+#define NUM_ITEMS 10
+
+// Is the small corner dot supposed to be on screen right now? Four call sites
+// asked this question and would otherwise have to stay in agreement by hand:
+// the window layout, draw_ui's early-out, draw_ui's indicator branch, and the
+// event loop's per-tick repaint. Disagreement leaves a mapped window with
+// nothing drawn in it, or a dot that never repaints.
+static int indicator_wanted(void) {
+    return show_indicator && (recording || instant_replay);
+}
 
 static pid_t record_pid = 0;
 static pid_t replay_pid = 0;
@@ -159,13 +232,13 @@ static void update_window_layout() {
 
     if (visible) {
         // Center settings menu
-        XMoveResizeWindow(dpy, win, (screen_w - 600) / 2, (screen_h - 480) / 2, 600, 480);
+        XMoveResizeWindow(dpy, win, (screen_w - HUD_W) / 2, (screen_h - HUD_H) / 2, HUD_W, HUD_H);
         XMapWindow(dpy, win);
     } else if (toast_active) {
         // Top-right toast notification
         XMoveResizeWindow(dpy, win, screen_w - 300, 40, 280, 80);
         XMapWindow(dpy, win);
-    } else if (recording || instant_replay) {
+    } else if (indicator_wanted()) {
         // Top-right tiny status indicator
         XMoveResizeWindow(dpy, win, screen_w - 90, 40, 70, 32);
         XMapWindow(dpy, win);
@@ -402,15 +475,31 @@ static void start_manual_recording() {
     show_toast("Recording Started");
 }
 
+// Ask the encoder to finish, and make sure it actually did.
+//
+// The previous version polled for 500ms and then zeroed the pid whether or not
+// the child had exited. That leaves a zombie, and - much worse - leaves the
+// encoder still running and still writing to the capture while the UI reports
+// "Saved". A 4K AV1 mux can take seconds to flush, so SIGINT gets a real grace
+// period; if it is ignored the child is killed and reaped rather than dropped.
+static void reap_encoder(pid_t* pid, const char* what) {
+    if (*pid <= 0) return;
+    int status;
+    kill(*pid, SIGINT);
+    for (int i = 0; i < 300; i++) {          // up to 3s
+        if (waitpid(*pid, &status, WNOHANG) > 0) { *pid = 0; return; }
+        usleep(10000);
+    }
+    fprintf(stderr, "[ShadowPlay] %s (pid %d) ignored SIGINT after 3s; sending SIGKILL. "
+                    "The capture may be truncated.\n", what, (int)*pid);
+    kill(*pid, SIGKILL);
+    waitpid(*pid, &status, 0);
+    *pid = 0;
+}
+
 static void stop_manual_recording() {
     if (record_pid > 0) {
-        kill(record_pid, SIGINT);
-        int status;
-        for (int i = 0; i < 50; i++) {
-            if (waitpid(record_pid, &status, WNOHANG) > 0) break;
-            usleep(10000);
-        }
-        record_pid = 0;
+        reap_encoder(&record_pid, "recorder");
         printf("[ShadowPlay] Manual screen recording saved to ~/Videos/Y_Captures/.\n");
         show_toast("Recording Saved");
     }
@@ -531,15 +620,7 @@ static void start_replay_buffer() {
 }
 
 static void stop_replay_buffer() {
-    if (replay_pid > 0) {
-        kill(replay_pid, SIGINT);
-        int status;
-        for (int i = 0; i < 50; i++) {
-            if (waitpid(replay_pid, &status, WNOHANG) > 0) break;
-            usleep(10000);
-        }
-        replay_pid = 0;
-    }
+    reap_encoder(&replay_pid, "replay buffer");
     usleep(100000);
     if (!has_gpu_screen_recorder) {
         unlink("/tmp/y_replay_buffer.mp4");
@@ -589,7 +670,7 @@ static void save_replay_clip() {
     }
 }
 
-static inline void cleanup_shadowplay_gui() {
+void cleanup_shadowplay_gui(void) {
     stop_manual_recording();
     stop_replay_buffer();
     if (dpy) {
@@ -638,7 +719,7 @@ static void fill_rounded_rect(Display* d, Drawable dr, GC gc, int x, int y, int 
 
 static void draw_ui() {
     if (!dpy || !win) return;
-    if (!visible && !toast_active && !recording && !instant_replay) return;
+    if (!visible && !toast_active && !indicator_wanted()) return;
 
     if (toast_active) {
         // Clear window to dark card background instead of fullscreen bg
@@ -667,7 +748,7 @@ static void draw_ui() {
         return;
     }
 
-    if (!visible && (recording || instant_replay)) {
+    if (!visible && indicator_wanted()) {
         // Clear window to dark card background
         XSetWindowBackground(dpy, win, color_card);
         XClearWindow(dpy, win);
@@ -972,10 +1053,37 @@ static void draw_ui() {
     snprintf(mic_opt, sizeof(mic_opt), "[ %s ]", mic_labels[selected_mic_idx]);
     XDrawString(dpy, win, gc, mic_x, row4_y + 16, mic_opt, strlen(mic_opt));
 
+    // Row 5 starts at settings_y + 185 (y = 385)
+    int row5_y = settings_y + 185;
+
+    // On-screen recording indicator toggle
+    int ind_x = 150;
+    if (selected_idx == 9) {
+        XSetForeground(dpy, gc, color_green);
+        XDrawString(dpy, win, gc, 30, row5_y + 15, "> Rec Indicator:", 16);
+        XSetLineAttributes(dpy, gc, 1, LineSolid, CapButt, JoinMiter);
+        draw_rounded_rect(dpy, win, gc, ind_x - 10, row5_y, 180, 22, 4);
+    } else {
+        XSetForeground(dpy, gc, color_white);
+        XDrawString(dpy, win, gc, 30, row5_y + 15, "  Rec Indicator:", 16);
+    }
+
+    if (show_indicator) {
+        XSetForeground(dpy, gc, color_green);
+        XDrawString(dpy, win, gc, ind_x, row5_y + 16, "[ Shown ]", 9);
+        XSetForeground(dpy, gc, color_grey);
+        XDrawString(dpy, win, gc, ind_x + 80, row5_y + 16, "  Hidden  ", 10);
+    } else {
+        XSetForeground(dpy, gc, color_grey);
+        XDrawString(dpy, win, gc, ind_x, row5_y + 16, "  Shown  ", 9);
+        XSetForeground(dpy, gc, color_green);
+        XDrawString(dpy, win, gc, ind_x + 80, row5_y + 16, "[ Hidden ]", 10);
+    }
+
     // Help Footer
     XSetForeground(dpy, gc, color_card);
     XSetLineAttributes(dpy, gc, 2, LineSolid, CapButt, JoinMiter);
-    XDrawLine(dpy, win, gc, 30, 395, 570, 395);
+    XDrawLine(dpy, win, gc, 30, HUD_H - 85, HUD_W - 30, HUD_H - 85);
 
     XSetForeground(dpy, gc, color_grey);
     char footer_msg[128];
@@ -984,20 +1092,28 @@ static void draw_ui() {
     } else {
         snprintf(footer_msg, sizeof(footer_msg), "Alt+Z: Hide HUD | Arrows: Navigate | Enter: Toggle Option | Esc: Close");
     }
-    XDrawString(dpy, win, gc, 30, 425, footer_msg, strlen(footer_msg));
+    XDrawString(dpy, win, gc, 30, HUD_H - 55, footer_msg, strlen(footer_msg));
 
     XFreeGC(dpy, gc);
     XFlush(dpy);
 }
 
+static volatile sig_atomic_t shutting_down = 0;
+
 static void handle_sigint(int sig) {
+    (void)sig;
+    // A second SIGINT while the encoder is being drained used to re-enter
+    // cleanup and kill/wait on pids it had already zeroed.
+    if (shutting_down) { _exit(130); }
+    shutting_down = 1;
     printf("\n[ShadowPlay] Interrupted! Performing clean shutdown...\n");
     cleanup_shadowplay_gui();
-    exit(0);
+    fflush(NULL);
+    _exit(0);
 }
 
 // Global initialization
-static inline int32_t init_shadowplay_gui() {
+int32_t init_shadowplay_gui(void) {
     signal(SIGINT, handle_sigint);
     signal(SIGTERM, handle_sigint);
 
@@ -1075,7 +1191,6 @@ static inline int32_t init_shadowplay_gui() {
     // Grab Alt+z key combinations globally
     KeyCode z_code = XKeysymToKeycode(dpy, XK_z);
     KeyCode f12_code = XKeysymToKeycode(dpy, XK_F12);
-    KeyCode s_code = XKeysymToKeycode(dpy, XK_s);
 
     // Grab Alt+z with various lock modifier combinations (NumLock, CapsLock)
     XGrabKey(dpy, z_code, Mod1Mask, root, True, GrabModeAsync, GrabModeAsync);
@@ -1098,8 +1213,8 @@ static inline int32_t init_shadowplay_gui() {
 
     int screen_w = DisplayWidth(dpy, screen);
     int screen_h = DisplayHeight(dpy, screen);
-    int win_w = 600;
-    int win_h = 480;
+    int win_w = HUD_W;
+    int win_h = HUD_H;
 
     win = XCreateWindow(dpy, root,
                        (screen_w - win_w) / 2,
@@ -1128,21 +1243,24 @@ static inline int32_t init_shadowplay_gui() {
     return 0;
 }
 
-// State accessors for Y code
-static inline int32_t is_overlay_visible() { return visible; }
-static inline int32_t get_instant_replay_state() { return instant_replay; }
-static inline int32_t get_recording_state() { return recording; }
-static inline int32_t get_broadcast_state() { return broadcast; }
-static inline int32_t get_file_format_state() { return file_format; }
-static inline int32_t get_quality_state() { return quality; }
-static inline int32_t get_codec_state() { return video_codec; }
-static inline int32_t get_replay_duration() { return replay_durations[replay_duration_idx]; }
-static inline int32_t get_replay_duration_idx() { return replay_duration_idx; }
-static inline int32_t get_microphone_index() { return selected_mic_idx; }
-static inline void get_microphone_name(char* out_buf) { strcpy(out_buf, mic_labels[selected_mic_idx]); }
+// State accessors for Y code. Exported, not `static inline` - see the note at
+// the top of this file; a static definition emits no symbol and the Y program
+// that declares these cannot link.
+int32_t is_overlay_visible(void)       { return visible; }
+int32_t get_instant_replay_state(void) { return instant_replay; }
+int32_t get_recording_state(void)      { return recording; }
+int32_t get_broadcast_state(void)      { return broadcast; }
+int32_t get_file_format_state(void)    { return file_format; }
+int32_t get_quality_state(void)        { return quality; }
+int32_t get_codec_state(void)          { return video_codec; }
+int32_t get_replay_duration(void)      { return replay_durations[replay_duration_idx]; }
+int32_t get_replay_duration_idx(void)  { return replay_duration_idx; }
+int32_t get_microphone_index(void)     { return selected_mic_idx; }
+int32_t get_indicator_state(void)      { return show_indicator; }
+void get_microphone_name(char* out_buf) { strcpy(out_buf, mic_labels[selected_mic_idx]); }
 
 // Check X11 events and update the display
-static inline int32_t update_shadowplay_gui() {
+int32_t update_shadowplay_gui(void) {
     if (!dpy) return -1;
 
     if (toast_active && (time(NULL) - toast_start_time >= 3)) {
@@ -1157,9 +1275,12 @@ static inline int32_t update_shadowplay_gui() {
         if (ev.type == KeyPress) {
             KeySym keysym = XLookupKeysym(&ev.xkey, 0);
             
-            // Print diagnostic debug logs for any keypresses caught by our grab list
-            printf("[X11 debug] KeyPress detected: keycode=%d, keysym=%lu (%s), state=%u\n",
-                   ev.xkey.keycode, (unsigned long)keysym, XKeysymToString(keysym), ev.xkey.state);
+            // Per-keypress diagnostics, opt-in. This printed on every single
+            // grabbed keypress in the shipped build.
+            if (getenv("Y_SHADOWPLAY_DEBUG")) {
+                printf("[X11 debug] KeyPress detected: keycode=%d, keysym=%lu (%s), state=%u\n",
+                       ev.xkey.keycode, (unsigned long)keysym, XKeysymToString(keysym), ev.xkey.state);
+            }
             
             int is_toggle = 0;
             // Alt+Z or Alt+z
@@ -1245,13 +1366,14 @@ static inline int32_t update_shadowplay_gui() {
                     }
                     draw_ui();
                 } else if (keysym == XK_Up) {
-                    if (selected_idx == 0 || selected_idx == 1 || selected_idx == 2) selected_idx = 8;
+                    if (selected_idx == 0 || selected_idx == 1 || selected_idx == 2) selected_idx = 9;
                     else if (selected_idx == 3) selected_idx = 0;
                     else if (selected_idx == 4) selected_idx = 1;
                     else if (selected_idx == 5) selected_idx = 3;
                     else if (selected_idx == 6) selected_idx = 4;
                     else if (selected_idx == 7) selected_idx = 5;
                     else if (selected_idx == 8) selected_idx = 7;
+                    else if (selected_idx == 9) selected_idx = 8;
                     draw_ui();
                 } else if (keysym == XK_Down) {
                     if (selected_idx == 0) selected_idx = 3;
@@ -1261,7 +1383,8 @@ static inline int32_t update_shadowplay_gui() {
                     else if (selected_idx == 5) selected_idx = 7;
                     else if (selected_idx == 6) selected_idx = 7;
                     else if (selected_idx == 7) selected_idx = 8;
-                    else if (selected_idx == 8) selected_idx = 0;
+                    else if (selected_idx == 8) selected_idx = 9;
+                    else if (selected_idx == 9) selected_idx = 0;
                     draw_ui();
                 } else if (keysym == XK_Return) {
                     // Activate focused item
@@ -1322,6 +1445,15 @@ static inline int32_t update_shadowplay_gui() {
                             stop_replay_buffer();
                             start_replay_buffer();
                         }
+                    } else if (selected_idx == 9) {
+                        // Hiding the indicator is purely cosmetic - it maps or
+                        // unmaps the corner window and does not touch the
+                        // encoder, so a capture in progress keeps running.
+                        show_indicator = !show_indicator;
+                        printf("[ShadowPlay] On-screen recording indicator %s.\n",
+                               show_indicator ? "shown" : "hidden");
+                        fflush(stdout);
+                        update_window_layout();
                     }
                     draw_ui();
                 }
@@ -1333,11 +1465,13 @@ static inline int32_t update_shadowplay_gui() {
     }
     
     // Continual drawing to handle potential frame refreshes
-    if (visible || toast_active || recording || instant_replay) {
+    if (visible || toast_active || indicator_wanted()) {
         draw_ui();
     }
     
     return 0;
 }
 
-#endif
+#endif // Y_NO_X11
+
+#endif // SHADOWPLAY_GUI_H

@@ -89,11 +89,16 @@ fn build_and_run(name: &str, source: &str) -> Option<String> {
     let ll = dir.join(format!("{}.ll", name));
     assert!(ll.exists(), "Y did not emit IR:\n{}", log);
 
-    // A two-line shim rather than the repo's runtime.c. The program only calls
-    // `print_int`, and `c_src/runtime.c` currently fails to compile for an
-    // unrelated reason (a static-after-non-static declaration in
-    // shadowplay_gui.h). Linking it would make this test fail for something it
-    // is not testing.
+    // A two-line shim rather than the repo's runtime.c: the program only calls
+    // `print_int`, and linking the whole runtime would drag in the X11 GUI
+    // surface and make this test fail for something it is not testing.
+    //
+    // This comment used to say `c_src/runtime.c` "currently fails to compile"
+    // because of a static-after-non-static declaration in shadowplay_gui.h.
+    // That was fixed by making the GUI surface `static` throughout - which
+    // silenced the warning and left `shadowplay.ysu` unable to LINK, since a
+    // static definition emits no symbol. The note outlived the fix and then
+    // documented the wrong problem. It compiles clean under clang and gcc.
     let shim = dir.join("shim.c");
     std::fs::write(
         &shim,

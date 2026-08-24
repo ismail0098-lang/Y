@@ -248,29 +248,106 @@ fn every_emitted_module_is_valid_llvm_ir() {
 /// which is exactly the failure this whole file exists to stop.
 #[test]
 fn runtime_symbols_match_the_runtime() {
-    let runtime = std::fs::read_to_string(repo().join("c_src/runtime.c"))
-        .expect("read c_src/runtime.c");
+    let sources = runtime_sources();
+
     let missing: Vec<&str> = y::llvm_emitter::RUNTIME_SYMBOLS
         .iter()
         .copied()
-        .filter(|name| {
-            // A definition, not merely a mention: the name followed by `(`.
-            !runtime
-                .match_indices(name)
-                .any(|(i, _)| {
-                    let after = runtime[i + name.len()..].trim_start();
-                    let before_ok = i == 0
-                        || !runtime.as_bytes()[i - 1].is_ascii_alphanumeric()
-                            && runtime.as_bytes()[i - 1] != b'_';
-                    before_ok && after.starts_with('(')
-                })
-        })
+        .filter(|name| find_definitions(&sources, name).is_empty())
         .collect();
     assert!(
         missing.is_empty(),
-        "the LLVM emitter allows these symbols but c_src/runtime.c does not \
+        "the LLVM emitter allows these symbols but the runtime does not \
          define them, so a call to one would be declared and then fail to \
          link: {:?}",
         missing
     );
+
+    // A `static` definition emits NO SYMBOL, so it satisfies "is defined" and
+    // still fails to link. That is not hypothetical: the whole ShadowPlay GUI
+    // surface was changed to `static inline` to silence a warning, and the
+    // only application in the repo that calls it stopped linking with
+    // `undefined reference to 'init_shadowplay_gui'`. The old version of this
+    // test looked for a definition and passed the entire time.
+    let unlinkable: Vec<&str> = y::llvm_emitter::RUNTIME_SYMBOLS
+        .iter()
+        .copied()
+        // EVERY definition, not the first one found. `shadowplay_gui.h` has
+        // two - a real one and a `Y_NO_X11` stub - and only one is compiled.
+        // Checking the first meant the stub branch, which sits earlier in the
+        // file, masked a re-`static`d real branch: verified by mutation, this
+        // test passed with the exact original bug put back.
+        .filter(|name| {
+            let defs = find_definitions(&sources, name);
+            !defs.is_empty() && defs.iter().any(|d| d.is_static)
+        })
+        .collect();
+    assert!(
+        unlinkable.is_empty(),
+        "these symbols are defined `static`, so no symbol is emitted and a \
+         call to one links to nothing: {:?}",
+        unlinkable
+    );
+}
+
+struct Definition {
+    is_static: bool,
+}
+
+/// `c_src/runtime.c` and every repo header it includes. A symbol the LLVM path
+/// links against does not have to be written in the `.c` file - the ShadowPlay
+/// surface lives in `shadowplay_gui.h`, and reading only `runtime.c` is what
+/// let that list drift.
+fn runtime_sources() -> Vec<String> {
+    let mut out = Vec::new();
+    let c = std::fs::read_to_string(repo().join("c_src/runtime.c")).expect("read c_src/runtime.c");
+    for line in c.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("#include \"") {
+            if let Some(name) = rest.split('"').next() {
+                let path = repo().join("c_src").join(name);
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    out.push(text);
+                }
+            }
+        }
+    }
+    out.push(c);
+    out
+}
+
+/// A DEFINITION, not a call or a forward declaration: the name at a word
+/// boundary, followed by a parameter list, followed by `{`. A call is followed
+/// by `;`, and so is a prototype - both were counted as definitions before.
+fn find_definitions(sources: &[String], name: &str) -> Vec<Definition> {
+    let mut found = Vec::new();
+    for src in sources {
+        for (i, _) in src.match_indices(name) {
+            let before_ok = i == 0 || {
+                let b = src.as_bytes()[i - 1];
+                !b.is_ascii_alphanumeric() && b != b'_'
+            };
+            if !before_ok {
+                continue;
+            }
+            let after = &src[i + name.len()..];
+            let after = after.trim_start();
+            if !after.starts_with('(') {
+                continue;
+            }
+            let close = match after.find(')') {
+                Some(c) => c,
+                None => continue,
+            };
+            if !after[close + 1..].trim_start().starts_with('{') {
+                continue; // a call or a prototype
+            }
+            let line_start = src[..i].rfind('\n').map(|n| n + 1).unwrap_or(0);
+            let prefix = &src[line_start..i];
+            found.push(Definition {
+                is_static: prefix.split_whitespace().any(|w| w == "static"),
+            });
+        }
+    }
+    found
 }
