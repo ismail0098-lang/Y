@@ -9,7 +9,7 @@ kernel drift_demo() {
     let fast_acc: F16 = 0.0;
 
     // Test heuristic branching vs predication
-    if 1 {
+    if true {
         let x: u32 = 10;
         let y: u32 = 20;
     } else {

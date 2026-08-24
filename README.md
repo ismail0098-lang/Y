@@ -1268,8 +1268,8 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # 478 tests
-cargo test --release --features zk      # 736 tests, ZK included
+cargo test --release                    # 486 tests
+cargo test --release --features zk      # 744 tests, ZK included
 ```
 
 **Four gates are conditional on an external tool, and a missing tool makes them
@@ -1282,6 +1282,7 @@ they ran — read this list before trusting one:
 | `ptxas` | `ptx_portability`, `ptx_intrinsics_assemble`, `coprocessor_ptx_assembles` | that emitted PTX is legal, at architectures this machine does not have |
 | `solc` + Node (`npm install solc`) | `zk_solidity_verifier` | that the generated Groth16 verifier accepts a real proof on a real EVM |
 | `circom` | `circom_frontend`, `tools/circomlib_coverage.py` | that Y agrees with the reference compiler |
+| `rustc` | `cpu_emitter_output_compiles` | that the Rust `--emit-cpu` prints is Rust |
 
 That list is here because the third one had been skipping. Installing `solc`
 made it run — and with the G2 coordinate order reverted to `(c0, c1)`, the bug
@@ -1302,7 +1303,7 @@ throughout.
 | `--emit-llvm` | LLVM IR | real |
 | `--emit-ptx` | NVIDIA PTX | real |
 | `--emit-native` | standalone x86-64 ELF | **straight-line integer subset only**; refuses the rest by name |
-| `--emit-cpu` | prints Rust/AVX source **for you to paste** — Y never compiles it | real, but not a build step |
+| `--emit-cpu` | prints Rust/AVX source **for you to paste** — Y never compiles it | real, but not a build step; gated on `rustc` accepting what it prints |
 | `--emit-attention-ptx <head_dim> <seq_len>` | the exact-attention kernel, to stdout | real; both positional arguments are required and refused by name if absent |
 | `--emit-coprocessor` | RT + Tensor Core fused schedule | **a scheduling simulation** — see "What is real". It writes a complete module whose `.version`/`.target` are gated against the PTX backend's |
 | `--emit-c`, `--c`, `--target=c` | removed; reports so and exits 1 | gone |

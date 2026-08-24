@@ -12,6 +12,23 @@
 use crate::ast::*;
 use std::fmt::Write;
 
+/// Names the emitted prelude defines, plus the intrinsics with real lowerings.
+///
+/// Anything else that is a bare identifier in call position is refused. Keep
+/// this in step with the prelude written in `CpuEmitter::new`.
+const PRELUDE_FNS: &[&str] = &[
+    "y_shared_alloc_f32",
+    "y_pipeline_init",
+    "y_pipe_wait",
+    "y_barrier_sync",
+    "println",
+    "print_int",
+    "cp_async",
+    "ldmatrix",
+    "mma_sync",
+    "store",
+];
+
 pub struct CpuEmitter {
     pub host_buffer: String,
     indent_level: usize,
@@ -19,6 +36,17 @@ pub struct CpuEmitter {
     /// and `LlvmEmitter::emit_errors`: a named gap costs the user a line
     /// number, a plausible-looking blob costs them a debugging session.
     pub emit_errors: Vec<String>,
+    /// Names emitted as Rust `unsafe fn`, collected before any body is walked.
+    ///
+    /// A Y function without `@safe` becomes `pub unsafe fn`, and Rust requires
+    /// its CALLERS to say so too. `tests/hello.ysu` - the program the README
+    /// uses to demonstrate `--emit-cpu` - has a safe `main` calling an unsafe
+    /// `fizzbuzz`, so the printed blob did not compile. The set is built in a
+    /// pre-pass because a call can precede the definition.
+    unsafe_fns: std::collections::HashSet<String>,
+    /// Every name this blob will define, so a call to anything else can be
+    /// refused instead of transcribed.
+    known_fns: std::collections::HashSet<String>,
 }
 
 impl CpuEmitter {
@@ -58,7 +86,32 @@ impl CpuEmitter {
         writeln!(&mut buffer, "fn y_barrier_sync() {{}}").unwrap();
         writeln!(&mut buffer, "").unwrap();
 
+        // Y's two printing builtins. The LLVM backend gets them from
+        // `c_src/runtime.c` (`declare void @println(ptr)` /
+        // `declare void @print_int(i64)`); this backend prints Rust for a
+        // human to paste, so it has to carry its own.
+        //
+        // Without them `--emit-cpu` emitted `println("FizzBuzz")` - a CALL to
+        // Rust's `println` MACRO, which rustc rejects - and `print_int(x)`
+        // against no definition at all. `tests/hello.ysu`, the program the
+        // README uses to demonstrate this flag, produced six compile errors.
+        // The output is the whole deliverable here, so output that does not
+        // compile is the same failure as a backend emitting a bad instruction.
+        //
+        // `fn println` is a function, not a macro, so it does not collide with
+        // `std::println!`; and `print_int` is generic so an `i32` argument
+        // does not need a cast the source never asked for.
+        writeln!(&mut buffer, "fn println(s: &str) {{ std::println!(\"{{}}\", s); }}").unwrap();
+        writeln!(
+            &mut buffer,
+            "fn print_int<T: std::fmt::Display>(v: T) {{ std::println!(\"{{}}\", v); }}"
+        )
+        .unwrap();
+        writeln!(&mut buffer, "").unwrap();
+
         Self {
+            unsafe_fns: std::collections::HashSet::new(),
+            known_fns: PRELUDE_FNS.iter().map(|s| s.to_string()).collect(),
             host_buffer: buffer,
             indent_level: 0,
             emit_errors: Vec::new(),
@@ -71,6 +124,28 @@ impl CpuEmitter {
     }
 
     pub fn emit_program(&mut self, prog: &Program) -> String {
+        // Pre-pass: which functions will be `unsafe fn`. Kernels always are.
+        for item in &prog.items {
+            match item {
+                Item::Func(f) => {
+                    if !f.is_safe {
+                        self.unsafe_fns.insert(f.name.clone());
+                    }
+                    self.known_fns.insert(f.name.clone());
+                }
+                Item::Kernel(k) => {
+                    self.unsafe_fns.insert(k.name.clone());
+                    self.known_fns.insert(k.name.clone());
+                }
+                Item::Impl(b) => {
+                    for m in &b.methods {
+                        self.known_fns.insert(m.name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
         for item in &prog.items {
             match item {
                 Item::Kernel(k) => self.emit_kernel(k),
@@ -487,7 +562,38 @@ impl CpuEmitter {
             );
         }
 
-        format!("{}({})", fname, arg_strs.join(", "))
+        // A plain identifier this blob does not define is a GPU intrinsic or a
+        // Y builtin with no CPU lowering, and transcribing it produces Rust
+        // that references nothing. `--emit-cpu` on any of the `bn254_*` or
+        // `coprocessor_*` kernels emitted `block_idx_x()`, `thread_idx_x()`,
+        // `block_ptr2d_load_v4(...)` and the carry-chain intrinsics verbatim -
+        // 31 of the 85 programs in `tests/` produced a blob rustc rejects,
+        // under "Compilation Successful!".
+        //
+        // Qualified names (`Y256f32::zero`) and method calls (`x.foo`) are
+        // left alone: those are resolved by the paste target, not by this
+        // blob, and the four intrinsics with real lowerings returned above.
+        if !fname.contains("::")
+            && !fname.contains('.')
+            && !self.known_fns.contains(&fname)
+        {
+            self.emit_errors.push(format!(
+                "[CPU host backend] `{}(...)` has no CPU lowering - it would be \
+                 emitted verbatim into Rust that does not compile. This backend \
+                 targets host code; GPU intrinsics belong to --emit-ptx.",
+                fname
+            ));
+        }
+
+        let call = format!("{}({})", fname, arg_strs.join(", "));
+        // Rust will not let a safe function call an `unsafe fn`. Y's own
+        // safety analysis has already run by this point - `@safe` is what
+        // decided the callee's prefix - so the block is a transcription of a
+        // decision already made, not a new claim about the code.
+        if self.unsafe_fns.contains(&fname) {
+            return format!("unsafe {{ {} }}", call);
+        }
+        call
     }
 
     fn emit_expr(&mut self, expr: &Expr) -> String {
