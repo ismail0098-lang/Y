@@ -122,6 +122,35 @@ and what it costs.
 - **Done when** — the tiled, threaded, K-split GEMM returns bit-identical
   results to the naive nest across every thread count and both backends. The
   property that is merely *tested* here becomes the theorem in Phase 1.
+
+#### Phase 0 status, 2026-08-25 — DONE on the LLVM backend
+
+`try_emit_gemm_kernel` substitutes `__y_gemm_exact_vnni_threaded` for a
+recognised `@ZeroDrift` nest over `I16` operands and an `I64` accumulator, and
+`tests/exact_gemm_thread_invariance.rs` pins the claim: byte-identical output
+at 1, 2, 3, 5, 8 and 16 threads over a ragged K, each run also checked against
+an integer reference, with a `--wrap=pthread_create` counter proving the split
+actually forked. Measured 37.7 → 10.2 ms at 8 threads on 256×256×65536, same
+checksum throughout.
+
+**The operand domain is the source's types**, which is the decision that made
+the substitution legal: `VnniExact::license` is stated over the int16 values
+fed to `vpdpwssd`, and an `F32` nest cannot reach that domain without a
+quantization scale — at which point the licence would have been granted against
+the source's magnitude, not the kernel's. `I16`/`I64` *is* the kernel's
+contract, so nothing is converted. An `F32` `@ZeroDrift` nest still falls back
+to scalar exact lowering, permanently.
+
+**The "both backends" clause is NOT met, and its premise needs correcting.**
+`--emit-cpu` cannot express the recognised nest at all — it refuses
+`block_ptr2d_load` by name, since it targets host code and that is a GPU
+intrinsic. Its GEMM kernels come from a different mechanism entirely: a shape
+dispatcher keyed on literal `M`/`N`/`K` that emits hand-written Rust/AVX, with
+no `@ZeroDrift` path anywhere in the file (zero references). So satisfying this
+clause is not "wire the same kernel into a second emitter" but "write a second
+exact GEMM, in Rust source form, for a backend Y never compiles" — the
+`--emit-cpu` output is printed for the user to paste. Re-scope it deliberately
+or drop it; do not quietly treat the LLVM result as covering it.
 - **Exit value** — deterministic GEMM is independently saleable. Reproducible
   numerics across thread counts and hardware is a real, unmet want in regulated
   ML and financial model validation.
