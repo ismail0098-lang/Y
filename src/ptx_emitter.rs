@@ -2452,6 +2452,24 @@ declare it as a Q format.",
                 writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", ty.reg_mem(), reg, v).unwrap();
                 reg
             }
+            // A `bool` is a u32 holding 0 or 1, which is the representation
+            // `Stmt::If` and `Stmt::While` already expect: both lower a
+            // condition as `setp.eq.u32 %p, <cond>, 0`. There was no arm here
+            // at all, so `if true { .. }` fell to `_ => "".into()` and was
+            // refused - which took out `tests/test_drift.ysu --emit-ptx`, a
+            // command CLAUDE.md documents and an earlier session had already
+            // repaired once.
+            Expr::BoolLit(val, _) => {
+                let reg = self.alloc_ty(ScalarTy::U32);
+                writeln!(
+                    &mut self.ptx_buffer,
+                    "    mov.u32 {}, {};",
+                    reg,
+                    if *val { 1 } else { 0 }
+                )
+                .unwrap();
+                reg
+            }
             Expr::FloatLit(val, _) => {
                 let reg = self.alloc_regf32();
                 let mut val_str = format!("{}", *val);
@@ -2461,17 +2479,29 @@ declare it as a Q format.",
                 writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", reg, val_str).unwrap();
                 reg
             }
-            Expr::Ident(name, _) => {
+            Expr::Ident(name, span) => {
                 // Reading a @ZeroDrift accumulator converts back out of its
                 // integer domain; the stored value stays exact.
                 if let Some((reg, repr)) = self.zero_drift.get(name).cloned() {
                     return self.emit_drift_from_fixed(&reg, repr);
                 }
                 if let Some(reg) = self.variables.get(name) {
-                    reg.clone()
-                } else {
-                    name.clone()
+                    return reg.clone();
                 }
+                // An unbound name used to return ITSELF, which the caller
+                // splices into instruction text as if it were a register:
+                // `let z: u32 = ZeroInit;` emitted `mov.u32 %r0, ZeroInit;`
+                // under "Compilation Successful!" and exit 0, and `ptxas`
+                // then rejected the module with `Unknown symbol 'ZeroInit'`.
+                //
+                // Every name this backend really does define is inserted into
+                // `variables` at the point it is bound - parameters, `let`s,
+                // loop induction variables, and the tile-GEMM machinery's
+                // `pid_m`/`pid_n`. There is no legitimate bare name left, so
+                // reaching here means the program named something that does
+                // not exist.
+                self.unsupported_expr(&format!("the undefined name `{}`", name), span);
+                "".into()
             }
             Expr::BinaryOp {
                 op, left, right, span,
@@ -4031,8 +4061,60 @@ declare it as a Q format.",
             Expr::GenericCall { func, .. } => {
                 self.emit_expr(&**func, cache_policy, hw_profile)
             }
-            _ => "".into(),
+
+            // Everything this backend genuinely cannot lower is named here,
+            // with NO `_ =>` arm, so a new `Expr` variant is a compile error
+            // rather than a silently empty operand.
+            //
+            // The fallback used to be `_ => "".into()`, and an empty string is
+            // spliced straight into instruction text by every caller: a string
+            // literal in an argument position emitted
+            // `mul.lo.s32 %r5, , %r1;` and `setp.lt.u32 %p0, , %r2;` -
+            // missing operands - after "Compilation Successful!" and exit 0.
+            // `ptxas` then rejects the file with a parse error, on a machine
+            // that is not the one that compiled it. This is the same row of
+            // the design-rule table as the intrinsic arity fallbacks and the
+            // unknown-call-name gate; both of those were fixed for their own
+            // arm and this one was left.
+            Expr::StringLit(_, span) => {
+                self.unsupported_expr("a string literal", span);
+                "".into()
+            }
+            Expr::CharLit(_, span) => {
+                self.unsupported_expr("a character literal", span);
+                "".into()
+            }
+            Expr::StructLit { span, .. } => {
+                self.unsupported_expr("a struct literal", span);
+                "".into()
+            }
+            Expr::BlockExpr(_, span) => {
+                self.unsupported_expr("a block used as an expression", span);
+                "".into()
+            }
+            Expr::SelfLit(span) => {
+                self.unsupported_expr("`self`", span);
+                "".into()
+            }
+            Expr::ZeroInit(span) => {
+                self.unsupported_expr("a zero-initialiser", span);
+                "".into()
+            }
         }
+    }
+
+    /// An expression with no PTX lowering.
+    ///
+    /// Separate from `unsupported_intrinsic` because that one names a call the
+    /// user wrote; this names a whole expression form the backend does not
+    /// have. Both push to `emit_errors`, which `main` turns into a failed
+    /// build - the point being that the refusal is fail-closed, where an empty
+    /// return value is spliced into an instruction and is not.
+    fn unsupported_expr(&mut self, what: &str, span: &Span) {
+        self.emit_errors.push(format!(
+            "[PTX] {} (line {}, col {}) cannot be lowered by this backend.",
+            what, span.line, span.col
+        ));
     }
 
     /// The name of a `WitnessOp` variant, for a refusal message.
