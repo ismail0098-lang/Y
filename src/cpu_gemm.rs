@@ -1757,6 +1757,62 @@ pub const KSPLIT_MIN_K: usize = 512;
 /// accumulation they saved.
 pub const KSPLIT_MIN_BAND: usize = 128;
 
+/// Largest K-split thread count the emitted wrapper will use. Mirrors the
+/// `maxthr` substituted into `emit_vnni_threaded_module`.
+pub const KSPLIT_MAX_THREADS: usize = 64;
+
+/// The K-split thread count, as `__y_gemm_exact_threads` computes it.
+///
+/// This is a **transcription of emitted LLVM**, not a second decision. From
+/// `emit_vnni_threaded_module`:
+///
+/// ```text
+///   %r1  = select i1 %lo, i64 1, i64 %raw       ; clamp the request up to 1
+///   %r2  = select i1 %hi, i64 64, i64 %r1       ; ...and down to maxthr
+///   %byk = sdiv i64 %K, 128                     ; never a band under minband
+///   %n   = select i1 %small, i64 %byk, i64 %ceil
+///   %out = select i1 %z, i64 1, i64 %n
+/// ```
+///
+/// It exists so the model can PREDICT an observable: the `--wrap=pthread_create`
+/// canary in `tests/exact_gemm_thread_invariance.rs` counts real spawns, and
+/// `the_min_band_floor_is_what_the_model_says` asserts the count is this
+/// function's answer. That is the one place the model touches the shipped code
+/// behaviourally rather than by inspection.
+pub fn ksplit_threads(requested: usize, k: usize) -> usize {
+    let ceil = requested.clamp(1, KSPLIT_MAX_THREADS);
+    let by_k = k / KSPLIT_MIN_BAND;
+    let n = by_k.min(ceil);
+    if n < 1 { 1 } else { n }
+}
+
+/// The K-band decomposition, as the emitted wrapper's spawn loop computes it:
+/// `base = K / nthr`, `rem = K % nthr`, and the first `rem` bands take one
+/// extra k so the cuts are uneven.
+///
+/// This is the Rust transcription of `blen` / `boff` in
+/// `proofs/ExactGemmKsplit.v`, where `bands_tile` proves the bands cover
+/// `[0, K)` exactly for every `K` and every positive `nthr`, and
+/// `ksplit_exact` proves that summing their partials equals the naive sum.
+/// `tests/exact_gemm_ksplit_model.rs` checks this transcription against that
+/// theorem over a finite range.
+///
+/// Returns `(offset, len)` per band. Panics on `nthr == 0`, which the emitted
+/// code cannot produce - `ksplit_threads` floors at 1.
+pub fn ksplit_bands(nthr: usize, k: usize) -> Vec<(usize, usize)> {
+    assert!(nthr > 0, "a K-split with no workers has no bands");
+    let base = k / nthr;
+    let rem = k % nthr;
+    let mut out = Vec::with_capacity(nthr);
+    let mut off = 0usize;
+    for t in 0..nthr {
+        let len = base + usize::from(t < rem);
+        out.push((off, len));
+        off += len;
+    }
+    out
+}
+
 const SCRATCH: &str = "@__y_gemm_scratch";
 const SCRATCH_CAP: &str = "@__y_gemm_scratch_threads";
 const NTHREADS_CACHE: &str = "@__y_gemm_nthreads";
