@@ -2656,13 +2656,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                     UnaryOp::Deref => {
                         let inner_ty = self.infer_type(operand);
                         let load_ty = if inner_ty == "ptr" {
-                            let ast_ty = self.infer_ast_type(expr);
-                            let resolved = self.ast_type_to_llvm_type(&ast_ty);
-                            if resolved != "i32" && !resolved.is_empty() {
-                                resolved
-                            } else {
-                                "i64".into()
-                            }
+                            self.pointee_llvm_type(expr)
                         } else {
                             inner_ty
                         };
@@ -3827,13 +3821,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 UnaryOp::Deref => {
                     let inner_ty = self.infer_type(operand);
                     if inner_ty == "ptr" {
-                        let ast_ty = self.infer_ast_type(expr);
-                        let resolved = self.ast_type_to_llvm_type(&ast_ty);
-                        if resolved != "i32" && !resolved.is_empty() {
-                            resolved
-                        } else {
-                            "i64".into()
-                        }
+                        self.pointee_llvm_type(expr)
                     } else {
                         inner_ty
                     }
@@ -3843,13 +3831,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
             Expr::Index { base, .. } => {
                 let base_ty = self.infer_type(base);
                 if base_ty == "ptr" {
-                    let ast_ty = self.infer_ast_type(expr);
-                    let resolved = self.ast_type_to_llvm_type(&ast_ty);
-                    if resolved != "i32" && !resolved.is_empty() {
-                        resolved
-                    } else {
-                        "i64".into()
-                    }
+                    self.pointee_llvm_type(expr)
                 } else if base_ty.starts_with('[') {
                     if let Some(pos) = base_ty.find('x') {
                         base_ty[pos + 1..].trim().trim_end_matches(']').to_string()
@@ -3881,6 +3863,45 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 None
             }
             _ => None,
+        }
+    }
+
+    /// The LLVM type that a `ptr`-typed expression points at.
+    ///
+    /// `ast_type_to_llvm_type` answers `"i32"` for FIVE different reasons: a
+    /// genuine `I32`, an `Unknown` ast type, an empty one, an unregistered
+    /// type name, and a data-less enum. So its callers could not tell success
+    /// from failure and used `resolved != "i32"` as a stand-in for "resolution
+    /// succeeded", substituting `i64` whenever it came back `i32`.
+    ///
+    /// That discarded the CORRECT answer for the commonest pointer in the
+    /// language. `fn g(r: &mut I32) { *r = 7; }` emitted
+    ///
+    /// ```text
+    /// %_t2 = sext i32 7 to i64
+    /// store i64 %_t2, ptr %_t1
+    /// ```
+    ///
+    /// an EIGHT-byte store through a pointer to four bytes. That is valid IR,
+    /// so `clang` accepts it without a word and the compiler printed
+    /// "Compilation Successful!"; it overwrites whatever sits next to the
+    /// target. With `struct Pair { a: I32, b: I32 }`, writing through
+    /// `&mut p.a` set `p.b` to zero.
+    ///
+    /// The sentinel belongs on the AST type, which *does* distinguish the
+    /// cases. `i64` is kept as the fallback for a genuinely unresolvable
+    /// pointee - it is what this code has always guessed, and narrowing it is
+    /// a separate question from not discarding a known answer.
+    fn pointee_llvm_type(&self, expr: &Expr) -> String {
+        let ast_ty = self.infer_ast_type(expr);
+        if ast_ty == "Unknown" || ast_ty.is_empty() {
+            return "i64".into();
+        }
+        let resolved = self.ast_type_to_llvm_type(&ast_ty);
+        if resolved.is_empty() {
+            "i64".into()
+        } else {
+            resolved
         }
     }
 
