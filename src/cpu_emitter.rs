@@ -619,7 +619,13 @@ impl CpuEmitter {
                 match op {
                     UnaryOp::Neg => format!("(-{})", v),
                     UnaryOp::Not => format!("(!{})", v),
-                    UnaryOp::Ref => format!("(&{})", v),
+                    UnaryOp::Ref { mutable } => {
+                        if *mutable {
+                            format!("(&mut {})", v)
+                        } else {
+                            format!("(&{})", v)
+                        }
+                    }
                     UnaryOp::Deref => format!("(*{})", v),
                 }
             }

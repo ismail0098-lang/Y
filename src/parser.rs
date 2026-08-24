@@ -1934,10 +1934,10 @@ impl Parser {
 
         // Address-of: &expr or &mut expr
         if self.match_token(TokenKind::Ampersand) {
-            let _mutable = self.match_token(TokenKind::Mut);
+            let mutable = self.match_token(TokenKind::Mut);
             let operand = self.parse_expr_bp(19)?;
             return Ok(Expr::UnaryOp {
-                op: UnaryOp::Ref,
+                op: UnaryOp::Ref { mutable },
                 operand: Box::new(operand),
                 span,
             });
