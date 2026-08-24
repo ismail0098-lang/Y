@@ -1492,10 +1492,35 @@ impl PtxEmitter {
     }
 
     pub fn emit_program(&mut self, prog: &Program, hw_profile: &HardwareProfile) -> String {
+        let mut kernels = 0usize;
         for item in &prog.items {
             if let Item::Kernel(k) = item {
                 self.emit_kernel(k, hw_profile);
+                kernels += 1;
             }
+        }
+        // This loop matches `Item::Kernel` and NOTHING else, so a source with no
+        // `kernel` in it produced a three-line module - `.version`, `.target`,
+        // `.address_size` and not one instruction - which the compiler wrote to
+        // disk under "PTX Assembly generated successfully!" and exit 0.
+        //
+        // **An empty module assembles perfectly**, which is why the `ptxas`
+        // gates this repo added after gotcha #8 could never see it: 24 of the 85
+        // programs in `tests/` emitted one, and a corpus-wide assemble sweep
+        // reported 82/82 accepted. That is the same limit recorded there for a
+        // MISSING instruction, one level up - here the whole program is missing.
+        //
+        // Refusing rather than warning, because there is no artifact to salvage:
+        // whatever the user meant to compile, none of it is in the file.
+        if kernels == 0 {
+            self.emit_errors.push(
+                "[PTX backend] this source declares no `kernel`, so there is \
+                 nothing to emit - the module would be a `.version`/`.target` \
+                 header and no instructions. An empty module assembles and does \
+                 nothing. Declare a `kernel`, or compile host code with the LLVM \
+                 backend (the default) or --emit-cpu."
+                    .to_string(),
+            );
         }
         self.finalize_ptx_version();
         self.ptx_buffer.clone()

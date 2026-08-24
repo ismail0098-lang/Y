@@ -1089,6 +1089,38 @@ fn main() {
         println!("         Cross-pipe edges:  {}", cross_edges);
         println!("         Sequential total:  {:.0} cycles", ir_graph.total_sequential_cycles());
 
+        // Nothing to fuse is not something to fuse anyway.
+        //
+        // This backend exists to overlap an RT Core pipeline with a Tensor Core
+        // one. With neither present it still emitted a complete, launchable
+        // `.visible .entry y_coprocessor_fused` whose body is `ret;`, under a
+        // **hardcoded two-parameter signature** (`param_rt_A_ptr`,
+        // `param_nns_query_ptr`) that is byte-identical for every program and
+        // derived from none of them - plus a banner comment reporting
+        // "RT Nodes: 0 | Tensor Nodes: 0 | Barriers: 0" and
+        // "Dual-accelerator PTX generated successfully!", exit 0.
+        //
+        // Measured over `tests/`: **77 of the 83 programs this backend accepted
+        // produced exactly that**, and only the six `coprocessor_*.ysu` files
+        // were real. `println("hi")` compiled to a launchable GPU kernel.
+        //
+        // It is worse than the empty module the PTX backend was writing one
+        // arm up, because it does not LOOK empty: it has an entry point, a
+        // parameter list and a schedule comment claiming to be a schedule. The
+        // repo's own rule for this is in gotcha #8 - "a named gap costs a user
+        // five minutes, a plausible-looking broken kernel costs them however
+        // long it takes to suspect the compiler".
+        if rt_count == 0 && tensor_count == 0 {
+            log_error!(
+                "[Co-processor backend] this source has no RT Core work and no \
+                 Tensor Core work, so there is nothing to fuse. The emitted \
+                 kernel would be a `ret;` under a fixed parameter list that \
+                 comes from no part of your program. Use --emit-ptx for an \
+                 ordinary kernel, or the LLVM backend for host code."
+            );
+            exit(1);
+        }
+
         println!("      -> Phase B: Co-Processor Scheduling...");
         let mut scheduler = coprocessor_scheduler::CoprocessorScheduler::new();
         scheduler.schedule(&ir_graph, &hw_profile);
