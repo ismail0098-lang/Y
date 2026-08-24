@@ -175,6 +175,18 @@ pub struct GemmShape {
     /// Set when the accumulator carries `@ZeroDrift`, in which case the
     /// reduction must be EXACT and the f32 kernel is not a legal lowering.
     pub drift: Option<DriftAccumulator>,
+    /// The declared type of the two operand `let`s, when both name the same
+    /// one.
+    ///
+    /// **This decides whether the product truncates**, and a substitution that
+    /// gets it wrong computes a different function. With `I16` buffers,
+    /// `let a_val: I16 = ...` makes `a_val * b_val` an `i16` multiply that
+    /// OVERFLOWS - 1024*1024 is 2^20 - and the naive nest then accumulates the
+    /// truncated product. `vpdpwssd` widens internally, so substituting it for
+    /// that nest replaces a truncating reduction with a widening one. Declaring
+    /// the operands `I64` sign-extends at the load and the multiply is `i64`,
+    /// which is what the kernel computes.
+    pub operand_ty: Option<String>,
 }
 
 /// A `@ZeroDrift` accumulator's declared type and stated range, carried from
@@ -939,11 +951,13 @@ pub fn recognize_gemm(body: &Block) -> Option<GemmShape> {
         name: a_val,
         init: Some(a_init),
         bounds: a_bounds_attr,
+        ty: a_val_ty,
         ..
     }, Stmt::Let {
         name: b_val,
         init: Some(b_init),
         bounds: b_bounds_attr,
+        ty: b_val_ty,
         ..
     }, Stmt::Assign { target, value, .. }] = k_body.stmts.as_slice()
     else {
@@ -1049,6 +1063,15 @@ pub fn recognize_gemm(body: &Block) -> Option<GemmShape> {
         ldb: b_stride.to_string(),
         ldc: c_stride.to_string(),
         drift,
+        // Both operands must be declared the SAME width for the product's type
+        // to be unambiguous; a mismatch is not a shape this recogniser claims
+        // to understand, so it reports None and the caller refuses the fast
+        // path rather than guessing which one wins.
+        operand_ty: match (a_val_ty, b_val_ty) {
+            (Some(Type::Primitive(x, _)) | Some(Type::Ident(x, _)),
+             Some(Type::Primitive(y, _)) | Some(Type::Ident(y, _))) if x == y => Some(x.clone()),
+            _ => None,
+        },
     })
 }
 
