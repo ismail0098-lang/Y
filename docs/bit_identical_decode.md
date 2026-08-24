@@ -907,6 +907,16 @@ exactness budget forces narrower K, which is derived correctly but untested on a
 real model. The cross-GPU claim — the strongest thing exactness buys over
 pinning the order — has never been run on a second GPU.
 
+`tools/exact_cross_device.py` is the harness for it, built and self-tested but
+**not yet run against a second card**, which is the only reason this paragraph
+still says what it says. `--record` writes a per-device artifact (tokens, the
+integer-exp domain digest, a CPU-side weight fingerprint, the sanity-gate
+verdict, and a same-card re-run check); `--compare` is pure Python and refuses
+six ways for a comparison to be vacuous — same device, a control that did not
+fire, an arm that failed the sanity gate, differing weights, differing workload,
+and a card that does not reproduce itself. `--check-gate` exercises all of that
+on synthetic artifacts with no GPU.
+
 ### CUDA graphs, worth up to 1.47x — blocked
 
 The prerequisites are cheap (a static cache costs 5–8%, and improves the ratio
@@ -1003,16 +1013,30 @@ flattering direction.
 
 ## What I would do with the following week
 
-- **Build the fixed-order-float arm.** It is the missing control and it could
-  invalidate the framing. If it wins, the honest conclusion is that this work
-  bought portability and tuning freedom rather than determinism — which is still
-  a real product, but a different pitch.
-- **Run a second GPU.** Cross-hardware bit-identity is the strongest thing
-  exactness buys and the only headline claim with no evidence behind it.
+- ~~**Build the fixed-order-float arm.**~~ **Done — Finding 11.** It measured
+  0/16 as well, so the framing did change: this work bought *portability and
+  tuning freedom*, not determinism. The pitch is now the second sentence of that
+  finding, not the first.
+- **Run a second GPU. This is now the top item, not the second.** Once a pinned
+  float order also gives 0/16, cross-hardware bit-identity is the *only*
+  remaining thing exactness uniquely buys that has no measurement behind it —
+  Finding 12 argues it and measures the exp alone. **The harness is built and
+  waiting: `tools/exact_cross_device.py`.** `--record` on each card, `--compare`
+  anywhere. It is a bit-identity check rather than a benchmark, so none of this
+  repo's timing discipline applies and a busy rented box is fine.
 - **Take it to an RL team before optimizing further.** The remaining engineering
   is a serving integration, and integrating against a hypothetical customer is
   how the last two levers ended up being framework costs rather than arithmetic
-  ones.
+  ones. Three blocked things converge there and none of them move separately:
+  CUDA graphs (up to 1.47x, blocked on a library bug), continuous batching with
+  paged KV (untested — what is tested is ragged *prefill*), and the
+  custom-op-versus-`torch.compile` problem that made `exact_pv` a 0.70x loss in
+  the shipping configuration.
+- **Not more kernel porting.** `exact_pv` is 5x standalone and **0.70x compiled**
+  end to end. `feedback-stateful-optimisations-lose-to-compilers` and
+  `feedback-isolated-benchmarks-cannot-price-epilogues` record the same shape
+  twice already; this is the third. Solve "how does a Y kernel survive
+  `torch.compile`" before porting a second one.
 
 ---
 
