@@ -92,8 +92,58 @@ impl NativeEmitter {
         self.emit_entry_point();
 
         for item in &prog.items {
-            if let Item::Func(f) = item {
-                self.emit_func(f);
+            match item {
+                Item::Func(f) => self.emit_func(f),
+
+                // A `kernel` is GPU code and this backend emits an x86-64 ELF,
+                // so it cannot be lowered. It used to be DROPPED SILENTLY:
+                //
+                //     kernel k(Out: GlobalMemory<U32>, N: U32) { ... }
+                //     fn main() {}
+                //
+                // produced a 162-byte executable BYTE-IDENTICAL to the one for
+                // `fn main() {}` on its own, under "Compiled to native ELF
+                // executable!" and exit 0. The whole kernel contributed
+                // nothing and nothing said so.
+                //
+                // This is the mirror of the bug in `ptx_emitter::emit_program`,
+                // which matched `Item::Kernel` and dropped everything else. The
+                // two backends were each keeping only the half they understood
+                // and discarding the rest without a word.
+                //
+                // `--emit-cpu` already refuses this program - it walks the
+                // kernel body and rejects `thread_idx_x` by name - so the host
+                // backends now agree.
+                Item::Kernel(k) => {
+                    self.emit_errors.push(format!(
+                        "[Native x86-64 Backend] `kernel {}` is GPU code and has \
+                         no native lowering. Dropping it would produce an \
+                         executable that silently does none of the work. Compile \
+                         kernels with --emit-ptx.",
+                        k.name
+                    ));
+                }
+
+                // These declare types or names and emit no code of their own.
+                //
+                // An `impl` method and a `module` function ARE code, and this
+                // loop does drop them - but the only way to reach one is a
+                // `Path` callee (`P::get()`, `M::helper()`), which `emit_expr`
+                // already refuses by name as "a call through a computed
+                // callee". Verified with both spellings rather than assumed,
+                // because that is the difference between a covered gap and an
+                // unexamined one. A method nothing calls contributes nothing.
+                //
+                // Matched exhaustively, with no `_ =>` arm, so a new `Item`
+                // variant is a compile error here rather than another silent
+                // drop.
+                Item::Struct(_)
+                | Item::Enum(_)
+                | Item::Import(_)
+                | Item::StaticAssert(_)
+                | Item::Impl(_)
+                | Item::Const(_)
+                | Item::Module(_) => {}
             }
         }
 

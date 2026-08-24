@@ -288,6 +288,118 @@ fn no_emitted_coprocessor_kernel_is_a_bare_ret() {
     );
 }
 
+// ── --emit-native ───────────────────────────────────────
+
+/// A `kernel` reaching the native backend was dropped without a word.
+///
+/// `native_emitter::emit_program` was `if let Item::Func(f) = item`, so every
+/// other `Item` variant fell out of the loop. A `kernel` beside an empty `main`
+/// produced a 162-byte executable **byte-identical** to the one for
+/// `fn main() {}` alone, under "Compiled to native ELF executable!" and exit 0
+/// - the whole kernel contributed nothing and nothing said so.
+///
+/// This is the mirror of the `ptx_emitter::emit_program` bug in the same commit
+/// series, which matched `Item::Kernel` and dropped everything else. The two
+/// backends were each keeping only the half they understood.
+///
+/// `--emit-cpu` already refused this program (it walks the kernel body and
+/// rejects `thread_idx_x` by name), so the host backends now agree.
+mod native_refuses_a_kernel {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn dir_for(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("y_nat_{}_{}", std::process::id(), name))
+    }
+
+    fn build(name: &str, src: &str) -> (bool, String, bool) {
+        let dir = dir_for(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("{}.ysu", name));
+        std::fs::write(&path, src).expect("write source");
+        let bin = dir.join(format!("{}.bin", name));
+        let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+            .arg(&path)
+            .arg("--emit-native")
+            .arg("-o")
+            .arg(&bin)
+            .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+            .output()
+            .expect("run Y");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text, bin.exists())
+    }
+
+    const KERNEL_PLUS_STUB: &str = "\
+kernel k(Out: GlobalMemory<U32>, N: U32) {
+    let t: U32 = thread_idx_x();
+    block_ptr2d_store(Out, 0, t, 1, 1, N, t);
+}
+
+fn main() {}
+";
+
+    #[test]
+    fn a_kernel_is_refused_by_name_not_dropped() {
+        let (ok, text, wrote) = build("kstub", KERNEL_PLUS_STUB);
+        assert!(!ok, "a kernel compiled to a native ELF and exited 0:\n{}", text);
+        assert!(
+            text.contains("kernel k"),
+            "refused without naming the kernel it could not lower:\n{}",
+            text
+        );
+        assert!(
+            !wrote,
+            "refused, but still wrote an executable - the refusal has to land \
+             before the file exists or the user has a binary to be misled by"
+        );
+    }
+
+    /// The control. Refusing every program satisfies the test above and deletes
+    /// the backend; this one RUNS the binary, because emitting something is not
+    /// the same as emitting something correct.
+    #[test]
+    fn an_ordinary_program_still_builds_and_runs() {
+        let src = "\
+fn main() -> I32 {
+    let a: I32 = 9;
+    let b: I32 = 2;
+    return a - b;
+}
+";
+        let (ok, text, wrote) = build("plain", src);
+        assert!(ok, "an ordinary integer program was refused:\n{}", text);
+        assert!(wrote, "exited 0 but wrote no executable:\n{}", text);
+        let code = Command::new(dir_for("plain").join("plain.bin"))
+            .status()
+            .expect("run the produced binary")
+            .code();
+        assert_eq!(code, Some(7), "the produced binary computed the wrong answer");
+    }
+
+    /// A type declaration emits no code, so dropping it is correct and must stay
+    /// allowed - otherwise "refuse every non-Func item" passes the kernel test
+    /// and breaks ordinary programs.
+    #[test]
+    fn a_type_declaration_beside_main_is_still_fine() {
+        let src = "\
+struct P { a: I32 }
+
+fn main() -> I32 {
+    return 3;
+}
+";
+        let (ok, text, wrote) = build("withstruct", src);
+        assert!(ok, "a struct declaration beside main was refused:\n{}", text);
+        assert!(wrote, "exited 0 but wrote no executable:\n{}", text);
+    }
+}
+
 // ── the C API ─────────────────────────────────────────────
 
 /// `y_compile_to_ptx` must report the emitter's refusals, not return a string.
