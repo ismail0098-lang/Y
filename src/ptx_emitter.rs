@@ -601,7 +601,12 @@ pub struct PtxEmitter {
     ptr_elem: std::collections::HashMap<String, ScalarTy>,
     /// `@ZeroDrift` accumulators: name -> (register holding the fixed-point
     /// value, representation chosen for it).
-    zero_drift: std::collections::HashMap<String, (String, crate::zero_drift::DriftRepr)>,
+    /// name -> (accumulator register, representation, is the value an
+    /// INTEGER rather than a fixed-point encoding of a float?). The third
+    /// field is what stops an exact `I64` accumulator being read through
+    /// `f32` on every access.
+    zero_drift:
+        std::collections::HashMap<String, (String, crate::zero_drift::DriftRepr, bool)>,
     /// Measured accumulate costs driving that choice.
     drift_costs: crate::zero_drift::CostTable,
     /// One line per `@ZeroDrift` binding.
@@ -783,7 +788,22 @@ impl PtxEmitter {
     /// backends rounded differently then the same Y source compiled for CPU and
     /// GPU would disagree - which would defeat the point of an annotation whose
     /// entire purpose is reproducibility.
-    fn emit_drift_to_fixed(&mut self, src: &str, repr: crate::zero_drift::DriftRepr) -> String {
+    /// Converts a value into the accumulator's stored representation.
+    ///
+    /// `integer_domain` means the accumulator holds an INTEGER, not a scaled
+    /// float, so there is nothing to convert and no float to route through.
+    /// Without this the exact `I64` path round-tripped every added term
+    /// through `f64` - exact only up to 2^53, on an accumulator whose entire
+    /// promise is that it is exact.
+    fn emit_drift_to_fixed(
+        &mut self,
+        src: &str,
+        repr: crate::zero_drift::DriftRepr,
+        integer_domain: bool,
+    ) -> String {
+        if integer_domain {
+            return self.emit_convert(src, ScalarTy::I64);
+        }
         let widened = self.alloc_regf64();
         if src.starts_with("%f") && !src.starts_with("%fd") {
             writeln!(&mut self.ptx_buffer, "    cvt.f64.f32 {}, {};", widened, src).unwrap();
@@ -829,8 +849,24 @@ impl PtxEmitter {
         out
     }
 
-    /// Converts a fixed-point accumulator back to an `f32` register.
-    fn emit_drift_from_fixed(&mut self, src: &str, repr: crate::zero_drift::DriftRepr) -> String {
+    /// Converts a fixed-point accumulator back to a readable register.
+    ///
+    /// For a fixed-point encoding of a float that is an `f32`, which is the
+    /// contract. For an INTEGER accumulator it is the integer: this function
+    /// used to narrow `s64 -> f64 -> f32` unconditionally, so every read of an
+    /// exact `I64` accumulator silently lost everything above 2^24 - the
+    /// `ld.global.f32`-on-a-`U32`-buffer bug, one directive over.
+    fn emit_drift_from_fixed(
+        &mut self,
+        src: &str,
+        repr: crate::zero_drift::DriftRepr,
+        integer_domain: bool,
+    ) -> String {
+        if integer_domain {
+            let out = self.alloc_ty(ScalarTy::I64);
+            writeln!(&mut self.ptx_buffer, "    mov.s64 {}, {};", out, src).unwrap();
+            return out;
+        }
         let as_f64 = self.alloc_regf64();
         writeln!(&mut self.ptx_buffer, "    cvt.rn.f64.s64 {}, {};", as_f64, src).unwrap();
         let out = self.alloc_regf32();
@@ -2082,13 +2118,36 @@ or `shared_alloc_u32` for a shared-memory array.",
                             repr.name()
                         )
                         .unwrap();
-                        let acc = self.alloc_reg64();
+                        // An accumulator is SIGNED in every representation.
+                        // Allocating it untyped left `ty_of` at its `%rd`
+                        // default of U64, which is how the old write-back came
+                        // out as `cvt.rzi.u64.f32` - unsigned - on a sum that is
+                        // routinely negative.
+                        //
+                        // MUTATION-CHECKED AND CURRENTLY NOT LOAD-BEARING:
+                        // reverting this to `alloc_reg64()` passes the whole of
+                        // `tests/zero_drift_backend_agreement.rs`, because the
+                        // `Stmt::Assign` / `Stmt::CompoundAssign` arms below
+                        // write `add.s64` literally and never consult
+                        // `ty_of(acc)`. It is kept because the generic
+                        // assignment path DOES consult it, and that path is one
+                        // deleted guard away - which is exactly the history
+                        // above. Do not read it as covered by a test.
+                        let acc = self.alloc_ty(ScalarTy::I64);
+                        // An integer accumulator holds the value itself. A
+                        // fixed-point one holds a scaled float and has to be
+                        // converted on every read and write.
+                        let integer_domain = repr.frac_bits() == 0
+                            && matches!(
+                                ty_name.as_str(),
+                                "I8" | "I16" | "I32" | "I64" | "U8" | "U16" | "U32" | "U64"
+                            );
                         match init {
                             Some(expr) => {
                                 let v = self.emit_expr(expr, cache_policy.as_ref(), hw_profile);
-                                if v.starts_with("%f") {
-                                    let fixed = self.emit_drift_to_fixed(&v, repr);
-                                    writeln!(&mut self.ptx_buffer, "    mov.u64 {}, {};", acc, fixed).unwrap();
+                                if v.starts_with("%f") || integer_domain {
+                                    let fixed = self.emit_drift_to_fixed(&v, repr, integer_domain);
+                                    writeln!(&mut self.ptx_buffer, "    mov.s64 {}, {};", acc, fixed).unwrap();
                                 } else {
                                     writeln!(&mut self.ptx_buffer, "    mov.u64 {}, 0;", acc).unwrap();
                                 }
@@ -2097,7 +2156,7 @@ or `shared_alloc_u32` for a shared-memory array.",
                                 writeln!(&mut self.ptx_buffer, "    mov.u64 {}, 0;", acc).unwrap();
                             }
                         }
-                        self.zero_drift.insert(name.clone(), (acc.clone(), repr));
+                        self.zero_drift.insert(name.clone(), (acc.clone(), repr, integer_domain));
                         self.variables.insert(name.clone(), acc);
                     }
                     None => {
@@ -2304,7 +2363,7 @@ declare it as a Q format.",
                     Expr::Ident(n, _) => n.clone(),
                     _ => unreachable!(),
                 };
-                let (acc, repr) = self.zero_drift[&name].clone();
+                let (acc, repr, integer_domain) = self.zero_drift[&name].clone();
                 if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                     self.emit_errors.push(format!(
                         "Line {}: `{:?}=` is not exact on the @ZeroDrift accumulator `{}`. Only \
@@ -2313,9 +2372,51 @@ declare it as a Q format.",
                     ));
                 }
                 let rhs = self.emit_expr(value, None, hw_profile);
-                let fixed = self.emit_drift_to_fixed(&rhs, repr);
+                let fixed = self.emit_drift_to_fixed(&rhs, repr, integer_domain);
                 let instr = if matches!(op, BinaryOp::Sub) { "sub.s64" } else { "add.s64" };
                 writeln!(&mut self.ptx_buffer, "    {} {}, {}, {};", instr, acc, acc, fixed).unwrap();
+            }
+            // `acc = acc + e` is the SAME statement as `acc += e`, and this
+            // emitter had an arm for one and not the other - so the running-sum
+            // form fell through to `Stmt::Assign` below, which read the
+            // accumulator as f32, added in f32, and wrote back through an
+            // UNSIGNED truncating convert. It compiled, it assembled, and the
+            // comment above it said `accumulated exactly as I64`.
+            //
+            // THIS ARM MUST STAY ABOVE `Stmt::Assign`. Match arms are ordered;
+            // the LLVM backend's equivalent was first inserted below its
+            // general arm, where it compiled, ran, and never fired.
+            Stmt::Assign { target, value, span }
+                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
+            {
+                let name = match target {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let (acc, repr, integer_domain) = self.zero_drift[&name].clone();
+                match crate::zero_drift::running_sum(target, value) {
+                    Some((op, term)) => {
+                        let rhs = self.emit_expr(term, None, hw_profile);
+                        let fixed = self.emit_drift_to_fixed(&rhs, repr, integer_domain);
+                        let instr = if matches!(op, BinaryOp::Sub) { "sub.s64" } else { "add.s64" };
+                        writeln!(
+                            &mut self.ptx_buffer,
+                            "    {} {}, {}, {};",
+                            instr, acc, acc, fixed
+                        )
+                        .unwrap();
+                    }
+                    None => {
+                        // Refusing is the fix, not a stopgap. Lowering this as
+                        // an ordinary assignment is what the bug was: the
+                        // guarantee is silently dropped and the artifact still
+                        // runs.
+                        self.emit_errors.push(format!(
+                            "Line {}: `{}` is a @ZeroDrift accumulator, and this assignment is not an exact accumulation. Only `{} += e`, `{} -= e` and their `{} = {} + e` / `{} = {} - e` spellings preserve drift-freedom; anything else reintroduces the rounding the directive exists to remove.",
+                            span.line, name, name, name, name, name, name, name
+                        ));
+                    }
+                }
             }
             Stmt::Assign {
                 target, value, ..
@@ -2570,8 +2671,8 @@ declare it as a Q format.",
             Expr::Ident(name, span) => {
                 // Reading a @ZeroDrift accumulator converts back out of its
                 // integer domain; the stored value stays exact.
-                if let Some((reg, repr)) = self.zero_drift.get(name).cloned() {
-                    return self.emit_drift_from_fixed(&reg, repr);
+                if let Some((reg, repr, integer_domain)) = self.zero_drift.get(name).cloned() {
+                    return self.emit_drift_from_fixed(&reg, repr, integer_domain);
                 }
                 if let Some(reg) = self.variables.get(name) {
                     return reg.clone();

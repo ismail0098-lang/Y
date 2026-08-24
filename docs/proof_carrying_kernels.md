@@ -103,6 +103,20 @@ Two corrections to `CLAUDE.md` found while drafting:
   `emit_drift_to_fixed` / `emit_drift_from_fixed`. **The GPU half is real
   today.**
 
+  > **CORRECTION, 2026-08-25 — it was real for `+=` and WRONG for `acc = acc + e`.**
+  > The PTX backend had a drift arm for `CompoundAssign` and none for `Assign`,
+  > so the running-sum spelling — which is how the recognised GEMM nest is
+  > written — fell through to the ordinary assignment path and accumulated in
+  > **f32**, then wrote back through an unsigned truncating convert, under a
+  > comment reading `accumulated exactly as I64`. Separately,
+  > `emit_drift_from_fixed` narrowed `s64 → f64 → f32` on *every* read, so even
+  > the working `+=` path lost an exact `I64` accumulator above 2^24. Both fixed;
+  > the rule for what counts as an exact accumulation now lives in
+  > `zero_drift::running_sum` and both backends call it, and
+  > `tests/zero_drift_backend_agreement.rs` pins that the two spellings emit
+  > byte-identical PTX. **Found by running every backend over the Phase 0 nest** —
+  > the source did not exist when the empty-artifact sweep ran.
+
 ---
 
 ## 4. The phases
