@@ -38,6 +38,116 @@ fn const_f64_of(expr: &Expr) -> Option<f64> {
     }
 }
 
+/// Symbols this module `declare`s in its own prelude, so a call to one needs no
+/// extra declaration.
+const PRELUDE_DECLARED: &[&str] = &[
+            "exit",
+            "free",
+            "llvm.memset.p0.i64",
+            "llvm.prefetch.p0",
+            "load",
+            "malloc",
+            "print_int",
+            "printf",
+            "println",
+            "yfile_read_to_string",
+            "yfile_write",
+            "ystr_char_at",
+            "ystr_clone",
+            "ystr_eq_cstr",
+            "ystr_len",
+            "ystr_new",
+            "ystr_push",
+            "ystr_push_str",
+            "yvec_get",
+            "yvec_len",
+            "yvec_new",
+            "yvec_push",
+];
+
+/// Symbols `c_src/runtime.c` DEFINES, which the LLVM path links against.
+///
+/// A call to one of these needs a `declare` emitted; a call to anything in
+/// NEITHER list and not defined in this module does not exist, and is refused.
+///
+/// These are two different questions and the first version of the refusal
+/// conflated them - which suppressed the declaration for `String_new` and
+/// turned two valid modules into invalid ones. The clang oracle caught it;
+/// review did not.
+///
+/// `runtime_symbols_match_the_runtime` asserts this list against
+/// `c_src/runtime.c` rather than re-deriving it, so the two cannot drift apart
+/// silently - the same "assert the producers AGREE" device the `.version` gate
+/// uses.
+pub const RUNTIME_SYMBOLS: &[&str] = &[
+            "Expr_BinaryExpr",
+            "Expr_BoolLit",
+            "Expr_Call",
+            "Expr_CharLit",
+            "Expr_FloatLit",
+            "Expr_Ident",
+            "Expr_Index",
+            "Expr_IntLit",
+            "Expr_MemberAccess",
+            "Expr_Path",
+            "Expr_StringLit",
+            "Expr_StructLit",
+            "Expr_UnaryExpr",
+            "MatchPattern_EnumVariant",
+            "MatchPattern_Ident",
+            "MatchPattern_Literal",
+            "Stmt_Assign",
+            "Stmt_CompoundAssign",
+            "Stmt_ExprStmt",
+            "Stmt_For",
+            "Stmt_If",
+            "Stmt_Let",
+            "Stmt_Match",
+            "Stmt_Return",
+            "Stmt_SafeBlock",
+            "Stmt_While",
+            "String_new",
+            "TokenKind_AtUnknown",
+            "TokenKind_CharLit",
+            "TokenKind_FloatLit",
+            "TokenKind_HardwareTarget",
+            "TokenKind_Ident",
+            "TokenKind_IntLit",
+            "TokenKind_MmaMod",
+            "TokenKind_StringLit",
+            "TokenKind_Unknown",
+            "init_allocator",
+            "is_valid_ystr",
+            "make_enum",
+            "print",
+            "print_int",
+            "println",
+            "register_ystr",
+            "resolve_ystr",
+            "str_to_i64",
+            "ychar_to_ascii",
+            "yfile_read_to_string",
+            "yfile_write",
+            "ymalloc",
+            "yrealloc",
+            "ystr_char_at",
+            "ystr_clone",
+            "ystr_eq",
+            "ystr_eq_cstr",
+            "ystr_free",
+            "ystr_hash_fn",
+            "ystr_len",
+            "ystr_new",
+            "ystr_push",
+            "ystr_push_str",
+            "yvec_free",
+            "yvec_get",
+            "yvec_get_char",
+            "yvec_len",
+            "yvec_new",
+            "yvec_push",
+];
+
 pub struct LlvmEmitter {
     pub output: String,
     /// String constants collected during emission, emitted at module scope
@@ -777,7 +887,7 @@ impl LlvmEmitter {
 
     // ── Type Mapping ────────────────────────────────────────
 
-    fn emit_type(&self, ty: &Type) -> String {
+    fn emit_type(&mut self, ty: &Type) -> String {
         let res: String = match ty {
             Type::Primitive(name, _) => match name.as_str() {
                 // `U64`/`u64` were absent and fell to the `_ => "i32"` arm
@@ -817,7 +927,26 @@ impl LlvmEmitter {
                         } else {
                             "i32".into()
                         }
+                    } else if self.structs.contains_key(other) {
+                        format!("%{}", other)
                     } else {
+                        // Not a primitive, not a registered struct, not an
+                        // enum: there is nothing to lower this to. Emitting
+                        // `%Name` names an LLVM struct type the module never
+                        // defines, and `alloca %Name` on an undefined type is
+                        // "Cannot allocate unsized type" - INVALID IR, written
+                        // out under "Compilation Successful!" and exit 0.
+                        //
+                        // Every instance in the corpus was `U32x4`, the PTX
+                        // backend's 16-byte vector type, reaching the host
+                        // backend: 11 of the 76 programs this backend accepted
+                        // emitted a module clang refuses.
+                        self.emit_errors.push(format!(
+                            "[LLVM host backend] type `{}` has no host lowering - it \
+                             would name an LLVM struct this module never defines. \
+                             GPU-only types such as `U32x4` belong to --emit-ptx.",
+                            other
+                        ));
                         format!("%{}", other)
                     }
                 }
@@ -837,7 +966,7 @@ impl LlvmEmitter {
         }
     }
 
-    fn emit_field_type(&self, ty: &Type) -> String {
+    fn emit_field_type(&mut self, ty: &Type) -> String {
         match ty {
             Type::Array { element, size, .. } => {
                 let elem_llvm_ty = self.emit_type(element);
@@ -974,6 +1103,29 @@ impl LlvmEmitter {
         self.functions.insert("File_read_to_string".into(), (vec!["&String".to_string()], "ptr".into()));
         self.functions.insert("File_write".into(), (vec!["&String".to_string(), "&String".to_string()], "void".into()));
 
+        // Phase 0a: register every struct and enum FIRST.
+        //
+        // This used to be one loop that registered structs and resolved
+        // function signatures together, so `emit_type` was asked about a
+        // struct declared later in the file and the struct table did not have
+        // it yet. That was harmless while the fallback silently emitted
+        // `%Name` anyway; the moment that fallback became a refusal, four
+        // corpus programs with a perfectly ordinary `struct` in them were
+        // refused. A name resolver must see all the names before it answers
+        // any question.
+        for item in &prog.items {
+            match item {
+                Item::Enum(e) => {
+                    let has_data = e.variants.iter().any(|v| v.fields.is_some());
+                    self.enums.insert(e.name.clone(), has_data);
+                    for (i, v) in e.variants.iter().enumerate() {
+                        self.enum_variants
+                            .insert(format!("{}_{}", e.name, v.name), i as i32);
+                    }
+                }
+                _ => {}
+            }
+        }
         for item in &prog.items {
             match item {
                 Item::Struct(s) => {
@@ -990,6 +1142,13 @@ impl LlvmEmitter {
                     self.ast_structs.insert(s.name.clone(), ast_fields);
                     self.struct_field_attrs.insert(s.name.clone(), field_attrs);
                 }
+                _ => {}
+            }
+        }
+
+        // Phase 0b: resolve function signatures, with every type name known.
+        for item in &prog.items {
+            match item {
                 Item::Func(f) => {
                     let ret_ty = f
                         .ret_ty
@@ -1020,14 +1179,6 @@ impl LlvmEmitter {
                         k.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
                     self.functions
                         .insert(k.name.clone(), (param_tys, "void".into()));
-                }
-                Item::Enum(e) => {
-                    let has_data = e.variants.iter().any(|v| v.fields.is_some());
-                    self.enums.insert(e.name.clone(), has_data);
-                    for (i, v) in e.variants.iter().enumerate() {
-                        self.enum_variants
-                            .insert(format!("{}_{}", e.name, v.name), i as i32);
-                    }
                 }
                 _ => {}
             }
@@ -1126,32 +1277,10 @@ impl LlvmEmitter {
         self.output.push_str(&func_output);
 
         // Auto-declare any called functions that are not defined or already declared
-        let runtime_set: std::collections::HashSet<&str> = [
-            "ystr_new",
-            "ystr_push",
-            "ystr_push_str",
-            "ystr_eq_cstr",
-            "ystr_len",
-            "ystr_char_at",
-            "ystr_clone",
-            "yvec_new",
-            "yvec_push",
-            "yvec_get",
-            "yvec_len",
-            "yfile_read_to_string",
-            "yfile_write",
-            "printf",
-            "malloc",
-            "free",
-            "exit",
-            "println",
-            "print_int",
-            "llvm.prefetch.p0",
-            "load",
-        ]
-        .iter()
-        .cloned()
-        .collect();
+        let prelude_set: std::collections::HashSet<&str> =
+            PRELUDE_DECLARED.iter().copied().collect();
+        let runtime_set: std::collections::HashSet<&str> =
+            RUNTIME_SYMBOLS.iter().copied().collect();
 
         let defined_set: std::collections::HashSet<String> =
             self.defined_functions.iter().cloned().collect();
@@ -1159,7 +1288,7 @@ impl LlvmEmitter {
         let mut extern_decls = String::new();
 
         for fname in &self.called_functions {
-            if !runtime_set.contains(fname.as_str())
+            if !prelude_set.contains(fname.as_str())
                 && !defined_set.contains(fname)
                 && !auto_declared.contains(fname)
             {
@@ -1182,10 +1311,34 @@ impl LlvmEmitter {
                         .unwrap_or_else(|| "i32".into()),
                 };
 
-                if ret_ty.starts_with('%') {
-                    writeln!(&mut extern_decls, "declare void @{}(...)", fname).unwrap();
+                if runtime_set.contains(fname.as_str()) {
+                    if ret_ty.starts_with('%') {
+                        writeln!(&mut extern_decls, "declare void @{}(...)", fname).unwrap();
+                    } else {
+                        writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname)
+                            .unwrap();
+                    }
                 } else {
-                    writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname).unwrap();
+                    // Neither declared above, nor defined here, nor present in
+                    // the runtime: this symbol does not exist. Declaring it
+                    // anyway produced a module that ASSEMBLES and then fails at
+                    // link with `undefined reference to 'thread_idx_x'` - which
+                    // reads as a broken toolchain rather than as a program
+                    // using a construct this backend cannot lower. Every such
+                    // name in the corpus was a GPU intrinsic: thread_idx_x,
+                    // block_idx_x/y/z, the carry-chain intrinsics, the v4
+                    // vector loads, mma_sync, ldmatrix, bvh_traverse.
+                    //
+                    // This is the exact check `cpu_emitter` already made
+                    // (`a_gpu_intrinsic_is_refused_rather_than_transcribed`);
+                    // the LLVM backend never got it.
+                    self.emit_errors.push(format!(
+                        "[LLVM host backend] `{}(...)` has no host lowering - it would be \
+                         declared as an external symbol that does not exist, and the link \
+                         would fail. This backend targets host code; GPU intrinsics belong \
+                         to --emit-ptx.",
+                        fname
+                    ));
                 }
                 auto_declared.insert(fname.clone());
             }
