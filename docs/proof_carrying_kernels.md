@@ -307,6 +307,54 @@ K-split reduction, `pack_a`/`pack_b`, the micro-kernel, the masked tails.
 - **Exit value** — the first publication, and the credential that makes the
   rest fundable.
 
+#### Phase 1 progress, 2026-08-25 — the SCHEDULE is proved
+
+`proofs/ExactGemmKsplit.v` (Rocq 9.1, no axioms, nothing admitted) proves the
+K-split half of the Phase 0 kernel. Three results:
+
+- **`bands_tile`** — the band decomposition the emitted wrapper computes
+  (`base = K/nthr`, `rem = K%nthr`, first `rem` bands one longer) covers
+  `[0, K)` exactly, for every `K` and every positive `nthr`.
+- **`ksplit_exact`** — summing the per-band partials equals the naive sum over
+  the whole of K. No hypothesis that K divides evenly, none that the bands are
+  equal, none about the thread count beyond it being positive.
+- **`any_thread_count_agrees`** — the corollary
+  `tests/exact_gemm_thread_invariance.rs` asserts, *derived*. Note it says
+  nothing about threads: two counts agree because each separately equals the
+  naive nest.
+
+**Section 2's central claim is now machine-checked rather than asserted.**
+`rounding_breaks_the_split` and `exact_survives_the_same_split` are the same
+`f`, the same `K = 201` and the same `nthr = 2`, differing only in the
+accumulate. The rounded one gives **1100 against its own reference's 1000** —
+it does not lose precision, it *disagrees*, and no tolerance makes that a proof
+of anything. The exact one gives 1200 either way. A control asserts the two
+accumulates really do differ on this input, so the exact case is not passing
+because the rounding happens to be inert.
+
+**What is NOT proved, stated because it is most of the kernel.** A band's
+partial is modelled as the exact sum over its indices: packing, the 2-D
+register tile, the masked tails and the int32 → int64 flush are all *assumed*
+to compute that. This file proves the schedule around them. Phase 1's remaining
+work is the micro-kernel, which is the harder half.
+
+**The model-to-code gap is narrowed in one specific place rather than waved
+at.** `cpu_gemm::ksplit_bands` / `ksplit_threads` are the Rust transcription of
+the same definitions; `tests/exact_gemm_ksplit_model.rs` checks the
+transcription against the theorem over 192,000 cases and asserts it *agrees*
+with the emitted module's constants instead of restating them. And
+`the_min_band_floor_is_what_the_model_says` sweeps K across the min-band floor
+with the thread request held fixed, asserting the observed `pthread_create`
+count is the model's answer — the one place the model predicts something the
+shipped code reveals. Drift in either direction fails it, verified by mutating
+each side separately.
+
+**Mutation-verified 8/8**, and one result is worth keeping: making the
+emitter's uneven split even (`icmp slt` → `sle`) is caught by the new floor
+sweep at K=256 and **passes** the pre-existing K=4099 invariance test. A
+correctness test at one shape does not cover a schedule.
+
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
