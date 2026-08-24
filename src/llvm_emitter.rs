@@ -1771,6 +1771,23 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
     /// emitted kernel is `<16 x float>` throughout. Running it over a `F64`
     /// buffer would reinterpret the data rather than fail.
     fn try_emit_gemm_kernel(&mut self, k: &KernelDecl) -> Option<crate::cpu_gemm::GemmShape> {
+        // `Y_NO_GEMM_RECOGNISER=1` lowers the nest as written instead of
+        // substituting the packed kernel.
+        //
+        // This exists so the compiler can be asked for BOTH readings of one
+        // source: the optimized kernel, and the naive loop nest it claims to
+        // be equal to. That pair is the differential in
+        // `tests/gemm_substitution_differential.rs`, and it is the cheapest
+        // honest form of the claim `docs/proof_carrying_kernels.md` eventually
+        // wants to PROVE - the spec is the user's own source lowered by the
+        // same compiler, so unlike a reference written inside a test it cannot
+        // drift from the language's semantics.
+        //
+        // Deliberately an escape hatch and not a tuning knob: it makes Y slow,
+        // never wrong.
+        if crate::cpu_gemm::recogniser_disabled() {
+            return None;
+        }
         let shape = crate::cpu_gemm::recognize_gemm(&k.body)?;
         for buf in [&shape.a, &shape.b, &shape.c] {
             if self.mem_elem_types.get(buf).map(String::as_str) != Some("float") {

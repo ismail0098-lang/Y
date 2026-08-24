@@ -266,6 +266,23 @@ pub enum ExactGemmPlan {
 /// and constant-folding rows of `CLAUDE.md`'s design-rule table both describe:
 /// two implementations of one rule, drifting apart, with the looser one
 /// deciding what actually ships.
+/// Whether the GEMM recogniser has been switched off for this process.
+///
+/// Set `Y_NO_GEMM_RECOGNISER=1` to lower a recognised nest as written. The
+/// point is to be able to ask the compiler for both readings of one source -
+/// the substituted kernel and the naive nest - so they can be compared against
+/// each other rather than against a reference someone typed into a test.
+///
+/// Read from the environment on every call rather than cached: a test process
+/// compiles the same source both ways, and a `OnceLock` would freeze whichever
+/// arm ran first.
+pub fn recogniser_disabled() -> bool {
+    matches!(
+        std::env::var("Y_NO_GEMM_RECOGNISER").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
+}
+
 pub fn plan_exact_gemm(drift: &DriftAccumulator) -> ExactGemmPlan {
     let operands = drift.operand_bounds();
     match crate::zero_drift::license_vnni_exact(
