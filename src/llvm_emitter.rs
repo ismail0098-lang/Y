@@ -241,6 +241,8 @@ pub struct LlvmEmitter {
     /// Set when a kernel was replaced by the packed AVX-512 GEMM, so the
     /// supporting module (packing routines, micro-kernel, driver) is emitted.
     needs_gemm_module: bool,
+    /// The flush interval of the exact VNNI GEMM, when one was substituted.
+    needs_exact_gemm_module: Option<u32>,
 }
 
 /// Entry-block stack slot that masked-off block-pointer stores are redirected
@@ -396,6 +398,7 @@ impl LlvmEmitter {
             in_ptx_emit: false,
             loop_exit_stack: Vec::new(),
             needs_gemm_module: false,
+            needs_exact_gemm_module: None,
         }
     }
 
@@ -582,6 +585,31 @@ impl LlvmEmitter {
     /// bias into a visible systematic error. The rounding is done with
     /// `fcmp`/`select` rather than `llvm.round` so no intrinsic declaration is
     /// needed.
+    /// `acc = acc + rhs` / `acc = acc - rhs`, the running-sum form, or `None`.
+    ///
+    /// Only the accumulator on the LEFT of the `+` is accepted. `acc = rhs +
+    /// acc` is the same value for addition and NOT for subtraction, and
+    /// accepting one shape and silently treating it as the other is how the
+    /// sign gets lost; the commuted form simply is not matched.
+    fn drift_running_sum<'e>(
+        target: &Expr,
+        value: &'e Expr,
+    ) -> Option<(BinaryOp, &'e Expr)> {
+        let name = match target {
+            Expr::Ident(n, _) => n,
+            _ => return None,
+        };
+        match value {
+            Expr::BinaryOp { op, left, right, .. }
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                    && matches!(&**left, Expr::Ident(l, _) if l == name) =>
+            {
+                Some((op.clone(), &**right))
+            }
+            _ => None,
+        }
+    }
+
     fn emit_to_fixed(&mut self, val: &str, repr: crate::zero_drift::DriftRepr) -> String {
         let ity = repr.llvm_type();
         if repr.frac_bits() == 0 {
@@ -1392,6 +1420,12 @@ impl LlvmEmitter {
             self.output.push_str(&m);
         }
 
+        if let Some(flush) = self.needs_exact_gemm_module {
+            self.wln("");
+            let m = crate::cpu_gemm::emit_vnni_gemm_module(flush);
+            self.output.push_str(&m);
+        }
+
         // Nontemporal metadata definition
         self.wln("!0 = !{i32 1}");
 
@@ -1763,6 +1797,146 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         self.wln("");
     }
 
+    /// Emit a call to the exact `vpdpwssd` GEMM for a recognised, licensed nest.
+    ///
+    /// The kernel's contract, from `emit_vnni_gemm_module`:
+    ///
+    ///   `__y_gemm_exact_vnni(A: i16*, B: i16*, C: i64*, M, N, K,
+    ///                        lda, ldb, ldc, Ap: i16*, Bp: i16*, Ct: i64*)`
+    ///
+    /// Two parts of it are easy to get wrong and are handled explicitly here.
+    ///
+    /// **`C` is accumulated INTO, not overwritten.** That is deliberate - it is
+    /// what lets a caller split the K range across threads and sum the pieces,
+    /// which is the order-independence the exact path exists to sell. But the
+    /// nest being replaced STORES its sum, so `C` has to be zeroed first or a
+    /// second call over the same buffer would double it.
+    ///
+    /// **The three scratch buffers are the caller's.** Sizes come from the
+    /// packers' layouts: `Ap` is one `i16` per (row-tile, k-pair, MR, 2),
+    /// `Bp` one per (k-pair, NR, 2), and `Ct` is a single `MR x NR` `i64`
+    /// micro-tile. They are heap-allocated rather than `alloca`d because `Ap`
+    /// grows with M*K and a dynamic `alloca` of that size is a stack overflow
+    /// on any real shape.
+    fn emit_exact_gemm_call(
+        &mut self,
+        shape: &crate::cpu_gemm::GemmShape,
+        flush_k_pairs: u32,
+    ) -> Option<()> {
+        use crate::cpu_gemm::{VNNI_GEMM_NAME, VNNI_MR, VNNI_NR};
+
+        // Extents and strides, widened to i64 exactly as the f32 path does.
+        let mut ext = Vec::new();
+        for name in [
+            &shape.m,
+            &shape.n,
+            &shape.k,
+            &shape.lda,
+            &shape.ldb,
+            &shape.ldc,
+        ] {
+            let ty = self.locals.get(name)?.clone();
+            let tmp = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load {}, ptr %{}", tmp, ty, name).unwrap();
+            ext.push(if ty == "i64" {
+                tmp
+            } else {
+                let w = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = sext {} {} to i64", w, ty, tmp).unwrap();
+                w
+            });
+        }
+
+        let mut ptrs = Vec::new();
+        for name in [&shape.a, &shape.b, &shape.c] {
+            let tmp = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load ptr, ptr %{}", tmp, name).unwrap();
+            ptrs.push(tmp);
+        }
+        let (m, n, k) = (ext[0].clone(), ext[1].clone(), ext[2].clone());
+
+        let mut bin = |op: &str, a: &str, b: &str, out: &mut String| {
+            let t = format!("%_t{}", {
+                self.tmp_counter += 1;
+                self.tmp_counter
+            });
+            writeln!(out, "  {} = {} i64 {}, {}", t, op, a, b).unwrap();
+            t
+        };
+        let mut ir = String::new();
+
+        // kpairs = (K + 1) / 2 - the packers count k-PAIRS, and an odd K leaves
+        // the final high half zero.
+        let k1 = bin("add", &k, "1", &mut ir);
+        let kpairs = bin("sdiv", &k1, "2", &mut ir);
+
+        // Ap: ceil(M / MR) row tiles, each kpairs * MR * 2 i16.
+        let m1 = bin("add", &m, &(VNNI_MR - 1).to_string(), &mut ir);
+        let mtiles = bin("sdiv", &m1, &VNNI_MR.to_string(), &mut ir);
+        let ap_e = bin("mul", &mtiles, &kpairs, &mut ir);
+        let ap_e = bin("mul", &ap_e, &(VNNI_MR * 2).to_string(), &mut ir);
+        let ap_b = bin("mul", &ap_e, "2", &mut ir);
+
+        // Bp: kpairs * NR * 2 i16.
+        let bp_e = bin("mul", &kpairs, &(VNNI_NR * 2).to_string(), &mut ir);
+        let bp_b = bin("mul", &bp_e, "2", &mut ir);
+
+        // C: M * N i64, zeroed because the kernel accumulates into it.
+        let c_e = bin("mul", &m, &n, &mut ir);
+        let c_b = bin("mul", &c_e, "8", &mut ir);
+        self.output.push_str(&ir);
+
+        let ct_b = (VNNI_MR * VNNI_NR * 8).to_string();
+        let mut alloc = |bytes: &str, this: &mut Self| {
+            let p = this.fresh_tmp();
+            writeln!(&mut this.output, "  {} = call ptr @malloc(i64 {})", p, bytes).unwrap();
+            writeln!(
+                &mut this.output,
+                "  call void @llvm.memset.p0.i64(ptr {}, i8 0, i64 {}, i1 false)",
+                p, bytes
+            )
+            .unwrap();
+            p
+        };
+        let ap = alloc(&ap_b, self);
+        let bp = alloc(&bp_b, self);
+        let ct = alloc(&ct_b, self);
+
+        // `C` is accumulated into, and the nest it replaces assigns.
+        writeln!(
+            &mut self.output,
+            "  call void @llvm.memset.p0.i64(ptr {}, i8 0, i64 {}, i1 false)",
+            ptrs[2], c_b
+        )
+        .unwrap();
+
+        writeln!(
+            &mut self.output,
+            "  call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
+             i64 {}, i64 {}, i64 {}, ptr {}, ptr {}, ptr {})",
+            VNNI_GEMM_NAME,
+            ptrs[0],
+            ptrs[1],
+            ptrs[2],
+            ext[0],
+            ext[1],
+            ext[2],
+            ext[3],
+            ext[4],
+            ext[5],
+            ap,
+            bp,
+            ct
+        )
+        .unwrap();
+        for p in [&ap, &bp, &ct] {
+            writeln!(&mut self.output, "  call void @free(ptr {})", p).unwrap();
+        }
+
+        self.needs_exact_gemm_module = Some(flush_k_pairs);
+        Some(())
+    }
+
     /// If `k`'s body is the canonical `C = A * B` nest over `F32` buffers,
     /// emit a call to the packed AVX-512 kernel and report the shape.
     ///
@@ -1789,10 +1963,98 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
             return None;
         }
         let shape = crate::cpu_gemm::recognize_gemm(&k.body)?;
-        for buf in [&shape.a, &shape.b, &shape.c] {
-            if self.mem_elem_types.get(buf).map(String::as_str) != Some("float") {
+
+        let elem = |e: &Self, n: &String| e.mem_elem_types.get(n).cloned().unwrap_or_default();
+        let (ea, eb, ec) = (
+            elem(self, &shape.a),
+            elem(self, &shape.b),
+            elem(self, &shape.c),
+        );
+
+        // The EXACT path. `i16` operands accumulating into `i64` is precisely
+        // `__y_gemm_exact_vnni`'s contract, so the source's own types state the
+        // operand domain and there is nothing to convert.
+        //
+        // That is what makes the substitution legal at all. `VnniExact::license`
+        // is stated over "the int16 operand values actually fed to `vpdpwssd`",
+        // and an `F32` nest would need a quantization scale to reach that domain
+        // - at which point the licence would have been granted against the
+        // source's magnitude and not the kernel's. Declaring the operands `I16`
+        // removes the question instead of answering it.
+        if ea == "i16" && eb == "i16" && ec == "i64" {
+            // THE PRODUCT MUST NOT TRUNCATE, and this is the check that makes
+            // the whole substitution legal rather than merely fast.
+            //
+            // `let a_val: I16 = ...` makes `a_val * b_val` an i16 multiply.
+            // 1024 * 1024 is 2^20, so it overflows, and the naive nest
+            // accumulates the TRUNCATED product - the emitted IR is
+            // `mul i16` followed by `sext i16 ... to i64`. `vpdpwssd` widens
+            // internally, so substituting it there replaces a truncating
+            // reduction with a widening one: a different function, computed
+            // faster, under a certificate claiming exactness.
+            //
+            // Declaring the operands `I64` sign-extends at the load and makes
+            // the multiply `i64`, which is what the kernel computes. Verified
+            // by running both: the widened nest is bit-identical to an integer
+            // reference and the truncating one is not.
+            let widened = matches!(shape.operand_ty.as_deref(), Some("I64") | Some("I32"));
+            if !widened {
+                if shape.drift.is_some() {
+                    self.drift_report.push(format!(
+                        "matmul {}x{}: using scalar lowering. The exact vpdpwssd kernel is \
+                         unavailable because the operands are declared `{}`, so `a * b` is a \
+                         {}-bit multiply that truncates before it is accumulated - the kernel \
+                         widens, so substituting it would compute a DIFFERENT function. \
+                         Declare the operand `let`s as `I64` to state the widening.",
+                        shape.m,
+                        shape.n,
+                        shape.operand_ty.as_deref().unwrap_or("?"),
+                        16
+                    ));
+                }
                 return None;
             }
+            if let Some(drift) = &shape.drift {
+                match crate::cpu_gemm::plan_exact_gemm(drift) {
+                    crate::cpu_gemm::ExactGemmPlan::Vnni {
+                        scheme,
+                        operand_magnitude,
+                    } => {
+                        self.emit_exact_gemm_call(&shape, scheme.flush_k_pairs)?;
+                        self.drift_report.push(format!(
+                            "matmul {}x{}: EXACT vpdpwssd kernel substituted (operands \
+                             |x| <= {}, flush every {} k-pairs). Integer addition is \
+                             associative, so the tiled, K-split result is bit-identical to \
+                             the naive nest rather than merely close to it.",
+                            shape.m, shape.n, operand_magnitude, scheme.flush_k_pairs
+                        ));
+                        return Some(shape);
+                    }
+                    crate::cpu_gemm::ExactGemmPlan::Unavailable(reason) => {
+                        // Still exact, just not fast - the scalar lowering
+                        // honours `@ZeroDrift` on its own. An advisory, not an
+                        // error; see `ExactGemmPlan`.
+                        self.drift_report.push(format!(
+                            "matmul {}x{}: using scalar lowering, which is still EXACT. The \
+                             fast vpdpwssd kernel is unavailable because {}",
+                            shape.m, shape.n, reason
+                        ));
+                        return None;
+                    }
+                }
+            }
+            // Integer buffers with no `@ZeroDrift`: the nest is an ordinary
+            // integer matmul and the f32 kernel below cannot serve it.
+            return None;
+        }
+
+        // The f32 path. The element-type check is not a formality: the
+        // recogniser matches on loop STRUCTURE, which is identical for `F64` or
+        // `F16` buffers, and the emitted kernel is `<16 x float>` throughout.
+        // Running it over an `F64` buffer would reinterpret the data rather
+        // than fail.
+        if ea != "float" || eb != "float" || ec != "float" {
+            return None;
         }
 
         // A `@ZeroDrift` accumulator demands an EXACT reduction. The packed
@@ -2014,6 +2276,72 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 }
 
                 self.current_cache_policy = None;
+            }
+            // `sum = sum + rhs` on a @ZeroDrift accumulator.
+            //
+            // Only `+=` had a drift-aware arm, so this form - the one the GEMM
+            // recogniser matches, and the one every reduction in `tests/` is
+            // written with - fell through to the ordinary assignment path. That
+            // path reads the accumulator through `sitofp`, adds in `double`, and
+            // then emits `store double` into an `alloca i64`. LLVM allows it,
+            // because pointers are untyped, so `clang` says nothing and the
+            // next read interprets the double's BIT PATTERN as an integer:
+            // `sum` came back as -4337501956902952448 where the answer was
+            // 2896931.
+            //
+            // Same shape as the ZK emitter's `x += 5` versus `x = x + 5`,
+            // recorded in the design-rule table - one spelling handled, its
+            // sibling silently wrong - found here in the other direction.
+            //
+            // Routed into the same exact integer path as `+=`: the term is
+            // quantised once and every addition after that is integer, which is
+            // what makes the total independent of the order the terms arrived
+            // in.
+            Stmt::Assign { target, value, span }
+                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n))
+                    && Self::drift_running_sum(target, value).is_some() =>
+            {
+                let name = match target {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let (op, rhs) = Self::drift_running_sum(target, value).unwrap();
+                let repr = self.zero_drift[&name];
+                let rhs_double = self.emit_expr_as_double(rhs);
+                let rhs_fixed = self.emit_to_fixed(&rhs_double, repr);
+                let ity = repr.llvm_type();
+                let addr = format!("%{}", name);
+                let loaded = self.emit_load(&addr, ity);
+                let result = self.fresh_tmp();
+                let instr = if matches!(op, BinaryOp::Sub) { "sub" } else { "add" };
+                writeln!(
+                    &mut self.output,
+                    "  {} = {} {} {}, {}",
+                    result, instr, ity, loaded, rhs_fixed
+                )
+                .unwrap();
+                writeln!(&mut self.output, "  store {} {}, ptr {}", ity, result, addr).unwrap();
+                let _ = span;
+            }
+            // Any OTHER assignment to a drift accumulator is refused rather
+            // than converted. `sum = <expr>` that is not a running sum would
+            // have to round `<expr>` into the fixed domain, and whether that is
+            // exact depends on the expression - which is precisely the
+            // judgement the design rule forbids a backend from making silently.
+            Stmt::Assign { target, span, .. }
+                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
+            {
+                let name = match target {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => unreachable!(),
+                };
+                self.emit_errors.push(format!(
+                    "Line {}: `{}` is a @ZeroDrift accumulator, so the only assignments that \
+preserve drift-freedom are `{} = {} + <term>` and `{} = {} - <term>` (or `+=` / `-=`). \
+Assigning anything else would have to round the value into the accumulator's exact \
+representation, and whether that is lossless depends on the expression.",
+                    span.line, name, name, name, name, name
+                ));
             }
             Stmt::Assign { target, value, .. } => {
                 let target_addr = self.emit_lvalue(target);

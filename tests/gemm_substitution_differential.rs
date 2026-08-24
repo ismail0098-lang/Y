@@ -103,6 +103,162 @@ const SHAPES: &[(usize, usize, usize)] = &[
     (100, 100, 96), // several MC/NR blocks
 ];
 
+/// The exact nest: `I16` operands widened to `I64` at the load, accumulating
+/// into an `I64` buffer under `@ZeroDrift`.
+///
+/// The operand `let`s are `I64` on purpose - see
+/// `a_truncating_product_is_refused_rather_than_widened_by_the_kernel`.
+const EXACT_SOURCE: &str = r#"
+kernel y_matmul(A: GlobalMemory<I16>, B: GlobalMemory<I16>, C: GlobalMemory<I64>, M: I32, N: I32, K: I32) {
+    @invariant(i >= 0)
+    for i in 0..M step 1 {
+        @invariant(j >= 0)
+        for j in 0..N step 1 {
+            @ZeroDrift
+            let mut sum: I64 = 0;
+            @invariant(k >= 0)
+            for k in 0..K step 1 {
+                @bounds(min=-1024, max=1024)
+                let a_val: I64 = block_ptr2d_load(A, i, k, K, M, K);
+                @bounds(min=-1024, max=1024)
+                let b_val: I64 = block_ptr2d_load(B, k, j, N, K, N);
+                sum = sum + a_val * b_val;
+            }
+            block_ptr2d_store(C, i, j, N, M, N, sum);
+        }
+    }
+}
+
+fn main() {
+}
+"#;
+
+const EXACT_DRIVER: &str = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+void y_matmul(const int16_t *A, const int16_t *B, int64_t *C, int M, int N, int K);
+
+static int16_t gen(long i, long salt) {
+    unsigned long h = i * 2654435761UL + salt * 40503UL;
+    h ^= h >> 13;
+    return (int16_t)((long)(h % 2049) - 1024);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    FILE *out = fopen(argv[1], "wb");
+    if (!out) return 2;
+    static const int shapes[][3] = { SHAPES_HERE };
+    int ns = (int)(sizeof(shapes)/sizeof(shapes[0]));
+    int allok = 1;
+    for (int s = 0; s < ns; ++s) {
+        int M = shapes[s][0], N = shapes[s][1], K = shapes[s][2];
+        int16_t *A = malloc((size_t)M*K*2), *B = malloc((size_t)K*N*2);
+        int64_t *C = malloc((size_t)M*N*8), *R = malloc((size_t)M*N*8);
+        for (long i = 0; i < (long)M*K; ++i) A[i] = gen(i, 1);
+        for (long i = 0; i < (long)K*N; ++i) B[i] = gen(i, 2);
+        /* Poison: the kernel accumulates INTO C, so the substitution has to
+           zero it. Leaving this as calloc would hide a missing memset. */
+        memset(C, 0xAB, (size_t)M*N*8);
+        for (int i = 0; i < M; ++i)
+            for (int j = 0; j < N; ++j) {
+                int64_t a = 0;
+                for (int k = 0; k < K; ++k)
+                    a += (int64_t)A[(long)i*K+k] * (int64_t)B[(long)k*N+j];
+                R[(long)i*N+j] = a;
+            }
+        y_matmul(A, B, C, M, N, K);
+        if (memcmp(C, R, (size_t)M*N*8) != 0) allok = 0;
+        fwrite(C, sizeof(int64_t), (size_t)M*N, out);
+        free(A); free(B); free(C); free(R);
+    }
+    fclose(out);
+    printf(allok ? "REFERENCE OK\n" : "REFERENCE MISMATCH\n");
+    printf("DONE\n");
+    return 0;
+}
+"#;
+
+struct ExactArm {
+    results: Vec<i64>,
+    substituted: bool,
+    /// Whether every shape matched the driver's own integer reference.
+    correct: bool,
+}
+
+fn build_and_run_exact(dir: &Path, recognise: bool) -> ExactArm {
+    let tag = if recognise { "xpacked" } else { "xnaive" };
+    let src = dir.join(format!("{tag}.ysu"));
+    std::fs::write(&src, EXACT_SOURCE).expect("write source");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_Y"));
+    cmd.arg(&src).arg("--emit-llvm").current_dir(repo());
+    if !recognise {
+        cmd.env("Y_NO_GEMM_RECOGNISER", "1");
+    }
+    let out = cmd.output().expect("run Y");
+    assert!(
+        out.status.success(),
+        "compiling the {tag} arm failed:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let ll = dir.join(format!("{tag}.ll"));
+    let ir = std::fs::read_to_string(&ll).expect("emitted .ll");
+    let substituted = ir.contains("__y_gemm_exact_vnni");
+
+    let shapes = SHAPES
+        .iter()
+        .map(|(m, n, k)| format!("{{{m},{n},{k}}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let driver = dir.join(format!("{tag}_driver.c"));
+    std::fs::write(&driver, EXACT_DRIVER.replace("SHAPES_HERE", &shapes)).expect("write driver");
+
+    let exe = dir.join(tag);
+    let cc = Command::new("clang")
+        .args([
+            ll.to_str().unwrap(),
+            driver.to_str().unwrap(),
+            "-O2",
+            "-lm",
+            "-lpthread",
+            "-o",
+            exe.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run clang");
+    assert!(
+        cc.status.success(),
+        "linking the {tag} arm failed:\n{}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+
+    let dump = dir.join(format!("{tag}.bin"));
+    let run = Command::new(&exe).arg(&dump).output().expect("run driver");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert!(
+        run.status.success() && stdout.contains("DONE"),
+        "the {tag} arm did not finish:\n{stdout}"
+    );
+
+    let bytes = std::fs::read(&dump).expect("read dump");
+    let results = bytes
+        .chunks_exact(8)
+        .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    ExactArm {
+        results,
+        substituted,
+        correct: stdout.contains("REFERENCE OK"),
+    }
+}
+
 const DRIVER: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
@@ -334,19 +490,137 @@ fn the_packed_kernel_computes_what_the_naive_nest_computes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The forcing function for Phase 0.
+/// The exact path, and here the comparison is EQUALITY.
 ///
-/// While no exact accumulator is substituted, the differential above can only
-/// assert a TOLERANCE - f32 addition is not associative, so a tiled reduction
-/// genuinely does not equal the naive one bit for bit.
+/// `I16` operands accumulating into `I64` is `__y_gemm_exact_vnni`'s own
+/// contract, so the source's types state the operand domain and nothing has to
+/// be converted. Integer addition is associative, so the tiled, packed,
+/// K-split kernel must be BIT-IDENTICAL to the naive nest - not close to it.
+/// That is the whole claim `docs/proof_carrying_kernels.md` is built on, and it
+/// is the reason the f32 differential above can only assert a tolerance.
 ///
-/// The moment `plan_exact_gemm`'s kernel is wired in, that stops being true:
-/// integer addition IS associative, so an exact substituted kernel must be
-/// BIT-IDENTICAL to the naive nest, and a tolerance would silently accept a
-/// kernel that is merely close. This test fails when that day comes, which is
-/// the point - it is how the person wiring it is told to come back here.
+/// Both arms are also checked against an independent integer reference in the
+/// driver, for the same reason the f32 case is three-way: two implementations
+/// that agree can be wrong together.
 #[test]
-fn the_exact_path_is_still_unsubstituted_so_the_tolerance_above_is_still_right() {
+fn the_exact_kernel_is_bit_identical_to_the_naive_nest() {
+    if !have("clang") {
+        eprintln!("skipping: clang not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("y_gemm_exact_diff_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+
+    let naive = build_and_run_exact(&dir, false);
+    let packed = build_and_run_exact(&dir, true);
+
+    assert!(
+        packed.substituted,
+        "the exact vpdpwssd kernel was NOT substituted, so this compared a \
+         program against itself. Check the licence: the operands need `@bounds` \
+         and must be declared `I64` so the product does not truncate."
+    );
+    assert!(
+        !naive.substituted,
+        "Y_NO_GEMM_RECOGNISER did not disable the substitution"
+    );
+    assert!(
+        naive.correct,
+        "the NAIVE @ZeroDrift lowering disagrees with an integer reference. \
+         `sum = sum + a*b` on a @ZeroDrift accumulator used to emit \
+         `store double` into an `alloca i64` - valid IR, so clang accepts it, \
+         and the next read interprets the double's bit pattern as an integer."
+    );
+    assert!(
+        packed.correct,
+        "the substituted exact kernel disagrees with an integer reference"
+    );
+
+    // The claim itself. Not a tolerance.
+    assert_eq!(
+        naive.results, packed.results,
+        "the exact kernel and the naive nest are not bit-identical. Integer \
+         addition is associative, so tiling, packing and splitting K cannot \
+         change the result - a difference here means the substitution computes \
+         a different function, which is exactly what a certificate of exactness \
+         must not permit."
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The truncation gate, and it is what makes the test above mean anything.
+///
+/// With the operands declared `I16`, `a_val * b_val` is an i16 multiply:
+/// 1024 * 1024 is 2^20, so it OVERFLOWS, and the naive nest accumulates the
+/// truncated product (`mul i16` then `sext i16 ... to i64` in the emitted IR).
+/// `vpdpwssd` widens internally, so substituting it there would replace a
+/// truncating reduction with a widening one - a different function, computed
+/// faster, under a certificate claiming exactness.
+#[test]
+fn a_truncating_product_is_refused_rather_than_widened_by_the_kernel() {
+    let dir = std::env::temp_dir().join(format!("y_gemm_trunc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join("trunc.ysu");
+    std::fs::write(&src, EXACT_SOURCE.replace(": I64 = block_ptr2d_load", ": I16 = block_ptr2d_load"))
+        .expect("write source");
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src)
+        .arg("--emit-llvm")
+        .current_dir(repo())
+        .output()
+        .expect("run Y");
+    assert!(out.status.success(), "the nest must still compile");
+    let ir = std::fs::read_to_string(dir.join("trunc.ll")).expect("read IR");
+    assert!(
+        !ir.contains("__y_gemm_exact_vnni"),
+        "an I16 product truncates and the kernel widens; substituting it would \
+         compute a different function"
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("truncates"),
+        "the refusal must say WHY, and name the repair. Output:\n{text}"
+    );
+    // The control: the same nest with widened operands IS substituted, so the
+    // refusal is about the truncation and not about the shape.
+    let wide = dir.join("wide.ysu");
+    std::fs::write(&wide, EXACT_SOURCE).expect("write source");
+    let out2 = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&wide)
+        .arg("--emit-llvm")
+        .current_dir(repo())
+        .output()
+        .expect("run Y");
+    assert!(out2.status.success());
+    let ir2 = std::fs::read_to_string(dir.join("wide.ll")).expect("read IR");
+    assert!(
+        ir2.contains("__y_gemm_exact_vnni"),
+        "the widened form must still be substituted, or this test would pass \
+         with the exact path deleted entirely"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An `F32` `@ZeroDrift` nest is still NOT substituted, and that is permanent.
+///
+/// This was written as a "forcing function" that would fail when Phase 0's
+/// exact kernel was wired in. **It could never have fired**, and that is worth
+/// recording rather than quietly deleting: its fixture is an `F32` nest, and
+/// `__y_gemm_exact_vnni` consumes `i16` operands accumulating into `i64`. An
+/// `F32` nest can never reach it without a quantization scale, so the fixture
+/// tested a case that stays true forever - a test named for a case it does not
+/// exercise, the same shape as
+/// `a_read_through_a_struct_field_is_still_a_dependency` in CLAUDE.md.
+///
+/// Kept, with an honest name, because the property IS worth pinning: it is what
+/// makes the f32 differential above correct to compare by tolerance. The real
+/// bit-identity claim lives in
+/// `the_exact_kernel_is_bit_identical_to_the_naive_nest`.
+#[test]
+fn an_f32_zero_drift_nest_falls_back_to_scalar_exact_lowering() {
     use y::cpu_gemm::{plan_exact_gemm, DriftAccumulator, ExactGemmPlan};
     let licensed = DriftAccumulator {
         ty: "F32".into(),
@@ -354,49 +628,45 @@ fn the_exact_path_is_still_unsubstituted_so_the_tolerance_above_is_still_right()
         a_bounds: Some((-1024.0, 1024.0)),
         b_bounds: Some((-1024.0, 1024.0)),
     };
-    // The licence is granted...
+    // The licence is about the operand MAGNITUDE and is granted...
     assert!(
         matches!(plan_exact_gemm(&licensed), ExactGemmPlan::Vnni { .. }),
-        "a nest with bounded integral operands must still be licensed"
+        "a bounded operand pair must still be licensed"
     );
-    // ...and the emitter still does not act on it. `try_emit_gemm_kernel`
-    // reports the licence and returns None, so a `@ZeroDrift` nest lowers
-    // scalar-exact rather than being substituted.
-    let ir = {
-        let dir = std::env::temp_dir().join(format!("y_gemm_exact_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let src = dir.join("exact.ysu");
-        let body = Y_SOURCE.replace(
-            "            let mut sum: F32 = 0.0;",
-            "            @ZeroDrift\n            @bounds(-1024.0, 1024.0)\n            let mut sum: F32 = 0.0;",
-        );
-        std::fs::write(&src, body).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_Y"))
-            .arg(&src)
-            .arg("--emit-llvm")
-            .current_dir(repo())
-            .output()
-            .expect("run Y");
-        assert!(
-            out.status.success(),
-            "the @ZeroDrift nest must still compile:\n{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let ir = std::fs::read_to_string(dir.join("exact.ll")).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-        ir
-    };
+
+    // ...and the F32 nest is still not substituted, because the kernel's
+    // operands are int16 and nothing here converts to that domain.
+    let dir = std::env::temp_dir().join(format!("y_gemm_f32drift_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("f32drift.ysu");
+    let body = Y_SOURCE.replace(
+        "            let mut sum: F32 = 0.0;",
+        "            @ZeroDrift\n            @bounds(-1024.0, 1024.0)\n            let mut sum: F32 = 0.0;",
+    );
+    std::fs::write(&src, body).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src)
+        .arg("--emit-llvm")
+        .current_dir(repo())
+        .output()
+        .expect("run Y");
+    assert!(
+        out.status.success(),
+        "the @ZeroDrift F32 nest must still compile:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ir = std::fs::read_to_string(dir.join("f32drift.ll")).unwrap();
     assert!(
         !ir.contains("__y_gemm_exact_vnni"),
-        "THE EXACT KERNEL IS NOW SUBSTITUTED. The differential in this file \
-         compares the two arms by a TOLERANCE, which was correct only while the \
-         substituted kernel accumulated in f32. An exact kernel accumulates in \
-         integers, integer addition is associative, and the tiled K-split \
-         result must therefore be BIT-IDENTICAL to the naive nest. Replace the \
-         relative-L2 comparison with equality for the exact arm - a tolerance \
-         would accept a kernel that is merely close, which is exactly the claim \
-         `docs/proof_carrying_kernels.md` is selling against."
+        "an F32 nest reached the int16 kernel. That needs a quantization scale, \
+         and the licence was granted against the SOURCE magnitude rather than \
+         the scaled one - see `VnniExact::license`."
     );
+    assert!(
+        !ir.contains(&format!("call void @{}", y::cpu_gemm::KERNEL_NAME)),
+        "an exact nest must not get the f32 packed kernel either"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
