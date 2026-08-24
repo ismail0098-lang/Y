@@ -211,3 +211,81 @@ fn the_real_kernels_still_compile() {
         "the control compiled only {compiled} kernels; it is close to vacuous"
     );
 }
+
+// ─────────────────────────── zero-initialisers ───────────────────────────
+//
+// `let x: T = {};` had NO lowering in this backend: it fell to `emit_expr`'s
+// `_ => ""` and then to the "initialiser produced no value" refusal. The LLVM
+// backend memsets it, `type_checker` types it, and `tests/bounds_test.ysu`
+// uses it, so it is a real language construct rather than a corner.
+//
+// It is what `python/tests/test_gpu_architect_features.py` uses to declare a
+// tile, which is why one of the two documented Python test commands had been
+// failing. That suite lives in a directory `cargo test` never runs, so these
+// three cases are the gate.
+
+#[test]
+fn a_block_tile_declaration_lowers_and_assembles() {
+    let r = emit_ptx(
+        "tiledecl",
+        "kernel k(A: GlobalMemory<F32>, B: GlobalMemory<F32>) {\n    \
+         let tile: BlockTile<F32, 128> = {};\n    \
+         let val: F32 = block_tile_load(A, 10, 128);\n    \
+         block_tile_store(B, 10, val, 128);\n}\n",
+    );
+    assert!(
+        r.ok,
+        "a `BlockTile` declaration is a DECLARATION - the tile intrinsics take \
+         the buffer directly and never read the name. Output:\n{}",
+        r.output
+    );
+    let ptx = r.ptx.expect("a .ptx should have been written");
+    assert!(
+        ptx.contains("BLOCK TILE LOAD"),
+        "the tile machinery must still run:\n{ptx}"
+    );
+    assert!(
+        !has_empty_operand(&ptx),
+        "the emitted module has an empty operand:\n{ptx}"
+    );
+}
+
+#[test]
+fn a_scalar_zero_initialiser_is_actually_zeroed() {
+    let r = emit_ptx(
+        "scalarzero",
+        "kernel k(A: GlobalMemory<F32>) {\n    \
+         let n: u32 = {};\n    \
+         let t: F32 = block_ptr2d_load(A, n, 0, 1, 1, 1);\n}\n",
+    );
+    assert!(r.ok, "`let n: u32 = {{}}` must lower. Output:\n{}", r.output);
+    let ptx = r.ptx.expect("a .ptx should have been written");
+    // The EFFECT: a register really is set to zero, not merely declared.
+    assert!(
+        ptx.lines()
+            .any(|l| l.trim().starts_with("mov.u32") && l.trim().ends_with(", 0;")),
+        "expected the scalar to be zeroed:\n{ptx}"
+    );
+}
+
+/// The refusal that keeps the other two honest. This backend has no local
+/// aggregate storage - a `let` binds ONE register - so zeroing "the array"
+/// would zero a single scalar and call it the array.
+#[test]
+fn an_aggregate_zero_initialiser_is_refused_by_name() {
+    let r = emit_ptx(
+        "aggzero",
+        "kernel k(A: GlobalMemory<F32>) {\n    let arr: [I32; 5] = {};\n}\n",
+    );
+    assert!(
+        !r.ok,
+        "an array local has no storage in this backend and must be refused. \
+         Output:\n{}",
+        r.output
+    );
+    assert!(
+        r.output.contains("aggregate") || r.output.contains("no local array"),
+        "the refusal must say why, not merely fail. Output:\n{}",
+        r.output
+    );
+}
