@@ -158,6 +158,16 @@ fn ptx_version_ge(a: &str, b: &str) -> bool {
 /// rejects it outright on sm_100/sm_120 ("PTX .version 8.0 does not support
 /// .target sm_120") - under a success message and exit 0. Any future site
 /// that writes a `.version` line must call this, not a literal.
+/// The three things `let x: T = {};` can mean in this backend.
+enum ZeroInitKind {
+    /// A scalar register to set to zero.
+    Scalar(ScalarTy),
+    /// A `BlockTile` declaration: nothing to emit, nothing to bind.
+    TileDeclaration,
+    /// An array or struct - this backend has no local aggregate storage.
+    Unrepresentable,
+}
+
 pub fn ptx_version_for_sm(sm: &str) -> &'static str {
     let normalized = if sm.starts_with("sm_") {
         sm.to_string()
@@ -1369,6 +1379,76 @@ impl PtxEmitter {
     ///
     /// No `ptxas` gate can catch that, for the reason gotcha #8 states: a
     /// MISSING instruction assembles perfectly.
+    /// `let x: T = {};` - a zero-initialiser.
+    ///
+    /// This backend had no lowering for it at all: it fell to `emit_expr`'s
+    /// `_ => "".into()` and then to the "initialiser produced no value"
+    /// refusal, so a construct the LLVM backend memsets, the type checker
+    /// types, and `tests/bounds_test.ysu` uses was simply unavailable in a
+    /// kernel. It is what `python/tests/test_gpu_architect_features.py` uses to
+    /// declare a tile, which is why that documented test command has been
+    /// failing.
+    fn emit_zero_init_let(&mut self, name: &str, ty: Option<&Type>, span: &Span) {
+        match Self::zero_init_kind(ty) {
+            ZeroInitKind::Scalar(t) => {
+                let reg = self.alloc_ty(t);
+                writeln!(&mut self.ptx_buffer, "    mov.{} {}, 0;", t.reg_mem(), reg).unwrap();
+                self.variables.insert(name.to_string(), reg);
+            }
+            ZeroInitKind::TileDeclaration => {
+                // A `BlockTile` declaration is a DECLARATION, not a value: the
+                // tile intrinsics (`block_tile_load` / `block_tile_store`) take
+                // the global buffer directly and never read this name. Binding
+                // nothing is correct here for exactly the reason it is correct
+                // for a linear token - and if the name IS read, the
+                // `Expr::Ident` refusal catches it by name rather than emitting
+                // the identifier as though it were a register.
+                writeln!(
+                    &mut self.ptx_buffer,
+                    "    // BlockTile `{}` declared; tiles are addressed through their buffer.",
+                    name
+                )
+                .unwrap();
+            }
+            ZeroInitKind::Unrepresentable => {
+                // An array or struct local. This backend has no local aggregate
+                // storage at all - a `let` binds ONE register - so there is
+                // nothing to zero. Refused by name rather than zeroing a single
+                // scalar and calling it the array.
+                self.emit_errors.push(format!(
+                    "[PTX] line {}: `let {} = {{}}` zero-initialises an aggregate, and this \
+backend has no local array or struct storage - a `let` binds one register. Use a global buffer, \
+or `shared_alloc_u32` for a shared-memory array.",
+                    span.line, name
+                ));
+            }
+        }
+    }
+
+    /// What a `let x: T = {};` declares, which decides whether this backend
+    /// can lower it.
+    ///
+    /// Split out because the three answers are genuinely different actions and
+    /// the design rule forbids collapsing them into a guess: a scalar has a
+    /// register to zero, a tile has nothing to emit, and an aggregate has no
+    /// storage in this backend at all.
+    fn zero_init_kind(ty: Option<&Type>) -> ZeroInitKind {
+        match ty {
+            // The parser produces `Type::BlockTile` directly for
+            // `BlockTile<F32, 128>` - verified by mutation: breaking a
+            // `Type::Generic { base: "BlockTile" }` arm changed nothing, so
+            // that arm was dead and is not carried here. If such a spelling
+            // ever does arrive it falls to `Unrepresentable`, which is a named
+            // refusal rather than a wrong answer.
+            Some(Type::BlockTile { .. }) => ZeroInitKind::TileDeclaration,
+            Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => match ScalarTy::from_name(n) {
+                Some(t) => ZeroInitKind::Scalar(t),
+                None => ZeroInitKind::Unrepresentable,
+            },
+            _ => ZeroInitKind::Unrepresentable,
+        }
+    }
+
     fn unsupported_stmt(&mut self, what: &str, span: &Span) {
         self.emit_errors.push(format!(
             "[PTX] {} (line {}, col {}) cannot be lowered by this backend.",
@@ -2049,6 +2129,14 @@ declare it as a Q format.",
                     }
                 }
                 if let Some(expr) = init {
+                    // Decided BEFORE `emit_expr` runs: a zero-initialiser is a
+                    // declaration, and asking the expression layer to produce a
+                    // value for it records a refusal for a construct that is
+                    // perfectly legal here.
+                    if matches!(expr, Expr::ZeroInit(_)) {
+                        self.emit_zero_init_let(name, ty.as_ref(), span);
+                        return;
+                    }
                     let val_str = self.emit_expr(expr, cache_policy.as_ref(), hw_profile);
                     if let Some(regs) = Self::parse_v4_marker(&val_str) {
                         self.vec_vars.insert(name.clone(), regs);
