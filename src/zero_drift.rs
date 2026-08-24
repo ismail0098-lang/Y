@@ -478,6 +478,33 @@ impl VnniExact {
 
     /// Licence the scheme for operands bounded by `m`, or say why not.
     pub fn license(&self, m: f64) -> Result<(), String> {
+        // The licence must be about the values the KERNEL sees, and `m` arrives
+        // from `@bounds` on the source matrices - real numbers. Those coincide
+        // only when staging into the int16 domain is the identity.
+        //
+        // A magnitude below 1 is the case where they provably do not: every
+        // operand rounds to 0 or +-1, so the kernel computes something
+        // unrelated to the source while this function certifies it exact.
+        // `@bounds(-0.001, 0.001)` was licensed at magnitude 0.001, and the
+        // int16 value of every such operand is zero.
+        //
+        // This is the same "necessary but not sufficient" shape `OperandBounds`
+        // records one level in: there, an accumulator bound does not imply an
+        // operand bound; here, a real-valued operand bound does not imply an
+        // integer-domain one. Refused rather than guessed at a scale - the
+        // design rule's whole subject.
+        //
+        // Zero is admitted deliberately: an all-zero operand IS representable,
+        // and refusing it would refuse a degenerate but correct program.
+        if m.is_finite() && m > 0.0 && m < 1.0 {
+            return Err(format!(
+                "operands bounded by {m} are not representable as int16: `vpdpwssd` consumes \
+                 integers, so every operand of magnitude below 1 stages to 0 and the kernel would \
+                 compute a different matrix than the source. State the bound in the scheme's \
+                 integer domain - i.e. apply the quantization scale before licensing - or use the \
+                 scalar exact lowering, which is exact and slow"
+            ));
+        }
         if !m.is_finite() || m < 0.0 {
             return Err(format!(
                 "operand bound {m} is not a usable magnitude: exact VNNI accumulation needs a \
