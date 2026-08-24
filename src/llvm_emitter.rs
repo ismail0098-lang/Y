@@ -1424,6 +1424,12 @@ impl LlvmEmitter {
             self.wln("");
             let m = crate::cpu_gemm::emit_vnni_gemm_module(flush);
             self.output.push_str(&m);
+            // The f32 module declares the same libc entry points, and a
+            // duplicate `declare` is an INVALID REDEFINITION in LLVM rather
+            // than a duplicate that gets merged - so they are emitted here only
+            // when that module is absent.
+            let t = crate::cpu_gemm::emit_vnni_threaded_module(!self.needs_gemm_module);
+            self.output.push_str(&t);
         }
 
         // Nontemporal metadata definition
@@ -1823,7 +1829,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         shape: &crate::cpu_gemm::GemmShape,
         flush_k_pairs: u32,
     ) -> Option<()> {
-        use crate::cpu_gemm::{VNNI_GEMM_NAME, VNNI_MR, VNNI_NR};
+        use crate::cpu_gemm::{VNNI_MR, VNNI_NR};
 
         // Extents and strides, widened to i64 exactly as the f32 path does.
         let mut ext = Vec::new();
@@ -1886,35 +1892,16 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         let c_b = bin("mul", &c_e, "8", &mut ir);
         self.output.push_str(&ir);
 
-        let ct_b = (VNNI_MR * VNNI_NR * 8).to_string();
-        let mut alloc = |bytes: &str, this: &mut Self| {
-            let p = this.fresh_tmp();
-            writeln!(&mut this.output, "  {} = call ptr @malloc(i64 {})", p, bytes).unwrap();
-            writeln!(
-                &mut this.output,
-                "  call void @llvm.memset.p0.i64(ptr {}, i8 0, i64 {}, i1 false)",
-                p, bytes
-            )
-            .unwrap();
-            p
-        };
-        let ap = alloc(&ap_b, self);
-        let bp = alloc(&bp_b, self);
-        let ct = alloc(&ct_b, self);
-
-        // `C` is accumulated into, and the nest it replaces assigns.
-        writeln!(
-            &mut self.output,
-            "  call void @llvm.memset.p0.i64(ptr {}, i8 0, i64 {}, i1 false)",
-            ptrs[2], c_b
-        )
-        .unwrap();
-
+        // The threaded entry owns the scratch, the K-split and the zeroing of
+        // `C`, because all three depend on the thread count it chooses. It
+        // falls back to a single direct call when one thread is enough, so
+        // there is no separate serial path to keep in step.
+        let _ = (&ap_b, &bp_b, &c_b);
         writeln!(
             &mut self.output,
             "  call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
-             i64 {}, i64 {}, i64 {}, ptr {}, ptr {}, ptr {})",
-            VNNI_GEMM_NAME,
+             i64 {}, i64 {}, i64 {})",
+            crate::cpu_gemm::VNNI_THREADED_NAME,
             ptrs[0],
             ptrs[1],
             ptrs[2],
@@ -1923,15 +1910,9 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
             ext[2],
             ext[3],
             ext[4],
-            ext[5],
-            ap,
-            bp,
-            ct
+            ext[5]
         )
         .unwrap();
-        for p in [&ap, &bp, &ct] {
-            writeln!(&mut self.output, "  call void @free(ptr {})", p).unwrap();
-        }
 
         self.needs_exact_gemm_module = Some(flush_k_pairs);
         Some(())
