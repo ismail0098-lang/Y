@@ -308,6 +308,53 @@ pub struct Decision {
 ///
 /// Returns `None` only when nothing exact can hold the declared type - which is
 /// a real error, not something to paper over with a float.
+/// The one shape of assignment that is an exact accumulation.
+///
+/// `acc += e` has a drift-aware arm in every backend that lowers `@ZeroDrift`.
+/// `acc = acc + e` is the SAME statement and had no arm in either - it fell
+/// through to the ordinary assignment path, where the LLVM backend read the
+/// integer accumulator as a `double`, added in `double`, and then
+/// `store double` into an `alloca i64` (pointers are untyped, so clang said
+/// nothing), and the PTX backend read it as **f32**, added in f32, and wrote
+/// back with an UNSIGNED `cvt.rzi.u64.f32` - under a comment reading
+/// `accumulated exactly as I64`.
+///
+/// It lives here, not in either emitter, because "which assignments preserve
+/// drift-freedom" is a rule about the language and not about a target. A
+/// second copy is how the two backends came to disagree in the first place;
+/// `tests/zero_drift_backend_agreement.rs` pins that they now do not.
+///
+/// Returns the operator and the term being accumulated, for
+/// `acc = acc + e` / `acc = acc - e` only. Everything else - `acc = e`,
+/// `acc = e + acc`, `acc = acc * e` - is `None`, and the caller must REFUSE
+/// rather than lower it: silently accepting `acc = acc * e` would reintroduce
+/// rounding into the accumulation, which is the whole thing the directive
+/// promises not to do.
+///
+/// `acc = e + acc` is deliberately not accepted even though addition is
+/// commutative. Recognising it means deciding, per operator, whether the
+/// accumulator may appear on the right - true for `+`, false for `-` - and the
+/// refusal already names `+=` as the repair, which is one character.
+pub fn running_sum<'e>(
+    target: &crate::ast::Expr,
+    value: &'e crate::ast::Expr,
+) -> Option<(crate::ast::BinaryOp, &'e crate::ast::Expr)> {
+    use crate::ast::{BinaryOp, Expr};
+    let name = match target {
+        Expr::Ident(n, _) => n,
+        _ => return None,
+    };
+    match value {
+        Expr::BinaryOp { op, left, right, .. }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub)
+                && matches!(&**left, Expr::Ident(l, _) if l == name) =>
+        {
+            Some((op.clone(), &**right))
+        }
+        _ => None,
+    }
+}
+
 pub fn select_repr(req: &Requirement, costs: &CostTable) -> Option<Decision> {
     let mut rejected = Vec::new();
     let mut viable = Vec::new();

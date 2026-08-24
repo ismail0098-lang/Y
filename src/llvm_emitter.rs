@@ -591,23 +591,16 @@ impl LlvmEmitter {
     /// acc` is the same value for addition and NOT for subtraction, and
     /// accepting one shape and silently treating it as the other is how the
     /// sign gets lost; the commuted form simply is not matched.
+    /// Delegates to `zero_drift::running_sum`, which both backends share.
+    ///
+    /// This used to be the rule's only copy. The PTX backend had no equivalent
+    /// at all, so `acc = acc + e` was an f32 accumulation there long after it
+    /// was fixed here - `feedback-gotchas-apply-to-every-backend`, found again.
     fn drift_running_sum<'e>(
         target: &Expr,
         value: &'e Expr,
     ) -> Option<(BinaryOp, &'e Expr)> {
-        let name = match target {
-            Expr::Ident(n, _) => n,
-            _ => return None,
-        };
-        match value {
-            Expr::BinaryOp { op, left, right, .. }
-                if matches!(op, BinaryOp::Add | BinaryOp::Sub)
-                    && matches!(&**left, Expr::Ident(l, _) if l == name) =>
-            {
-                Some((op.clone(), &**right))
-            }
-            _ => None,
-        }
+        crate::zero_drift::running_sum(target, value)
     }
 
     fn emit_to_fixed(&mut self, val: &str, repr: crate::zero_drift::DriftRepr) -> String {

@@ -23,7 +23,7 @@
     selp.f64 %fd2, 0dBFE0000000000000, 0d3FE0000000000000, %p0;
     add.f64 %fd3, %fd1, %fd2;
     cvt.rzi.s64.f64 %rd1, %fd3;
-    mov.u64 %rd0, %rd1;
+    mov.s64 %rd0, %rd1;
     // [Y ZERO DRIFT] fast_acc: F16 accumulated exactly as Q32.32
     mov.f32 %f1, 0.0;
     cvt.f64.f32 %fd4, %f1;
@@ -32,7 +32,7 @@
     selp.f64 %fd6, 0dBFE0000000000000, 0d3FE0000000000000, %p1;
     add.f64 %fd7, %fd5, %fd6;
     cvt.rzi.s64.f64 %rd3, %fd7;
-    mov.u64 %rd2, %rd3;
+    mov.s64 %rd2, %rd3;
     mov.u32 %r0, 1;
     // [HEURISTIC] Branch Divergence Penalty is 4.53 cycles.
     // if: emitting BRANCH execution (block cost 3 cy).
