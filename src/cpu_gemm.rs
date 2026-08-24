@@ -805,6 +805,328 @@ fn emit_vnni_gemm_driver() -> String {
     ))
 }
 
+/// Name of the threaded entry point that splits K across workers.
+pub const VNNI_THREADED_NAME: &str = "__y_gemm_exact_vnni_threaded";
+
+/// The K-split threaded wrapper around [`VNNI_GEMM_NAME`].
+///
+/// This is what makes the exact path's central claim observable rather than
+/// merely argued: integer addition is associative, so partitioning K across
+/// threads and summing the partial sums gives a BIT-IDENTICAL result whatever
+/// the thread count and however ragged the cuts are. An f32 kernel cannot say
+/// that, which is the whole reason `docs/proof_carrying_kernels.md` is built on
+/// exact accumulation.
+///
+/// Deliberately plain `pthread_create` / `pthread_join` rather than the f32
+/// path's persistent pool. The pool is tuned around a task struct shaped for
+/// that kernel and around dispatch costs this kernel has not been measured
+/// against; forking per call costs tens of microseconds, which is noise at any
+/// size where threading pays at all. Correctness first - the property under
+/// test here is bit-identity, not peak throughput.
+///
+/// `need_libc_decls` is false when the f32 module is also being emitted, since
+/// it declares the same libc entry points and **a duplicate `declare` is an
+/// invalid redefinition in LLVM, not a duplicate that gets merged**.
+pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
+    let mut s = String::new();
+    if need_libc_decls {
+        let _ = writeln!(&mut s, "declare ptr @getenv(ptr)");
+        let _ = writeln!(&mut s, "declare i32 @atoi(ptr)");
+        let _ = writeln!(&mut s, "declare i64 @sysconf(i32)");
+        let _ = writeln!(&mut s, "declare i32 @pthread_create(ptr, ptr, ptr, ptr)");
+        let _ = writeln!(&mut s, "declare i32 @pthread_join(i64, ptr)");
+    }
+    let _ = writeln!(
+        &mut s,
+        "@.y_exact_env = private unnamed_addr constant [15 x i8] c\"Y_NUM_THREADS\\00\\00\""
+    );
+    let _ = writeln!(
+        &mut s,
+        "@__y_gemm_exact_nthreads = internal global i64 0, align 8"
+    );
+
+    // Job slots, 8 bytes each: A B C M N K lda ldb ldc Ap Bp Ct.
+    let job_bytes = 96usize;
+    let mr = VNNI_MR;
+    let nr = VNNI_NR;
+
+    let _ = write!(
+        &mut s,
+        r#"
+define internal i64 @__y_gemm_exact_threads(i64 %K) {{
+entry:
+  %c = load i64, ptr @__y_gemm_exact_nthreads, align 8
+  %need = icmp eq i64 %c, 0
+  br i1 %need, label %resolve, label %have
+resolve:
+  %e = call ptr @getenv(ptr @.y_exact_env)
+  %has = icmp ne ptr %e, null
+  br i1 %has, label %fromenv, label %fromsys
+fromenv:
+  %ei = call i32 @atoi(ptr %e)
+  %e64 = sext i32 %ei to i64
+  br label %clamp
+fromsys:
+  %sc = call i64 @sysconf(i32 84)
+  br label %clamp
+clamp:
+  %raw = phi i64 [ %e64, %fromenv ], [ %sc, %fromsys ]
+  %lo = icmp slt i64 %raw, 1
+  %r1 = select i1 %lo, i64 1, i64 %raw
+  %hi = icmp sgt i64 %r1, {maxthr}
+  %r2 = select i1 %hi, i64 {maxthr}, i64 %r1
+  store i64 %r2, ptr @__y_gemm_exact_nthreads, align 8
+  br label %have
+have:
+  %ceil = phi i64 [ %c, %entry ], [ %r2, %clamp ]
+  ; Never hand out a K-band shorter than {minband}: the per-thread zero-fill and
+  ; the reduction are independent of K, so a sliver costs more than it saves.
+  %byk = sdiv i64 %K, {minband}
+  %small = icmp slt i64 %byk, %ceil
+  %n = select i1 %small, i64 %byk, i64 %ceil
+  %z = icmp slt i64 %n, 1
+  %out = select i1 %z, i64 1, i64 %n
+  ret i64 %out
+}}
+
+define internal ptr @__y_gemm_exact_worker(ptr %arg) {{
+entry:
+  %pa = getelementptr i8, ptr %arg, i64 0
+  %A = load ptr, ptr %pa, align 8
+  %pb = getelementptr i8, ptr %arg, i64 8
+  %B = load ptr, ptr %pb, align 8
+  %pc = getelementptr i8, ptr %arg, i64 16
+  %C = load ptr, ptr %pc, align 8
+  %pm = getelementptr i8, ptr %arg, i64 24
+  %M = load i64, ptr %pm, align 8
+  %pn = getelementptr i8, ptr %arg, i64 32
+  %N = load i64, ptr %pn, align 8
+  %pk = getelementptr i8, ptr %arg, i64 40
+  %K = load i64, ptr %pk, align 8
+  %pla = getelementptr i8, ptr %arg, i64 48
+  %lda = load i64, ptr %pla, align 8
+  %plb = getelementptr i8, ptr %arg, i64 56
+  %ldb = load i64, ptr %plb, align 8
+  %plc = getelementptr i8, ptr %arg, i64 64
+  %ldc = load i64, ptr %plc, align 8
+  %pap = getelementptr i8, ptr %arg, i64 72
+  %Ap = load ptr, ptr %pap, align 8
+  %pbp = getelementptr i8, ptr %arg, i64 80
+  %Bp = load ptr, ptr %pbp, align 8
+  %pct = getelementptr i8, ptr %arg, i64 88
+  %Ct = load ptr, ptr %pct, align 8
+  call void @{gemm}(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %lda, i64 %ldb, i64 %ldc, ptr %Ap, ptr %Bp, ptr %Ct)
+  ret ptr null
+}}
+
+define void @{threaded}(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %lda, i64 %ldb, i64 %ldc) {{
+entry:
+  ; `C` is ASSIGNED by the nest this replaces, while the kernel accumulates
+  ; INTO it - which is exactly what lets the K-bands be summed.
+  %cn = mul i64 %M, %N
+  %cb = mul i64 %cn, 8
+  call void @llvm.memset.p0.i64(ptr %C, i8 0, i64 %cb, i1 false)
+  %nthr = call i64 @__y_gemm_exact_threads(i64 %K)
+  %mtiles0 = add i64 %M, {mr_m1}
+  %mtiles = sdiv i64 %mtiles0, {mr}
+  %one = icmp sle i64 %nthr, 1
+  br i1 %one, label %single, label %many
+
+single:
+  %kp1 = add i64 %K, 1
+  %kps = sdiv i64 %kp1, 2
+  %apn = mul i64 %mtiles, %kps
+  %apn2 = mul i64 %apn, {mr2}
+  %apb = mul i64 %apn2, 2
+  %bpn = mul i64 %kps, {nr2}
+  %bpb = mul i64 %bpn, 2
+  %ap1 = call ptr @malloc(i64 %apb)
+  %bp1 = call ptr @malloc(i64 %bpb)
+  %ct1 = call ptr @malloc(i64 {ctb})
+  call void @llvm.memset.p0.i64(ptr %ap1, i8 0, i64 %apb, i1 false)
+  call void @llvm.memset.p0.i64(ptr %bp1, i8 0, i64 %bpb, i1 false)
+  call void @llvm.memset.p0.i64(ptr %ct1, i8 0, i64 {ctb}, i1 false)
+  call void @{gemm}(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %lda, i64 %ldb, i64 %ldc, ptr %ap1, ptr %bp1, ptr %ct1)
+  call void @free(ptr %ap1)
+  call void @free(ptr %bp1)
+  call void @free(ptr %ct1)
+  ret void
+
+many:
+  %jobsb = mul i64 %nthr, {jobb}
+  %jobs = call ptr @malloc(i64 %jobsb)
+  %tidsb = mul i64 %nthr, 8
+  %tids = call ptr @malloc(i64 %tidsb)
+  %base = sdiv i64 %K, %nthr
+  %rem = srem i64 %K, %nthr
+  br label %spawn.head
+
+spawn.head:
+  %t = phi i64 [ 0, %many ], [ %tnext, %spawn.next ]
+  %off = phi i64 [ 0, %many ], [ %offnext, %spawn.next ]
+  %more = icmp slt i64 %t, %nthr
+  br i1 %more, label %spawn.body, label %joinloop.head
+
+spawn.body:
+  ; The first `rem` bands get one extra k, so the cuts are uneven by
+  ; construction and never line up with the flush interval.
+  %extra = icmp slt i64 %t, %rem
+  %inc = select i1 %extra, i64 1, i64 0
+  %klen = add i64 %base, %inc
+
+  %kp1b = add i64 %klen, 1
+  %kpsb = sdiv i64 %kp1b, 2
+  %apnb = mul i64 %mtiles, %kpsb
+  %apn2b = mul i64 %apnb, {mr2}
+  %apbb = mul i64 %apn2b, 2
+  %bpnb = mul i64 %kpsb, {nr2}
+  %bpbb = mul i64 %bpnb, 2
+  %apt = call ptr @malloc(i64 %apbb)
+  %bpt = call ptr @malloc(i64 %bpbb)
+  %ctt = call ptr @malloc(i64 {ctb})
+  %cpt = call ptr @malloc(i64 %cb)
+  call void @llvm.memset.p0.i64(ptr %apt, i8 0, i64 %apbb, i1 false)
+  call void @llvm.memset.p0.i64(ptr %bpt, i8 0, i64 %bpbb, i1 false)
+  call void @llvm.memset.p0.i64(ptr %ctt, i8 0, i64 {ctb}, i1 false)
+  call void @llvm.memset.p0.i64(ptr %cpt, i8 0, i64 %cb, i1 false)
+
+  ; A is [M, K] with row stride lda, so a k-band starts at A + off and keeps
+  ; lda. B is [K, N] with row stride ldb, so its band starts at B + off*ldb.
+  %aoff = getelementptr i16, ptr %A, i64 %off
+  %boffi = mul i64 %off, %ldb
+  %boff = getelementptr i16, ptr %B, i64 %boffi
+
+  %jb = mul i64 %t, {jobb}
+  %j = getelementptr i8, ptr %jobs, i64 %jb
+  %s0 = getelementptr i8, ptr %j, i64 0
+  store ptr %aoff, ptr %s0, align 8
+  %s1 = getelementptr i8, ptr %j, i64 8
+  store ptr %boff, ptr %s1, align 8
+  %s2 = getelementptr i8, ptr %j, i64 16
+  store ptr %cpt, ptr %s2, align 8
+  %s3 = getelementptr i8, ptr %j, i64 24
+  store i64 %M, ptr %s3, align 8
+  %s4 = getelementptr i8, ptr %j, i64 32
+  store i64 %N, ptr %s4, align 8
+  %s5 = getelementptr i8, ptr %j, i64 40
+  store i64 %klen, ptr %s5, align 8
+  %s6 = getelementptr i8, ptr %j, i64 48
+  store i64 %lda, ptr %s6, align 8
+  %s7 = getelementptr i8, ptr %j, i64 56
+  store i64 %ldb, ptr %s7, align 8
+  %s8 = getelementptr i8, ptr %j, i64 64
+  store i64 %ldc, ptr %s8, align 8
+  %s9 = getelementptr i8, ptr %j, i64 72
+  store ptr %apt, ptr %s9, align 8
+  %s10 = getelementptr i8, ptr %j, i64 80
+  store ptr %bpt, ptr %s10, align 8
+  %s11 = getelementptr i8, ptr %j, i64 88
+  store ptr %ctt, ptr %s11, align 8
+
+  %tb = mul i64 %t, 8
+  %tp = getelementptr i8, ptr %tids, i64 %tb
+  %rc = call i32 @pthread_create(ptr %tp, ptr null, ptr @__y_gemm_exact_worker, ptr %j)
+  ; A thread that fails to start must still be accounted for, or the join
+  ; below waits on a tid that was never written. Run its band inline instead.
+  %failed = icmp ne i32 %rc, 0
+  br i1 %failed, label %spawn.inline, label %spawn.next
+
+spawn.inline:
+  call ptr @__y_gemm_exact_worker(ptr %j)
+  store i64 0, ptr %tp, align 8
+  br label %spawn.next
+
+spawn.next:
+  %tnext = add i64 %t, 1
+  %offnext = add i64 %off, %klen
+  br label %spawn.head
+
+joinloop.head:
+  %jt = phi i64 [ 0, %spawn.head ], [ %jtnext, %joinloop.skip ]
+  %jmore = icmp slt i64 %jt, %nthr
+  br i1 %jmore, label %joinloop.body, label %reduce.head
+
+joinloop.body:
+  %jtb = mul i64 %jt, 8
+  %jtp = getelementptr i8, ptr %tids, i64 %jtb
+  %tid = load i64, ptr %jtp, align 8
+  %live = icmp ne i64 %tid, 0
+  br i1 %live, label %joinloop.do, label %joinloop.skip
+
+joinloop.do:
+  %jrc = call i32 @pthread_join(i64 %tid, ptr null)
+  br label %joinloop.skip
+
+joinloop.skip:
+  %jtnext = add i64 %jt, 1
+  br label %joinloop.head
+
+reduce.head:
+  %rt = phi i64 [ 0, %joinloop.head ], [ %rtnext, %reduce.done ]
+  %rmore = icmp slt i64 %rt, %nthr
+  br i1 %rmore, label %reduce.body, label %cleanup
+
+reduce.body:
+  %rjb = mul i64 %rt, {jobb}
+  %rj = getelementptr i8, ptr %jobs, i64 %rjb
+  %rs2 = getelementptr i8, ptr %rj, i64 16
+  %rcp = load ptr, ptr %rs2, align 8
+  br label %reduce.inner
+
+reduce.inner:
+  %q = phi i64 [ 0, %reduce.body ], [ %qnext, %reduce.inner.body ]
+  %qmore = icmp slt i64 %q, %cn
+  br i1 %qmore, label %reduce.inner.body, label %reduce.free
+
+reduce.inner.body:
+  %dstp = getelementptr i64, ptr %C, i64 %q
+  %srcp = getelementptr i64, ptr %rcp, i64 %q
+  %dv = load i64, ptr %dstp, align 8
+  %sv = load i64, ptr %srcp, align 8
+  ; Integer addition, so the order these partials are summed in cannot change
+  ; the total. That is the property the whole exact path exists to provide.
+  %sum = add i64 %dv, %sv
+  store i64 %sum, ptr %dstp, align 8
+  %qnext = add i64 %q, 1
+  br label %reduce.inner
+
+reduce.free:
+  %fs9 = getelementptr i8, ptr %rj, i64 72
+  %fap = load ptr, ptr %fs9, align 8
+  call void @free(ptr %fap)
+  %fs10 = getelementptr i8, ptr %rj, i64 80
+  %fbp = load ptr, ptr %fs10, align 8
+  call void @free(ptr %fbp)
+  %fs11 = getelementptr i8, ptr %rj, i64 88
+  %fct = load ptr, ptr %fs11, align 8
+  call void @free(ptr %fct)
+  call void @free(ptr %rcp)
+  br label %reduce.done
+
+reduce.done:
+  %rtnext = add i64 %rt, 1
+  br label %reduce.head
+
+cleanup:
+  call void @free(ptr %jobs)
+  call void @free(ptr %tids)
+  ret void
+}}
+"#,
+        maxthr = 64,
+        minband = KSPLIT_MIN_BAND,
+        mr = mr,
+        mr_m1 = mr - 1,
+        mr2 = mr * 2,
+        nr2 = nr * 2,
+        ctb = mr * nr * 8,
+        jobb = job_bytes,
+        gemm = VNNI_GEMM_NAME,
+        threaded = VNNI_THREADED_NAME,
+    );
+    s
+}
+
 /// The complete exact GEMM module: micro-kernel, both packers, and the driver.
 pub fn emit_vnni_gemm_module(flush_k_pairs: u32) -> String {
     let mut out = emit_vnni_micro_module(flush_k_pairs);
