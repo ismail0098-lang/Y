@@ -783,6 +783,28 @@ impl TypeChecker {
     /// `Q<i>.<f>` counts: a fixed-point accumulator is initialised from a
     /// float literal (`@ZeroDrift let acc: Q32.32 = 0.0;`) and leaving it out
     /// made that a type mismatch.
+    /// A short, user-facing name for a `SemanticType`, for diagnostics.
+    fn semantic_type_name(ty: &SemanticType) -> String {
+        match ty {
+            SemanticType::Primitive(p) => p.clone(),
+            SemanticType::GlobalMemory(t) => format!("GlobalMemory<{}>", t),
+            SemanticType::Array { element, size } => {
+                format!("[{}; {}]", Self::semantic_type_name(element), size)
+            }
+            SemanticType::Reference { inner, mutable } => format!(
+                "&{}{}",
+                if *mutable { "mut " } else { "" },
+                Self::semantic_type_name(inner)
+            ),
+            SemanticType::Vector(inner, _) => {
+                format!("Vec<{}>", Self::semantic_type_name(inner))
+            }
+            SemanticType::Pipeline => "Pipeline".into(),
+            SemanticType::TransferObligation => "TransferObligation".into(),
+            other => format!("{:?}", other),
+        }
+    }
+
     fn is_numeric_primitive(name: &str) -> bool {
         if let Some(rest) = name.strip_prefix('Q') {
             if let Some((i, f)) = rest.split_once('.') {
@@ -2018,18 +2040,41 @@ impl TypeChecker {
                 // binding checkable at all.
                 match op {
                     crate::ast::UnaryOp::Neg | crate::ast::UnaryOp::Not => operand_ty,
-                    crate::ast::UnaryOp::Ref => SemanticType::Reference {
+                    crate::ast::UnaryOp::Ref { mutable } => SemanticType::Reference {
                         inner: Box::new(operand_ty),
-                        mutable: false,
+                        mutable: *mutable,
                     },
                     // Dereferencing a reference yields what it points at.
-                    // A raw pointer is NOT a `Reference` here and stays
-                    // `Unknown` -- it is already refused outside `unsafe`, and
-                    // widening this arm would start reporting type errors in
-                    // `unsafe` code that nothing has ever checked.
-                    crate::ast::UnaryOp::Deref => match operand_ty {
-                        SemanticType::Reference { inner, .. } => *inner,
-                        _ => SemanticType::Unknown,
+                    //
+                    // Anything we can positively identify as NOT a reference is
+                    // refused. Y has no raw pointer type - only `&T` - so `*p`
+                    // with `p: I32` is a type error and not an escape hatch,
+                    // and treating it as one produced INVALID LLVM IR under a
+                    // green banner: `store i32 0, ptr %_t1` where `%_t1` is an
+                    // i32. `@unsafe` does not license it either, because there
+                    // is no pointee type to derive a width from - lowering it
+                    // through `inttoptr` would have to guess one, which is the
+                    // substitution the design rule exists to forbid.
+                    //
+                    // `Unknown` is deliberately NOT refused. It means the
+                    // checker has no information, not that it has established
+                    // the operand is a non-reference, and this checker leaves
+                    // plenty untyped - refusing it would reject correct
+                    // programs. That is a whitelist with its reason written
+                    // down, per the design rule, and the LLVM backend's own
+                    // GPU-construct refusal is what covers what reaches it.
+                    crate::ast::UnaryOp::Deref => match &operand_ty {
+                        SemanticType::Reference { inner, .. } => (**inner).clone(),
+                        SemanticType::Unknown => SemanticType::Unknown,
+                        other => {
+                            self.errors.push(format!(
+                                "Line {}: Cannot dereference `{}` - it is not a reference. \
+                                 Y has no raw pointer type; pass a `&mut T` and dereference that.",
+                                span.line,
+                                Self::semantic_type_name(other)
+                            ));
+                            SemanticType::Unknown
+                        }
                     },
                 }
             }
@@ -2885,7 +2930,7 @@ model",
     /// Whether the expression takes a reference to anything.
     fn takes_reference(expr: &Expr) -> bool {
         match expr {
-            Expr::UnaryOp { op: UnaryOp::Ref, .. } => true,
+            Expr::UnaryOp { op: UnaryOp::Ref { .. }, .. } => true,
             Expr::UnaryOp { operand, .. } => Self::takes_reference(operand),
             Expr::BinaryOp { left, right, .. } => {
                 Self::takes_reference(left) || Self::takes_reference(right)
@@ -3651,7 +3696,13 @@ fn expr_to_string(expr: &Expr) -> String {
             let op_str = match op {
                 UnaryOp::Neg => "-",
                 UnaryOp::Not => "!",
-                UnaryOp::Ref => "&",
+                UnaryOp::Ref { mutable } => {
+                    if *mutable {
+                        "&mut "
+                    } else {
+                        "&"
+                    }
+                }
                 UnaryOp::Deref => "*",
             };
             format!("{}{}", op_str, expr_to_string(operand))

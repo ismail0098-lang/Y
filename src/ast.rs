@@ -485,8 +485,15 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Neg,   // -
     Not,   // !
-    Ref,   // &
-    Deref, // *
+    /// `&expr` / `&mut expr`.
+    ///
+    /// `mutable` used to not exist: the parser matched the `mut` token into a
+    /// binding named `_mutable` and dropped it, so `&mut x` and `&x` were the
+    /// same node. `cpu_emitter` then emitted `(&x)` for both and rustc
+    /// rejected the call whenever the callee wanted `&mut i32`, and
+    /// `type_checker` typed every `&mut x` as an immutable `&x`.
+    Ref { mutable: bool }, // & / &mut
+    Deref,                 // *
 }
 
 /// Generic arguments can be Types (`F16`), Values (`3`), or Named (`rows=16`)

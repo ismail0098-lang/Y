@@ -2634,7 +2634,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 tmp
             }
             Expr::UnaryOp { op, operand, .. } => {
-                if let UnaryOp::Ref = op {
+                if let UnaryOp::Ref { .. } = op {
                     return self.emit_lvalue(operand);
                 }
 
@@ -2667,7 +2667,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         )
                         .unwrap();
                     }
-                    UnaryOp::Ref => unreachable!(),
+                    UnaryOp::Ref { .. } => unreachable!(),
                 }
                 tmp
             }
@@ -3562,12 +3562,12 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 "Unknown".into()
             }
             Expr::UnaryOp {
-                op: UnaryOp::Ref,
+                op: UnaryOp::Ref { mutable },
                 operand,
                 ..
             } => {
                 let inner = self.infer_ast_type(operand);
-                format!("&{}", inner)
+                format!("&{}{}", if *mutable { "mut " } else { "" }, inner)
             }
             Expr::UnaryOp {
                 op: UnaryOp::Deref,
@@ -3817,7 +3817,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 }
             }
             Expr::UnaryOp { op, operand, .. } => match op {
-                UnaryOp::Ref => "ptr".into(),
+                UnaryOp::Ref { .. } => "ptr".into(),
                 UnaryOp::Deref => {
                     let inner_ty = self.infer_type(operand);
                     if inner_ty == "ptr" {

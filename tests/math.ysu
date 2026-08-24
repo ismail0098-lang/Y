@@ -2,10 +2,16 @@
 // A simple matrix calculation simulation demonstrating Y's safety cage.
 
 @unsafe
-fn matrix_init() {
-    // Unsafe block: hardware-level initialization
-    let mut mem_ptr: I32 = 0;
-    *mem_ptr = 0; // Raw pointer dereferencing
+fn matrix_init(cell: &mut I32) {
+    // Unsafe block: hardware-level initialization, written through a
+    // caller-supplied reference.
+    //
+    // This used to read `let mut mem_ptr: I32 = 0; *mem_ptr = 0;`, treating an
+    // integer as an address. Y has no raw pointer type - only `&T` - so that
+    // is a type error, and the LLVM backend lowered it to `store i32 0, ptr
+    // %_t1` with `%_t1` an i32: invalid IR, emitted under "Compilation
+    // Successful!" and exit 0. The front end refuses it by name now.
+    *cell = 0;
 }
 
 fn calculate_matrix() {
@@ -36,7 +42,8 @@ fn calculate_matrix() {
 }
 
 fn main() {
-    matrix_init();
+    let mut cell: I32 = 1;
+    matrix_init(&mut cell);
     calculate_matrix();
 }
 

@@ -185,23 +185,26 @@ fn no_emitted_blob_is_invalid_rust() {
         emitted,
         sources.len()
     );
-    // One known failure, and it is NOT a bug in this backend. `math.ysu` does
+    // The list is EMPTY, and that is the resolution of what used to sit here.
     //
-    //     @unsafe fn matrix_init() { let mut mem_ptr: I32 = 0; *mem_ptr = 0; }
+    // `math.ysu` did `@unsafe fn matrix_init() { let mut mem_ptr: I32 = 0;
+    // *mem_ptr = 0; }` - dereferencing an integer. `type_checker`'s
+    // `UnaryOp::Deref` arm returned `Unknown` for anything that was not a
+    // `Reference`, so the front end accepted it and the LLVM backend emitted
+    // `store i32 0, ptr %_t1` with `%_t1` an `i32`: invalid IR under a green
+    // banner. This comment recorded "whether Y should type that as an error or
+    // lower it through `inttoptr` is a language decision".
     //
-    // - dereferencing an integer. `type_checker`'s `UnaryOp::Deref` arm
-    // returns `Unknown` for anything that is not a `Reference`, deliberately
-    // and with the reasoning written beside it, so the front end accepts it;
-    // the LLVM backend then emits `store i32 0, ptr %_t1` where `%_t1` is an
-    // `i32`, which is invalid IR that `clang` rejects downstream. Whether Y
-    // should type that as an error or lower it through `inttoptr` is a
-    // language decision, not a transcription bug, so it is named here rather
-    // than papered over.
+    // It is typed as an error. Y has no raw pointer type - only `&T` - so
+    // there is no pointee type for `inttoptr` to take a width from, and
+    // guessing one is the substitution the design rule forbids. The front end
+    // refuses `*x` on anything it can positively identify as a non-reference
+    // and names the type; `math.ysu` uses a `&mut I32` parameter now.
     //
     // Pinned as an EXACT set: a new failure fails this test, and so does
-    // fixing this one without updating the list. A silently growing allowlist
-    // is how a refusal baseline becomes a list of unexamined bugs.
-    const KNOWN_FRONT_END_GAPS: &[&str] = &["math.ysu"];
+    // fixing an entry without removing it. A silently growing allowlist is how
+    // a refusal baseline becomes a list of unexamined bugs.
+    const KNOWN_FRONT_END_GAPS: &[&str] = &[];
 
     let unexpected: Vec<&String> = bad
         .iter()
