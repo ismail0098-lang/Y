@@ -778,6 +778,58 @@ impl TypeChecker {
         SemanticType::Unknown
     }
 
+    /// Is this primitive one of Y's numeric scalar types?
+    ///
+    /// `Q<i>.<f>` counts: a fixed-point accumulator is initialised from a
+    /// float literal (`@ZeroDrift let acc: Q32.32 = 0.0;`) and leaving it out
+    /// made that a type mismatch.
+    fn is_numeric_primitive(name: &str) -> bool {
+        if let Some(rest) = name.strip_prefix('Q') {
+            if let Some((i, f)) = rest.split_once('.') {
+                if !i.is_empty()
+                    && !f.is_empty()
+                    && i.bytes().all(|b| b.is_ascii_digit())
+                    && f.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return true;
+                }
+            }
+        }
+        matches!(
+            name,
+            "I8" | "I16" | "I32" | "I64"
+                | "U8" | "U16" | "U32" | "U64"
+                | "F16" | "F32" | "F64"
+                | "i8" | "i16" | "i32" | "i64"
+                | "u8" | "u16" | "u32" | "u64"
+                | "f16" | "f32" | "f64"
+        )
+    }
+
+    /// A branch condition must be a boolean.
+    ///
+    /// `if 1 { ... }` type-checked and reached the backends: `--emit-cpu`
+    /// printed Rust with a literal `if 1 {` in it, which rustc rejects
+    /// ("expected `bool`, found integer"). `tests/test_drift.ysu` is exactly
+    /// this program.
+    ///
+    /// Deliberately narrow: it fires only on a type this checker is CONFIDENT
+    /// about. `SemanticType::Unknown` is still produced in more places than it
+    /// should be (see the design-rule table), and treating it as a violation
+    /// here would refuse working programs for a reason unrelated to their
+    /// condition. Fail-open on Unknown, refuse on a definite numeric.
+    fn require_bool_condition(&mut self, ty: &SemanticType, kw: &str, span: Span) {
+        let SemanticType::Primitive(name) = ty else {
+            return;
+        };
+        if Self::is_numeric_primitive(name) {
+            self.errors.push(format!(
+                "Line {}: `{}` condition has type {}, not a boolean. Y has no implicit truthiness; write a comparison such as `{} x != 0`.",
+                span.line, kw, name, kw
+            ));
+        }
+    }
+
     fn check_uniformity(&mut self, expr: &Expr) {
         // Uniformity analysis: fail if the expression relies on thread-local IDs
         let mut is_uniform = true;
@@ -1457,6 +1509,23 @@ impl TypeChecker {
             Stmt::Return(val, span) => {
                 if let Some(expr) = val {
                     let expected_ret_ty = self.current_return_type.clone();
+
+                    // A function with no declared return type returns nothing,
+                    // so `return <expr>` in one is a type error - and it was
+                    // accepted. `fn f() { let x = 5; return x; }` compiled
+                    // clean and made the LLVM backend emit
+                    // `sext i32 %t to void` / `ret void %t`, neither of which
+                    // is legal LLVM; the build then failed inside `clang`,
+                    // pointing at a line number in generated IR instead of at
+                    // the user's source. `--emit-llvm` wrote that IR and
+                    // exited 0. `tests/test.ysu` is exactly this program.
+                    if expected_ret_ty.is_none() {
+                        self.errors.push(format!(
+                            "Line {}: `return` with a value in a function that declares no return type. Add `-> <type>` to the signature, or drop the value.",
+                            span.line
+                        ));
+                    }
+
                     let ret_ty = self.check_expr_with_expected(expr, expected_ret_ty.as_ref());
                     if ret_ty == SemanticType::TransferObligation {
                         self.errors.push(format!(
@@ -1480,7 +1549,8 @@ impl TypeChecker {
                 if *is_uniform_branch {
                     self.check_uniformity(condition);
                 }
-                self.check_expr(condition);
+                let cond_ty = self.check_expr(condition);
+                self.require_bool_condition(&cond_ty, "if", condition.span());
                 // Both arms are conditional: a transfer awaited in either one is
                 // not awaited on the paths that take the other.
                 self.linear_tracker.enter_conditional();
@@ -1520,7 +1590,11 @@ impl TypeChecker {
                     self.update_interval(var, None);
                 }
 
-                self.check_expr(condition);
+                let cond_ty = self.check_expr(condition);
+                // Same rule at every branching site. Wiring `if` alone and
+                // leaving `while` is the shape this repo keeps finding:
+                // a correct guard consulted at a subset of its sites.
+                self.require_bool_condition(&cond_ty, "while", condition.span());
                 // A while body is both conditional (it may run zero times) and a
                 // loop (it may run many). Entering both is not redundant: the
                 // zero-iteration case is what makes an await inside it unsound
@@ -1963,6 +2037,38 @@ impl TypeChecker {
                 self.check_block(block);
                 SemanticType::Unknown
             }
+            // Literals were falling into the catch-all below and typing as
+            // `Unknown`, which the `let` arm reads as "adopt the annotation"
+            // and the assignment arm exempts from the mismatch check outright.
+            // It also made `require_bool_condition` dormant: `if 1` could not
+            // be caught, because the 1 had no type at all.
+            //
+            // A literal is POLYMORPHIC and takes the expected type where there
+            // is one - `let x: F16 = 0.0` is legal and pinning the literal to
+            // `F32` made it a mismatch. Where nothing is expected it falls
+            // back to the default, which is what gives an `if` condition a
+            // type to check.
+            //
+            // Only the FLOAT arm is observable today: mutation shows that
+            // pinning `IntLit` to `I32` changes nothing, because the `let`
+            // mismatch check is lenient between integer widths. It is kept
+            // anyway - the two arms are one rule, and an int/float asymmetry
+            // here would be a trap the moment that leniency is tightened. Not
+            // the same case as a clause that is logically IMPLIED, which
+            // should be deleted rather than kept.
+            Expr::BoolLit(..) => SemanticType::Primitive("bool".into()),
+            Expr::IntLit(..) => match expected_type {
+                Some(SemanticType::Primitive(p)) if Self::is_numeric_primitive(p) => {
+                    SemanticType::Primitive(p.clone())
+                }
+                _ => SemanticType::Primitive("I32".into()),
+            },
+            Expr::FloatLit(..) => match expected_type {
+                Some(SemanticType::Primitive(p)) if Self::is_numeric_primitive(p) => {
+                    SemanticType::Primitive(p.clone())
+                }
+                _ => SemanticType::Primitive("F32".into()),
+            },
             _ => SemanticType::Unknown,
         }
     }

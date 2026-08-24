@@ -148,9 +148,18 @@ fn statements_without_a_lowering_are_refused() {
             "`match`",
         ),
         (
+            // The PTX backend refuses this too ("no return value"), but the
+            // TYPE CHECKER gets there first now: a kernel declares no return
+            // type, so `return N` is the same error as `fn f() { return x; }`
+            // and is reported against the source line rather than by a
+            // backend. That makes the backend's arm a CONFIRMATION rather than
+            // a guard - the same standing as `break` below - and this case
+            // asserts on the error that actually fires, per this file's own
+            // rule that a fixture stopped by an earlier pass must fail rather
+            // than pass.
             "ptxcf_ret_value",
             "kernel k(A: GlobalMemory<F32>, N: I32) {\n    store(A, 0, 1.0);\n    return N;\n}\n",
-            "no return value",
+            "declares no return type",
         ),
     ];
     for (name, src, phrase) in cases {

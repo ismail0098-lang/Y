@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! let t = cp_async(A, B, 16);
-//! if n { pipe.wait(t); }           // awaited on one path out of two
+//! if n > 0 { pipe.wait(t); }       // awaited on one path out of two
 //!
 //! let t = cp_async(A, B, 16);
 //! for i in 0..4 { pipe.wait(t); }  // one copy, four awaits
@@ -30,6 +30,10 @@
 //! the tracker being right is not the property that matters - the property that
 //! matters is that the type checker drives it correctly, and an earlier version
 //! of this bug was entirely in the wiring.
+//!
+//! The conditions are written `N > 0` rather than `N` because a branch
+//! condition must be a boolean; `if N` on an integer is a type error now, and
+//! these cases assert that the LINEAR TRACKER is what rejects them.
 //!
 //! Run with:  cargo test --test linear_tracker_enforcement
 
@@ -159,7 +163,7 @@ fn shadowing_a_pending_obligation_is_rejected() {
 fn obligation_pending_at_scope_exit_is_rejected() {
     assert_rejected(
         "lt_scope",
-        "    if N {\n        let tok: AsyncToken = cp_async(A, B, 16);\n    }",
+        "    if N > 0 {\n        let tok: AsyncToken = cp_async(A, B, 16);\n    }",
         "the obligation goes out of scope still pending",
     );
 }
@@ -175,7 +179,7 @@ fn obligation_pending_at_scope_exit_is_rejected() {
 fn conditionally_awaited_transfer_is_rejected() {
     assert_rejected(
         "lt_cond",
-        "    let tok: AsyncToken = cp_async(A, B, 16);\n    if N {\n        pipe.wait(tok);\n    }",
+        "    let tok: AsyncToken = cp_async(A, B, 16);\n    if N > 0 {\n        pipe.wait(tok);\n    }",
         "the branch may not be taken, leaving the transfer unawaited",
     );
 
@@ -183,7 +187,7 @@ fn conditionally_awaited_transfer_is_rejected() {
     // and awaiting on one is still conditional.
     assert_rejected(
         "lt_cond_else",
-        "    let tok: AsyncToken = cp_async(A, B, 16);\n    if N {\n        pipe.wait(tok);\n    } else {\n        pipe.wait(tok);\n    }",
+        "    let tok: AsyncToken = cp_async(A, B, 16);\n    if N > 0 {\n        pipe.wait(tok);\n    } else {\n        pipe.wait(tok);\n    }",
         "one obligation cannot be consumed by two branch bodies",
     );
 }
@@ -233,7 +237,7 @@ fn copy_and_await_within_the_same_iteration_compiles() {
 fn copy_and_await_within_the_same_branch_compiles() {
     assert_accepted(
         "lt_ok_branch",
-        "    if N {\n        let tok: AsyncToken = cp_async(A, B, 16);\n        pipe.wait(tok);\n    }",
+        "    if N > 0 {\n        let tok: AsyncToken = cp_async(A, B, 16);\n        pipe.wait(tok);\n    }",
         "on the paths where the copy happens, the await happens too",
     );
 }
@@ -243,7 +247,7 @@ fn copy_and_await_within_the_same_branch_compiles() {
 // The conditional-depth fix wired `Stmt::If`, `Stmt::For` and `Stmt::While`
 // into the tracker and stopped there. `Stmt::Match` is a branch too, so
 //
-//     if N { pipe.wait(tok); }            -> rejected
+//     if N > 0 { pipe.wait(tok); }            -> rejected
 //     match N { _ => pipe.wait(tok) }     -> "Compilation Successful!"
 //
 // were the same program with two different answers. That is the same shape as
