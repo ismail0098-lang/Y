@@ -94,6 +94,26 @@ pub unsafe extern "C" fn y_compile_to_ptx(
     let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
     let ptx_output = emitter.emit_program(&ast, &hw_profile);
 
+    // The emitter's refusals were discarded here, so a program it could not
+    // lower came back to the C caller as a PTX string and a null error.
+    //
+    // `y_interpret_kernel` below has this exact fix, with this exact comment,
+    // and the PTX path never got it - the "a correct guard is worthless where
+    // it is not called" shape, for the third time in this repo. Everything
+    // `PtxEmitter` refuses went out this door silently: `tma_load` and
+    // `wgmma_async` (which assemble to nothing), the intrinsic arity gate, the
+    // unknown-call gate, and now a source with no `kernel` in it, which
+    // returned a three-line `.version`/`.target` header as though it were a
+    // compiled program.
+    if !emitter.emit_errors.is_empty() {
+        if !error_out.is_null() {
+            *error_out = CString::new(emitter.emit_errors.join("\n"))
+                .unwrap()
+                .into_raw();
+        }
+        return ptr::null_mut();
+    }
+
     if !error_out.is_null() {
         *error_out = ptr::null_mut();
     }
