@@ -394,6 +394,46 @@ fn solve_and_write_witness(
     Ok(witness.len())
 }
 
+/// Refuse a constraint system that asserts nothing.
+///
+/// A circuit with NO constraints is satisfied by every assignment, so a Groth16
+/// proof over it verifies unconditionally and proves nothing at all. Y emitted
+/// one for `fn main() {}`, for a `main` whose body only declares an unused
+/// local, for a body that is entirely `@ghost`, and -- the case that matters --
+/// for every program whose work lives in a `kernel` rather than in `main`.
+/// Measured over `tests/`: **all 57 programs the backend accepted produced
+/// 1 wire, 0 constraints, no inputs and no outputs**, under "Compilation
+/// Successful!" and exit 0, with `.r1cs`, `.sym` and `.r1cs.txt` on disk.
+///
+/// This is the empty-artifact bug the PTX and co-processor backends had, in the
+/// one backend where the artifact is supposed to carry a soundness guarantee.
+/// An empty `.ptx` does nothing; an empty `.r1cs` ASSERTS nothing while looking
+/// exactly like a circuit that does.
+///
+/// The test is the constraint count alone, deliberately. A circuit with no
+/// PUBLIC inputs is legitimate -- that is a proof of knowledge of a witness --
+/// and so is one with no outputs, which is what a body of pure assertions
+/// emits. Neither is refused. Zero constraints is the one shape that cannot
+/// mean anything.
+///
+/// **Both front ends call this.** The `.ysu` path and the circom path build the
+/// circuit through different code and write it through different code, and the
+/// circom arm printed its own constraint count one line above the write without
+/// ever looking at it. Fixing one arm and not the other is the recurring shape
+/// in this repo's design-rule table.
+#[cfg(feature = "zk")]
+fn refuse_if_no_constraints(n: usize, source_hint: &str) {
+    if n == 0 {
+        log_error!(
+            "[ZK backend] this circuit has no constraints, so it asserts \
+             nothing - every assignment satisfies it and a proof over it would \
+             verify unconditionally. {}",
+            source_hint
+        );
+        exit(1);
+    }
+}
+
 /// Compile a circom circuit through Y's R1CS back end.
 ///
 /// The whole point of the front end: a team's existing, audited `.circom`
@@ -481,6 +521,11 @@ fn compile_circom(path: &str, args: &[String]) {
         circuit.public_inputs.len(),
         circuit.private_inputs.len(),
         circuit.outputs.len()
+    );
+
+    refuse_if_no_constraints(
+        circuit.constraints.len(),
+        "No template in this circom source emitted one.",
     );
 
     log_step!("2/2", "Writing R1CS...");
@@ -1375,6 +1420,12 @@ fn main() {
             }
             match emitted {
                 Ok(r1cs_text) => {
+                    refuse_if_no_constraints(
+                        emitter.constraints.len(),
+                        "Nothing in `fn main` produced a constraint; work inside \
+                         a `kernel` is not compiled to R1CS.",
+                    );
+
                     // Write binary R1CS format directly to output_path
                     let written = phase!("write_r1cs_binary", emitter.write_r1cs_binary(&output_path));
                     match written {
@@ -1640,21 +1691,39 @@ fn main() {
             }
         };
 
-        // `-lX11` is needed ONLY by the optional GUI surface, and linking it
+// `-lX11` is needed ONLY by the optional GUI surface, and linking it
         // unconditionally made every headless machine - CI, containers, a
         // server without libX11 - unable to compile any Y program at all.
-        // Try with it, and if the LIBRARY is what is missing, link without.
+        // Try with it, and if X11 is what is missing, retry.
+        //
+        // The retry must also pass `-DY_NO_X11`, which compiles the ShadowPlay
+        // surface as refusing stubs. Dropping `-lX11` alone is not enough: the
+        // GUI entry points are exported symbols now (they have to be, or the
+        // program that calls them cannot link), so their bodies are emitted
+        // and reference XOpenDisplay whether or not anything calls them.
+        // Without the macro, un-static-ing them would have made libX11 a hard
+        // requirement for compiling ANY Y program - reinstating exactly the
+        // regression this fallback exists to prevent.
+        //
+        // Both spellings of "X11 is missing" are matched: `cannot find -lX11`
+        // when only the library is absent, and `X11/Xlib.h` when the
+        // development headers are too.
         let base = ["-O2", "-o", output_path.as_str(), ll_path.as_str(), runtime_path.as_str(), "-lm"];
         let with_x11 = std::process::Command::new("clang")
             .args(base)
             .arg("-lX11")
             .output();
         let clang_result = match with_x11 {
-            Ok(o) if !o.status.success()
-                && String::from_utf8_lossy(&o.stderr).contains("-lX11") =>
+            Ok(o) if !o.status.success() && {
+                let e = String::from_utf8_lossy(&o.stderr);
+                e.contains("-lX11") || e.contains("X11/Xlib.h")
+            } =>
             {
-                println!("      -> libX11 not present; linking without it (GUI calls will not resolve).");
-                std::process::Command::new("clang").args(base).output()
+                println!("      -> libX11 not present; linking without it (GUI calls will refuse at runtime).");
+                std::process::Command::new("clang")
+                    .args(base)
+                    .arg("-DY_NO_X11")
+                    .output()
             }
             other => other,
         };

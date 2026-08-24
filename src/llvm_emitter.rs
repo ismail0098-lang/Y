@@ -65,7 +65,29 @@ const PRELUDE_DECLARED: &[&str] = &[
             "yvec_push",
 ];
 
-/// Symbols `c_src/runtime.c` DEFINES, which the LLVM path links against.
+/// Symbols libc provides, which every host link already resolves.
+///
+/// Kept apart from `RUNTIME_SYMBOLS` because that list is asserted against
+/// `c_src/runtime.c`, and a libc name is not defined there. Deliberately
+/// short: each entry is a promise that the symbol exists on every host this
+/// backend targets, so it is not a place to park a name that merely ought to.
+pub const LIBC_SYMBOLS: &[&str] = &[
+            "usleep",
+];
+
+/// Six names were removed from this list in the same change that added the
+/// ShadowPlay surface, for the opposite reason: `init_allocator`,
+/// `is_valid_ystr`, `make_enum`, `register_ystr`, `resolve_ystr` and
+/// `ystr_hash_fn` are `static` helpers INSIDE the runtime. They emit no
+/// symbol, so listing them meant `init_allocator();` in a Y program compiled
+/// clean and then died at link with `undefined reference to 'init_allocator'`
+/// - which reads as a broken toolchain. They are refused by name now.
+///
+/// Symbols that linking `c_src/runtime.c` PROVIDES, which the LLVM path links
+/// against. That includes what the headers it pulls in define - the ShadowPlay
+/// GUI surface comes from `c_src/shadowplay_gui.h`, and leaving it off this
+/// list is what made `shadowplay.ysu`, the repo's only end-user application,
+/// stop compiling: the backend refused nine of its calls by name.
 ///
 /// A call to one of these needs a `declare` emitted; a call to anything in
 /// NEITHER list and not defined in this module does not exist, and is refused.
@@ -116,15 +138,25 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
             "TokenKind_MmaMod",
             "TokenKind_StringLit",
             "TokenKind_Unknown",
-            "init_allocator",
-            "is_valid_ystr",
-            "make_enum",
+            "cleanup_shadowplay_gui",
+            "get_broadcast_state",
+            "get_codec_state",
+            "get_file_format_state",
+            "get_indicator_state",
+            "get_instant_replay_state",
+            "get_microphone_index",
+            "get_microphone_name",
+            "get_quality_state",
+            "get_recording_state",
+            "get_replay_duration",
+            "get_replay_duration_idx",
+            "init_shadowplay_gui",
+            "is_overlay_visible",
             "print",
             "print_int",
             "println",
-            "register_ystr",
-            "resolve_ystr",
             "str_to_i64",
+            "update_shadowplay_gui",
             "ychar_to_ascii",
             "yfile_read_to_string",
             "yfile_write",
@@ -135,7 +167,6 @@ pub const RUNTIME_SYMBOLS: &[&str] = &[
             "ystr_eq",
             "ystr_eq_cstr",
             "ystr_free",
-            "ystr_hash_fn",
             "ystr_len",
             "ystr_new",
             "ystr_push",
@@ -1279,8 +1310,11 @@ impl LlvmEmitter {
         // Auto-declare any called functions that are not defined or already declared
         let prelude_set: std::collections::HashSet<&str> =
             PRELUDE_DECLARED.iter().copied().collect();
-        let runtime_set: std::collections::HashSet<&str> =
-            RUNTIME_SYMBOLS.iter().copied().collect();
+        let runtime_set: std::collections::HashSet<&str> = RUNTIME_SYMBOLS
+            .iter()
+            .chain(LIBC_SYMBOLS.iter())
+            .copied()
+            .collect();
 
         let defined_set: std::collections::HashSet<String> =
             self.defined_functions.iter().cloned().collect();
