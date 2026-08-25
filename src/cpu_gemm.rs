@@ -1867,6 +1867,52 @@ pub fn pack_b_slot(j: usize, h: usize) -> usize {
     (j / 16) * 32 + (j % 16) * 2 + h
 }
 
+/// The flush chunking, transcribed from `emit_vnni_micro_module`'s outer loop.
+///
+/// The emitted loop is `for c = 0; c < kpairs; c += flush`, with
+/// `cend = select (c + flush < kpairs), c + flush, kpairs` — so a chunk is
+/// `[c, min(c + flush, kpairs))` and the final partial chunk is carried by the
+/// same clamp rather than by a separate epilogue. `proofs/ExactGemmMicro.v`
+/// proves this decomposition sums to the whole range (`flush_exact`), which is
+/// the flush's analogue of the K-split's `bands_tile`.
+///
+/// This is the same clamped-tile shape as [`mn_tiles`], NOT the K-split's
+/// uneven-band shape: the chunks are uniform with a short tail, because the
+/// interval is a fixed overflow budget rather than a work split.
+pub fn flush_chunks(kpairs: usize, flush: usize) -> Vec<(usize, usize)> {
+    assert!(flush > 0, "a zero flush interval would not terminate");
+    let mut out = Vec::new();
+    let mut c = 0usize;
+    while c < kpairs {
+        out.push((c, kpairs.min(c + flush) - c));
+        c += flush;
+    }
+    out
+}
+
+/// Which `<32 x i16>` vector, and which of its 16 lanes, carries panel slot `s`.
+///
+/// `vpdpwssd` treats a `<32 x i16>` operand as 16 lanes of two int16, so lane
+/// `l` consumes elements `2l` and `2l + 1` of its own vector.
+pub fn vec_of_slot(s: usize) -> usize {
+    s / 32
+}
+
+/// See [`vec_of_slot`].
+pub fn lane_of_slot(s: usize) -> usize {
+    (s % 32) / 2
+}
+
+/// Which column of the `MR x NR` tile the store reads back out of vector `v`,
+/// lane `l` — the inverse leg of the round trip [`pack_b_slot`] opens.
+///
+/// `the_packed_column_is_the_stored_column` in `proofs/ExactGemmMicro.v` proves
+/// the composition is the identity. A mismatch is a correctly-summed but
+/// column-PERMUTED result, which no bound or bijection elsewhere can see.
+pub fn column_of_lane(v: usize, l: usize) -> usize {
+    16 * v + l
+}
+
 /// The output tiling, as `emit_vnni_gemm_driver`'s `vg.j` / `vg.i` loops
 /// compute it: uniform tiles of `tile` with a CLAMPED ragged tail.
 ///
