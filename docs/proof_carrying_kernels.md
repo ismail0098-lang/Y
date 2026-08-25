@@ -419,6 +419,83 @@ verified 8/8 across the three fixed sites, the Rust transcription, the emitter's
 clamp and two hypotheses of the proof.
 
 
+#### Phase 1 progress, 2026-08-25 (3) — the PACKING is proved, and it says less than expected
+
+`proofs/ExactGemmPacking.v` (Rocq 9.1, no axioms, nothing admitted) covers the
+third obligation: `pack_a` and `pack_b` move a live `MR x kc` / `kc x NR` tile
+into a contiguous panel, and the micro-kernel then runs the panel at **full**
+width regardless of how ragged the tile was. Two theorems make that legal:
+
+- `pack_a_slot_bijective` / `pack_b_slot_bijective` (with `_in_panel` and
+  `_onto`): each destination map is a bijection onto its panel, so nothing is
+  written twice and no slot is left holding the previous tile.
+- `padded_product_is_the_live_dot_product`: the full `kpairs * 2` product over
+  the padded panel equals the dot product over the live `kc`. This is THE
+  theorem — it is what licenses running a ragged tile at full width — and it
+  rests entirely on the packers' `select ... i16 0`.
+  `garbage_in_the_pad_changes_the_answer` refutes the zero-fill-free version
+  concretely, so the mask is machine-checked as load-bearing rather than
+  asserted to be.
+
+**The interesting result is negative, and it corrects a claim this repo was
+making.** The emitted `pack_b` destination map is `(j/16)*32 + (j%16)*2 + h`,
+written that way to document the `vpdpwssd` lane layout: group `v = j/16` is one
+`<32 x i16>` vector and lane `l = j%16` inside it consumes int16 elements `2l`
+and `2l+1`. The docstring and an earlier draft of the model test both claimed
+the split was "not a convenience". It is: `16*(j/16) + (j mod 16) = j`, so the
+whole decomposition folds and the map **is** the plain interleave `2*j + h`.
+`slot_b_is_the_plain_interleave` states that as a theorem.
+
+So the gap between what is proved and what is true is wider than the usual
+"bijectivity cannot distinguish two layouts" — there are not two layouts. That
+a hardware lane consumes elements `2l`/`2l+1` of its own vector is an ISA fact
+with no arithmetic content, and it is pinned only by
+`tests/cpu_gemm_vnni_micro.rs` running the real instruction against a scalar
+reference. Writing the proof is what forced that to be said precisely.
+
+**And the behavioural tie is weaker than it looks — measured, not assumed.**
+`tests/exact_gemm_packing_model.rs` poisons the operand padding with
+live-range values (a `calloc` buffer would supply the zeros that are the
+property under test, the same trap as pre-zeroing C one section up) and runs
+five shapes. Removing a packer's mask and sweeping them:
+
+| mask removed | 53x71x301 | 48x128x301 | 53x128x300 | 48x71x300 | 48x128x300 |
+|---|---|---|---|---|---|
+| `pack_a` only | 0 | 0 | 0 | 0 | 0 |
+| `pack_b` only | 0 | 0 | 0 | 0 | 0 |
+| both | 3763 | 6144 | 0 | 0 | 0 |
+
+Two facts, neither visible from reading the code:
+
+1. **The two masks are redundant with each other**, and no driver can separate
+   them: a padding term is `a_pad * b_pad`, so a zero on either side kills it.
+   Removing one leaves the kernel correct and undefended, not wrong. The
+   obligation the test really pins is the conjunction — *the padding
+   contributes nothing* — which is exactly what the theorem states.
+2. **Only the phantom k-half can corrupt an answer.** The ragged M and ragged N
+   shapes report 0 with both masks gone, because those accumulator rows and
+   columns are discarded by the C store mask before anything reads them — the
+   property proved in `ExactGemmTiling.v`, doing double duty. So one of the five
+   shapes is load-bearing and four are controls, and the test says so rather
+   than implying five-fold coverage.
+
+The row and column masks are therefore defence in depth against a future change
+to the store, not correctness today. Recorded rather than deleted.
+
+Mutation-verified 10/10 (three model mutations, three emitter mutations, three
+proof-gate mutations, one kernel mutation), with three further mutations sorted
+as **mis-aimed rather than survivors**: `replace(old, new, 1)` had been landing
+on a docstring occurrence of the slot expression instead of the code. *A
+survivor is a hypothesis about the test; check where the mutation landed before
+recording it as a hole.*
+
+With this, Phase 1's schedule is complete: the K-split reduction, the output
+partition, and the operand packing. What remains unproved in the exact GEMM is
+the micro-kernel itself — the 2-D register tile, the masked tails, and the
+int32 accumulate with its periodic int64 flush, whose no-overflow obligation is
+discharged exhaustively over the finite int16 domain in
+`tests/exact_gemm_licence_obligations.rs` rather than by proof.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation

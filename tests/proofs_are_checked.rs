@@ -249,6 +249,27 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "row_stride_below_n_aliases",
             ][..],
         ),
+        (
+            "ExactGemmPacking.v",
+            &[
+                // Both packers' destination maps are bijections onto their panel.
+                "pack_a_slot_bijective",
+                "pack_b_slot_bijective",
+                // THE theorem: the full padded product equals the live dot
+                // product, which is what licenses running a ragged tile at full
+                // width.
+                "Print Assumptions padded_product_is_the_live_dot_product",
+                // ...and the zero-fill that makes it true, refuted concretely.
+                "garbage_in_the_pad_changes_the_answer",
+                "the_masked_version_agrees_on_the_same_input",
+                // The precise statement of what the packing proof CANNOT say
+                // about lane layout: the emitted vector-group form IS the
+                // plain interleave, so there is no arithmetic difference for
+                // any proof to capture. Deleting this turns the file's own
+                // "what this does not prove" section into an unchecked remark.
+                "slot_b_is_the_plain_interleave",
+            ][..],
+        ),
     ]
 }
 

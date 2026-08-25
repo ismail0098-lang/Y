@@ -1832,6 +1832,41 @@ pub fn ksplit_threads(requested: usize, k: usize) -> usize {
     if n < 1 { 1 } else { n }
 }
 
+/// Where `pack_a` puts row `i`, half `h` of a k-pair, inside its 2*MR slot group.
+///
+/// `Ap[p*(2*MR) + pack_a_slot(i, h)] = A[i][2p+h]`, zero outside the live tile.
+/// Transcribed from `emit_vnni_pack_a`; `proofs/ExactGemmPacking.v` proves it a
+/// bijection onto `[0, 2*MR)`, so no slot is written twice and none keeps a
+/// value from the previous tile - the panel buffer really is reused.
+pub fn pack_a_slot(i: usize, h: usize) -> usize {
+    2 * i + h
+}
+
+/// Where `pack_b` puts column `j`, half `h`, inside its 2*NR slot group.
+///
+/// `Bp[p*(2*NR) + pack_b_slot(j, h)] = B[2p+h][j]`, zero outside the live tile.
+///
+/// The `(j / 16, j % 16)` split spells out the `vpdpwssd` lane layout: group
+/// `v = j / 16` is one `<32 x i16>` vector and lane `l = j % 16` inside it
+/// consumes int16 elements `2l` and `2l + 1`, so a column's two k-values are
+/// ADJACENT and consecutive columns sit 2 int16 apart rather than 1.
+///
+/// **It is arithmetically the plain interleave `2*j + h`**, since
+/// `16*(j/16) + (j%16) == j` - the decomposition folds away and computes
+/// nothing extra. It is kept in that form because it is the derivation, and
+/// because an inconsistent pair of constants (the `32` and the `16`) stops
+/// it equalling `2*j + h`, which both `slot_b_is_the_plain_interleave` in
+/// `proofs/ExactGemmPacking.v` and the model test assert.
+///
+/// **No proof here pins the lane layout**, and not merely because two
+/// bijections are indistinguishable - there is no arithmetic difference to
+/// distinguish. That lane `l` consumes elements `2l`/`2l+1` is an ISA fact;
+/// `tests/cpu_gemm_vnni_micro.rs` covers it by mutating the stride against a
+/// scalar reference on the real instruction.
+pub fn pack_b_slot(j: usize, h: usize) -> usize {
+    (j / 16) * 32 + (j % 16) * 2 + h
+}
+
 /// The output tiling, as `emit_vnni_gemm_driver`'s `vg.j` / `vg.i` loops
 /// compute it: uniform tiles of `tile` with a CLAMPED ragged tail.
 ///
