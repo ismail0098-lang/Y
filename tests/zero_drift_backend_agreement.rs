@@ -300,3 +300,132 @@ fn the_exact_kernel_assembles() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// The host source, shaped so every host backend can be offered the same one.
+const HOST_NEST: &str = r#"
+fn total(n: I32) -> F32 {
+    @ZeroDrift
+    @bounds(min=-1024.0, max=1024.0)
+    let mut acc: F32 = 0.0;
+    @invariant(i >= 0)
+    for i in 0..n step 1 {
+        acc += 0.1;
+    }
+    return acc;
+}
+
+fn main() {
+}
+"#;
+
+/// `--emit-cpu` accepted a `@ZeroDrift` accumulator, printed
+/// `let mut acc = 0.0; acc += 0.1;` and exited 0 - a plain float accumulation,
+/// which is the one thing the directive forbids. `cpu_emitter.rs` contains zero
+/// references to `zero_drift`; the directive was simply not implemented there
+/// and nothing said so.
+///
+/// This is worse than an ordinary unhandled construct because `--emit-cpu`
+/// prints Rust for the user to PASTE. Y never compiles it, so nothing
+/// downstream ever gets a chance to object - the guarantee is dropped between
+/// the source and a file on someone's clipboard.
+#[test]
+fn the_cpu_host_backend_refuses_zero_drift_rather_than_ignoring_it() {
+    let d = dir("cpudrift");
+    let (ok, out, _) = compile(&d, "hd", HOST_NEST, "--emit-cpu", "rs");
+    assert!(
+        !ok,
+        "--emit-cpu accepted a @ZeroDrift accumulator. It has no exact \
+         accumulation lowering, so what it emitted is an ordinary float \
+         reduction:\n{out}"
+    );
+    assert!(
+        out.contains("@ZeroDrift") && out.contains("acc"),
+        "the refusal must name the directive and the binding:\n{out}"
+    );
+    assert!(
+        !out.contains("Compilation Successful"),
+        "the success banner appeared over a refusal:\n{out}"
+    );
+    // And nothing pasteable was printed - a refusal that still emits the code
+    // is not a refusal, it is a warning.
+    //
+    // MUTATION-CHECKED AND ENFORCED ONE LAYER UP, not by the emitter arm:
+    // making the arm emit the accumulator anyway leaves this green, because
+    // `main.rs` checks `emit_errors` and `exit(1)`s BEFORE it prints the blob.
+    // So this assertion is a claim about the CLI, which is the layer that
+    // matters for "what reaches the user's clipboard" - but do not read it as
+    // covering `cpu_emitter`. If the print is ever moved above that check, this
+    // is the test that fails.
+    assert!(
+        !out.contains("let mut acc"),
+        "the backend printed the accumulator anyway; a user pasting this gets \
+         the drifting reduction the refusal is about:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// THE CONTROL. Refusing every `let` would satisfy the test above and delete
+/// the backend. The identical program without the directive must still compile
+/// and must still emit the accumulator.
+#[test]
+fn the_cpu_host_backend_still_compiles_the_same_program_undirected() {
+    let d = dir("cpuplain");
+    let plain: String = HOST_NEST
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("@ZeroDrift") && !l.trim_start().starts_with("@bounds"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (ok, out, _) = compile(&d, "plain", &plain, "--emit-cpu", "rs");
+    assert!(ok, "the undirected program must still compile:\n{out}");
+    assert!(
+        out.contains("let mut acc"),
+        "...and must still emit the accumulator:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// The census, which is the part that generalises: **no backend may accept a
+/// `@ZeroDrift` program without saying something about the directive.**
+///
+/// Honouring it (the LLVM backend prints the representation it selected) and
+/// refusing it are both fine. Exiting 0 in silence is not, and that is exactly
+/// what `--emit-cpu` did. Written as a sweep so a backend added later is
+/// covered without anyone remembering to come back here.
+///
+/// Note `--emit-native` and `--emit-coprocessor` pass by refusing the program
+/// for unrelated reasons - floats and branches for one, no RT/Tensor work for
+/// the other. That is a weak pass and is recorded as such: neither backend has
+/// a drift path, and if either ever grows one it must grow a decision with it.
+#[test]
+fn no_backend_accepts_zero_drift_in_silence() {
+    let d = dir("census");
+    let mut honoured = 0usize;
+    for (flag, ext) in [
+        ("--emit-llvm", "ll"),
+        ("--emit-cpu", "rs"),
+        ("--emit-native", "bin"),
+        ("--emit-coprocessor", "ptx"),
+    ] {
+        let name = flag.trim_start_matches("--").replace('-', "_");
+        let (ok, out, _) = compile(&d, &name, HOST_NEST, flag, ext);
+        if !ok {
+            continue; // refused: nothing was emitted, so nothing was claimed
+        }
+        assert!(
+            out.contains("@ZeroDrift"),
+            "{flag} accepted a @ZeroDrift program and never mentioned the \
+             directive. Either it selected a representation and should say so, \
+             or it has no exact-accumulation lowering and must refuse - the one \
+             thing it may not do is emit an ordinary accumulator under a green \
+             banner.\n{out}"
+        );
+        honoured += 1;
+    }
+    // Non-vacuity: if every backend refused, this test would pass while
+    // checking nothing at all.
+    assert!(
+        honoured >= 1,
+        "no backend accepted the program, so the census asserted nothing"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}

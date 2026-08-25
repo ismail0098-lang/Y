@@ -328,6 +328,30 @@ impl CpuEmitter {
     fn emit_block(&mut self, block: &Block) {
         for stmt in &block.stmts {
             match stmt {
+                Stmt::Let { name, init, zero_drift: Some(_), span, .. } => {
+                    // `@ZeroDrift` is a CORRECTNESS CLAIM, and this backend has
+                    // no exact-accumulation lowering - zero references to
+                    // `zero_drift` in the whole file. Emitting the accumulator
+                    // as written produces `let mut acc = 0.0; acc += x;`, i.e.
+                    // exactly the float accumulation the directive exists to
+                    // forbid, while the LLVM backend on the same source reports
+                    // `acc: F32 -> Q32.32` and lowers it exactly. Two backends
+                    // disagreeing about what a directive MEANS is the shape of
+                    // gotcha #7 and of the `@ZeroDrift`-did-nothing era this
+                    // whole module was written to end.
+                    //
+                    // Worse here than usual: `--emit-cpu` prints Rust for the
+                    // user to paste, so nothing downstream ever gets a chance to
+                    // object. Refusing costs a line number; the alternative is a
+                    // silently drifting reduction under a green banner.
+                    self.unsupported_stmt(
+                        &format!(
+                            "`@ZeroDrift` on `{}` (this backend has no exact-accumulation lowering, so the accumulator would be emitted as an ordinary one and the guarantee silently dropped - use --emit-llvm, which selects a drift-free representation)",
+                            name
+                        ),
+                        span,
+                    );
+                }
                 Stmt::Let { name, init, .. } => {
                     self.indent();
                     write!(&mut self.host_buffer, "let mut {} = ", name).unwrap();
