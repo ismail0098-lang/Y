@@ -3070,37 +3070,57 @@ The limit is read from the hardware profile and varies by SM generation (48 KB o
 
 ## 19. `ypm` — Y Package Manager
 
-`ypm` is Y's built-in package manager for managing Y library dependencies and distributing reusable `.ysu` modules.
+`ypm` is Y's package manager for organizing multi-file Y projects and sharing
+reusable `.ysu` modules.
+
+**`ypm` is its OWN binary, not a `Y` subcommand.** `Cargo.toml` declares it as a
+`[[bin]]` target, so `cargo build --release` produces `target/release/ypm`
+alongside `target/release/Y`. Every command below used to be written
+`./target/release/Y ypm ...`, which runs the compiler with `ypm` as a source
+filename and reports `Failed to read file`.
 
 ### 19.1 Basic Commands
 
 ```bash
-# Initialize a new Y package in the current directory
-./target/release/Y ypm init
+# Create a new project directory from a template
+./target/release/ypm new <project_name>
 
-# Add a dependency
-./target/release/Y ypm add <package-name>
+# Initialize a project in the current directory
+./target/release/ypm init
 
-# Install all dependencies listed in Y.toml
-./target/release/Y ypm install
+# Build the current project and its dependencies
+./target/release/ypm build
 
-# Build the current package
-./target/release/Y ypm build
+# Build and run the current project
+./target/release/ypm run
 
-# Run the package entry point
-./target/release/Y ypm run
+# Run the test modules under tests/
+./target/release/ypm test
+
+# Clear the build target directory
+./target/release/ypm clean
 ```
 
-### 19.2 Package Manifest (`Y.toml`)
+That is the complete command set. **`ypm add` and `ypm install` were documented
+here and do not exist** — both answer `Unknown command`. Dependencies are
+declared in `Ysu.toml` and resolved by `ypm build`; there is no separate install
+step and no registry to add from (see §19.4).
 
-Each Y package is described by a `Y.toml` manifest:
+### 19.2 Package Manifest (`Ysu.toml`)
+
+Each Y package is described by an `Ysu.toml` manifest. **The file is
+`Ysu.toml`, not `Y.toml`** — this section named the latter in four places, and
+`ypm build` reports the directory is not a Y project if the manifest is not
+found under its real name.
+
+This is exactly what `ypm new` writes, and the `[build]` section is where the
+entry point lives — not under `[package]`, where it used to be documented:
 
 ```toml
 [package]
-name    = "my_kernel"
+name = "my_kernel"
 version = "0.1.0"
-author  = "YSU"
-entry   = "src/main.ysu"
+description = "A high-performance Y project"
 
 [dependencies]
 # Local path dependency
@@ -3108,15 +3128,22 @@ y_dsp = { path = "../y_dsp" }
 
 # Future: registry-based dependency (planned)
 # y_linalg = "0.2.1"
+
+[build]
+target = "native"
+entry = "src/main.ysu"
+ld_flags = []
 ```
 
 ### 19.3 Package Structure
 
-A standard `ypm` package layout:
+The layout `ypm new <name>` creates, plus the `tests/` directory `ypm test`
+looks in:
 
 ```
 my_kernel/
-  Y.toml          Package manifest
+  Ysu.toml        Package manifest
+  libs/           Local dependency checkouts
   src/
     main.ysu      Entry point (fn main)
     kernels.ysu   GPU kernel definitions
