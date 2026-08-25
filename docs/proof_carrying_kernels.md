@@ -368,6 +368,56 @@ emitter's uneven split even (`icmp slt` → `sle`) is caught by the new floor
 sweep at K=256 and **passes** the pre-existing K=4099 invariance test. A
 correctness test at one shape does not cover a schedule.
 
+#### Phase 1 progress, 2026-08-25 (2) — the OUTPUT tiling is proved, and it found a bug
+
+`proofs/ExactGemmTiling.v` finishes the schedule. Where the K-split is a
+*reduction* (the bands are summed, so the obligation is that they tile the
+range), the output tiling is a *partition* (each tile writes a disjoint
+rectangle of C, so the obligation is that every element is written **exactly
+once**). Different theorem, and the difference matters: a coverage count is
+satisfied by a tiling that writes one element twice and another never.
+
+- **`tiles_cover`** — uniform `MR`/`NR` tiles with a clamped ragged tail
+  account for `[0, extent)` exactly.
+- **`tile_index_injective` / `tile_index_surjective`** — `(tile, offset)` is a
+  bijection onto the axis. This is the "exactly once" obligation.
+- **`c_written_exactly_once`** — the 2-D consequence over the whole `vg.j` /
+  `vg.i` / `vg.fi` / `vg.fj` nest.
+- **`unclamped_tail_writes_out_of_bounds`** turns the emitter's own comment
+  ("Letting it write C directly would run past the last row and column … an
+  out-of-bounds WRITE, not a wrong number") into a machine-checked refutation.
+
+**Writing the theorem surfaced a precondition nobody had written down, and
+testing that precondition found a live out-of-bounds heap write.** The 2-D
+result needs `N <= ldc`; with a shorter row stride two distinct `(row, col)`
+pairs collapse onto one address. Nothing in the compiler states that, because
+every caller passes `ldc = N` — so nothing had ever called the exact kernel
+with a padded C. Doing so found **three sites in `emit_vnni_threaded_module`
+that treat C as contiguous `M*N`, ignoring `ldc`**:
+
+| site | consequence with `ldc > N` |
+|---|---|
+| `memset(C, 0, M*N*8)` | zeroes into early rows' padding and leaves the **last rows' live cells unzeroed** — and the kernel accumulates, so that is a wrong answer |
+| worker's job slot 8 stores the caller's `%ldc` | the worker's private C is a compact `M*N` buffer, so it writes `(M-1)*(ldc-N)` elements past the end — **heap overflow**, observed as `double free or corruption` |
+| the reduction walks source and destination with one flat index | correct only when the two strides are equal |
+
+Fixed: the zeroing is row-wise at the caller's stride, workers are handed
+`ldc = N` for their compact buffer, and the reduction crosses the two strides
+explicitly. Verified at 1, 2, 4 and 8 threads with `lda = K+5`, `ldb = N+9`,
+`ldc = N+7` and both axes ragged.
+
+**This is exactly the class §1 of this document cites** — *"twelve address
+computations in the CPU GEMM were correct only because `lda == K` made stride
+and extent the same number"* — found again, in the exact kernel, by the
+programme that exists because of it. It is not reachable from the compiler
+today; it is reachable from the public symbol that is Phase 0's deliverable.
+
+**The honest causal story: the proof did not find the bug, and it is the more
+interesting version.** Formalising the tiling forced the `N <= ldc` hypothesis
+to be stated; stating it suggested the test; the test found the bug. Mutation-
+verified 8/8 across the three fixed sites, the Rust transcription, the emitter's
+clamp and two hypotheses of the proof.
+
 
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
