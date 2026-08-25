@@ -619,6 +619,51 @@ is the whole schedule plus the tile's routing; what it does not have is a
 machine-checked model of the instruction itself, which no proof over `Z` can
 supply.
 
+#### Phase 1 progress, 2026-08-25 (6) — where the five proofs meet
+
+`proofs/ExactGemmComposition.v` (Rocq 9.1, 7 `Print Assumptions`, no axioms)
+does two things.
+
+**It makes the five files agree.** Each was written self-contained, so three of
+them define the B panel's slot map — `ExactGemmPacking.slot_b` as the emitted
+`(j/16)*32 + (j%16)*2 + h`, `ExactGemmMicro.slot` and
+`ExactGemmRegisterTile.slot_b` as the plain `2j + h` — and `MR`, `NR` and
+`col_of` are each defined twice. Nothing checked that any of those denoted the
+same thing.
+
+**The first draft of that argument overstated the risk, and measuring it is
+what showed so.** The header claimed each file would go on type-checking while
+silently describing a different kernel. Three attempts to produce such a drift
+— `RegisterTile.slot_b` shifted by one, its `NR` set to 32, `Micro.slot` with
+the halves swapped — were all **caught by the file itself**, because each
+definition happens to be pinned by a theorem that file already proves. So the
+agreement theorems do not close a demonstrably open hole; they make an
+incidental pinning explicit and cross-file. That is a smaller claim, and it is
+the true one.
+
+**The composition step is the new content.**
+`the_lane_accumulates_the_source_elements` says one `vpdpwssd` step on the
+packed panels contributes exactly the two k-terms of the *source* matrices' dot
+product for `(row i, column 16v + l)`, masked — so a padding row, column or
+k-half contributes zero. Packing says what a slot holds; the register tile says
+which lane reads it; only together do they say the lane reads the right source
+element. Neither file can state it alone, which is the reason the split was
+worth making in the first place.
+
+**The packers' contract is taken as a HYPOTHESIS, and naming it is the point.**
+`ExactGemmPacking.v` proves the slot maps are bijections and that the padded
+product equals the live dot product; it never states "slot `s` holds source
+element `x`" as one reusable lemma. The composition assumes that explicitly.
+That is the single step of Phase 1 which is assumed rather than proved, and it
+is written down rather than buried in a definition.
+
+**What is still not composed**, also stated in the file: this joins packing to
+routing for *one* `vpdpwssd` step. It does not chain through the k-pair loop
+into the flush, nor through the output partition, nor through the K-split, into
+one "the emitted kernel equals the naive nest" theorem. Each of those is proved
+over its own model. A genuine end-to-end statement needs a single shared model
+of the kernel — which is Phase 2's subject, not a missing lemma here.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation

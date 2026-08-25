@@ -313,6 +313,25 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "a_padding_column_never_reaches_c",
             ][..],
         ),
+        (
+            "ExactGemmComposition.v",
+            &[
+                // The five files must AGREE on the definitions they each
+                // declared separately - three copies of the B slot map, two of
+                // MR/NR/col_of. Without this each file goes on type-checking
+                // while proving a theorem about a kernel the others no longer
+                // describe.
+                "packing_and_register_tile_agree_on_the_b_slot",
+                "micro_and_register_tile_agree_on_the_b_slot",
+                "the_tile_shape_is_the_same_everywhere",
+                "the_agreement_is_not_vacuous",
+                // Packing says what a slot holds, the register tile says which
+                // lane reads it; together, the lane reads the right source
+                // elements. Neither half can state this alone.
+                "Print Assumptions the_lane_accumulates_the_source_elements",
+                "a_dead_row_contributes_nothing",
+            ][..],
+        ),
     ]
 }
 
