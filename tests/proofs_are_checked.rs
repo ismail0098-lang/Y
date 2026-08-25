@@ -270,6 +270,28 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "slot_b_is_the_plain_interleave",
             ][..],
         ),
+        (
+            "ExactGemmMicro.v",
+            &[
+                // The flush chunks sum to the whole k-pair range, with no
+                // hypothesis that the interval divides it.
+                "Print Assumptions flush_exact",
+                // The int32 accumulator agrees with Z exactly when nothing
+                // leaves the range...
+                "flush_exact_in_int32",
+                // ...and the licence's own bound is what supplies that.
+                "operand_bound_gives_no_overflow",
+                "the_licence_makes_the_chunk_exact",
+                // The overflow refuted concretely rather than assumed, and the
+                // boundary pinned at one unit wide.
+                "overflow_breaks_the_flush",
+                "the_4096_case_exceeds_by_exactly_one",
+                // The cross-file tie: the column pack_b routes to a lane is the
+                // column the store reads that lane back out to.
+                "the_packed_column_is_the_stored_column",
+                "a_wrong_lane_stride_permutes_the_columns",
+            ][..],
+        ),
     ]
 }
 

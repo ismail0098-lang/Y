@@ -496,6 +496,81 @@ int32 accumulate with its periodic int64 flush, whose no-overflow obligation is
 discharged exhaustively over the finite int16 domain in
 `tests/exact_gemm_licence_obligations.rs` rather than by proof.
 
+#### Phase 1 progress, 2026-08-25 (4) — the FLUSH is proved, and the licence is now known to be necessary
+
+`proofs/ExactGemmMicro.v` (Rocq 9.1, no axioms, nothing admitted) closes the
+last schedule obligation. Two things inside the micro-kernel are provable, and
+the file says plainly which parts are not.
+
+**The flush.** `vpdpwssd` accumulates into int32, which wraps. The kernel runs a
+bounded number of k-pairs into int32 accumulators, then widens them into an
+int64 running sum and re-zeroes them. `flush_exact` proves the chunks
+`[c, min(c+F, kpairs))` sum to the whole range — with no hypothesis that `F`
+divides `kpairs`, since the emitted `select` clamp carries the final partial
+chunk. `flush_exact_in_int32` proves the int32 arithmetic (modelled with an
+explicit `wrap32`) agrees with `Z` exactly when no partial sum leaves the
+range, and `operand_bound_gives_no_overflow` derives that hypothesis from
+`2 * F * m^2 <= i32::MAX` — which is precisely what
+`VnniExact::max_operand_magnitude` computes. `the_licence_makes_the_chunk_exact`
+composes the two.
+
+Note the chunking is the **clamped-tile** shape of `ExactGemmTiling.v`, not the
+uneven-band shape of `ExactGemmKsplit.v`: a flush interval is a fixed overflow
+budget, not a work split. Confusing the two is how a schedule proof gets pointed
+at the wrong theorem.
+
+**The lane round trip, which is a CROSS-FILE obligation and the first of its
+kind here.** `ExactGemmPacking.v` says `pack_b` puts column `j`'s `h`-th
+k-value at panel slot `2j + h`. `vpdpwssd` consumes that slot in vector
+`slot / 32`, lane `(slot mod 32) / 2`; the store writes vector `v` lane `l` to
+column `16v + l`. `the_packed_column_is_the_stored_column` proves the
+composition is the identity. **A mismatch here is a correctly-summed but
+column-PERMUTED tile** — every partial sum right, every value in the wrong
+place, and no bijection or bound in any other file able to see it. The control
+`a_wrong_lane_stride_permutes_the_columns` stops the theorem being satisfied by
+any pair of maps that happen to compose.
+
+**The behavioural half answers a question none of the existing tests asked: is
+the licence necessary, or is it paperwork?** `cpu_gemm_exact_threaded.rs`
+already links three flush intervals into one process and compares them bit for
+bit, so interval *invariance* was covered. Nothing checked the other direction.
+Since `emit_vnni_micro_module` takes the interval directly, the emitted symbols
+can be driven past the bound even though the compiler refuses to:
+
+| operand magnitude | interval sum | exact answer | kernel returns |
+|---|---|---|---|
+| 4095 (licensed) | 2,146,435,200 | 2,146,435,200 | 2,146,435,200 |
+| 4096 (refused) | 2,147,483,648 | 2,147,483,648 | **-2,147,483,648** |
+
+`K = 128` is `kpairs = 64`, exactly one full default interval, with *constant*
+operands because the bound is a worst case that random data never reaches. One
+unit past the licence the int32 accumulator wraps to the negative of the right
+answer. So the one-unit-wide boundary that
+`tests/exact_gemm_licence_obligations.rs` finds by exhausting the int16 domain,
+and that `the_4096_case_exceeds_by_exactly_one` states as arithmetic, is now
+also observable in a running kernel. **A licence nothing can violate is
+indistinguishable from a licence that certifies nothing.**
+
+Mutation-verified 8/8, and the load-bearing one is M6: forcing the emitter to
+flush every k-pair — so no overflow is possible — fails the refutation test.
+Without that mutation, "the bound is real" and "the test cannot tell" look the
+same.
+
+One incidental finding: `malloc`/`free` are declared by `llvm_emitter`'s
+prelude, not by either `cpu_gemm` module, so the modules are not
+self-contained when emitted standalone. Not a bug — nothing in production
+emits them that way — but `emit_vnni_threaded_module`'s `need_libc_decls` flag
+does not cover them, which is worth knowing before writing another standalone
+harness.
+
+**Phase 1's schedule is now complete: K-split reduction, output partition,
+operand packing, and the flush.** What remains unproved in the exact GEMM is
+the 2-D register tile and the masked tails — a lane's contribution is taken as
+given rather than derived from the packed panels, so nothing here says the
+accumulator for row `i` is fed row `i`'s broadcast. That and the `vpdpwssd`
+semantics themselves are ISA facts, pinned by `tests/cpu_gemm_vnni_micro.rs`
+against a scalar reference.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
