@@ -571,6 +571,54 @@ accumulator for row `i` is fed row `i`'s broadcast. That and the `vpdpwssd`
 semantics themselves are ISA facts, pinned by `tests/cpu_gemm_vnni_micro.rs`
 against a scalar reference.
 
+#### Phase 1 progress, 2026-08-25 (5) — the REGISTER TILE's routing, and a compensating pair
+
+`proofs/ExactGemmRegisterTile.v` (Rocq 9.1, 8 `Print Assumptions`, no axioms)
+covers the routing half of the arithmetic core — the piece the previous entry
+listed as remaining.
+
+`the_lane_consumes_its_own_column` proves that the emitted broadcast, the four
+`<32 x i16>` B loads at `Bp + p*NR*2 + v*32` and `vpdpwssd` send panel slot
+`2j + h` to the accumulator lane whose store column is `j`. That is the join
+between `ExactGemmPacking.v` (which says what a slot holds) and the kernel
+(which says which lane reads it); neither is interesting alone, and a mismatch
+between them is a correctly-summed, **column-permuted** tile.
+
+`the_i32_load_is_the_packed_pair` proves the emitter's `getelementptr inbounds
+i32` at element `p*MR + i` aliases exactly the packed int16 slots `2i` and
+`2i+1` of group `p`. Which half is `2p` rather than `2p+1` is little-endianness
+— an ISA fact, taken as a definition — and
+`swapping_the_pair_halves_computes_a_different_function` shows the assumption is
+load-bearing, paired with `a_symmetric_operand_hides_the_swap`, which is why
+the fixture is asymmetric in every axis.
+
+The masked tails are here too, and they explain a measurement from the packing
+entry: `a_padding_column_never_reaches_c` and `a_padding_row_never_reaches_c`
+are *why* the packers' row and column masks turned out redundant, while the
+phantom k-half's mask — which contributes to a live column — did not.
+
+**The behavioural tie drives `__y_gemm_micro_vnni` DIRECTLY with hand-built
+panels, and the reason is demonstrated rather than asserted.** Every other
+exact-GEMM test goes through the full driver, where the packers and the routing
+are composed. A single-site mutation does not expose that: breaking the B
+vector offset alone fails every GEMM test in the repo. A **compensating pair**
+does — XOR the vector index in both `emit_vnni_pack_b` and the flush's store
+column, and the two cancel:
+
+| | packing_model | thread_invariance | cpu_gemm_exact_threaded | register_tile |
+|---|---|---|---|---|
+| compensating pair | ok | ok | ok | **FAILED** |
+
+Building the panel by hand removes the composition, so there is nothing left
+for a packer to compensate with.
+
+**What is still not proved**, and the file says so: `vpdpwssd`'s own semantics
+and the endianness are definitions, pinned empirically by
+`tests/cpu_gemm_vnni_micro.rs` against a scalar reference. What Phase 1 now has
+is the whole schedule plus the tile's routing; what it does not have is a
+machine-checked model of the instruction itself, which no proof over `Z` can
+supply.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
