@@ -34,6 +34,25 @@
 
     The second half is the file's real new content: the one composition step
     the pieces were built for, which no single file can state.
+
+    *** What changed after the first commit. ***
+
+    That step was proved under two HYPOTHESES about what the packed panels
+    hold, and the file said so - "the one step of Phase 1 that is assumed
+    rather than proved". The next thing done to it was to try to violate them,
+    and **the real panel does not satisfy them as they were written**: they
+    quantified over all `i` and `j`, and at `i = MR` the index named is the
+    following k-pair group's first slot, not a pad. So the composition was
+    true and unusable - to apply it you had to supply a premise satisfied only
+    by a panel one group long.
+
+    Both are now bounded and DISCHARGED, against
+    [ExactGemmPacking.panel_decodes_its_own_write] and its uniqueness
+    companion, giving [the_packed_panels_route_to_the_right_source_elements]
+    with no hypothesis about panel contents at all. **A hypothesis nothing is
+    shown to satisfy is the proof-shaped version of a licence nothing can
+    violate** - which this repo already knows to check for, and had not
+    checked here.
 *)
 
 Require Import ZArith Lia Arith.
@@ -95,15 +114,28 @@ Proof. split; vm_compute; lia. Qed.
 (** ** The composition step                                            *)
 (* ------------------------------------------------------------------ *)
 
-(** The packers' contract, as a hypothesis rather than as something re-derived
-    here: panel slot `slot_a i h` of k-pair group `p` holds `A[i][2p+h]`,
-    masked to the live tile, and `slot_b j h` holds `B[2p+h][j]`.
+(** The packers' contract. It was a HYPOTHESIS when this file was written,
+    and the first thing done to it afterwards was to try to violate it - which
+    is how the bound below came to be here.
 
-    `ExactGemmPacking.v` proves the maps are bijections and that the padded
-    product equals the live dot product; it does not state "slot `s` holds
-    source element `x`" as one reusable lemma, so the composition takes it as
-    an explicit assumption. **That is the seam, and naming it is the point** -
-    it is the one step of Phase 1 that is assumed rather than proved. *)
+    **As first stated it quantified over ALL `i` and ALL `j`, and in that form
+    no real panel satisfies it.** At `i = MR` the write index
+    `p*(2*MR) + 2*MR` is the FIRST slot of k-pair group `p+1`, which holds
+    that group's data; an unbounded contract demands a zero there whenever
+    row `MR` is past `mrows`. So the theorem below was true and useless: to
+    apply it you had to supply a premise satisfied only by a panel one k-pair
+    group long, never by the panel the emitted loop builds.
+    `ExactGemmPacking.the_group_bound_is_load_bearing` refutes the unbounded
+    form on concrete numbers, with a control showing the same panel agrees
+    inside the group.
+
+    It is no longer an assumption either way:
+    [ExactGemmPacking.panel_decodes_its_own_write] proves it of the decoded
+    panel, and [ExactGemmPacking.panel_is_the_only_solution] proves that panel
+    is the only array the loop's writes admit. The section keeps the
+    hypothesis form so the composition stays stated about *any* panel meeting
+    the contract, and [the_packed_panels_route_to_the_right_source_elements]
+    below discharges it. *)
 Section Compose.
 
 Variable A B : nat -> nat -> Z.        (* A i k, B k j *)
@@ -111,14 +143,24 @@ Variable Ap Bp : nat -> Z.             (* the packed panels *)
 Variable mrows ncols kc p : nat.
 
 Hypothesis pack_a_contract : forall i h,
-  (h < 2)%nat ->
+  (i < ExactGemmRegisterTile.MR)%nat -> (h < 2)%nat ->
   Ap (p * (2 * ExactGemmRegisterTile.MR) + ExactGemmRegisterTile.slot_a i h)%nat
   = ExactGemmPacking.packed (A i) mrows kc i (2 * p + h)%nat.
 
 Hypothesis pack_b_contract : forall j h,
-  (h < 2)%nat ->
+  (j < ExactGemmRegisterTile.NR)%nat -> (h < 2)%nat ->
   Bp (p * (2 * ExactGemmRegisterTile.NR) + ExactGemmRegisterTile.slot_b j h)%nat
   = ExactGemmPacking.packed (fun k => B k j) ncols kc j (2 * p + h)%nat.
+
+(** The tile's own bounds: 4 accumulator vectors of 16 lanes is 64 columns. *)
+Lemma col_of_is_in_the_tile : forall v l,
+  (v < ExactGemmRegisterTile.NRV)%nat -> (l < 16)%nat ->
+  (ExactGemmRegisterTile.col_of v l < ExactGemmRegisterTile.NR)%nat.
+Proof.
+  intros v l Hv Hl.
+  unfold ExactGemmRegisterTile.col_of, ExactGemmRegisterTile.NR,
+         ExactGemmRegisterTile.NRV in *. lia.
+Qed.
 
 (** **THE COMPOSITION.** One `vpdpwssd` step on the packed panels contributes
     exactly the two k-terms of the SOURCE matrices' dot product for
@@ -130,6 +172,8 @@ Hypothesis pack_b_contract : forall j h,
     can state this alone, which is the whole reason the split was worth
     making. *)
 Theorem the_lane_accumulates_the_source_elements : forall acc i v l,
+  (i < ExactGemmRegisterTile.MR)%nat ->
+  (v < ExactGemmRegisterTile.NRV)%nat -> (l < 16)%nat ->
   ExactGemmRegisterTile.vpdpwssd
     acc
     (ExactGemmRegisterTile.broadcast
@@ -150,13 +194,14 @@ Theorem the_lane_accumulates_the_source_elements : forall acc i v l,
           (fun k => B k (ExactGemmRegisterTile.col_of v l)) ncols kc
           (ExactGemmRegisterTile.col_of v l) (2 * p + 1)%nat.
 Proof.
-  intros acc i v l.
+  intros acc i v l Hi Hv Hl.
+  pose proof (col_of_is_in_the_tile v l Hv Hl) as Hcol.
   rewrite ExactGemmRegisterTile.the_lane_consumes_its_own_column.
   cbv beta.
-  rewrite (pack_a_contract i 0 ltac:(lia)).
-  rewrite (pack_a_contract i 1 ltac:(lia)).
-  rewrite (pack_b_contract (ExactGemmRegisterTile.col_of v l) 0 ltac:(lia)).
-  rewrite (pack_b_contract (ExactGemmRegisterTile.col_of v l) 1 ltac:(lia)).
+  rewrite (pack_a_contract i 0 Hi ltac:(lia)).
+  rewrite (pack_a_contract i 1 Hi ltac:(lia)).
+  rewrite (pack_b_contract (ExactGemmRegisterTile.col_of v l) 0 Hcol ltac:(lia)).
+  rewrite (pack_b_contract (ExactGemmRegisterTile.col_of v l) 1 Hcol ltac:(lia)).
   replace (2 * p + 0)%nat with (2 * p)%nat by lia.
   reflexivity.
 Qed.
@@ -165,6 +210,8 @@ Qed.
     masking survives the composition rather than having to be re-argued at
     each layer. *)
 Corollary a_dead_row_contributes_nothing : forall acc i v l,
+  (i < ExactGemmRegisterTile.MR)%nat ->
+  (v < ExactGemmRegisterTile.NRV)%nat -> (l < 16)%nat ->
   (mrows <= i)%nat ->
   ExactGemmRegisterTile.vpdpwssd
     acc
@@ -178,13 +225,72 @@ Corollary a_dead_row_contributes_nothing : forall acc i v l,
     l
   = acc l.
 Proof.
-  intros acc i v l Hdead.
-  rewrite the_lane_accumulates_the_source_elements.
+  intros acc i v l Hi Hv Hl Hdead.
+  rewrite the_lane_accumulates_the_source_elements by assumption.
   unfold ExactGemmPacking.packed.
   rewrite (proj2 (Nat.ltb_ge i mrows) Hdead). simpl. lia.
 Qed.
 
 End Compose.
+
+(* ------------------------------------------------------------------ *)
+(** ** Discharging the contract: the seam is closed                    *)
+(* ------------------------------------------------------------------ *)
+
+(** The same statement over the panels the packer loops actually produce, with
+    no hypothesis about what a panel holds. This is what the section was for;
+    [ExactGemmPacking.panel_is_the_only_solution] is what makes it a claim
+    about the emitted loop rather than about a chosen model.
+
+    A hypothesis nothing is shown to satisfy is the proof-shaped version of a
+    licence nothing can violate. This file spent a commit in that state. *)
+Theorem the_packed_panels_route_to_the_right_source_elements :
+  forall (A B : nat -> nat -> Z) (mrows ncols kc p : nat) acc i v l,
+    (i < ExactGemmRegisterTile.MR)%nat ->
+    (v < ExactGemmRegisterTile.NRV)%nat -> (l < 16)%nat ->
+    ExactGemmRegisterTile.vpdpwssd
+      acc
+      (ExactGemmRegisterTile.broadcast
+         (ExactGemmPacking.panel A mrows kc ExactGemmPacking.MR
+            (p * (2 * ExactGemmRegisterTile.MR)
+             + ExactGemmRegisterTile.slot_a i 0)%nat)
+         (ExactGemmPacking.panel A mrows kc ExactGemmPacking.MR
+            (p * (2 * ExactGemmRegisterTile.MR)
+             + ExactGemmRegisterTile.slot_a i 1)%nat))
+      (ExactGemmRegisterTile.bvec
+         (fun e => ExactGemmPacking.panel (fun j k => B k j) ncols kc
+                     ExactGemmPacking.NR
+                     (p * (2 * ExactGemmRegisterTile.NR) + e)%nat) v)
+      l
+    = acc l
+      + ExactGemmPacking.packed (A i) mrows kc i (2 * p)%nat
+        * ExactGemmPacking.packed
+            (fun k => B k (ExactGemmRegisterTile.col_of v l)) ncols kc
+            (ExactGemmRegisterTile.col_of v l) (2 * p)%nat
+      + ExactGemmPacking.packed (A i) mrows kc i (2 * p + 1)%nat
+        * ExactGemmPacking.packed
+            (fun k => B k (ExactGemmRegisterTile.col_of v l)) ncols kc
+            (ExactGemmRegisterTile.col_of v l) (2 * p + 1)%nat.
+Proof.
+  intros A B mrows ncols kc p acc i v l Hi Hv Hl.
+  apply the_lane_accumulates_the_source_elements; try assumption.
+  - intros i' h' Hi' Hh'.
+    apply ExactGemmPacking.panel_decodes_its_own_write;
+      [ unfold ExactGemmPacking.MR, ExactGemmRegisterTile.MR in *; lia
+      | unfold ExactGemmPacking.MR, ExactGemmRegisterTile.MR in *; lia
+      | exact Hh' ].
+  - intros j' h' Hj' Hh'.
+    (* [ExactGemmRegisterTile.slot_b] is the plain interleave by definition,
+       and [packing_and_register_tile_agree_on_the_b_slot] above is what says
+       that is the map the emitter writes. Unfolding rather than rewriting
+       with the interleave theorem: `2*j+h` is a shape the accumulator index
+       `2*p+h` also has, so a backwards rewrite hits the wrong occurrence. *)
+    unfold ExactGemmRegisterTile.slot_b.
+    apply ExactGemmPacking.panel_decodes_its_own_write;
+      [ unfold ExactGemmPacking.NR, ExactGemmRegisterTile.NR in *; lia
+      | unfold ExactGemmPacking.NR, ExactGemmRegisterTile.NR in *; lia
+      | exact Hh' ].
+Qed.
 
 (** *** What is still NOT composed, stated rather than implied.
 
@@ -207,3 +313,4 @@ Print Assumptions the_tile_shape_is_the_same_everywhere.
 Print Assumptions the_agreement_is_not_vacuous.
 Print Assumptions the_lane_accumulates_the_source_elements.
 Print Assumptions a_dead_row_contributes_nothing.
+Print Assumptions the_packed_panels_route_to_the_right_source_elements.

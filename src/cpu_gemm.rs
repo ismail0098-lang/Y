@@ -1867,6 +1867,29 @@ pub fn pack_b_slot(j: usize, h: usize) -> usize {
     (j / 16) * 32 + (j % 16) * 2 + h
 }
 
+/// Read a panel index back as the `(k-pair group, row-or-column, half)` the
+/// packer wrote it for. The inverse of `p*(2*width) + slot(idx, h)`.
+///
+/// `width` is [`VNNI_MR`] for an A panel and [`VNNI_NR`] for a B one. Decoding
+/// B's index with a bare `/2` is faithful to the emitted vector-group form
+/// because [`pack_b_slot`] IS the plain interleave, as the doc above says.
+///
+/// This is the transcription of `panel` in `proofs/ExactGemmPacking.v`.
+/// `panel_decodes_its_own_write` there proves the round trip, and
+/// `panel_is_the_only_solution` proves that ANY array satisfying the packer's
+/// writes agrees with it over the whole panel - which is what makes the
+/// composition proof a statement about the emitted loop instead of about a
+/// model chosen to make it go through.
+///
+/// The bound `idx < width` is load-bearing and is why this returns the group:
+/// at `idx = width` the index is the FIRST slot of group `p + 1`, holding that
+/// group's data rather than a pad.
+///
+pub fn panel_slot_decode(s: usize, width: usize) -> (usize, usize, usize) {
+    let r = s % (2 * width);
+    (s / (2 * width), r / 2, r % 2)
+}
+
 /// The flush chunking, transcribed from `emit_vnni_micro_module`'s outer loop.
 ///
 /// The emitted loop is `for c = 0; c < kpairs; c += flush`, with

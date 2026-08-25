@@ -621,7 +621,7 @@ supply.
 
 #### Phase 1 progress, 2026-08-25 (6) — where the five proofs meet
 
-`proofs/ExactGemmComposition.v` (Rocq 9.1, 7 `Print Assumptions`, no axioms)
+`proofs/ExactGemmComposition.v` (Rocq 9.1, 8 `Print Assumptions`, no axioms)
 does two things.
 
 **It makes the five files agree.** Each was written self-contained, so three of
@@ -650,12 +650,13 @@ which lane reads it; only together do they say the lane reads the right source
 element. Neither file can state it alone, which is the reason the split was
 worth making in the first place.
 
-**The packers' contract is taken as a HYPOTHESIS, and naming it is the point.**
-`ExactGemmPacking.v` proves the slot maps are bijections and that the padded
-product equals the live dot product; it never states "slot `s` holds source
-element `x`" as one reusable lemma. The composition assumes that explicitly.
-That is the single step of Phase 1 which is assumed rather than proved, and it
-is written down rather than buried in a definition.
+**The packers' contract was taken as a HYPOTHESIS, and naming it is what made
+it get fixed.** `ExactGemmPacking.v` proved the slot maps are bijections and
+that the padded product equals the live dot product; it never stated "slot `s`
+holds source element `x`" as one reusable lemma, so the composition assumed
+that explicitly and the file called it the single step of Phase 1 which is
+assumed rather than proved. See the entry below — the assumption turned out to
+be false of the real panel.
 
 **What is still not composed**, also stated in the file: this joins packing to
 routing for *one* `vpdpwssd` step. It does not chain through the k-pair loop
@@ -663,6 +664,69 @@ into the flush, nor through the output partition, nor through the K-split, into
 one "the emitted kernel equals the naive nest" theorem. Each of those is proved
 over its own model. A genuine end-to-end statement needs a single shared model
 of the kernel — which is Phase 2's subject, not a missing lemma here.
+
+#### Phase 1 progress, 2026-08-26 — the assumed step, and why it was wrong
+
+**The seam the last entry named was closed, and trying to violate it first is
+what found a defect in it.** The composition's two hypotheses said panel slot
+`p*(2*MR) + slot_a i h` holds `A[i][2p+h]` masked, for **every** `i` — and no
+real panel satisfies that. At `i = MR` the index named is the FIRST slot of
+k-pair group `p+1`, which holds that group's data rather than a pad, while an
+unbounded contract demands a zero there whenever row `MR` is past `mrows`.
+
+So the composition theorem was true and unusable: applying it meant supplying a
+premise satisfied only by a panel one k-pair group long, never by the panel the
+emitted loop builds. **A hypothesis nothing is shown to satisfy is the
+proof-shaped version of a licence nothing can violate** — a check this repo
+already runs on its licences (`the_add_formula_really_is_incomplete`,
+`garbage_in_the_pad_changes_the_answer`) and had not run on its own premises.
+
+The fix is a bound plus a discharge:
+
+- `ExactGemmPacking.panel` models the panel as a FUNCTION — decode the index
+  into `(group, row-or-column, half)` — and `panel_decodes_its_own_write`
+  proves the contract of it, with `idx < width`.
+- `panel_is_the_only_solution` proves ANY array satisfying the packer's writes
+  agrees with `panel` over the whole panel range. That is what makes the first
+  a claim about the emitted loop rather than about a model chosen to make the
+  composition go through, and it is where the bijection lemmas finally earn
+  their keep at panel scale: injective ⇒ the write specification is consistent,
+  onto ⇒ it is complete.
+- `the_group_bound_is_load_bearing` refutes the unbounded form on concrete
+  numbers, with `inside_the_group_the_same_panel_agrees` as the control.
+- `the_packed_panels_route_to_the_right_source_elements` is the composition
+  with no hypothesis about panel contents at all.
+
+**The behavioural tie runs the real packers** (`tests/exact_gemm_panel_model.rs`):
+`__y_gemm_vnni_pack_a` / `_pack_b` are called on poisoned panels over five
+shapes (full, phantom k-half, ragged M, ragged N, all three) with every stride
+differing from its extent, and **every slot** is compared against
+`panel_slot_decode`. `the_next_group_is_not_padding` refutes the unbounded
+contract against real bytes rather than against the model.
+
+**It also isolates something no end-to-end test can.** The packing entry above
+records that removing `pack_b`'s zero-fill *alone* leaves every answer correct,
+because a padding term is `a_pad * b_pad` and a zero on either side kills it —
+so the two masks could only ever be pinned as a conjunction. Measured, with
+`pack_b`'s mask removed:
+
+| | packing_model | thread_invariance | cpu_gemm_exact_threaded | tiling_model | panel_model |
+|---|---|---|---|---|---|
+| pack_b mask dropped | ok | ok | ok | ok | **FAILED** |
+
+Mutation-verified 8/8: four against the emitted packers and the decode, four
+against the proofs — including reverting the contract to its unbounded form,
+which now fails where the previous commit compiled it happily.
+
+**A gate bug fell out of writing the prose.** `nothing_in_any_proof_is_admitted`
+stripped Coq comments LINE-LOCALLY, so a continuation line inside a multi-line
+comment was scanned as code and the ordinary English word "admit" failed the
+build. Contorting the prose would have left the hole. Probing the fixed gate
+with what it exists to catch then found a second, older one: it tested
+`code == "Admitted."`, `starts_with("admit")` and `contains(" admit.")`, and
+`Proof. Admitted.` on ONE line — the commonest way to stub a Coq lemma — is
+none of the three. It matches the TOKEN now, and covers `Abort.` as well, which
+discards the lemma outright while the file still compiles.
 
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
