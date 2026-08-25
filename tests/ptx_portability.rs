@@ -56,8 +56,24 @@ static SALT: AtomicUsize = AtomicUsize::new(0);
 const FLOOR: &str = "sm_80";
 
 /// Architectures a kernel is expected to load on, oldest first. sm_86 is the
-/// 3060, sm_89 the 4070 Ti SUPER this was developed on, sm_120 Blackwell.
-const ARCHES: [&str; 4] = ["sm_80", "sm_86", "sm_89", "sm_120"];
+/// 3060, sm_89 the 4070 Ti SUPER this was developed on, sm_90 the H100/H200,
+/// sm_120 Blackwell.
+///
+/// **sm_90 was missing, and it is the one arch here nobody can spot-check by
+/// running something.** The list covered two consumer Ampere parts, the
+/// development machine, and consumer Blackwell - and skipped the datacenter
+/// architecture entirely. That is the arch where "does it load?" is least
+/// answerable by hand, because no one working on this repo has an H100; it is
+/// therefore the one that most needs the gate. All 67 committed artifacts
+/// already assemble there, so this asserts a property the compiler had rather
+/// than demanding a new one - which is precisely why it should have been
+/// asserted before somebody changed it.
+///
+/// Note this says nothing about Hopper-SPECIFIC instructions. TMA and WGMMA
+/// are not in this backend (see gotcha #8: the surface that claimed to be was
+/// deleted for never having assembled). What is checked is that the ordinary
+/// `mma.sync` / `cp.async` instruction mix Y really emits loads on an H100.
+const ARCHES: [&str; 5] = ["sm_80", "sm_86", "sm_89", "sm_90", "sm_120"];
 
 /// The PTX ISA version shipped artifacts declare.
 ///
@@ -505,6 +521,21 @@ fn the_llvm_backend_works_from_a_foreign_directory() {
 /// it. The first version of this test hardcoded the expected numbers in a
 /// table and so verified the table rather than the compiler -- reverting sm_86
 /// to 7.5 left it green. Found by mutation.
+/// Archs whose DOCUMENTED PTX ISA floor is above what this assembler measures.
+///
+/// `ptxas` 13.3 accepts `.version 7.8` at `-arch=sm_90`, but sm_90 shipped in
+/// CUDA 12.0, whose ISA is 8.0 - there is no 11.x driver with sm_90 support to
+/// be compatible with, so 7.8 buys nothing and claims something the spec does
+/// not. `ptx_version_for_sm` keeps 8.0 deliberately and this is where that is
+/// written down.
+const SPEC_FLOOR_ABOVE_MEASURED: [(&str, &str, &str); 1] = [(
+    "sm_90",
+    "8.0",
+    "sm_90 arrived in CUDA 12.0 (ISA 8.0). This assembler accepting 7.8 at that \
+     target is leniency, not a contract, and no driver old enough to care about \
+     the difference supports sm_90 at all.",
+)];
+
 #[test]
 fn the_emitter_declares_the_real_driver_floor() {
     let Some(tool) = ptxas() else {
@@ -526,6 +557,36 @@ fn the_emitter_declares_the_real_driver_floor() {
             .unwrap_or_else(|| panic!("{}: no candidate .version assembles at all", arch));
 
         let declared = emitted_version_for(arch);
+
+        // A DOCUMENTED exception, kept narrow on purpose. Where the arch is
+        // newer than the ISA version this assembler will accept for it, the
+        // measured floor is leniency rather than a contract, and the emitter
+        // deliberately declares the SPEC floor instead. Guess down, but not
+        // below the spec.
+        //
+        // Written as a table of named archs, not as a blanket `declared >=
+        // measured`: the whole reason this test exists is that four archs were
+        // over-stating their floor, and a `>=` comparison passes all four.
+        if let Some((_, spec, why)) = SPEC_FLOOR_ABOVE_MEASURED
+            .iter()
+            .find(|(a, _, _)| *a == arch)
+        {
+            assert_eq!(
+                declared.as_str(),
+                *spec,
+                "{arch}: the emitter declares .version {declared}, but this arch's \
+                 documented floor is {spec}. {why}"
+            );
+            assert!(
+                CANDIDATES.iter().position(|v| v == floor)
+                    <= CANDIDATES.iter().position(|v| v == spec),
+                "{arch}: the MEASURED floor {floor} is now above the documented \
+                 {spec}, so the exception is stale - this assembler no longer \
+                 accepts what the table assumes it does."
+            );
+            continue;
+        }
+
         assert_eq!(
             &declared.as_str(),
             floor,
@@ -544,7 +605,18 @@ fn the_emitter_declares_the_real_driver_floor() {
 ///
 /// Driving the real binary is what makes the caller a test OF THE EMITTER
 /// rather than of a constant repeated in the test file.
-fn emitted_version_for(arch: &str) -> String {
+/// The `.target` the emitter declares for a probed arch.
+///
+/// Deliberately separate from `emitted_version_for`, which asserts the target
+/// matches as a sanity check on its own probe - an assertion inside a helper is
+/// not a test, and the sm_90a promotion is exactly what it failed to report as
+/// a finding.
+fn emitted_target_for(arch: &str) -> String {
+    let ptx = emitted_module_for(arch);
+    declared_target(&ptx).unwrap_or_default()
+}
+
+fn emitted_module_for(arch: &str) -> String {
     let dir = std::env::temp_dir().join(format!(
         "y_ptxver_{}_{}_{}",
         std::process::id(),
@@ -576,6 +648,12 @@ fn emitted_version_for(arch: &str) -> String {
         .expect("run Y");
     let ptx = std::fs::read_to_string(dir.join("plain.ptx"))
         .unwrap_or_else(|_| String::from_utf8_lossy(&out.stdout).to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+    ptx
+}
+
+fn emitted_version_for(arch: &str) -> String {
+    let ptx = emitted_module_for(arch);
     let target = declared_target(&ptx).unwrap_or_default();
     assert_eq!(
         target, arch,
@@ -583,10 +661,8 @@ fn emitted_version_for(arch: &str) -> String {
          measuring the arch it thinks it is",
         arch, target
     );
-    let v = declared_version(&ptx)
-        .unwrap_or_else(|| panic!("no .version line in the emitted PTX:\n{}", ptx));
-    let _ = std::fs::remove_dir_all(&dir);
-    v
+    declared_version(&ptx)
+        .unwrap_or_else(|| panic!("no .version line in the emitted PTX:\n{}", ptx))
 }
 
 /// A kernel with no FP8 in it must not inherit FP8's driver requirement.
@@ -798,5 +874,87 @@ fn no_source_file_hardcodes_a_ptx_version_above_the_floor() {
          Call `ptx_version_for_sm` instead of writing a literal:\n{}",
         VERSION_FLOOR,
         bad.join("\n")
+    );
+}
+
+/// No emitted `.target` may carry an architecture-SPECIFIC suffix.
+///
+/// The emitter promoted `sm_90` to `sm_90a` unconditionally and without a
+/// stated reason - a leftover from the WGMMA/TMA surface that was deleted for
+/// never having assembled. The `a` suffix is not "sm_90 plus extras": it is a
+/// different, architecture-specific target that never JITs forward, so every
+/// kernel compiled on an H100 was pinned to that exact card.
+///
+/// It went unnoticed for the most ordinary reason - `ARCHES` did not include
+/// sm_90, so nothing ever asked the emitter what it would target there. This
+/// test asks the question of every arch, and would catch the same promotion
+/// applied to any future one.
+#[test]
+fn no_kernel_declares_an_architecture_specific_target() {
+    for arch in ARCHES {
+        let target = emitted_target_for(arch);
+        assert_eq!(
+            target, arch,
+            "asked the emitter for {arch} and it declared `.target {target}`. A \
+             target must be what was probed, not a promotion - PTX is forward \
+             compatible and an arch-specific variant is not."
+        );
+        assert!(
+            !target
+                .trim_start_matches("sm_")
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_alphabetic()),
+            "`.target {target}` carries an architecture-specific suffix. Nothing \
+             this backend emits requires one; if a Hopper- or Blackwell-specific \
+             instruction is ever added it must request the suffix the way FP8 \
+             requests a `.version` - discovered during emission, on the module - \
+             not by promoting every kernel on the chance that one needs it."
+        );
+    }
+}
+
+/// The MEASUREMENT the rule above rests on, so it is grounded rather than
+/// believed.
+///
+/// A plain target JITs forward to every later architecture; the `a` variant
+/// assembles at neither the later archs NOR its own plain one. Without this,
+/// the test above is a style rule.
+#[test]
+fn an_architecture_specific_target_does_not_travel() {
+    let Some(tool) = ptxas() else {
+        eprintln!("ptxas not found; skipping");
+        return;
+    };
+    let body = ".address_size 64\n.visible .entry k(){ ret; }\n";
+    let plain = format!(".version 8.0\n.target sm_90\n{body}");
+    let specific = format!(".version 8.0\n.target sm_90a\n{body}");
+
+    // The control: without this the assertions below could pass because the
+    // probe module is malformed for some unrelated reason.
+    assert!(
+        assembles(&tool, &plain, "sm_90", "travel_plain_90").is_ok(),
+        "the plain sm_90 probe must assemble at its own arch, or this test is \
+         measuring a broken module rather than the suffix"
+    );
+
+    for later in ["sm_100", "sm_120"] {
+        if assembles(&tool, &plain, later, &format!("travel_plain_{later}")).is_err() {
+            // This assembler may simply not know the arch; skip rather than
+            // assert something about the local toolchain.
+            eprintln!("skipping {later}: not supported by this ptxas");
+            continue;
+        }
+        assert!(
+            assembles(&tool, &specific, later, &format!("travel_spec_{later}")).is_err(),
+            "`.target sm_90a` assembled at {later}. If that is now true the \
+             suffix has stopped being architecture-specific and the rule in \
+             `no_kernel_declares_an_architecture_specific_target` needs revisiting."
+        );
+    }
+    assert!(
+        assembles(&tool, &specific, "sm_90", "travel_spec_90").is_err(),
+        "`.target sm_90a` assembled at plain -arch=sm_90; the suffix is supposed \
+         to require an exactly-matching arch"
     );
 }
