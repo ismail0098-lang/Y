@@ -399,6 +399,36 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "the_packed_panels_route_to_the_right_source_elements",
             ][..],
         ),
+        (
+            "ExactGemmChain.v",
+            &[
+                // THE headline: the emitted flush schedule, accumulating each
+                // chunk in int32, over the panels the emitted packers produce,
+                // through the emitted routing, computes the SOURCE dot product
+                // for one accumulator lane.
+                "Print Assumptions the_emitted_lane_computes_the_source_dot_product",
+                // The two joins that are the file's own new content. The
+                // sibling models were written independently and it was not
+                // obvious they would meet: sum_pairs counts k-PAIRS with both
+                // halves, sum_from is a flat range.
+                "kloop_is_the_padded_product",
+                "kloop_is_sum_from_step",
+                "the_k_pair_loop_computes_the_source_dot_product",
+                "the_flush_schedule_computes_the_source_dot_product",
+                // The masking survives to loop scale rather than being
+                // re-argued per layer.
+                "a_dead_row_accumulates_nothing",
+                "a_dead_column_accumulates_nothing",
+                // The licence made load-bearing for the WHOLE chain, with the
+                // one-unit boundary and its control. Without these the chain
+                // is a theorem about an idealised Z accumulator.
+                "violating_the_licence_breaks_the_chain",
+                "at_the_licensed_magnitude_the_chain_holds",
+                // ...and the chain evaluated on concrete numbers, because
+                // every equality above is satisfied by a model computing 0.
+                "the_whole_chain_is_not_vacuous",
+            ][..],
+        ),
     ]
 }
 

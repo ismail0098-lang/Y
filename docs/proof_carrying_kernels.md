@@ -728,6 +728,77 @@ with what it exists to catch then found a second, older one: it tested
 none of the three. It matches the TOKEN now, and covers `Abort.` as well, which
 discards the lemma outright while the file still compiles.
 
+#### Phase 1 progress, 2026-08-26 (2) — the chain closes for one lane
+
+`proofs/ExactGemmChain.v` (Rocq 9.1, 11 `Print Assumptions`, no axioms) joins
+four files into one statement. **`the_emitted_lane_computes_the_source_dot_product`**:
+run the emitted flush schedule, accumulating each chunk in **int32** and adding
+it into an int64 running sum, over the panels the emitted packers produce,
+through the emitted routing — and lane `l` of vector `v` for row `i` holds
+exactly `sum_k A[i][k] * B[k][16v+l]`, the dot product of the **source**
+matrices.
+
+No hypothesis about panel contents, none that the flush interval divides the
+k-pair count, none that the tile is full. The one assumption is the **licence**,
+`2·Fl·m² ≤ i32::MAX`, which is precisely what
+`VnniExact::max_operand_magnitude` computes — and which
+`tests/exact_gemm_licence_obligations.rs` discharges by exhausting the finite
+int16 domain.
+
+**The connective tissue is the new content, and it was not obviously going to
+fit.** `kloop_is_the_padded_product` turns a loop of routing steps into the
+padded product `ExactGemmPacking` already evaluates; `kloop_is_sum_from_step`
+re-presents the same loop in the shape `ExactGemmMicro`'s flush theorem
+quantifies over. Those two models were written independently — `sum_pairs`
+counts k-*pairs* carrying both halves, `sum_from` is a flat range — so the join
+is a small lemma each way rather than a definitional coincidence. That the
+pieces met at all is the first evidence that the file split was the right
+decomposition rather than five unrelated models.
+
+**The licence is load-bearing for the whole chain, refuted symbolically and
+behaviourally at the same numbers.** `violating_the_licence_breaks_the_chain`
+evaluates the chain at operand magnitude 4096 with the shipped interval of 64
+and gets **−2,147,483,648 where the answer is 2,147,483,648**;
+`at_the_licensed_magnitude_the_chain_holds` is the same chain at 4095.
+`tests/exact_gemm_chain_model.rs` reaches the identical pair on the real
+`vpdpwssd` kernel — from **source** matrices through the **real packers**, where
+`exact_gemm_micro_model.rs` reaches it only with hand-built panels.
+
+**The behavioural tie also crosses more than one flush chunk**, which no sibling
+model test does: `kc = 133` is 67 k-pairs against a 64-pair interval, so the
+clamped final chunk is a real case. Mutating the flush to overwrite `C` rather
+than accumulate — a bug invisible with a single chunk — is caught.
+
+**And what it does not catch is recorded beside what it does.** Five emitter
+mutations across every exact-GEMM suite:
+
+| mutation | packing | panel | regtile | micro | thr-inv | exact-thr | chain |
+|---|---|---|---|---|---|---|---|
+| flush OVERWRITES C | FAIL | ok | ok | ok | FAIL | FAIL | **FAIL** |
+| pack_b vector stride 32→16 | FAIL | FAIL | ok | ok | FAIL | FAIL | **FAIL** |
+| pack_b zero-fill dropped | ok | FAIL | ok | ok | ok | ok | **FAIL** |
+| compensating pair (pack_b `v^1` **and** store column `v^1`) | ok | FAIL | FAIL | ok | ok | ok | **ok** |
+
+The last row is the point: **the chain test does not subsume the register-tile
+test and cannot.** It composes packing with routing, so an inverse pair cancels
+here exactly as in a full GEMM. Isolating it needs panels stated by the test, or
+a panel checked slot by slot. *Adding a test does not retire the tests it
+resembles.* (That row also dates the register-tile file's own table, written
+before `exact_gemm_panel_model.rs` existed — the panel model catches the pair
+too, by the other route.)
+
+**What is still not chained**, stated in the file: this is one **lane**, not the
+tile (the tile needs the store, over a different model of C); it does not reach
+`C` through `ExactGemmTiling`'s output partition or `ExactGemmKsplit`'s band
+reduction, both of which sit above it and are proved over their own models; and
+`vpdpwssd`'s semantics plus i32 half-order remain definitions, pinned by
+`tests/cpu_gemm_vnni_micro.rs` on the real instruction. Joining the remaining
+layers still needs one shared model of the kernel — Phase 2's subject.
+
+Mutation-verified 8/8: four against the emitter, four against the proof
+(dropping the licence bound, dropping `0 < Fl`, seeding the accumulator at 1,
+and reading the next k-pair group's base).
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation

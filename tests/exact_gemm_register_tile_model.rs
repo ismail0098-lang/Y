@@ -19,6 +19,14 @@
 //! |---|---|---|---|---|
 //! | compensating pair | ok | ok | ok | **FAILED** |
 //!
+//! **That table predates `exact_gemm_panel_model.rs`, which also catches it** -
+//! by a different route, and the difference is worth keeping. This file breaks
+//! the composition by stating the panel contents; the panel model breaks it by
+//! checking the panel the real packers produced, slot by slot, against the
+//! model. Either kills the cancellation. `exact_gemm_chain_model.rs`, which
+//! composes both halves against a source-level reference, does NOT catch it -
+//! measured, and recorded in that file.
+//!
 //! Building the panel by hand breaks the composition: the panel contents are
 //! stated by the test, so only the routing is under test and there is nothing
 //! left for a packer to compensate with.
