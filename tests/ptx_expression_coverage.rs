@@ -289,3 +289,134 @@ fn an_aggregate_zero_initialiser_is_refused_by_name() {
         r.output
     );
 }
+
+/// `Expr::MemberAccess` was the last arm in `emit_expr` still falling through
+/// to `"".into()`.
+///
+/// The hole was closed for `Expr::Ident`, for `Expr::BoolLit` and for the `_`
+/// arm, and never for this one - which is the whole reason the design-rule
+/// table says to enumerate SITES rather than variants. `emit_expr`'s callers
+/// splice the result straight into instruction text, so a field read in an
+/// ARGUMENT position emitted
+///
+/// ```text
+///     cvt.rn.f32.s32 %f1, ;
+/// ```
+///
+/// under "Compilation Successful!" and exit 0, with `ptxas` rejecting the file
+/// afterwards - on whatever machine tries to run it, which is not the one that
+/// compiled it.
+#[test]
+fn a_struct_field_access_is_refused_rather_than_spliced_as_an_empty_operand() {
+    let d = std::env::temp_dir().join(format!("y_ptx_member_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).expect("temp dir");
+    let src = d.join("ma.ysu");
+    std::fs::write(
+        &src,
+        r#"
+kernel k(A: GlobalMemory<F32>, C: GlobalMemory<F32>, M: I32, N: I32) {
+    let x: F32 = block_ptr2d_load(A, 0, 0, N, M, N);
+    block_ptr2d_store(C, 0, 0, N, M, N, x.lane);
+}
+fn main() {}
+"#,
+    )
+    .expect("write source");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src)
+        .arg("--emit-ptx")
+        .output()
+        .expect("run Y");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    assert!(
+        !out.status.success(),
+        "a field access this backend cannot lower must fail the build:\n{text}"
+    );
+    assert!(
+        text.contains("x.lane"),
+        "the refusal must name the field it could not lower:\n{text}"
+    );
+    assert!(
+        !text.contains("Compilation Successful"),
+        "the success banner appeared over a refusal:\n{text}"
+    );
+    assert!(
+        !d.join("ma.ptx").exists(),
+        "a .ptx was written for a program the backend refused; that file is what \
+         `ptxas` rejects on somebody else's machine"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// THE CONTROL. Refusing every member access satisfies the test above and
+/// deletes the `v4` lane surface, which is how eight-limb field arithmetic is
+/// written in this repo. `.x/.y/.z/.w` on a value bound by a vector load must
+/// still lower.
+#[test]
+fn a_v4_lane_is_still_a_member_access_that_works() {
+    let src = repo().join("tests/bn254_fr_mul_fast.ysu");
+    assert!(src.exists(), "the v4 fixture is missing");
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src)
+        .arg("--emit-ptx")
+        .current_dir(repo())
+        .output()
+        .expect("run Y");
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "a kernel reading `.x/.y/.z/.w` off a v4 load must still compile:\n{text}"
+    );
+    let ptx = std::fs::read_to_string(repo().join("tests/bn254_fr_mul_fast.ptx"))
+        .expect("emitted PTX");
+    assert!(
+        ptx.lines().filter(|l| l.contains("ld.global")).count() > 0,
+        "the v4 kernel emitted no loads, so the lanes reached nothing"
+    );
+}
+
+/// The class-wide structural gate: an emitted instruction may never have a
+/// MISSING operand.
+///
+/// Every bug of this shape - `Expr::Ident`, the `_` arm, `mbarrier_*`,
+/// `mma_sync`, and now `MemberAccess` - produces the same artifact signature,
+/// a comma with nothing after it. Checking the signature catches the next one
+/// without anyone having to guess which arm it will be in.
+#[test]
+fn no_emitted_instruction_has_a_missing_operand() {
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(repo().join("tests")).expect("read tests/") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().map(|e| e != "ptx").unwrap_or(true) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read ptx");
+        for (i, line) in text.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("").trim();
+            if code.is_empty() {
+                continue;
+            }
+            // `, ;` - an operand list that ends in a comma. `, ,` - one with a
+            // hole in the middle.
+            assert!(
+                !code.contains(", ;") && !code.contains(",;") && !code.contains(", ,"),
+                "{}:{}: `{}` has a missing operand. Some `emit_expr` arm returned \
+                 an empty string and a caller spliced it into instruction text.",
+                path.display(),
+                i + 1,
+                code
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 20,
+        "only {checked} committed .ptx files were scanned; a sweep that finds \
+         nothing reports no missing operands perfectly"
+    );
+}

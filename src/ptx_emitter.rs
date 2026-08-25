@@ -4191,7 +4191,39 @@ declare it as a Q format.",
                 }
                 if member == "wait" {
                     writeln!(&mut self.ptx_buffer, "    cp.async.wait_group 0;").unwrap();
+                    // An await has no VALUE. Returning "" is only safe because
+                    // `Stmt::Let` refuses an initialiser that produced nothing;
+                    // in an argument position it would splice an empty operand,
+                    // which is the bug the arm below exists to stop.
+                    return "".into();
                 }
+                // Everything else was `"".into()` - the same hole that was
+                // closed for `Expr::Ident` and for the `_` arm and never for
+                // this one. `emit_expr`'s callers splice the result straight
+                // into instruction text, so a struct field read in an argument
+                // position emitted
+                //
+                //     cvt.rn.f32.s32 %f1, ;
+                //
+                // under "Compilation Successful!" and exit 0, with `ptxas`
+                // rejecting the file afterwards - on whatever machine tries to
+                // run it, which is not the one that compiled it.
+                //
+                // This backend has no struct field access: `emit_expr` returns
+                // one register, kernel parameters are buffers and scalars, and
+                // `Expr::StructLit` is already refused. So a field read here is
+                // a gap to name, not a lowering to guess at.
+                let base_name = match &**base {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => "<expression>".to_string(),
+                };
+                self.unsupported_expr(
+                    &format!(
+                        "the field access `{}.{}` (this backend has no struct field access; `.x`/`.y`/`.z`/`.w` on a value bound by a v4 load are the only members it knows)",
+                        base_name, member
+                    ),
+                    span,
+                );
                 "".into()
             }
             Expr::Path {
