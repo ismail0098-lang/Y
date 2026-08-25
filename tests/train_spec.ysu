@@ -8,6 +8,7 @@ kernel train_step_gpu(weights: GlobalMemory<F32>, size: I32) {
     @safe {
         // Zero Numerical Drift Accumulator for training stability
         @ZeroDrift
+        @bounds(-1048576, 1048576)
         let acc: F32 = 0.0;
 
         @invariant(i >= 0)

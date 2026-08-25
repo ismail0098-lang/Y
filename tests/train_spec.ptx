@@ -6,30 +6,44 @@
     .param .u64 weights_0,
     .param .b32 size_1
 )
-    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 8
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 13
     // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 32 (to maximize SM occupancy)
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 100.00% (6 active blocks per SM)
 .maxnreg 32
 {
     .reg .b32 %r<3>;
-    .reg .f32 %f<3>;
-    .reg .b64 %rd<1>;
-    .reg .pred %p<1>;
+    .reg .f32 %f<2>;
+    .reg .b64 %rd<4>;
+    .reg .pred %p<3>;
+    .reg .f64 %fd<8>;
 
     ld.param.u64 %rd0, [weights_0];
     ld.param.u32 %r0, [size_1];
     ld.global.ca.f32 %f0, [%rd0];
+    // [Y ZERO DRIFT] acc: F32 accumulated exactly as Q32.32
     mov.f32 %f1, 0.0;
+    cvt.f64.f32 %fd0, %f1;
+    mul.f64 %fd1, %fd0, 0d41F0000000000000;
+    setp.lt.f64 %p0, %fd1, 0d0000000000000000;
+    selp.f64 %fd2, 0dBFE0000000000000, 0d3FE0000000000000, %p0;
+    add.f64 %fd3, %fd1, %fd2;
+    cvt.rzi.s64.f64 %rd2, %fd3;
+    mov.s64 %rd1, %rd2;
     // for i in ...
-    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M=IntLit(16, Span { line: 15, col: 15 }), N=IntLit(16, Span { line: 15, col: 19 }), K=Some(IntLit(8, Span { line: 15, col: 23 }))
-    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M=IntLit(16, Span { line: 15, col: 15 }), N=IntLit(16, Span { line: 15, col: 19 }), K=Some(IntLit(8, Span { line: 15, col: 23 }))
+    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M=IntLit(16, Span { line: 16, col: 15 }), N=IntLit(16, Span { line: 16, col: 19 }), K=Some(IntLit(8, Span { line: 16, col: 23 }))
+    // [Y TILE OPTIMIZATION] Tiled loop dimensions: M=IntLit(16, Span { line: 16, col: 15 }), N=IntLit(16, Span { line: 16, col: 19 }), K=Some(IntLit(8, Span { line: 16, col: 23 }))
     mov.u32 %r1, 0;
     mov.u32 %r2, 1024;
     $LOOP_START_0:
-    setp.ge.u32 %p0, %r1, %r2;
-    @%p0 bra $LOOP_END_1;
-    add.f32 %f2, %f1, %f0;
-    mov.f32 %f1, %f2;
+    setp.ge.u32 %p1, %r1, %r2;
+    @%p1 bra $LOOP_END_1;
+    cvt.f64.f32 %fd4, %f0;
+    mul.f64 %fd5, %fd4, 0d41F0000000000000;
+    setp.lt.f64 %p2, %fd5, 0d0000000000000000;
+    selp.f64 %fd6, 0dBFE0000000000000, 0d3FE0000000000000, %p2;
+    add.f64 %fd7, %fd5, %fd6;
+    cvt.rzi.s64.f64 %rd3, %fd7;
+    add.s64 %rd1, %rd1, %rd3;
     add.u32 %r1, %r1, 1;
     bra $LOOP_START_0;
     $LOOP_END_1:
