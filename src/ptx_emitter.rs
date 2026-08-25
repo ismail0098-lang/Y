@@ -704,11 +704,30 @@ impl PtxEmitter {
             } else {
                 format!("sm_{}", raw_sm)
             };
-            if t == "sm_90" {
-                "sm_90a".to_string()
-            } else {
-                t
-            }
+            // NO ARCHITECTURE-SPECIFIC SUFFIX. This used to promote sm_90 to
+            // `sm_90a` unconditionally and without a stated reason - a leftover
+            // from the WGMMA/TMA surface that was deleted for never having
+            // assembled (gotcha #8). Nothing this backend emits needs it: the
+            // instruction mix is `mma.sync`, `cp.async`, `ld`/`st`, all plain
+            // sm_90.
+            //
+            // The `a` suffix is not "sm_90 plus extras", it is a DIFFERENT and
+            // architecture-SPECIFIC target that never JITs forward. Measured
+            // with ptxas 13.3:
+            //
+            //     .target sm_90   ->  -arch=sm_90 ok, sm_100 ok, sm_120 ok
+            //     .target sm_90a  ->  -arch=sm_90 FAILS, sm_100 FAILS, sm_120 FAILS
+            //
+            // So a kernel compiled on an H100 was pinned to that exact card and
+            // would not load on Blackwell - the same failure as a committed
+            // `.ysu_hw_profile` baking in the build machine, one directive over.
+            // Guess DOWN.
+            //
+            // If a Hopper-specific instruction is ever added, it must request
+            // the suffix the way FP8 requests a `.version` - discovered during
+            // emission, on the module - not by promoting every kernel on the
+            // chance that one of them needs it.
+            t
         } else {
             "sm_80".to_string()
         };
