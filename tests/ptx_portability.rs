@@ -57,7 +57,14 @@ const FLOOR: &str = "sm_80";
 
 /// Architectures a kernel is expected to load on, oldest first. sm_86 is the
 /// 3060, sm_89 the 4070 Ti SUPER this was developed on, sm_90 the H100/H200,
-/// sm_120 Blackwell.
+/// sm_100 datacenter Blackwell (B100/B200), sm_120 consumer Blackwell (RTX 50).
+///
+/// **sm_100 and sm_120 are different architectures, not two names for
+/// Blackwell.** Measured with ptxas 13.3: `tcgen05` assembles at sm_100a and is
+/// refused at sm_120a, and `wgmma` is refused at both (it is Hopper-only and
+/// Blackwell dropped it). Listing only sm_120 therefore left the datacenter
+/// part of the line unchecked, which is the same hole sm_90 was in - and for
+/// the same reason, that nobody here can spot-check it by running something.
 ///
 /// **sm_90 was missing, and it is the one arch here nobody can spot-check by
 /// running something.** The list covered two consumer Ampere parts, the
@@ -73,7 +80,7 @@ const FLOOR: &str = "sm_80";
 /// are not in this backend (see gotcha #8: the surface that claimed to be was
 /// deleted for never having assembled). What is checked is that the ordinary
 /// `mma.sync` / `cp.async` instruction mix Y really emits loads on an H100.
-const ARCHES: [&str; 5] = ["sm_80", "sm_86", "sm_89", "sm_90", "sm_120"];
+const ARCHES: [&str; 6] = ["sm_80", "sm_86", "sm_89", "sm_90", "sm_100", "sm_120"];
 
 /// The PTX ISA version shipped artifacts declare.
 ///
