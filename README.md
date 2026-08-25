@@ -1275,8 +1275,8 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # 486 tests
-cargo test --release --features zk      # 744 tests, ZK included
+cargo test --release                    # ~580 tests
+cargo test --release --features zk      # ~850 tests, ZK included
 ```
 
 **Four gates are conditional on an external tool, and a missing tool makes them

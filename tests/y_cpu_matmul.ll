@@ -72,7 +72,7 @@ entry:
   %_t14 = load ptr, ptr %B
   %_t15 = load ptr, ptr %C
   call void @__y_sgemm_f32_avx512(ptr %_t13, ptr %_t14, ptr %_t15, i64 %_t2, i64 %_t4, i64 %_t6, i64 %_t8, i64 %_t10, i64 %_t12)
-  ; [Y CPU GEMM] GemmShape { a: "A", b: "B", c: "C", m: "M", n: "N", k: "K", lda: "K", ldb: "N", ldc: "N" }
+  ; [Y CPU GEMM] GemmShape { a: "A", b: "B", c: "C", m: "M", n: "N", k: "K", lda: "K", ldb: "N", ldc: "N", drift: None, operand_ty: Some("F32") }
   ret void
 }
 

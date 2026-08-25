@@ -155,26 +155,50 @@ cargo run -- countdown.ysu
 
 ### Step 5: Write a GPU Kernel (PTX backend)
 
-Y compiles directly to NVIDIA PTX for GPU execution. Here is a simple F32 accumulation kernel:
+Y compiles directly to NVIDIA PTX for GPU execution. This is
+`tests/train_spec.ysu` as it actually stands — the snippet shown here used to
+be a different kernel entirely, under this filename, and neither of the two
+commands below it worked:
 
 ```ysu
-// train_spec.ysu — GPU kernel: accumulate 1024 F32 values
-kernel accumulate(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32) {
-    let mut acc: F32 = 0.0;
-    for i in 0..N {
-        acc += data[i];
+// tests/train_spec.ysu
+kernel train_step_gpu(weights: GlobalMemory<F32>, size: I32) {
+    let w_val: F32 = GlobalMemory::load(weights);
+
+    @safe {
+        // Zero Numerical Drift accumulator, lowered to exact Q32.32
+        @ZeroDrift
+        @bounds(-1048576, 1048576)
+        let acc: F32 = 0.0;
+
+        @invariant(i >= 0)
+        @divergence(uniform)
+        @tile(16, 16, 8)
+        for i in 0..1024 step 1 {
+            @bounds(0, 1024)
+            let idx: I32 = i;
+
+            acc = acc + w_val;
+        }
     }
-    result[0] = acc;
 }
 ```
 
 ```bash
-# Compile to native binary via LLVM backend:
-cargo run -- tests/train_spec.ysu --emit-llvm
-
-# Or emit raw PTX directly:
-cargo run -- tests/train_spec.ysu --emit-ptx
+# Emit PTX:
+./target/release/Y tests/train_spec.ysu --emit-ptx
 ```
+
+**`@bounds` on the accumulator is required, not decorative.** Without it the
+compiler refuses: no exact representation holds `F32`'s full range at its
+resolution, and only exact accumulation is drift-free. Stating the real range
+is what makes the directive satisfiable — see §on `@ZeroDrift`. The emitted
+kernel carries `// [Y ZERO DRIFT] acc: F32 accumulated exactly as Q32.32`.
+
+There is deliberately no `--emit-llvm` line here. This is a GPU kernel, and the
+LLVM host backend **refuses** `GlobalMemory::load` by name rather than declaring
+an external symbol that does not exist and failing at link. GPU intrinsics
+belong to `--emit-ptx`.
 
 Benchmarked against PyTorch on RTX 4070 Ti SUPER:
 
@@ -2252,12 +2276,35 @@ module StaticRec {
 
 ### 12.9 Verifying Generated Circuits
 
-Verification scripts are included:
+This section used to list three "included" scripts — `verify_r1cs.py`,
+`verify_heavy.py` and `verify_benchmarks.js` — **none of which exist anywhere
+in the repository**, and the last of which was a `.js` file invoked with
+`python`. What follows is what actually runs.
+
+**In-repo, no external tooling.** Groth16 over BN254 through arkworks, used as
+an independent oracle:
+
 ```bash
-python verify_r1cs.py      # dot_product circuit
-python verify_heavy.py     # heavy_circuit (1M constraints)
-python verify_benchmarks.js  # snarkjs-based verification
+cargo test --release --features zk --test zk_groth16_end_to_end
 ```
+
+It asserts an honest proof verifies, a tampered public input is rejected, a
+perturbed witness fails satisfiability, and that Y's modulus equals the true
+BN254 one. String-matching an emitted `.r1cs` cannot catch a wrong field or a
+mis-numbered wire; this can.
+
+**Against the external toolchain.** Y's `.r1cs` and `.wtns` are iden3-format,
+so the whole snarkjs pipeline consumes them directly — see the
+`snarkjs r1cs info` / `groth16 setup` / `prove` / `verify` sequence in
+`README.md`. Emit both files with:
+
+```bash
+./target/release/Y circuit.ysu --target=r1cs --witness input.json
+```
+
+Note `snarkjs wtns check` is the load-bearing step of that sequence: it is the
+only check that sees the wire *ordering*, which Y permutes on write and which
+every internal check is blind to, because they all use Y's own numbering.
 
 ### 12.10 Benchmark Methodology & Transparency
 

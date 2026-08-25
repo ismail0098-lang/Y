@@ -318,3 +318,114 @@ fn the_ypm_docs_name_the_right_binary_and_the_right_manifest() {
         );
     }
 }
+
+/// Collect `Y <file.ysu> [flags]` invocations out of the docs' fenced blocks,
+/// in any of the three spellings the docs use.
+fn documented_y_commands() -> Vec<(String, Vec<String>)> {
+    let mut docs = vec!["README.md".to_string()];
+    if let Ok(rd) = std::fs::read_dir(repo().join("docs")) {
+        for e in rd.flatten() {
+            if e.path().extension().and_then(|s| s.to_str()) == Some("md") {
+                docs.push(format!("docs/{}", e.file_name().to_str().unwrap()));
+            }
+        }
+    }
+    docs.sort();
+    let mut out = Vec::new();
+    for d in docs {
+        let text = read(&d);
+        let mut inside = false;
+        for line in text.lines() {
+            if line.starts_with("```") {
+                inside = !inside;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            let t = line.trim();
+            let t = t.split('#').next().unwrap_or(t).trim();
+            let rest = if let Some(r) = t.strip_prefix("./target/release/Y ") {
+                r
+            } else if let Some(r) = t.strip_prefix("cargo run -- ") {
+                r
+            } else if let Some(r) = t.strip_prefix("Y ") {
+                r
+            } else {
+                continue;
+            };
+            let parts: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
+            let Some(src) = parts.first() else { continue };
+            if !src.ends_with(".ysu") || !repo().join(src).exists() {
+                continue; // a file the reader is told to create, not a repo fixture
+            }
+            // Skip what this gate cannot legitimately judge:
+            //  - the ZK backend needs `--features zk`, absent from a default build
+            //  - `--emit-c` and friends are DOCUMENTED as failing, and do
+            //  - autotuning touches the GPU
+            let flags: Vec<String> = parts[1..].to_vec();
+            if flags.iter().any(|f| {
+                f.contains("r1cs") || f.contains("zk") || f.contains("autotune")
+                    || *f == "--emit-c" || *f == "--c" || f.contains("target=c")
+            }) {
+                continue;
+            }
+            out.push((src.clone(), flags));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// **Every documented `Y` command over a repo fixture must actually work.**
+///
+/// `docs/y_language_documentation.md` presented `tests/train_spec.ysu` with two
+/// commands, and BOTH failed - `--emit-llvm` because the LLVM host backend
+/// correctly refuses `GlobalMemory::load`, and `--emit-ptx` because the fixture
+/// carried `@ZeroDrift` on a bare `F32` with no `@bounds`, which the compiler
+/// correctly refuses. The compiler was right both times; the fixture and the
+/// documentation were wrong. The doc also displayed a completely DIFFERENT
+/// kernel under that filename.
+///
+/// Existence is not enough - `the_readme_layout_names_only_files_that_exist`
+/// would have passed this, because the file was there and simply did not
+/// compile.
+#[test]
+fn every_documented_y_command_over_a_repo_fixture_succeeds() {
+    let cmds = documented_y_commands();
+    assert!(
+        cmds.len() >= 3,
+        "only {} documented Y commands found over repo fixtures - the scrape \
+         has drifted and this gate is checking nothing",
+        cmds.len()
+    );
+    let mut broken = Vec::new();
+    for (src, flags) in &cmds {
+        let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+            .arg(src)
+            .args(flags)
+            .current_dir(repo())
+            .output()
+            .expect("run Y");
+        if !out.status.success() {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let why = text
+                .lines()
+                .find(|l| l.contains("Error") || l.contains("[!]"))
+                .unwrap_or("<no diagnostic>")
+                .trim()
+                .to_string();
+            broken.push(format!("`Y {src} {}` -> {why}", flags.join(" ")));
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "documented commands that do not work:\n  {}",
+        broken.join("\n  ")
+    );
+}

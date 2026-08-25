@@ -22,6 +22,7 @@
 //! A regeneration is a one-time act and this is the gate that makes it stick.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -185,5 +186,110 @@ fn every_committed_ptx_declares_the_version_floor_for_its_target() {
          and fails to load on an older driver with \
          CUDA_ERROR_UNSUPPORTED_PTX_VERSION. Regenerate these:\n  {}",
         wrong.join("\n  ")
+    );
+}
+
+/// **A committed artifact whose source no longer compiles is a third staleness
+/// class, and neither gate above can see it.**
+///
+/// `tests/train_spec.ptx` was committed with 11 instructions and no
+/// `[Y ZERO DRIFT]` comment - emitted back when the directive did nothing -
+/// and its source had been REFUSED ever since `@ZeroDrift` became real
+/// (`@ZeroDrift` on a bare `F32` with no `@bounds` cannot be honoured). So the
+/// checked-in file was one no run of the current compiler could produce, and
+/// it passed `no_committed_ptx_module_is_empty` and
+/// `every_committed_ptx_declares_the_version_its_target_requires` perfectly:
+/// it is neither empty nor over-stated, just unreachable.
+///
+/// This asserts only that the source still COMPILES, not that the artifact is
+/// byte-identical to a fresh emission. Byte-identity would be machine
+/// dependent - emitted PTX can vary with `.ysu_hw_profile` and with tile
+/// overrides like `Y_CTA_OVERRIDE`, which is exactly why that variable
+/// "persists in whatever `.ptx` files were written while it was set".
+///
+/// Found by running a documented command. 60 committed `.ptx` have a matching
+/// `.ysu`; 59 compiled, and this was the one that did not.
+
+/// Committed artifacts with a given extension, for the source-compiles gate.
+fn committed_with_extension(ext: &str) -> Vec<PathBuf> {
+    let out = Command::new("git")
+        .args(["ls-files", &format!("tests/*.{ext}")])
+        .current_dir(repo_root())
+        .output()
+        .expect("git ls-files");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| repo_root().join(l.trim()))
+        .filter(|p| p.exists())
+        .collect()
+}
+
+#[test]
+fn every_committed_artifact_still_has_a_source_that_compiles() {
+    let mut refused = Vec::new();
+    let mut compiled = 0usize;
+    let dir = std::env::temp_dir().join(format!("y_ptx_sources_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let mut artifacts: Vec<(PathBuf, &str)> =
+        committed_ptx().into_iter().map(|p| (p, "--emit-ptx")).collect();
+    // `.ll` is covered by the same argument and had its own instance:
+    // `tests/naive_gemm_f32.ll` was committed declaring `block_idx_y` and
+    // friends as EXTERNS - it assembles and dies at link with `undefined
+    // reference`, which is exactly the bug `llvm_emitter` was fixed to stop
+    // producing. Deleted; the file is a GPU kernel and its artifact is the
+    // committed `.ptx`.
+    artifacts.extend(committed_with_extension("ll").into_iter().map(|p| (p, "--emit-llvm")));
+    for (art, flag) in artifacts {
+        let ysu = art.with_extension("ysu");
+        if !ysu.exists() {
+            continue; // generated fixtures without a checked-in source
+        }
+        // Compile a COPY in a temp directory. `--emit-ptx` writes its output
+        // next to the source, so compiling in place would rewrite the very
+        // artifacts under test and race any other test doing the same - this
+        // repo has already been bitten by exactly that ("a test harness that
+        // compiles the same .ysu from several threads races on the .ptx path",
+        // which passed for several runs before failing).
+        let tmp = dir.join(ysu.file_name().unwrap());
+        std::fs::copy(&ysu, &tmp).expect("copy fixture");
+        let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+            .arg(&tmp)
+            .arg(flag)
+            .current_dir(repo_root())
+            .output()
+            .expect("run Y");
+        // Counted AFTER the run, not before: an earlier version incremented
+        // on finding the .ysu/.ptx pair, so neutering the compile loop left
+        // the floor at 60 and the mutation survived. A non-vacuity floor has
+        // to count the work, not the candidates.
+        compiled += 1;
+        if !out.status.success() {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let why = text
+                .lines()
+                .find(|l| l.contains("Error") || l.contains("[!]"))
+                .unwrap_or("<no diagnostic>")
+                .trim()
+                .to_string();
+            refused.push(format!("{} ({flag}) -> {why}", rel(&ysu)));
+        }
+    }
+    assert!(
+        compiled > 40,
+        "only {compiled} sources were actually compiled - either the .ysu/.ptx \
+         pairing has drifted or the loop stopped running the compiler, and \
+         this gate is checking almost nothing"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        refused.is_empty(),
+        "these committed artifacts have a source the compiler now \
+         REFUSES, so the checked-in file cannot be reproduced by any run:\n  {}",
+        refused.join("\n  ")
     );
 }
