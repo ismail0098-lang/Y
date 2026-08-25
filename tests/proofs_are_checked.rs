@@ -233,6 +233,22 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "exact_survives_the_same_split",
             ][..],
         ),
+        (
+            "ExactGemmTiling.v",
+            &[
+                // The output tiles account for the axis exactly...
+                "tiles_cover",
+                // ...and, the real obligation, name each position ONCE.
+                "tile_index_injective",
+                "tile_index_surjective",
+                "Print Assumptions c_written_exactly_once",
+                // The emitter's own comment about the ragged tail, as a
+                // machine-checked refutation rather than a comment.
+                "unclamped_tail_writes_out_of_bounds",
+                // ...and the precondition nothing in the compiler states.
+                "row_stride_below_n_aliases",
+            ][..],
+        ),
     ]
 }
 

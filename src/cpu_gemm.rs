@@ -925,7 +925,29 @@ entry:
   ; INTO it - which is exactly what lets the K-bands be summed.
   %cn = mul i64 %M, %N
   %cb = mul i64 %cn, 8
-  call void @llvm.memset.p0.i64(ptr %C, i8 0, i64 %cb, i1 false)
+  %rowb = mul i64 %N, 8
+  br label %zero.head
+
+; Zero the LIVE M x N rectangle ONLY, a row at a time at the caller's stride.
+;
+; This was one flat `memset(C, 0, M*N*8)`, which is right if and only if
+; `ldc == N` - and every caller in the compiler passes exactly that, so nothing
+; ever exercised it. With a padded C it zeroed into the row padding of the early
+; rows and left the last rows' live cells UNZEROED, and since this kernel
+; ACCUMULATES into C that is a wrong answer, not a cosmetic one.
+zero.head:
+  %zi = phi i64 [ 0, %entry ], [ %zinext, %zero.body ]
+  %zmore = icmp slt i64 %zi, %M
+  br i1 %zmore, label %zero.body, label %zero.done
+
+zero.body:
+  %zrow = mul i64 %zi, %ldc
+  %zp = getelementptr i64, ptr %C, i64 %zrow
+  call void @llvm.memset.p0.i64(ptr %zp, i8 0, i64 %rowb, i1 false)
+  %zinext = add i64 %zi, 1
+  br label %zero.head
+
+zero.done:
   %nthr = call i64 @__y_gemm_exact_threads(i64 %K)
   %mtiles0 = add i64 %M, {mr_m1}
   %mtiles = sdiv i64 %mtiles0, {mr}
@@ -1015,7 +1037,11 @@ spawn.body:
   %s7 = getelementptr i8, ptr %j, i64 56
   store i64 %ldb, ptr %s7, align 8
   %s8 = getelementptr i8, ptr %j, i64 64
-  store i64 %ldc, ptr %s8, align 8
+  ; The worker's C is `%cpt`, a private M*N buffer - COMPACT, whatever the
+  ; caller's stride is. Passing the caller's `%ldc` here made the worker write
+  ; at that stride into a buffer sized for N, i.e. `(M-1)*(ldc-N)` elements past
+  ; the end: a heap overflow, reported as `double free or corruption`.
+  store i64 %N, ptr %s8, align 8
   %s9 = getelementptr i8, ptr %j, i64 72
   store ptr %apt, ptr %s9, align 8
   %s10 = getelementptr i8, ptr %j, i64 80
@@ -1071,16 +1097,32 @@ reduce.body:
   %rj = getelementptr i8, ptr %jobs, i64 %rjb
   %rs2 = getelementptr i8, ptr %rj, i64 16
   %rcp = load ptr, ptr %rs2, align 8
+  br label %reduce.row
+
+; The destination and the source have DIFFERENT row strides - `%ldc` for the
+; caller's C, `%N` for the worker's compact private one. The flat loop this
+; replaces walked both with one index, which is only correct when they are
+; equal.
+reduce.row:
+  %ri = phi i64 [ 0, %reduce.body ], [ %rinext, %reduce.rowend ]
+  %rimore = icmp slt i64 %ri, %M
+  br i1 %rimore, label %reduce.rowbody, label %reduce.free
+
+reduce.rowbody:
+  %drow = mul i64 %ri, %ldc
+  %srow = mul i64 %ri, %N
   br label %reduce.inner
 
 reduce.inner:
-  %q = phi i64 [ 0, %reduce.body ], [ %qnext, %reduce.inner.body ]
-  %qmore = icmp slt i64 %q, %cn
-  br i1 %qmore, label %reduce.inner.body, label %reduce.free
+  %q = phi i64 [ 0, %reduce.rowbody ], [ %qnext, %reduce.inner.body ]
+  %qmore = icmp slt i64 %q, %N
+  br i1 %qmore, label %reduce.inner.body, label %reduce.rowend
 
 reduce.inner.body:
-  %dstp = getelementptr i64, ptr %C, i64 %q
-  %srcp = getelementptr i64, ptr %rcp, i64 %q
+  %didx = add i64 %drow, %q
+  %sidx = add i64 %srow, %q
+  %dstp = getelementptr i64, ptr %C, i64 %didx
+  %srcp = getelementptr i64, ptr %rcp, i64 %sidx
   %dv = load i64, ptr %dstp, align 8
   %sv = load i64, ptr %srcp, align 8
   ; Integer addition, so the order these partials are summed in cannot change
@@ -1089,6 +1131,10 @@ reduce.inner.body:
   store i64 %sum, ptr %dstp, align 8
   %qnext = add i64 %q, 1
   br label %reduce.inner
+
+reduce.rowend:
+  %rinext = add i64 %ri, 1
+  br label %reduce.row
 
 reduce.free:
   %fs9 = getelementptr i8, ptr %rj, i64 72
@@ -1784,6 +1830,38 @@ pub fn ksplit_threads(requested: usize, k: usize) -> usize {
     let by_k = k / KSPLIT_MIN_BAND;
     let n = by_k.min(ceil);
     if n < 1 { 1 } else { n }
+}
+
+/// The output tiling, as `emit_vnni_gemm_driver`'s `vg.j` / `vg.i` loops
+/// compute it: uniform tiles of `tile` with a CLAMPED ragged tail.
+///
+/// ```text
+///   %rem_n = sub i64 %N, %j0
+///   %nw    = call i64 @llvm.smin.i64(i64 %rem_n, i64 <NR>)
+/// ```
+///
+/// This is the Rust transcription of `tw` / `toff` in
+/// `proofs/ExactGemmTiling.v`, where `tiles_cover` proves the tiles account
+/// for `[0, extent)` exactly and `tile_index_injective` /
+/// `tile_index_surjective` prove `(tile, offset)` is a BIJECTION onto it - the
+/// "written exactly once" obligation, which a coverage count alone does not
+/// give (a tiling that writes one element twice and another never still
+/// covers the right total).
+///
+/// Different decomposition from [`ksplit_bands`], deliberately: that one
+/// spreads the remainder one k at a time across all bands, this one clamps a
+/// single ragged tail. Do not unify them.
+///
+/// Returns `(offset, width)` per tile. A `tile` of 0 has no meaning and panics.
+pub fn mn_tiles(extent: usize, tile: usize) -> Vec<(usize, usize)> {
+    assert!(tile > 0, "a tiling with zero-width tiles does not terminate");
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off < extent {
+        out.push((off, (extent - off).min(tile)));
+        off += tile;
+    }
+    out
 }
 
 /// The K-band decomposition, as the emitted wrapper's spawn loop computes it:
