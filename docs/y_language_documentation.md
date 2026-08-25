@@ -2293,6 +2293,33 @@ perturbed witness fails satisfiability, and that Y's modulus equals the true
 BN254 one. String-matching an emitted `.r1cs` cannot catch a wrong field or a
 mis-numbered wire; this can.
 
+**A runnable example, on a fixture in this repository.** Every other ZK command
+in this document names a placeholder (`circuit.ysu`, `foo.circom`), so none of
+them could be copy-pasted. This one can — it needs a `--features zk` build:
+
+```bash
+./target/release/Y tests/circom/multiplier.circom --target=r1cs
+```
+
+That writes `.r1cs`, `.sym` and `.r1cs.txt` **next to the input**, which matters
+if the input lives somewhere you did not intend to litter. Counts match circom
+2.2.3 exactly on this circuit: 1 non-linear constraint, 0 linear, 4 wires, 2
+private inputs, 1 public output.
+
+Add `--witness` to solve and emit a `.wtns` as well:
+
+```bash
+./target/release/Y tests/circom/multiplier.circom --target=r1cs \
+    --witness tests/circom/multiplier_input.json
+```
+
+That input file holds `{"a": "3", "b": "5"}`. Inputs are matched **by name**
+against the circuit's signals — a file in the wrong order would otherwise prove
+a different statement — and both spellings are accepted, the source name `a` and
+the fully-qualified `main.a` from the `.sym`. The resulting `.wtns` is
+**byte-for-byte identical** to the one circom's own wasm witness calculator
+produces from the same input.
+
 **Against the external toolchain.** Y's `.r1cs` and `.wtns` are iden3-format,
 so the whole snarkjs pipeline consumes them directly — see the
 `snarkjs r1cs info` / `groth16 setup` / `prove` / `verify` sequence in
