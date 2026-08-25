@@ -110,16 +110,23 @@ repository's own investigation documents contradict.
   below. **Sub-word widths (`U8`/`U16`/`I8`/`I16`) are still refused**, because
   an element type is also a stride and there is no byte width threaded through
   the address math.
-- **There is no AMD/ROCm backend.** `src/rocm_emitter.rs` is 173 lines, is
-  compiled into the library, and is called by **nothing** — no CLI flag, no
-  test, no caller anywhere in the tree. The header of this file says "CPU
-  (x86-64 / AVX-512) and GPU (NVIDIA PTX)" and that is the complete list.
-- **`ypm`, the package manager, is not in the build.** `src/ypm.rs` is 504 lines
-  and is not a `mod` in either `lib.rs` or `main.rs`, so it is not compiled —
-  the same state `c_emitter.rs` is in. `docs/y_language_documentation.md` §19
-  nevertheless documents `Y ypm init / add / install / build / run` and a
-  `Y.toml` manifest. `Y ypm init` reports `Failed to read file: ypm.ysu` and
-  exits 1: it fails loudly, but it fails.
+- **There is no AMD/ROCm backend.** `src/rocm_emitter.rs` was 173 lines
+  compiled into the library and called by **nothing** — no CLI flag, no test,
+  no caller anywhere in the tree — and has been deleted, along with
+  `auto_vectorize.rs`, which was dead in the same way. The header of this file
+  says "CPU (x86-64 / AVX-512) and GPU (NVIDIA PTX)" and that is the complete
+  list.
+- **`ypm`, the package manager, IS built — this entry used to say the
+  opposite.** `src/ypm.rs` is declared by no `mod`, which is what the previous
+  version of this paragraph checked, but it is a `[[bin]]` target in
+  `Cargo.toml`: `cargo build --release` produces a working `target/release/ypm`
+  and `ypm new / init / build / run / test / clean` all do something.
+  **`mod` is not the same question as "compiled"**, and
+  `tests/source_surface.rs` now asks both. What IS wrong is the documentation:
+  `docs/y_language_documentation.md` §19 spelled every invocation `Y ypm ...`,
+  which runs the compiler and reports `Failed to read file`, and documented
+  `add` and `install`, which answer `Unknown command`. Corrected there; the
+  registry side really is unimplemented.
 - **Hopper TMA / WGMMA support never existed.** Sixteen of nineteen `emit_*`
   methods in that family produced PTX that `ptxas` rejects at their own target
   architecture. They were deleted rather than fixed. `mma.sync` — the path the
@@ -1385,14 +1392,13 @@ src/                       Rust bootstrap compiler
   zk_solidity.rs                   Groth16 on-chain verifier
   circom_{lexer,ast,parser,lower}.rs   circom 2.x front end
   quantization_pass.rs             FP32 -> FP16 staging conversions
-  auto_vectorize.rs layout_pass.rs cpu_specializer.rs
-                                   CPU-side rewrites
+  cpu_specializer.rs               CPU-side rewrites
   zk_fuzz.rs                       generative differential fuzzer (grammar + 3 oracles)
   c_api.rs                         C ABI — the crate also builds as a cdylib
   ir_grapher.rs coprocessor_scheduler.rs rt_core_emitter.rs
                                    scheduling simulation — see "What is real"
-  rocm_emitter.rs                  compiled, reachable from nothing — see "What is not real"
-  ypm.rs c_emitter.rs              NOT compiled; no `mod` declares them
+  ypm.rs ysu_gpu_probe.rs          separate `[[bin]]` targets, not modules —
+                                   they build as their own executables
 
 self_hosted/    compiler phases rewritten in Y (.ysu); not the default build path
 tests/          test programs, benchmarks, PTX assembly gates
