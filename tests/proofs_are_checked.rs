@@ -292,6 +292,27 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "a_wrong_lane_stride_permutes_the_columns",
             ][..],
         ),
+        (
+            "ExactGemmRegisterTile.v",
+            &[
+                // THE routing theorem: lane l of vector v consumes exactly the
+                // two packed slots of the column the store sends it to.
+                "Print Assumptions the_lane_consumes_its_own_column",
+                // The i32 load of A aliases the packed pair...
+                "the_i32_load_is_the_packed_pair",
+                // ...and the endianness that rests on is load-bearing, with a
+                // control showing a symmetric operand would hide it.
+                "swapping_the_pair_halves_computes_a_different_function",
+                "a_symmetric_operand_hides_the_swap",
+                // The 24 accumulators of 16 lanes tile the 64 columns.
+                "tile_position_injective",
+                "tile_position_surjective",
+                // The masked tails, and why the packers' row/column masks are
+                // redundant while the phantom k-half's is not.
+                "only_the_live_rectangle_is_stored",
+                "a_padding_column_never_reaches_c",
+            ][..],
+        ),
     ]
 }
 

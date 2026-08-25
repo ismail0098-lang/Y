@@ -1903,6 +1903,37 @@ pub fn lane_of_slot(s: usize) -> usize {
     (s % 32) / 2
 }
 
+/// The i32 element index the micro-kernel loads row `i`'s k-pair `p` from.
+///
+/// The emitter writes `%aidx = mul i64 %p, MR` then `%ai{i} = add i64 %aidx, i`
+/// and indexes `Ap` as **i32** - one load fetches both halves of the pair.
+pub fn a_i32_element(p: usize, i: usize) -> usize {
+    p * VNNI_MR + i
+}
+
+/// The two int16 panel slots that i32 load aliases, low half first.
+///
+/// `proofs/ExactGemmRegisterTile.v::the_i32_load_is_the_packed_pair` proves
+/// these are exactly `pack_a_slot(i, 0)` and `pack_a_slot(i, 1)` inside k-pair
+/// group `p`. Which half is `2p` rather than `2p+1` is little-endianness, an
+/// ISA fact - and `swapping_the_pair_halves_computes_a_different_function`
+/// shows it is load-bearing, not decorative.
+pub fn a_pair_slots(p: usize, i: usize) -> (usize, usize) {
+    let base = p * (VNNI_MR * 2);
+    (base + pack_a_slot(i, 0), base + pack_a_slot(i, 1))
+}
+
+/// The two int16 B panel slots accumulator `acc[i][v]` lane `l` consumes.
+///
+/// `vpdpwssd` lane `l` reads elements `2l` and `2l+1` of the `<32 x i16>`
+/// loaded at `Bp + p*NR*2 + v*32`, which are the two slots of column
+/// `column_of_lane(v, l)` - proved as `the_lane_consumes_its_own_column`.
+pub fn b_pair_slots_for_lane(p: usize, v: usize, l: usize) -> (usize, usize) {
+    let base = p * (VNNI_NR * 2);
+    let j = column_of_lane(v, l);
+    (base + pack_b_slot(j, 0), base + pack_b_slot(j, 1))
+}
+
 /// Which column of the `MR x NR` tile the store reads back out of vector `v`,
 /// lane `l` — the inverse leg of the round trip [`pack_b_slot`] opens.
 ///
