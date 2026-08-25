@@ -33,6 +33,16 @@
     - [garbage_in_the_pad_changes_the_answer] : the same statement with the
       zero-fill removed is FALSE. The `select ... i16 0` is load-bearing, not
       defensive.
+    - [panel_decodes_its_own_write] / [panel_is_the_only_solution] : the panel
+      as a FUNCTION - what slot `s` holds, not merely which slot a write lands
+      in. Added later, because [ExactGemmComposition.v] needed exactly that
+      statement and had to take it as a hypothesis; the uniqueness half is what
+      makes it a claim about the emitted loop rather than about a model chosen
+      to make the composition go through.
+    - [the_group_bound_is_load_bearing] : and the `idx < width` bound on that
+      contract is not decoration. Without it the statement is FALSE of every
+      non-zero operand, because the next index along is the following k-pair
+      group's first slot rather than a pad.
 
     *** What this does NOT prove, and it is the interesting half. ***
 
@@ -328,6 +338,118 @@ Theorem the_masked_version_agrees_on_the_same_input :
   = sum_k (fun k => a_vals k * b_vals k) 1.
 Proof. vm_compute. reflexivity. Qed.
 
+(* ------------------------------------------------------------------ *)
+(** ** The panel as a FUNCTION, so "slot s holds x" is a theorem        *)
+(* ------------------------------------------------------------------ *)
+
+(** Everything above is about ONE k-pair group: which slot a `(i, h)` or
+    `(j, h)` lands in, and what the resulting product sums to. It never says
+    what the whole panel array CONTAINS, and that turned out to matter -
+    `ExactGemmComposition.v` needed exactly that statement and had to take it
+    as a hypothesis, which is the one seam Phase 1 left open.
+
+    The panel a packer loop leaves behind, read back by DECODING the index:
+    group `p = s / (2*width)`, then the group-local `(idx, h)` from the plain
+    interleave. One definition serves both packers - `v idx` is the k-indexed
+    vector that row or column `idx` contributes (`A i` for A,
+    `fun k => B k j` for B) and `width` is [MR] or [NR]. Decoding B's index
+    this way is faithful to the emitted vector-group form because
+    [slot_b_is_the_plain_interleave] says the two are the same map. *)
+Definition panel (v : nat -> nat -> Z) (extent kc width s : nat) : Z :=
+  let r   := (s mod (2 * width))%nat in
+  let idx := (r / 2)%nat in
+  packed (v idx) extent kc idx (2 * (s / (2 * width)) + r mod 2)%nat.
+
+(** **The contract.** The slot the packer writes for `(p, idx, h)` reads back
+    as the value it wrote. This is the statement the composition needed. *)
+Theorem panel_decodes_its_own_write : forall v extent kc width p idx h,
+  (0 < width)%nat -> (idx < width)%nat -> (h < 2)%nat ->
+  panel v extent kc width (p * (2 * width) + (2 * idx + h))%nat
+  = packed (v idx) extent kc idx (2 * p + h)%nat.
+Proof.
+  intros v extent kc width p idx h Hw Hi Hh. unfold panel.
+  assert (Hr : (2 * idx + h < 2 * width)%nat) by lia.
+  assert (Hq : ((p * (2 * width) + (2 * idx + h)) / (2 * width) = p)%nat).
+  { rewrite Nat.div_add_l by lia. rewrite Nat.div_small by lia. lia. }
+  assert (Hm : ((p * (2 * width) + (2 * idx + h)) mod (2 * width)
+                = 2 * idx + h)%nat).
+  { rewrite Nat.add_comm, Nat.Div0.mod_add. apply Nat.mod_small; lia. }
+  rewrite Hq, Hm.
+  assert (Hd : ((2 * idx + h) / 2 = idx)%nat).
+  { replace (2 * idx + h)%nat with (idx * 2 + h)%nat by lia.
+    rewrite Nat.div_add_l by lia. rewrite Nat.div_small by lia. lia. }
+  assert (Hh2 : ((2 * idx + h) mod 2 = h)%nat).
+  { replace (2 * idx + h)%nat with (h + idx * 2)%nat by lia.
+    rewrite Nat.Div0.mod_add. apply Nat.mod_small; lia. }
+  rewrite Hd, Hh2. reflexivity.
+Qed.
+
+(** **And decoding is not one arbitrary model among several.** Any array at
+    all that satisfies the loop's writes agrees with [panel] on the whole
+    panel range - so [panel] is not a convenient choice of contents, it is the
+    ONLY contents the loop can produce. That is what makes the theorem above
+    a statement about the emitted packer rather than about a definition
+    written to make the composition go through.
+
+    This is where the bijection lemmas earn their keep at panel scale: the
+    write map is injective (nothing is overwritten with a different value, so
+    the specification is consistent) and onto (no slot escapes it, so the
+    specification is complete). *)
+Theorem panel_is_the_only_solution :
+  forall v extent kc width kp (P : nat -> Z),
+    (0 < width)%nat ->
+    (forall p idx h, (p < kp)%nat -> (idx < width)%nat -> (h < 2)%nat ->
+       P (p * (2 * width) + (2 * idx + h))%nat
+       = packed (v idx) extent kc idx (2 * p + h)%nat) ->
+    forall s, (s < kp * (2 * width))%nat -> P s = panel v extent kc width s.
+Proof.
+  intros v extent kc width kp P Hw Hwrite s Hs.
+  set (p := (s / (2 * width))%nat).
+  set (r := (s mod (2 * width))%nat).
+  assert (Hr : (r < 2 * width)%nat) by (apply Nat.mod_upper_bound; lia).
+  assert (Hsplit : (s = p * (2 * width) + r)%nat)
+    by (unfold p, r; pose proof (Nat.div_mod_eq s (2 * width)); lia).
+  set (idx := (r / 2)%nat). set (h := (r mod 2)%nat).
+  assert (Hrs : (r = 2 * idx + h)%nat)
+    by (unfold idx, h; pose proof (Nat.div_mod_eq r 2); lia).
+  assert (Hi : (idx < width)%nat)
+    by (unfold idx; apply Nat.Div0.div_lt_upper_bound; lia).
+  assert (Hh : (h < 2)%nat) by (unfold h; apply Nat.mod_upper_bound; lia).
+  assert (Hp : (p < kp)%nat)
+    by (unfold p; apply Nat.Div0.div_lt_upper_bound; lia).
+  rewrite Hsplit, Hrs, (Hwrite p idx h Hp Hi Hh).
+  rewrite (panel_decodes_its_own_write v extent kc width p idx h Hw Hi Hh).
+  reflexivity.
+Qed.
+
+(** **The bound `idx < width` is load-bearing, and dropping it does not merely
+    weaken the theorem - it makes it FALSE of every non-zero operand.** At
+    `idx = width` the index `p*(2*width) + 2*width` is the FIRST slot of group
+    `p+1`, which holds that group's data and not a pad. So a contract stated
+    without the bound is satisfied only by a panel one k-pair group long.
+
+    Concretely: `MR = 6`, `mrows = 6`, `kc = 4`, so two groups. Group 0's
+    write for `i = 6` lands on index 12, which is group 1's `(i=0, h=0)` slot
+    holding `A[0][2]`; an unbounded contract would demand a 0 there because
+    row 6 is past `mrows`. *)
+Definition all_ones (i k : nat) : Z := 1.
+
+Theorem the_group_bound_is_load_bearing :
+  panel all_ones 6 4 MR (0 * (2 * MR) + (2 * MR + 0))%nat
+  <> packed (all_ones MR) 6 4 MR (2 * 0 + 0)%nat.
+Proof. vm_compute. discriminate. Qed.
+
+(** The control: inside the group the same panel satisfies the contract, so
+    the refutation above is about the bound and not about the numbers. *)
+Theorem inside_the_group_the_same_panel_agrees : forall i h,
+  (i < MR)%nat -> (h < 2)%nat ->
+  panel all_ones 6 4 MR (0 * (2 * MR) + (2 * i + h))%nat
+  = packed (all_ones i) 6 4 i (2 * 0 + h)%nat.
+Proof.
+  intros i h Hi Hh.
+  apply panel_decodes_its_own_write; [ unfold MR; lia | exact Hi | exact Hh ].
+Qed.
+
 Print Assumptions pack_a_slot_bijective.
 Print Assumptions pack_a_slot_onto.
 Print Assumptions pack_b_slot_bijective.
@@ -337,3 +459,7 @@ Print Assumptions padded_product_is_the_live_dot_product.
 Print Assumptions a_dead_row_contributes_nothing.
 Print Assumptions garbage_in_the_pad_changes_the_answer.
 Print Assumptions the_masked_version_agrees_on_the_same_input.
+Print Assumptions panel_decodes_its_own_write.
+Print Assumptions panel_is_the_only_solution.
+Print Assumptions the_group_bound_is_load_bearing.
+Print Assumptions inside_the_group_the_same_panel_agrees.

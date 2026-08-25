@@ -173,6 +173,42 @@ fn every_coq_proof_still_checks_and_rests_on_no_axioms() {
     }
 }
 
+/// Blank out everything inside `(* ... *)`, keeping every newline so line
+/// numbers survive.
+///
+/// **Stripping comments LINE-LOCALLY is not enough, and that was found the way
+/// these things are found: by writing a docstring.** The first version split
+/// each line on `(*` and scanned the prefix, so the *opening* line of a comment
+/// was handled and every continuation line was scanned as if it were code - a
+/// paragraph containing the ordinary English word "admit" failed the gate.
+/// Contorting the prose would have left the hole; Coq comments also NEST, so
+/// the depth counter is not optional.
+fn strip_coq_comments(src: &str) -> String {
+    let b: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == '(' && i + 1 < b.len() && b[i + 1] == '*' {
+            depth += 1;
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+        } else if depth > 0 && b[i] == '*' && i + 1 < b.len() && b[i + 1] == ')' {
+            depth -= 1;
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+        } else {
+            // Newlines are kept even inside a comment, so `lines()` still
+            // agrees with the file.
+            out.push(if depth > 0 && b[i] != '\n' { ' ' } else { b[i] });
+            i += 1;
+        }
+    }
+    out
+}
+
 /// `coqc` accepts an admitted lemma and exits 0. Only the source says.
 #[test]
 fn nothing_in_any_proof_is_admitted() {
@@ -180,10 +216,23 @@ fn nothing_in_any_proof_is_admitted() {
     for path in proof_sources() {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let src = std::fs::read_to_string(&path).expect("read a proof");
-        for (i, line) in src.lines().enumerate() {
-            let code = line.split("(*").next().unwrap_or("").trim();
-            // `Admitted.` closes a proof with a hole; `admit.` leaves one mid-proof.
-            if code == "Admitted." || code.starts_with("admit") || code.contains(" admit.") {
+        let stripped = strip_coq_comments(&src);
+        for (i, (code, line)) in stripped.lines().zip(src.lines()).enumerate() {
+            // Match the TOKEN, not a line shape. The previous version tested
+            // `code == "Admitted."`, `starts_with("admit")` and
+            // `contains(" admit.")`, which between them miss the commonest way
+            // of stubbing a Coq lemma at all: `Proof. Admitted.` on ONE line is
+            // none of the three. Found by probing the gate with the thing it
+            // exists to catch, which is the only way a hole like this surfaces -
+            // it passes every real file perfectly.
+            //
+            // `Abort.` is here for the same reason one level up: it discards the
+            // lemma outright, so there is no theorem left to `Print Assumptions`
+            // and the file still compiles.
+            let holed = code
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|t| t == "Admitted" || t == "admit" || t == "Abort" || t == "give_up");
+            if holed {
                 offenders.push(format!("{name}:{}: {}", i + 1, line.trim()));
             }
         }
@@ -268,6 +317,18 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // any proof to capture. Deleting this turns the file's own
                 // "what this does not prove" section into an unchecked remark.
                 "slot_b_is_the_plain_interleave",
+                // The panel as a FUNCTION - what slot `s` actually holds. This
+                // is the statement the composition needed and had to assume;
+                // the uniqueness theorem is what makes it a claim about the
+                // emitted loop rather than about a convenient model.
+                "Print Assumptions panel_decodes_its_own_write",
+                "panel_is_the_only_solution",
+                // The group bound refuted concretely: without `idx < width` the
+                // contract is FALSE of every non-zero operand, because the next
+                // index is the following k-pair group's first slot. The control
+                // shows the same panel agrees inside the group.
+                "the_group_bound_is_load_bearing",
+                "inside_the_group_the_same_panel_agrees",
             ][..],
         ),
         (
@@ -318,9 +379,9 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             &[
                 // The five files must AGREE on the definitions they each
                 // declared separately - three copies of the B slot map, two of
-                // MR/NR/col_of. Without this each file goes on type-checking
-                // while proving a theorem about a kernel the others no longer
-                // describe.
+                // MR/NR/col_of. Each copy turns out to be pinned by a theorem
+                // in its own file already (that was measured, not assumed), so
+                // these make an incidental pinning explicit and cross-file.
                 "packing_and_register_tile_agree_on_the_b_slot",
                 "micro_and_register_tile_agree_on_the_b_slot",
                 "the_tile_shape_is_the_same_everywhere",
@@ -330,6 +391,12 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // elements. Neither half can state this alone.
                 "Print Assumptions the_lane_accumulates_the_source_elements",
                 "a_dead_row_contributes_nothing",
+                // ...and the packers' contract is DISCHARGED rather than
+                // assumed. Deleting this leaves the composition resting on a
+                // hypothesis nothing is shown to satisfy - which is the
+                // proof-shaped version of a licence nothing can violate, and
+                // is the state this file was committed in once.
+                "the_packed_panels_route_to_the_right_source_elements",
             ][..],
         ),
     ]
