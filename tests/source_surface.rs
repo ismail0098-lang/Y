@@ -356,7 +356,7 @@ fn documented_y_commands() -> Vec<(String, Vec<String>)> {
             };
             let parts: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
             let Some(src) = parts.first() else { continue };
-            if !src.ends_with(".ysu") || !repo().join(src).exists() {
+            if !(src.ends_with(".ysu") || src.ends_with(".circom")) || !repo().join(src).exists() {
                 continue; // a file the reader is told to create, not a repo fixture
             }
             // Skip what this gate cannot legitimately judge:
@@ -364,9 +364,15 @@ fn documented_y_commands() -> Vec<(String, Vec<String>)> {
             //  - `--emit-c` and friends are DOCUMENTED as failing, and do
             //  - autotuning touches the GPU
             let flags: Vec<String> = parts[1..].to_vec();
+            let needs_zk = flags.iter().any(|f| f.contains("r1cs") || f.contains("zk"));
+            if needs_zk && !cfg!(feature = "zk") {
+                continue; // the ZK backend is not in a default build
+            }
             if flags.iter().any(|f| {
-                f.contains("r1cs") || f.contains("zk") || f.contains("autotune")
-                    || *f == "--emit-c" || *f == "--c" || f.contains("target=c")
+                f.contains("autotune")
+                    || *f == "--emit-c"
+                    || *f == "--c"
+                    || f.contains("target=c")
             }) {
                 continue;
             }
@@ -401,9 +407,20 @@ fn every_documented_y_command_over_a_repo_fixture_succeeds() {
         cmds.len()
     );
     let mut broken = Vec::new();
+    // Every emitting backend writes its artifact NEXT TO THE SOURCE, so
+    // running these in place would rewrite committed files whenever an
+    // emission differs - and it would race any other test compiling the same
+    // fixture. It happens to be a no-op today only because the artifacts
+    // regenerate byte-identically; that is luck, not design.
+    let dir = std::env::temp_dir().join(format!("y_doccmd_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
     for (src, flags) in &cmds {
+        let name = Path::new(src).file_name().expect("fixture name");
+        let tmp = dir.join(name);
+        std::fs::copy(repo().join(src), &tmp).expect("copy fixture");
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
-            .arg(src)
+            .arg(&tmp)
             .args(flags)
             .current_dir(repo())
             .output()
@@ -423,6 +440,7 @@ fn every_documented_y_command_over_a_repo_fixture_succeeds() {
             broken.push(format!("`Y {src} {}` -> {why}", flags.join(" ")));
         }
     }
+    let _ = std::fs::remove_dir_all(&dir);
     assert!(
         broken.is_empty(),
         "documented commands that do not work:\n  {}",
