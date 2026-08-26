@@ -137,12 +137,21 @@ struct Panels {
 }
 
 /// Build the module once, then run it per shape.
-fn build() -> Option<std::path::PathBuf> {
+///
+/// `tag` is per-test and belongs in the SIGNATURE, not in a comment asking the
+/// next author to remember. Both tests in this file call this; a shared
+/// directory name means one test's `remove_dir_all` lands while the other is
+/// writing its IR, which presents as `write IR: NotFound` with the module
+/// perfectly valid. That race has now fired five times in this repo (the GPU
+/// `.ptx` harness, `backend_differential.rs`, `exact_gemm_chain_model.rs`,
+/// `exact_gemm_tile_enumeration.rs`, here) - it is a property of any helper
+/// that materialises files in a temp directory.
+fn build(tag: &str) -> Option<std::path::PathBuf> {
     if !have("clang") {
         eprintln!("skipping: clang not found");
         return None;
     }
-    let dir = std::env::temp_dir().join(format!("y_panel_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("y_panel_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
 
@@ -222,7 +231,7 @@ const SHAPES: &[(usize, usize, usize)] = &[
 /// writes fails rather than reading back as a plausible zero.
 #[test]
 fn every_panel_slot_is_what_the_model_says() {
-    let Some(exe) = build() else { return };
+    let Some(exe) = build("slots") else { return };
 
     for &(mrows, kc, ncols) in SHAPES {
         let (lda, ldb) = (kc + 5, ncols + 9);
@@ -267,7 +276,7 @@ fn every_panel_slot_is_what_the_model_says() {
 /// same panel agrees with the model everywhere.
 #[test]
 fn the_next_group_is_not_padding() {
-    let Some(exe) = build() else { return };
+    let Some(exe) = build("group") else { return };
 
     let (mrows, kc, ncols) = (VNNI_MR, 8, VNNI_NR);
     let p = run(&exe, mrows, kc, ncols, kc + 5, ncols + 9);

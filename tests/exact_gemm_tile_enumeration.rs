@@ -53,6 +53,13 @@
 //!
 //! So the honest claim is: this covers enumeration errors that do not change
 //! the answer, and diagnoses the rest by name instead of as a bad number.
+//!
+//! **The companion is `exact_gemm_packing_schedule.rs`**, which excises all
+//! three callees instead of one and covers the driver's OTHER loop - the panels
+//! it prepares rather than the tiles it visits. The two catch disjoint sets:
+//! this file catches none of that file's six packing mutations, because
+//! excising the micro-kernel alone leaves what the packers are handed, and in
+//! what order, invisible.
 
 use std::process::Command;
 
