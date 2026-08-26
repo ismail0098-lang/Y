@@ -962,6 +962,81 @@ Also, the shared-temp-dir race, hit for the **fourth** time. It is a property of
 the `build()` helper rather than of any one test, so the per-test tag now lives
 in the signature instead of in a comment asking the next author to remember.
 
+#### Phase 1 progress, 2026-08-26 (6) — the other half of the driver, and an invisible out-of-bounds read
+
+Entry (5) tied the driver's *tile* loop to the model. Its other loop — the one
+that prepares the panels — was still guarded by nothing but a paragraph of
+prose. `emit_vnni_gemm_driver`'s own comment states the schedule as a measured
+fact:
+
+> The first version packed A inside the i-loop and B inside the j-loop nested
+> within it, so B was re-packed once per ROW panel — `M/MR` times over … At
+> MR=6 that is a sixth of the total run spent copying B.
+
+**A re-packing bug is invisible in the answer.** Packing A inside the j-loop, or
+B inside the i-loop, computes exactly the right result — it just does `ntiles_n`
+or `ntiles_m` times the packing work. So no correctness test in this repository
+can fail on it. Same shape as `a_deep_constant_chain_collapses_completely` (a
+convergence property, guarded by a *size* assertion) and the shared-memory
+swizzle (a bank-conflict property, guarded by a measurement).
+
+`tests/exact_gemm_packing_schedule.rs` reuses (5)'s technique on all three
+callees at once — `__y_gemm_vnni_pack_a`, `__y_gemm_vnni_pack_b` and
+`__y_gemm_micro_vnni` are excised and replaced by `declare`s, with recording C
+stubs. Recording all three in **one event stream** is what makes the schedule
+checkable rather than three separate counts; the whole of it is one assertion:
+
+```text
+[A(0) .. A(ntm-1)]  ++  concat over j of ( [B(j)] ++ [K(0) .. K(ntm-1)] )
+```
+
+which says at once that every A pack precedes every B pack, that there are `ntm`
+and `ntn` of them rather than `ntm × ntn`, and that each B panel is **live for
+exactly its own column's tiles** — not merely written the right number of times.
+(The two packers are `internal`, so the excision has to match `define internal
+void @…` as well; a `declare` is never `internal`.)
+
+**Six mutations, each suite run separately.** `cargo test` aborts the remaining
+binaries after one fails, so a run listing several `--test` targets can leave
+the important one unmeasured.
+
+| mutation | pack_sched | tile_enum | tiling_model | thr-inv | exact-thr | packing_model |
+|---|---|---|---|---|---|---|
+| **A packed inside the j-loop** | **caught** | ok | ok | ok | ok | ok |
+| **B packed inside the i-loop** | **caught** | ok | ok | ok | ok | ok |
+| **pack_a's row count unclamped (`MR`)** | **caught** | ok | ok | ok | ok | ok |
+| **pack_b's column count unclamped (`NR`)** | **caught** | ok | ok | ok | ok | ok |
+| A panel offset is the row index, not the tile index | caught | ok | caught | caught | caught | caught |
+| both packers handed `K-1` | caught | ok | caught | caught | caught | caught |
+
+**Four of six are caught by this file and nothing else, and the two I did not
+predict are the more serious pair.** I expected the unclamped-packer mutations
+to be caught by the correctness suites and wrote that into the docstring before
+measuring; they are not. Dropping either packer's clamp *at the call site* makes
+it read up to `MR-1` rows past the end of `A`, or `NR-1` columns past the end of
+`B` — and every answer stays bit-identical, because the fold-back's own `mw`/`nw`
+clamp discards exactly the rows and columns the packer over-read. **The
+observable consequence of a live out-of-bounds read is nothing at all**, until
+the buffer happens to end at a page boundary. That is the redundant-guard
+pattern `exact_gemm_packing_model` already records for the masks *inside* the
+packers, one layer up at the call site — and it is why "the correctness suites
+cover the packers" is false.
+
+`exact_gemm_tile_enumeration` catches **none** of the six, which is the result
+that says the two files are complementary rather than overlapping: it excises the
+micro-kernel only, so what the packers are handed, and in what order, is
+invisible to it. Between them they cover the driver's two loops — that one the
+tiles it visits, this one the panels it prepares.
+
+Also, the shared-temp-dir race, hit for the **fifth** time — and this time in a
+file written two entries ago (`exact_gemm_panel_model.rs`), which had been green
+for two commits before a new test binary changed the scheduling enough to fire
+it. That is the "passed for several runs before failing" signature exactly. The
+rest of `tests/` was then swept for the same defect rather than waiting for a
+sixth: two candidates turned out to be false positives (per-`name` filenames with
+no `remove_dir_all`, and a `main(` inside an embedded Y source string), so the
+suite is now clean.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
