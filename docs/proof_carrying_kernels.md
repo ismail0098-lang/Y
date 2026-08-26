@@ -912,6 +912,56 @@ Phase 2 exists to close**, and it is now the only structural one left.
 Mutation-verified 4/4 (column offset at `mod MR`, dropping `r < M`, reading band
 `t` rather than `t'`, scaling the row by `NR` in the address tie).
 
+#### Phase 1 progress, 2026-08-26 (5) — narrowing the model-to-code gap
+
+The capstone's one remaining structural gap is that the loop **structure** is
+modelled rather than extracted: `gemm_position` says what `(r, c)` receives *on
+the reading that* the driver visits tile `(r/MR, c/NR)`. Nothing had asked the
+emitted driver how many tiles it runs, or in what order.
+
+`tests/exact_gemm_tile_enumeration.rs` asks. **A correct tiling is invisible in
+the answer** — `c_written_exactly_once` is exactly that statement — so the
+answer cannot arbitrate it, the same bind the K-split was in when the
+`--wrap=pthread_create` spawn count turned out to be the only observable. Here
+the observable is the sequence of micro-kernel invocations.
+
+`--wrap` does not work for it: `__y_gemm_micro_vnni` is called from the driver
+in the *same module*, so the call is resolved at compile time and there is no
+relocation to redirect. Instead the emitted module has that definition
+**excised** and replaced by a `declare`, and the C driver supplies a recording
+stub; the driver under test is byte-identical otherwise. Three things are then
+pinned:
+
+1. the call count is `mn_tiles(M, MR).len() × mn_tiles(N, NR).len()`;
+2. the **order** is column-panel outer, row-panel inner — the row-tile sequence
+   is `0..ntiles_m` repeated `ntiles_n` times, which is what makes "B is packed
+   once per column panel" a checked fact rather than a comment;
+3. every call receives the full `kpairs = (K+1)/2` and `ldc = NR` — the
+   machine-checked form of the fact the previous entry got wrong from
+   structural resemblance.
+
+**What it isolates is less than it first looked, and the table says so.** Five
+driver mutations:
+
+| mutation | tile_enum | tiling_model | thr-inv | exact-thr | packing | chain |
+|---|---|---|---|---|---|---|
+| row loop strides by `MR-1` | caught | caught | caught | caught | – | – |
+| column loop strides by `2·NR` | caught | caught | caught | caught | – | – |
+| micro-kernel handed half the k-pairs | caught | caught | caught | caught | – | – |
+| scratch row stride is `ldc`, not `NR` | caught | caught | caught | caught | – | – |
+| **one extra row panel past M** | **caught** | ok | caught | ok | ok | ok |
+
+The first four are caught by everything — they change the answer, and the
+correctness suites see that. The last row is what the file earns its place on:
+an extra panel is clamped to zero width, so the fold-back writes nothing and
+**the answer is unchanged**; four of six suites miss it. So the honest claim is
+"covers enumeration errors that do not change the answer, and diagnoses the rest
+by name rather than as a bad number" — not "catches what the others cannot".
+
+Also, the shared-temp-dir race, hit for the **fourth** time. It is a property of
+the `build()` helper rather than of any one test, so the per-test tag now lives
+in the signature instead of in a comment asking the next author to remember.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
