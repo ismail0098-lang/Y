@@ -446,6 +446,30 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "the_store_predicate_is_redundant",
             ][..],
         ),
+        (
+            "ExactGemmWhole.v",
+            &[
+                // THE capstone: all six exact-GEMM proofs chained. Every
+                // element of C, over every thread's K band, is the source dot
+                // product - no hypothesis that MR divides M, NR divides N,
+                // nthr divides K, or that K is even.
+                "Print Assumptions the_threaded_gemm_holds_the_source_dot_products",
+                "the_whole_output_holds_the_source_dot_products",
+                // Every position is live in its OWN tile, which is what makes
+                // the store predicate true for it.
+                "the_position_is_live_in_its_own_tile",
+                // ...and the (r, c) view addresses the same element the tiling
+                // proof's (tile, offset) view does, so
+                // ExactGemmTiling.c_written_exactly_once applies here.
+                "the_position_decomposition_is_the_tilings",
+                // Concrete, because every equality above is satisfied by a
+                // model computing 0 - and with BOTH bands contributing, so the
+                // K-split is a real reduction rather than one band doing all
+                // the work.
+                "the_whole_chain_is_not_vacuous",
+                "both_bands_contribute",
+            ][..],
+        ),
     ]
 }
 
