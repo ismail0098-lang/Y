@@ -54,16 +54,55 @@
     states as arithmetic and `tests/exact_gemm_micro_model.rs` observes on a
     running kernel - here it is the END-TO-END function that changes.
 
+    *** The tile lift. ***
+
+    [the_tile_holds_the_source_dot_products] takes the same statement from one
+    lane to the whole `MR x NR` tile: for every live `(i, j)`,
+
+    <<  C[i][j]  =  C0[i][j] + sum over k < kc of A[i][k] * B[k][j]  >>
+
+    and for every dead one, `C[i][j] = C0[i][j]` exactly
+    ([a_dead_position_leaves_c_untouched]). Note the ACCUMULATE - `C0` is what
+    was there before, because the kernel adds into C rather than assigning,
+    which is what lets a caller split K across threads.
+
+    The join needed is the inverse of `RT.col_of`.
+    `RT.tile_position_surjective` says an inverse exists;
+    [the_lane_map_is_a_two_sided_inverse] names it (`vec_of j = j / 16`,
+    `lane_of j = j mod 16`) and proves it inverts BOTH ways, which is what
+    licenses [distinct_columns_use_distinct_lanes] - no two tile positions
+    share an accumulator lane, so 384 values really do live in 24 registers of
+    16 lanes with nothing aliasing.
+
+    **And the store predicate turns out to be redundant, which is a theorem
+    rather than a convenience.** The emitted micro-kernel writes all `MR x NR`
+    positions unconditionally - the live-rectangle clamp is the DRIVER's - so
+    [tile_after] models two things at once and it is fair to ask whether the
+    second does any work. [the_store_predicate_is_redundant] says it does not:
+    a dead row or column accumulates zero by the packers' masks, so adding it
+    to `C0` leaves `C0`. That settles the faithfulness question - the tile
+    theorem describes the micro-kernel's own effect on C, clamp or no clamp -
+    and it is the same redundancy `tests/exact_gemm_packing_model.rs`
+    MEASURED from the other side, where removing a packer's row or column mask
+    leaves every answer correct.
+
+    **The live rectangle here is the tile's CLAMPED extent, not `M` and `N`.**
+    `mrows`/`ncols` are `ExactGemmTiling.tw M MR ti` and `tw N NR tj`. That is
+    a modelling fact worth stating and not worth a theorem - instantiating
+    `RT.only_the_live_rectangle_is_stored` at those arguments proves nothing
+    new. It is where the two models would have to be joined, and they are not.
+
     *** What this does NOT do, stated rather than implied. ***
 
-    - **It is one LANE, not the tile.** Lanes are independent, but the
-      tile-level statement needs the store, which is
-      `ExactGemmRegisterTile.only_the_live_rectangle_is_stored` over a
-      different model of C.
-    - **It does not reach C.** `ExactGemmTiling.v`'s output partition and
-      `ExactGemmKsplit.v`'s band reduction sit ABOVE this and are proved over
-      their own models. Joining those needs one shared model of the kernel,
-      which remains Phase 2's subject.
+    - **It does not reach the whole of C.** Three layers sit above the tile.
+      `ExactGemmTiling.v`'s output partition and `ExactGemmKsplit.v`'s band
+      reduction are each proved over their own model and are not joined to
+      this one. The third is not proved anywhere: the **kc-panel loop**, which
+      cuts K into panels of `kc` inside one thread. That is the same
+      decomposition shape as `ExactGemmKsplit.bands_tile` - a clamped or
+      uneven cut of `[0, K)` whose parts sum - so it is probably cheap, but
+      "probably cheap" is not "done", and it is named here rather than left to
+      be discovered.
     - **The ISA facts are still definitions.** `vpdpwssd`'s semantics and the
       little-endian order of an i32's halves are pinned by
       `tests/cpu_gemm_vnni_micro.rs` on the real instruction, not here.
@@ -347,6 +386,189 @@ Theorem at_the_licensed_magnitude_the_chain_holds :
   = PK.sum_k (fun k => A4095 0 k * B4095 k 0) 128.
 Proof. vm_compute. reflexivity. Qed.
 
+(* ------------------------------------------------------------------ *)
+(** ** The tile lift: from one lane to the MR x NR rectangle           *)
+(* ------------------------------------------------------------------ *)
+
+(* Which accumulator vector and lane hold tile column j - the inverse of
+   RT.col_of, which RT.tile_position_surjective says exists. *)
+Definition vec_of  (j : nat) : nat := (j / 16)%nat.
+Definition lane_of (j : nat) : nat := (j mod 16)%nat.
+
+Lemma the_lane_decomposition_inverts_the_column : forall j,
+  (j < RT.NR)%nat ->
+  (vec_of j < RT.NRV)%nat /\ (lane_of j < 16)%nat
+  /\ RT.col_of (vec_of j) (lane_of j) = j.
+Proof.
+  intros j Hj. unfold vec_of, lane_of, RT.col_of, RT.NR, RT.NRV in *.
+  pose proof (Nat.div_mod_eq j 16) as Hdm.
+  pose proof (Nat.mod_upper_bound j 16 ltac:(lia)) as Hub.
+  assert ((j / 16 < 4)%nat) by (apply Nat.Div0.div_lt_upper_bound; lia).
+  repeat split; lia.
+Qed.
+
+(* The kernel's effect on one tile position: the lane's int32-flushed
+   accumulator added into C, through the store's live-rectangle predicate. *)
+Definition tile_after (C0 : nat -> nat -> Z) (Ap Bp : nat -> Z)
+                      (Fl mrows ncols kp i j : nat) : Z :=
+  if RT.stored mrows ncols i j
+  then C0 i j
+       + chunk_acc_i32 (step Ap Bp i (vec_of j) (lane_of j))
+           Fl kp (MC.nchunks Fl kp)
+  else C0 i j.
+
+Theorem the_tile_holds_the_source_dot_products :
+  forall A B C0 mrows ncols kc Fl m i j,
+    (0 < Fl)%nat -> 0 <= m ->
+    2 * Z.of_nat Fl * m * m <= MC.I32MAX ->
+    (forall idx k, Z.abs (A idx k) <= m) ->
+    (forall k idx, Z.abs (B k idx) <= m) ->
+    (i < RT.MR)%nat -> (j < RT.NR)%nat ->
+    tile_after C0
+      (PK.panel A mrows kc PK.MR)
+      (PK.panel (fun c k => B k c) ncols kc PK.NR)
+      Fl mrows ncols (PK.kpairs kc) i j
+    = if RT.stored mrows ncols i j
+      then C0 i j + PK.sum_k (fun k => A i k * B k j) kc
+      else C0 i j.
+Proof.
+  intros A B C0 mrows ncols kc Fl m i j HFl Hm Hlic HA HB Hi Hj.
+  destruct (the_lane_decomposition_inverts_the_column j Hj) as [Hv [Hl Hcol]].
+  unfold tile_after.
+  destruct (RT.stored mrows ncols i j) eqn:Hs; [| reflexivity ].
+  apply (proj1 (RT.only_the_live_rectangle_is_stored mrows ncols i j)) in Hs.
+  destruct Hs as [Hrow Hncol].
+  rewrite (the_emitted_lane_computes_the_source_dot_product
+             A B mrows ncols kc Fl m i (vec_of j) (lane_of j));
+    try assumption; rewrite Hcol; try assumption.
+  reflexivity.
+Qed.
+
+(** The other direction: `vec_of`/`lane_of` is a two-sided inverse of
+    `RT.col_of`. `RT.tile_position_surjective` says an inverse exists; this
+    names it and proves it inverts BOTH ways, which is what licenses "no two
+    tile positions share an accumulator lane". *)
+Theorem the_lane_map_is_a_two_sided_inverse : forall v l,
+  (v < RT.NRV)%nat -> (l < 16)%nat ->
+  vec_of (RT.col_of v l) = v /\ lane_of (RT.col_of v l) = l.
+Proof.
+  intros v l Hv Hl. unfold vec_of, lane_of, RT.col_of.
+  split.
+  - replace (16 * v + l)%nat with (l + v * 16)%nat by lia.
+    rewrite Nat.div_add by lia. rewrite Nat.div_small by lia. lia.
+  - replace (16 * v + l)%nat with (l + v * 16)%nat by lia.
+    rewrite Nat.Div0.mod_add. apply Nat.mod_small; lia.
+Qed.
+
+Corollary distinct_columns_use_distinct_lanes : forall j1 j2,
+  (j1 < RT.NR)%nat -> (j2 < RT.NR)%nat ->
+  vec_of j1 = vec_of j2 -> lane_of j1 = lane_of j2 -> j1 = j2.
+Proof.
+  intros j1 j2 H1 H2 Hv Hl.
+  destruct (the_lane_decomposition_inverts_the_column j1 H1) as [_ [_ E1]].
+  destruct (the_lane_decomposition_inverts_the_column j2 H2) as [_ [_ E2]].
+  rewrite <- E1, <- E2, Hv, Hl. reflexivity.
+Qed.
+
+(** A dead position is left exactly as it was - the tile runs at full width
+    and the store discards the rest. *)
+Corollary a_dead_position_leaves_c_untouched :
+  forall C0 Ap Bp Fl mrows ncols kp i j,
+    (mrows <= i)%nat \/ (ncols <= j)%nat ->
+    tile_after C0 Ap Bp Fl mrows ncols kp i j = C0 i j.
+Proof.
+  intros C0 Ap Bp Fl mrows ncols kp i j Hdead.
+  unfold tile_after.
+  destruct (RT.stored mrows ncols i j) eqn:Hs; [| reflexivity ].
+  apply (proj1 (RT.only_the_live_rectangle_is_stored mrows ncols i j)) in Hs.
+  lia.
+Qed.
+
+(** Concrete, because every equality above is satisfied by a model computing
+    nothing. A 2 x 3 live rectangle inside the 6 x 64 tile, kc = 3 (odd, so the
+    phantom k-half is live), C pre-loaded with 100 so the ACCUMULATE is visible
+    rather than an assignment.
+
+    Row 1 of A is 2, 3, 4; column 2 of B is 3, 5, 7; so 6 + 15 + 28 = 49. *)
+Definition Atc (i k : nat) : Z := Z.of_nat (i + k + 1).
+Definition Btc (k j : nat) : Z := Z.of_nat (2 * k + j + 1).
+Definition C100 (i j : nat) : Z := 100.
+
+Theorem the_tile_lift_is_not_vacuous :
+  tile_after C100 (PK.panel Atc 2 3 PK.MR)
+                  (PK.panel (fun c k => Btc k c) 3 3 PK.NR)
+             64 2 3 (PK.kpairs 3) 1 2 = 149
+  /\ tile_after C100 (PK.panel Atc 2 3 PK.MR)
+                     (PK.panel (fun c k => Btc k c) 3 3 PK.NR)
+                64 2 3 (PK.kpairs 3) 1 5 = 100.
+Proof. split; vm_compute; reflexivity. Qed.
+
+Print Assumptions the_lane_decomposition_inverts_the_column.
+Print Assumptions the_lane_map_is_a_two_sided_inverse.
+Print Assumptions distinct_columns_use_distinct_lanes.
+Print Assumptions the_tile_holds_the_source_dot_products.
+Print Assumptions a_dead_position_leaves_c_untouched.
+Print Assumptions the_tile_lift_is_not_vacuous.
+
+(** **Is the store predicate needed at all?** The emitted micro-kernel writes
+    every one of the `MR x NR` positions unconditionally; the live-rectangle
+    clamp lives in the DRIVER. So [tile_after] models two things at once, and
+    it is fair to ask whether the second one does any work.
+
+    It does not, and that is a THEOREM rather than a modelling convenience: a
+    dead row or column accumulates zero (the packers' masks), so adding it to
+    `C0` leaves `C0`. `tests/exact_gemm_packing_model.rs` MEASURED this
+    redundancy - removing a packer's row or column mask leaves every answer
+    correct because the clamp discards it anyway - and this is the same fact
+    proved from the other side. It also settles the faithfulness question:
+    [the_tile_holds_the_source_dot_products] describes the micro-kernel's own
+    effect on C, clamp or no clamp. *)
+Theorem the_store_predicate_is_redundant :
+  forall A B C0 mrows ncols kc Fl m i j,
+    (0 < Fl)%nat -> 0 <= m ->
+    2 * Z.of_nat Fl * m * m <= MC.I32MAX ->
+    (forall idx k, Z.abs (A idx k) <= m) ->
+    (forall k idx, Z.abs (B k idx) <= m) ->
+    (i < RT.MR)%nat -> (j < RT.NR)%nat ->
+    tile_after C0
+      (PK.panel A mrows kc PK.MR)
+      (PK.panel (fun c k => B k c) ncols kc PK.NR)
+      Fl mrows ncols (PK.kpairs kc) i j
+    = C0 i j
+      + chunk_acc_i32
+          (step (PK.panel A mrows kc PK.MR)
+                (PK.panel (fun c k => B k c) ncols kc PK.NR)
+                i (vec_of j) (lane_of j))
+          Fl (PK.kpairs kc) (MC.nchunks Fl (PK.kpairs kc)).
+Proof.
+  intros A B C0 mrows ncols kc Fl m i j HFl Hm Hlic HA HB Hi Hj.
+  destruct (the_lane_decomposition_inverts_the_column j Hj) as [Hv [Hl Hcol]].
+  unfold tile_after.
+  destruct (RT.stored mrows ncols i j) eqn:Hs; [ reflexivity |].
+  (* Dead: the accumulator is zero, so the predicate changes nothing. *)
+  assert (Hstep : forall p,
+    Z.abs (step (PK.panel A mrows kc PK.MR)
+                (PK.panel (fun c k => B k c) ncols kc PK.NR)
+                i (vec_of j) (lane_of j) p) <= 2 * m * m).
+  { apply step_bound.
+    - exact Hm.
+    - apply panel_bound; [ exact Hm | exact HA ].
+    - apply panel_bound; [ exact Hm | intros idx k; apply HB ]. }
+  rewrite (the_licence_makes_every_chunk_exact _ Fl _ m _ HFl Hm Hlic Hstep).
+  rewrite MC.flush_exact by exact HFl.
+  rewrite <- kloop_is_sum_from_step.
+  assert (Hdead : (mrows <= i)%nat \/ (ncols <= j)%nat).
+  { unfold RT.stored in Hs.
+    apply Bool.andb_false_iff in Hs.
+    destruct Hs as [H | H]; [ left | right ];
+      apply Nat.ltb_ge in H; exact H. }
+  destruct Hdead as [Hdr | Hdc].
+  - rewrite (a_dead_row_accumulates_nothing A B mrows ncols kc i (vec_of j)
+               (lane_of j) _ Hi Hv Hl Hdr). ring.
+  - rewrite (a_dead_column_accumulates_nothing A B mrows ncols kc i (vec_of j)
+               (lane_of j) _ Hi Hv Hl ltac:(rewrite Hcol; exact Hdc)). ring.
+Qed.
+
 Print Assumptions kloop_is_the_padded_product.
 Print Assumptions the_k_pair_loop_computes_the_source_dot_product.
 Print Assumptions a_dead_row_accumulates_nothing.
@@ -358,3 +580,4 @@ Print Assumptions the_chain_is_not_vacuous.
 Print Assumptions the_whole_chain_is_not_vacuous.
 Print Assumptions violating_the_licence_breaks_the_chain.
 Print Assumptions at_the_licensed_magnitude_the_chain_holds.
+Print Assumptions the_store_predicate_is_redundant.

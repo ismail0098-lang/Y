@@ -99,6 +99,7 @@ int main(int argc, char **argv) {
     long lda   = atol(argv[4]);
     long ldb   = atol(argv[5]);
     long mag   = atol(argv[6]);   /* 0 = position-encoded, else a constant */
+    long c0on  = atol(argv[7]);   /* 1 = pre-load C, to exercise the ACCUMULATE */
     long kp    = (kc + 1) / 2;
 
     int16_t *A = malloc(sizeof(int16_t) * (size_t)(MR + 2) * lda);
@@ -117,8 +118,15 @@ int main(int argc, char **argv) {
     y_test_pack_a(A, lda, mrows, kc, Ap);
     y_test_pack_b(B, ldb, kc, ncols, Bp);
 
-    /* The kernel ACCUMULATES into C, so the caller owns the zeroing. */
-    for (long t = 0; t < (long)MR * NR; ++t) C[t] = 0;
+    /* The kernel ACCUMULATES into C, so the caller owns the initial value.
+       With `c0on` the tile is pre-loaded, which is the only way to tell an
+       accumulate from an assignment at a single flush chunk - and the only way
+       to check that a DEAD position is left exactly as it was rather than
+       merely left at zero. `proofs/ExactGemmChain.v` states both as
+       `C0 i j + ...` and `a_dead_position_leaves_c_untouched`. */
+    for (long i = 0; i < MR; ++i)
+        for (long j = 0; j < NR; ++j)
+            C[i * NR + j] = c0on ? (int64_t)(1000 + 100 * i + j) : 0;
     __y_gemm_micro_vnni(Ap, Bp, C, NR, kp);
 
     long wrong = 0;
@@ -127,7 +135,7 @@ int main(int argc, char **argv) {
         for (long j = 0; j < NR; j++) {
             /* The reference is over the SOURCE matrices, masked exactly as a
                ragged tile is: a dead row or column contributes nothing. */
-            int64_t want = 0;
+            int64_t want = c0on ? (int64_t)(1000 + 100 * i + j) : 0;
             if (i < mrows && j < ncols)
                 for (long k = 0; k < kc; k++)
                     want += (int64_t)A[i * lda + k] * (int64_t)B[k * ldb + j];
@@ -138,7 +146,7 @@ int main(int argc, char **argv) {
         }
     /* The (0,0) reference, printed unconditionally: `first_want` is only set
        when something disagrees, so it says nothing on a passing run. */
-    int64_t ref00 = 0;
+    int64_t ref00 = c0on ? 1000 : 0;
     if (0 < mrows && 0 < ncols)
         for (long k = 0; k < kc; k++)
             ref00 += (int64_t)A[k] * (int64_t)B[k * ldb];
@@ -203,6 +211,7 @@ fn run(
     kc: usize,
     ncols: usize,
     mag: i64,
+    c0: bool,
 ) -> (i64, i64, i64) {
     let out = Command::new(exe)
         .args([
@@ -212,6 +221,7 @@ fn run(
             (kc + 5).to_string(),
             (ncols + 9).to_string(),
             mag.to_string(),
+            (c0 as i32).to_string(),
         ])
         .output()
         .expect("run");
@@ -255,12 +265,16 @@ const SHAPES: &[(usize, usize, usize)] = &[
 fn the_kernel_computes_the_source_dot_product() {
     let Some(exe) = build("dot") else { return };
 
+    // Both initial states, because a kernel that ASSIGNS rather than
+    // accumulates is indistinguishable from a correct one when C starts zeroed
+    // and there is only one flush chunk.
+    for &c0 in &[false, true] {
     for &(mrows, kc, ncols) in SHAPES {
-        let (wrong, got00, ref00) = run(&exe, mrows, kc, ncols, 0);
+        let (wrong, got00, ref00) = run(&exe, mrows, kc, ncols, 0, c0);
         assert_eq!(
             wrong, 0,
-            "shape ({mrows}, {kc}, {ncols}): {wrong} of {} tile positions \
-             disagree with the source dot product",
+            "shape ({mrows}, {kc}, {ncols}), C pre-loaded = {c0}: {wrong} of {} \
+             tile positions disagree with the source dot product",
             VNNI_MR * VNNI_NR
         );
         // Non-vacuity: a kernel that wrote nothing would leave the zeroed C and
@@ -270,6 +284,7 @@ fn the_kernel_computes_the_source_dot_product() {
             "shape ({mrows}, {kc}, {ncols}): the (0,0) reference is {ref00}, so \
              this shape proves nothing about a kernel that never writes"
         );
+    }
     }
 }
 
@@ -294,7 +309,7 @@ fn the_licence_boundary_is_one_unit_wide_through_the_whole_chain() {
     assert_eq!(m, 4095, "the licensed magnitude moved; this test's numbers are stale");
 
     // kc = 128 is exactly one flush interval of 64 k-pairs.
-    let (wrong_ok, got_ok, want_ok) = run(&exe, VNNI_MR, 128, VNNI_NR, m);
+    let (wrong_ok, got_ok, want_ok) = run(&exe, VNNI_MR, 128, VNNI_NR, m, false);
     assert_eq!(
         wrong_ok, 0,
         "the largest LICENSED operand magnitude ({m}) already disagrees, so the \
@@ -303,7 +318,7 @@ fn the_licence_boundary_is_one_unit_wide_through_the_whole_chain() {
     assert_eq!(want_ok, 128 * m * m, "the licensed fixture's reference moved");
     assert_eq!(got_ok, want_ok);
 
-    let (wrong_bad, got_bad, want_bad) = run(&exe, VNNI_MR, 128, VNNI_NR, m + 1);
+    let (wrong_bad, got_bad, want_bad) = run(&exe, VNNI_MR, 128, VNNI_NR, m + 1, false);
     let _ = want_bad;
     assert!(
         wrong_bad > 0,

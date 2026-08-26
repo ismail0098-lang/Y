@@ -427,6 +427,23 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // ...and the chain evaluated on concrete numbers, because
                 // every equality above is satisfied by a model computing 0.
                 "the_whole_chain_is_not_vacuous",
+                // The tile lift: the same statement over the whole MR x NR
+                // rectangle, with the ACCUMULATE visible (C0 + dot) and dead
+                // positions left exactly as they were.
+                "Print Assumptions the_tile_holds_the_source_dot_products",
+                "a_dead_position_leaves_c_untouched",
+                // The join it needs: RT.tile_position_surjective says an
+                // inverse of col_of exists, this names it and proves it
+                // inverts BOTH ways - which is what licenses "no two tile
+                // positions share an accumulator lane".
+                "the_lane_map_is_a_two_sided_inverse",
+                "distinct_columns_use_distinct_lanes",
+                "the_tile_lift_is_not_vacuous",
+                // The clamp does no work: a dead position accumulates zero by
+                // the packers' masks, so the tile theorem describes the
+                // micro-kernel's own effect on C. The proved twin of the
+                // redundancy exact_gemm_packing_model.rs measured.
+                "the_store_predicate_is_redundant",
             ][..],
         ),
     ]

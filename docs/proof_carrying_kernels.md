@@ -799,6 +799,62 @@ Mutation-verified 8/8: four against the emitter, four against the proof
 (dropping the licence bound, dropping `0 < Fl`, seeding the accumulator at 1,
 and reading the next k-pair group's base).
 
+#### Phase 1 progress, 2026-08-26 (3) — the tile lift
+
+`the_tile_holds_the_source_dot_products` takes the previous entry's statement
+from one accumulator lane to the whole `MR × NR` tile: for every live `(i, j)`
+
+> `C[i][j] = C0[i][j] + sum over k < kc of A[i][k] · B[k][j]`
+
+and for every dead one `C[i][j] = C0[i][j]` exactly. Note the **accumulate** —
+`C0` is what was there before, which is what lets a caller split K across
+threads and is the property `ExactGemmKsplit.v` rests on.
+
+**The join it needed is the inverse of `col_of`.**
+`ExactGemmRegisterTile.tile_position_surjective` says an inverse exists;
+`the_lane_map_is_a_two_sided_inverse` names it (`vec_of j = j/16`,
+`lane_of j = j mod 16`) and proves it inverts *both* ways, which is what
+licenses `distinct_columns_use_distinct_lanes` — no two tile positions share an
+accumulator lane, so 384 values really do live in 24 registers of 16 lanes with
+nothing aliasing.
+
+**The store predicate turns out to do no work, and that is a theorem.** The
+emitted micro-kernel writes all `MR × NR` positions unconditionally — the
+live-rectangle clamp is the *driver's* — so the tile model was carrying two
+things at once. `the_store_predicate_is_redundant` shows a dead row or column
+accumulates zero by the packers' masks, so adding it to `C0` leaves `C0`. That
+settles the faithfulness question (the tile theorem describes the micro-kernel's
+own effect on C, clamp or no clamp) and it is the proved twin of a redundancy
+`tests/exact_gemm_packing_model.rs` had only **measured** — removing a packer's
+row or column mask leaves every answer correct because the clamp discards it.
+
+**The behavioural gap this exposed is the more useful half.** The tile theorem
+says `C0 + dot`, and the chain driver zeroed `C` — so the *accumulate clause was
+never exercised*. A kernel that ASSIGNS instead of accumulating is
+indistinguishable from a correct one when `C` starts at zero and there is one
+flush chunk. `tests/exact_gemm_chain_model.rs` now runs every shape twice, with
+`C` zeroed and with `C` pre-loaded, and the pre-load is load-bearing: with the
+multi-chunk shapes removed so `kc = 133` cannot do the work, mutating the flush
+to overwrite `C` is caught **only** on the pre-loaded arm, at the very first
+shape. Pre-loading also makes "a dead position is left as it was" testable at
+all — with `C` zeroed, *untouched* and *zeroed* are the same observation.
+
+**What is still missing to reach the whole of C**, named rather than left to be
+discovered: three layers sit above the tile. `ExactGemmTiling.v`'s output
+partition and `ExactGemmKsplit.v`'s band reduction are each proved over their
+own model and are not joined to this one. The third is proved **nowhere** — the
+**kc-panel loop**, which cuts K into panels of `kc` inside a single thread. It
+is the same decomposition shape as `ExactGemmKsplit.bands_tile`, so it is
+probably cheap; "probably cheap" is not "done".
+
+Mutation-verified 4/4 on the proof (`vec_of` at /32, `lane_of` at mod 8,
+dropping the `j < NR` bound, dropping the store predicate) plus the behavioural
+demonstration above. 18 `Print Assumptions`, no axioms.
+
+Also: `proofs/` now gitignores Rocq build artifacts. The gate compiles in a temp
+directory precisely so they never appear, but the proof headers tell a reader to
+run `coqc` by hand, which drops a `.lia.cache` beside the source — as mine did.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
