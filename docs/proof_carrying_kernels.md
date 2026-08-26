@@ -855,6 +855,63 @@ Also: `proofs/` now gitignores Rocq build artifacts. The gate compiles in a temp
 directory precisely so they never appear, but the proof headers tell a reader to
 run `coqc` by hand, which drops a `.lia.cache` beside the source — as mine did.
 
+#### Phase 1 progress, 2026-08-26 (4) — **all six proofs chained: the whole of C**
+
+`proofs/ExactGemmWhole.v` (Rocq 9.1, 6 `Print Assumptions`, no axioms) states the
+thing the six files were built for.
+**`the_threaded_gemm_holds_the_source_dot_products`**: sum the partials of
+`nthr` threads, each handed a K band, each running the emitted driver — packing,
+the register tile's routing, the k-pair loop, the int32 flush, the scratch tile
+and the fold-back — and for every `(r, c)` inside `M × N` the result is exactly
+
+> `sum over k < K of A[r][k] · B[k][c]`
+
+with **no** hypothesis that `MR` divides `M`, that `NR` divides `N`, that `nthr`
+divides `K`, or that `K` is even. The only assumption is the licence,
+`2·Fl·m² ≤ i32::MAX`, discharged by exhausting int16 in
+`tests/exact_gemm_licence_obligations.rs`.
+
+| file | contributes |
+|---|---|
+| `ExactGemmPacking.v` | what a packed panel slot holds |
+| `ExactGemmRegisterTile.v` | which accumulator lane reads it |
+| `ExactGemmComposition.v` | their join, for one `vpdpwssd` step |
+| `ExactGemmMicro.v` | the int32 flush chunking |
+| `ExactGemmChain.v` | the k-pair loop, and the lift to a tile |
+| `ExactGemmTiling.v` | the output partition — **joined here** |
+| `ExactGemmKsplit.v` | the K-band reduction — **joined here** |
+
+**A correction to what the previous entry recorded as missing.** It named a
+**kc-panel loop** — K cut into panels of `kc` inside one thread — as the layer
+proved nowhere, and guessed it was "probably cheap" because it looked like
+`bands_tile`. **There is no such loop.** `emit_vnni_gemm_driver` passes the full
+`K` to both packers and `kpairs = (K+1)/2` to the micro-kernel; the only cut of
+the K axis is the K-split across threads. So `kc` in every sibling file *is* K,
+and the gap that actually remained was the fold-back into C. *Read the emitter
+before recording a gap* — the guess was wrong in both directions, naming a layer
+that does not exist while missing the one that did.
+
+**No new behavioural test, and that is deliberate.**
+`tests/exact_gemm_thread_invariance.rs` already runs M=53, N=71, K=4099 — all
+three ragged against the `6 × 64` tile — at 1, 2, 3, 5, 8 and 16 threads, each
+checked against an independent integer reference; `cpu_gemm_exact_threaded.rs`
+sweeps flush intervals across the same; `exact_gemm_tiling_model.rs` covers a
+padded `ldc`. That *is* this theorem's behavioural tie. A fourth near-duplicate
+would add coverage of nothing.
+
+**What is still not proved**, stated in the file: `vpdpwssd`'s semantics and the
+little-endian order of an i32's halves remain **definitions** (pinned by
+`tests/cpu_gemm_vnni_micro.rs` on the real instruction); and the loop
+**structure** is modelled, not extracted — `gemm_position` says what `(r, c)`
+receives on the reading that the driver visits tile `(r/MR, c/NR)` at offset
+`(r mod MR, c mod NR)`. `the_position_decomposition_is_the_tilings` ties that to
+`ExactGemmTiling.addr`, so `c_written_exactly_once` applies — but the tie is
+between two models rather than to the emitted LLVM. **That is precisely the gap
+Phase 2 exists to close**, and it is now the only structural one left.
+
+Mutation-verified 4/4 (column offset at `mod MR`, dropping `r < M`, reading band
+`t` rather than `t'`, scaling the row by `NR` in the address tie).
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
