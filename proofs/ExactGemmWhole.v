@@ -63,6 +63,7 @@
 *)
 
 From Stdlib Require Import ZArith Arith Lia.
+Require ExactGemmSchedule.
 Require ExactGemmChain.
 Require ExactGemmPacking.
 Require ExactGemmRegisterTile.
@@ -71,6 +72,7 @@ Require ExactGemmKsplit.
 Require ExactGemmMicro.
 Open Scope Z_scope.
 
+Module SCH := ExactGemmSchedule.
 Module RT := ExactGemmRegisterTile.
 Module PK := ExactGemmPacking.
 Module TL := ExactGemmTiling.
@@ -83,7 +85,7 @@ Lemma the_position_is_live_in_its_own_tile : forall ext T r,
   (0 < T)%nat -> (r < ext)%nat ->
   (r mod T < TL.tw ext T (r / T))%nat.
 Proof.
-  intros ext T r HT Hr. unfold TL.tw.
+  intros ext T r HT Hr. unfold TL.tw, SCH.tw.
   pose proof (Nat.div_mod_eq r T) as Hdm.
   pose proof (Nat.mod_upper_bound r T ltac:(lia)) as Hub.
   apply Nat.min_glb_lt; lia.
@@ -117,8 +119,8 @@ Theorem the_whole_output_holds_the_source_dot_products :
     gemm_position A B M N K Fl r c = PK.sum_k (fun k => A r k * B k c) K.
 Proof.
   intros A B M N K Fl m r c HFl Hm Hlic HA HB Hr Hc.
-  assert (HMR : (0 < RT.MR)%nat) by (unfold RT.MR; lia).
-  assert (HNR : (0 < RT.NR)%nat) by (unfold RT.NR; lia).
+  assert (HMR : (0 < RT.MR)%nat) by (unfold RT.MR, SCH.MR; lia).
+  assert (HNR : (0 < RT.NR)%nat) by (unfold RT.NR, SCH.NR; lia).
   assert (Hi : (r mod RT.MR < RT.MR)%nat) by (apply Nat.mod_upper_bound; lia).
   assert (Hj : (c mod RT.NR < RT.NR)%nat) by (apply Nat.mod_upper_bound; lia).
   unfold gemm_position.
@@ -216,8 +218,8 @@ Theorem the_position_decomposition_is_the_tilings : forall ldc r c,
   = (r * ldc + c)%nat.
 Proof.
   intros ldc r c. unfold TL.addr.
-  assert (HMR : (0 < RT.MR)%nat) by (unfold RT.MR; lia).
-  assert (HNR : (0 < RT.NR)%nat) by (unfold RT.NR; lia).
+  assert (HMR : (0 < RT.MR)%nat) by (unfold RT.MR, SCH.MR; lia).
+  assert (HNR : (0 < RT.NR)%nat) by (unfold RT.NR, SCH.NR; lia).
   rewrite (the_tile_and_offset_rebuild_the_position RT.MR r HMR).
   rewrite (the_tile_and_offset_rebuild_the_position RT.NR c HNR).
   reflexivity.

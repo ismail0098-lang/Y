@@ -39,11 +39,19 @@
 *)
 
 Require Import ZArith Lia Arith.
+Require ExactGemmSchedule.
 Open Scope Z_scope.
 
-Definition MR : nat := 6.
-Definition NRV : nat := 4.
-Definition NR : nat := 64.
+Module SCH := ExactGemmSchedule.
+
+(** The tile shape. Taken from [ExactGemmSchedule], which is GENERATED from
+    `cpu_gemm.rs`'s own `VNNI_MR` / `VNNI_NRV` / `VNNI_NR` - so these are the
+    emitter's constants rather than a transcription of them. They were literals
+    here, and `MR` in particular was pinned by nothing in this file: setting it
+    to 8 left the file compiling. *)
+Definition MR : nat := SCH.MR.
+Definition NRV : nat := SCH.NRV.
+Definition NR : nat := SCH.NR.
 
 (* ------------------------------------------------------------------ *)
 (** ** The ISA facts, written down as definitions                      *)
@@ -74,11 +82,11 @@ Definition bvec (Bp : nat -> Z) (v : nat) : v32 :=
 (** Where the packers put things. Both are `ExactGemmPacking.v`'s maps;
     `slot_b_is_the_plain_interleave` there proves the emitted vector-group
     form equals this. *)
-Definition slot_a (i h : nat) : nat := (2 * i + h)%nat.
-Definition slot_b (j h : nat) : nat := (2 * j + h)%nat.
+Definition slot_a (i h : nat) : nat := SCH.slot_a i h.
+Definition slot_b (j h : nat) : nat := SCH.slot_b_interleave j h.
 
 (** Which column of the tile accumulator lane `l` of vector `v` is. *)
-Definition col_of (v l : nat) : nat := (16 * v + l)%nat.
+Definition col_of (v l : nat) : nat := SCH.col_of v l.
 
 (* ------------------------------------------------------------------ *)
 (** ** The broadcast really does pair the row's two k-values            *)
@@ -134,7 +142,7 @@ Theorem the_i32_load_is_the_packed_pair : forall Ap p i,
   i32_lo Ap (p * MR + i)%nat = Ap (p * (MR * 2) + slot_a i 0)%nat
   /\ i32_hi Ap (p * MR + i)%nat = Ap (p * (MR * 2) + slot_a i 1)%nat.
 Proof.
-  intros Ap p i. unfold i32_lo, i32_hi, slot_a, MR.
+  intros Ap p i. unfold i32_lo, i32_hi, slot_a, SCH.slot_a, MR, SCH.MR.
   split; f_equal; lia.
 Qed.
 
@@ -187,12 +195,12 @@ Theorem tile_position_injective : forall (i1 v1 l1 i2 v2 l2 : nat),
   i1 = i2 /\ v1 = v2 /\ l1 = l2.
 Proof.
   intros i1 v1 l1 i2 v2 l2 Hv1 Hl1 Hv2 Hl2 Hi Hc.
-  unfold col_of in Hc. repeat split; lia.
+  unfold col_of, SCH.col_of in Hc. repeat split; lia.
 Qed.
 
 Theorem tile_position_in_range : forall v l,
   (v < NRV)%nat -> (l < 16)%nat -> (col_of v l < NR)%nat.
-Proof. intros v l Hv Hl. unfold col_of, NRV, NR in *. lia. Qed.
+Proof. intros v l Hv Hl. unfold col_of, SCH.col_of, NRV, SCH.NRV, NR, SCH.NR in *. lia. Qed.
 
 Theorem tile_position_surjective : forall j,
   (j < NR)%nat -> exists v l, (v < NRV)%nat /\ (l < 16)%nat /\ col_of v l = j.
@@ -201,8 +209,9 @@ Proof.
   pose proof (Nat.div_mod_eq j 16) as Hdm.
   pose proof (Nat.mod_upper_bound j 16 ltac:(lia)) as Hub.
   assert ((j / 16 < NRV)%nat).
-  { unfold NRV. apply Nat.Div0.div_lt_upper_bound. unfold NR in Hj. lia. }
-  unfold col_of. repeat split; lia.
+  { unfold NRV, SCH.NRV. apply Nat.Div0.div_lt_upper_bound.
+    unfold NR, SCH.NR in Hj. lia. }
+  unfold col_of, SCH.col_of. repeat split; lia.
 Qed.
 
 (* ------------------------------------------------------------------ *)

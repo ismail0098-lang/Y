@@ -113,6 +113,7 @@
 *)
 
 From Stdlib Require Import ZArith Arith Lia.
+Require ExactGemmSchedule.
 Require ExactGemmPacking.
 Require ExactGemmRegisterTile.
 Require ExactGemmComposition.
@@ -124,6 +125,7 @@ Open Scope Z_scope.
 Module RT := ExactGemmRegisterTile.
 Module PK := ExactGemmPacking.
 Module MC := ExactGemmMicro.
+Module SCH := ExactGemmSchedule.
 
 (* ------------------------------------------------------------------ *)
 (** ** The k-pair loop                                                  *)
@@ -274,7 +276,7 @@ Fixpoint chunk_acc_i32 (f : nat -> Z) (Fl n t : nat) : Z :=
 Lemma chunk_width_fits_the_interval : forall Fl n t,
   (0 < Fl)%nat -> (MC.cw Fl n t <= Fl)%nat.
 Proof.
-  intros Fl n t HFl. unfold MC.cw, MC.coff.
+  intros Fl n t HFl. unfold MC.cw, MC.coff, SCH.cw, SCH.coff.
   pose proof (Nat.le_min_l (S t * Fl)%nat n) as H1. lia.
 Qed.
 
@@ -400,7 +402,9 @@ Lemma the_lane_decomposition_inverts_the_column : forall j,
   (vec_of j < RT.NRV)%nat /\ (lane_of j < 16)%nat
   /\ RT.col_of (vec_of j) (lane_of j) = j.
 Proof.
-  intros j Hj. unfold vec_of, lane_of, RT.col_of, RT.NR, RT.NRV in *.
+  intros j Hj.
+  unfold vec_of, lane_of, RT.col_of, SCH.col_of,
+         RT.NR, SCH.NR, RT.NRV, SCH.NRV in *.
   pose proof (Nat.div_mod_eq j 16) as Hdm.
   pose proof (Nat.mod_upper_bound j 16 ltac:(lia)) as Hub.
   assert ((j / 16 < 4)%nat) by (apply Nat.Div0.div_lt_upper_bound; lia).
@@ -452,7 +456,7 @@ Theorem the_lane_map_is_a_two_sided_inverse : forall v l,
   (v < RT.NRV)%nat -> (l < 16)%nat ->
   vec_of (RT.col_of v l) = v /\ lane_of (RT.col_of v l) = l.
 Proof.
-  intros v l Hv Hl. unfold vec_of, lane_of, RT.col_of.
+  intros v l Hv Hl. unfold vec_of, lane_of, RT.col_of, SCH.col_of.
   split.
   - replace (16 * v + l)%nat with (l + v * 16)%nat by lia.
     rewrite Nat.div_add by lia. rewrite Nat.div_small by lia. lia.

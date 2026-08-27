@@ -72,24 +72,30 @@
 *)
 
 From Stdlib Require Import ZArith Arith Lia.
+Require ExactGemmSchedule.
 
 Open Scope Z_scope.
 
-(** The micro-kernel's tile. `VNNI_MR` and `VNNI_NR` in `cpu_gemm.rs`. *)
-Definition MR : nat := 6.
-Definition NR : nat := 64.
+Module SCH := ExactGemmSchedule.
+
+(** The micro-kernel's tile. `VNNI_MR` and `VNNI_NR` in `cpu_gemm.rs`, taken
+    from [ExactGemmSchedule], which is GENERATED from those constants. They
+    were literals here; `MR` was pinned by no theorem in this file, so setting
+    it to 8 left the file compiling and only the downstream chain complained. *)
+Definition MR : nat := SCH.MR.
+Definition NR : nat := SCH.NR.
 
 (* ------------------------------------------------------------------ *)
 (** ** Destination indices                                             *)
 (* ------------------------------------------------------------------ *)
 
-Definition slot_a (i h : nat) : nat := (2 * i + h)%nat.
+Definition slot_a (i h : nat) : nat := SCH.slot_a i h.
 
 (** The `vpdpwssd` lane layout: accumulator group `v = j / 16` is one
     <32 x i16> vector, and lane `l = j mod 16` inside it consumes int16
     elements `2l` and `2l + 1`. So the two k-values for a column are ADJACENT
     and consecutive columns are 2 int16 apart, not 1. *)
-Definition slot_b (j h : nat) : nat := ((j / 16) * 32 + (j mod 16) * 2 + h)%nat.
+Definition slot_b (j h : nat) : nat := SCH.slot_b j h.
 
 (** Quotient and remainder are unique. Proved locally rather than imported:
     it is six lines, and a lemma cannot drift into being wrong the way a
@@ -111,13 +117,13 @@ Theorem pack_a_slot_bijective : forall i1 h1 i2 h2,
   (i1 < MR)%nat -> (i2 < MR)%nat -> (h1 < 2)%nat -> (h2 < 2)%nat ->
   slot_a i1 h1 = slot_a i2 h2 -> i1 = i2 /\ h1 = h2.
 Proof.
-  intros i1 h1 i2 h2 _ _ H1 H2 Heq. unfold slot_a in Heq.
+  intros i1 h1 i2 h2 _ _ H1 H2 Heq. unfold slot_a, SCH.slot_a in Heq.
   apply (quot_rem_unique 2); lia.
 Qed.
 
 Theorem pack_a_slot_in_panel : forall i h,
   (i < MR)%nat -> (h < 2)%nat -> (slot_a i h < 2 * MR)%nat.
-Proof. intros i h Hi Hh. unfold slot_a, MR in *. lia. Qed.
+Proof. intros i h Hi Hh. unfold slot_a, SCH.slot_a, MR, SCH.MR in *. lia. Qed.
 
 (** Every slot of an A panel is written: the map is onto, so no slot keeps a
     value from the previous tile. The panel buffer really is reused. *)
@@ -127,7 +133,7 @@ Proof.
   intros s Hs. exists (s / 2)%nat, (s mod 2)%nat.
   pose proof (Nat.div_mod_eq s 2) as Hdm.
   pose proof (Nat.mod_upper_bound s 2 ltac:(lia)) as Hmod.
-  unfold slot_a, MR in *. repeat split; lia.
+  unfold slot_a, SCH.slot_a, MR, SCH.MR in *. repeat split; lia.
 Qed.
 
 Theorem pack_b_slot_bijective : forall j1 h1 j2 h2,
@@ -135,7 +141,7 @@ Theorem pack_b_slot_bijective : forall j1 h1 j2 h2,
   slot_b j1 h1 = slot_b j2 h2 -> j1 = j2 /\ h1 = h2.
 Proof.
   intros j1 h1 j2 h2 Hj1 Hj2 Hh1 Hh2 Heq.
-  unfold slot_b, NR in *.
+  unfold slot_b, SCH.slot_b, NR, SCH.NR in *.
   pose proof (Nat.div_mod_eq j1 16) as D1.
   pose proof (Nat.div_mod_eq j2 16) as D2.
   pose proof (Nat.mod_upper_bound j1 16 ltac:(lia)) as M1.
@@ -165,14 +171,19 @@ Theorem slot_b_is_the_plain_interleave : forall j h,
   slot_b j h = (2 * j + h)%nat.
 Proof.
   intros j h. unfold slot_b.
-  pose proof (Nat.div_mod_eq j 16) as Hdm.
-  lia.
+  (* Statement unchanged; the arithmetic now lives beside the two definitions
+     it relates, in the generated [ExactGemmSchedule]. Re-stating it here is
+     free - a lemma cannot drift into being wrong the way a duplicated
+     CONSTANT can, which is the same reason [quot_rem_unique] below is proved
+     locally rather than imported. *)
+  rewrite SCH.slot_b_is_the_plain_interleave.
+  reflexivity.
 Qed.
 
 Theorem pack_b_slot_in_panel : forall j h,
   (j < NR)%nat -> (h < 2)%nat -> (slot_b j h < 2 * NR)%nat.
 Proof.
-  intros j h Hj Hh. unfold slot_b, NR in *.
+  intros j h Hj Hh. unfold slot_b, SCH.slot_b, NR, SCH.NR in *.
   pose proof (Nat.mod_upper_bound j 16 ltac:(lia)).
   assert ((j / 16 < 4)%nat) by (apply Nat.Div0.div_lt_upper_bound; lia).
   lia.
@@ -238,11 +249,11 @@ Qed.
 Definition packed (v : nat -> Z) (extent kc : nat) (idx k : nat) : Z :=
   if andb (Nat.ltb idx extent) (Nat.ltb k kc) then v k else 0.
 
-Definition kpairs (kc : nat) : nat := ((kc + 1) / 2)%nat.
+Definition kpairs (kc : nat) : nat := SCH.kpairs kc.
 
 Lemma kpairs_covers : forall kc, (kc <= 2 * kpairs kc)%nat.
 Proof.
-  intros kc. unfold kpairs.
+  intros kc. unfold kpairs, SCH.kpairs.
   pose proof (Nat.div_mod_eq (kc + 1) 2) as Hdm.
   pose proof (Nat.mod_upper_bound (kc + 1) 2 ltac:(lia)) as Hmod.
   lia.
@@ -447,7 +458,7 @@ Theorem inside_the_group_the_same_panel_agrees : forall i h,
   = packed (all_ones i) 6 4 i (2 * 0 + h)%nat.
 Proof.
   intros i h Hi Hh.
-  apply panel_decodes_its_own_write; [ unfold MR; lia | exact Hi | exact Hh ].
+  apply panel_decodes_its_own_write; [ unfold MR, SCH.MR; lia | exact Hi | exact Hh ].
 Qed.
 
 Print Assumptions pack_a_slot_bijective.

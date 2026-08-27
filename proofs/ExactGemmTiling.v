@@ -63,6 +63,9 @@
 *)
 
 From Stdlib Require Import ZArith Arith Lia.
+Require ExactGemmSchedule.
+
+Module SCH := ExactGemmSchedule.
 
 (* ------------------------------------------------------------------ *)
 (** ** One axis: uniform tiles with a clamped ragged tail              *)
@@ -72,9 +75,18 @@ From Stdlib Require Import ZArith Arith Lia.
     subtraction, which truncates at 0 - so a tile entirely past the end has
     width 0 rather than a negative one, and the results below hold for any
     tile count at or above [ntiles]. *)
-Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
-Definition toff (T t : nat) : nat := (t * T)%nat.
-Definition ntiles (ext T : nat) : nat := ((ext + T - 1) / T)%nat.
+Definition tw (ext T t : nat) : nat := SCH.tw ext T t.
+Definition toff (T t : nat) : nat := SCH.toff T t.
+Definition ntiles (ext T : nat) : nat := SCH.ntiles ext T.
+
+(** The generated definitions in their unfolded shape, named once so a tactic
+    never has to see two spellings at the same time. *)
+Lemma tw_unfold : forall ext T t, tw ext T t = Nat.min (ext - t * T) T.
+Proof. reflexivity. Qed.
+Lemma toff_unfold : forall T t, toff T t = (t * T)%nat.
+Proof. reflexivity. Qed.
+Lemma ntiles_unfold : forall ext T, ntiles ext T = ((ext + T - 1) / T)%nat.
+Proof. reflexivity. Qed.
 
 (** How much of the axis the first [n] tiles account for. *)
 Fixpoint covered (ext T n : nat) : nat :=
@@ -88,7 +100,7 @@ Lemma covered_closed : forall ext T n,
 Proof.
   intros ext T n HT. induction n as [| n IH]; cbn [covered].
   - rewrite Nat.min_0_l. reflexivity.
-  - rewrite IH. unfold tw.
+  - rewrite IH. unfold tw, SCH.tw.
     (* Three regimes: the tile is entirely past the end, straddles it, or is
        full. `lia` closes each once `min` is resolved. *)
     destruct (Nat.le_gt_cases ext (n * T)) as [Hpast | Hlive].
@@ -107,7 +119,7 @@ Qed.
 Lemma ntiles_spans : forall ext T,
   (0 < T)%nat -> (ext <= ntiles ext T * T)%nat.
 Proof.
-  intros ext T HT. unfold ntiles.
+  intros ext T HT. unfold ntiles, SCH.ntiles.
   pose proof (Nat.div_mod_eq (ext + T - 1) T) as Hdm.
   pose proof (Nat.mod_upper_bound (ext + T - 1) T ltac:(lia)) as Hmod.
   nia.
@@ -131,7 +143,7 @@ Qed.
 Theorem tile_index_in_range : forall ext T t f,
   (f < tw ext T t)%nat -> (toff T t + f < ext)%nat.
 Proof.
-  intros ext T t f Hf. unfold tw, toff in *. lia.
+  intros ext T t f Hf. unfold tw, SCH.tw, toff, SCH.toff in *. lia.
 Qed.
 
 (** Uniqueness of quotient and remainder, which is what BOTH injectivity
@@ -158,7 +170,7 @@ Theorem tile_index_injective : forall ext T t1 f1 t2 f2,
   toff T t1 + f1 = toff T t2 + f2 -> t1 = t2 /\ f1 = f2.
 Proof.
   intros ext T t1 f1 t2 f2 HT H1 H2 Heq.
-  unfold tw, toff in *.
+  unfold tw, SCH.tw, toff, SCH.toff in *.
   apply (quot_rem_unique T); [lia | lia | lia | exact Heq].
 Qed.
 
@@ -176,8 +188,8 @@ Proof.
   { apply Nat.Div0.div_lt_upper_bound. nia. }
   repeat split.
   - exact Hlt.
-  - unfold tw. nia.
-  - unfold toff. nia.
+  - unfold tw, SCH.tw. nia.
+  - unfold toff, SCH.toff. nia.
 Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -256,7 +268,7 @@ Definition tw_flat (T : nat) (_ _ : nat) : nat := T.
 
 Theorem unclamped_tail_writes_out_of_bounds :
   exists f, (f < tw_flat 6 53 8)%nat /\ ~ (toff 6 8 + f < 53)%nat.
-Proof. exists 5%nat. unfold tw_flat, toff. cbn. lia. Qed.
+Proof. exists 5%nat. unfold tw_flat, toff, SCH.toff. cbn. lia. Qed.
 
 (** ...and the clamped one does not, on the same numbers. Without this the
     theorem above is satisfied by a tiling that writes nothing. *)
