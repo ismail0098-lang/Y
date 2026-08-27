@@ -64,8 +64,11 @@
 *)
 
 From Stdlib Require Import ZArith Arith Lia.
+Require ExactGemmSchedule.
 
 Open Scope Z_scope.
+
+Module SCH := ExactGemmSchedule.
 
 (* ------------------------------------------------------------------ *)
 (** ** The band decomposition the emitter computes                     *)
@@ -81,21 +84,27 @@ Open Scope Z_scope.
     flush interval would make the whole family of tests agree for the wrong
     reason. *)
 
-Definition blen (K nthr t : nat) : nat :=
-  (K / nthr + (if Nat.ltb t (K mod nthr) then 1 else 0))%nat.
+Definition blen (K nthr t : nat) : nat := SCH.blen K nthr t.
+Definition boff (K nthr t : nat) : nat := SCH.boff K nthr t.
 
-Fixpoint boff (K nthr t : nat) : nat :=
-  match t with
-  | O => O
-  | S t' => (boff K nthr t' + blen K nthr t')%nat
-  end.
+(** The generated definitions in the shapes the scripts below manipulate. *)
+Lemma blen_unfold : forall K nthr t,
+  blen K nthr t = (K / nthr + (if Nat.ltb t (K mod nthr) then 1 else 0))%nat.
+Proof. reflexivity. Qed.
+
+Lemma boff_step : forall K nthr t,
+  boff K nthr (S t) = (boff K nthr t + blen K nthr t)%nat.
+Proof. reflexivity. Qed.
+
+Lemma boff_zero : forall K nthr, boff K nthr 0 = 0%nat.
+Proof. reflexivity. Qed.
 
 Lemma boff_closed : forall K nthr t,
   boff K nthr t = (t * (K / nthr) + Nat.min t (K mod nthr))%nat.
 Proof.
   intros K nthr t. induction t as [| t IH].
-  - cbn [boff]. rewrite Nat.min_0_l. lia.
-  - cbn [boff]. rewrite IH. unfold blen.
+  - rewrite boff_zero. rewrite Nat.min_0_l. lia.
+  - rewrite boff_step. rewrite IH. rewrite blen_unfold.
     destruct (Nat.ltb_spec t (K mod nthr)) as [Hlt | Hge].
     + rewrite (Nat.min_l t (K mod nthr)) by lia.
       rewrite (Nat.min_l (S t) (K mod nthr)) by lia. lia.

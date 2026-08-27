@@ -40,7 +40,10 @@
 *)
 
 Require Import ZArith Lia Arith.
+Require ExactGemmSchedule.
 Open Scope Z_scope.
+
+Module SCH := ExactGemmSchedule.
 
 (* ------------------------------------------------------------------ *)
 (** ** Sums over a range                                               *)
@@ -78,9 +81,16 @@ Hypothesis HFl : (0 < Fl)%nat.
 (** The emitted loop is `for c = 0; c < kpairs; c += Fl`, with
     `cend = min(c + Fl, kpairs)` - so chunk `t` starts at `t*Fl` and is
     CLAMPED, exactly like the ragged output tile. *)
-Definition coff (t : nat) : nat := (t * Fl)%nat.
-Definition cw (n t : nat) : nat := (Nat.min (coff (S t)) n - coff t)%nat.
-Definition nchunks (n : nat) : nat := ((n + Fl - 1) / Fl)%nat.
+Definition coff (t : nat) : nat := SCH.coff Fl t.
+Definition cw (n t : nat) : nat := SCH.cw Fl n t.
+Definition nchunks (n : nat) : nat := SCH.nchunks Fl n.
+
+(** The generated definitions are delta-equal to the shapes the proofs below
+    manipulate; naming that once keeps the scripts stated over the LOCAL
+    aliases, so a tactic never has to see two spellings of `coff` at the same
+    time. *)
+Lemma cw_unfold : forall n t, cw n t = (Nat.min (coff (S t)) n - coff t)%nat.
+Proof. reflexivity. Qed.
 
 (** The int64 running sum: one `+=` per chunk, which is what the flush block
     emits. *)
@@ -95,18 +105,18 @@ Lemma chunk_acc_prefix : forall n t,
 Proof.
   intros n t. induction t as [| t IH].
   - cbn [chunk_acc coff]. rewrite ?Nat.mul_0_l. rewrite Nat.min_0_l. reflexivity.
-  - cbn [chunk_acc]. rewrite IH. unfold cw.
+  - cbn [chunk_acc]. rewrite IH. rewrite cw_unfold.
     destruct (Nat.le_gt_cases n (coff t)) as [Hle | Hgt].
     + (* this chunk is entirely past the end: it is empty *)
       rewrite (Nat.min_r (coff t) n) by lia.
       assert (Nat.min (coff (S t)) n = n) as ->.
-      { apply Nat.min_r. unfold coff in *. nia. }
+      { apply Nat.min_r. unfold coff, SCH.coff in *. nia. }
       replace (n - coff t)%nat with O by lia.
       cbn [sum_from]. lia.
     + rewrite (Nat.min_l (coff t) n) by lia.
       set (e := Nat.min (coff (S t)) n).
       assert (coff t <= e)%nat as He.
-      { unfold e, coff in *. apply Nat.min_glb; nia. }
+      { unfold e, coff, SCH.coff in *. apply Nat.min_glb; nia. }
       replace e with (coff t + (e - coff t))%nat at 2 by lia.
       rewrite sum_from_split. rewrite Nat.add_0_l.
       replace (coff t + (e - coff t))%nat with e by lia.
@@ -116,7 +126,7 @@ Qed.
 (** The chunk count really does reach the end. *)
 Lemma nchunks_spans : forall n, (n <= coff (nchunks n))%nat.
 Proof.
-  intros n. unfold coff, nchunks.
+  intros n. unfold coff, SCH.coff, nchunks, SCH.nchunks.
   pose proof (Nat.div_mod_eq (n + Fl - 1) Fl) as Hdm.
   pose proof (Nat.mod_upper_bound (n + Fl - 1) Fl ltac:(lia)) as Hub.
   nia.
@@ -234,17 +244,33 @@ Proof.
   eapply operand_bound_gives_no_overflow; eauto.
 Qed.
 
-(** **The boundary is one unit wide**, at the shipped `DEFAULT_FLUSH_K_PAIRS`
-    of 64. `tests/exact_gemm_licence_obligations.rs` exhausts the int16 domain
-    against the real function; this pins the same two numbers here, so a change
-    to either width or interval that moves the edge breaks both. *)
+(** **The boundary is one unit wide**, at the shipped `DEFAULT_FLUSH_K_PAIRS`.
+    `tests/exact_gemm_licence_obligations.rs` exhausts the int16 domain against
+    the real function; this pins the same two numbers here, so a change to
+    either width or interval that moves the edge breaks both.
+
+    **These two are the only theorem STATEMENTS in the nine proofs that carried
+    a schedule constant, and the `64` was a bare literal.** It now reads from
+    the generated [ExactGemmSchedule.FLUSH_K_PAIRS], so the interval has one
+    source like every other constant. The propositions are unchanged at the
+    shipped value; what changed is that a drift in `DEFAULT_FLUSH_K_PAIRS` now
+    makes them FALSE and fails `coqc`, rather than leaving them quietly pinning
+    an interval the compiler no longer uses.
+
+    4095 and 4096 stay literals on purpose: they are the LICENCE's answer at
+    this interval - `VnniExact::max_operand_magnitude`'s
+    `floor(sqrt(i32::MAX / (2*Fl)))` - not a schedule constant, and stating
+    them explicitly is what makes the edge one unit wide rather than a
+    tautology. *)
+Definition FLUSH : Z := Z.of_nat SCH.FLUSH_K_PAIRS.
+
 Theorem the_default_interval_licenses_4095_and_not_4096 :
-  2 * 64 * 4095 * 4095 <= I32MAX /\ ~ (2 * 64 * 4096 * 4096 <= I32MAX).
-Proof. unfold I32MAX. split; [lia | lia]. Qed.
+  2 * FLUSH * 4095 * 4095 <= I32MAX /\ ~ (2 * FLUSH * 4096 * 4096 <= I32MAX).
+Proof. unfold I32MAX, FLUSH, SCH.FLUSH_K_PAIRS. split; [lia | lia]. Qed.
 
 Theorem the_4096_case_exceeds_by_exactly_one :
-  2 * 64 * 4096 * 4096 = I32MAX + 1.
-Proof. unfold I32MAX. reflexivity. Qed.
+  2 * FLUSH * 4096 * 4096 = I32MAX + 1.
+Proof. unfold I32MAX, FLUSH, SCH.FLUSH_K_PAIRS. reflexivity. Qed.
 
 (* ------------------------------------------------------------------ *)
 (** ** The lane round trip                                             *)
@@ -253,16 +279,16 @@ Proof. unfold I32MAX. reflexivity. Qed.
 (** `pack_b` writes column `j`'s `h`-th k-value at this slot of the k-pair
     group. `ExactGemmPacking.v` proves the emitted `(j/16)*32 + (j%16)*2 + h`
     equals this. *)
-Definition slot (j h : nat) : nat := (2 * j + h)%nat.
+Definition slot (j h : nat) : nat := SCH.slot_b_interleave j h.
 
 (** How `vpdpwssd` reads that slot: 32 int16 per `<32 x i16>` vector, and lane
     `l` of the 16 consumes elements `2l` and `2l+1` of its own vector. *)
-Definition vec_of_slot (s : nat) : nat := (s / 32)%nat.
-Definition lane_of_slot (s : nat) : nat := ((s mod 32) / 2)%nat.
+Definition vec_of_slot (s : nat) : nat := SCH.vec_of_slot s.
+Definition lane_of_slot (s : nat) : nat := SCH.lane_of_slot s.
 
 (** How the store reads the accumulator back out: vector `v`, lane `l` is
     column `16v + l` of the tile. *)
-Definition col_of (v l : nat) : nat := (16 * v + l)%nat.
+Definition col_of (v l : nat) : nat := SCH.col_of v l.
 
 (** **The round trip is the identity.** Pack a column, let the hardware route
     it to a lane, store that lane back out, and you land on the column you
@@ -273,7 +299,9 @@ Theorem the_packed_column_is_the_stored_column : forall j h,
   (h < 2)%nat ->
   col_of (vec_of_slot (slot j h)) (lane_of_slot (slot j h)) = j.
 Proof.
-  intros j h Hh. unfold col_of, vec_of_slot, lane_of_slot, slot.
+  intros j h Hh.
+  unfold col_of, SCH.col_of, vec_of_slot, SCH.vec_of_slot,
+         lane_of_slot, SCH.lane_of_slot, slot, SCH.slot_b_interleave.
   pose proof (Nat.div_mod_eq j 16) as Hj.
   pose proof (Nat.mod_upper_bound j 16 ltac:(lia)) as Hjm.
   set (a := (j / 16)%nat) in *. set (b := (j mod 16)%nat) in *.

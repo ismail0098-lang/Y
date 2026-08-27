@@ -266,6 +266,51 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            // GENERATED from `src/cpu_gemm.rs` by
+            // `tests/exact_gemm_schedule_proof.rs`, which also gates it on
+            // byte-identity. It is the one file here whose CONTENT is not
+            // written by hand, and that is exactly why it takes no exemption
+            // from this control.
+            //
+            // A definitions-only file would fail `every_proof_has_a_content_control`,
+            // and that gate is right: "compiles" and "no axioms" are properties
+            // an EMPTY file has, and a generator emitting nonsense emits it
+            // confidently. So the generated file carries theorems, and two of
+            // the three are STRUCTURAL - they constrain the shape of the
+            // emitted expressions rather than restating their values, so they
+            // are not made true merely by being generated alongside what they
+            // describe.
+            "ExactGemmSchedule.v",
+            &[
+                // The emitted `vpdpwssd` vector-group form of the B slot map
+                // IS the plain interleave. The two sides come from different
+                // places in `cpu_gemm.rs` - `pack_b_slot` and the bare `/2`
+                // that `panel_slot_decode` inverts it with - so this is a
+                // real check on the generator, not a restatement of a value.
+                // The Rust asserts their agreement in a doc comment; this
+                // proves it.
+                "Print Assumptions slot_b_is_the_plain_interleave",
+                // The constants are internally consistent. Catches a
+                // generator that emitted `NR` and `NRV` from constants that
+                // had stopped agreeing, or any degenerate zero.
+                "the_tile_geometry_is_consistent",
+                // A genuine cross-file join: every theorem in
+                // `ExactGemmKsplit.v` is stated under `0 < nthr`, and nothing
+                // proved the emitted thread count satisfies it - the floor
+                // was argued in a comment.
+                "ksplit_threads_is_never_zero",
+                // The non-vacuity control, and it is honestly the weakest of
+                // the four: under generation it is self-fulfilling. Its job is
+                // the other direction - it makes the shipped values
+                // load-bearing inside Coq, so a hand-edit of the committed
+                // file fails `coqc` as well as failing byte-identity. That
+                // matters most for `MR`, which the measurement recorded in
+                // `ExactGemmComposition.v`'s header found was pinned by no
+                // theorem in its own file.
+                "the_schedule_is_the_shipped_one",
+            ][..],
+        ),
+        (
             "ExactGemmKsplit.v",
             &[
                 // The K-split reduction equals the naive nest, every K, every nthr.

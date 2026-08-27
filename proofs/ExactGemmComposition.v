@@ -15,22 +15,58 @@
     `2j + h`. `MR`, `NR` and `col_of` are each defined twice. Nothing checked
     that any of those agreed.
 
-    **How bad that is was MEASURED, and it is milder than it looks - the first
-    draft of this header overstated it.** The claim to check is whether a
-    drifted definition would go on type-checking in its own file while
-    silently disagreeing with the others. Three attempts, all CAUGHT by the
-    file itself: `ExactGemmRegisterTile.slot_b` shifted by one, its `NR` set
-    to 32, and `ExactGemmMicro.slot` with the two halves swapped. Each
-    definition turns out to be pinned by a theorem in its own file - the last
-    one by a proof script rather than by the statement, which is weaker but
-    still a gate.
+    **How bad that is was MEASURED, and the measurement was then RE-RUN and
+    found incomplete. Both readings are kept, because the correction is the
+    interesting part.**
 
-    So these agreement theorems do not close a hole that was demonstrably
-    open. What they do is make the pinning EXPLICIT and cross-file rather than
-    incidental: today each file constrains its own copy by accident of what it
-    happens to prove, and nothing says the three copies denote one map. That
-    is worth stating, and it is a smaller claim than "the files could drift
-    apart unnoticed".
+    The claim to check is whether a drifted definition would go on
+    type-checking in its own file while silently disagreeing with the others.
+    The first pass tried three: `ExactGemmRegisterTile.slot_b` shifted by one,
+    its `NR` set to 32, and `ExactGemmMicro.slot` with the halves swapped. All
+    three are caught by the file itself, and this header concluded that "each
+    definition turns out to be pinned by a theorem in its own file".
+
+    That conclusion is FALSE, and it is false for the constant nobody tried.
+    Re-running the sweep over every duplicated definition: `RegisterTile.NRV`
+    (4 -> 2) and `Packing.NR` (64 -> 32) behave like the original three, and
+    **`MR` set to 8 - in EITHER `ExactGemmPacking` or
+    `ExactGemmRegisterTile` - leaves that file compiling perfectly.** Both are
+    caught only here and by the downstream chain. So the pinning was
+    incidental for five definitions and ABSENT for the sixth, and the only
+    thing standing between `MR` and silent drift was this file - a theorem
+    somebody remembered to write.
+
+    **That is what `proofs/ExactGemmSchedule.v` now removes the need for.** It
+    is GENERATED from `cpu_gemm.rs`'s own constants, committed, and gated on
+    byte-identity by `tests/exact_gemm_schedule_proof.rs`; every file above
+    takes its constants and index maps from it. A drift is no longer a
+    theorem's job to catch, in either direction: a `.v` edited by hand and a
+    Rust constant moved without regenerating both fail the gate.
+
+    *** What that does to the agreement theorems below. ***
+
+    They are kept, and their character has changed - which is worth stating
+    rather than leaving for a reader to infer. Where two files' copies now
+    resolve to ONE generated definition (`MR`, `NR`, `col_of`, `slot_a`, and
+    `Micro.slot` against `RegisterTile.slot_b`), the theorem no longer asserts
+    that two independent definitions coincide; it asserts that the two files
+    ALIAS the right one. That is a weaker claim, and a real one - nothing
+    stops `Definition NR := SCH.MR`.
+
+    [packing_and_register_tile_agree_on_the_b_slot] is the exception and keeps
+    its full strength. The generated file deliberately carries the B map in
+    TWO forms - the emitted `vpdpwssd` vector-group expression and the plain
+    interleave that `panel_slot_decode` inverts - because collapsing them
+    would make that theorem, and
+    [the_agreement_is_not_vacuous] below, true by `reflexivity` and worth
+    nothing.
+
+    *** What is NOT closed. ***
+
+    Constant drift only. The loop NEST is still hand-written `IrBuilder` calls
+    in `cpu_gemm.rs`, and the tie between these models and the emitted LLVM is
+    still two models meeting - the gap `docs/proof_carrying_kernels.md` names
+    about itself. That is Phase 2.
 
     The second half is the file's real new content: the one composition step
     the pieces were built for, which no single file can state.
@@ -56,6 +92,7 @@
 *)
 
 Require Import ZArith Lia Arith.
+Require ExactGemmSchedule.
 Require ExactGemmPacking.
 Require ExactGemmMicro.
 Require ExactGemmRegisterTile.
@@ -158,8 +195,9 @@ Lemma col_of_is_in_the_tile : forall v l,
   (ExactGemmRegisterTile.col_of v l < ExactGemmRegisterTile.NR)%nat.
 Proof.
   intros v l Hv Hl.
-  unfold ExactGemmRegisterTile.col_of, ExactGemmRegisterTile.NR,
-         ExactGemmRegisterTile.NRV in *. lia.
+  unfold ExactGemmRegisterTile.col_of, ExactGemmSchedule.col_of,
+         ExactGemmRegisterTile.NR, ExactGemmSchedule.NR,
+         ExactGemmRegisterTile.NRV, ExactGemmSchedule.NRV in *. lia.
 Qed.
 
 (** **THE COMPOSITION.** One `vpdpwssd` step on the packed panels contributes
@@ -276,8 +314,10 @@ Proof.
   apply the_lane_accumulates_the_source_elements; try assumption.
   - intros i' h' Hi' Hh'.
     apply ExactGemmPacking.panel_decodes_its_own_write;
-      [ unfold ExactGemmPacking.MR, ExactGemmRegisterTile.MR in *; lia
-      | unfold ExactGemmPacking.MR, ExactGemmRegisterTile.MR in *; lia
+      [ unfold ExactGemmPacking.MR, ExactGemmRegisterTile.MR,
+               ExactGemmSchedule.MR in *; lia
+      | unfold ExactGemmPacking.MR, ExactGemmRegisterTile.MR,
+               ExactGemmSchedule.MR in *; lia
       | exact Hh' ].
   - intros j' h' Hj' Hh'.
     (* [ExactGemmRegisterTile.slot_b] is the plain interleave by definition,
@@ -285,10 +325,12 @@ Proof.
        that is the map the emitter writes. Unfolding rather than rewriting
        with the interleave theorem: `2*j+h` is a shape the accumulator index
        `2*p+h` also has, so a backwards rewrite hits the wrong occurrence. *)
-    unfold ExactGemmRegisterTile.slot_b.
+    unfold ExactGemmRegisterTile.slot_b, ExactGemmSchedule.slot_b_interleave.
     apply ExactGemmPacking.panel_decodes_its_own_write;
-      [ unfold ExactGemmPacking.NR, ExactGemmRegisterTile.NR in *; lia
-      | unfold ExactGemmPacking.NR, ExactGemmRegisterTile.NR in *; lia
+      [ unfold ExactGemmPacking.NR, ExactGemmRegisterTile.NR,
+               ExactGemmSchedule.NR in *; lia
+      | unfold ExactGemmPacking.NR, ExactGemmRegisterTile.NR,
+               ExactGemmSchedule.NR in *; lia
       | exact Hh' ].
 Qed.
 

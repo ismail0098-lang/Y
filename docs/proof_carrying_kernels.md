@@ -1037,6 +1037,142 @@ sixth: two candidates turned out to be false positives (per-`name` filenames wit
 no `remove_dir_all`, and a `main(` inside an embedded Y source string), so the
 suite is now clean.
 
+#### Phase 1 progress, 2026-08-27 — the schedule has ONE source, and a written measurement was wrong
+
+Phase 1 is mathematically complete, and the gap it names about itself is that
+the loop **structure** is modelled rather than extracted — "the tie is between
+two models rather than to the LLVM". That gap has two halves. The extraction
+half is Phase 2. The other half is cheaper and was never stated: the schedule
+existed in **three** places with nothing structurally forcing agreement.
+
+- `src/cpu_gemm.rs`, where the emitter reads it.
+- The proof files, each declaring its own copy — `MR` and `NR` twice, `col_of`
+  twice, the B slot map three times, and `DEFAULT_FLUSH_K_PAIRS` as a bare
+  `64` inside two theorem *statements*.
+- `proofs/ExactGemmComposition.v`, which asserts the copies agree.
+
+That third one is a theorem somebody remembered to write.
+
+**The measurement came first, and it corrected a claim this repo had already
+written down.** `ExactGemmComposition.v`'s header records three attempts —
+`RegisterTile.slot_b` shifted by one, its `NR` set to 32, `Micro.slot` with the
+halves swapped — all caught by the file itself, and concludes that "each
+definition turns out to be pinned by a theorem in its own file". Re-running the
+sweep over *every* duplicated definition confirms those three and adds two more
+(`RegisterTile.NRV` 4→2, `Packing.NR` 64→32) — and finds the exception nobody
+tried:
+
+> **`MR` set to 8, in EITHER `ExactGemmPacking` or `ExactGemmRegisterTile`,
+> leaves that file compiling perfectly.** Both are caught only by
+> `ExactGemmComposition.v` and by the downstream chain.
+
+So the pinning was incidental for five definitions of six and **absent for the
+sixth**. The honest claim for this work is therefore "makes the pinning
+structural instead of incidental, and closes one constant that had none" — not
+"fixes a live drift bug". Nothing had drifted.
+
+**`proofs/ExactGemmSchedule.v` is generated from `cpu_gemm.rs`'s own constants,
+committed, and gated on byte-identity** by `tests/exact_gemm_schedule_proof.rs`.
+Every sibling proof takes its constants and index maps from it. Same shape as
+`tools/extract_poseidon.py` → `src/zk_poseidon_constants.rs`, and as
+`tests/committed_ptx_artifacts.rs` for the `.ptx` corpus.
+
+**The generator LINKS rather than PARSES, and that is the whole design.** A
+`tools/` script would have to recover `VNNI_MR` with a regex over `cpu_gemm.rs`
+— a fourth copy of the value, living in the generator, which is the bug and not
+the fix. `extract_poseidon.py` parses because its input is *foreign*
+(circomlib's `.circom`); this input is our own Rust and can be `use`d. That
+leaves `[[bin]]` or `#[test]`; a fifth `[[bin]]` is a permanent user surface
+(`tests/source_surface.rs` gates those) bought for a file regenerated twice a
+year, so it is a `#[test]` with `Y_REWRITE_SCHEDULE_PROOF=1`. There is no
+`build.rs`.
+
+**The content-control collision was a real design decision, not an obstacle.**
+`tests/proofs_are_checked.rs::every_proof_has_a_content_control` rejects a `.v`
+that names no load-bearing theorem — so a definitions-only generated file fails
+it. It takes **no exemption**. Two of its three theorems are *structural*: they
+constrain the shape of the emitted expressions rather than restating their
+values, so they are not made true merely by being generated alongside what they
+describe.
+
+- `slot_b_is_the_plain_interleave` — the two sides come from different places
+  in `cpu_gemm.rs` (`pack_b_slot`, and the bare `/2` that `panel_slot_decode`
+  inverts it with). The Rust asserts their agreement in a doc comment; this
+  proves it.
+- `the_tile_geometry_is_consistent` — `NR = NRV * LANES`, `VEC_ELEMS = 2*LANES`
+  and no degenerate zero. `LANES` is *derived* in the generator as
+  `VNNI_NR / VNNI_NRV` rather than written down, so it cannot become a fourth
+  copy of 16.
+- `ksplit_threads_is_never_zero` — a genuine cross-file join. Every theorem in
+  `ExactGemmKsplit.v` is stated under `0 < nthr` and `ksplit_bands` asserts the
+  same precondition at runtime; nothing proved the emitted thread count
+  satisfies it. The floor was argued in a comment.
+
+The fourth, `the_schedule_is_the_shipped_one`, is **self-fulfilling under
+generation and the file says so**. Its job is the other direction: it makes the
+values load-bearing inside `coqc`, so a hand-edit fails twice.
+
+**`slot_b` and `slot_b_interleave` are deliberately NOT collapsed.** The
+generated file carries the B map in both the emitted `vpdpwssd` vector-group
+form and the plain interleave. Collapsing them would make
+`slot_b_is_the_plain_interleave` and
+`ExactGemmComposition.the_agreement_is_not_vacuous` true by `reflexivity` and
+worth nothing.
+
+**Two theorem statements changed text, declared rather than slipped through.**
+`ExactGemmMicro.the_default_interval_licenses_4095_and_not_4096` and
+`the_4096_case_exceeds_by_exactly_one` carried the flush interval as a literal
+`64` — the only place in the nine proofs where a schedule constant sat inside a
+*statement*. They now read `ExactGemmSchedule.FLUSH_K_PAIRS`. Same proposition
+at the shipped value; the difference is that a drift in
+`DEFAULT_FLUSH_K_PAIRS` now makes them FALSE and fails `coqc` instead of
+quietly pinning an interval the compiler no longer uses. 4095 and 4096 stay
+literals on purpose — they are the *licence's* answer at that interval
+(`floor(sqrt(i32::MAX / 2Fl))`), not a schedule constant, and stating them is
+what makes the edge one unit wide rather than a tautology. Everything else is
+byte-identical in statement; the sibling files gained only `*_unfold` helper
+lemmas proved by `reflexivity`, which restate a generated definition in the
+shape a tactic script manipulates.
+
+**What it does not close.** The loop **nest** is still hand-written `IrBuilder`
+calls in `cpu_gemm.rs`. This closes constant drift, not extraction.
+
+**The mutation table**, thirteen exact-GEMM suites, each `--test` target run
+separately:
+
+| mutation | schedule gate | `proofs_are_checked` | the other 11 |
+|---|---|---|---|
+| Rust `VNNI_MR` 6→8 | **FAIL** | ok | 6 FAIL |
+| Rust `KSPLIT_MIN_BAND` 128→256 | **FAIL** | ok | all ok |
+| committed `.v` hand-edited, `MR := 8` | **FAIL** | **FAIL** | all ok |
+| `RegisterTile.NR := SCH.MR` | ok | **FAIL** | all ok |
+| `render` echoes the committed file | **FAIL** | ok | all ok |
+| `render` hardcodes `MR := 6` | **FAIL** | ok | all ok |
+
+`KSPLIT_MIN_BAND` **is caught by nothing else** — the clearest single
+justification. A hand-edited `.v` is caught only by the two gates, because every
+model test drives the Rust and never reads the proofs; that is the Coq-side half
+of the drift, previously uncovered. The alias mistake is correctly *not* caught
+by byte-identity — the generated file is untouched — and is what demonstrates
+that the agreement theorems' weakened claim is still a real one.
+
+**One mutation survived and was sorted rather than recorded**, and it was a
+hole in the control written to prevent exactly this. The first version of
+`the_generated_text_actually_depends_on_the_rust_constants` asserted the output
+*contains* `Definition MR : nat := 6.` — and a generator neutered to echo the
+committed file passes that, because the committed file contains that line. The
+gate became a check on a constant string and the whole run stayed green. It now
+renders a **perturbed** schedule and requires the result to differ from the
+committed text, which an echoing generator cannot do.
+`feedback-null-metrics-pass-dead-components`, committed by me, in the control
+written to apply it — for the second time in this file's history.
+
+A second survivor was genuinely mis-aimed: `Schedule::shipped` reading `mr: 6`
+instead of `mr: VNNI_MR` changes nothing observable, since the two are the same
+number. Hardcode `6` *and* move `VNNI_MR` to 8, or read the wrong constant
+outright, and the tie assertion fails in both — a hardcode that agrees today is
+caught the moment it stops agreeing.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
