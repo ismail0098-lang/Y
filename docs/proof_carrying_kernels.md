@@ -1656,6 +1656,7 @@ keys counted twice, others never.
 | instructions reordered, dataflow unchanged | ok | ok | ok |
 | the proof's classes become a block split | — | — | `coqc` FAIL |
 | the proof's accumulator bound drifts | FAIL | — | — |
+| the `[Y SEQUENCE REDUCTION]` marker removed | **FAIL** | ok | ok |
 
 **Row 1 is the result.** With a card present the device test catches it too, so
 the gate is a diagnosis by name. Without one — the ordinary CI case — the device
@@ -1669,20 +1670,52 @@ the *same* decomposition in a *different instruction order* — `attn_accum`
 hoists `%ntid.x` and `%tid.x` above the shared-memory zeroing loop and
 `attn_accum_naive` does not — so a literal sequence matches at most one of them.
 
-##### Two traps in writing the tie
+##### Two traps in writing the tie, and both are now removed at the source
 
-Both were mine, and both are the shape this repo keeps recording.
+Both were mine, both are the shape this repo keeps recording, and both were
+first *worked around in the test*. A workaround leaves the hazard in place for
+the next reader, so both were then fixed in `src/exact_attention.rs`.
 
 - **`attn_accum` contains TWO grid-stride loops** of identical shape: the one
   over the sequence, and one over `d` that zeroes the shared accumulators.
   Taking the first `add.s32 %i, %i, %s` picks the zeroing loop, whose stride is
   `%ntid.x` alone — which then reports the decomposition as depending on
-  `tid.x` and nothing else. The loops are told apart by their **bound**, which
-  is why the fixture uses `head_dim = 64` with `seq_len = 512`: the
-  `lda == K` coincidence, one layer over, and the test asserts the two differ.
-- **`%r9 = %r9 * %r5` is a real instruction here** — the worker count is built
-  in two steps — so a "last definition wins" walk resolves its own operand to
-  itself. Operands must resolve at the *definition's* position, not at the use.
+  `tid.x` and nothing else.
+  - *Worked around* by telling the loops apart by their **bound**, so the test
+    only worked because the fixture happened to use `head_dim != seq_len` — the
+    `lda == K` coincidence, one layer over.
+  - *Fixed* by naming the loop in the artifact: `// [Y SEQUENCE REDUCTION]`,
+    the device this backend already uses for `[Y PAGED DECODE ATTENTION]` and
+    `[Y ZERO DRIFT]`. Both entries carry it, the test locates the reduction by
+    it, and nothing depends on the shape chosen any more. The labels could not
+    serve — they are `LOOP_I` in one entry and `NLOOP_I` in the other, so
+    keying on those is a different hardcode, not a fix.
+- **`%r9 = %r9 * %r5` was a real instruction here** — the worker count was
+  built in two steps into one register — so a "last definition wins" walk
+  resolves its own operand to itself.
+  - *Worked around* by resolving operands at the **definition's** position
+    rather than the use, which is ordinary reaching definitions and is correct
+    in general.
+  - *Fixed* by making the computation SSA (`%r20` for the intermediate).
+    Nothing needed the reuse; it was a trap for anything reading the kernel
+    back, human or tool.
+
+**Fixing the kernel removed the only thing exercising the resolver's
+reaching-definition logic, which is precisely when a capability rots.** That
+path is pinned on a synthetic body instead
+(`the_dependency_walk_handles_a_redefined_register`), and the transfer is
+demonstrated rather than assumed: reverting the resolver to "last definition
+wins" now fails **only** that test, with all five real-kernel tests passing.
+Hand-written PTX elsewhere in this repo is full of non-SSA reuse, so the
+capability has to survive its own kernel being cleaned up.
+
+The register change is a pure renaming and was verified where it matters — all
+nine launch geometries on the real card, `two-level == naive == reference`.
+
+Two further mutations, on the fixes themselves: dropping `%nctaid.z` is still
+caught (and still only by the gate without a card), and **removing the marker
+fails the gate loudly** rather than silently selecting the wrong loop, which is
+the difference between a fixed hazard and a hidden one.
 
 ##### What is NOT claimed
 
@@ -1696,7 +1729,7 @@ shared with the proof generator, so a divergence is a byte-identity failure.
 This kernel is a PTX string template, and making it an `Ix` means routing
 attention through `IrBuilder` — a larger change than this file.
 
-Twelve proofs, no axioms, nothing admitted. 612 / 878 tests, both builds green.
+Twelve proofs, no axioms, nothing admitted. 614 / 880 tests, both builds green.
 
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 

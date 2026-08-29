@@ -225,8 +225,12 @@ ZSKIP:
     mad.lo.s32 %r4, %r1, %r2, %r3;      // flat CTA index
     mad.lo.s32 %r7, %r4, %r5, %r6;      // worker
     mov.u32 %r8, %nctaid.z;
-    mul.lo.s32 %r9, %r8, %r2;
-    mul.lo.s32 %r9, %r9, %r5;           // nworkers
+    // nworkers, in two steps and TWO registers. Writing %r9 twice is legal
+    // PTX and was a trap for anything reading this back: a reaching-definition
+    // walk that resolves an operand at the USE finds the same instruction
+    // again. Nothing here needs the reuse.
+    mul.lo.s32 %r20, %r8, %r2;
+    mul.lo.s32 %r9, %r20, %r5;          // nworkers
     mov.u32 %r10, %ctaid.y;             // b
 
     mul.wide.s32 %rd10, %r10, 4;
@@ -244,6 +248,12 @@ ZSKIP:
     add.s64 %rd25, %rd6, %rd16;         // &P[b][0]
 
     mov.u64 %rd33, 0;                   // per-thread l accumulator
+    // [Y SEQUENCE REDUCTION] grid-stride over S, stride = nworkers. This is
+    // the partition proofs/GridStrideSplit.v is about. The marker is here
+    // because the entry contains a SECOND grid-stride loop of identical shape
+    // (ZLOOP, over d) and nothing else distinguishes them structurally - they
+    // differ only in their bound, so a reader or a tool picking "the first
+    // one" gets the wrong loop.
     mov.u32 %r14, %r7;                  // i = worker
 LOOP_I:
     setp.ge.s32 %p1, %r14, $S;
@@ -365,8 +375,8 @@ FSKIP:
     mov.u32 %r6, %tid.x;
     mad.lo.s32 %r7, %r4, %r5, %r6;
     mov.u32 %r8, %nctaid.z;
-    mul.lo.s32 %r9, %r8, %r2;
-    mul.lo.s32 %r9, %r9, %r5;
+    mul.lo.s32 %r20, %r8, %r2;
+    mul.lo.s32 %r9, %r20, %r5;
     mov.u32 %r10, %ctaid.y;
 
     mul.wide.s32 %rd10, %r10, 4;
@@ -383,6 +393,10 @@ FSKIP:
     add.s64 %rd17, %rd1, %rd16;
     add.s64 %rd25, %rd6, %rd16;
 
+    // [Y SEQUENCE REDUCTION] grid-stride over S, stride = nworkers. The naive
+    // entry has no zeroing loop to be confused with, but the marker is what
+    // tests/exact_attention_schedule.rs looks for and both entries must carry
+    // it - a marker present in one of two reductions is worse than none.
     mov.u32 %r14, %r7;
 NLOOP_I:
     setp.ge.s32 %p1, %r14, $S;
