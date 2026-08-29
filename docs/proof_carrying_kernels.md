@@ -1848,7 +1848,47 @@ only; drop the undo in each accumulating entry separately (the survivor, now
 caught); bias with `0x40000000`, which is not order-preserving; and keep the
 bias but reduce with a *signed* max, which puts the identity back where it was.
 
-617 / 883 tests, both builds green. Twelve proofs, no axioms.
+##### And the sweep for the same class found the saturate
+
+The lesson generalises to "what other constant here can make a wrong value land
+back on a right one", and the answer was one line down:
+
+```text
+shr.s64      %rd50, %rd50, 16;
+min.s64      %rd50, %rd50, 1073741824;   // <- this
+cvt.u32.u64  %r16,  %rd50;
+```
+
+Without the `min`, a large score delta wraps modulo `2^32` at the narrowing and
+a **far** key comes back with a **small** argument — a weight near `2^28`, the
+weight of the best key. Not precision loss: attention paid to the wrong token.
+
+**Deleting it from the emitter passes `gpu_attention_invariance` on a real
+card.** At `head_dim = 32` and `C = 2^-13` the argument never approaches `2^32`,
+so no device fixture can reach it. The parameters that *do* reach it are ones
+this repo already sweeps — `C = 3.0e-2` is the largest scale in
+`the_temperature_multiplier_carries_two_to_the_thirty_two`'s own list, and
+`head_dim = 128` is a shape `the_shapes_a_model_uses_still_generate` generates.
+At those, a key `2,184,534` below the maximum comes back at `0.986 × 2^28`.
+
+What was missing was the **necessity**, not the presence. The literal was pinned
+by a substring assertion, so removing or moving it already failed — but a check
+that a line exists says nothing about what happens without it, and the host
+replica in the temperature test is `((ds * kfix + 32768) >> 16) as f64`, with no
+clamp and **no narrowing**. Both conventions it exists to separate live above
+the point where the guard acts, so it is right about the multiplier and silent
+about everything else. *Nothing anywhere modelled the u32.*
+
+`the_saturate_is_what_stops_a_far_key_wrapping_into_a_large_weight` models the
+kernel's arithmetic once with the guard as a **parameter**, so the two readings
+cannot drift; *searches* for the wrapping delta rather than hardcoding it;
+carries the control that stops `min(t, 0)` passing (in range the guard must be a
+no-op); shows the value is the exp's own saturation point; and ties the model to
+the emitter. Four mutations, all caught — remove the guard, clamp at `2^31`,
+clamp after the narrowing, and drop the clamp from *both* arms of the model,
+which is the vacuous-necessity case.
+
+618 / 884 tests, both builds green. Twelve proofs, no axioms.
 
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 

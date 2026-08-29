@@ -218,3 +218,127 @@ fn the_emitted_kernel_multiplies_by_a_runtime_temperature() {
         "the argument must be clamped to 2^30 BEFORE it is narrowed to u32"
     );
 }
+
+/// **The saturate is load-bearing, and nothing modelled it.**
+///
+/// The kernel forms the exp argument in 64 bits and then narrows it to u32:
+///
+/// ```text
+/// mul.wide.s32 %rd50, %r16, %r50;     // (m - s) * KFix
+/// add.s64      %rd50, %rd50, 32768;
+/// shr.s64      %rd50, %rd50, 16;
+/// min.s64      %rd50, %rd50, 1073741824;   // <- this line
+/// cvt.u32.u64  %r16,  %rd50;
+/// ```
+///
+/// Without the `min` a large delta wraps modulo `2^32`, and a *far* key comes
+/// back with a *small* argument — so it gets a weight close to `2^28`, the
+/// weight of the best key. That is not precision loss; it is attention paid to
+/// the wrong token.
+///
+/// What was missing is the *necessity*, not the presence.
+/// `the_emitted_kernel_multiplies_by_a_runtime_temperature` does pin the
+/// literal and its position before the `cvt`, so removing or moving the `min`
+/// fails it — but a check that a line is present says nothing about what
+/// happens without it, and the number `1073741824` appeared in the emitter and
+/// in that assertion and nowhere else. Meanwhile
+/// `the_temperature_multiplier_carries_two_to_the_thirty_two`'s host replica is
+/// `((ds * kfix + 32768) >> 16) as f64`, with **no clamp and no narrowing** —
+/// the two conventions it exists to separate both live above the point where
+/// the guard acts, so the replica is right about the multiplier and silent
+/// about everything the guard does. Nothing anywhere modelled the u32.
+///
+/// Deleting the `min` from the emitter passes `gpu_attention_invariance` on a
+/// real card: at `head_dim = 32` and `C = 2^-13` the argument never gets near
+/// `2^32`, so the device fixtures cannot reach it. The parameters that DO reach
+/// it are ones this file already sweeps — `C = 3.0e-2` is the largest scale in
+/// the list above, and `head_dim = 128` is a shape
+/// `the_shapes_a_model_uses_still_generate` generates.
+#[test]
+fn the_saturate_is_what_stops_a_far_key_wrapping_into_a_large_weight() {
+    // The kernel's own arithmetic, with the guard as a parameter so both
+    // readings come from ONE description and cannot drift apart.
+    let arg = |ds: i64, kfix: i64, clamp: bool| -> u32 {
+        let t = (ds * kfix + 32768) >> 16;
+        let t = if clamp { t.min(1_073_741_824) } else { t };
+        t as u32 // `cvt.u32.u64`: takes the low 32 bits, whatever they are
+    };
+    let weight = |ds: i64, kfix: i64, clamp: bool| y::fixed_exp::exp2_neg_q16_16(arg(ds, kfix, clamp));
+
+    // C = 3.0e-2 is the largest scale swept above; head_dim 128 bounds an int8
+    // dot product by 127*127*128, so a score delta spans twice that.
+    const C: f64 = 3.0e-2;
+    let kfix = (C * 2f64.powi(32)).round() as i64;
+    let ds_max = 2 * 127 * 127 * 128;
+
+    // The first delta whose 64-bit argument crosses 2^32 and lands back near
+    // zero. Found by search rather than asserted, so the case cannot go stale
+    // if a constant moves; failing to find one is itself the failure.
+    let wrapped = (1..=ds_max)
+        .find(|&ds| {
+            let t = (ds * kfix + 32768) >> 16;
+            t >= 1 << 32 && (t % (1 << 32)) < 65536
+        })
+        .expect(
+            "no score delta in an int8 head_dim-128 dot product wraps the exp \
+             argument; the arithmetic has changed and this test no longer \
+             describes the kernel",
+        );
+    assert!(
+        wrapped <= ds_max,
+        "the wrapping delta {wrapped} is outside what head_dim 128 can produce"
+    );
+
+    // With the guard: an astronomically distant key gets nothing.
+    assert_eq!(
+        weight(wrapped, kfix, true),
+        0,
+        "a key {wrapped} below the maximum must have zero weight"
+    );
+    // Without it: essentially the weight of the BEST key.
+    let leaked = weight(wrapped, kfix, false);
+    assert!(
+        leaked > (1 << 28) / 2,
+        "unclamped, the same key should come back with a weight near 2^28 — \
+         this test asserts nothing unless the wrap is observable (got {leaked})"
+    );
+
+    // The control, and it is what stops `min(t, 0)` passing: over the ordinary
+    // range the guard must be a NO-OP, or it would be flattening a real
+    // softmax rather than catching an overflow.
+    let mut clamped = 0;
+    for ds in (0..ds_max).step_by(997) {
+        let t = (ds * kfix + 32768) >> 16;
+        if t > 1_073_741_824 {
+            clamped += 1;
+            continue;
+        }
+        assert_eq!(
+            arg(ds, kfix, true),
+            arg(ds, kfix, false),
+            "the guard changed an argument ({ds}) that was already in range"
+        );
+    }
+    assert!(clamped > 0, "no sampled delta reached the guard; it is untested here");
+
+    // And the guard's value is the exp's own saturation point, not a magic
+    // number: 2^30 in Q16.16 is 2^14, and 2^-16384 is zero in Q0.28 by a very
+    // wide margin. Anything at or above it is zero either way.
+    assert_eq!(y::fixed_exp::exp2_neg_q16_16(1_073_741_824), 0);
+    assert_eq!(y::fixed_exp::exp2_neg_q16_16(u32::MAX), 0);
+
+    // The tie to the emitter. Everything above is a claim about the model; this
+    // is what says the model is the kernel's. Without it the file would be
+    // proving a guard necessary and separately observing that *a* `min` is
+    // emitted, with nothing insisting they are the same number — and the
+    // ordering assertion in `the_emitted_kernel_multiplies_by_a_runtime_
+    // temperature` passes for a clamp at any value.
+    let ptx = attention_ptx(128, 256).expect("128/256 is well inside every bound");
+    assert_eq!(
+        ptx.matches("min.s64 %rd50, %rd50, 1073741824;").count(),
+        2,
+        "both accum entries must clamp the exp argument at the value this test \
+         proved necessary and in-range-harmless. The literal is pinned in one \
+         other place too; what is here is the reason it is that number"
+    );
+}
