@@ -218,6 +218,40 @@ Proof.
   rewrite Nat.div_mul by lia. reflexivity.
 Qed.
 
+(** The flush chunk's END, as the micro-kernel's outer loop computes it.
+
+    The emitter computes an END and [cw] computes a WIDTH; they are the same
+    clamp seen from two sides, and the theorem below is that identity. *)
+Definition chunk_end (iv T ext : nat) : nat := Nat.min (iv + T) ext.
+
+(** The K-split's even share and remainder. Loop-invariant, so the emitted
+    wrapper hoists both out of the spawn loop - which is why they are separate
+    expressions rather than subterms of [band_len]. An expression split across
+    basic blocks is not one contiguous instruction sequence. *)
+Definition band_base (K nthr : nat) : nat := (K / nthr).
+Definition band_rem (K nthr : nat) : nat := (K mod nthr).
+
+(** Band `t`'s length, over the already-hoisted `base` and `rem`. *)
+Definition band_len (base rem t : nat) : nat := (base + (if Nat.ltb t rem then 1 else 0)).
+
+(** **The flush join.** [cw] is the model's chunk width; the emitted loop
+    clamps an end instead. *)
+Theorem the_emitted_chunk_end_is_the_flush_model : forall Fl n t,
+  cw Fl n t = chunk_end (coff Fl t) Fl n - coff Fl t.
+Proof.
+  intros Fl n t. unfold cw, chunk_end, coff.
+  replace (S t * Fl)%nat with (t * Fl + Fl)%nat by lia.
+  reflexivity.
+Qed.
+
+(** **The K-split join.** The emitted spawn loop's `%klen` is
+    `ExactGemmKsplit`'s [blen], recomposed from the two hoisted terms. Every
+    theorem in that file is about [blen]; this is what says the emitted wrapper
+    computes it. *)
+Theorem the_emitted_band_length_is_the_ksplit_model : forall K nthr t,
+  blen K nthr t = band_len (band_base K nthr) (band_rem K nthr) t.
+Proof. reflexivity. Qed.
+
 (* ------------------------------------------------------------------ *)
 (** ** What this file proves about itself                              *)
 (* ------------------------------------------------------------------ *)
@@ -326,6 +360,8 @@ Print Assumptions the_tile_geometry_is_consistent.
 Print Assumptions slot_b_is_the_plain_interleave.
 Print Assumptions the_emitted_width_is_the_tiling_model_at_the_loop_variable.
 Print Assumptions the_emitted_panel_index_is_the_tile_index.
+Print Assumptions the_emitted_chunk_end_is_the_flush_model.
+Print Assumptions the_emitted_band_length_is_the_ksplit_model.
 Print Assumptions the_tile_fits_the_register_file.
 Print Assumptions ksplit_threads_is_never_zero.
 Print Assumptions the_schedule_is_the_shipped_one.

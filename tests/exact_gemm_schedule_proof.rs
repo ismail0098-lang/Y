@@ -136,8 +136,8 @@
 use std::path::PathBuf;
 
 use y::cpu_gemm::{
-    panel_index_ix, tile_width_ix, KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR,
-    VNNI_NRV,
+    band_base_ix, band_len_ix, band_rem_ix, chunk_end_ix, panel_index_ix, tile_width_ix,
+    KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
 };
 use y::zero_drift::VnniExact;
 
@@ -205,6 +205,11 @@ fn coq_names(n: &'static str) -> String {
         "ext" => "ext".into(),
         "iv" => "iv".into(),
         "T" => "T".into(),
+        "K" => "K".into(),
+        "nthr" => "nthr".into(),
+        "base" => "base".into(),
+        "rem" => "rem".into(),
+        "t" => "t".into(),
         other => panic!("the schedule expressions gained an unbound name `{other}`"),
     }
 }
@@ -212,6 +217,10 @@ fn coq_names(n: &'static str) -> String {
 fn render(s: &Schedule) -> String {
     let tile_width_body = tile_width_ix().coq(&coq_names);
     let panel_index_body = panel_index_ix().coq(&coq_names);
+    let chunk_end_body = chunk_end_ix().coq(&coq_names);
+    let band_base_body = band_base_ix().coq(&coq_names);
+    let band_rem_body = band_rem_ix().coq(&coq_names);
+    let band_len_body = band_len_ix().coq(&coq_names);
     let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
 
     format!(
@@ -435,6 +444,40 @@ Proof.
   rewrite Nat.div_mul by lia. reflexivity.
 Qed.
 
+(** The flush chunk's END, as the micro-kernel's outer loop computes it.
+
+    The emitter computes an END and [cw] computes a WIDTH; they are the same
+    clamp seen from two sides, and the theorem below is that identity. *)
+Definition chunk_end (iv T ext : nat) : nat := {chunk_end_body}.
+
+(** The K-split's even share and remainder. Loop-invariant, so the emitted
+    wrapper hoists both out of the spawn loop - which is why they are separate
+    expressions rather than subterms of [band_len]. An expression split across
+    basic blocks is not one contiguous instruction sequence. *)
+Definition band_base (K nthr : nat) : nat := {band_base_body}.
+Definition band_rem (K nthr : nat) : nat := {band_rem_body}.
+
+(** Band `t`'s length, over the already-hoisted `base` and `rem`. *)
+Definition band_len (base rem t : nat) : nat := {band_len_body}.
+
+(** **The flush join.** [cw] is the model's chunk width; the emitted loop
+    clamps an end instead. *)
+Theorem the_emitted_chunk_end_is_the_flush_model : forall Fl n t,
+  cw Fl n t = chunk_end (coff Fl t) Fl n - coff Fl t.
+Proof.
+  intros Fl n t. unfold cw, chunk_end, coff.
+  replace (S t * Fl)%nat with (t * Fl + Fl)%nat by lia.
+  reflexivity.
+Qed.
+
+(** **The K-split join.** The emitted spawn loop's `%klen` is
+    `ExactGemmKsplit`'s [blen], recomposed from the two hoisted terms. Every
+    theorem in that file is about [blen]; this is what says the emitted wrapper
+    computes it. *)
+Theorem the_emitted_band_length_is_the_ksplit_model : forall K nthr t,
+  blen K nthr t = band_len (band_base K nthr) (band_rem K nthr) t.
+Proof. reflexivity. Qed.
+
 (* ------------------------------------------------------------------ *)
 (** ** What this file proves about itself                              *)
 (* ------------------------------------------------------------------ *)
@@ -543,6 +586,8 @@ Print Assumptions the_tile_geometry_is_consistent.
 Print Assumptions slot_b_is_the_plain_interleave.
 Print Assumptions the_emitted_width_is_the_tiling_model_at_the_loop_variable.
 Print Assumptions the_emitted_panel_index_is_the_tile_index.
+Print Assumptions the_emitted_chunk_end_is_the_flush_model.
+Print Assumptions the_emitted_band_length_is_the_ksplit_model.
 Print Assumptions the_tile_fits_the_register_file.
 Print Assumptions ksplit_threads_is_never_zero.
 Print Assumptions the_schedule_is_the_shipped_one.
@@ -928,5 +973,135 @@ fn the_emitted_arithmetic_is_the_arithmetic_the_proof_describes() {
         "the driver contains `iv - ext`, the tile-width clamp with its operands \
          reversed. Either the emitter is wrong or this control is matching too \
          loosely to mean anything."
+    );
+}
+
+/// The same claim for the sites emitted as RAW LLVM rather than through the
+/// builder: the flush chunk in the micro-kernel, and the K-split bands in the
+/// threaded wrapper.
+///
+/// These are stronger and simpler than the driver's gate above, for a reason
+/// worth stating: those emitters choose their own register names (`%cend`,
+/// `%base`, `%klen`), so there is nothing to normalise. The rendered text is
+/// compared VERBATIM against the module. If a site stops using the shared
+/// expression, or uses it differently, the exact line goes missing.
+///
+/// The count is asserted for the same reason it is asserted above - an
+/// existential check is satisfied while one site of several diverges, which
+/// mutation demonstrated on the driver's gate rather than being assumed here.
+#[test]
+fn the_raw_emitted_sites_use_the_shared_schedule_expressions() {
+    use y::cpu_gemm::{emit_vnni_micro_module, emit_vnni_threaded_module, render_named};
+
+    let micro = emit_vnni_micro_module(64);
+    let threaded = emit_vnni_threaded_module(true);
+
+    let ksplit = |n: &'static str| -> String {
+        match n {
+            "K" => "%K".into(),
+            "nthr" => "%nthr".into(),
+            "base" => "%base".into(),
+            "rem" => "%rem".into(),
+            "t" => "%t".into(),
+            other => panic!("unbound {other}"),
+        }
+    };
+
+    let cases: Vec<(&str, &str, Vec<String>, Vec<String>)> = vec![
+        (
+            "chunk_end_ix",
+            "the micro-kernel",
+            vec!["%cend0".into(), "%clt".into(), "%cend".into()],
+            render_named(
+                &chunk_end_ix(),
+                &mut ["%cend0", "%clt", "%cend"].into_iter().map(String::from),
+                &|n| match n {
+                    "iv" => "%c".to_string(),
+                    "T" => "64".to_string(),
+                    "ext" => "%kpairs".to_string(),
+                    other => panic!("unbound {other}"),
+                },
+            )
+            .0,
+        ),
+        (
+            "band_base_ix",
+            "the threaded wrapper",
+            vec!["%base".into()],
+            render_named(
+                &band_base_ix(),
+                &mut ["%base"].into_iter().map(String::from),
+                &ksplit,
+            )
+            .0,
+        ),
+        (
+            "band_rem_ix",
+            "the threaded wrapper",
+            vec!["%rem".into()],
+            render_named(
+                &band_rem_ix(),
+                &mut ["%rem"].into_iter().map(String::from),
+                &ksplit,
+            )
+            .0,
+        ),
+        (
+            "band_len_ix",
+            "the threaded wrapper",
+            vec!["%extra".into(), "%inc".into(), "%klen".into()],
+            render_named(
+                &band_len_ix(),
+                &mut ["%extra", "%inc", "%klen"].into_iter().map(String::from),
+                &ksplit,
+            )
+            .0,
+        ),
+    ];
+
+    for (name, module_name, _names, lines) in &cases {
+        let module = if *module_name == "the micro-kernel" { &micro } else { &threaded };
+        assert!(!lines.is_empty(), "{name} rendered to nothing");
+        for l in lines {
+            let n = module.lines().filter(|m| m.trim_end() == l.trim_end()).count();
+            assert_eq!(
+                n, 1,
+                "`{name}` renders the line `{}`, which appears {n} times in \
+                 {module_name} - expected exactly once. Either that site stopped \
+                 using the shared schedule expression, so the arithmetic in \
+                 proofs/ExactGemmSchedule.v is no longer the arithmetic the \
+                 compiler emits, or the emitter changed and this gate needs \
+                 updating deliberately.",
+                l.trim()
+            );
+        }
+    }
+
+    // Non-vacuity. The flush clamp with its `min` operands swapped computes the
+    // SAME VALUE by different instructions - the mutation that escaped every
+    // correctness suite on the driver's gate. It must not be what the emitter
+    // writes, or this check is matching something it did not intend to.
+    let swapped = render_named(
+        &y::cpu_gemm::Ix::Min(
+            Box::new(y::cpu_gemm::Ix::Val("ext")),
+            Box::new(y::cpu_gemm::Ix::Add(
+                Box::new(y::cpu_gemm::Ix::Val("iv")),
+                Box::new(y::cpu_gemm::Ix::Val("T")),
+            )),
+        ),
+        &mut ["%cend0", "%clt", "%cend"].into_iter().map(String::from),
+        &|n| match n {
+            "iv" => "%c".to_string(),
+            "T" => "64".to_string(),
+            "ext" => "%kpairs".to_string(),
+            other => panic!("unbound {other}"),
+        },
+    )
+    .0;
+    assert!(
+        !swapped.iter().all(|l| micro.lines().any(|m| m.trim_end() == l.trim_end())),
+        "the micro-kernel contains the flush clamp with its operands swapped. \
+         That computes the same value, so no correctness test can see it - \
+         which is exactly the divergence this gate exists to catch."
     );
 }

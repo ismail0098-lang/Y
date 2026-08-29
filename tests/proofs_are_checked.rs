@@ -302,6 +302,13 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // join to the tiling model's tile-index view.
                 "Print Assumptions the_emitted_width_is_the_tiling_model_at_the_loop_variable",
                 "the_emitted_panel_index_is_the_tile_index",
+                // ...and the same for the two sites emitted as raw LLVM: the
+                // micro-kernel's flush clamp, and the threaded wrapper's
+                // K-split bands. Every theorem in ExactGemmKsplit.v is about
+                // `blen`; the second of these is what says the emitted spawn
+                // loop computes it.
+                "the_emitted_chunk_end_is_the_flush_model",
+                "the_emitted_band_length_is_the_ksplit_model",
                 // The realizability constraint that was prose in a test
                 // comment and stated nowhere: MR*NRV accumulators + NRV B
                 // vectors + 1 A broadcast must fit 32 zmm. Measured by

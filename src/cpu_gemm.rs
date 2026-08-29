@@ -449,13 +449,20 @@ pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
     writeln!(out, "  br i1 %ogo, label %obody, label %done\n").unwrap();
 
     writeln!(out, "obody:").unwrap();
-    writeln!(out, "  %cend0 = add i64 %c, {flush_k_pairs}").unwrap();
-    writeln!(out, "  %clt = icmp slt i64 %cend0, %kpairs").unwrap();
-    writeln!(
-        out,
-        "  %cend = select i1 %clt, i64 %cend0, i64 %kpairs"
-    )
-    .unwrap();
+    // The chunk end, rendered from the SHARED schedule expression rather than
+    // written out here - so the arithmetic in `proofs/ExactGemmSchedule.v` is
+    // this arithmetic. The names are the ones this block already used, which is
+    // what keeps the emitted module byte-identical.
+    let mut chunk_names = ["%cend0", "%clt", "%cend"].into_iter().map(String::from);
+    let (chunk_lines, _) = render_named(&chunk_end_ix(), &mut chunk_names, &|n| match n {
+        "iv" => "%c".to_string(),
+        "T" => flush_k_pairs.to_string(),
+        "ext" => "%kpairs".to_string(),
+        other => unreachable!("unbound schedule name {other}"),
+    });
+    for l in chunk_lines {
+        writeln!(out, "{l}").unwrap();
+    }
     for i in 0..VNNI_MR {
         for v in 0..VNNI_NRV {
             writeln!(
@@ -859,6 +866,46 @@ pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
     let mr = VNNI_MR;
     let nr = VNNI_NR;
 
+    // The K-split band arithmetic, rendered from the SHARED schedule
+    // expressions instead of written out below. The result names are the ones
+    // this function already used, which is what keeps the emitted module
+    // byte-identical - and `proofs/ExactGemmSchedule.v`'s `band_base`,
+    // `band_rem` and `band_len` are these same expressions rendered to Coq.
+    //
+    // `base` and `rem` are loop-invariant and the emitter hoists them into
+    // `many:`, so they are rendered separately from the per-band length in
+    // `spawn.body:`. An expression split across basic blocks is not one
+    // contiguous sequence, and pretending otherwise would have changed the
+    // emitted code.
+    let ksplit_bind = |n: &'static str| -> String {
+        match n {
+            "K" => "%K".into(),
+            "nthr" => "%nthr".into(),
+            "base" => "%base".into(),
+            "rem" => "%rem".into(),
+            "t" => "%t".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        }
+    };
+    let (mut band_pre, _) = render_named(
+        &band_base_ix(),
+        &mut ["%base"].into_iter().map(String::from),
+        &ksplit_bind,
+    );
+    let (rem_lines, _) = render_named(
+        &band_rem_ix(),
+        &mut ["%rem"].into_iter().map(String::from),
+        &ksplit_bind,
+    );
+    band_pre.extend(rem_lines);
+    let band_pre = band_pre.join("\n");
+    let (band_len, _) = render_named(
+        &band_len_ix(),
+        &mut ["%extra", "%inc", "%klen"].into_iter().map(String::from),
+        &ksplit_bind,
+    );
+    let band_len = band_len.join("\n");
+
     let _ = write!(
         &mut s,
         r#"
@@ -988,8 +1035,7 @@ many:
   %jobs = call ptr @malloc(i64 %jobsb)
   %tidsb = mul i64 %nthr, 8
   %tids = call ptr @malloc(i64 %tidsb)
-  %base = sdiv i64 %K, %nthr
-  %rem = srem i64 %K, %nthr
+{band_pre}
   br label %spawn.head
 
 spawn.head:
@@ -1001,9 +1047,7 @@ spawn.head:
 spawn.body:
   ; The first `rem` bands get one extra k, so the cuts are uneven by
   ; construction and never line up with the flush interval.
-  %extra = icmp slt i64 %t, %rem
-  %inc = select i1 %extra, i64 1, i64 0
-  %klen = add i64 %base, %inc
+{band_len}
 
   %kp1b = add i64 %klen, 1
   %kpsb = sdiv i64 %kp1b, 2
@@ -1178,6 +1222,8 @@ cleanup:
         jobb = job_bytes,
         gemm = VNNI_GEMM_NAME,
         threaded = VNNI_THREADED_NAME,
+        band_pre = band_pre,
+        band_len = band_len,
     );
     s
 }
@@ -1853,9 +1899,15 @@ pub enum Ix {
     /// truncates by definition, which is what makes a tile entirely past the
     /// end have width 0 rather than a negative one.
     Sub(Box<Ix>, Box<Ix>),
+    Add(Box<Ix>, Box<Ix>),
     Min(Box<Ix>, Box<Ix>),
     /// Floor division. `sdiv` on non-negative operands is Coq's `/` on `nat`.
     Div(Box<Ix>, Box<Ix>),
+    /// Truncating remainder. `srem` on non-negative operands is Coq's `mod`.
+    Mod(Box<Ix>, Box<Ix>),
+    /// `if a < b then x else y`, emitted as `icmp slt` + `select`. The k-split
+    /// gives the first `rem` bands one extra k, and this is that choice.
+    SelLt(Box<Ix>, Box<Ix>, Box<Ix>, Box<Ix>),
 }
 
 impl Ix {
@@ -1865,11 +1917,20 @@ impl Ix {
     fn sub(a: Ix, b: Ix) -> Ix {
         Ix::Sub(Box::new(a), Box::new(b))
     }
+    fn add(a: Ix, b: Ix) -> Ix {
+        Ix::Add(Box::new(a), Box::new(b))
+    }
     fn min(a: Ix, b: Ix) -> Ix {
         Ix::Min(Box::new(a), Box::new(b))
     }
     fn div(a: Ix, b: Ix) -> Ix {
         Ix::Div(Box::new(a), Box::new(b))
+    }
+    fn imod(a: Ix, b: Ix) -> Ix {
+        Ix::Mod(Box::new(a), Box::new(b))
+    }
+    fn sel_lt(a: Ix, b: Ix, x: Ix, y: Ix) -> Ix {
+        Ix::SelLt(Box::new(a), Box::new(b), Box::new(x), Box::new(y))
     }
 
     /// Render to Coq, over the names `bind` supplies.
@@ -1878,8 +1939,17 @@ impl Ix {
             Ix::Val(n) => bind(n),
             Ix::Lit(k) => k.to_string(),
             Ix::Sub(a, b) => format!("({} - {})", a.coq(bind), b.coq(bind)),
+            Ix::Add(a, b) => format!("({} + {})", a.coq(bind), b.coq(bind)),
             Ix::Min(a, b) => format!("Nat.min {} {}", a.coq(bind), b.coq(bind)),
             Ix::Div(a, b) => format!("({} / {})", a.coq(bind), b.coq(bind)),
+            Ix::Mod(a, b) => format!("({} mod {})", a.coq(bind), b.coq(bind)),
+            Ix::SelLt(a, b, x, y) => format!(
+                "(if Nat.ltb {} {} then {} else {})",
+                a.coq(bind),
+                b.coq(bind),
+                x.coq(bind),
+                y.coq(bind)
+            ),
         }
     }
 
@@ -1892,6 +1962,10 @@ impl Ix {
                 let (x, y) = (x.emit(b, bind), y.emit(b, bind));
                 b.sub(&x, &y)
             }
+            Ix::Add(x, y) => {
+                let (x, y) = (x.emit(b, bind), y.emit(b, bind));
+                b.add(&x, &y)
+            }
             Ix::Min(x, y) => {
                 let (x, y) = (x.emit(b, bind), y.emit(b, bind));
                 b.imin(&x, &y)
@@ -1902,6 +1976,121 @@ impl Ix {
                 b.w(&format!("{} = sdiv i64 {}, {}", r, x, y));
                 r
             }
+            Ix::Mod(x, y) => {
+                let (x, y) = (x.emit(b, bind), y.emit(b, bind));
+                let r = b.t();
+                b.w(&format!("{} = srem i64 {}, {}", r, x, y));
+                r
+            }
+            Ix::SelLt(a, bb, x, y) => {
+                let (a, bb) = (a.emit(b, bind), bb.emit(b, bind));
+                let (x, y) = (x.emit(b, bind), y.emit(b, bind));
+                let c = b.t();
+                b.w(&format!("{} = icmp slt i64 {}, {}", c, a, bb));
+                let r = b.t();
+                b.w(&format!("{} = select i1 {}, i64 {}, i64 {}", r, c, x, y));
+                r
+            }
+        }
+    }
+}
+
+/// Render an [`Ix`] to LLVM as NAMED SSA, one instruction per line.
+///
+/// The `IrBuilder` emitters number their own temporaries; several of the
+/// exact-GEMM emitters instead write raw LLVM with hand-chosen register names
+/// (`%cend0`, `%clt`, `%cend`). This renders into that style: `names` is
+/// consumed in emission order and supplies the result name of each
+/// instruction, so an extracted expression can reproduce an existing hand-
+/// written sequence EXACTLY - which is what lets the refactor be checked by
+/// byte-identity rather than by reading it.
+///
+/// Returns the lines and the register holding the result.
+pub fn render_named(
+    ix: &Ix,
+    names: &mut dyn Iterator<Item = String>,
+    bind: &dyn Fn(&'static str) -> String,
+) -> (Vec<String>, String) {
+    let mut out = Vec::new();
+    let r = emit_named(ix, &mut out, names, bind);
+    (out, r)
+}
+
+fn emit_named(
+    ix: &Ix,
+    out: &mut Vec<String>,
+    names: &mut dyn Iterator<Item = String>,
+    bind: &dyn Fn(&'static str) -> String,
+) -> String {
+    let mut take = |names: &mut dyn Iterator<Item = String>| {
+        names
+            .next()
+            .expect("render_named ran out of result names for the expression")
+    };
+    match ix {
+        Ix::Val(n) => bind(n),
+        Ix::Lit(k) => k.to_string(),
+        Ix::Sub(a, b) => {
+            let (a, b) = (
+                emit_named(a, out, names, bind),
+                emit_named(b, out, names, bind),
+            );
+            let r = take(names);
+            out.push(format!("  {r} = sub nsw i64 {a}, {b}"));
+            r
+        }
+        Ix::Add(a, b) => {
+            let (a, b) = (
+                emit_named(a, out, names, bind),
+                emit_named(b, out, names, bind),
+            );
+            let r = take(names);
+            out.push(format!("  {r} = add i64 {a}, {b}"));
+            r
+        }
+        Ix::Min(a, b) => {
+            let (a, b) = (
+                emit_named(a, out, names, bind),
+                emit_named(b, out, names, bind),
+            );
+            let c = take(names);
+            out.push(format!("  {c} = icmp slt i64 {a}, {b}"));
+            let r = take(names);
+            out.push(format!("  {r} = select i1 {c}, i64 {a}, i64 {b}"));
+            r
+        }
+        Ix::Div(a, b) => {
+            let (a, b) = (
+                emit_named(a, out, names, bind),
+                emit_named(b, out, names, bind),
+            );
+            let r = take(names);
+            out.push(format!("  {r} = sdiv i64 {a}, {b}"));
+            r
+        }
+        Ix::Mod(a, b) => {
+            let (a, b) = (
+                emit_named(a, out, names, bind),
+                emit_named(b, out, names, bind),
+            );
+            let r = take(names);
+            out.push(format!("  {r} = srem i64 {a}, {b}"));
+            r
+        }
+        Ix::SelLt(a, b, x, y) => {
+            let (a, b) = (
+                emit_named(a, out, names, bind),
+                emit_named(b, out, names, bind),
+            );
+            let (x, y) = (
+                emit_named(x, out, names, bind),
+                emit_named(y, out, names, bind),
+            );
+            let c = take(names);
+            out.push(format!("  {c} = icmp slt i64 {a}, {b}"));
+            let r = take(names);
+            out.push(format!("  {r} = select i1 {c}, i64 {x}, i64 {y}"));
+            r
         }
     }
 }
@@ -1923,6 +2112,52 @@ pub fn render_llvm(ix: &Ix, bind: &dyn Fn(&'static str) -> String) -> Vec<String
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect()
+}
+
+/// The k-split's even share: `K / nthr`. Loop-invariant, so the emitter hoists
+/// it out of the spawn loop - which is why it is its own expression rather than
+/// a subterm of [`band_len_ix`].
+pub fn band_base_ix() -> Ix {
+    Ix::div(Ix::val("K"), Ix::val("nthr"))
+}
+
+/// The k values left over after the even share: `K mod nthr`. Also hoisted.
+pub fn band_rem_ix() -> Ix {
+    Ix::imod(Ix::val("K"), Ix::val("nthr"))
+}
+
+/// Band `t`'s length: `base + (if t < rem then 1 else 0)`.
+///
+/// The first `rem` bands take one extra k, so the cuts are UNEVEN by
+/// construction and never line up with the flush interval.
+/// `ExactGemmKsplit.bands_tile` proves they cover `[0, K)` exactly for every
+/// `K` and every positive `nthr`, and `ksplit_exact` that summing their
+/// partials equals the naive sum.
+///
+/// Stated over the already-hoisted `base` and `rem`, which is the form the
+/// emitted spawn loop has; the generated
+/// `the_emitted_band_length_is_the_ksplit_model` composes it back with the two
+/// above and ties it to `ExactGemmSchedule.blen`.
+pub fn band_len_ix() -> Ix {
+    Ix::add(
+        Ix::val("base"),
+        Ix::sel_lt(Ix::val("t"), Ix::val("rem"), Ix::Lit(1), Ix::Lit(0)),
+    )
+}
+
+/// Where the current flush chunk ends: `min(iv + T, ext)`.
+///
+/// The micro-kernel's outer loop is `for c = 0; c < kpairs; c += Fl` and the
+/// chunk is `[c, min(c + Fl, kpairs))`, so the final partial chunk is carried
+/// by this clamp rather than by an epilogue. `ExactGemmMicro.flush_exact`
+/// proves that decomposition sums to the whole range.
+///
+/// Note this is the same clamp as [`tile_width_ix`] expressed as an END rather
+/// than a WIDTH - the emitter computes the end, `ExactGemmSchedule.cw`
+/// computes the width, and the generated
+/// `the_emitted_chunk_end_is_the_flush_model` is the join.
+pub fn chunk_end_ix() -> Ix {
+    Ix::min(Ix::add(Ix::val("iv"), Ix::val("T")), Ix::val("ext"))
 }
 
 /// The live width of the tile starting at induction variable `iv`.
