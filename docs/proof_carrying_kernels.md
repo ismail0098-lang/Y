@@ -1596,6 +1596,108 @@ test something this does not. And nothing here touches the f32 micro-kernel,
 its packing, or its scratch reduction — this is the schedule, and only the
 schedule.
 
+#### The third kernel, and the first that is not a GEMM · 2026-08-30
+
+The previous entry closed by naming its own limit: *"both kernels are GEMMs, so
+the axes coincide even though the decompositions do not."* `src/exact_attention.rs`
+is not a GEMM, and its module header makes a claim of exactly the kind this
+programme exists to discharge — **"the answer does not depend on `blockDim.x`,
+`gridDim.x`, `gridDim.z`, or the order the atomics land."**
+`tests/gpu_attention_invariance.rs` demonstrates it on a real card at nine
+launch geometries. Nine geometries is not every geometry, and *the order the
+atomics land is not a geometry at all*: it is a property of a race.
+
+`proofs/GridStrideSplit.v` (Rocq 9.1, 8 `Print Assumptions`, no axioms) and
+`tests/exact_attention_schedule.rs` close both halves.
+
+##### It needed a property neither GEMM proof did
+
+The decomposition is different in two ways, and the second is the interesting one.
+
+- **It is not an interval split.** Worker `w` of `n` takes
+  `{ i < S : i mod n = w }` — the residue classes, interleaved. Not
+  `ExactGemmKsplit`'s contiguous bands, not `GemmBandSplit`'s proportional
+  edges. An index belongs to its class by arithmetic rather than by an
+  accumulated offset, so `stride_classes_partition` is a third proof of the
+  same obligation.
+- **The partials are combined in ARBITRARY order**, by `red.shared.add.u64`
+  and `red.global.add.u64`. Both GEMM proofs fold their bands in index order,
+  so associativity carried the whole argument. Here the order is whatever the
+  hardware chooses, so the argument needs **commutativity** —
+  `atomics_may_land_in_any_order` quantifies over every permutation of the
+  workers.
+
+That is the first obligation in the programme that is genuinely *new* rather
+than a re-discharge, and it is what a transformation IR would have to know to
+schedule an atomic reduction at all.
+
+Both halves are shown to be about the accumulate, and the second refutation is
+a failure the GEMM kernels **cannot exhibit**:
+`rounding_breaks_the_stride_split` disagrees across worker counts, as a GEMM's
+K-split does; `rounding_is_order_dependent` disagrees at a *fixed* worker count
+purely from the order the partials land — 1000 against 1100 — with
+`exact_is_order_independent` as the control. Two fixtures were needed, because
+the input that makes the worker count matter and the input that makes the order
+matter are not the same one; three plausible single fixtures agreed on both
+readings before this pair.
+
+##### What the gate isolates, measured rather than asserted
+
+The tie reads the emitted PTX and derives the dataflow rather than matching
+text. The property it pins is the **precondition** the partition theorem needs:
+`worker` is a mixed-radix index over `(ctaid.z, ctaid.x, tid.x)`, so `nworkers`
+must be the product of exactly those three indices' extents. Drop `%nctaid.z`
+and the stride is smaller than the worker count — the classes overlap, some
+keys counted twice, others never.
+
+| mutation | schedule gate | device test (GPU) | device test (no GPU) |
+|---|---|---|---|
+| `nworkers` drops `%nctaid.z` | **FAIL** | FAIL | **ok** |
+| instructions reordered, dataflow unchanged | ok | ok | ok |
+| the proof's classes become a block split | — | — | `coqc` FAIL |
+| the proof's accumulator bound drifts | FAIL | — | — |
+
+**Row 1 is the result.** With a card present the device test catches it too, so
+the gate is a diagnosis by name. Without one — the ordinary CI case — the device
+test prints `SKIP: no CUDA driver` and reports **ok on a broken kernel**, and
+the gate is the only thing left. Verified by running it under
+`CUDA_VISIBLE_DEVICES=""`, not assumed.
+
+Row 2 is why the check derives the dataflow instead of matching a window, and
+it is load-bearing rather than decorative: the two accumulating entries build
+the *same* decomposition in a *different instruction order* — `attn_accum`
+hoists `%ntid.x` and `%tid.x` above the shared-memory zeroing loop and
+`attn_accum_naive` does not — so a literal sequence matches at most one of them.
+
+##### Two traps in writing the tie
+
+Both were mine, and both are the shape this repo keeps recording.
+
+- **`attn_accum` contains TWO grid-stride loops** of identical shape: the one
+  over the sequence, and one over `d` that zeroes the shared accumulators.
+  Taking the first `add.s32 %i, %i, %s` picks the zeroing loop, whose stride is
+  `%ntid.x` alone — which then reports the decomposition as depending on
+  `tid.x` and nothing else. The loops are told apart by their **bound**, which
+  is why the fixture uses `head_dim = 64` with `seq_len = 512`: the
+  `lda == K` coincidence, one layer over, and the test asserts the two differ.
+- **`%r9 = %r9 * %r5` is a real instruction here** — the worker count is built
+  in two steps — so a "last definition wins" walk resolves its own operand to
+  itself. Operands must resolve at the *definition's* position, not at the use.
+
+##### What is NOT claimed
+
+The accumulator ceiling (`the_bound_is_one_unit_wide`) is stated and tied to
+`MAX_EXACT_SEQ_LEN`, parsed out of the `.v` rather than restated — it needs
+2.7e8 keys to reach, so no device test can ever demonstrate it. The per-thread
+body is not modelled: `f` is an arbitrary function of the index, so the integer
+exp, the Q0.28 weight and the int8 `V` load are outside this. And the tie is
+**weaker than the GEMM kernels'**: those render their schedule from an `Ix`
+shared with the proof generator, so a divergence is a byte-identity failure.
+This kernel is a PTX string template, and making it an `Ix` means routing
+attention through `IrBuilder` — a larger change than this file.
+
+Twelve proofs, no axioms, nothing admitted. 612 / 878 tests, both builds green.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation

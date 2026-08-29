@@ -352,6 +352,30 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            "GridStrideSplit.v",
+            &[
+                // The third kernel, and the first that is not a GEMM: the
+                // residue classes partition the sequence, so any worker count
+                // gives the naive sum.
+                "grid_stride_exact",
+                "stride_classes_partition",
+                "any_worker_count_agrees",
+                // The property neither GEMM proof needed. The atomics supply
+                // their operands in whatever order the hardware chooses, so
+                // this one needs commutativity and not just associativity.
+                "atomics_may_land_in_any_order",
+                // Both halves are about the ACCUMULATE - and the second is a
+                // failure the GEMM kernels cannot exhibit at all, since they
+                // fold their bands in index order.
+                "rounding_breaks_the_stride_split",
+                "rounding_is_order_dependent",
+                "exact_is_order_independent",
+                // The accumulator ceiling, which needs 2.7e8 keys to reach and
+                // so can never be demonstrated on a device.
+                "the_bound_is_one_unit_wide",
+            ][..],
+        ),
+        (
             "GemmBandSplit.v",
             &[
                 // The f32 kernel is the SECOND kernel, and its K-split is a
