@@ -294,6 +294,14 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // generator that emitted `NR` and `NRV` from constants that
                 // had stopped agreeing, or any degenerate zero.
                 "the_tile_geometry_is_consistent",
+                // The index arithmetic rendered from the SAME expressions
+                // the emitter renders to LLVM (`cpu_gemm::tile_width_ix`,
+                // `panel_index_ix`). Everything else in that file is
+                // generated from a constant; these are generated from the
+                // emitted CODE's arithmetic, and these two theorems are the
+                // join to the tiling model's tile-index view.
+                "Print Assumptions the_emitted_width_is_the_tiling_model_at_the_loop_variable",
+                "the_emitted_panel_index_is_the_tile_index",
                 // The realizability constraint that was prose in a test
                 // comment and stated nowhere: MR*NRV accumulators + NRV B
                 // vectors + 1 A broadcast must fit 32 zmm. Measured by

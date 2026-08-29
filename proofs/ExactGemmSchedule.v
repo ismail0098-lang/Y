@@ -172,6 +172,53 @@ Definition cw (Fl n t : nat) : nat := Nat.min (coff Fl (S t)) n - coff Fl t.
 Definition nchunks (Fl n : nat) : nat := (n + Fl - 1) / Fl.
 
 (* ------------------------------------------------------------------ *)
+(** ** The emitter's own index arithmetic                              *)
+(* ------------------------------------------------------------------ *)
+
+(** **These two are rendered from the SAME expressions the emitter renders to
+    LLVM** - `cpu_gemm::tile_width_ix` and `panel_index_ix`, via `Ix::coq`
+    where the driver uses `Ix::emit`. Everything above is generated from a
+    constant; these are generated from the emitted CODE's arithmetic.
+
+    That is the difference between a model that agrees with the emitter and a
+    model that IS the emitter, for this slice of the schedule. The slice is
+    small and deliberately so: it is the tile-width clamp and the panel index,
+    which is the arithmetic the driver's loop nest does on its induction
+    variables, and which §1 of `docs/proof_carrying_kernels.md` names as where
+    the bugs live ("twelve address computations ... correct only because
+    `lda == K` made stride and extent the same number"). Which loops exist, in
+    what order, and what they call is still hand-written. *)
+
+(** The live width of the tile starting at induction variable `iv`. *)
+Definition tile_width (ext iv T : nat) : nat := Nat.min (ext - iv) T.
+
+(** Which packed panel the tile at `iv` reads. *)
+Definition panel_index (iv T : nat) : nat := (iv / T).
+
+(** **The join.** [tw] is the tiling model, stated over the tile INDEX; the
+    emitted loop has the induction variable instead. This says they are the
+    same number, which is what lets `ExactGemmTiling.v`'s partition theorems
+    describe the emitted driver.
+
+    It was implicit before: the emitter clamped with three `IrBuilder` calls
+    and a behavioural test (`exact_gemm_tile_enumeration.rs`) sampled the
+    result. *)
+Theorem the_emitted_width_is_the_tiling_model_at_the_loop_variable :
+  forall ext T t, tw ext T t = tile_width ext (toff T t) T.
+Proof. reflexivity. Qed.
+
+(** ...and the emitted `sdiv iv, T` really does recover the tile index, so the
+    panel a tile reads is its own. Getting this wrong is a correctly-computed
+    tile read from the wrong panel - the shape of bug this repo catalogues as
+    invisible to a relative-L2 check. *)
+Theorem the_emitted_panel_index_is_the_tile_index :
+  forall T t, 0 < T -> panel_index (toff T t) T = t.
+Proof.
+  intros T t HT. unfold panel_index, toff.
+  rewrite Nat.div_mul by lia. reflexivity.
+Qed.
+
+(* ------------------------------------------------------------------ *)
 (** ** What this file proves about itself                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -277,6 +324,8 @@ Proof. repeat split; reflexivity. Qed.
 
 Print Assumptions the_tile_geometry_is_consistent.
 Print Assumptions slot_b_is_the_plain_interleave.
+Print Assumptions the_emitted_width_is_the_tiling_model_at_the_loop_variable.
+Print Assumptions the_emitted_panel_index_is_the_tile_index.
 Print Assumptions the_tile_fits_the_register_file.
 Print Assumptions ksplit_threads_is_never_zero.
 Print Assumptions the_schedule_is_the_shipped_one.
