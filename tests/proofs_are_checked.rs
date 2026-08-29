@@ -307,6 +307,7 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // K-split bands. Every theorem in ExactGemmKsplit.v is about
                 // `blen`; the second of these is what says the emitted spawn
                 // loop computes it.
+                "the_emitted_tile_count_is_the_tiling_model",
                 "the_emitted_chunk_end_is_the_flush_model",
                 "the_emitted_band_length_is_the_ksplit_model",
                 // The realizability constraint that was prose in a test

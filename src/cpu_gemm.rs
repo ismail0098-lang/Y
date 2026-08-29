@@ -572,9 +572,10 @@ fn emit_vnni_pack_a() -> String {
     let (src, lda, mrows, kc, dst) = ("%src", "%lda", "%mrows", "%kc", "%dst");
 
     // kpairs = ceil(kc / 2). An odd kc leaves the final high half zero.
-    let kc1 = b.add(kc, "1");
-    let kpairs = b.t();
-    b.w(&format!("{} = sdiv i64 {}, 2", kpairs, kc1));
+    let kpairs = kpairs_ix().emit(&mut b, &|n: &'static str| match n {
+        "kc" => kc.to_string(),
+        other => unreachable!("unbound schedule name {other}"),
+    });
 
     let pl = b.loop_begin("va.p", "0", &kpairs, "1");
     let p = b.iv(&pl);
@@ -633,9 +634,10 @@ fn emit_vnni_pack_b() -> String {
     let mut b = IrBuilder::new();
     let (src, ldb, kc, ncols, dst) = ("%src", "%ldb", "%kc", "%ncols", "%dst");
 
-    let kc1 = b.add(kc, "1");
-    let kpairs = b.t();
-    b.w(&format!("{} = sdiv i64 {}, 2", kpairs, kc1));
+    let kpairs = kpairs_ix().emit(&mut b, &|n: &'static str| match n {
+        "kc" => kc.to_string(),
+        other => unreachable!("unbound schedule name {other}"),
+    });
 
     let pl = b.loop_begin("vb.p", "0", &kpairs, "1");
     let p = b.iv(&pl);
@@ -713,9 +715,10 @@ fn emit_vnni_gemm_driver() -> String {
     let (lda, ldb, ldc) = ("%lda", "%ldb", "%ldc");
     let (ap, bp, ct) = ("%Apanel", "%Bpanel", "%Ctile");
 
-    let kc1 = b.add(k, "1");
-    let kpairs = b.t();
-    b.w(&format!("{} = sdiv i64 {}, 2", kpairs, kc1));
+    let kpairs = kpairs_ix().emit(&mut b, &|n: &'static str| match n {
+        "kc" => k.to_string(),
+        other => unreachable!("unbound schedule name {other}"),
+    });
 
     // Pack ALL of A once, before either loop.
     //
@@ -899,6 +902,35 @@ pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
     );
     band_pre.extend(rem_lines);
     let band_pre = band_pre.join("\n");
+    let (tile_count_ir, _) = render_named(
+        &tile_count_ix(),
+        &mut ["%mtiles0", "%mtiles"].into_iter().map(String::from),
+        &|n| match n {
+            "ext" => "%M".into(),
+            "Tm1" => (mr - 1).to_string(),
+            "T" => mr.to_string(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let tile_count_ir = tile_count_ir.join("\n");
+    let (kpairs_ir, _) = render_named(
+        &kpairs_ix(),
+        &mut ["%kp1", "%kps"].into_iter().map(String::from),
+        &|n| match n {
+            "kc" => "%K".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let kpairs_ir = kpairs_ir.join("\n");
+    let (kpairs_b_ir, _) = render_named(
+        &kpairs_ix(),
+        &mut ["%kp1b", "%kpsb"].into_iter().map(String::from),
+        &|n| match n {
+            "kc" => "%klen".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let kpairs_b_ir = kpairs_b_ir.join("\n");
     let (band_len, _) = render_named(
         &band_len_ix(),
         &mut ["%extra", "%inc", "%klen"].into_iter().map(String::from),
@@ -1005,14 +1037,12 @@ zero.body:
 
 zero.done:
   %nthr = call i64 @__y_gemm_exact_threads(i64 %K)
-  %mtiles0 = add i64 %M, {mr_m1}
-  %mtiles = sdiv i64 %mtiles0, {mr}
+{tile_count_ir}
   %one = icmp sle i64 %nthr, 1
   br i1 %one, label %single, label %many
 
 single:
-  %kp1 = add i64 %K, 1
-  %kps = sdiv i64 %kp1, 2
+{kpairs_ir}
   %apn = mul i64 %mtiles, %kps
   %apn2 = mul i64 %apn, {mr2}
   %apb = mul i64 %apn2, 2
@@ -1049,8 +1079,7 @@ spawn.body:
   ; construction and never line up with the flush interval.
 {band_len}
 
-  %kp1b = add i64 %klen, 1
-  %kpsb = sdiv i64 %kp1b, 2
+{kpairs_b_ir}
   %apnb = mul i64 %mtiles, %kpsb
   %apn2b = mul i64 %apnb, {mr2}
   %apbb = mul i64 %apn2b, 2
@@ -1214,8 +1243,6 @@ cleanup:
 "#,
         maxthr = 64,
         minband = KSPLIT_MIN_BAND,
-        mr = mr,
-        mr_m1 = mr - 1,
         mr2 = mr * 2,
         nr2 = nr * 2,
         ctb = mr * nr * 8,
@@ -1224,6 +1251,9 @@ cleanup:
         threaded = VNNI_THREADED_NAME,
         band_pre = band_pre,
         band_len = band_len,
+        tile_count_ir = tile_count_ir,
+        kpairs_ir = kpairs_ir,
+        kpairs_b_ir = kpairs_b_ir,
     );
     s
 }
@@ -2112,6 +2142,30 @@ pub fn render_llvm(ix: &Ix, bind: &dyn Fn(&'static str) -> String) -> Vec<String
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect()
+}
+
+/// k-pairs in a K panel of `kc`, rounded up: `(kc + 1) / 2`.
+///
+/// The phantom half of an odd `kc` is what the packers' zero-fill covers, and
+/// `ExactGemmPacking.padded_product_is_the_live_dot_product` is why running the
+/// full `kpairs` over a padded panel is exact. **Every packing and flush
+/// theorem is stated in terms of this number**, and until it was extracted
+/// nothing said the emitter computed the same one - it is spelled at FIVE
+/// sites (both packers, the driver, and twice in the threaded wrapper).
+pub fn kpairs_ix() -> Ix {
+    Ix::div(Ix::add(Ix::val("kc"), Ix::Lit(1)), Ix::Lit(2))
+}
+
+/// How many tiles an axis of `ext` is cut into by a tile of `T`:
+/// `(ext + (T-1)) / T`.
+///
+/// `T - 1` is a SEPARATE bound name rather than a subterm, because the emitter
+/// folds it at compile time into a literal (`add i64 %M, 5`) - modelling it as
+/// `Sub(T, 1)` would emit an instruction the compiler does not. The generated
+/// `the_emitted_tile_count_is_the_tiling_model` states that folding, and needs
+/// `0 < T` because `nat` subtraction truncates.
+pub fn tile_count_ix() -> Ix {
+    Ix::div(Ix::add(Ix::val("ext"), Ix::val("Tm1")), Ix::val("T"))
 }
 
 /// The k-split's even share: `K / nthr`. Loop-invariant, so the emitter hoists
