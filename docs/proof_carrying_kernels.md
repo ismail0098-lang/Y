@@ -1173,6 +1173,78 @@ number. Hardcode `6` *and* move `VNNI_MR` to 8, or read the wrong constant
 outright, and the tie assertion fails in both — a hardcode that agrees today is
 caught the moment it stops agreeing.
 
+#### Phase 1 progress, 2026-08-27 (2) — the mutation row was misattributed, and the register bound was prose
+
+The entry above records `VNNI_MR` 6→8 as caught by "6 model suites". **Diagnosing
+why produced a different answer, and it corrects that row.**
+
+**The kernel is not wrong at MR=8.** `exact_gemm_thread_invariance` — the suite
+that runs the real threaded kernel at ragged shapes against an independent
+integer reference and compares bit-identically across thread counts — **passes**.
+So whatever those six suites were reporting, it was not a wrong answer.
+
+**Seven harnesses carried their own copy of the tile shape.** Each embeds a C
+driver with `#define MR 6` / `#define NR 64` hardcoded, while its Rust half
+reads `VNNI_MR`/`VNNI_NR` from the crate. So moving the constant did not make
+those tests report a schedule mismatch — it made each test **disagree with
+itself**: `exact_gemm_panel_model` compared a 48-element panel against a
+64-element expectation, and `exact_gemm_register_tile_model`'s child process
+simply crashed (empty stdout, no `DONE`) on buffers sized for the wrong tile.
+
+That is the same defect `ExactGemmSchedule.v` was built to remove, one layer
+down and in the half of the harness that allocates the memory the emitted kernel
+writes into. All seven now take the constants from `cpu_gemm.rs`:
+`std::fs::write(&drv, schedule_defines() + DRIVER)`. Prepending rather than
+templating the whole driver, because C source is full of braces and `format!`
+is not the right tool for it.
+
+**With the harnesses fixed, six of the eight pass at MR=8** — confirming the
+original signal was self-disagreement. What still fails is the real constraint:
+
+> `cpu_gemm_vnni_micro::the_hot_loop_does_not_spill_the_accumulators` —
+> *"hot-loop stack traffic regressed to 17 spills + 17 reloads; it was 10 + 10
+> when this bound was set"*.
+
+**The constraint existed, as a comment.** That test's own prose says "24
+accumulators + 4 B vectors + 1 A broadcast is 29 of 32 zmm, so the allocator has
+almost no slack". Nothing stated it as a property of the schedule — not
+`cpu_gemm.rs`, not any of the nine proofs.
+
+**The predicate is measured, not guessed.** Sweeping `VNNI_MR` and reading real
+compiled spill traffic:
+
+| MR | `MR*NRV + NRV + 1` | hot-loop spills + reloads |
+|---|---|---|
+| 5 | 25/32 | within bound |
+| 6 | 29/32 | within bound (10 + 10, the shipped kernel) |
+| 7 | 33/32 | 16 + 16 |
+| 8 | 37/32 | 17 + 17 |
+
+The cliff falls exactly where the inequality flips, so the *form* of the bound
+is the measurement's rather than an invention. It is now
+`ExactGemmSchedule.the_tile_fits_the_register_file`, and it **bites**: with
+`VNNI_MR = 8` the regenerated file fails `coqc` at that theorem's `lia`, so the
+generator cannot emit a schedule that does not fit the register file. Nine
+theorems about an unallocatable tile is not a state this should be able to reach.
+
+`ZMM_REGISTERS = 32` is emitted as an **ISA fact, not a schedule constant** —
+there is no `cpu_gemm.rs` constant for it and no proof over `nat` establishes
+it. It sits at the same TCB boundary as `vpdpwssd`'s semantics, pinned
+empirically by the spill test reading real compiled output.
+
+Note what the theorem does *not* claim: a spilling kernel is **slow, not wrong**.
+Separating those two is what the `thread_invariance` result above is for, and it
+is why the bound is a realizability constraint rather than a correctness one.
+
+**One remaining MR=8 failure was left alone, deliberately.**
+`exact_gemm_tiling_model::the_unclamped_tail_would_write_past_the_end` asserts
+`last_off == 48` against a computed `8 * VNNI_MR`. That looks like an eighth
+hardcode and is not: it mirrors `ExactGemmTiling.unclamped_tail_writes_out_of_bounds`'s
+**concrete counterexample**, which is stated at MR = 6. Parameterising it would
+make the assertion `8*VNNI_MR == 8*VNNI_MR` and worth nothing. Failing when the
+schedule moves is the correct behaviour — it says the proof's concrete
+refutation no longer matches the shipped tile.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation

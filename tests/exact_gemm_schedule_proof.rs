@@ -75,14 +75,36 @@
 //!
 //! | mutation | this file | proofs_are_checked | the other 11 |
 //! |---|---|---|---|
-//! | Rust `VNNI_MR` 6 -> 8 | **FAIL** | ok | 6 FAIL |
+//! | Rust `VNNI_MR` 6 -> 8 | **FAIL** | ok | 6 FAIL, see below |
 //! | Rust `KSPLIT_MIN_BAND` 128 -> 256 | **FAIL** | ok | all ok |
 //! | committed `.v` hand-edited, `MR := 8` | **FAIL** | **FAIL** | all ok |
 //! | `ExactGemmRegisterTile.NR := SCH.MR` | ok | **FAIL** | all ok |
 //! | `render` echoes the committed file | **FAIL** | ok | all ok |
 //! | `render` hardcodes `MR := 6` | **FAIL** | ok | all ok |
 //!
-//! Three of those are worth reading rather than counting.
+//! **THE `VNNI_MR` ROW WAS MISATTRIBUTED WHEN FIRST RECORDED, AND DIAGNOSING
+//! IT IS WHERE `the_tile_fits_the_register_file` CAME FROM.** "6 model suites
+//! FAIL" reads as "six suites detect the schedule drift". They do not.
+//!
+//! `exact_gemm_thread_invariance` - the suite that runs the real threaded
+//! kernel at ragged shapes against an independent integer reference - **passes
+//! at MR = 8**. The kernel is not wrong. What failed was seven harnesses that
+//! each embed a C driver hardcoding `#define MR 6` / `#define NR 64` while
+//! their Rust half reads the crate constant, so moving `VNNI_MR` made each
+//! test disagree with ITSELF: a 48-element panel against a 64-element
+//! expectation, and a child process crashing on buffers sized for the wrong
+//! tile. The same defect this file exists to remove, one layer down, in the
+//! half of the harness that allocates the memory the kernel writes into.
+//!
+//! All seven take the constants from `cpu_gemm.rs` now, and with that fixed
+//! six of the eight PASS at MR = 8. What still fails is the real constraint -
+//! `cpu_gemm_vnni_micro::the_hot_loop_does_not_spill_the_accumulators`, whose
+//! own comment already stated the register budget in prose. That is what
+//! `the_tile_fits_the_register_file` promotes into a checked statement, with
+//! the bound's FORM taken from a sweep of real spill traffic rather than
+//! guessed.
+//!
+//! Three of the rows are worth reading rather than counting.
 //!
 //! **`KSPLIT_MIN_BAND` is caught by NOTHING else.** That is this gate's
 //! clearest single justification: the constant is transcribed into
@@ -247,6 +269,14 @@ Definition NR : nat := {nr}.
     the `v * 32` stride of the emitted B load. *)
 Definition VEC_ELEMS : nat := {ve}.
 
+(** AVX-512's architectural register count. An ISA FACT, not a schedule
+    constant - there is no `cpu_gemm.rs` constant for it, and no proof over
+    [nat] establishes it. It sits at the same boundary as `vpdpwssd`'s
+    semantics: pinned empirically, here by
+    `tests/cpu_gemm_vnni_micro.rs::the_hot_loop_does_not_spill_the_accumulators`
+    reading real compiled output. *)
+Definition ZMM_REGISTERS : nat := 32.
+
 (* ------------------------------------------------------------------ *)
 (** ** The K axis                                                      *)
 (* ------------------------------------------------------------------ *)
@@ -384,6 +414,39 @@ Proof.
   pose proof (Nat.div_mod_eq j {lanes}) as H. lia.
 Qed.
 
+(** **The tile fits the register file**, and this is the constraint that was
+    written in a test comment and stated nowhere.
+
+    The micro-kernel holds `MR * NRV` int32 accumulators live across the hot
+    loop, plus [NRV] `<32 x i16>` B vectors and one broadcast A vector. On
+    AVX-512 that has to fit in 32 zmm. `cpu_gemm.rs` never says so and no
+    theorem did either - the arithmetic appeared only as prose beside a spill
+    bound ("24 accumulators + 4 B vectors + 1 A broadcast is 29 of 32 zmm").
+
+    **The predicate is MEASURED, not guessed**, by sweeping `VNNI_MR` and
+    reading the hot loop's real spill traffic:
+
+<<
+      MR   budget   hot-loop spills + reloads
+       5   25/32    within bound
+       6   29/32    within bound  (10 + 10, the shipped kernel)
+       7   33/32    16 + 16
+       8   37/32    17 + 17
+>>
+
+    The cliff falls exactly where this inequality flips, so the form of the
+    bound is the measurement's and not an invention.
+
+    It is STRUCTURAL and it bites: a generator emitting `MR = 8` emits a file
+    in which this theorem is FALSE, so `coqc` rejects the schedule outright
+    rather than proving nine theorems about a tile that cannot be allocated.
+    Note what it does not claim - a spilling kernel is SLOW, not wrong.
+    `tests/exact_gemm_thread_invariance.rs` still passes bit-identically at
+    `MR = 8`, which is how the diagnosis separated the two. *)
+Theorem the_tile_fits_the_register_file :
+  MR * NRV + NRV + 1 <= ZMM_REGISTERS.
+Proof. unfold MR, NRV, ZMM_REGISTERS. lia. Qed.
+
 (** The thread count is never zero.
 
     A genuine cross-file join rather than a self-check: every theorem in
@@ -411,6 +474,7 @@ Proof. repeat split; reflexivity. Qed.
 
 Print Assumptions the_tile_geometry_is_consistent.
 Print Assumptions slot_b_is_the_plain_interleave.
+Print Assumptions the_tile_fits_the_register_file.
 Print Assumptions ksplit_threads_is_never_zero.
 Print Assumptions the_schedule_is_the_shipped_one.
 "#
