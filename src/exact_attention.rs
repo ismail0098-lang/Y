@@ -113,15 +113,32 @@ const KERNELS: &str = r#"
     mov.u32 %r1, %ctaid.x;
     mov.u32 %r2, %ntid.x;
     mov.u32 %r3, %tid.x;
-    mad.lo.s32 %r4, %r1, %r2, %r3;      // i
+    mad.lo.s32 %r4, %r1, %r2, %r3;      // i = worker
+    mov.u32 %r20, %nctaid.x;
+    mul.lo.s32 %r21, %r20, %r2;         // nworkers
     mov.u32 %r5, %ctaid.y;              // b
 
+    // [Y SEQUENCE REDUCTION] grid-stride over S, stride = nworkers.
+    //
+    // This used to be ONE THREAD PER KEY with a bounds guard and no loop, so it
+    // silently required `gridDim.x * blockDim.x >= S`. Measured on an RTX 4070
+    // Ti SUPER at S=512: launched with 128 threads it left 768 of 1024 score
+    // slots stale AND computed the wrong maximum (34647 against 34752). A wrong
+    // max is worse than a partly-filled buffer - `attn_accum` subtracts it from
+    // every score, so every softmax weight moves.
+    //
+    // That made the two kernels in this file carry OPPOSITE launch contracts
+    // while the module header advertises launch invariance. The precondition is
+    // removed rather than documented: this is now the same residue-class
+    // partition `attn_accum` uses, so proofs/GridStrideSplit.v covers it and any
+    // geometry visits every key exactly once.
+SLOOP_I:
     setp.ge.s32 %p1, %r4, $S;
     @%p1 bra DONE_A;
 
     mul.lo.s32 %r6, %r5, $D;
     mul.wide.s32 %rd5, %r6, 1;
-    add.s64 %rd6, %rd1, %rd5;           // &Q[b][0]
+    add.s64 %rd6, %rd1, %rd5;           // &Q[b][0], recomputed: LOOP_A walks it
     mul.wide.s32 %rd7, %r4, $D;
     add.s64 %rd8, %rd2, %rd7;           // &K[i][0]
 
@@ -145,7 +162,14 @@ LOOP_A:
 
     mul.wide.s32 %rd11, %r5, 4;
     add.s64 %rd12, %rd4, %rd11;
+    // `max` is associative, commutative AND idempotent, so the atomics' order
+    // does not matter - but its identity is NOT supplied here: the host must
+    // seed M[b] at i32::MIN. Nothing checks that, and it is the one precondition
+    // this kernel still carries.
     red.global.max.s32 [%rd12], %r8;
+
+    add.s32 %r4, %r4, %r21;
+    bra SLOOP_I;
 DONE_A:
     ret;
 }
