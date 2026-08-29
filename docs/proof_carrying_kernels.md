@@ -1312,6 +1312,65 @@ The last row is a design confirmation, not a gap: a hand-written clamp that is
 property (the proof's arithmetic is the emitter's arithmetic), not the plumbing
 (that a particular helper was called).
 
+#### Phase 1 progress, 2026-08-27 (4) — the flush and the K-split bands are extracted too
+
+The two slices named as next in the entry above. `ExactGemmSchedule.v` already
+held `cw`/`nchunks` and `blen`/`boff`; the emitter did not consume them. It does
+now, through the same `Ix` layer.
+
+**These sites are emitted as RAW LLVM, not through `IrBuilder`**, with
+hand-chosen register names (`%cend0`, `%base`, `%klen`) — so extracting them
+needed a second renderer, `render_named`, which takes the result names in
+emission order. Supplying the names the emitter already used is what let the
+refactor be checked by byte-identity: all three modules are byte-for-byte
+unchanged, again.
+
+Three expressions, and the split between them is forced by the code rather than
+chosen:
+
+- `chunk_end_ix() = min(iv + T, ext)` — the micro-kernel's flush clamp. Note the
+  emitter computes an **end** where `cw` computes a **width**; they are the same
+  clamp from two sides, and `the_emitted_chunk_end_is_the_flush_model` is that
+  identity.
+- `band_base_ix() = K / nthr` and `band_rem_ix() = K mod nthr` — loop-invariant,
+  so the emitted wrapper hoists both into `many:`.
+- `band_len_ix() = base + (if t < rem then 1 else 0)` — in `spawn.body:`, over
+  the already-hoisted terms.
+
+**An expression split across basic blocks is not one contiguous instruction
+sequence**, and modelling it as one would have changed the emitted code. Hence
+three expressions and a composition theorem rather than a single term:
+`the_emitted_band_length_is_the_ksplit_model` recomposes them and ties the
+result to `blen`. Every theorem in `ExactGemmKsplit.v` is stated about `blen`;
+that is what now says the emitted spawn loop computes it.
+
+The gate for these is **simpler and stronger** than the driver's: those
+emitters choose their own register names, so there is nothing to normalise and
+the rendered text is compared verbatim.
+
+Mutations, each `--test` target run separately:
+
+| mutation | schedule gate | correctness suites |
+|---|---|---|
+| **flush clamp operands swapped — same value** | **FAIL** | **all ok** |
+| band's extra k moved to the last bands | FAIL | `thread_invariance` FAIL |
+| micro-kernel bypasses the helper, *identical* text | ok | ok |
+
+The first row is the one worth having, and it is the second time this session a
+same-value divergence has been caught by this gate and by nothing else. The
+second row was **mislabelled in my own sweep as "same total" and is not**:
+flipping the condition gives `nthr*base + (nthr - rem)`, which equals `K` only
+when `rem = nthr - rem`, so it breaks `bands_tile` and the answer moves. Worth
+recording because the label was a guess and the measurement corrected it. The
+third row is the design confirmation — the gate checks the property, not that a
+particular helper was called.
+
+**Where the extraction now stands.** The schedule's *arithmetic* is extracted:
+the output tiling's width and panel index, the flush chunking, and the K-split
+bands. What is still hand-written is the loop nest's **shape** — which loops
+exist, in what order, which blocks they live in, and what they call. That is a
+larger change than an expression layer and is squarely Phase 2.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
