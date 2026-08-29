@@ -82,11 +82,13 @@
 
 From Stdlib Require Import ZArith Arith Lia List Permutation.
 Require ExactGemmKsplit.
+Require Decomposition.
 
 Import ListNotations.
 Open Scope Z_scope.
 
 Module KS := ExactGemmKsplit.
+Module D := Decomposition.
 
 (* ------------------------------------------------------------------ *)
 (** ** The decomposition                                               *)
@@ -130,27 +132,48 @@ Fixpoint combine (op : Z -> Z -> Z) (f : nat -> Z) (n S t : nat) : Z :=
 (** Peeling the last index off the sequence hands one term to exactly one
     worker - the one numbered `S mod n`. This single lemma is the partition;
     everything below is bookkeeping around it. *)
+(** [class_sum] and [combine] ARE [Decomposition.part] and
+    [Decomposition.combine] at the owner map `i |-> i mod n`. That identity is
+    the whole of instantiating the schema, and it is where this kernel's
+    decomposition is named: everything below about partitioning is the abstract
+    theorem, and everything peculiar to a grid-stride loop is in these two
+    lines. *)
+Lemma class_sum_is_part : forall op f w n S,
+  class_sum op f w n S = D.part op (fun k => k mod n)%nat f w S.
+Proof.
+  intros op f w n S. induction S as [| S IH]; cbn [class_sum D.part];
+    [ reflexivity | now rewrite IH ].
+Qed.
+
+Lemma combine_is_decomposition : forall op f n S t,
+  combine op f n S t = D.combine op (fun k => k mod n)%nat f S t.
+Proof.
+  intros op f n S t. induction t as [| t IH]; cbn [combine D.combine];
+    [ reflexivity | rewrite IH, class_sum_is_part; reflexivity ].
+Qed.
+
 Lemma combine_peel : forall f n S t,
   combine Z.add f n (Datatypes.S S) t
   = combine Z.add f n S t + (if Nat.ltb (S mod n) t then f S else 0).
 Proof.
-  intros f n S t. induction t as [| t IH].
-  - cbn. ring.
-  - cbn [combine]. rewrite IH. cbn [class_sum].
-    destruct (Nat.eqb_spec (S mod n) t);
-      destruct (Nat.ltb_spec (S mod n) t);
-      destruct (Nat.ltb_spec (S mod n) (Datatypes.S t)); try lia; ring.
+  intros f n S t. rewrite !combine_is_decomposition.
+  apply (D.combine_peel (fun k => k mod n)%nat f S t).
 Qed.
 
 (** **The partition.** Every index below `S` is claimed by exactly one of the
-    `n` workers, so peeling it off moves exactly one term. *)
+    `n` workers, so peeling it off moves exactly one term.
+
+    This is the only fact about residue classes the schema needs: `S mod n < n`.
+    Contrast the two GEMM splits, which supply three facts about an edge
+    function instead - and get a theorem that costs only associativity, because
+    their parts are contiguous. *)
 Theorem stride_classes_partition : forall f n S,
   (0 < n)%nat ->
   combine Z.add f n (Datatypes.S S) n = combine Z.add f n S n + f S.
 Proof.
-  intros f n S Hn. rewrite combine_peel.
-  assert (S mod n < n)%nat by (apply Nat.mod_upper_bound; lia).
-  destruct (Nat.ltb_spec (S mod n) n); [ reflexivity | lia ].
+  intros f n S Hn. rewrite !combine_is_decomposition.
+  apply (D.parts_tile (fun k => k mod n)%nat f S n).
+  apply Nat.mod_upper_bound. lia.
 Qed.
 
 Lemma combine_empty : forall f n t, combine Z.add f n 0 t = 0.
@@ -164,10 +187,10 @@ Theorem grid_stride_exact : forall f n S,
   (0 < n)%nat ->
   combine Z.add f n S n = sum_upto Z.add f S.
 Proof.
-  intros f n S Hn. unfold sum_upto. induction S as [| S IH].
-  - cbn [KS.acc_range]. apply combine_empty.
-  - cbn [KS.acc_range]. rewrite stride_classes_partition by exact Hn.
-    rewrite IH, Nat.add_0_l. reflexivity.
+  intros f n S Hn. unfold sum_upto, KS.acc_range.
+  rewrite combine_is_decomposition.
+  apply (D.decomposition_exact (fun k => k mod n)%nat f S n).
+  intros i _. apply Nat.mod_upper_bound. lia.
 Qed.
 
 (** The `blockDim.x` / `gridDim.x` / `gridDim.z` half of the module's claim,
@@ -299,6 +322,7 @@ Print Assumptions grid_stride_exact.
 Print Assumptions any_worker_count_agrees.
 Print Assumptions atomics_may_land_in_any_order.
 Print Assumptions stride_classes_partition.
+Print Assumptions combine_is_decomposition.
 Print Assumptions rounding_breaks_the_stride_split.
 Print Assumptions rounding_is_order_dependent.
 Print Assumptions exact_is_order_independent.

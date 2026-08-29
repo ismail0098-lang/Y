@@ -65,10 +65,12 @@
 
 From Stdlib Require Import ZArith Arith Lia.
 Require ExactGemmSchedule.
+Require Decomposition.
 
 Open Scope Z_scope.
 
 Module SCH := ExactGemmSchedule.
+Module D := Decomposition.
 
 (* ------------------------------------------------------------------ *)
 (** ** The band decomposition the emitter computes                     *)
@@ -138,12 +140,11 @@ Section Schedule.
       schedule rather than two schedules that might differ elsewhere. *)
   Variable op : Z -> Z -> Z.
 
-  (** The band partial: fold f over [lo, lo+len) in index order, from 0. *)
-  Fixpoint acc_range (f : nat -> Z) (lo len : nat) : Z :=
-    match len with
-    | O => 0
-    | S n => op (acc_range f lo n) (f (lo + n)%nat)
-    end.
+  (** The band partial: fold f over [lo, lo+len) in index order, from 0.
+      Taken from [Decomposition] rather than restated - the range fold is not a
+      property of any decomposition, which is why an identical copy of it sat
+      in three files. *)
+  Definition acc_range (f : nat -> Z) (lo len : nat) : Z := D.acc_range op f lo len.
 
   (** The reduction: fold the first [t] bands' partials together, from 0.
       This is [reduce.head] in the emitted module. *)
@@ -159,19 +160,28 @@ End Schedule.
 Lemma sum_range_split : forall f lo a b,
   acc_range Z.add f lo (a + b)%nat
   = acc_range Z.add f lo a + acc_range Z.add f (lo + a)%nat b.
+Proof. exact D.sum_range_split. Qed.
+
+(** [acc_bands] IS [Decomposition.acc_parts] at the edge function [boff]. That
+    is the whole content of instantiating the schema: this file's band
+    reduction and the abstract contiguous one are the same fold, once
+    [bands_contiguous] says a band's length is the gap between its edges. *)
+Lemma acc_bands_is_acc_parts : forall f K nthr t,
+  acc_bands Z.add f K nthr t = D.acc_parts Z.add (boff K nthr) f t.
 Proof.
-  intros f lo a b. induction b as [| b IH]; simpl.
-  - rewrite Nat.add_0_r. ring.
-  - rewrite Nat.add_succ_r. simpl. rewrite IH.
-    replace (lo + (a + b))%nat with (lo + a + b)%nat by lia. ring.
+  intros f K nthr t. induction t as [| t IH].
+  - reflexivity.
+  - cbn [acc_bands D.acc_parts]. rewrite IH.
+    rewrite bands_contiguous, Nat.add_sub_swap, Nat.sub_diag by lia.
+    reflexivity.
 Qed.
 
 Lemma acc_bands_prefix : forall f K nthr t,
   acc_bands Z.add f K nthr t = acc_range Z.add f 0 (boff K nthr t).
 Proof.
-  intros f K nthr t. induction t as [| t IH].
-  - cbn. reflexivity.
-  - cbn [acc_bands]. rewrite IH, bands_contiguous, sum_range_split. reflexivity.
+  intros f K nthr t. rewrite acc_bands_is_acc_parts.
+  apply D.acc_parts_prefix; [ apply boff_zero | ].
+  intros u. rewrite bands_contiguous. lia.
 Qed.
 
 (** ** The theorem.

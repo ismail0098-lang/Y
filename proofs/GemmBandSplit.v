@@ -56,11 +56,13 @@
 From Stdlib Require Import ZArith Arith Lia.
 Require ExactGemmSchedule.
 Require ExactGemmKsplit.
+Require Decomposition.
 
 Open Scope Z_scope.
 
 Module SCH := ExactGemmSchedule.
 Module KS := ExactGemmKsplit.
+Module D := Decomposition.
 
 (* ------------------------------------------------------------------ *)
 (** ** The proportional split: the f32 K-bands                          *)
@@ -209,29 +211,79 @@ Fixpoint pacc_bands (op : Z -> Z -> Z) (f : nat -> Z) (n ext t : nat) : Z :=
                (KS.acc_range op f (pedge t' n ext) (plen t' n ext))
   end.
 
+(** [pacc_bands] IS [Decomposition.acc_parts] at the edge function [pedge],
+    which is all instantiating the schema amounts to. *)
+Lemma pacc_bands_is_acc_parts : forall f n ext t,
+  pacc_bands Z.add f n ext t
+  = D.acc_parts Z.add (fun u => pedge u n ext) f t.
+Proof.
+  intros f n ext t. induction t as [| t IH].
+  - reflexivity.
+  - cbn [pacc_bands D.acc_parts]. rewrite IH. reflexivity.
+Qed.
+
 Lemma pacc_prefix : forall f n ext t,
   (0 < n)%nat ->
   pacc_bands Z.add f n ext t = KS.acc_range Z.add f 0 (pedge t n ext).
 Proof.
-  intros f n ext t Hn. induction t as [| t IH].
-  - cbn [pacc_bands]. rewrite pedge_zero. reflexivity.
-  - cbn [pacc_bands]. rewrite IH.
-    unfold plen.
-    replace (pedge (S t) n ext)
-      with (pedge t n ext + (pedge (S t) n ext - pedge t n ext))%nat
-      at 2 by (pose proof (pedge_monotone t n ext); lia).
-    rewrite KS.sum_range_split. rewrite Nat.add_0_l. reflexivity.
+  intros f n ext t Hn. rewrite pacc_bands_is_acc_parts.
+  apply (D.acc_parts_prefix (fun u => pedge u n ext) f t);
+    [ apply pedge_zero | intros u; apply pedge_monotone ].
 Qed.
 
-(** **The tiling obligation, discharged for the second kernel.** Same shape as
-    [ExactGemmKsplit.ksplit_exact] and a different proof, over a different
-    decomposition, with no hypothesis that `n` divides `ext`. *)
+(** **The tiling obligation, discharged for the second kernel.**
+
+    This proof used to be twenty lines of its own. It is three now, and the
+    three are exactly the facts peculiar to THIS decomposition: its edges start
+    at 0, end at the extent, and never go backwards. Everything else -
+    splitting the range, the prefix induction, the final fold - is
+    [Decomposition.contiguous_exact], shared with the exact kernel's uneven
+    bands and needing no hypothesis that `n` divides `ext`. *)
 Theorem prop_ksplit_exact : forall f n ext,
   (0 < n)%nat ->
   pacc_bands Z.add f n ext n = KS.acc_range Z.add f 0 ext.
 Proof.
-  intros f n ext Hn. rewrite pacc_prefix by exact Hn.
-  now rewrite pedge_last.
+  intros f n ext Hn. rewrite pacc_bands_is_acc_parts.
+  apply (D.contiguous_exact (fun u => pedge u n ext) f n ext);
+    [ apply pedge_zero | now apply pedge_last | intros u; apply pedge_monotone ].
+Qed.
+
+(** **And the M/N split, which had no exactness theorem at all.**
+
+    Every theorem above about [gedge] is about its EDGES - zero, last,
+    monotone, granule-snapping - because writing the reduction out a third time
+    was not worth it for a family the emitter uses to cut rows and columns
+    rather than a reduction. With the schema it costs one application and the
+    three edge facts already proved, so there is no longer a reason not to
+    state it.
+
+    This is the measurement the schema exists to produce: a fourth
+    decomposition, verified with no new induction, no new prefix lemma and no
+    new reasoning about ranges. *)
+Fixpoint gacc_bands (op : Z -> Z -> Z) (f : nat -> Z) (count ext gran t : nat) : Z :=
+  match t with
+  | O => 0
+  | S t' => op (gacc_bands op f count ext gran t')
+               (KS.acc_range op f (gedge t' count ext gran)
+                  (gedge (S t') count ext gran - gedge t' count ext gran))
+  end.
+
+Lemma gacc_bands_is_acc_parts : forall f count ext gran t,
+  gacc_bands Z.add f count ext gran t
+  = D.acc_parts Z.add (fun u => gedge u count ext gran) f t.
+Proof.
+  intros f count ext gran t. induction t as [| t IH].
+  - reflexivity.
+  - cbn [gacc_bands D.acc_parts]. rewrite IH. reflexivity.
+Qed.
+
+Theorem granule_split_exact : forall f count ext gran,
+  (0 < count)%nat -> (0 < gran)%nat ->
+  gacc_bands Z.add f count ext gran count = KS.acc_range Z.add f 0 ext.
+Proof.
+  intros f count ext gran Hc Hg. rewrite gacc_bands_is_acc_parts.
+  apply (D.contiguous_exact (fun u => gedge u count ext gran) f count ext);
+    [ apply gedge_zero | now apply gedge_last | intros u; apply gedge_monotone ].
 Qed.
 
 (** **The two splits are different partitions**, so the theorem above is not
@@ -263,6 +315,7 @@ Print Assumptions prop_bands_tile.
 Print Assumptions gedge_last.
 Print Assumptions every_edge_snaps_to_a_granule_or_the_extent.
 Print Assumptions prop_ksplit_exact.
+Print Assumptions granule_split_exact.
 Print Assumptions the_two_splits_are_different.
 Print Assumptions rounding_breaks_the_proportional_split_too.
 Print Assumptions exact_survives_the_proportional_split.
