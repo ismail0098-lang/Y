@@ -294,6 +294,13 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // generator that emitted `NR` and `NRV` from constants that
                 // had stopped agreeing, or any degenerate zero.
                 "the_tile_geometry_is_consistent",
+                // The realizability constraint that was prose in a test
+                // comment and stated nowhere: MR*NRV accumulators + NRV B
+                // vectors + 1 A broadcast must fit 32 zmm. Measured by
+                // sweeping VNNI_MR and reading real spill traffic - the cliff
+                // is exactly where this flips. It makes the generator unable
+                // to emit a schedule that does not fit the register file.
+                "the_tile_fits_the_register_file",
                 // A genuine cross-file join: every theorem in
                 // `ExactGemmKsplit.v` is stated under `0 < nthr`, and nothing
                 // proved the emitted thread count satisfies it - the floor

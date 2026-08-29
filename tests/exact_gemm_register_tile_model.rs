@@ -104,6 +104,21 @@ fn the_slots_the_tile_reads_are_the_slots_the_packers_write() {
     }
 }
 
+/// The schedule constants, as C `#define`s taken from `cpu_gemm.rs` itself.
+///
+/// **This driver used to hardcode `#define MR 6` / `#define NR 64`.** That is a
+/// second copy of the tile shape, in the half of the harness that allocates the
+/// buffers the emitted kernel writes into - so a change to `VNNI_MR` did not
+/// make this test report a schedule mismatch, it made the test disagree with
+/// itself and crash or mis-size a panel. Found by diagnosing exactly that: with
+/// `VNNI_MR = 8`, `exact_gemm_thread_invariance` (which checks the ANSWER)
+/// passes, while seven harnesses carrying their own `6` fail.
+///
+/// Same defect `proofs/ExactGemmSchedule.v` exists to remove, one layer down.
+fn schedule_defines() -> String {
+    format!("#define MR {VNNI_MR}\n#define NR {VNNI_NR}\n")
+}
+
 const DRIVER: &str = r#"
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,8 +127,6 @@ const DRIVER: &str = r#"
 void __y_gemm_micro_vnni(const int16_t *Ap, const int16_t *Bp, int64_t *C,
                          long ldc, long kpairs);
 
-#define MR 6
-#define NR 64
 
 int main(void) {
     const long KP = 3;                 /* three k-pair groups */
@@ -186,7 +199,7 @@ fn every_accumulator_lane_gets_its_own_column() {
     )
     .expect("write IR");
     let drv = dir.join("drv.c");
-    std::fs::write(&drv, DRIVER).expect("write driver");
+    std::fs::write(&drv, schedule_defines() + DRIVER).expect("write driver");
     let exe = dir.join("run");
     let cc = Command::new("clang")
         .args(["-O2", "-x", "ir"])

@@ -35,6 +35,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use y::cpu_gemm::{VNNI_MR, VNNI_NR};
 
 fn have(tool: &str) -> bool {
     Command::new(tool)
@@ -53,14 +54,27 @@ fn host_has_vnni() -> bool {
 /// Flush intervals compiled into the harness, each under its own symbol.
 const INTERVALS: [u32; 3] = [64, 512, 65536];
 
+/// The schedule constants, as C `#define`s taken from `cpu_gemm.rs` itself.
+///
+/// **This driver used to hardcode `#define MR 6` / `#define NR 64`.** That is a
+/// second copy of the tile shape, in the half of the harness that allocates the
+/// buffers the emitted kernel writes into - so a change to `VNNI_MR` did not
+/// make this test report a schedule mismatch, it made the test disagree with
+/// itself and crash or mis-size a panel. Found by diagnosing exactly that: with
+/// `VNNI_MR = 8`, `exact_gemm_thread_invariance` (which checks the ANSWER)
+/// passes, while seven harnesses carrying their own `6` fail.
+///
+/// Same defect `proofs/ExactGemmSchedule.v` exists to remove, one layer down.
+fn schedule_defines() -> String {
+    format!("#define MR {VNNI_MR}\n#define NR {VNNI_NR}\n")
+}
+
 const DRIVER: &str = r#"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-#define MR 6
-#define NR 64
 typedef void (*gemm_fn)(const int16_t*,const int16_t*,int64_t*,long,long,long,long,long,long,int16_t*,int16_t*,int64_t*);
 void __y_gemm_exact_vnni_64(const int16_t*,const int16_t*,int64_t*,long,long,long,long,long,long,int16_t*,int16_t*,int64_t*);
 void __y_gemm_exact_vnni_512(const int16_t*,const int16_t*,int64_t*,long,long,long,long,long,long,int16_t*,int16_t*,int64_t*);
@@ -234,7 +248,7 @@ fn the_exact_gemm_is_bit_identical_across_threads_and_intervals() {
     }
 
     let drv = dir.join("drv.c");
-    std::fs::write(&drv, DRIVER).expect("write driver");
+    std::fs::write(&drv, schedule_defines() + DRIVER).expect("write driver");
     let exe = dir.join("drv");
     let mut link = Command::new("clang");
     link.arg("-O2").arg(&drv);

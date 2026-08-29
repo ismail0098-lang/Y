@@ -72,6 +72,14 @@ Definition NR : nat := 64.
     the `v * 32` stride of the emitted B load. *)
 Definition VEC_ELEMS : nat := 32.
 
+(** AVX-512's architectural register count. An ISA FACT, not a schedule
+    constant - there is no `cpu_gemm.rs` constant for it, and no proof over
+    [nat] establishes it. It sits at the same boundary as `vpdpwssd`'s
+    semantics: pinned empirically, here by
+    `tests/cpu_gemm_vnni_micro.rs::the_hot_loop_does_not_spill_the_accumulators`
+    reading real compiled output. *)
+Definition ZMM_REGISTERS : nat := 32.
+
 (* ------------------------------------------------------------------ *)
 (** ** The K axis                                                      *)
 (* ------------------------------------------------------------------ *)
@@ -209,6 +217,39 @@ Proof.
   pose proof (Nat.div_mod_eq j 16) as H. lia.
 Qed.
 
+(** **The tile fits the register file**, and this is the constraint that was
+    written in a test comment and stated nowhere.
+
+    The micro-kernel holds `MR * NRV` int32 accumulators live across the hot
+    loop, plus [NRV] `<32 x i16>` B vectors and one broadcast A vector. On
+    AVX-512 that has to fit in 32 zmm. `cpu_gemm.rs` never says so and no
+    theorem did either - the arithmetic appeared only as prose beside a spill
+    bound ("24 accumulators + 4 B vectors + 1 A broadcast is 29 of 32 zmm").
+
+    **The predicate is MEASURED, not guessed**, by sweeping `VNNI_MR` and
+    reading the hot loop's real spill traffic:
+
+<<
+      MR   budget   hot-loop spills + reloads
+       5   25/32    within bound
+       6   29/32    within bound  (10 + 10, the shipped kernel)
+       7   33/32    16 + 16
+       8   37/32    17 + 17
+>>
+
+    The cliff falls exactly where this inequality flips, so the form of the
+    bound is the measurement's and not an invention.
+
+    It is STRUCTURAL and it bites: a generator emitting `MR = 8` emits a file
+    in which this theorem is FALSE, so `coqc` rejects the schedule outright
+    rather than proving nine theorems about a tile that cannot be allocated.
+    Note what it does not claim - a spilling kernel is SLOW, not wrong.
+    `tests/exact_gemm_thread_invariance.rs` still passes bit-identically at
+    `MR = 8`, which is how the diagnosis separated the two. *)
+Theorem the_tile_fits_the_register_file :
+  MR * NRV + NRV + 1 <= ZMM_REGISTERS.
+Proof. unfold MR, NRV, ZMM_REGISTERS. lia. Qed.
+
 (** The thread count is never zero.
 
     A genuine cross-file join rather than a self-check: every theorem in
@@ -236,5 +277,6 @@ Proof. repeat split; reflexivity. Qed.
 
 Print Assumptions the_tile_geometry_is_consistent.
 Print Assumptions slot_b_is_the_plain_interleave.
+Print Assumptions the_tile_fits_the_register_file.
 Print Assumptions ksplit_threads_is_never_zero.
 Print Assumptions the_schedule_is_the_shipped_one.
