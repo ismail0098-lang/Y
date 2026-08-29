@@ -42,13 +42,19 @@ use y::exact_attention::{attention_ptx, MAX_EXACT_SEQ_LEN};
 const HEAD_DIM: usize = 64;
 const SEQ_LEN: usize = 512;
 
+/// The marker `src/exact_attention.rs` writes above the sequence reduction.
+///
+/// `attn_accum` contains a SECOND grid-stride loop, over `d`, that zeroes the
+/// CTA's shared accumulators - identical in shape to the sequence loop and
+/// distinguished from it by nothing structural. The first version of this file
+/// told them apart by their BOUND, which meant the test only worked because the
+/// fixture happened to use `head_dim != seq_len`: the `lda == K` coincidence,
+/// one layer over. The kernel names the loop now, the way this backend already
+/// names `[Y PAGED DECODE ATTENTION]` and `[Y ZERO DRIFT]`, so nothing here
+/// depends on the shape chosen.
+const SEQ_MARKER: &str = "[Y SEQUENCE REDUCTION]";
+
 fn ptx() -> String {
-    // `HEAD_DIM != SEQ_LEN` on purpose: `attn_accum` opens with a SECOND
-    // grid-stride loop, over `d`, that zeroes the CTA's shared accumulators.
-    // It has the same `add.s32 %i, %i, %stride` shape as the sequence loop, and
-    // picking it instead was the first version of this file - the extent is
-    // what tells them apart, which is the `lda == K` coincidence one layer up.
-    assert_ne!(HEAD_DIM, SEQ_LEN, "the two grid-stride loops must be distinguishable");
     attention_ptx(HEAD_DIM, SEQ_LEN).expect("a shape well inside the exactness argument")
 }
 
@@ -65,10 +71,17 @@ fn entry_body(ptx: &str, name: &str) -> String {
     rest[..end].to_string()
 }
 
+/// Instructions, comments stripped - except the sequence-reduction marker,
+/// which is kept as a line of its own so the loop can be located structurally.
 fn norm(s: &str) -> Vec<String> {
     s.lines()
-        .map(|l| l.split("//").next().unwrap_or("").trim().to_string())
-        .filter(|l| !l.is_empty())
+        .filter_map(|l| {
+            if l.contains(SEQ_MARKER) {
+                return Some(SEQ_MARKER.to_string());
+            }
+            let code = l.split("//").next().unwrap_or("").trim();
+            (!code.is_empty()).then(|| code.to_string())
+        })
         .collect()
 }
 
@@ -124,30 +137,32 @@ fn deps(body: &[String], reg: &str) -> Vec<String> {
     out
 }
 
-/// The SEQUENCE loop's counter and stride, found from the loop's own bound
-/// rather than hardcoded - so this file names no register number of its own.
+/// The SEQUENCE loop's counter and stride, located by the kernel's own marker.
 ///
-/// The bound is what disambiguates. `attn_accum` contains two grid-stride
-/// loops of identical shape: this one over the sequence, and one over `d` that
-/// zeroes the shared accumulators. Taking the first `add.s32 %i, %i, %s` picks
-/// the zeroing loop, whose stride is `%ntid.x` alone - which then reports the
-/// decomposition as depending on `tid.x` and nothing else.
+/// Nothing here names a register number or a bound: the marker says which of
+/// the entry's grid-stride loops is the reduction, and the loop's own update
+/// says which registers it uses.
 fn loop_counter_and_stride(body: &[String]) -> (String, String) {
-    let guard = format!(", {SEQ_LEN};");
-    let counter = body
+    let at = body.iter().position(|l| l == SEQ_MARKER).unwrap_or_else(|| {
+        panic!(
+            "no `{SEQ_MARKER}` in this entry. The kernel must say which of its \
+             grid-stride loops is the reduction over the sequence - `attn_accum` \
+             has two of identical shape, and picking the wrong one reports the \
+             decomposition as depending on `tid.x` and nothing else"
+        )
+    });
+    let upd = body[at..]
         .iter()
-        .find_map(|l| {
-            let r = l.strip_prefix("setp.ge.s32 ")?;
-            let r = r.strip_suffix(&guard)?;
-            Some(r.split(',').nth(1)?.trim().to_string())
+        .find(|l| {
+            l.starts_with("add.s32 ") && {
+                let o: Vec<&str> =
+                    l[8..].trim_end_matches(';').split(',').map(str::trim).collect();
+                o.len() == 3 && o[0] == o[1] && o[2].starts_with("%r")
+            }
         })
-        .expect("no loop guarded by the sequence length in this entry");
-    let upd = body
-        .iter()
-        .find(|l| l.starts_with(&format!("add.s32 {counter}, {counter}, %r")))
-        .unwrap_or_else(|| panic!("the sequence loop over {counter} never advances"));
-    let stride = upd.rsplit(',').next().unwrap().trim().trim_end_matches(';').to_string();
-    (counter, stride)
+        .expect("the marked sequence loop never advances");
+    let o: Vec<&str> = upd[8..].trim_end_matches(';').split(',').map(str::trim).collect();
+    (o[0].to_string(), o[2].to_string())
 }
 
 /// **The precondition the partition theorem needs, and the one assertion here
@@ -275,4 +290,84 @@ fn the_proof_and_the_compiler_agree_on_the_accumulator_bound() {
          than an imprecise one, and it is untestable on a device — it needs \
          2.7e8 keys — so this agreement is the only thing checking it"
     );
+}
+
+/// The marker is load-bearing, not decoration: `attn_accum` really does contain
+/// more than one grid-stride loop, and both accumulating entries carry the
+/// marker.
+///
+/// A marker present in one of two reductions is worse than none - the test
+/// would silently examine one entry and skip the other.
+#[test]
+fn the_sequence_marker_is_doing_work() {
+    let ptx = ptx();
+    for name in ACCUM_ENTRIES {
+        let body = norm(&entry_body(&ptx, name));
+        let markers = body.iter().filter(|l| *l == SEQ_MARKER).count();
+        assert_eq!(markers, 1, "`{name}` carries {markers} sequence markers, not 1");
+    }
+
+    // The hazard the marker exists for: two loops of identical shape.
+    let accum = norm(&entry_body(&ptx, "attn_accum"));
+    let strides = accum
+        .iter()
+        .filter(|l| {
+            l.starts_with("add.s32 ") && {
+                let o: Vec<&str> =
+                    l[8..].trim_end_matches(';').split(',').map(str::trim).collect();
+                o.len() == 3 && o[0] == o[1] && o[2].starts_with("%r")
+            }
+        })
+        .count();
+    assert!(
+        strides >= 2,
+        "`attn_accum` now has only {strides} grid-stride loop(s). If the \
+         shared-memory zeroing loop is gone the marker no longer disambiguates \
+         anything, and this file should say so rather than keep implying it does"
+    );
+}
+
+/// `deps` must resolve an operand at its DEFINITION's position, not at the use.
+///
+/// The kernel used to build its worker count as `%r9 = %r8 * %r2` then
+/// `%r9 = %r9 * %r5` - legal PTX, and a "last definition wins" walk resolves
+/// that second instruction's first operand to itself. `src/exact_attention.rs`
+/// no longer reuses the register, **so the real kernel stops exercising this
+/// path** - which is exactly when a capability quietly rots. Pinned here on a
+/// synthetic body instead, because hand-written PTX elsewhere in this repo is
+/// full of non-SSA reuse and the next caller of `deps` will meet it.
+#[test]
+fn the_dependency_walk_handles_a_redefined_register() {
+    let body: Vec<String> = [
+        "mov.u32 %r1, %ctaid.z;",
+        "mov.u32 %r2, %nctaid.x;",
+        "mov.u32 %r5, %ntid.x;",
+        "mul.lo.s32 %r9, %r1, %r2;",
+        "mul.lo.s32 %r9, %r9, %r5;", // reads its own previous definition
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    assert_eq!(
+        deps(&body, "%r9"),
+        vec!["%ctaid.z".to_string(), "%nctaid.x".to_string(), "%ntid.x".to_string()],
+        "the walk lost a factor across a redefinition - resolving `%r9`'s \
+         operand at the USE finds the same instruction again and the chain \
+         either cycles or truncates"
+    );
+
+    // The control: without the reuse the answer must be the same, or the test
+    // above is passing for a reason unrelated to redefinition.
+    let ssa: Vec<String> = [
+        "mov.u32 %r1, %ctaid.z;",
+        "mov.u32 %r2, %nctaid.x;",
+        "mov.u32 %r5, %ntid.x;",
+        "mul.lo.s32 %r20, %r1, %r2;",
+        "mul.lo.s32 %r9, %r20, %r5;",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(deps(&body, "%r9"), deps(&ssa, "%r9"));
 }
