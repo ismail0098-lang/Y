@@ -494,9 +494,34 @@ pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
     }
     // A: one i32 per row, broadcast across all 16 lanes then reinterpreted as
     // 32 int16 - the pattern clang generates for `_mm512_set1_epi32`.
-    writeln!(out, "  %aidx = mul i64 %p, {VNNI_MR}").unwrap();
+    // The A panel row base and the per-row element index are the schedule's
+    // own arithmetic (`a_row_base_ix` / `a_i32_element_ix`), rendered here as
+    // named SSA so the emitted text is what it always was.
+    let (base_lines, _) = render_named(
+        &a_row_base_ix(),
+        &mut ["%aidx".to_string()].into_iter(),
+        &|n| match n {
+            "p" => "%p".to_string(),
+            "MR" => VNNI_MR.to_string(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    for l in &base_lines {
+        writeln!(out, "{l}").unwrap();
+    }
     for i in 0..VNNI_MR {
-        writeln!(out, "  %ai{i} = add i64 %aidx, {i}").unwrap();
+        let (elem_lines, _) = render_named(
+            &a_i32_element_ix(),
+            &mut [format!("%ai{i}")].into_iter(),
+            &|n| match n {
+                "base" => "%aidx".to_string(),
+                "i" => i.to_string(),
+                other => unreachable!("unbound schedule name {other}"),
+            },
+        );
+        for l in &elem_lines {
+            writeln!(out, "{l}").unwrap();
+        }
         writeln!(out, "  %ap{i} = getelementptr inbounds i32, ptr %Ap, i64 %ai{i}").unwrap();
         writeln!(out, "  %a{i} = load i32, ptr %ap{i}, align 4").unwrap();
         writeln!(
@@ -1930,6 +1955,9 @@ pub enum Ix {
     /// end have width 0 rather than a negative one.
     Sub(Box<Ix>, Box<Ix>),
     Add(Box<Ix>, Box<Ix>),
+    /// Multiplication. Used for the packed-panel row stride, where one operand
+    /// is always a tile constant, so nothing here can overflow an `i64`.
+    Mul(Box<Ix>, Box<Ix>),
     Min(Box<Ix>, Box<Ix>),
     /// Floor division. `sdiv` on non-negative operands is Coq's `/` on `nat`.
     Div(Box<Ix>, Box<Ix>),
@@ -1949,6 +1977,9 @@ impl Ix {
     }
     fn add(a: Ix, b: Ix) -> Ix {
         Ix::Add(Box::new(a), Box::new(b))
+    }
+    fn mul(a: Ix, b: Ix) -> Ix {
+        Ix::Mul(Box::new(a), Box::new(b))
     }
     fn min(a: Ix, b: Ix) -> Ix {
         Ix::Min(Box::new(a), Box::new(b))
@@ -1970,6 +2001,7 @@ impl Ix {
             Ix::Lit(k) => k.to_string(),
             Ix::Sub(a, b) => format!("({} - {})", a.coq(bind), b.coq(bind)),
             Ix::Add(a, b) => format!("({} + {})", a.coq(bind), b.coq(bind)),
+            Ix::Mul(a, b) => format!("({} * {})", a.coq(bind), b.coq(bind)),
             Ix::Min(a, b) => format!("Nat.min {} {}", a.coq(bind), b.coq(bind)),
             Ix::Div(a, b) => format!("({} / {})", a.coq(bind), b.coq(bind)),
             Ix::Mod(a, b) => format!("({} mod {})", a.coq(bind), b.coq(bind)),
@@ -1995,6 +2027,10 @@ impl Ix {
             Ix::Add(x, y) => {
                 let (x, y) = (x.emit(b, bind), y.emit(b, bind));
                 b.add(&x, &y)
+            }
+            Ix::Mul(x, y) => {
+                let (x, y) = (x.emit(b, bind), y.emit(b, bind));
+                b.mul(&x, &y)
             }
             Ix::Min(x, y) => {
                 let (x, y) = (x.emit(b, bind), y.emit(b, bind));
@@ -2076,6 +2112,15 @@ fn emit_named(
             );
             let r = take(names);
             out.push(format!("  {r} = add i64 {a}, {b}"));
+            r
+        }
+        Ix::Mul(a, b) => {
+            let (a, b) = (
+                emit_named(a, out, names, bind),
+                emit_named(b, out, names, bind),
+            );
+            let r = take(names);
+            out.push(format!("  {r} = mul i64 {a}, {b}"));
             r
         }
         Ix::Min(a, b) => {
@@ -2225,6 +2270,31 @@ pub fn chunk_end_ix() -> Ix {
 /// `the_emitted_width_is_the_tiling_model_at_the_loop_variable` is the join.
 pub fn tile_width_ix() -> Ix {
     Ix::min(Ix::sub(Ix::val("ext"), Ix::val("iv")), Ix::val("T"))
+}
+
+/// The base of row `p`'s k-pair group inside the packed A panel: `p * MR`.
+///
+/// Loop-invariant across the `MR`-way unroll below it, so the emitter hoists it
+/// (`%aidx = mul i64 %p, 6`) and only the `+ i` is per-row - which is why this
+/// is its own expression rather than a subterm of [`a_i32_element_ix`], the
+/// same split as [`band_base_ix`] against [`band_len_ix`].
+pub fn a_row_base_ix() -> Ix {
+    Ix::mul(Ix::val("p"), Ix::val("MR"))
+}
+
+/// The i32 element the micro-kernel loads row `i`'s k-pair `p` from: `base + i`.
+///
+/// One i32 load fetches BOTH int16 halves of the pair, which is what
+/// `ExactGemmRegisterTile.the_i32_load_is_the_packed_pair` is about - and that
+/// theorem is stated over `a_i32_element`, so this is the join saying the
+/// emitter computes the number the theorem describes.
+///
+/// `i` is a Rust-side constant per unrolled row, so it reaches the emitted
+/// `add` as a literal operand. That does not make the expression un-extractable
+/// - it makes one of its two operands a constant, exactly as `T` is in
+/// [`tile_width_ix`].
+pub fn a_i32_element_ix() -> Ix {
+    Ix::add(Ix::val("base"), Ix::val("i"))
 }
 
 /// Which packed panel the tile at induction variable `iv` reads.

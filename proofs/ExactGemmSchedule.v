@@ -123,7 +123,10 @@ Definition col_of (v l : nat) : nat := 16 * v + l.
 Definition vec_of_slot (s : nat) : nat := s / 32.
 Definition lane_of_slot (s : nat) : nat := (s mod 32) / 2.
 
-(** `a_i32_element`. One i32 load fetches both halves of row `i`'s k-pair `p`. *)
+(** `a_i32_element`. One i32 load fetches both halves of row `i`'s k-pair `p`.
+    [ExactGemmRegisterTile.the_i32_load_is_the_packed_pair] is stated over this
+    number; [the_emitted_a_index_is_the_pair_element] below is what says the
+    emitter computes it. *)
 Definition a_i32_element (p i : nat) : nat := p * 6 + i.
 
 (** `panel_slot_decode`, as its three legs. `width` is [MR] for an A panel and
@@ -246,6 +249,18 @@ Definition band_len (base rem t : nat) : nat := (base + (if Nat.ltb t rem then 1
     expression would emit an instruction the compiler does not. *)
 Definition tile_count (ext Tm1 T : nat) : nat := ((ext + Tm1) / T).
 
+(** The packed-A row base and the per-row element index, as the micro-kernel
+    emits them. `MR` is a tile constant and `i` is a Rust-side constant per
+    unrolled row, so both reach the emitted instructions as literal operands -
+    which makes them bound NAMES here, not a reason the expression cannot be
+    extracted.
+
+    They are two expressions rather than one because the base is loop-invariant
+    across the unroll and the emitter hoists it, the same split as
+    [band_base]/[band_len]. *)
+Definition a_base (p MR : nat) : nat := (p * MR).
+Definition a_elem (base i : nat) : nat := (base + i).
+
 (** **The tiling-count join**, and it needs `0 < T` because `nat` subtraction
     truncates: at `T = 0` the model's `ext + T - 1` is `ext - 1` while the
     emitter's `ext + (T-1)` is `ext`. The emitter cannot reach `T = 0` - the
@@ -275,6 +290,14 @@ Qed.
     computes it. *)
 Theorem the_emitted_band_length_is_the_ksplit_model : forall K nthr t,
   blen K nthr t = band_len (band_base K nthr) (band_rem K nthr) t.
+Proof. reflexivity. Qed.
+
+(** **The A-index join.** [ExactGemmRegisterTile.the_i32_load_is_the_packed_pair]
+    proves the i32 load at element [a_i32_element p i] aliases packed slots
+    `2i` and `2i+1` of k-pair group `p`. That theorem says nothing about the
+    compiler; this says the compiler computes that element. *)
+Theorem the_emitted_a_index_is_the_pair_element : forall p i,
+  a_i32_element p i = a_elem (a_base p MR) i.
 Proof. reflexivity. Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -388,6 +411,7 @@ Print Assumptions the_emitted_panel_index_is_the_tile_index.
 Print Assumptions the_emitted_tile_count_is_the_tiling_model.
 Print Assumptions the_emitted_chunk_end_is_the_flush_model.
 Print Assumptions the_emitted_band_length_is_the_ksplit_model.
+Print Assumptions the_emitted_a_index_is_the_pair_element.
 Print Assumptions the_tile_fits_the_register_file.
 Print Assumptions ksplit_threads_is_never_zero.
 Print Assumptions the_schedule_is_the_shipped_one.

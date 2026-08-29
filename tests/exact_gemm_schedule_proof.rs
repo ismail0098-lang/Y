@@ -136,8 +136,8 @@
 use std::path::PathBuf;
 
 use y::cpu_gemm::{
-    band_base_ix, band_len_ix, band_rem_ix, chunk_end_ix, kpairs_ix, panel_index_ix,
-    tile_count_ix, tile_width_ix,
+    a_i32_element_ix, a_row_base_ix, band_base_ix, band_len_ix, band_rem_ix, chunk_end_ix,
+    kpairs_ix, panel_index_ix, tile_count_ix, tile_width_ix,
     KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
 };
 use y::zero_drift::VnniExact;
@@ -213,6 +213,9 @@ fn coq_names(n: &'static str) -> String {
         "t" => "t".into(),
         "kc" => "kc".into(),
         "Tm1" => "Tm1".into(),
+        "p" => "p".into(),
+        "MR" => "MR".into(),
+        "i" => "i".into(),
         other => panic!("the schedule expressions gained an unbound name `{other}`"),
     }
 }
@@ -226,6 +229,8 @@ fn render(s: &Schedule) -> String {
     let band_len_body = band_len_ix().coq(&coq_names);
     let kpairs_body = kpairs_ix().coq(&coq_names);
     let tile_count_body = tile_count_ix().coq(&coq_names);
+    let a_row_base_body = a_row_base_ix().coq(&coq_names);
+    let a_elem_body = a_i32_element_ix().coq(&coq_names);
     let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
 
     format!(
@@ -354,7 +359,10 @@ Definition col_of (v l : nat) : nat := {lanes} * v + l.
 Definition vec_of_slot (s : nat) : nat := s / {ve}.
 Definition lane_of_slot (s : nat) : nat := (s mod {ve}) / 2.
 
-(** `a_i32_element`. One i32 load fetches both halves of row `i`'s k-pair `p`. *)
+(** `a_i32_element`. One i32 load fetches both halves of row `i`'s k-pair `p`.
+    [ExactGemmRegisterTile.the_i32_load_is_the_packed_pair] is stated over this
+    number; [the_emitted_a_index_is_the_pair_element] below is what says the
+    emitter computes it. *)
 Definition a_i32_element (p i : nat) : nat := p * {mr} + i.
 
 (** `panel_slot_decode`, as its three legs. `width` is [MR] for an A panel and
@@ -477,6 +485,18 @@ Definition band_len (base rem t : nat) : nat := {band_len_body}.
     expression would emit an instruction the compiler does not. *)
 Definition tile_count (ext Tm1 T : nat) : nat := {tile_count_body}.
 
+(** The packed-A row base and the per-row element index, as the micro-kernel
+    emits them. `MR` is a tile constant and `i` is a Rust-side constant per
+    unrolled row, so both reach the emitted instructions as literal operands -
+    which makes them bound NAMES here, not a reason the expression cannot be
+    extracted.
+
+    They are two expressions rather than one because the base is loop-invariant
+    across the unroll and the emitter hoists it, the same split as
+    [band_base]/[band_len]. *)
+Definition a_base (p MR : nat) : nat := {a_row_base_body}.
+Definition a_elem (base i : nat) : nat := {a_elem_body}.
+
 (** **The tiling-count join**, and it needs `0 < T` because `nat` subtraction
     truncates: at `T = 0` the model's `ext + T - 1` is `ext - 1` while the
     emitter's `ext + (T-1)` is `ext`. The emitter cannot reach `T = 0` - the
@@ -506,6 +526,14 @@ Qed.
     computes it. *)
 Theorem the_emitted_band_length_is_the_ksplit_model : forall K nthr t,
   blen K nthr t = band_len (band_base K nthr) (band_rem K nthr) t.
+Proof. reflexivity. Qed.
+
+(** **The A-index join.** [ExactGemmRegisterTile.the_i32_load_is_the_packed_pair]
+    proves the i32 load at element [a_i32_element p i] aliases packed slots
+    `2i` and `2i+1` of k-pair group `p`. That theorem says nothing about the
+    compiler; this says the compiler computes that element. *)
+Theorem the_emitted_a_index_is_the_pair_element : forall p i,
+  a_i32_element p i = a_elem (a_base p MR) i.
 Proof. reflexivity. Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -619,6 +647,7 @@ Print Assumptions the_emitted_panel_index_is_the_tile_index.
 Print Assumptions the_emitted_tile_count_is_the_tiling_model.
 Print Assumptions the_emitted_chunk_end_is_the_flush_model.
 Print Assumptions the_emitted_band_length_is_the_ksplit_model.
+Print Assumptions the_emitted_a_index_is_the_pair_element.
 Print Assumptions the_tile_fits_the_register_file.
 Print Assumptions ksplit_threads_is_never_zero.
 Print Assumptions the_schedule_is_the_shipped_one.
@@ -1155,6 +1184,47 @@ fn the_raw_emitted_sites_use_the_shared_schedule_expressions() {
             .0,
         ),
     ];
+
+    let mut cases = cases;
+
+    // The A panel index, at the micro-kernel's hoisted base and at all MR
+    // unrolled rows. `ExactGemmRegisterTile.the_i32_load_is_the_packed_pair` is
+    // stated over that element; these are what tie it to the emitted loads.
+    cases.push((
+        "a_row_base_ix",
+        "the micro-kernel",
+        vec!["%aidx".into()],
+        render_named(
+            &a_row_base_ix(),
+            &mut ["%aidx"].into_iter().map(String::from),
+            &|n| match n {
+                "p" => "%p".to_string(),
+                "MR" => VNNI_MR.to_string(),
+                other => panic!("unbound {other}"),
+            },
+        )
+        .0,
+    ));
+    let row_cases: Vec<(String, Vec<String>)> = (0..VNNI_MR)
+        .map(|i| {
+            (
+                format!("a_i32_element_ix @ row {i}"),
+                render_named(
+                    &a_i32_element_ix(),
+                    &mut [format!("%ai{i}")].into_iter(),
+                    &|n| match n {
+                        "base" => "%aidx".to_string(),
+                        "i" => i.to_string(),
+                        other => panic!("unbound {other}"),
+                    },
+                )
+                .0,
+            )
+        })
+        .collect();
+    for (name, lines) in &row_cases {
+        cases.push((name.as_str(), "the micro-kernel", vec![], lines.clone()));
+    }
 
     for (name, module_name, _names, lines) in &cases {
         let module = if *module_name == "the micro-kernel" { &micro } else { &threaded };

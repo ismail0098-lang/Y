@@ -310,6 +310,7 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "the_emitted_tile_count_is_the_tiling_model",
                 "the_emitted_chunk_end_is_the_flush_model",
                 "the_emitted_band_length_is_the_ksplit_model",
+                "the_emitted_a_index_is_the_pair_element",
                 // The realizability constraint that was prose in a test
                 // comment and stated nowhere: MR*NRV accumulators + NRV B
                 // vectors + 1 A broadcast must fit 32 zmm. Measured by
