@@ -163,10 +163,23 @@ LOOP_A:
     mul.wide.s32 %rd11, %r5, 4;
     add.s64 %rd12, %rd4, %rd11;
     // `max` is associative, commutative AND idempotent, so the atomics' order
-    // does not matter - but its identity is NOT supplied here: the host must
-    // seed M[b] at i32::MIN. Nothing checks that, and it is the one precondition
-    // this kernel still carries.
-    red.global.max.s32 [%rd12], %r8;
+    // does not matter. Its IDENTITY is the remaining question, and it is
+    // answered here rather than left to the host.
+    //
+    // A signed max wants i32::MIN, which is not a uniform byte pattern - so the
+    // caller could not seed M with the same `memset(0)` that L, O and P need,
+    // and a caller who used one anyway got a silently wrong answer whenever a
+    // row's scores were ALL negative (with max(0, s) = 0 the softmax then
+    // subtracts a maximum no key attains). That never fires on random int8
+    // data, which is the worst kind of precondition.
+    //
+    // `x ^ 0x80000000` is the order-preserving signed->unsigned bijection, so a
+    // max over the biased values is the max over the originals, and UNSIGNED
+    // max has identity 0. A zeroed buffer therefore MEANS i32::MIN. The two
+    // accumulating entries undo the bias when they load M[b]; nothing else
+    // reads it.
+    xor.b32 %r22, %r8, -2147483648;
+    red.global.max.u32 [%rd12], %r22;
 
     add.s32 %r4, %r4, %r21;
     bra SLOOP_I;
@@ -259,7 +272,20 @@ ZSKIP:
 
     mul.wide.s32 %rd10, %r10, 4;
     add.s64 %rd11, %rd3, %rd10;
-    ld.global.s32 %r11, [%rd11];        // m = M[b]
+    ld.global.s32 %r11, [%rd11];        // m = M[b], biased
+    // Undo `attn_scores`'s unsigned bias. Deleting this line from ONE of the
+    // two accumulating entries used to pass every test in the repo, including
+    // the accum-vs-naive differential on `p` that ought to catch a one-sided
+    // change: the bias is 2^31, the exp argument below is
+    // `((m - s) * KFix + 2^15) >> 16` computed in 64 bits and then TRUNCATED to
+    // u32, so a missing undo shifts it by `2^15 * KFix` -- and every test used
+    // `KFix = 8 << 16 = 2^19`, for which that is exactly 2^34, i.e. zero
+    // modulo 2^32. The truncation annihilated the bug, at the one temperature
+    // every arm of the differential shared. A real model's scale is
+    // `q_scale * k_scale / sqrt(d)` and does not oblige;
+    // `the_accumulating_entries_undo_the_bias` uses 2^19 + 1 for exactly that
+    // reason.
+    xor.b32 %r11, %r11, -2147483648;
 
     mul.wide.s32 %rd12, %r10, 8;
     add.s64 %rd13, %rd4, %rd12;         // &L[b]
@@ -406,6 +432,7 @@ FSKIP:
     mul.wide.s32 %rd10, %r10, 4;
     add.s64 %rd11, %rd3, %rd10;
     ld.global.s32 %r11, [%rd11];
+    xor.b32 %r11, %r11, -2147483648;    // undo `attn_scores`'s unsigned bias
 
     mul.wide.s32 %rd12, %r10, 8;
     add.s64 %rd13, %rd4, %rd12;

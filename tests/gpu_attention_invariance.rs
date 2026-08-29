@@ -135,11 +135,11 @@ fn attention_is_bit_identical_across_every_launch_geometry() {
     ctx.memcpy_htod_at(&d_k, 0, &as_u8(&k)).unwrap();
     ctx.memcpy_htod_at(&d_v, 0, &as_u8(&v)).unwrap();
 
-    // `max` needs an identity, and i32::MIN is not a uniform byte pattern.
-    let neg_inf: Vec<u8> = (0..B).flat_map(|_| i32::MIN.to_le_bytes()).collect();
-
     let run = |block: u32, gx: u32, gz: u32, naive: bool| -> Run {
-        ctx.memcpy_htod_at(&d_m, 0, &neg_inf).unwrap();
+        // Every accumulator this module writes is seeded the same way, M
+        // included: `attn_scores` biases its max into unsigned space, whose
+        // identity is 0. There is no i32::MIN pattern to remember.
+        ctx.memset_u8(&d_m, 0).unwrap();
         ctx.memset_u8(&d_l, 0).unwrap();
         ctx.memset_u8(&d_o, 0).unwrap();
         ctx.memset_u8(&d_p, 0).unwrap();
@@ -533,10 +533,9 @@ fn the_scores_kernel_is_launch_invariant_too() {
     let d_m = ctx.alloc(B * 4).unwrap();
     ctx.memcpy_htod_at(&d_q, 0, &as_u8(&q)).unwrap();
     ctx.memcpy_htod_at(&d_k, 0, &as_u8(&k)).unwrap();
-    let neg_inf: Vec<u8> = (0..B).flat_map(|_| i32::MIN.to_le_bytes()).collect();
 
     let run = |gx: u32, block: u32| -> (Vec<i32>, Vec<i32>) {
-        ctx.memcpy_htod_at(&d_m, 0, &neg_inf).unwrap();
+        ctx.memset_u8(&d_m, 0).unwrap();
         // NOT zeroed: a kernel that skips a key must show as a stale slot, and
         // zeroing here would hide exactly the failure this test exists for.
         ctx.memset_u8(&d_s, 0xAB).unwrap();
@@ -557,7 +556,7 @@ fn the_scores_kernel_is_launch_invariant_too() {
     // The reference is a geometry that covers the sequence, which is what the
     // kernel used to require.
     let (s_ref, m_ref) = run((S as u32).div_ceil(128), 128);
-    assert!(m_ref.iter().all(|&m| m != i32::MIN), "the reference launch computed no maximum");
+    assert!(m_ref.iter().all(|&m| m != 0), "the reference launch computed no maximum");
 
     // Every one of these is SHORT of S, so each thread must take several keys.
     let geometries: &[(u32, u32)] = &[(1, 32), (1, 64), (1, 128), (2, 32), (3, 64), (7, 16)];
@@ -576,6 +575,237 @@ fn the_scores_kernel_is_launch_invariant_too() {
             "attn_scores at grid.x {gx} block {block} computed a different \
              maximum. That is the worse half: attn_accum subtracts it from every \
              score, so every softmax weight moves"
+        );
+    }
+}
+
+/// **The max reduction's IDENTITY, which was the last precondition this module
+/// left to the host.**
+///
+/// `red.global.max` is associative, commutative and idempotent, so
+/// `GridStrideSplit.v` covers the order and the partition. It says nothing
+/// about the value the buffer starts at, and a signed max wants `i32::MIN` —
+/// not a uniform byte pattern, so M could not be seeded by the same
+/// `memset(0)` that L, O and P take. A caller who used one anyway got a
+/// silently wrong answer **only when a row's scores were all negative**: with
+/// `max(0, s) = 0` the softmax then subtracts a maximum no key attains, every
+/// weight is scaled down by `2^(C*|shift|)`, and in Q0.28 they quantise toward
+/// zero rather than cancelling as they would in exact arithmetic.
+///
+/// That is the worst shape a precondition can have — it cannot fire on random
+/// int8 data, where the max over hundreds of keys is positive with
+/// overwhelming probability, so every test in this file passed either way.
+///
+/// The kernel biases into unsigned space (`x ^ 0x80000000`, the
+/// order-preserving signed→unsigned bijection), and unsigned max has identity
+/// **0**. A zeroed buffer now *means* `i32::MIN`.
+///
+/// This test seeds M with a plain `memset(0)` over an input whose scores are
+/// **all negative**, and asserts the kernel finds the true (negative) maximum.
+/// Reverting the bias to `red.global.max.s32` leaves M at 0 and fails it.
+#[test]
+fn a_zeroed_max_buffer_is_the_identity() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — the max identity was not demonstrated.");
+        return;
+    };
+    let src = ptx();
+    let scores_mod = ctx.load_ptx(&src, "attn_scores").expect("attn_scores");
+
+    // Every score is a dot product of a strictly positive Q row with a
+    // strictly negative K row, so every score is strictly negative and the
+    // identity is the only thing that can supply the maximum.
+    let q: Vec<i8> = (0..B * D).map(|i| ((i % 100) + 1) as i8).collect();
+    let k: Vec<i8> = (0..S * D).map(|i| -(((i % 100) + 1) as i8)).collect();
+
+    let as_u8 = |x: &[i8]| x.iter().map(|&b| b as u8).collect::<Vec<u8>>();
+    let d_q = ctx.alloc(B * D).unwrap();
+    let d_k = ctx.alloc(S * D).unwrap();
+    let d_s = ctx.alloc(B * S * 4).unwrap();
+    let d_m = ctx.alloc(B * 4).unwrap();
+    ctx.memcpy_htod_at(&d_q, 0, &as_u8(&q)).unwrap();
+    ctx.memcpy_htod_at(&d_k, 0, &as_u8(&k)).unwrap();
+    ctx.memset_u8(&d_s, 0xAB).unwrap();
+    // The whole point: the same seed L, O and P get. No i32::MIN pattern.
+    ctx.memset_u8(&d_m, 0).unwrap();
+
+    let args = vec![d_q.device_ptr(), d_k.device_ptr(), d_s.device_ptr(), d_m.device_ptr()];
+    ctx.launch(&scores_mod, ((S as u32).div_ceil(128), B as u32, 1), (128, 1, 1), 0, &args)
+        .expect("attn_scores launch");
+    ctx.synchronize().unwrap();
+
+    let mut rs = vec![0u8; B * S * 4];
+    let mut rm = vec![0u8; B * 4];
+    ctx.memcpy_dtoh_at(&mut rs, &d_s, 0).unwrap();
+    ctx.memcpy_dtoh_at(&mut rm, &d_m, 0).unwrap();
+    let to_i32 = |v: &[u8]| -> Vec<i32> {
+        v.chunks(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect()
+    };
+    let scores = to_i32(&rs);
+    // M is stored biased; undo it exactly as the accumulating entries do.
+    let maxima: Vec<i32> =
+        to_i32(&rm).iter().map(|&m| ((m as u32) ^ 0x8000_0000) as i32).collect();
+
+    for b in 0..B {
+        let row = &scores[b * S..(b + 1) * S];
+        let want = *row.iter().max().unwrap();
+
+        // Non-vacuity: this case only bites when the true maximum is negative,
+        // so a fixture whose scores drifted positive would pass while testing
+        // nothing.
+        assert!(
+            want < 0,
+            "row {b}'s maximum is {want}; the fixture is supposed to make every \
+             score negative, and with a positive maximum `max(0, s)` is right \
+             by accident and this test asserts nothing"
+        );
+        assert_eq!(
+            maxima[b], want,
+            "row {b}: the kernel found {} (raw {}) where the true maximum is \
+             {want}. A zeroed M is not being read as the identity — a signed \
+             max leaves the raw word at 0, which no key attains, and \
+             `attn_accum` then subtracts that from every score",
+            maxima[b],
+            (maxima[b] as u32) ^ 0x8000_0000
+        );
+    }
+}
+
+/// **The other half of the bias, and the temperature is what makes it
+/// testable.**
+///
+/// `attn_scores` stores M biased; `attn_accum` and `attn_accum_naive` must
+/// undo it. Deleting the undo from ONE of the two entries passes every other
+/// test in this file — including the accum-vs-naive differential on `p`, which
+/// is precisely the comparison that ought to catch a one-sided change.
+///
+/// It survives for an arithmetic accident worth writing down. The bias is
+/// `2^31`; the kernel computes `t = ((m - s) * KFix + 2^15) >> 16` in 64 bits
+/// and then **truncates to u32**. A missing undo therefore shifts `t` by
+/// `(2^31 * KFix) >> 16 = 2^15 * KFix`, and the other tests pass
+/// `KFix = 8 << 16 = 2^19`, for which that shift is `2^34` — **exactly zero
+/// modulo 2^32**. The truncation annihilates the bug. Every arm of the
+/// differential shares the constant, so every arm is wrong in the same
+/// invisible way.
+///
+/// A real model's softmax scale is `q_scale * k_scale / sqrt(d)`, an arbitrary
+/// number. This test uses `2^19 + 1` — the same temperature to within 2e-6,
+/// and odd, so the shift is `2^34 + 2^15 ≡ 2^15` and a missing undo drives
+/// almost every weight to zero.
+///
+/// The oracle is `fixed_exp::exp2_neg_q16_16` on the host over the device's own
+/// scores, which is what `p` was never checked against: the existing test
+/// says `p` is "a per-element function of `s`, so it is not what is in
+/// question" — true of the reduction claim, and the undo lives exactly there.
+#[test]
+fn the_accumulating_entries_undo_the_bias() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — the bias undo was not demonstrated.");
+        return;
+    };
+
+    // Not a multiple of 2^17, which is the whole point: `2^15 * KFix` must not
+    // vanish modulo 2^32, or a missing undo is invisible here too.
+    const KFIX: u64 = (8u64 << 16) + 1;
+    assert_ne!(
+        (KFIX << 15) % (1u64 << 32),
+        0,
+        "the temperature annihilates the bias under the u32 truncation, so this \
+         test cannot see a missing undo — pick one that is not a multiple of 2^17"
+    );
+
+    let src = ptx();
+    let scores_mod = ctx.load_ptx(&src, "attn_scores").expect("attn_scores");
+    let accum_mod = ctx.load_ptx(&src, "attn_accum").expect("attn_accum");
+    let naive_mod = ctx.load_ptx(&src, "attn_accum_naive").expect("attn_accum_naive");
+
+    let (q, k, v) = inputs();
+    let as_u8 = |x: &[i8]| x.iter().map(|&b| b as u8).collect::<Vec<u8>>();
+    let d_q = ctx.alloc(B * D).unwrap();
+    let d_k = ctx.alloc(S * D).unwrap();
+    let d_v = ctx.alloc(S * D).unwrap();
+    let d_s = ctx.alloc(B * S * 4).unwrap();
+    let d_m = ctx.alloc(B * 4).unwrap();
+    let d_l = ctx.alloc(B * 8).unwrap();
+    let d_o = ctx.alloc(B * D * 8).unwrap();
+    let d_p = ctx.alloc(B * S * 4).unwrap();
+    ctx.memcpy_htod_at(&d_q, 0, &as_u8(&q)).unwrap();
+    ctx.memcpy_htod_at(&d_k, 0, &as_u8(&k)).unwrap();
+    ctx.memcpy_htod_at(&d_v, 0, &as_u8(&v)).unwrap();
+    ctx.memset_u8(&d_m, 0).unwrap();
+    ctx.memset_u8(&d_s, 0).unwrap();
+
+    let sargs = vec![d_q.device_ptr(), d_k.device_ptr(), d_s.device_ptr(), d_m.device_ptr()];
+    ctx.launch(&scores_mod, ((S as u32).div_ceil(128), B as u32, 1), (128, 1, 1), 0, &sargs)
+        .expect("attn_scores launch");
+    ctx.synchronize().unwrap();
+
+    let to_i32 = |v: &[u8]| -> Vec<i32> {
+        v.chunks(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect()
+    };
+    let mut raw = vec![0u8; B * S * 4];
+    ctx.memcpy_dtoh_at(&mut raw, &d_s, 0).unwrap();
+    let scores = to_i32(&raw);
+    let mut raw_m = vec![0u8; B * 4];
+    ctx.memcpy_dtoh_at(&mut raw_m, &d_m, 0).unwrap();
+    let maxima: Vec<i32> =
+        to_i32(&raw_m).iter().map(|&m| ((m as u32) ^ 0x8000_0000) as i32).collect();
+
+    let run_accum = |naive: bool| -> Vec<i32> {
+        ctx.memset_u8(&d_l, 0).unwrap();
+        ctx.memset_u8(&d_o, 0).unwrap();
+        ctx.memset_u8(&d_p, 0).unwrap();
+        let aargs = vec![
+            d_s.device_ptr(),
+            d_v.device_ptr(),
+            d_m.device_ptr(),
+            d_l.device_ptr(),
+            d_o.device_ptr(),
+            d_p.device_ptr(),
+            KFIX,
+        ];
+        let which = if naive { &naive_mod } else { &accum_mod };
+        ctx.launch(which, ((S as u32).div_ceil(128), B as u32, 1), (128, 1, 1), 0, &aargs)
+            .expect("attn_accum launch");
+        ctx.synchronize().unwrap();
+        let mut r = vec![0u8; B * S * 4];
+        ctx.memcpy_dtoh_at(&mut r, &d_p, 0).unwrap();
+        to_i32(&r)
+    };
+
+    // The host reading of the kernel's own arithmetic, from `m` and `s`.
+    let want = |b: usize, i: usize| -> i32 {
+        let diff = maxima[b].wrapping_sub(scores[b * S + i]) as i64;
+        let t = ((diff * KFIX as i64 + 32768) >> 16).min(1_073_741_824) as u32;
+        y::fixed_exp::exp2_neg_q16_16(t) as i32
+    };
+
+    for (tag, p) in [("two-level", run_accum(false)), ("naive", run_accum(true))] {
+        let mut nonzero = 0usize;
+        for b in 0..B {
+            for i in 0..S {
+                let w = want(b, i);
+                assert_eq!(
+                    p[b * S + i],
+                    w,
+                    "{tag}: p[{b}][{i}] is {} where the host exp of the device's own \
+                     score gives {w}. The most likely cause is a maximum that was \
+                     never unbiased: `attn_scores` stores `m ^ 0x80000000`",
+                    p[b * S + i]
+                );
+                if w != 0 {
+                    nonzero += 1;
+                }
+            }
+        }
+        // Non-vacuity: `p == 0` everywhere agrees with a host oracle that is
+        // also zero everywhere, so a collapsed softmax would make the loop
+        // above assert nothing.
+        assert!(
+            nonzero > B * S / 2,
+            "{tag}: only {nonzero} of {} weights are non-zero; the softmax has \
+             collapsed and the comparison above is vacuous",
+            B * S
         );
     }
 }
