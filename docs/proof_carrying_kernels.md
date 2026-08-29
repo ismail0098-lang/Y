@@ -1731,6 +1731,83 @@ attention through `IrBuilder` — a larger change than this file.
 
 Twelve proofs, no axioms, nothing admitted. 614 / 880 tests, both builds green.
 
+#### The launch contract the other kernel in the same file did not have · 2026-08-30
+
+Continuing the sweep from the schedule work found a live bug, and the tell was
+that the two reductions in `src/exact_attention.rs` were **not the same kind of
+loop**. `attn_accum` is grid-stride and launch-invariant — that is the module's
+headline claim. `attn_scores` was **one thread per key with a bounds guard and
+no loop**, so it silently required `gridDim.x * blockDim.x >= S`.
+
+Measured on the card at `S = 512`, before touching anything:
+
+    grid.x 1 block 128 -> 128 threads:  768 of 1024 score slots stale, max 34647
+    grid.x 1 block  32 ->  32 threads:  960 of 1024 stale,             max 33794
+    grid.x 4 block 128 -> 512 threads:    0 stale,                     max 34752
+
+**The stale scores are the lesser half.** `attn_accum` subtracts the maximum
+from every score, so a wrong maximum moves *every* softmax weight — a silently
+wrong answer for the whole batch row, not a partially-filled buffer.
+
+Two kernels in one file with opposite launch contracts, under a header that
+advertises launch invariance, and nothing stating either. The same class as the
+paged-decode kernel's fixed launch contract that this file already records, and
+worse in one respect: there the contract is at least written down.
+
+**Removed rather than documented.** `attn_scores` is a grid-stride loop now —
+the same residue-class partition `proofs/GridStrideSplit.v` already proves, so
+the theorem covers it with no new proof and the contract across the family is
+uniform. `&Q[b][0]` moved inside the loop because the inner dot-product walks
+that pointer.
+
+##### What caught it, and what could not
+
+| | before the fix |
+|---|---|
+| `gpu_attention_invariance` (new test) | **FAIL** |
+| `exact_attention_schedule` | **FAIL** |
+| `exact_attention_bounds` | ok |
+| `ptx_portability` (assembles at every arch) | ok |
+
+The portability gate runs real `ptxas` at five architectures and is untroubled,
+which is this repo's own recorded limit — *an assemble gate cannot see a missing
+instruction*, and here the missing instruction is a whole loop.
+
+The existing invariance test could not see it either, and the reason is worth
+keeping: it sweeps the geometry of `attn_accum` while launching `attn_scores`
+at **one fixed, correct** geometry. **A test that sweeps one kernel's launch
+geometry is not testing the other kernel's.** The new test poisons `Scores`
+with `0xAB` rather than zeroing it — zeroing would hide a skipped key behind a
+plausible value — and asserts every short geometry agrees with a covering one.
+
+##### The gate had to stop hardcoding a rule that held for two of three kernels
+
+Adding `attn_scores` to the schedule gate broke it, correctly. The check
+asserted that `nworkers` is the product of **three** extents; `attn_scores`
+mixes only two hardware dimensions. The rule is now *derived from each kernel*:
+take the hardware indices `worker` actually depends on, map each to its extent
+(`%ctaid.x` → `%nctaid.x`), and require `nworkers` to be the product of exactly
+those — no fewer, or the classes overlap; no more, or they stop covering.
+
+**And a structural pattern matched more than one thing for the third time in
+this file.** "The stride update is `add.s32 %X, %X, %rY` after the marker" also
+matches `add.s32 %r12, %r12, %r4` — an ordinary `b * S + i` flat-index
+computation — so the counter came out as address arithmetic. It anchors on the
+loop's **back-edge** now: the increment is the last such instruction before the
+branch that closes the loop, which is a property of loops rather than a shape
+that happens to be unique today. First the marker, now the back-edge: both
+times the fix was to anchor on something the kernel actually *says*.
+
+##### The one precondition that remains
+
+`red.global.max.s32` needs no order argument — max is associative, commutative
+and idempotent — but its **identity is not supplied by the kernel**: the host
+must seed `M[b]` at `i32::MIN`. Nothing checks that. It is stated in the kernel
+and in the proof header rather than left implicit, and it is the last unchecked
+precondition in this family.
+
+615 / 881 tests, both builds green. Twelve proofs, no axioms.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation

@@ -33,6 +33,22 @@
     [rounding_is_order_dependent] disagrees at a FIXED worker count purely from
     the order - a failure the GEMM kernels cannot even exhibit.
 
+    ** It covers all three entry points now, and did not when it was written.
+
+    `attn_scores` was one thread per key with a bounds guard and no loop, so it
+    silently required `gridDim.x * blockDim.x >= S` - the OPPOSITE contract to
+    the accumulate's, in the same file, under a module header advertising launch
+    invariance. Measured at S=512 launched with 128 threads: 768 of 1024 score
+    slots stale and the maximum wrong. It is the same residue-class partition
+    now, so everything below applies to it verbatim; nothing here changed to
+    make that true.
+
+    Its reduction is `red.global.max.s32` rather than a sum. Order-independence
+    there needs no theorem - max is associative, commutative AND idempotent - but
+    its IDENTITY is not supplied by the kernel: the host must seed `M[b]` at
+    `i32::MIN`. That is the one precondition this kernel family still carries,
+    and nothing checks it.
+
     ** What is NOT proved.
 
     The per-thread body - the integer exp, the Q0.28 weight, the int8 `V` load

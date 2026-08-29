@@ -498,3 +498,84 @@ fn the_attention_kernels_contain_no_floating_point() {
         "the kernels no longer look like the ones this test is about"
     );
 }
+
+/// **`attn_scores` is launch-invariant too — and it was not.**
+///
+/// The test above sweeps the geometry of `attn_accum` and launches
+/// `attn_scores` at one fixed, correct geometry (`ceil(S/128) x 128`). So the
+/// scores kernel's own launch contract was never exercised, and it turned out
+/// to be the opposite of the accumulate's: one thread per key with a bounds
+/// guard and no loop, silently requiring `gridDim.x * blockDim.x >= S`.
+///
+/// Measured on an RTX 4070 Ti SUPER at S=512 before the fix: launched with 128
+/// threads it left **768 of 1024 score slots stale and computed the wrong
+/// maximum** (34647 against 34752). The stale scores are the lesser half — the
+/// maximum is subtracted from every score in `attn_accum`, so a wrong one moves
+/// **every** softmax weight, and the failure is silent.
+///
+/// `attn_scores` is a grid-stride loop now, the same residue-class partition
+/// `proofs/GridStrideSplit.v` proves. This test is what keeps it one: the
+/// deliberately-short geometries below are the ones that used to be wrong.
+#[test]
+fn the_scores_kernel_is_launch_invariant_too() {
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — scores launch invariance was not demonstrated.");
+        return;
+    };
+    let src = ptx();
+    let scores_mod = ctx.load_ptx(&src, "attn_scores").expect("attn_scores");
+    let (q, k, _) = inputs();
+    let as_u8 = |x: &[i8]| x.iter().map(|&b| b as u8).collect::<Vec<u8>>();
+
+    let d_q = ctx.alloc(B * D).unwrap();
+    let d_k = ctx.alloc(S * D).unwrap();
+    let d_s = ctx.alloc(B * S * 4).unwrap();
+    let d_m = ctx.alloc(B * 4).unwrap();
+    ctx.memcpy_htod_at(&d_q, 0, &as_u8(&q)).unwrap();
+    ctx.memcpy_htod_at(&d_k, 0, &as_u8(&k)).unwrap();
+    let neg_inf: Vec<u8> = (0..B).flat_map(|_| i32::MIN.to_le_bytes()).collect();
+
+    let run = |gx: u32, block: u32| -> (Vec<i32>, Vec<i32>) {
+        ctx.memcpy_htod_at(&d_m, 0, &neg_inf).unwrap();
+        // NOT zeroed: a kernel that skips a key must show as a stale slot, and
+        // zeroing here would hide exactly the failure this test exists for.
+        ctx.memset_u8(&d_s, 0xAB).unwrap();
+        let args =
+            vec![d_q.device_ptr(), d_k.device_ptr(), d_s.device_ptr(), d_m.device_ptr()];
+        ctx.launch(&scores_mod, (gx, B as u32, 1), (block, 1, 1), 0, &args)
+            .expect("attn_scores launch");
+        ctx.synchronize().unwrap();
+        let mut rs = vec![0u8; B * S * 4];
+        let mut rm = vec![0u8; B * 4];
+        ctx.memcpy_dtoh_at(&mut rs, &d_s, 0).unwrap();
+        ctx.memcpy_dtoh_at(&mut rm, &d_m, 0).unwrap();
+        let to_i32 =
+            |v: &[u8]| v.chunks(4).map(|c| i32::from_le_bytes(c.try_into().unwrap())).collect();
+        (to_i32(&rs), to_i32(&rm))
+    };
+
+    // The reference is a geometry that covers the sequence, which is what the
+    // kernel used to require.
+    let (s_ref, m_ref) = run((S as u32).div_ceil(128), 128);
+    assert!(m_ref.iter().all(|&m| m != i32::MIN), "the reference launch computed no maximum");
+
+    // Every one of these is SHORT of S, so each thread must take several keys.
+    let geometries: &[(u32, u32)] = &[(1, 32), (1, 64), (1, 128), (2, 32), (3, 64), (7, 16)];
+    for &(gx, block) in geometries {
+        let covered = gx as usize * block as usize;
+        assert!(covered < S, "({gx},{block}) covers {covered} >= S={S}; not a short launch");
+        let (s, m) = run(gx, block);
+        assert_eq!(
+            s, s_ref,
+            "attn_scores at grid.x {gx} block {block} ({covered} threads for S={S}) \
+             does not agree with a covering launch. It is one thread per key \
+             again, so keys past the launch are silently skipped"
+        );
+        assert_eq!(
+            m, m_ref,
+            "attn_scores at grid.x {gx} block {block} computed a different \
+             maximum. That is the worse half: attn_accum subtracts it from every \
+             score, so every softmax weight moves"
+        );
+    }
+}

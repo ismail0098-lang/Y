@@ -58,9 +58,17 @@ fn ptx() -> String {
     attention_ptx(HEAD_DIM, SEQ_LEN).expect("a shape well inside the exactness argument")
 }
 
-/// The accumulating entry points. `attn_scores` is one thread per key and
-/// reduces nothing, so it is deliberately not here.
-const ACCUM_ENTRIES: [&str; 2] = ["attn_accum", "attn_accum_naive"];
+/// Every entry point that reduces over the sequence.
+///
+/// `attn_scores` was NOT here originally, because it was one thread per key
+/// with a bounds guard and no loop - which silently required
+/// `gridDim.x * blockDim.x >= S`. Measured at S=512 launched with 128 threads:
+/// 768 of 1024 score slots stale and the maximum wrong (34647 against 34752),
+/// which is worse, since `attn_accum` subtracts that maximum from every score.
+/// So the two kernels in one file carried OPPOSITE launch contracts while the
+/// module header advertised launch invariance. It is a grid-stride loop now and
+/// the contract is uniform.
+const REDUCING_ENTRIES: [&str; 3] = ["attn_scores", "attn_accum", "attn_accum_naive"];
 
 /// The body of `.visible .entry <name>`, up to the next entry.
 fn entry_body(ptx: &str, name: &str) -> String {
@@ -137,11 +145,21 @@ fn deps(body: &[String], reg: &str) -> Vec<String> {
     out
 }
 
-/// The SEQUENCE loop's counter and stride, located by the kernel's own marker.
+/// The SEQUENCE loop's counter and stride, located by the kernel's own marker
+/// and by the loop's BACK-EDGE.
 ///
 /// Nothing here names a register number or a bound: the marker says which of
-/// the entry's grid-stride loops is the reduction, and the loop's own update
-/// says which registers it uses.
+/// the entry's grid-stride loops is the reduction, and the back-edge says where
+/// its body ends.
+///
+/// **The back-edge is load-bearing, and this is the third time in this file
+/// that a structural pattern turned out to match more than one thing.**
+/// "`add.s32 %X, %X, %rY` after the marker" also matches
+/// `add.s32 %r12, %r12, %r4` - an ordinary flat-index computation
+/// (`b * S + i`) inside `attn_scores` - and taking the first one made the loop
+/// counter the address arithmetic. A loop's increment is the last such
+/// instruction before the branch that closes it; that is a property of loops,
+/// not a shape that happens to be unique today.
 fn loop_counter_and_stride(body: &[String]) -> (String, String) {
     let at = body.iter().position(|l| l == SEQ_MARKER).unwrap_or_else(|| {
         panic!(
@@ -151,15 +169,25 @@ fn loop_counter_and_stride(body: &[String]) -> (String, String) {
              decomposition as depending on `tid.x` and nothing else"
         )
     });
-    let upd = body[at..]
+    let label = body[at..]
         .iter()
-        .find(|l| {
-            l.starts_with("add.s32 ") && {
-                let o: Vec<&str> =
-                    l[8..].trim_end_matches(';').split(',').map(str::trim).collect();
-                o.len() == 3 && o[0] == o[1] && o[2].starts_with("%r")
-            }
-        })
+        .find_map(|l| l.strip_suffix(':').filter(|t| !t.contains(' ')))
+        .expect("the marked sequence loop has no label")
+        .to_string();
+    let back = body
+        .iter()
+        .rposition(|l| l.ends_with(&format!("bra {label};")))
+        .expect("the marked sequence loop has no back-edge");
+    let is_stride = |l: &String| {
+        l.starts_with("add.s32 ") && {
+            let o: Vec<&str> = l[8..].trim_end_matches(';').split(',').map(str::trim).collect();
+            o.len() == 3 && o[0] == o[1] && o[2].starts_with("%r")
+        }
+    };
+    let upd = body[at..back]
+        .iter()
+        .rev()
+        .find(|l| is_stride(l))
         .expect("the marked sequence loop never advances");
     let o: Vec<&str> = upd[8..].trim_end_matches(';').split(',').map(str::trim).collect();
     (o[0].to_string(), o[2].to_string())
@@ -168,57 +196,62 @@ fn loop_counter_and_stride(body: &[String]) -> (String, String) {
 /// **The precondition the partition theorem needs, and the one assertion here
 /// that is not a transcription.**
 ///
-/// `worker` is a mixed-radix index over `(ctaid.z, ctaid.x, tid.x)`;
+/// `worker` is a mixed-radix index over some set of hardware indices;
 /// `GridStrideSplit.stride_classes_partition` needs it to range over exactly
-/// `[0, nworkers)`, so `nworkers` must be the product of those three indices'
-/// EXTENTS. Drop `%nctaid.z` from the product and the stride is smaller than
-/// the number of workers: the residue classes overlap, some keys are counted
-/// twice and others never. Only a launch with `gridDim.z > 1` can see that on a
-/// device, and only when there is a device.
+/// `[0, nworkers)`, so `nworkers` must be the product of exactly those indices'
+/// EXTENTS - no fewer, or the classes overlap and keys are counted twice; no
+/// more, or they no longer cover the sequence.
+///
+/// **Which indices is DERIVED from the kernel, not listed here.** `attn_accum`
+/// mixes three (`ctaid.z`, `ctaid.x`, `tid.x`); `attn_scores` mixes two. The
+/// first version of this test hardcoded the triple, which is a rule that
+/// happens to hold for two of the three entries.
 #[test]
 fn the_worker_index_and_the_worker_count_use_paired_registers() {
     let ptx = ptx();
-    let pairs = [("%ctaid.z", "%nctaid.z"), ("%ctaid.x", "%nctaid.x"), ("%tid.x", "%ntid.x")];
 
-    for name in ACCUM_ENTRIES {
+    /// `%ctaid.x` -> `%nctaid.x`, `%tid.x` -> `%ntid.x`. A hardware INDEX is
+    /// what a worker is built from; its extent is what a worker count is built
+    /// from, and the two spellings differ by exactly one `n`.
+    fn extent_of(idx: &str) -> Option<String> {
+        let bare = idx.strip_prefix('%')?;
+        (bare.starts_with("ctaid.") || bare.starts_with("tid."))
+            .then(|| format!("%n{bare}"))
+    }
+
+    for name in REDUCING_ENTRIES {
         let body = norm(&entry_body(&ptx, name));
         let (counter, stride) = loop_counter_and_stride(&body);
 
-        // The counter is seeded from the worker index.
-        let seed = body
+        // The counter is seeded from the worker index - or, where the loop
+        // counter IS the worker index, from it directly.
+        let worker = body
             .iter()
             .find(|l| l.starts_with(&format!("mov.u32 {counter},")))
-            .unwrap_or_else(|| panic!("{name}: the loop counter {counter} is never seeded"));
-        let worker = seed.split(',').nth(1).unwrap().trim().trim_end_matches(';').to_string();
+            .map(|l| l.split(',').nth(1).unwrap().trim().trim_end_matches(';').to_string())
+            .unwrap_or_else(|| counter.clone());
 
         let wdeps = deps(&body, &worker);
         let sdeps = deps(&body, &stride);
+        assert!(!wdeps.is_empty(), "{name}: the worker index depends on nothing");
 
-        for (idx, extent) in pairs {
-            assert!(
-                wdeps.iter().any(|d| d == idx),
-                "{name}: the worker index depends on {wdeps:?}, which does not \
-                 include {idx} - this is not the decomposition \
-                 GridStrideSplit.v proves"
-            );
-            assert!(
-                sdeps.iter().any(|d| d == extent),
-                "{name}: the worker index uses {idx} but the worker count \
-                 depends on {sdeps:?}, which never mentions its extent \
-                 {extent}. The workers then alias: `worker` ranges past \
-                 `nworkers`, the residue classes overlap, and some keys are \
-                 counted twice while others are missed"
-            );
-        }
-
-        // ...and nothing else. An extra factor in the stride is the mirror
-        // failure: the classes no longer cover the sequence.
-        let mut want: Vec<String> = pairs.iter().map(|(_, e)| e.to_string()).collect();
+        let mut want: Vec<String> = wdeps.iter().filter_map(|d| extent_of(d)).collect();
         want.sort();
+        want.dedup();
+        assert!(
+            !want.is_empty(),
+            "{name}: the worker index {wdeps:?} contains no hardware index at \
+             all, so there is nothing for the worker count to pair with"
+        );
+
         assert_eq!(
             sdeps, want,
-            "{name}: the worker count is a product over {sdeps:?}, not over the \
-             extents of the three indices the worker index actually uses"
+            "{name}: the worker index is built from {wdeps:?}, so the worker \
+             count must be the product of exactly {want:?} - it is a product \
+             over {sdeps:?}. Too few and the residue classes overlap, so some \
+             keys are counted twice and others missed; too many and they no \
+             longer cover the sequence. Only a launch that uses the missing \
+             dimension can see it on a device, and only when there is a device"
         );
     }
 }
@@ -229,7 +262,7 @@ fn the_worker_index_and_the_worker_count_use_paired_registers() {
 #[test]
 fn the_stride_is_the_worker_count() {
     let ptx = ptx();
-    for name in ACCUM_ENTRIES {
+    for name in REDUCING_ENTRIES {
         let body = norm(&entry_body(&ptx, name));
         let (counter, _) = loop_counter_and_stride(&body);
         let n = body
@@ -246,14 +279,21 @@ fn the_stride_is_the_worker_count() {
 /// `attn_scores` is deliberately excluded - it is one thread per key and
 /// reduces nothing, so it has no stride loop to check.
 #[test]
-fn both_accumulating_entries_were_actually_examined() {
+fn every_reducing_entry_was_actually_examined() {
     let ptx = ptx();
-    for name in ACCUM_ENTRIES {
+    for name in REDUCING_ENTRIES {
         let body = norm(&entry_body(&ptx, name));
         assert!(body.len() > 40, "{name}: the entry body is too short to be the kernel");
         let (counter, stride) = loop_counter_and_stride(&body);
         assert_ne!(counter, stride, "{name}: the loop strides by itself");
-        assert_eq!(deps(&body, &stride).len(), 3, "{name}: the worker count is not a triple product");
+        let n = deps(&body, &stride).len();
+        assert!(
+            (2..=3).contains(&n),
+            "{name}: the worker count is a product over {n} extents. \
+             `attn_scores` uses two hardware dimensions and the accumulating \
+             entries three; anything else means the decomposition changed and \
+             this file has not noticed"
+        );
     }
     assert!(
         !entry_body(&ptx, "attn_scores").is_empty(),
@@ -301,7 +341,7 @@ fn the_proof_and_the_compiler_agree_on_the_accumulator_bound() {
 #[test]
 fn the_sequence_marker_is_doing_work() {
     let ptx = ptx();
-    for name in ACCUM_ENTRIES {
+    for name in REDUCING_ENTRIES {
         let body = norm(&entry_body(&ptx, name));
         let markers = body.iter().filter(|l| *l == SEQ_MARKER).count();
         assert_eq!(markers, 1, "`{name}` carries {markers} sequence markers, not 1");
