@@ -2015,6 +2015,39 @@ impl Ix {
         }
     }
 
+    /// Evaluate over concrete values, so a test can exercise the SAME
+    /// expression the emitter renders and the proof describes.
+    ///
+    /// Without this a model test transcribes the arithmetic a third time,
+    /// which is the defect this whole layer exists to remove. The three
+    /// renderings agree because every operand here is non-negative: LLVM's
+    /// `sdiv`/`srem` truncate toward zero and Coq's `nat` division floors, and
+    /// those coincide on non-negative inputs. `eval` asserts that rather than
+    /// assuming it.
+    pub fn eval(&self, bind: &dyn Fn(&'static str) -> i64) -> i64 {
+        let v = match self {
+            Ix::Val(n) => bind(n),
+            Ix::Lit(k) => *k as i64,
+            Ix::Sub(a, b) => a.eval(bind) - b.eval(bind),
+            Ix::Add(a, b) => a.eval(bind) + b.eval(bind),
+            Ix::Mul(a, b) => a.eval(bind) * b.eval(bind),
+            Ix::Min(a, b) => a.eval(bind).min(b.eval(bind)),
+            Ix::Div(a, b) => {
+                let (x, y) = (a.eval(bind), b.eval(bind));
+                if y == 0 { 0 } else { x / y }
+            }
+            Ix::Mod(a, b) => {
+                let (x, y) = (a.eval(bind), b.eval(bind));
+                if y == 0 { x } else { x % y }
+            }
+            Ix::SelLt(a, b, x, y) => {
+                if a.eval(bind) < b.eval(bind) { x.eval(bind) } else { y.eval(bind) }
+            }
+        };
+        debug_assert!(v >= 0, "a schedule expression evaluated negative: {v}");
+        v
+    }
+
     /// Emit into the LLVM builder, returning the register holding the value.
     fn emit(&self, b: &mut IrBuilder, bind: &dyn Fn(&'static str) -> String) -> String {
         match self {
@@ -2304,6 +2337,37 @@ pub fn a_i32_element_ix() -> Ix {
 /// the roadmap catalogues.
 pub fn panel_index_ix() -> Ix {
     Ix::div(Ix::val("iv"), Ix::val("T"))
+}
+
+/// The **proportional** split's band edge: `(t * ext) / n`.
+///
+/// This is the f32 kernel's K-split, and it is a DIFFERENT decomposition from
+/// the exact kernel's ([`band_base_ix`] / [`band_len_ix`], which give the first
+/// `rem` bands one extra k). Both tile `[0, ext)`; they are not the same
+/// partition, and `proofs/GemmBandSplit.v` proves the tiling separately for
+/// exactly that reason.
+///
+/// Band `t` is `[edge(t), edge(t+1))`, so one expression serves both ends.
+pub fn prop_band_edge_ix() -> Ix {
+    Ix::div(Ix::mul(Ix::val("t"), Ix::val("ext")), Ix::val("n"))
+}
+
+/// The **granule-counting** band's edge: `min(gran * ((idx * g) / count), ext)`,
+/// over the granule count `g = ceil(ext / gran)` that [`tile_count_ix`] gives.
+///
+/// The f32 kernel's M and N bands. It partitions the GRANULE COUNT rather than
+/// the extent, because snapping a band's position to the tile granularity dumps
+/// the accumulated rounding slack onto one band - at most one granule in 1-D,
+/// but the errors on the two axes MULTIPLY in 2-D. The measured imbalance table
+/// is in `emit_entry`.
+pub fn granule_band_edge_ix() -> Ix {
+    Ix::min(
+        Ix::mul(
+            Ix::div(Ix::mul(Ix::val("idx"), Ix::val("g")), Ix::val("count")),
+            Ix::val("gran"),
+        ),
+        Ix::val("ext"),
+    )
 }
 
 /// The K-split thread count, as `__y_gemm_exact_threads` computes it.
@@ -4778,21 +4842,31 @@ fn emit_entry() -> String {
     // — and its empty reduction bands are expected; see the driver's early
     // return.
     let band = |b: &mut IrBuilder, idx: &str, count: &str, extent: &str, gran: &str| {
+        // The granule count and the band edge are the schedule's own arithmetic
+        // (`tile_count_ix` / `granule_band_edge_ix`), shared with
+        // `proofs/GemmBandSplit.v`. `gm1` is emitted rather than folded because
+        // `gran` is a register here, unlike the exact kernel's compile-time
+        // tile - so `Tm1` binds to it instead of to a literal.
         let gm1 = b.sub(gran, "1");
-        let up = b.add(extent, &gm1);
-        let g = b.t();
-        b.w(&format!("{} = sdiv i64 {}, {}", g, up, gran));
-        let lo0 = b.mul(idx, &g);
-        let lo1 = b.t();
-        b.w(&format!("{} = sdiv i64 {}, {}", lo1, lo0, count));
-        let lo2 = b.mul(&lo1, gran);
-        let lo = b.imin(&lo2, extent);
+        let g = tile_count_ix().emit(b, &|n| match n {
+            "ext" => extent.to_string(),
+            "Tm1" => gm1.clone(),
+            "T" => gran.to_string(),
+            other => unreachable!("unbound schedule name {other}"),
+        });
+        let edge = |b: &mut IrBuilder, at: &str| {
+            granule_band_edge_ix().emit(b, &|n| match n {
+                "idx" => at.to_string(),
+                "g" => g.clone(),
+                "count" => count.to_string(),
+                "gran" => gran.to_string(),
+                "ext" => extent.to_string(),
+                other => unreachable!("unbound schedule name {other}"),
+            })
+        };
+        let lo = edge(b, idx);
         let nx = b.add(idx, "1");
-        let hi0 = b.mul(&nx, &g);
-        let hi1 = b.t();
-        b.w(&format!("{} = sdiv i64 {}, {}", hi1, hi0, count));
-        let hi2 = b.mul(&hi1, gran);
-        let hi3 = b.imin(&hi2, extent);
+        let hi3 = edge(b, &nx);
         let is_last = b.t();
         b.w(&format!("{} = icmp eq i64 {}, {}", is_last, nx, count));
         let hi = b.t();
@@ -4835,12 +4909,16 @@ fn emit_entry() -> String {
     let tn = b.add(&ti, "1");
     let k_last = b.t();
     b.w(&format!("{} = icmp eq i64 {}, {}", k_last, tn, nt));
-    let kl0 = b.mul(&ti, k);
-    let kfrom = b.t();
-    b.w(&format!("{} = sdiv i64 {}, {}", kfrom, kl0, nt));
-    let kl1 = b.mul(&tn, k);
-    let kto0 = b.t();
-    b.w(&format!("{} = sdiv i64 {}, {}", kto0, kl1, nt));
+    let kedge = |b: &mut IrBuilder, at: &str| {
+        prop_band_edge_ix().emit(b, &|n| match n {
+            "t" => at.to_string(),
+            "ext" => k.to_string(),
+            "n" => nt.to_string(),
+            other => unreachable!("unbound schedule name {other}"),
+        })
+    };
+    let kfrom = kedge(&mut b, &ti);
+    let kto0 = kedge(&mut b, &tn);
     let kto = b.t();
     b.w(&format!(
         "{} = select i1 {}, i64 {}, i64 {}",
