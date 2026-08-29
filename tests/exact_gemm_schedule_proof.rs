@@ -136,7 +136,8 @@
 use std::path::PathBuf;
 
 use y::cpu_gemm::{
-    band_base_ix, band_len_ix, band_rem_ix, chunk_end_ix, panel_index_ix, tile_width_ix,
+    band_base_ix, band_len_ix, band_rem_ix, chunk_end_ix, kpairs_ix, panel_index_ix,
+    tile_count_ix, tile_width_ix,
     KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
 };
 use y::zero_drift::VnniExact;
@@ -210,6 +211,8 @@ fn coq_names(n: &'static str) -> String {
         "base" => "base".into(),
         "rem" => "rem".into(),
         "t" => "t".into(),
+        "kc" => "kc".into(),
+        "Tm1" => "Tm1".into(),
         other => panic!("the schedule expressions gained an unbound name `{other}`"),
     }
 }
@@ -221,6 +224,8 @@ fn render(s: &Schedule) -> String {
     let band_base_body = band_base_ix().coq(&coq_names);
     let band_rem_body = band_rem_ix().coq(&coq_names);
     let band_len_body = band_len_ix().coq(&coq_names);
+    let kpairs_body = kpairs_ix().coq(&coq_names);
+    let tile_count_body = tile_count_ix().coq(&coq_names);
     let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
 
     format!(
@@ -363,8 +368,13 @@ Definition panel_half (s width : nat) : nat := (s mod (2 * width)) mod 2.
 (* ------------------------------------------------------------------ *)
 
 (** k-pairs in a K panel of `kc`, rounded up: the phantom half of an odd `kc`
-    is what the packers' zero-fill covers. *)
-Definition kpairs (kc : nat) : nat := (kc + 1) / 2.
+    is what the packers' zero-fill covers.
+
+    **Rendered from `cpu_gemm::kpairs_ix`**, the expression the emitter spells
+    at FIVE sites - both packers, the driver, and twice in the threaded
+    wrapper. Every packing and flush theorem is stated in terms of this number
+    and nothing said the compiler computed the same one. *)
+Definition kpairs (kc : nat) : nat := {kpairs_body}.
 
 (** `mn_tiles`. The output partition: a single ragged tail, clamped. *)
 Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
@@ -459,6 +469,26 @@ Definition band_rem (K nthr : nat) : nat := {band_rem_body}.
 
 (** Band `t`'s length, over the already-hoisted `base` and `rem`. *)
 Definition band_len (base rem t : nat) : nat := {band_len_body}.
+
+(** How many tiles an axis is cut into, as the threaded wrapper computes it.
+
+    `T - 1` is a separate parameter because the emitter FOLDS it at compile
+    time into a literal (`add i64 %M, 5`); modelling it as `T - 1` inside the
+    expression would emit an instruction the compiler does not. *)
+Definition tile_count (ext Tm1 T : nat) : nat := {tile_count_body}.
+
+(** **The tiling-count join**, and it needs `0 < T` because `nat` subtraction
+    truncates: at `T = 0` the model's `ext + T - 1` is `ext - 1` while the
+    emitter's `ext + (T-1)` is `ext`. The emitter cannot reach `T = 0` - the
+    tile is a compile-time constant - but the hypothesis is what makes the
+    folding legitimate rather than incidental. *)
+Theorem the_emitted_tile_count_is_the_tiling_model : forall ext T,
+  0 < T -> ntiles ext T = tile_count ext (T - 1) T.
+Proof.
+  intros ext T HT. unfold ntiles, tile_count.
+  replace (ext + T - 1)%nat with (ext + (T - 1))%nat by lia.
+  reflexivity.
+Qed.
 
 (** **The flush join.** [cw] is the model's chunk width; the emitted loop
     clamps an end instead. *)
@@ -586,6 +616,7 @@ Print Assumptions the_tile_geometry_is_consistent.
 Print Assumptions slot_b_is_the_plain_interleave.
 Print Assumptions the_emitted_width_is_the_tiling_model_at_the_loop_variable.
 Print Assumptions the_emitted_panel_index_is_the_tile_index.
+Print Assumptions the_emitted_tile_count_is_the_tiling_model.
 Print Assumptions the_emitted_chunk_end_is_the_flush_model.
 Print Assumptions the_emitted_band_length_is_the_ksplit_model.
 Print Assumptions the_tile_fits_the_register_file.
@@ -921,6 +952,28 @@ fn the_emitted_arithmetic_is_the_arithmetic_the_proof_describes() {
         ("panel_index_ix @ MR", panel_index_ix(), VNNI_MR, "%M", 2),
     ];
 
+    // `kpairs_ix` is emitted through the builder at three sites - both packers
+    // and the driver - all of which live in `emit_vnni_gemm_module`. Its
+    // operand is a parameter (`%kc` or `%K`), so it is checked separately from
+    // the table above, whose expressions all take the extent.
+    for (kc_reg, want_n) in [("%kc", 2), ("%K", 1)] {
+        let want: Vec<String> = render_llvm(&kpairs_ix(), &|n: &'static str| match n {
+            "kc" => kc_reg.to_string(),
+            other => panic!("unbound {other}"),
+        })
+        .iter()
+        .map(|l| shape(l))
+        .collect();
+        let n = emitted.windows(want.len()).filter(|w| *w == want.as_slice()).count();
+        assert_eq!(
+            n, want_n,
+            "`kpairs_ix` over `{kc_reg}` appears {n} times in the gemm module, \
+             not {want_n}. Every packing and flush theorem is stated in terms \
+             of this number, so a site computing a different one makes those \
+             theorems about a kernel that is not this one."
+        );
+    }
+
     for (name, ix, tile, ext, want_n) in sites {
         let bind = move |n: &'static str| -> String {
             match n {
@@ -1019,6 +1072,50 @@ fn the_raw_emitted_sites_use_the_shared_schedule_expressions() {
                     "iv" => "%c".to_string(),
                     "T" => "64".to_string(),
                     "ext" => "%kpairs".to_string(),
+                    other => panic!("unbound {other}"),
+                },
+            )
+            .0,
+        ),
+        (
+            "tile_count_ix",
+            "the threaded wrapper",
+            vec!["%mtiles0".into(), "%mtiles".into()],
+            render_named(
+                &tile_count_ix(),
+                &mut ["%mtiles0", "%mtiles"].into_iter().map(String::from),
+                &|n| match n {
+                    "ext" => "%M".to_string(),
+                    "Tm1" => (VNNI_MR - 1).to_string(),
+                    "T" => VNNI_MR.to_string(),
+                    other => panic!("unbound {other}"),
+                },
+            )
+            .0,
+        ),
+        (
+            "kpairs_ix @ %K",
+            "the threaded wrapper",
+            vec!["%kp1".into(), "%kps".into()],
+            render_named(
+                &kpairs_ix(),
+                &mut ["%kp1", "%kps"].into_iter().map(String::from),
+                &|n| match n {
+                    "kc" => "%K".to_string(),
+                    other => panic!("unbound {other}"),
+                },
+            )
+            .0,
+        ),
+        (
+            "kpairs_ix @ %klen",
+            "the threaded wrapper",
+            vec!["%kp1b".into(), "%kpsb".into()],
+            render_named(
+                &kpairs_ix(),
+                &mut ["%kp1b", "%kpsb"].into_iter().map(String::from),
+                &|n| match n {
+                    "kc" => "%klen".to_string(),
                     other => panic!("unbound {other}"),
                 },
             )

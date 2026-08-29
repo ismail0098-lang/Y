@@ -137,8 +137,13 @@ Definition panel_half (s width : nat) : nat := (s mod (2 * width)) mod 2.
 (* ------------------------------------------------------------------ *)
 
 (** k-pairs in a K panel of `kc`, rounded up: the phantom half of an odd `kc`
-    is what the packers' zero-fill covers. *)
-Definition kpairs (kc : nat) : nat := (kc + 1) / 2.
+    is what the packers' zero-fill covers.
+
+    **Rendered from `cpu_gemm::kpairs_ix`**, the expression the emitter spells
+    at FIVE sites - both packers, the driver, and twice in the threaded
+    wrapper. Every packing and flush theorem is stated in terms of this number
+    and nothing said the compiler computed the same one. *)
+Definition kpairs (kc : nat) : nat := ((kc + 1) / 2).
 
 (** `mn_tiles`. The output partition: a single ragged tail, clamped. *)
 Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
@@ -233,6 +238,26 @@ Definition band_rem (K nthr : nat) : nat := (K mod nthr).
 
 (** Band `t`'s length, over the already-hoisted `base` and `rem`. *)
 Definition band_len (base rem t : nat) : nat := (base + (if Nat.ltb t rem then 1 else 0)).
+
+(** How many tiles an axis is cut into, as the threaded wrapper computes it.
+
+    `T - 1` is a separate parameter because the emitter FOLDS it at compile
+    time into a literal (`add i64 %M, 5`); modelling it as `T - 1` inside the
+    expression would emit an instruction the compiler does not. *)
+Definition tile_count (ext Tm1 T : nat) : nat := ((ext + Tm1) / T).
+
+(** **The tiling-count join**, and it needs `0 < T` because `nat` subtraction
+    truncates: at `T = 0` the model's `ext + T - 1` is `ext - 1` while the
+    emitter's `ext + (T-1)` is `ext`. The emitter cannot reach `T = 0` - the
+    tile is a compile-time constant - but the hypothesis is what makes the
+    folding legitimate rather than incidental. *)
+Theorem the_emitted_tile_count_is_the_tiling_model : forall ext T,
+  0 < T -> ntiles ext T = tile_count ext (T - 1) T.
+Proof.
+  intros ext T HT. unfold ntiles, tile_count.
+  replace (ext + T - 1)%nat with (ext + (T - 1))%nat by lia.
+  reflexivity.
+Qed.
 
 (** **The flush join.** [cw] is the model's chunk width; the emitted loop
     clamps an end instead. *)
@@ -360,6 +385,7 @@ Print Assumptions the_tile_geometry_is_consistent.
 Print Assumptions slot_b_is_the_plain_interleave.
 Print Assumptions the_emitted_width_is_the_tiling_model_at_the_loop_variable.
 Print Assumptions the_emitted_panel_index_is_the_tile_index.
+Print Assumptions the_emitted_tile_count_is_the_tiling_model.
 Print Assumptions the_emitted_chunk_end_is_the_flush_model.
 Print Assumptions the_emitted_band_length_is_the_ksplit_model.
 Print Assumptions the_tile_fits_the_register_file.

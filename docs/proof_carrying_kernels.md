@@ -1371,6 +1371,58 @@ bands. What is still hand-written is the loop nest's **shape** — which loops
 exist, in what order, which blocks they live in, and what they call. That is a
 larger change than an expression layer and is squarely Phase 2.
 
+#### Phase 1 progress, 2026-08-27 (5) — a sweep for un-extracted arithmetic, and the clearest isolation result yet
+
+Rather than start on the loop nest's shape, the emitted IR was **swept** for
+arithmetic carrying a schedule literal. Three model functions turned out to
+exist in `ExactGemmSchedule.v` and be computed independently by the emitter:
+`kpairs`, `ntiles`, and `a_i32_element`. The first two are now extracted.
+
+**`kpairs` is the one that mattered.** It is spelled at **five** sites — both
+packers, the driver, and twice in the threaded wrapper — and *every packing and
+flush theorem is stated in terms of it*. `ExactGemmPacking.kpairs` is
+`SCH.kpairs`; `padded_product_is_the_live_dot_product` quantifies over
+`kpairs kc`; the micro-kernel's flush decomposes `kpairs`. Nothing said the
+compiler computed the same number. `Definition kpairs` is now rendered from
+`cpu_gemm::kpairs_ix`, and the five sites emit from it.
+
+`tile_count_ix` covers the threaded wrapper's `(M + MR - 1) / MR`. `T - 1` is a
+separate bound name rather than a subterm, because **the emitter folds it at
+compile time into a literal** (`add i64 %M, 5`) — modelling it as `Sub(T, 1)`
+would emit an instruction the compiler does not.
+`the_emitted_tile_count_is_the_tiling_model` states that folding and carries
+`0 < T`, because `nat` subtraction truncates and the two disagree at `T = 0`.
+
+All three modules remain byte-for-byte unchanged.
+
+| mutation | schedule gate | correctness suites |
+|---|---|---|
+| `kpairs` rounds down | FAIL | 4 FAIL |
+| one `kpairs` site bypasses the helper, rounds down | FAIL | 3 FAIL |
+| **`tile_count` uses `T` instead of `T-1`** | **FAIL** | **all ok** |
+
+**The third row is the clearest isolation result in this series, and the reason
+is worth stating exactly.** `%mtiles` feeds *only* `malloc` sizes — `%apn = mul
+%mtiles, %kps`, then a byte count, then `malloc`. Using `T` instead of `T-1`
+computes `(M + 6)/6` where the model says `(M + 5)/6`: never smaller, so the
+buffer is **over-allocated**. An over-allocation produces no wrong answer, no
+crash, and no observable symptom at all. It is precisely a divergence between
+the proof's arithmetic and the emitter's that no test of the *result* can ever
+see — which is the case this whole layer exists for.
+
+That is now the third such case (after the driver's swapped `min` operands and
+the flush clamp's), and together they are the argument for the layer: the
+correctness suites catch everything that changes the answer, and these catch the
+class that does not.
+
+**What is left un-extracted, named rather than left to be rediscovered.**
+`a_i32_element` (`p * MR + i`, the micro-kernel's A load index) is still spelled
+independently — it lives inside a fully unrolled `MR × NRV` emission loop where
+the index is a Rust-side constant per iteration, not an emitted expression, so
+it is a different shape of problem. And the loop nest's **structure** — which
+loops exist, in what order, in which blocks, calling what — remains hand-written.
+That is Phase 2.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
