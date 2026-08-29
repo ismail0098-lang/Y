@@ -1423,6 +1423,72 @@ it is a different shape of problem. And the loop nest's **structure** — which
 loops exist, in what order, in which blocks, calling what — remains hand-written.
 That is Phase 2.
 
+#### Phase 1 progress, 2026-08-29 — the last named leftover, and a correction to how it was named
+
+The previous entry closed with `a_i32_element` recorded as un-extracted and
+described it as "a different shape of problem — the index is a Rust-side
+constant per iteration, not an emitted expression". **That description was
+wrong, and reading the emitter is what settled it.** The micro-kernel emits
+
+    %aidx = mul i64 %p, 6
+    %ai0  = add i64 %aidx, 0
+    ...   through %ai5
+
+Both instructions are emitted. What is Rust-side is one *operand* of the `add`
+— exactly as `T` is a Rust-side constant operand of `tile_width_ix`, which was
+extracted three entries ago without difficulty. A constant operand is not a
+reason an expression cannot be extracted.
+
+Extracted as two expressions, `a_row_base_ix` (`p * MR`) and
+`a_i32_element_ix` (`base + i`), for the reason the K-split bands needed the
+same split: the base is loop-invariant across the `MR`-way unroll and the
+emitter **hoists** it, so the two are not one contiguous instruction sequence.
+`Ix` gained a `Mul` variant to express it. All three emitted modules are
+byte-for-byte unchanged.
+
+**Why this one is worth having rather than tidy.**
+`ExactGemmRegisterTile.the_i32_load_is_the_packed_pair` proves the i32 load at
+element `a_i32_element p i` aliases packed slots `2i` and `2i+1` of k-pair
+group `p` — the little-endian half-order being the ISA fact the whole
+register-tile file rests on. That theorem says nothing whatever about the
+compiler. `the_emitted_a_index_is_the_pair_element` is what says the compiler
+computes that element. Same shape as `kpairs`: a theorem stated in terms of a
+number nothing confirmed the emitter produced.
+
+**The join BITES at two independent layers, checked rather than assumed.**
+Byte-identity catches a change to the Rust `Ix`; and hand-editing the committed
+`.v` so `a_base` reads `p * MR + 1` fails `coqc` at the theorem
+(`Unable to unify "a_elem (a_base p MR) i" with "a_i32_element p i"`). A
+`reflexivity` proof is not thereby paperwork — it is the statement that two
+independently-reachable definitions coincide, and it stops holding the moment
+one of them moves.
+
+**MUTATION TABLE**, each `--test` target run separately from a bash script.
+
+| mutation | schedule gate | correctness suites |
+|---|---|---|
+| A row stride is `NR`, not `MR` | FAIL | 6 FAIL |
+| **`%aidx = mul i64 6, %p` — operands swapped by hand** | **FAIL** | **all ok** |
+| hand-written `mul` with IDENTICAL text | ok | ok |
+
+The middle row is the **fourth same-value divergence** in this series caught by
+the schedule gate and by nothing else, and the count is now the argument rather
+than the anecdote: the correctness suites catch every mutation that changes the
+answer, and this layer catches the class that does not. The third row is the
+design control — the gate checks the *property* (the proof's arithmetic is the
+emitter's arithmetic), not the *plumbing* (that a helper was called), so a
+hand-written identical sequence must pass and does.
+
+**Where extraction now stands.** Every schedule *number* the emitter computes
+is rendered from one description: tile width, panel index, tile count, k-pair
+count, flush chunking, K-split bands, and now the packed-A element index. The
+loop nest's **shape** — which loops exist, in what order, in which basic
+blocks, calling what — is still hand-written `IrBuilder` and raw-string
+emission. That is Phase 2, and it is a materially larger change than an
+expression layer: it needs the emitter restructured around a description of the
+nest rather than around the instructions, and nothing above it can be checked
+by byte-identity in the same cheap way.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
