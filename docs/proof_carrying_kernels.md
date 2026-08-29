@@ -1489,6 +1489,113 @@ expression layer: it needs the emitter restructured around a description of the
 nest rather than around the instructions, and nothing above it can be checked
 by byte-identity in the same cheap way.
 
+#### Phase 2's decisive experiment, run early on a kernel that already existed · 2026-08-29
+
+Phase 2's "Done when" is *a second, structurally different kernel verified with
+no new hand-written proof*, and its stated risk is *"if obligations don't
+compose, the thing is a one-off proof rather than a compiler."* That question
+was answerable now, because **`src/cpu_gemm.rs` already emits two GEMMs.**
+Beside the exact `vpdpwssd` one that nine proofs are about sits
+`__y_sgemm_f32_avx512` — the kernel that ships for ordinary Y programs — which
+partitions the same three axes and had **no proofs at all**.
+
+`proofs/GemmBandSplit.v` (Rocq 9.1, 8 `Print Assumptions`, no axioms) and
+`tests/f32_band_split_model.rs` are that experiment. The answer is a split, and
+the split is the deliverable:
+
+| layer | transferred? |
+|---|---|
+| range folding (`acc_range`, `sum_range_split`) | **verbatim** — folding a contiguous range is not a property of any decomposition |
+| the tiling obligation | **composed, proof did not transfer** — ~30 new lines |
+| the exactness obligation | **provably does not hold**, and that is a result |
+
+**The two kernels split K differently, which is why the proof had to be
+redone.** The exact kernel gives the first `rem` bands one extra k; the f32 one
+is proportional, `[t·K/n, (t+1)·K/n)`. Both tile `[0, K)`;
+`the_two_splits_are_different` exhibits `K = 5, n = 3`, where the proportional
+band 0 has one element and the exact one has two. So the *obligation* is the
+same object and its *discharge* is not — which is exactly the distinction a
+transformation IR would have to mechanise, and the first real datum about
+whether it can.
+
+**The exactness half is a result, not a gap.** f32 addition is not associative,
+so per-band partials do not sum to the naive sum.
+`rounding_breaks_the_proportional_split_too` refutes it at the same `f`, `K`
+and thread count where the exact kernel's own refutation lives, with the same
+control showing the failure belongs to the accumulate rather than to the
+decomposition. The repo asserts bit-identity for the exact kernel and nowhere
+for this one; that is now a stated consequence instead of an omission.
+
+##### The finding: a redundant guard that becomes load-bearing exactly when it is needed
+
+Both decompositions clamp their last band — `select (t+1 == n) ext hi` — under a
+comment saying the last thread takes the remainder "so no row of B is dropped".
+**The clamp never fires**: `(n·ext)/n` is already `ext`, and a granule count
+always covers its extent. Measured exhaustively over the reachable domain
+(0 of 192,000 K cases, 0 of 48,000 granule cases) and proved as `pedge_last` /
+`gedge_last`.
+
+The tempting conclusion is "dead code". **The discriminating experiment says
+otherwise**, and it was run rather than reasoned about:
+
+    R1   band edge broken to (ext/n)*t, clamp kept      correctness suites ALL PASS
+    R1b  same break, clamp removed                      cpu_gemm_threaded FAILS
+
+So the clamp is redundant *with the correct arithmetic* and is precisely what
+turns a wrong band edge into a right answer. It stays, and now with a measured
+reason rather than a comment. This is the mirror image of the packers' masks in
+`ExactGemmPacking.v`, which are redundant *with each other* so neither is
+pinned alone; here the redundancy is with an arithmetic identity, and breaking
+the identity makes the guard live.
+
+`every_edge_snaps_to_a_granule_or_the_extent` promotes a second comment to a
+theorem: a band boundary inside a tile would make one thread write a partial
+tile, and nothing had said it cannot happen.
+
+##### MUTATION TABLE
+
+Each `--test` target run separately from a bash script.
+
+| mutation | schedule gate | band model | correctness |
+|---|---|---|---|
+| K edge `(ext/n)*t` — drops the remainder | FAIL | FAIL | **all ok** (the clamp saves it) |
+| ...same, with the clamp removed | FAIL | FAIL | `cpu_gemm_threaded` FAIL |
+| **K edge operands swapped (same value)** | **FAIL** | ok | **all ok** |
+| granule edge loses its `min(·, ext)` | FAIL | FAIL | all ok |
+| K edge hand-written, identical text | ok | ok | ok |
+| proof re-declares `pedge` (not aliasing) | — | — | `coqc` FAIL |
+| proof re-declares `pedge` identically | — | — | ok |
+
+Rows 5 and 7 are the design controls, and they are the same control twice: the
+gates check the *property* — the proof's arithmetic is the emitter's — not the
+*plumbing*. Row 7's re-declaration is safe for the reason already recorded
+about `mr: 6` versus `mr: VNNI_MR`: the generated `ExactGemmSchedule.v` is
+byte-identity-gated against `cpu_gemm.rs`, so a copy that agrees today fails
+`coqc` the moment the schedule moves.
+
+Row 3 is the fifth same-value divergence caught by the schedule gate alone.
+
+##### `Ix::eval`, so the model test is not a third description
+
+The obvious way to write `f32_band_split_model.rs` is to transcribe the
+arithmetic into Rust — which is the exact defect this layer exists to remove,
+one file over. `Ix` gained an evaluator instead, so the test runs the **same**
+expression the emitter renders to LLVM and the generator renders to Coq: one
+description, three consumers. The three agree because every operand is
+non-negative, where `sdiv`'s truncation and `nat` division's floor coincide;
+`eval` asserts that rather than assuming it.
+
+All four emitted modules — including the 4,752-line f32 one — are byte-for-byte
+unchanged by the extraction.
+
+##### What this does not settle
+
+One kernel is not a compiler. Both of these are GEMMs, so the axes are the same
+even though the decompositions are not; a stencil or an attention kernel would
+test something this does not. And nothing here touches the f32 micro-kernel,
+its packing, or its scratch reduction — this is the schedule, and only the
+schedule.
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation

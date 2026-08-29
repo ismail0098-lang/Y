@@ -261,6 +261,28 @@ Definition tile_count (ext Tm1 T : nat) : nat := ((ext + Tm1) / T).
 Definition a_base (p MR : nat) : nat := (p * MR).
 Definition a_elem (base i : nat) : nat := (base + i).
 
+(** ** The f32 kernel's bands - a SECOND consumer, and a different split
+
+    `src/cpu_gemm.rs` emits two GEMMs. Everything above is the exact `vpdpwssd`
+    one; these two expressions are the **f32 AVX-512** kernel's partitions, and
+    they are here because they are the same KIND of object, not because they
+    are the same object. The f32 K-split is proportional
+    (`[t*K/n, (t+1)*K/n)`), NOT the exact kernel's even-with-remainder split
+    (`[boff, boff + blen)`) - `proofs/GemmBandSplit.v` proves each tiles, and
+    exhibits an instance where they disagree.
+
+    `prop_band_edge`: band `t` of the proportional split runs
+    `[prop_band_edge t n ext, prop_band_edge (S t) n ext)`, so one expression
+    is both ends. *)
+Definition prop_band_edge (t n ext : nat) : nat := ((t * ext) / n).
+
+(** `granule_band_edge`: the f32 M and N bands, which partition the GRANULE
+    COUNT `g` rather than the extent - snapping a band's position to the tile
+    granularity instead dumps the accumulated slack onto one band, and in 2-D
+    the two axes' errors multiply. `g` is [tile_count], so this shares an
+    expression with the exact kernel above. *)
+Definition granule_band_edge (idx g count gran ext : nat) : nat := Nat.min (((idx * g) / count) * gran) ext.
+
 (** **The tiling-count join**, and it needs `0 < T` because `nat` subtraction
     truncates: at `T = 0` the model's `ext + T - 1` is `ext - 1` while the
     emitter's `ext + (T-1)` is `ext`. The emitter cannot reach `T = 0` - the

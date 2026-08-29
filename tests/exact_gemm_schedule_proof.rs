@@ -137,7 +137,8 @@ use std::path::PathBuf;
 
 use y::cpu_gemm::{
     a_i32_element_ix, a_row_base_ix, band_base_ix, band_len_ix, band_rem_ix, chunk_end_ix,
-    kpairs_ix, panel_index_ix, tile_count_ix, tile_width_ix,
+    granule_band_edge_ix, kpairs_ix, panel_index_ix, prop_band_edge_ix, tile_count_ix,
+    tile_width_ix,
     KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
 };
 use y::zero_drift::VnniExact;
@@ -216,6 +217,11 @@ fn coq_names(n: &'static str) -> String {
         "p" => "p".into(),
         "MR" => "MR".into(),
         "i" => "i".into(),
+        "n" => "n".into(),
+        "idx" => "idx".into(),
+        "g" => "g".into(),
+        "count" => "count".into(),
+        "gran" => "gran".into(),
         other => panic!("the schedule expressions gained an unbound name `{other}`"),
     }
 }
@@ -231,6 +237,8 @@ fn render(s: &Schedule) -> String {
     let tile_count_body = tile_count_ix().coq(&coq_names);
     let a_row_base_body = a_row_base_ix().coq(&coq_names);
     let a_elem_body = a_i32_element_ix().coq(&coq_names);
+    let prop_edge_body = prop_band_edge_ix().coq(&coq_names);
+    let granule_edge_body = granule_band_edge_ix().coq(&coq_names);
     let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
 
     format!(
@@ -496,6 +504,28 @@ Definition tile_count (ext Tm1 T : nat) : nat := {tile_count_body}.
     [band_base]/[band_len]. *)
 Definition a_base (p MR : nat) : nat := {a_row_base_body}.
 Definition a_elem (base i : nat) : nat := {a_elem_body}.
+
+(** ** The f32 kernel's bands - a SECOND consumer, and a different split
+
+    `src/cpu_gemm.rs` emits two GEMMs. Everything above is the exact `vpdpwssd`
+    one; these two expressions are the **f32 AVX-512** kernel's partitions, and
+    they are here because they are the same KIND of object, not because they
+    are the same object. The f32 K-split is proportional
+    (`[t*K/n, (t+1)*K/n)`), NOT the exact kernel's even-with-remainder split
+    (`[boff, boff + blen)`) - `proofs/GemmBandSplit.v` proves each tiles, and
+    exhibits an instance where they disagree.
+
+    `prop_band_edge`: band `t` of the proportional split runs
+    `[prop_band_edge t n ext, prop_band_edge (S t) n ext)`, so one expression
+    is both ends. *)
+Definition prop_band_edge (t n ext : nat) : nat := {prop_edge_body}.
+
+(** `granule_band_edge`: the f32 M and N bands, which partition the GRANULE
+    COUNT `g` rather than the extent - snapping a band's position to the tile
+    granularity instead dumps the accumulated slack onto one band, and in 2-D
+    the two axes' errors multiply. `g` is [tile_count], so this shares an
+    expression with the exact kernel above. *)
+Definition granule_band_edge (idx g count gran ext : nat) : nat := {granule_edge_body}.
 
 (** **The tiling-count join**, and it needs `0 < T` because `nat` subtraction
     truncates: at `T = 0` the model's `ext + T - 1` is `ext - 1` while the
@@ -904,54 +934,54 @@ fn the_generated_index_maps_agree_with_the_rust_ones() {
 /// driver that hand-wrote a different one - operands swapped, `sle` for `slt`,
 /// the clamp dropped - fails, which is the case that matters. Register names
 /// are normalised away because they are numbered by the surrounding function.
+/// Normalise only the BUILDER'S OWN temporaries (`%g12`, `%iv4`), leaving
+/// named values like `%M` and `%lda` verbatim.
+///
+/// **Normalising every register was the first attempt and it was too
+/// loose** - it turns `sub i64 %M, %iv` and `sub i64 %iv, %M` into the same
+/// string, which is precisely the distinction this test exists to make.
+/// The non-vacuity control below caught that on the first run, which is
+/// what a control is for. Alpha-renaming does not fix it either: both
+/// operands are distinct registers under any renaming. Keeping the NAMED
+/// half anchored is what makes operand order observable.
+fn shape(line: &str) -> String {
+    let mut out = String::new();
+    let ch: Vec<char> = line.chars().collect();
+    let mut i = 0;
+    while i < ch.len() {
+        if ch[i] == '%' {
+            let start = i + 1;
+            let mut j = start;
+            while j < ch.len() && (ch[j].is_alphanumeric() || ch[j] == '.' || ch[j] == '_') {
+                j += 1;
+            }
+            let name: String = ch[start..j].iter().collect();
+            // A builder temporary: `g` or `iv` followed by digits only.
+            let generated = ["g", "iv"].iter().any(|p| {
+                name.strip_prefix(*p)
+                    .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
+            });
+            out.push_str(if generated { "%_" } else { line_slice(line, i, j) });
+            i = j;
+        } else {
+            out.push(ch[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `line[i..j]` by character index, including the leading `%`.
+fn line_slice(line: &str, i: usize, j: usize) -> &str {
+    let s: Vec<(usize, char)> = line.char_indices().collect();
+    let a = s[i].0;
+    let b = if j < s.len() { s[j].0 } else { line.len() };
+    &line[a..b]
+}
+
 #[test]
 fn the_emitted_arithmetic_is_the_arithmetic_the_proof_describes() {
     use y::cpu_gemm::{emit_vnni_gemm_module, render_llvm};
-
-    /// Normalise only the BUILDER'S OWN temporaries (`%g12`, `%iv4`), leaving
-    /// named values like `%M` and `%lda` verbatim.
-    ///
-    /// **Normalising every register was the first attempt and it was too
-    /// loose** - it turns `sub i64 %M, %iv` and `sub i64 %iv, %M` into the same
-    /// string, which is precisely the distinction this test exists to make.
-    /// The non-vacuity control below caught that on the first run, which is
-    /// what a control is for. Alpha-renaming does not fix it either: both
-    /// operands are distinct registers under any renaming. Keeping the NAMED
-    /// half anchored is what makes operand order observable.
-    fn shape(line: &str) -> String {
-        let mut out = String::new();
-        let ch: Vec<char> = line.chars().collect();
-        let mut i = 0;
-        while i < ch.len() {
-            if ch[i] == '%' {
-                let start = i + 1;
-                let mut j = start;
-                while j < ch.len() && (ch[j].is_alphanumeric() || ch[j] == '.' || ch[j] == '_') {
-                    j += 1;
-                }
-                let name: String = ch[start..j].iter().collect();
-                // A builder temporary: `g` or `iv` followed by digits only.
-                let generated = ["g", "iv"].iter().any(|p| {
-                    name.strip_prefix(*p)
-                        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
-                });
-                out.push_str(if generated { "%_" } else { line_slice(line, i, j) });
-                i = j;
-            } else {
-                out.push(ch[i]);
-                i += 1;
-            }
-        }
-        out
-    }
-
-    /// `line[i..j]` by character index, including the leading `%`.
-    fn line_slice(line: &str, i: usize, j: usize) -> &str {
-        let s: Vec<(usize, char)> = line.char_indices().collect();
-        let a = s[i].0;
-        let b = if j < s.len() { s[j].0 } else { line.len() };
-        &line[a..b]
-    }
 
     let module = emit_vnni_gemm_module(64);
     let emitted: Vec<String> = module.lines().map(shape).map(|l| l.trim().to_string()).collect();
@@ -1270,5 +1300,107 @@ fn the_raw_emitted_sites_use_the_shared_schedule_expressions() {
         "the micro-kernel contains the flush clamp with its operands swapped. \
          That computes the same value, so no correctness test can see it - \
          which is exactly the divergence this gate exists to catch."
+    );
+}
+
+/// The **f32** kernel emits the band arithmetic `proofs/GemmBandSplit.v`
+/// describes.
+///
+/// `src/cpu_gemm.rs` emits two GEMMs, and everything above this test is about
+/// the exact one. `__y_sgemm_f32_avx512` partitions the same three axes with a
+/// DIFFERENT K-split - proportional rather than even-with-remainder - and its
+/// M/N bands partition the granule count. Both now render from the shared
+/// expressions, so this is the same universal claim one kernel over: the
+/// arithmetic in the proof is the arithmetic the compiler emits.
+///
+/// Counts are per site, for the reason recorded on the exact kernel's table: an
+/// existential search is satisfied while one site of several diverges.
+#[test]
+fn the_f32_kernel_emits_the_band_arithmetic_the_proof_describes() {
+    use y::cpu_gemm::{emit_kernel_module, render_llvm, DEFAULT_TILE};
+
+    let module = emit_kernel_module();
+    let emitted: Vec<String> = module.lines().map(shape).map(|l| l.trim().to_string()).collect();
+
+    let find = |want: &[String]| -> usize {
+        emitted.windows(want.len()).filter(|w| *w == want).count()
+    };
+    let render = |ix: &y::cpu_gemm::Ix, b: &dyn Fn(&'static str) -> String| -> Vec<String> {
+        render_llvm(ix, b).iter().map(|l| shape(l)).collect()
+    };
+
+    // A builder temporary, which `shape` normalises exactly as it normalises
+    // the emitter's own. The ANCHORS are the extents (`%M`, `%N`, `%K`) and the
+    // M-axis granularity, which is the compile-time `MR`.
+    let t = || "%g0".to_string();
+    let mr = DEFAULT_TILE.mr.to_string();
+
+    // The granule count is `tile_count_ix` - the same expression the exact
+    // kernel's threaded wrapper uses for `(M + MR-1)/MR`. Here `gran` is a
+    // register on the N axis, so `Tm1` is emitted rather than folded.
+    for (axis, ext, gran, want_n) in [("M", "%M", mr.clone(), 1usize), ("N", "%N", t(), 1)] {
+        let want = render(&tile_count_ix(), &|n| match n {
+            "ext" => ext.to_string(),
+            "Tm1" => t(),
+            "T" => gran.clone(),
+            other => panic!("unbound {other}"),
+        });
+        let n = find(&want);
+        assert_eq!(
+            n, want_n,
+            "the f32 kernel's {axis}-axis granule count is not `tile_count_ix` \
+             ({n} matches, not {want_n})"
+        );
+    }
+
+    // The band edge, at both ends of both axes.
+    for (axis, ext, gran, want_n) in [("M", "%M", mr.clone(), 2usize), ("N", "%N", t(), 2)] {
+        let want = render(&granule_band_edge_ix(), &|n| match n {
+            "idx" => t(),
+            "g" => t(),
+            "count" => t(),
+            "gran" => gran.clone(),
+            "ext" => ext.to_string(),
+            other => panic!("unbound {other}"),
+        });
+        let n = find(&want);
+        assert_eq!(
+            n, want_n,
+            "the f32 kernel's {axis} band edge appears {n} times, not {want_n}. \
+             `GemmBandSplit.gedge_last` proves the emitted last-band clamp is \
+             redundant; if the edge is no longer this expression that theorem is \
+             about a kernel that is not this one."
+        );
+    }
+
+    // The proportional K-split: `[t*K/n, (t+1)*K/n)`, one expression, both ends.
+    let want = render(&prop_band_edge_ix(), &|n| match n {
+        "t" => t(),
+        "ext" => "%K".to_string(),
+        "n" => t(),
+        other => panic!("unbound {other}"),
+    });
+    let n = find(&want);
+    assert_eq!(
+        n, 2,
+        "the f32 K-split's band edge appears {n} times, not 2 (its two ends). \
+         `GemmBandSplit.prop_ksplit_exact` is stated over this decomposition."
+    );
+
+    // Non-vacuity, and it is a real distinction rather than a formality: the
+    // EXACT kernel's split is `K/nthr` + a remainder test, and if the f32
+    // kernel emitted that instead, every theorem in GemmBandSplit.v would be
+    // about the wrong partition while still being true of its own definitions.
+    let exact_shaped = render(&band_base_ix(), &|n| match n {
+        "K" => "%K".to_string(),
+        "nthr" => t(),
+        other => panic!("unbound {other}"),
+    });
+    assert_eq!(
+        find(&exact_shaped),
+        0,
+        "the f32 kernel divides %K by the thread count directly, which is the \
+         EXACT kernel's decomposition - the two splits are supposed to differ, \
+         and GemmBandSplit.the_two_splits_are_different says so"
     );
 }

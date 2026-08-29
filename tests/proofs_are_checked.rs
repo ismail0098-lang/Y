@@ -352,6 +352,31 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            "GemmBandSplit.v",
+            &[
+                // The f32 kernel is the SECOND kernel, and its K-split is a
+                // different decomposition. The tiling obligation composed; its
+                // proof did not transfer.
+                "prop_ksplit_exact",
+                "prop_bands_tile",
+                // ...and that it really is a different partition, or the
+                // theorem above would be the exact kernel's wearing a hat.
+                "the_two_splits_are_different",
+                // The two last-band clamps the emitter writes are redundant -
+                // the property that was a comment in `emit_entry`.
+                "pedge_last",
+                "gedge_last",
+                // A band boundary inside a tile would make one thread write a
+                // partial tile; also only a comment before.
+                "every_edge_snaps_to_a_granule_or_the_extent",
+                // The exactness obligation provably does NOT transfer, at the
+                // same f/K/nthr as the exact kernel's own refutation, with the
+                // control that says the failure is the accumulate's.
+                "rounding_breaks_the_proportional_split_too",
+                "exact_survives_the_proportional_split",
+            ][..],
+        ),
+        (
             "ExactGemmTiling.v",
             &[
                 // The output tiles account for the axis exactly...
