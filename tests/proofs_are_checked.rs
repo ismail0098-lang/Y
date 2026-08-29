@@ -352,6 +352,30 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            "Decomposition.v",
+            &[
+                // The partition obligation, proved once and instantiated by
+                // all three kernels. Two theorems, not one: contiguous parts
+                // are a re-bracketing and cost only associativity; an
+                // arbitrary owner map reorders the terms and costs
+                // commutativity as well.
+                "contiguous_exact",
+                "decomposition_exact",
+                "parts_tile",
+                "acc_parts_prefix",
+                // ...and that the two really are different claims, or
+                // "use the general one everywhere" would be free.
+                "the_interleaved_split_is_not_contiguous",
+                // The refutation every kernel used to carry its own copy of:
+                // the theorems are about the ACCUMULATE, not the indices.
+                "rounding_breaks_a_contiguous_split",
+                "rounding_breaks_an_interleaved_split",
+                "exact_survives_the_same_split",
+                "exact_survives_the_interleaved_split",
+                "the_two_accumulates_differ_on_this_input",
+            ][..],
+        ),
+        (
             "GridStrideSplit.v",
             &[
                 // The third kernel, and the first that is not a GEMM: the
@@ -360,6 +384,9 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "grid_stride_exact",
                 "stride_classes_partition",
                 "any_worker_count_agrees",
+                // The instantiation itself: this kernel's classes ARE the
+                // schema's parts at the owner map `i |-> i mod n`.
+                "combine_is_decomposition",
                 // The property neither GEMM proof needed. The atomics supply
                 // their operands in whatever order the hardware chooses, so
                 // this one needs commutativity and not just associativity.
@@ -383,6 +410,12 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // proof did not transfer.
                 "prop_ksplit_exact",
                 "prop_bands_tile",
+                // The measurement the schema exists to produce: the M/N split
+                // had edge theorems and no exactness theorem, because writing
+                // the reduction out a third time was not worth it. Under
+                // `Decomposition` it costs one application and the three edge
+                // facts already proved.
+                "granule_split_exact",
                 // ...and that it really is a different partition, or the
                 // theorem above would be the exact kernel's wearing a hat.
                 "the_two_splits_are_different",

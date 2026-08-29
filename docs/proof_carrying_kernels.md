@@ -1888,7 +1888,63 @@ the emitter. Four mutations, all caught — remove the guard, clamp at `2^31`,
 clamp after the narrowing, and drop the clamp from *both* arms of the model,
 which is the vacuous-necessity case.
 
-618 / 884 tests, both builds green. Twelve proofs, no axioms.
+#### Phase 2's research question, answered from what was already here
+
+Phase 2's stated risk is *"if obligations don't compose, the thing is a one-off
+proof rather than a compiler."* Three files were proving the same theorem three
+times — `ExactGemmKsplit` (contiguous uneven bands), `GemmBandSplit`
+(proportional edges, plus a granule-snapped family), `GridStrideSplit`
+(interleaved residue classes) — each with its own edge facts, prefix lemma,
+tiling theorem, rounding refutation and control. That question is answerable
+with no new kernel, no IR and no hardware.
+
+`proofs/Decomposition.v` is the schema. Every existing theorem keeps its exact
+statement; its *proof* becomes an instantiation.
+
+**It is TWO theorems, and which one a kernel gets is decided by whether its
+parts are contiguous.** `contiguous_exact` takes an edge function with three
+properties and spends **associativity only** — consecutive parts are a
+re-bracketing, not a reordering. `decomposition_exact` takes an arbitrary
+`owner` map, so the terms genuinely change order, and needs **commutativity**.
+Neither is derived from the other: the general form would give the contiguous
+one only by inverting the edge function, and would then demand commutativity
+the contiguous case does not need — a *weaker* result presented as a simpler
+one. `the_interleaved_split_is_not_contiguous` stops "just use the general one
+everywhere" from looking free. That distinction was prose scattered across two
+files and is now two theorems.
+
+**The honest headline is that it does not save lines — the total went up.**
+255 tactic lines across the three files became 269, plus 76 in the shared one.
+Two causes, both real: each kernel gained a ~5-line *bridge* saying its own fold
+IS the schema's fold (the price of leaving every statement unchanged), and
+`GemmBandSplit` gained a theorem that did not exist before. The proof burden was
+already thin because the informal reuse was already happening — `GemmBandSplit`
+reused `acc_range` and `sum_range_split` by name and copied the *shape* of the
+rest.
+
+What it buys instead:
+
+- **A theorem that did not exist.** The f32 kernel's M/N granule split had four
+  theorems about its *edges* and no exactness theorem, because writing the
+  reduction out a third time was not worth it for a family used to cut rows and
+  columns. Under the schema it costs one application and the three edge facts
+  already proved. Measured against a straw-man written the old way, in the same
+  file, both compiling and proving the same thing: **11 tactic lines standalone,
+  7 through the schema** — so the marginal cost of a *new* decomposition is a
+  bridge plus three facts, with **no new induction and no new reasoning about
+  ranges**.
+- **The reuse becomes a checked dependency instead of a convention.** Same move
+  as `ExactGemmSchedule.v` made for constants, with the same honest caveat that
+  file's header carries: nothing had actually drifted. Six mutations, all caught
+  by `proofs_are_checked` — drop either theorem's key hypothesis, declare the
+  interleaved split contiguous, make `part` ignore its owner, instantiate the
+  granule family with the *proportional* edge function.
+- **The standing limit, stated rather than gated:** nothing *forces* a kernel to
+  instantiate the schema. The straw-man above compiles perfectly. What is
+  guaranteed is that the three which do instantiate it cannot drift from each
+  other — a change to `contiguous_exact` breaks all of them at once.
+
+618 / 884 tests, both builds green. **Thirteen proofs, no axioms.**
 
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
