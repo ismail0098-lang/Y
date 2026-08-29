@@ -274,10 +274,13 @@ fn the_stride_is_the_worker_count() {
 }
 
 /// A control on the two tests above: they must be looking at a real
-/// decomposition in BOTH entries, not silently at one.
+/// decomposition in EVERY entry, not silently at one.
 ///
-/// `attn_scores` is deliberately excluded - it is one thread per key and
-/// reduces nothing, so it has no stride loop to check.
+/// `attn_scores` was excluded here while it was one thread per key with no
+/// stride loop to check. That exclusion was the bug, not a scoping decision:
+/// the entry carried the opposite launch contract to its two siblings and
+/// nothing in this file could say so. It is in `REDUCING_ENTRIES` now, and the
+/// assertion below is what stops it being dropped again.
 #[test]
 fn every_reducing_entry_was_actually_examined() {
     let ptx = ptx();
@@ -297,7 +300,8 @@ fn every_reducing_entry_was_actually_examined() {
     }
     assert!(
         !entry_body(&ptx, "attn_scores").is_empty(),
-        "attn_scores vanished; the exclusion above would then be hiding it"
+        "attn_scores vanished; the loop above would then be checking two \
+         entries while claiming three"
     );
 }
 

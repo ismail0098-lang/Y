@@ -43,11 +43,27 @@
     now, so everything below applies to it verbatim; nothing here changed to
     make that true.
 
-    Its reduction is `red.global.max.s32` rather than a sum. Order-independence
-    there needs no theorem - max is associative, commutative AND idempotent - but
-    its IDENTITY is not supplied by the kernel: the host must seed `M[b]` at
-    `i32::MIN`. That is the one precondition this kernel family still carries,
-    and nothing checks it.
+    Its reduction is a max rather than a sum. Order-independence there needs no
+    theorem - max is associative, commutative AND idempotent - but its IDENTITY
+    has to come from somewhere, and it used to come from the host: a signed max
+    wants `i32::MIN`, which is not a uniform byte pattern, so `M` could not be
+    seeded by the `memset(0)` that every other accumulator in the module takes.
+    A caller who used one anyway got a silently wrong answer whenever a row's
+    scores were ALL negative - a precondition that cannot fire on random int8
+    data, which is the worst kind.
+
+    The kernel supplies it now. `x ^ 0x80000000` is the order-preserving
+    signed->unsigned bijection, so a max over the biased values is the max over
+    the originals and `red.global.max.u32` has identity 0: a zeroed buffer MEANS
+    `i32::MIN`. The two accumulating entries undo the bias when they load
+    `M[b]`. Guarded by [a_zeroed_max_buffer_is_the_identity] and
+    [the_accumulating_entries_undo_the_bias] in
+    `tests/gpu_attention_invariance.rs`; the second of those exists because the
+    undo is invisible at the temperature every other test shares (2^15 * KFix is
+    exactly 2^34 there, so the u32 truncation annihilates a missing undo).
+
+    Nothing here changed to accommodate that: `f` is an arbitrary function of the
+    index, so the bias is inside `f` and the partition theorems are untouched.
 
     ** What is NOT proved.
 

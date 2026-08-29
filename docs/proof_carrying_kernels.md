@@ -1798,15 +1798,57 @@ branch that closes the loop, which is a property of loops rather than a shape
 that happens to be unique today. First the marker, now the back-edge: both
 times the fix was to anchor on something the kernel actually *says*.
 
-##### The one precondition that remains
+##### The last precondition is removed rather than documented, and the test that
+##### should have covered it was annihilated by a shared constant
 
-`red.global.max.s32` needs no order argument — max is associative, commutative
-and idempotent — but its **identity is not supplied by the kernel**: the host
-must seed `M[b]` at `i32::MIN`. Nothing checks that. It is stated in the kernel
-and in the proof header rather than left implicit, and it is the last unchecked
-precondition in this family.
+`red.global.max` needs no order argument — max is associative, commutative and
+idempotent, so `GridStrideSplit.v` covers the order. Its **identity** is a
+different question, and it used to come from the host: a signed max wants
+`i32::MIN`, which is not a uniform byte pattern, so `M` could not take the
+`memset(0)` that L, O and P all take. A caller who used one anyway got a wrong
+answer **only when a row's scores were all negative** — with `max(0, s) = 0` the
+softmax subtracts a maximum no key attains, and in Q0.28 the weights quantise
+toward zero instead of cancelling as they would in exact arithmetic.
 
-615 / 881 tests, both builds green. Twelve proofs, no axioms.
+**That is the worst shape a precondition can have: it cannot fire on random
+int8 data**, where the max over hundreds of keys is positive with overwhelming
+probability. Every test in the file passed either way.
+
+`x ^ 0x80000000` is the order-preserving signed→unsigned bijection, so a max
+over the biased values is the max over the originals and **unsigned max has
+identity 0** — a zeroed buffer now *means* `i32::MIN`, and the module's contract
+is uniform: everything it writes starts at zero. The two accumulating entries
+undo the bias when they load `M[b]`.
+
+**The interesting half is the mutation that survived.** Deleting the undo from
+*one* of the two accumulating entries passed everything, including the
+accum-vs-naive differential on `p` — which is precisely the comparison that
+should catch a one-sided change. The cause is arithmetic and worth stating: the
+exp argument is `((m - s) * KFix + 2^15) >> 16` computed in 64 bits and then
+**truncated to u32**, so a missing undo shifts it by `2^15 * KFix`, and every
+test passed `KFix = 8 << 16 = 2^19`, for which that shift is exactly `2^34` —
+**zero modulo 2^32**. The truncation annihilated the bug at the one temperature
+every arm of the differential shared. `feedback-differential-arms-share-constants`,
+in a place nobody thought to look: not a scale factor both sides multiply by,
+but a constant that makes a *wrong* value truncate to the right one.
+
+A real model's softmax scale is `q_scale * k_scale / sqrt(d)` and does not
+oblige. `the_accumulating_entries_undo_the_bias` uses `2^19 + 1` — the same
+temperature to within 2e-6, odd, so the shift is `2^15` and a missing undo
+drives almost every weight to zero — and checks `p` against
+`fixed_exp::exp2_neg_q16_16` on the host over the device's own scores. That is
+the oracle `p` never had: the existing test says `p` is "a per-element function
+of `s`, so it is not what is in question here", true of the *reduction* claim,
+and the undo lives exactly there. **When a docstring explains why something is
+out of scope, check what has since moved into it.**
+
+Six mutations, all caught, `gpu_attention_invariance` the only suite that fires
+for any of them: full revert to a signed max; drop the bias in `attn_scores`
+only; drop the undo in each accumulating entry separately (the survivor, now
+caught); bias with `0x40000000`, which is not order-preserving; and keep the
+bias but reduce with a *signed* max, which puts the identity back where it was.
+
+617 / 883 tests, both builds green. Twelve proofs, no axioms.
 
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
