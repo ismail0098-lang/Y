@@ -135,7 +135,10 @@
 
 use std::path::PathBuf;
 
-use y::cpu_gemm::{VNNI_MR, VNNI_NR, VNNI_NRV, KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND};
+use y::cpu_gemm::{
+    panel_index_ix, tile_width_ix, KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR,
+    VNNI_NRV,
+};
 use y::zero_drift::VnniExact;
 
 fn repo() -> PathBuf {
@@ -191,7 +194,24 @@ fn schedule_path() -> PathBuf {
     repo().join("proofs").join("ExactGemmSchedule.v")
 }
 
+/// Bind the schedule expressions' names to Coq variables.
+///
+/// The LLVM side binds the same names to registers. That is the whole point:
+/// [tile_width_ix] and [panel_index_ix] are ONE expression with two renderings,
+/// so the definitions below are not a transcription of the emitter - they are
+/// the emitter's own arithmetic.
+fn coq_names(n: &'static str) -> String {
+    match n {
+        "ext" => "ext".into(),
+        "iv" => "iv".into(),
+        "T" => "T".into(),
+        other => panic!("the schedule expressions gained an unbound name `{other}`"),
+    }
+}
+
 fn render(s: &Schedule) -> String {
+    let tile_width_body = tile_width_ix().coq(&coq_names);
+    let panel_index_body = panel_index_ix().coq(&coq_names);
     let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
 
     format!(
@@ -369,6 +389,53 @@ Definition cw (Fl n t : nat) : nat := Nat.min (coff Fl (S t)) n - coff Fl t.
 Definition nchunks (Fl n : nat) : nat := (n + Fl - 1) / Fl.
 
 (* ------------------------------------------------------------------ *)
+(** ** The emitter's own index arithmetic                              *)
+(* ------------------------------------------------------------------ *)
+
+(** **These two are rendered from the SAME expressions the emitter renders to
+    LLVM** - `cpu_gemm::tile_width_ix` and `panel_index_ix`, via `Ix::coq`
+    where the driver uses `Ix::emit`. Everything above is generated from a
+    constant; these are generated from the emitted CODE's arithmetic.
+
+    That is the difference between a model that agrees with the emitter and a
+    model that IS the emitter, for this slice of the schedule. The slice is
+    small and deliberately so: it is the tile-width clamp and the panel index,
+    which is the arithmetic the driver's loop nest does on its induction
+    variables, and which §1 of `docs/proof_carrying_kernels.md` names as where
+    the bugs live ("twelve address computations ... correct only because
+    `lda == K` made stride and extent the same number"). Which loops exist, in
+    what order, and what they call is still hand-written. *)
+
+(** The live width of the tile starting at induction variable `iv`. *)
+Definition tile_width (ext iv T : nat) : nat := {tile_width_body}.
+
+(** Which packed panel the tile at `iv` reads. *)
+Definition panel_index (iv T : nat) : nat := {panel_index_body}.
+
+(** **The join.** [tw] is the tiling model, stated over the tile INDEX; the
+    emitted loop has the induction variable instead. This says they are the
+    same number, which is what lets `ExactGemmTiling.v`'s partition theorems
+    describe the emitted driver.
+
+    It was implicit before: the emitter clamped with three `IrBuilder` calls
+    and a behavioural test (`exact_gemm_tile_enumeration.rs`) sampled the
+    result. *)
+Theorem the_emitted_width_is_the_tiling_model_at_the_loop_variable :
+  forall ext T t, tw ext T t = tile_width ext (toff T t) T.
+Proof. reflexivity. Qed.
+
+(** ...and the emitted `sdiv iv, T` really does recover the tile index, so the
+    panel a tile reads is its own. Getting this wrong is a correctly-computed
+    tile read from the wrong panel - the shape of bug this repo catalogues as
+    invisible to a relative-L2 check. *)
+Theorem the_emitted_panel_index_is_the_tile_index :
+  forall T t, 0 < T -> panel_index (toff T t) T = t.
+Proof.
+  intros T t HT. unfold panel_index, toff.
+  rewrite Nat.div_mul by lia. reflexivity.
+Qed.
+
+(* ------------------------------------------------------------------ *)
 (** ** What this file proves about itself                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -474,6 +541,8 @@ Proof. repeat split; reflexivity. Qed.
 
 Print Assumptions the_tile_geometry_is_consistent.
 Print Assumptions slot_b_is_the_plain_interleave.
+Print Assumptions the_emitted_width_is_the_tiling_model_at_the_loop_variable.
+Print Assumptions the_emitted_panel_index_is_the_tile_index.
 Print Assumptions the_tile_fits_the_register_file.
 Print Assumptions ksplit_threads_is_never_zero.
 Print Assumptions the_schedule_is_the_shipped_one.
@@ -713,4 +782,151 @@ fn the_generated_index_maps_agree_with_the_rust_ones() {
             assert_eq!(h, (s % (2 * width)) % 2, "panel_half at ({s}, {width})");
         }
     }
+}
+
+/// The claim this file's index-arithmetic half makes, checked against the real
+/// emitted module.
+///
+/// `tile_width_ix` and `panel_index_ix` are ONE expression with two renderings:
+/// `Ix::coq` produces the definitions in `proofs/ExactGemmSchedule.v`, and
+/// `Ix::emit` produces the driver's instructions. This asserts the second half
+/// - that the arithmetic the proof describes is the arithmetic the compiler
+/// emits - by rendering each expression standalone and requiring the same
+/// instruction SHAPE to appear in `emit_vnni_gemm_module`.
+///
+/// **It checks the PROPERTY, not the plumbing.** A driver that hand-wrote an
+/// identical clamp would pass, and should: there would be no divergence. A
+/// driver that hand-wrote a different one - operands swapped, `sle` for `slt`,
+/// the clamp dropped - fails, which is the case that matters. Register names
+/// are normalised away because they are numbered by the surrounding function.
+#[test]
+fn the_emitted_arithmetic_is_the_arithmetic_the_proof_describes() {
+    use y::cpu_gemm::{emit_vnni_gemm_module, render_llvm};
+
+    /// Normalise only the BUILDER'S OWN temporaries (`%g12`, `%iv4`), leaving
+    /// named values like `%M` and `%lda` verbatim.
+    ///
+    /// **Normalising every register was the first attempt and it was too
+    /// loose** - it turns `sub i64 %M, %iv` and `sub i64 %iv, %M` into the same
+    /// string, which is precisely the distinction this test exists to make.
+    /// The non-vacuity control below caught that on the first run, which is
+    /// what a control is for. Alpha-renaming does not fix it either: both
+    /// operands are distinct registers under any renaming. Keeping the NAMED
+    /// half anchored is what makes operand order observable.
+    fn shape(line: &str) -> String {
+        let mut out = String::new();
+        let ch: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i < ch.len() {
+            if ch[i] == '%' {
+                let start = i + 1;
+                let mut j = start;
+                while j < ch.len() && (ch[j].is_alphanumeric() || ch[j] == '.' || ch[j] == '_') {
+                    j += 1;
+                }
+                let name: String = ch[start..j].iter().collect();
+                // A builder temporary: `g` or `iv` followed by digits only.
+                let generated = ["g", "iv"].iter().any(|p| {
+                    name.strip_prefix(*p)
+                        .is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
+                });
+                out.push_str(if generated { "%_" } else { line_slice(line, i, j) });
+                i = j;
+            } else {
+                out.push(ch[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// `line[i..j]` by character index, including the leading `%`.
+    fn line_slice(line: &str, i: usize, j: usize) -> &str {
+        let s: Vec<(usize, char)> = line.char_indices().collect();
+        let a = s[i].0;
+        let b = if j < s.len() { s[j].0 } else { line.len() };
+        &line[a..b]
+    }
+
+    let module = emit_vnni_gemm_module(64);
+    let emitted: Vec<String> = module.lines().map(shape).map(|l| l.trim().to_string()).collect();
+
+    // Every site in the driver, with the tile it is instantiated at. Counting
+    // is what makes this a claim about ALL of them.
+    //
+    // **The first version searched for the arithmetic ANYWHERE in the module
+    // and that was too weak** - it is satisfied while one site of three
+    // diverges, and mutation proved it: swapping the `min` operands at the
+    // i-loop (same VALUE, different instructions) passed this test AND all
+    // five correctness suites, because the other two sites still matched.
+    // Counting turns an existential into a universal.
+    //
+    // A count is deliberately brittle against the driver gaining or losing a
+    // loop. That should be a deliberate edit, and this is where it gets
+    // noticed.
+    let sites: &[(&str, y::cpu_gemm::Ix, usize, &str, usize)] = &[
+        // The pack-A loop and the i-loop walk M in steps of MR; the j-loop
+        // walks N in steps of NR. The extent is part of the site, not a
+        // constant of the expression - binding it to `%M` everywhere was the
+        // first attempt and the NR site reported 0.
+        ("tile_width_ix @ M/MR", tile_width_ix(), VNNI_MR, "%M", 2),
+        ("tile_width_ix @ N/NR", tile_width_ix(), VNNI_NR, "%N", 1),
+        // The A panel index, at the pack-A loop and the i-loop. It does not
+        // mention the extent.
+        ("panel_index_ix @ MR", panel_index_ix(), VNNI_MR, "%M", 2),
+    ];
+
+    for (name, ix, tile, ext, want_n) in sites {
+        let bind = move |n: &'static str| -> String {
+            match n {
+                "ext" => (*ext).into(),
+                // A builder-shaped name, so `shape` normalises it exactly as
+                // it normalises the driver's own induction temporary.
+                "iv" => "%g0".into(),
+                "T" => tile.to_string(),
+                other => panic!("unbound {other}"),
+            }
+        };
+        let want: Vec<String> = render_llvm(ix, &bind).iter().map(|l| shape(l)).collect();
+        assert!(!want.is_empty(), "{name} rendered to nothing");
+
+        let n = emitted
+            .windows(want.len())
+            .filter(|w| *w == want.as_slice())
+            .count();
+        assert_eq!(
+            n, *want_n,
+            "`{name}` renders to an instruction sequence the driver contains \
+             {n} times, not {want_n}. Either a site stopped using the shared \
+             schedule expression - so the arithmetic in \
+             proofs/ExactGemmSchedule.v is no longer the arithmetic the \
+             compiler emits - or the loop nest gained or lost a site and this \
+             table needs updating deliberately.\nrendered:\n  {}\n",
+            want.join("\n  ")
+        );
+    }
+
+    // Non-vacuity: the clamp with its operands reversed must appear NOWHERE.
+    // `%M` stays anchored under `shape`, which is what makes operand order
+    // observable at all - normalising every register made this control fire on
+    // the first run, correctly.
+    let reversed = y::cpu_gemm::Ix::Sub(
+        Box::new(y::cpu_gemm::Ix::Val("iv")),
+        Box::new(y::cpu_gemm::Ix::Val("ext")),
+    );
+    let bind0 = |n: &'static str| -> String {
+        match n {
+            "ext" => "%M".into(),
+            "iv" => "%g0".into(),
+            "T" => VNNI_MR.to_string(),
+            other => panic!("unbound {other}"),
+        }
+    };
+    let wrong: Vec<String> = render_llvm(&reversed, &bind0).iter().map(|l| shape(l)).collect();
+    assert!(
+        !emitted.windows(wrong.len()).any(|w| w == wrong.as_slice()),
+        "the driver contains `iv - ext`, the tile-width clamp with its operands \
+         reversed. Either the emitter is wrong or this control is matching too \
+         loosely to mean anything."
+    );
 }

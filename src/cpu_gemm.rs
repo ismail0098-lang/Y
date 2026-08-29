@@ -721,15 +721,16 @@ fn emit_vnni_gemm_driver() -> String {
     let panel_stride = b.mul(&kpairs, &(VNNI_MR * 2).to_string());
     let pal = b.loop_begin("vg.pa", "0", m, &VNNI_MR.to_string());
     let pai = b.iv(&pal);
-    let pa_rem = b.sub(m, &pai);
-    let pa_mw = b.imin(&pa_rem, &VNNI_MR.to_string());
+    let pa_env = |n: &'static str| match n {
+        "ext" => m.to_string(),
+        "iv" => pai.clone(),
+        "T" => VNNI_MR.to_string(),
+        other => unreachable!("unbound schedule name {other}"),
+    };
+    let pa_mw = tile_width_ix().emit(&mut b, &pa_env);
     let pa_row = b.mul(&pai, lda);
     let pa_src = b.gep("i16", a, &pa_row);
-    let pa_idx = b.t();
-    b.w(&format!(
-        "{} = sdiv i64 {}, {}",
-        pa_idx, pai, VNNI_MR
-    ));
+    let pa_idx = panel_index_ix().emit(&mut b, &pa_env);
     let pa_off = b.mul(&pa_idx, &panel_stride);
     let pa_dst = b.gep("i16", ap, &pa_off);
     b.w(&format!(
@@ -740,8 +741,12 @@ fn emit_vnni_gemm_driver() -> String {
 
     let jl = b.loop_begin("vg.j", "0", n, &VNNI_NR.to_string());
     let j0 = b.iv(&jl);
-    let rem_n = b.sub(n, &j0);
-    let nw = b.imin(&rem_n, &VNNI_NR.to_string());
+    let nw = tile_width_ix().emit(&mut b, &|nm: &'static str| match nm {
+        "ext" => n.to_string(),
+        "iv" => j0.clone(),
+        "T" => VNNI_NR.to_string(),
+        other => unreachable!("unbound schedule name {other}"),
+    });
     let bsub = b.gep("i16", bb, &j0);
     b.w(&format!(
         "call void @__y_gemm_vnni_pack_b(ptr {}, i64 {}, i64 {}, i64 {}, ptr {})",
@@ -750,10 +755,14 @@ fn emit_vnni_gemm_driver() -> String {
 
     let il = b.loop_begin("vg.i", "0", m, &VNNI_MR.to_string());
     let i0 = b.iv(&il);
-    let rem_m = b.sub(m, &i0);
-    let mw = b.imin(&rem_m, &VNNI_MR.to_string());
-    let ai_idx = b.t();
-    b.w(&format!("{} = sdiv i64 {}, {}", ai_idx, i0, VNNI_MR));
+    let i_env = |nm: &'static str| match nm {
+        "ext" => m.to_string(),
+        "iv" => i0.clone(),
+        "T" => VNNI_MR.to_string(),
+        other => unreachable!("unbound schedule name {other}"),
+    };
+    let mw = tile_width_ix().emit(&mut b, &i_env);
+    let ai_idx = panel_index_ix().emit(&mut b, &i_env);
     let ai_off = b.mul(&ai_idx, &panel_stride);
     let apan = b.gep("i16", ap, &ai_off);
 
@@ -1806,6 +1815,137 @@ pub const KSPLIT_MIN_BAND: usize = 128;
 /// Largest K-split thread count the emitted wrapper will use. Mirrors the
 /// `maxthr` substituted into `emit_vnni_threaded_module`.
 pub const KSPLIT_MAX_THREADS: usize = 64;
+
+// ── The schedule's index algebra: ONE description, two consumers ────────────
+//
+// `docs/proof_carrying_kernels.md` names the gap Phase 1 leaves about itself:
+// the loop STRUCTURE is modelled rather than extracted, so the tie is between
+// two models rather than to the emitted LLVM. `proofs/ExactGemmSchedule.v`
+// closed that for CONSTANTS by generating them from here. This closes it for
+// the piece of the STRUCTURE where §1 says the bugs live - "twelve address
+// computations in the CPU GEMM were correct only because `lda == K` made
+// stride and extent the same number".
+//
+// An [`Ix`] is a small index expression. It is rendered TWO ways from one
+// value: to LLVM by [`Ix::emit`], and to Coq by [`Ix::coq`]. The emitter no
+// longer spells the clamped tile width as three `IrBuilder` calls that a proof
+// happens to describe - the proof's definition and the emitted instructions are
+// the same expression.
+//
+// Deliberately tiny. This is not an IR: it covers the tile-width clamp and the
+// panel index, which is the arithmetic the driver's loop nest does on its
+// induction variables. The loop nest ITSELF - which loops exist, in what order,
+// and what they call - is still hand-written, and so are the k-split bands and
+// the flush chunking. That remains Phase 2.
+
+/// A schedule index expression over named runtime values.
+///
+/// Names are bound at render time, so the same expression serves an LLVM
+/// register (`%M`, `%vg.i.iv`) and a Coq variable (`ext`, `iv`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ix {
+    /// A named runtime value, bound by the caller's environment.
+    Val(&'static str),
+    /// A compile-time constant - a tile width, in practice.
+    Lit(usize),
+    /// Truncating subtraction. **Both renderings truncate at zero**: LLVM's
+    /// operands here are always `iv < ext`, and Coq's `nat` subtraction
+    /// truncates by definition, which is what makes a tile entirely past the
+    /// end have width 0 rather than a negative one.
+    Sub(Box<Ix>, Box<Ix>),
+    Min(Box<Ix>, Box<Ix>),
+    /// Floor division. `sdiv` on non-negative operands is Coq's `/` on `nat`.
+    Div(Box<Ix>, Box<Ix>),
+}
+
+impl Ix {
+    fn val(n: &'static str) -> Ix {
+        Ix::Val(n)
+    }
+    fn sub(a: Ix, b: Ix) -> Ix {
+        Ix::Sub(Box::new(a), Box::new(b))
+    }
+    fn min(a: Ix, b: Ix) -> Ix {
+        Ix::Min(Box::new(a), Box::new(b))
+    }
+    fn div(a: Ix, b: Ix) -> Ix {
+        Ix::Div(Box::new(a), Box::new(b))
+    }
+
+    /// Render to Coq, over the names `bind` supplies.
+    pub fn coq(&self, bind: &dyn Fn(&'static str) -> String) -> String {
+        match self {
+            Ix::Val(n) => bind(n),
+            Ix::Lit(k) => k.to_string(),
+            Ix::Sub(a, b) => format!("({} - {})", a.coq(bind), b.coq(bind)),
+            Ix::Min(a, b) => format!("Nat.min {} {}", a.coq(bind), b.coq(bind)),
+            Ix::Div(a, b) => format!("({} / {})", a.coq(bind), b.coq(bind)),
+        }
+    }
+
+    /// Emit into the LLVM builder, returning the register holding the value.
+    fn emit(&self, b: &mut IrBuilder, bind: &dyn Fn(&'static str) -> String) -> String {
+        match self {
+            Ix::Val(n) => bind(n),
+            Ix::Lit(k) => k.to_string(),
+            Ix::Sub(x, y) => {
+                let (x, y) = (x.emit(b, bind), y.emit(b, bind));
+                b.sub(&x, &y)
+            }
+            Ix::Min(x, y) => {
+                let (x, y) = (x.emit(b, bind), y.emit(b, bind));
+                b.imin(&x, &y)
+            }
+            Ix::Div(x, y) => {
+                let (x, y) = (x.emit(b, bind), y.emit(b, bind));
+                let r = b.t();
+                b.w(&format!("{} = sdiv i64 {}, {}", r, x, y));
+                r
+            }
+        }
+    }
+}
+
+/// Render an [`Ix`] to LLVM on its own, for a gate to compare against the real
+/// module.
+///
+/// The claim this whole layer makes is that the Coq definition and the emitted
+/// instructions are one expression. `tests/exact_gemm_schedule_proof.rs`
+/// checks it by rendering here and looking for the same instruction SHAPE in
+/// the driver - which verifies the property directly rather than verifying
+/// that the driver called a particular helper. A hand-written clamp that
+/// happens to be identical is not a divergence; one that is not, is.
+pub fn render_llvm(ix: &Ix, bind: &dyn Fn(&'static str) -> String) -> Vec<String> {
+    let mut b = IrBuilder::new();
+    let _ = ix.emit(&mut b, bind);
+    b.out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// The live width of the tile starting at induction variable `iv`.
+///
+/// `min(ext - iv, T)`. The micro-kernel always runs at FULL width; this is what
+/// the fold-back clamps to, and `proofs/ExactGemmTiling.v` proves the resulting
+/// partition writes every element of C exactly once.
+///
+/// Stated over the INDUCTION VARIABLE, which is what the emitted loop has.
+/// `ExactGemmSchedule.tw` is stated over the tile INDEX; the generated
+/// `the_emitted_width_is_the_tiling_model_at_the_loop_variable` is the join.
+pub fn tile_width_ix() -> Ix {
+    Ix::min(Ix::sub(Ix::val("ext"), Ix::val("iv")), Ix::val("T"))
+}
+
+/// Which packed panel the tile at induction variable `iv` reads.
+///
+/// `iv / T`. The A panels are contiguous, so the row panel at row `i0` is
+/// panel number `i0 / MR` - an address computation of exactly the class §1 of
+/// the roadmap catalogues.
+pub fn panel_index_ix() -> Ix {
+    Ix::div(Ix::val("iv"), Ix::val("T"))
+}
 
 /// The K-split thread count, as `__y_gemm_exact_threads` computes it.
 ///

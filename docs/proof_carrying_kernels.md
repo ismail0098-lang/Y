@@ -1245,6 +1245,73 @@ make the assertion `8*VNNI_MR == 8*VNNI_MR` and worth nothing. Failing when the
 schedule moves is the correct behaviour — it says the proof's concrete
 refutation no longer matches the shipped tile.
 
+#### Phase 1 progress, 2026-08-27 (3) — the first slice of the loop nest is EXTRACTED, not modelled
+
+The gap Phase 1 names about itself is that the loop **structure** is modelled
+rather than extracted, so the tie is between two models. This closes that for
+one slice, using the same move that closed constant drift: **one description,
+two consumers** — not by proving a translator correct, which needs an LLVM
+semantics and would eat the programme, but by removing the second description.
+
+`cpu_gemm::Ix` is a small index expression rendered two ways from one value:
+`Ix::emit` produces the driver's LLVM, `Ix::coq` produces the definitions in
+`proofs/ExactGemmSchedule.v`. Two expressions are covered:
+
+- `tile_width_ix()` = `min(ext - iv, T)` — the clamped live width of a tile,
+  at three sites (pack-A, the j-loop, the i-loop).
+- `panel_index_ix()` = `iv / T` — which packed panel a tile reads, at two.
+
+That is deliberately the arithmetic §1 of this document says the bugs live in:
+*"twelve address computations in the CPU GEMM were correct only because
+`lda == K` made stride and extent the same number"*. Which loops exist, in what
+order, and what they call is still hand-written, and so are the k-split bands
+and the flush chunking.
+
+**The refactor is proved faithful by byte-identity**: all three emitted modules
+(`emit_vnni_gemm_module`, `emit_vnni_threaded_module`, `emit_vnni_micro_module`)
+are byte-for-byte what they were before. The driver used to spell the clamp as
+three separate `IrBuilder` calls; it now renders it from the shared expression
+and emits the same instructions.
+
+Two new theorems are the **join** that was previously implicit. `tw` is stated
+over the tile INDEX and the emitted loop has the induction variable instead:
+
+- `the_emitted_width_is_the_tiling_model_at_the_loop_variable` —
+  `tw ext T t = tile_width ext (toff T t) T`.
+- `the_emitted_panel_index_is_the_tile_index` —
+  `panel_index (toff T t) T = t`, i.e. the emitted `sdiv iv, T` really does
+  recover the tile index, so a tile reads its own panel.
+
+**The gate had to become universal, and mutation is what showed it.** The first
+version searched for the rendered instruction sequence *somewhere* in the
+module. That is satisfied while one site of three diverges — and the
+discriminating mutation proves it: swapping the `min` operands at the i-loop
+computes the **same value** by different instructions, and it passed the gate
+*and* all five correctness suites. Counting the occurrences per site turns the
+existential into a universal, and that mutation is now caught **by this gate
+alone**, because no answer can see it.
+
+The honest limits of the other mutations, measured rather than assumed:
+
+| mutation | schedule gate | correctness suites |
+|---|---|---|
+| shared expression reversed, `.v` stale | **FAIL** | ok |
+| shared expression reversed, `.v` regenerated | **FAIL** (and `coqc` FAILS) | ok |
+| driver bypasses helper, reversed clamp | **FAIL** | 3 FAIL |
+| driver drops one clamp | **FAIL** (after counting) | 1 FAIL |
+| **min operands swapped — same value** | **FAIL** (after counting) | **all ok** |
+| driver bypasses helper, *identical* clamp | ok | ok |
+
+The third and fourth rows are worth reading as limits: the gate does **not**
+extend coverage there — a reversed or missing clamp is a wrong answer and the
+correctness suites catch it too. What the gate adds for those is a diagnosis by
+name instead of a bad number. Its unique coverage is the fifth row.
+
+The last row is a design confirmation, not a gap: a hand-written clamp that is
+*identical* passes, and should — there is no divergence. The gate checks the
+property (the proof's arithmetic is the emitter's arithmetic), not the plumbing
+(that a particular helper was called).
+
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 
 Phase 1 proves one kernel by hand. This makes it structural: a transformation
