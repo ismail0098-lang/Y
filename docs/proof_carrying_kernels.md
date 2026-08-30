@@ -88,13 +88,26 @@ which is why the programme is credible and also why nothing is ready.
 | Linear resource types | `linear_tracker.rs` | **real, tested** | Proves async tokens consumed once. Needed for the GPU pipeline. |
 | Interval arithmetic | `type_checker.rs` | narrow | Basis for Phase 4 error bounds; currently only index bounds. |
 | Empirical validation | `empirical_autotune.rs` | real | Already correctness-checks candidates against a CPU reference. |
-| Certificate format | — | **does not exist** | Phase 5. The actual deliverable to a certification authority. |
+| Certificate format | `exact_gemm_certificate.rs` | **real, emitted, gated** | Was "does not exist / Phase 5". See the 2026-08-30 entry. |
 
 The single most useful fact in this table: `recognize_gemm` contains an
 explicit refusal of exact accumulators (`src/cpu_gemm.rs:289`), with a comment
 explaining that substituting one would silently discard the guarantee. **The
 two halves have never met, and the code declines to introduce them.** That
 refusal is Phase 0.
+
+> **STATUS, 2026-08-31 — this table is the state at the programme's start and
+> is kept as written.** Three of its rows have moved since. The refusal is
+> gone: `recognize_gemm` substitutes the exact `vpdpwssd` kernel, and the
+> "Kernel rewrite" row's *"explicitly refuses"* is history. The certificate
+> format exists, is emitted per compilation, and is gated. And the proofs
+> themselves went from zero to **fourteen files, ~215 theorems, no axioms**.
+> What has NOT moved: the SMT discharge and the interval arithmetic are still
+> narrow, and Phase 4's error bounds have not been started — they are not on
+> the path, because exactness makes them unnecessary for this kernel family.
+>
+> The method is written up separately in
+> [The process: taking a kernel from *fast* to *verified*](verified_kernel_process.md).
 
 Two corrections to `CLAUDE.md` found while drafting:
 
@@ -2431,6 +2444,16 @@ sequence that is off by a factor of `N/NR`.
 
 ## 5. End goal
 
+> **STATUS, 2026-08-31.** The end goal below is reached for **one kernel on one
+> backend**: `Y gemm.ysu --emit-llvm` substitutes the exact `vpdpwssd` GEMM and
+> writes a `.v` beside the `.ll` that an auditor can check with `coqc` and the
+> proofs, without trusting the compiler. What is *not* reached is the scope —
+> one kernel family, one backend, and three things the certificate's own header
+> declares outside it: `vpdpwssd`'s semantics (a definition pinned on hardware),
+> the loop nest's structure (partly extracted, partly gated), and anything at
+> all about LLVM or machine code. The repeatable method is in
+> [The process](verified_kernel_process.md).
+
 You write the naive loop nest — the specification, readable and obviously
 correct. The compiler emits a tiled, swizzled, async-pipelined AVX-512 or PTX
 kernel, **and a certificate that the two compute the same thing.** Not a
@@ -2480,7 +2503,15 @@ slip.
 
 ---
 
-## 7. The first move
+## 7. The first move — DONE, 2026-08-12
+
+> **This section is kept as written because the measurement it asked for is the
+> reason everything after it exists.** The four lines are deleted, the packed
+> kernel accumulates exactly, and the number that "decides whether any of the
+> rest is worth doing" came back **1.88x in favour of exactness** — the exact
+> `vpdpwssd` GEMM is faster than the f32 one it replaces, so exactness trades
+> range rather than speed. Read the rest of this section as the question, and
+> §"Phase 0 status" above as the answer.
 
 Delete four lines and find out what happens.
 

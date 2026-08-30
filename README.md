@@ -59,9 +59,12 @@ repository's own investigation documents contradict.
   +0.12% perplexity.
 - A C-callable shared library: the crate builds as `cdylib` as well as `rlib`
   (`src/c_api.rs`), so the compiler can be embedded rather than shelled out to.
-- A **machine-checked proof** of the ZK backend's control-flow lowering
-  (`proofs/ZkControlFlow.v`, Rocq 9.1.1, `coqchk` reports no axioms), and a
-  generative differential fuzzer with a metamorphic oracle.
+- **Machine-checked proofs**: fourteen Rocq files, ~215 theorems, no axioms and
+  nothing admitted, all run by `cargo test`. They cover the ZK backend's
+  control-flow lowering and — the bulk of them — the exact AVX-512 GEMM's
+  schedule end to end, from the source dot product to the threaded, tiled,
+  K-split kernel. A compilation that substitutes that kernel now **emits its own
+  certificate** beside the `.ll`.
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
   arkworks crates are `[dev-dependencies]` and are used as an *independent
@@ -1166,6 +1169,101 @@ compares it at consumption. `tests/linear_tracker_enforcement.rs` is 10 tests,
 6 negative and 4 positive — rejecting every `pipe.wait` under a loop would be
 sound and would also ban the shape every real pipelined kernel is built from.
 
+### Proof-carrying kernels: the exact GEMM, verified end to end
+
+`src/cpu_gemm.rs` emits a tiled, packed, K-split, multi-threaded AVX-512
+`vpdpwssd` GEMM. It is **bit-identical** to the naive triple loop it replaces,
+and that is a theorem rather than a test result:
+
+```coq
+(* proofs/ExactGemmWhole.v *)
+Theorem the_threaded_gemm_holds_the_source_dot_products :
+  forall A B M N K Fl m nthr r c,
+    (0 < Fl)%nat -> 0 <= m ->
+    2 * Z.of_nat Fl * m * m <= ExactGemmMicro.I32MAX ->
+    (forall idx k, Z.abs (A idx k) <= m) ->
+    (forall k idx, Z.abs (B k idx) <= m) ->
+    (0 < nthr)%nat -> (r < M)%nat -> (c < N)%nat ->
+    thread_sum A B M N K Fl nthr r c nthr
+    = PK.sum_k (fun k => A r k * B k c) K.
+```
+
+Sum the partials of `nthr` threads, each handed a K band, each running the
+emitted driver — packing, the register tile's routing, the k-pair loop, the
+int32 flush, the output tiling and the fold-back — and every position of C is
+exactly the source matrices' dot product. **No hypothesis that `MR` divides
+`M`, that `NR` divides `N`, that `nthr` divides `K`, or that `K` is even.**
+
+**This is only possible because the kernel is exact.** Floating-point addition
+is not associative, so a tiled f32 reduction provably does *not* equal the naive
+one — `GemmBandSplit.v` refutes it at `K = 201`, `nthr = 2`, where the rounded
+version answers 1100 against its own reference's 1000. Integer addition *is*
+associative, so the relationship is an equality, which is what a proof assistant
+is good at. Measured cost: exact VNNI is **1.88× faster** than the f32 path, so
+exactness here trades range rather than speed.
+
+Fourteen files, ~215 theorems, **no axioms, nothing admitted** — and `tests/proofs_are_checked.rs` runs `coqc` over all of
+them in `cargo test`, with a content control per file so that "it compiles" and
+"no axioms" (both properties an *empty* file has) are not the whole check.
+
+#### The proof is tied to the emitted code by removing the second description
+
+The usual way to connect a proof to a compiler is to give the IR a semantics and
+prove the emitter refines it. That is a multi-year project of its own. Instead,
+**there is one description and both consumers are rendered from it** — an `Ix`
+expression tree and a `CountedLoop` iteration space that render to LLVM, to Coq,
+and to values for tests. `proofs/ExactGemmSchedule.v` is *generated* from
+`src/cpu_gemm.rs`'s own constants, and a byte-identity gate fails the build on
+any divergence.
+
+Every extraction step left all four emitted LLVM modules **byte-for-byte
+unchanged**, which is the argument that the description is what the compiler was
+already doing.
+
+#### A compilation emits its own certificate
+
+```
+$ Y gemm.ysu --emit-llvm
+  -> @ZeroDrift matmul MxN: EXACT vpdpwssd kernel substituted (|x| <= 1024, flush every 64 k-pairs)
+  -> Written to: gemm.ll
+  -> Certificate: gemm_certificate.v (check with `coqc -Q proofs "" gemm_certificate.v`)
+```
+
+The `.v` instantiates the theorem above at *this* compilation's flush interval
+and operand bound. It is not paperwork: the one hypothesis that depends on the
+program is the overflow licence `2·Fl·m² ≤ i32::MAX`, and the compiler decides
+it in **floating point** — a `sqrt` and a `floor` on `f64`. The certificate
+states it over `Z` and hands it to `coqc`, which has no floats. Two derivations
+of one obligation, by two tools, gated against each other at the boundary, which
+is one unit wide: accepted at `m = 4095`, refused at `m = 4096`.
+
+#### What the proofs find that running the code does not
+
+Every kind of check here is blind to something:
+
+| bug | correctness suites | schedule gate | Coq |
+|---|---|---|---|
+| tile count over-allocates a buffer | **pass** | **FAIL** | pass |
+| `min(a,b)` emitted as `min(b,a)` — same value | **pass** | **FAIL** | pass |
+| scratch-zeroing loop one trip long | **pass** | pass | **FAIL** |
+| fold-back loop unclamped (writes past C) | 2 of 4 **pass** | **FAIL** | pass |
+
+The last row is the one to read twice. An unclamped fold-back is a genuine
+out-of-bounds write past the last row of C, and it is **not observed** by two of
+the four correctness suites — including the one running `M = 53` against a
+6-row tile, the most ragged shape in the repo. The overrun lands in memory the
+process already owns and the answer stays correct.
+
+Writing the proofs also found a **live heap overflow**. Formalising the output
+tiling forced the hypothesis `N <= ldc` to be *stated*; nothing in the compiler
+stated it, every caller happened to pass `ldc = N`, and calling the kernel with
+a padded C corrupted the heap from three separate sites. The proof did not
+discharge the bug — it surfaced the unwritten precondition, and the test written
+from that precondition found it.
+
+The method is written up in
+**[The process: taking a kernel from *fast* to *verified*](docs/verified_kernel_process.md)**.
+
 ### A machine-checked proof of the ZK control-flow lowering
 
 `proofs/ZkControlFlow.v` formalises the `return` / `if` / sequencing fragment of
@@ -1275,8 +1373,8 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # ~580 tests
-cargo test --release --features zk      # ~850 tests, ZK included
+cargo test --release                    # ~635 tests
+cargo test --release --features zk      # ~900 tests, ZK included
 ```
 
 **Four gates are conditional on an external tool, and a missing tool makes them
@@ -1385,6 +1483,7 @@ src/                       Rust bootstrap compiler
   cpu_emitter.rs cpu_gemm.rs       x86-64 / AVX-512 GEMM
   native_emitter.rs                standalone ELF
   zero_drift.rs                    @ZeroDrift representation selection
+  exact_gemm_certificate.rs        the .v a compilation emits with its kernel
   exact_attention.rs fixed_exp.rs  exact int8 attention PTX + integer exp2
   zk_field.rs                      BN254 Fr, Montgomery form
   zk_emitter.rs zk_witness.rs      R1CS emission and witness solving
@@ -1401,6 +1500,7 @@ src/                       Rust bootstrap compiler
                                    they build as their own executables
 
 self_hosted/    compiler phases rewritten in Y (.ysu); not the default build path
+proofs/         Rocq proofs — ExactGemmSchedule.v is GENERATED
 tests/          test programs, benchmarks, PTX assembly gates
 circomlib/      vendored circomlib (upstream 2.0.5)
 docs/           language spec and design notes
@@ -1425,6 +1525,7 @@ Further reading:
 - [ZK emit profiling](docs/zk_emit_profile.md)
 - [CPU GEMM tuning, the harness biases, and the two regimes a loop benchmark
   cannot distinguish](docs/cpu_gemm_tuning.md)
+- [The process: taking a kernel from *fast* to *verified*](docs/verified_kernel_process.md)
 - [The ZK control-flow lowering, proved in Rocq](proofs/ZkControlFlow.v)
 - [Deterministic / bit-identical decode](docs/bit_identical_decode.md)
 - [Deterministic inference design notes](docs/deterministic_inference.md)
