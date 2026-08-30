@@ -2284,6 +2284,80 @@ and partly modelled; and nothing here is a statement about LLVM, `clang`, or the
 machine code either produces.
 
 
+#### The other kind of loop: a bound that is not an operand · 2026-08-31
+
+The previous slice extracted three counted loops and named its own limit:
+*only loops whose bounds are OPERANDS can be described this way; the fold-back
+loops walk builder-computed registers.* That limit is now removed, and the loops
+it excluded turn out to be the ones where the bound carries the obligation.
+
+The micro-kernel writes a full `MR x NR` tile into scratch whatever the extents
+are. The fold-back copies only the **live rectangle** into C — so its trip count
+is the clamped tile width, and a fold-back over `MR` is an out-of-bounds
+**write**. That is what `ExactGemmTiling.unclamped_tail_writes_out_of_bounds`
+refutes about the model, and it is the same class as the three `ldc` sites in
+`emit_vnni_threaded_module` that writing that file found in the first place.
+
+`IrBuilder::loop_begin_over` takes the register the driver has **already**
+computed plus the `Ix` that produced it. It deliberately does not re-emit the
+expression: the driver computes the tile width once and uses it for several
+things, and emitting it again at the loop would add instructions the compiler
+does not have. **All four emitted modules are byte-for-byte unchanged**, which
+is the evidence the description is faithful.
+
+```coq
+Definition fold_row_trips (ext iv T : nat) : nat := (((Nat.min (ext - iv) T - 0) + (1 - 1)) / 1).
+
+Theorem the_emitted_fold_back_runs_the_tile_width : forall ext T t,
+  SCH.fold_row_trips ext (toff T t) T = tw ext T t.
+
+Theorem the_fold_back_stays_inside_the_live_rectangle : forall ext T t k,
+  (k < SCH.fold_row_trips ext (toff T t) T)%nat ->
+  (toff T t + SCH.fold_row_visit ext (toff T t) T k < ext)%nat.
+```
+
+The second is the join — `tile_index_in_range`, which was a property of the
+model only, now applied to the loop that actually performs the copy.
+
+##### Naming the register is not enough; the gate checks it was PRODUCED by the expression
+
+A loop opening on *some* register says nothing. The gate recovers the bound
+register from the emitted LLVM, finds its **reaching definition** — searching
+backwards from the loop's own `cond` block, because register names are
+per-function and this module has three — and requires the instructions defining
+it to be the rendered `tile_width_ix`. Taking the first textual match instead
+compared the driver's fold-back against `pack_a`'s address arithmetic, which is
+how that was found.
+
+##### MUTATION TABLE — and F1 is the row that matters
+
+| mutation | schedule gate | `proofs_are_checked` | `tiling_model` | `thread_invariance` | `exact_threaded` |
+|---|---|---|---|---|---|
+| **F1 fold-back bound unclamped (`MR`)** | **FAIL** | ok | **ok** | **ok** | FAIL |
+| F2 row fold-back given the *column* description | **FAIL** | ok | ok | ok | ok |
+| F3 description claims the bound is `M` | **FAIL** | ok | ok | ok | ok |
+| F5 same-value `min` swap, `.v` regenerated | **FAIL** | FAIL | ok | ok | ok |
+
+**F1 is a live out-of-bounds write, and two of the four correctness suites do
+not observe it** — including `exact_gemm_thread_invariance`, which runs
+`M = 53` against the 6-row tile and is the most ragged shape in the repo. The
+overrun lands in memory the process owns and the answer stays correct. That is
+the same "invisible out-of-bounds" signature this document already records for
+the `ldc` sites, and it is the strongest single argument for a gate that reads
+the loop rather than the answer.
+
+F2 and F3 are caught by the schedule gate **alone** — the emitted instructions
+are unchanged in both, so there is nothing for a correctness suite to see. F5 is
+the same-value divergence this layer keeps producing: identical value, different
+instructions, and this time it also breaks `coqc`, because `lia` does not know
+`Nat.min` commutes.
+
+##### What is still hand-written
+
+Which loops exist, in what order, in which blocks, and what they call. Every
+loop in the exact-GEMM driver is now described; the *nest* is not.
+
+
 ## 5. End goal
 
 You write the naive loop nest — the specification, readable and obviously

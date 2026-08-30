@@ -140,7 +140,7 @@ use y::cpu_gemm::{
     granule_band_edge_ix, kpairs_ix, panel_index_ix, prop_band_edge_ix, tile_count_ix,
     tile_width_ix,
     KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
-    row_panel_loop, col_panel_loop,
+    row_panel_loop, col_panel_loop, fold_row_loop, fold_col_loop,
 };
 use y::zero_drift::VnniExact;
 
@@ -243,10 +243,17 @@ fn render(s: &Schedule) -> String {
     // The loop descriptions the driver emits, rendered as Coq definitions.
     // `row_panel_loop`'s tag differs between its two sites and its iteration
     // space does not, which is why one description serves both.
+    //
+    // The two fold-back loops have a MATERIALISED bound - the clamped tile
+    // width - so their free names are the clamp's (`ext`, `iv`, `T`) rather
+    // than an extent. That is what lets `ExactGemmTiling` state that the loop
+    // folding a tile back into C runs exactly `tw` times.
     let loop_defs = format!(
-        "{}\n{}",
+        "{}\n{}\n{}\n{}",
         row_panel_loop("vg.i").coq(&["M"]),
-        col_panel_loop().coq(&["N"])
+        col_panel_loop().coq(&["N"]),
+        fold_row_loop().coq(&["ext", "iv", "T"]),
+        fold_col_loop().coq(&["ext", "iv", "T"])
     );
     let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
 
@@ -1380,6 +1387,94 @@ fn the_driver_opens_the_loop_it_was_described_with() {
     }
     // A sweep that finds no loops reports every loop correct.
     assert_eq!(checked, 3, "the described loops went missing from the driver");
+}
+
+/// The other kind of loop: the fold-back's bound is not an operand but a value
+/// the driver has already materialised - the clamped tile width.
+///
+/// **This is the loop where the bound carries the obligation.** The
+/// micro-kernel writes a full `MR x NR` tile into scratch whatever the extents
+/// are; the fold-back copies only the live rectangle into C. A fold-back over
+/// `MR` runs past the last row - an out-of-bounds WRITE, which is precisely
+/// the class of bug the three `ldc` sites in `emit_vnni_threaded_module` were,
+/// found by writing `ExactGemmTiling.v` in the first place.
+///
+/// So it is not enough to check the loop opens on SOME register. The register
+/// it tests against must be DEFINED by the rendered `tile_width_ix` - the same
+/// expression `ExactGemmSchedule.tw` is generated from - which is what makes
+/// `the_fold_back_stays_inside_the_live_rectangle` a claim about the emitter
+/// rather than about a model.
+#[test]
+fn the_fold_back_loops_are_bounded_by_the_tile_width_the_proof_describes() {
+    use y::cpu_gemm::{emit_vnni_gemm_module, fold_col_loop, fold_row_loop, render_llvm, Ix};
+
+    let ir = emit_vnni_gemm_module(64);
+    let lines: Vec<String> = ir.lines().map(|l| l.trim().to_string()).collect();
+    let shaped: Vec<String> = lines.iter().map(|l| shape(l)).collect();
+
+    let mut checked = 0usize;
+    for (tag, l, tile, ext) in [
+        ("vg.fi", fold_row_loop(), VNNI_MR, "%M"),
+        ("vg.fj", fold_col_loop(), VNNI_NR, "%N"),
+    ] {
+        let (start, end, step) = loop_operands(&ir, tag)
+            .unwrap_or_else(|| panic!("{tag}: no counted loop of that tag in the driver"));
+        let op = |ix: &Ix| match ix {
+            Ix::Val(n) => format!("%{n}"),
+            Ix::Lit(k) => k.to_string(),
+            other => panic!("{tag}: start/step is not an operand: {other:?}"),
+        };
+        assert_eq!(start, op(&l.start), "{tag}: emitted start is not the described one");
+        assert_eq!(step, op(&l.step), "{tag}: emitted step is not the described one");
+        assert!(
+            end.starts_with('%') && !end.starts_with("%M") && !end.starts_with("%N"),
+            "{tag}: the bound is {end}, an operand - this loop is supposed to test              against a materialised tile width, so either the emitter changed or              this test is looking at the wrong loop"
+        );
+
+        // The bound register must be DEFINED by the described expression.
+        let bind = move |n: &'static str| -> String {
+            match n {
+                "ext" => ext.into(),
+                // A builder-shaped name, normalised by `shape` exactly as the
+                // driver's own induction temporary is.
+                "iv" => "%g0".into(),
+                "T" => tile.to_string(),
+                other => panic!("unbound {other}"),
+            }
+        };
+        let want: Vec<String> =
+            render_llvm(&l.end, &bind).iter().map(|x| shape(x)).collect();
+        assert!(!want.is_empty(), "{tag}: the bound rendered to nothing");
+
+        // The REACHING definition, not the first textual one. Register names
+        // are per-function and this module holds three functions, so
+        // `%g12` exists in the packers too; taking the first match compared
+        // the driver's loop against `pack_a`'s address arithmetic. Search
+        // backwards from the loop's own cond block.
+        let cond = lines
+            .iter()
+            .position(|x| x.starts_with(&format!("{tag}.cond.")) && x.ends_with(':'))
+            .unwrap_or_else(|| panic!("{tag}: no cond block"));
+        let def = lines[..cond]
+            .iter()
+            .rposition(|x| x.starts_with(&format!("{end} = ")))
+            .unwrap_or_else(|| panic!("{tag}: nothing before the loop defines the bound {end}"));
+        assert!(
+            def + 1 >= want.len(),
+            "{tag}: the bound is defined too early to be this expression"
+        );
+        let got = &shaped[def + 1 - want.len()..=def];
+        assert_eq!(
+            got,
+            want.as_slice(),
+            "{tag}: the register the fold-back tests against is not produced by              `tile_width_ix`. The loop would then run a different number of              times than `ExactGemmSchedule.fold_{}_trips` says, and the tiling              proof's `tile_index_in_range` would be about a loop that is not              this one.\nwant:\n  {}\ngot:\n  {}",
+            if tag == "vg.fi" { "row" } else { "col" },
+            want.join("\n  "),
+            got.join("\n  ")
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 2, "the fold-back loops went missing from the driver");
 }
 
 /// Recover `(start, end, step)` for the counted loop whose blocks are tagged

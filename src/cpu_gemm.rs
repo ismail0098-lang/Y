@@ -816,14 +816,14 @@ fn emit_vnni_gemm_driver() -> String {
         VNNI_MICRO_NAME, apan, bp, ct, VNNI_NR, kpairs
     ));
 
-    let fl = b.loop_begin("vg.fi", "0", &mw, "1");
+    let fl = b.loop_begin_over(&fold_row_loop(), &mw);
     let fi = b.iv(&fl);
     let crow = b.add(&i0, &fi);
     let coff = b.mul(&crow, ldc);
     let coff2 = b.add(&coff, &j0);
     let trow = b.mul(&fi, &VNNI_NR.to_string());
 
-    let fjl = b.loop_begin("vg.fj", "0", &nw, "1");
+    let fjl = b.loop_begin_over(&fold_col_loop(), &nw);
     let fj = b.iv(&fjl);
     let cidx = b.add(&coff2, &fj);
     let cp = b.gep("i64", c, &cidx);
@@ -1642,6 +1642,33 @@ impl IrBuilder {
         self.loop_begin(l.tag, &op(&l.start), &op(&l.end), &op(&l.step))
     }
 
+    /// Open a described loop whose BOUND is a value the emitter has already
+    /// materialised into `end_reg`.
+    ///
+    /// The description still carries the [`Ix`] that register was produced by,
+    /// so the Coq side sees the expression and the LLVM side sees the register
+    /// - one description, two consumers, exactly as for an operand bound. What
+    /// it deliberately does NOT do is re-emit the expression here: the driver
+    /// computes the tile width once and uses it for several things, and
+    /// emitting it again at the loop would add instructions the compiler does
+    /// not have. Byte-identity is the evidence this layer is faithful, so a
+    /// form that breaks it is not an option.
+    ///
+    /// `start` and `step` must still be operands - they are `0` and `1` at
+    /// every site, and a computed one would have to be emitted here for real.
+    fn loop_begin_over(&mut self, l: &CountedLoop, end_reg: &str) -> LoopCtx {
+        let op = |ix: &Ix| match ix {
+            Ix::Val(n) => format!("%{n}"),
+            Ix::Lit(k) => k.to_string(),
+            _ => panic!(
+                "`{}`: start and step must be operands even when the bound is \
+                 materialised",
+                l.tag
+            ),
+        };
+        self.loop_begin(l.tag, &op(&l.start), end_reg, &op(&l.step))
+    }
+
     fn loop_begin(&mut self, tag: &str, start: &str, end: &str, step: &str) -> LoopCtx {
         self.n += 1;
         let var = format!("%iv{}", self.n);
@@ -2276,12 +2303,22 @@ pub fn kpairs_ix() -> Ix {
 /// SPACE. What is still hand-written is which loops exist, in what order, and
 /// what they call.
 ///
-/// **Bounds must be operands, not expressions.** Every loop extracted here has
-/// a parameter or a literal at each of the three positions, so nothing is
-/// emitted before the loop and byte-identity is preserved. The fold-back loops
-/// (`vg.fi`, `vg.fj`) walk builder-computed registers and are deliberately not
-/// described - handling those means emitting their bounds through [`Ix`] as
-/// well, which changes the instruction stream.
+/// **A bound is either an OPERAND or an already-MATERIALISED value**, and the
+/// distinction is about byte-identity rather than about expressiveness.
+/// [`IrBuilder::loop_begin_counted`] takes loops whose three positions are all
+/// parameters or literals, so nothing is emitted before the loop. The
+/// fold-back loops (`vg.fi`, `vg.fj`) test against the clamped TILE WIDTH,
+/// which the driver has already computed into a register for other reasons -
+/// so [`IrBuilder::loop_begin_over`] takes that register and the [`Ix`] that
+/// produced it. Re-emitting the expression at the loop would duplicate
+/// instructions the compiler does not emit, which is the one thing this layer
+/// must never do; naming the existing register describes the loop without
+/// changing a byte.
+///
+/// The gate is what makes the second form mean anything: it recovers the
+/// register the emitted loop tests against and checks it is DEFINED by the
+/// rendered expression, so "the bound is the tile width" is checked rather
+/// than asserted.
 #[derive(Clone)]
 pub struct CountedLoop {
     /// Basic-block label prefix, as `loop_begin` uses it.
@@ -2351,6 +2388,40 @@ pub fn row_panel_loop(tag: &'static str) -> CountedLoop {
 /// The driver's column-panel loop: `for j = 0; j < N; j += NR`.
 pub fn col_panel_loop() -> CountedLoop {
     CountedLoop { tag: "vg.j", name: "col_panel", start: Ix::Lit(0), end: Ix::val("N"), step: Ix::Lit(VNNI_NR) }
+}
+
+/// The fold-back's row loop: `for fi = 0; fi < tile_width(ext, iv, T); fi += 1`.
+///
+/// **The bound is the CLAMPED width, and that is the whole reason the loop
+/// exists.** The micro-kernel writes a full `MR x NR` tile into scratch
+/// whatever the extents are; only the live rectangle may be folded back into
+/// C. A fold-back over `MR` would run past the last row - an out-of-bounds
+/// WRITE, not a wrong number - which is what
+/// `ExactGemmTiling.unclamped_tail_writes_out_of_bounds` refutes about the
+/// model, and what describing this loop ties to the emitter.
+///
+/// Its bound is [`tile_width_ix`], the same expression the tile's own width
+/// comes from, so the fold-back and the tiling proof provably talk about ONE
+/// number rather than two that happen to agree.
+pub fn fold_row_loop() -> CountedLoop {
+    CountedLoop {
+        tag: "vg.fi",
+        name: "fold_row",
+        start: Ix::Lit(0),
+        end: tile_width_ix(),
+        step: Ix::Lit(1),
+    }
+}
+
+/// The fold-back's column loop: `for fj = 0; fj < tile_width(ext, iv, T); fj += 1`.
+pub fn fold_col_loop() -> CountedLoop {
+    CountedLoop {
+        tag: "vg.fj",
+        name: "fold_col",
+        start: Ix::Lit(0),
+        end: tile_width_ix(),
+        step: Ix::Lit(1),
+    }
 }
 
 pub fn tile_count_ix() -> Ix {

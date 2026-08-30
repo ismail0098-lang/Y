@@ -347,6 +347,71 @@ Proof.
   replace (N + (64 - 1))%nat with (N + 64 - 1)%nat by lia. reflexivity.
 Qed.
 
+(* ------------------------------------------------------------------ *)
+(** ** The FOLD-BACK loop, whose bound is not an operand                *)
+(* ------------------------------------------------------------------ *)
+
+(** The four theorems above cover loops whose three positions are all
+    parameters or literals. The fold-back loops are the other kind: their bound
+    is the CLAMPED TILE WIDTH, a value the driver computes into a register.
+
+    That distinction is about byte-identity in the emitter, not about the
+    proof - `cpu_gemm::loop_begin_over` names the register the driver already
+    has rather than re-emitting the expression - but it is exactly the loop
+    where the bound carries the obligation. The micro-kernel writes a full
+    `MR x NR` tile into scratch whatever the extents are; the fold-back copies
+    only the live rectangle into C. A fold-back over `MR` instead of the
+    clamped width is an out-of-bounds WRITE, which is what
+    [unclamped_tail_writes_out_of_bounds] refutes about the model and what
+    these tie to the emitted loop. *)
+
+Theorem the_emitted_fold_back_visits_each_offset_once : forall ext iv T k,
+  SCH.fold_row_visit ext iv T k = k.
+Proof. intros ext iv T k. unfold SCH.fold_row_visit. lia. Qed.
+
+Theorem the_emitted_fold_back_runs_the_tile_width : forall ext T t,
+  SCH.fold_row_trips ext (toff T t) T = tw ext T t.
+Proof.
+  intros ext T t. unfold SCH.fold_row_trips, toff, SCH.toff, tw, SCH.tw.
+  rewrite Nat.div_1_r. lia.
+Qed.
+
+(** The column fold-back likewise. Stated separately for the reason
+    [the_two_panel_loops_are_different] gives: they are two descriptions in
+    `cpu_gemm.rs`, and the claim is about each. *)
+Theorem the_emitted_fold_back_column_runs_the_tile_width : forall ext T t,
+  SCH.fold_col_trips ext (toff T t) T = tw ext T t.
+Proof.
+  intros ext T t. unfold SCH.fold_col_trips, toff, SCH.toff, tw, SCH.tw.
+  rewrite Nat.div_1_r. lia.
+Qed.
+
+(** *** THE JOIN: the emitted fold-back never leaves the live rectangle.
+
+    Composing the two above with [tile_index_in_range]. This is the statement
+    the driver's three `ldc` bugs violated - all of which wrote outside the
+    rectangle they own - and until now it was a property of the MODEL only. *)
+Theorem the_fold_back_stays_inside_the_live_rectangle : forall ext T t k,
+  (k < SCH.fold_row_trips ext (toff T t) T)%nat ->
+  (toff T t + SCH.fold_row_visit ext (toff T t) T k < ext)%nat.
+Proof.
+  intros ext T t k Hk.
+  rewrite the_emitted_fold_back_visits_each_offset_once.
+  rewrite the_emitted_fold_back_runs_the_tile_width in Hk.
+  apply tile_index_in_range. exact Hk.
+Qed.
+
+(** ...and the trip count is what does the work, one unit wide. At `M = 53`,
+    `MR = 6`, the last tile starts at 48: the emitted fold-back runs FIVE
+    times, and a sixth iteration would address row 53 of a 53-row matrix.
+
+    Without this the theorem above is satisfied by a loop that runs zero
+    times. *)
+Theorem the_fold_back_trip_count_is_what_keeps_it_in_bounds :
+  SCH.fold_row_trips 53 (toff 6 8) 6 = 5%nat
+  /\ ~ (toff 6 8 + 5 < 53)%nat.
+Proof. unfold SCH.fold_row_trips, toff, SCH.toff. cbn. split; [reflexivity | lia]. Qed.
+
 (** ...and that this is not the same theorem twice: the two loops walk
     DIFFERENT spaces, so a single `CountedLoop` reused at both sites - the
     obvious way to get the four theorems above for free - would be a bug the
@@ -360,6 +425,11 @@ Print Assumptions the_emitted_row_loop_runs_once_per_tile.
 Print Assumptions the_emitted_column_loop_enumerates_the_tiles.
 Print Assumptions the_emitted_column_loop_runs_once_per_tile.
 Print Assumptions the_two_panel_loops_are_different.
+Print Assumptions the_emitted_fold_back_visits_each_offset_once.
+Print Assumptions the_emitted_fold_back_runs_the_tile_width.
+Print Assumptions the_emitted_fold_back_column_runs_the_tile_width.
+Print Assumptions the_fold_back_stays_inside_the_live_rectangle.
+Print Assumptions the_fold_back_trip_count_is_what_keeps_it_in_bounds.
 Print Assumptions tiles_cover.
 Print Assumptions tile_index_in_range.
 Print Assumptions tile_index_injective.
