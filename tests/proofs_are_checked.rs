@@ -474,6 +474,13 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "unclamped_tail_writes_out_of_bounds",
                 // ...and the precondition nothing in the compiler states.
                 "row_stride_below_n_aliases",
+                // The fold-back loop, whose BOUND carries the obligation: it
+                // runs exactly the clamped tile width, so the copy into C
+                // never leaves the rectangle the tile owns.
+                "the_emitted_fold_back_runs_the_tile_width",
+                "the_fold_back_stays_inside_the_live_rectangle",
+                // ...with the trip count doing the work, one unit wide.
+                "the_fold_back_trip_count_is_what_keeps_it_in_bounds",
                             // The FIRST tie between a proof and the SHAPE of an emitted
                 // loop rather than the value of an emitted expression:
                 // `SCH.row_panel_*` is rendered from `cpu_gemm::CountedLoop`,
