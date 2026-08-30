@@ -1202,9 +1202,10 @@ associative, so the relationship is an equality, which is what a proof assistant
 is good at. Measured cost: exact VNNI is **1.88× faster** than the f32 path, so
 exactness here trades range rather than speed.
 
-Fourteen files, ~215 theorems, **no axioms, nothing admitted** — and `tests/proofs_are_checked.rs` runs `coqc` over all of
-them in `cargo test`, with a content control per file so that "it compiles" and
-"no axioms" (both properties an *empty* file has) are not the whole check.
+Fourteen files, ~215 theorems, **no axioms, nothing admitted** — and
+`tests/proofs_are_checked.rs` runs `coqc` over all of them in `cargo test`,
+with a content control per file so that "it compiles" and "no axioms" (both
+properties an *empty* file has) are not the whole check.
 
 #### The proof is tied to the emitted code by removing the second description
 
