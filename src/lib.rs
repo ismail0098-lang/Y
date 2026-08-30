@@ -24,6 +24,7 @@ pub mod exact_attention;
 pub mod c_api;
 pub mod cpu_specializer;
 pub mod cpu_gemm;
+pub mod exact_gemm_certificate;
 
 #[cfg(feature = "zk")]
 pub mod circom_lexer;

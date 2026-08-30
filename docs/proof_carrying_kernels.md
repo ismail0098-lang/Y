@@ -2168,6 +2168,122 @@ itself.
 
 ---
 
+#### The certificate is EMITTED now, and that is what the programme is named after · 2026-08-30
+
+`proofs/` is checked once, at build time, against the shipped schedule
+constants. Its theorems are universally quantified over `M`, `N`, `K` and
+`nthr`, so every shape is covered — and a user who compiled their own
+`@ZeroDrift` nest still got a fast kernel and **no artifact**. "Proof-carrying"
+described the repository, not the output. That was the largest gap between what
+exists and what the programme is called, and it was mostly plumbing, because
+the generator already existed.
+
+`src/exact_gemm_certificate.rs` renders a `.v` beside the `.ll` whenever the
+exact `vpdpwssd` kernel is substituted. It **instantiates**
+`ExactGemmWhole.the_threaded_gemm_holds_the_source_dot_products` at this
+compilation's flush interval and operand bound rather than re-proving anything:
+
+```coq
+Definition Fl : nat := 64.
+Definition m  : Z   := 1024.
+
+Theorem the_licence_holds :
+  2 * Z.of_nat Fl * m * m <= ExactGemmMicro.I32MAX.
+
+Theorem this_kernel_computes_the_source_dot_products :
+  forall A B M N K nthr r c,
+    (forall i k, Z.abs (A i k) <= m) -> (forall k j, Z.abs (B k j) <= m) ->
+    (0 < nthr)%nat -> (r < M)%nat -> (c < N)%nat ->
+    W.thread_sum A B M N K Fl nthr r c nthr = PK.sum_k (fun k => A r k * B k c) K.
+```
+
+`--emit-llvm` writes it, names it in the report, and prints the command that
+checks it. `Y_NO_CERTIFICATE=1` suppresses it, loudly.
+
+##### Why this is not paperwork: two derivations of one obligation, by two tools
+
+The only hypothesis that depends on the program is the LICENCE. Y decides it in
+**floating point** — a `sqrt` and a `floor` on `f64` in
+`VnniExact::max_operand_magnitude`. The certificate states it over `Z` and
+hands it to `coqc`, which has no floats. **So emitting the certificate makes the
+compiler's own floating-point reasoning checkable by an independent integer
+tool.**
+
+Verified at the edge before anything was wired in: at the default interval the
+certificate is **accepted at `m = 4095` and refused at `m = 4096`** — the same
+one-unit boundary `tests/exact_gemm_licence_obligations.rs` finds by exhausting
+the int16 domain, reproduced by a different tool from a different derivation.
+`the_certificate_refuses_exactly_the_bounds_the_compiler_refuses` runs that
+comparison at four intervals, at the limit and one above it, and asserts the two
+answers agree.
+
+The rounding direction is the other place the two could diverge, and the
+argument is short enough to write down. `m` plays two roles at once — the
+licence gets **harder** as `m` grows, the data hypothesis `|A[i,k]| <= m` gets
+**easier** — so `ceil` is conservative for both, and `floor` would be wrong
+twice. It cannot break a licence Y granted: Y licenses exactly when `m <= L` for
+an integer `L`, and `m <= L` gives `ceil(m) <= L`. Checked over every interval
+the scheme admits rather than argued.
+
+##### TWO SURVIVORS, AND BOTH ARE THE SAME LESSON ABOUT PROOF ARTIFACTS
+
+Eight mutations. Six caught immediately; two survived a fresh, all-green test
+file, and they have a common cause worth more than the fixes.
+
+| mutation | outcome |
+|---|---|
+| `integer_bound` floors instead of ceiling | caught (unit + the fractional-bound fixture) |
+| renderer hardcodes `m = 1024` | caught |
+| renderer hardcodes `Fl = 64` | caught (the licence sweep renders at four intervals) |
+| **licence statement drops one factor of `m`** | **SURVIVED** |
+| certificate never recorded at the substitution site | caught (4 tests) |
+| `Y_NO_CERTIFICATE` ignored | caught |
+| file name not sanitised to a Coq identifier | caught |
+| **non-vacuity theorem replaced by `True`** | **SURVIVED** |
+
+**Coq compares propositions up to CONVERSION.** At a licensed numeral,
+`2*Fl*m <= I32MAX` and `2*Fl*m*m <= I32MAX` both reduce to `Lt <> Gt`, so a
+certificate stating the wrong obligation type-checks, and its use site — which
+still demands the real hypothesis — accepts it by conversion as well. The
+mutated certificate therefore refuses **exactly** the magnitudes the correct one
+refuses, and no `coqc` run can tell them apart. What it changes is the claim a
+human auditing the artifact reads, which for a certificate is the entire point
+of the artifact.
+
+`Theorem the_certificate_is_not_vacuous : True.` is the same shape: it compiles,
+it reports `Closed under the global context`, and it passes a count of how many
+such reports appeared.
+
+So **`coqc` accepting a generated proof is necessary and not sufficient**, and
+the guard has to be on the statement's TEXT. That is
+`every_proof_has_a_content_control` in `tests/proofs_are_checked.rs` — which
+guards the *committed* proofs against precisely this and had no counterpart for
+the *generated* one. Both survivors are closed by asserting the certificate
+states the obligation it is about and evaluates the model it claims to.
+
+The sanitiser row is small and worth stating because it is the one place the
+artifact could be self-inconsistent: `coqc` derives the module's logical name
+from the FILE name, so sanitising inside the renderer alone would leave a
+certificate whose own "check with" line names a module that does not exist.
+`4-bit gemm.ysu` is an ordinary source name and an illegal Coq identifier.
+
+##### The controls, because "always write a certificate" would pass the rest
+
+A nest with no operand `@bounds` is still **exact** — scalar lowering honours
+`@ZeroDrift` — it is simply not licensed for the fast kernel, and then there is
+nothing to certify: the emitted code *is* the naive nest. No certificate is
+written for it, nor for `Y_NO_GEMM_RECOGNISER=1`, and both are asserted.
+
+##### What the certificate does not claim
+
+Exactly what the library files exclude, repeated in the artifact's own header
+because a certificate that overstates its scope is worse than none: `vpdpwssd`'s
+semantics and the little-endian i32 half-order are **definitions** pinned on
+hardware by `tests/cpu_gemm_vnni_micro.rs`; the loop nest is partly extracted
+and partly modelled; and nothing here is a statement about LLVM, `clang`, or the
+machine code either produces.
+
+
 ## 5. End goal
 
 You write the naive loop nest — the specification, readable and obviously

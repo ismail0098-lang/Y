@@ -30,6 +30,7 @@ mod empirical_autotune;
 mod zero_drift;
 mod cpu_specializer;
 mod cpu_gemm;
+mod exact_gemm_certificate;
 
 #[cfg(feature = "zk")]
 mod zk_emitter;
@@ -607,6 +608,86 @@ fn load_or_measure_drift_costs(gpu_name: &str) -> zero_drift::CostTable {
         let _ = writeln!(f, "{}", zero_drift::serialize_costs(&costs, gpu_name));
     }
     costs
+}
+
+/// Write one `.v` certificate per exact GEMM this compilation substituted.
+///
+/// **This is the "carrying" half of proof-carrying kernels.** The library in
+/// `proofs/` is checked once at build time against the shipped schedule; until
+/// now a user compiling their own `@ZeroDrift` nest got a fast kernel and no
+/// artifact. The certificate instantiates
+/// `ExactGemmWhole.the_threaded_gemm_holds_the_source_dot_products` at THIS
+/// compilation's flush interval and operand bound, so it travels with the
+/// `.ll` and can be checked by anyone with `coqc` and the proofs.
+///
+/// A failure to write is reported and does NOT fail the build: the kernel is
+/// correct whether or not the paperwork lands, and refusing to compile because
+/// a directory is read-only would be a worse trade than saying so. A failure
+/// to LICENSE, by contrast, is decided long before this point and does refuse.
+///
+/// `Y_NO_CERTIFICATE=1` suppresses the file. It exists for callers that
+/// compile into a directory they do not own, and for tests that want the `.ll`
+/// alone; like `Y_NO_GEMM_RECOGNISER` it is read from the environment on every
+/// call rather than cached.
+fn write_exact_gemm_certificates(
+    certs: &[exact_gemm_certificate::Certificate],
+    output_path: &str,
+    source_label: &str,
+) {
+    if certs.is_empty() {
+        return;
+    }
+    if matches!(
+        env::var("Y_NO_CERTIFICATE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) {
+        println!(
+            "      -> {} exact-GEMM certificate(s) suppressed by Y_NO_CERTIFICATE",
+            certs.len()
+        );
+        return;
+    }
+    let base = std::path::Path::new(output_path);
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    for (i, cert) in certs.iter().enumerate() {
+        // One certificate per substituted nest, so the name has to distinguish
+        // them when a program contains more than one. The first keeps the bare
+        // name because that is overwhelmingly the common case and a `_0`
+        // suffix on a lone file reads as an accident.
+        //
+        // The name is SANITISED here and not only inside the renderer, because
+        // `coqc` derives the module's logical name from the FILE name: a
+        // source called `4-bit gemm.ysu` is an ordinary file name and an
+        // illegal Coq identifier, and letting the two diverge would produce a
+        // certificate whose own "check with" line names a module that does not
+        // exist.
+        let file_stem = exact_gemm_certificate::module_stem(&if i == 0 {
+            format!("{stem}_certificate")
+        } else {
+            format!("{stem}_certificate_{i}")
+        });
+        let path = base.with_file_name(format!("{file_stem}.v"));
+        let text = exact_gemm_certificate::render(cert, source_label, &file_stem);
+        match fs::write(&path, &text) {
+            Ok(_) => println!(
+                "      -> Certificate: {} (check with `coqc -Q proofs \"\" {}.v`)",
+                path.display(),
+                file_stem
+            ),
+            Err(e) => {
+                log_error!(
+                    "could not write the exact-GEMM certificate to {}: {}. The emitted kernel \
+                     is unaffected - only the artifact recording why it is exact could not be \
+                     saved.",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
 }
 
 fn main() {
@@ -1545,6 +1626,11 @@ fn main() {
                 exit(1);
             }
         }
+        write_exact_gemm_certificates(
+            &emitter.exact_gemm_certificates,
+            &output_path,
+            source_file.as_deref().unwrap_or("<stdin>"),
+        );
         println!("      Compile manually: clang -O2 -o output {} c_src/runtime.c -lm", &output_path);
     } else if emit_ptx {
         log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
