@@ -1998,7 +1998,56 @@ What it buys instead:
   (`tw 5 3 1 < 3`), which the move makes false. **A control that merely
   exhibits the interesting case has not said the case is interesting.**
 
-618 / 884 tests, both builds green. **Thirteen proofs, no axioms.**
+#### The second schema: positional indices
+
+`quot_rem_unique` had **two independent copies** — `ExactGemmTiling` and
+`ExactGemmPacking`, neither file requiring the other. `ExactGemmPacking`'s
+carried a comment defending it:
+
+> Proved locally rather than imported: it is six lines, and a lemma cannot
+> drift into being wrong the way a duplicated CONSTANT can — it is re-proved
+> wherever it is stated.
+
+**That argument is right, and it is right about the wrong thing.** A duplicated
+*lemma* is checked by `coqc` at every copy, unlike a duplicated constant, which
+is exactly why `ExactGemmSchedule.v` is generated. What it does not cover is the
+package around it: uniqueness is six lines, but **onto** was eleven lines in
+`ExactGemmTiling`, seven in `ExactGemmRegisterTile` and four in
+`ExactGemmPacking` — the same argument three times — and the two-digit peel in
+`pack_b_slot_bijective` was sixteen. *The thing that recurs is the bijection,
+not the lemma inside it.*
+
+`proofs/MixedRadix.v` is `pack B q r = q·B + r` with its two legs, its
+two-sided inverse, in-range, onto, and a two-digit form. Every index in this
+compiler is one of these at a different radix: a tile offset `t·T + f`, a packed
+A slot `2i + h`, an accumulator column `16v + l`, a linear address `r·ldc + c`,
+and the packed B slot `(j/16)·32 + (j mod 16)·2 + h` — three digits, radix 4,
+16, 2.
+
+**This is the first factoring where the kernel files got smaller in aggregate**:
+222 → 200 tactic lines, plus 30 in the shared file.
+
+| | before | after |
+|---|---|---|
+| `Tiling.quot_rem_unique` | 7 | **1** |
+| `Packing.quot_rem_unique` | 7 | **1** |
+| `Tiling.tile_index_surjective` | 11 | 6 |
+| `Packing.pack_b_slot_bijective` | 16 | 13 |
+| `RegisterTile.tile_position_surjective` | 7 | 5 |
+
+**Six mutations, four caught, two survivors of different kinds** — and sorting
+them is the point. Restoring `ExactGemmPacking`'s *identical* hand-written copy
+passes, and should: the gate checks the property, not the plumbing, exactly as
+the `Ix` gate's design control does. The other survivor was a **real hole in a
+control written minutes earlier**, and it is the same shape as the previous
+increment's: `without_the_digit_bound_it_is_not_injective` exhibited a collision
+(`0·2 + 2 = 1·2 + 0`), and moving the fixture to a *legal* digit pair left the
+statement true, provable and green. It refutes the **weakened theorem** now —
+`~ (forall …, q₁·B + r₁ = q₂·B + r₂ → q₁ = q₂ ∧ r₁ = r₂)` — which no choice of
+witness can satisfy vacuously. **Twice in two increments: a control has to state
+what makes the case interesting as a proposition, not merely exhibit it.**
+
+618 / 884 tests, both builds green. **Fourteen proofs, no axioms.**
 
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 

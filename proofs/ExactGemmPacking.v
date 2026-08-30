@@ -73,6 +73,7 @@
 
 From Stdlib Require Import ZArith Arith Lia.
 Require ExactGemmSchedule.
+Require MixedRadix.
 
 Open Scope Z_scope.
 
@@ -97,21 +98,17 @@ Definition slot_a (i h : nat) : nat := SCH.slot_a i h.
     and consecutive columns are 2 int16 apart, not 1. *)
 Definition slot_b (j h : nat) : nat := SCH.slot_b j h.
 
-(** Quotient and remainder are unique. Proved locally rather than imported:
-    it is six lines, and a lemma cannot drift into being wrong the way a
-    duplicated CONSTANT can - it is re-proved wherever it is stated. *)
+(** Quotient and remainder are unique. This used to be a local copy, with a
+    comment saying a lemma "cannot drift into being wrong the way a duplicated
+    CONSTANT can - it is re-proved wherever it is stated". That is true, and it
+    is why the SIX-line lemma was never the problem: what recurred was the
+    package around it - onto, in-range, and the two-digit peel below. It comes
+    from [MixedRadix] now, with the statement unchanged so every use site is
+    untouched. *)
 Lemma quot_rem_unique : forall B q1 r1 q2 r2,
   (0 < B)%nat -> (r1 < B)%nat -> (r2 < B)%nat ->
   (q1 * B + r1 = q2 * B + r2)%nat -> q1 = q2 /\ r1 = r2.
-Proof.
-  intros B q1 r1 q2 r2 HB H1 H2 Heq.
-  assert (E1 : ((q1 * B + r1) / B = q1)%nat).
-  { rewrite Nat.div_add_l by lia. rewrite Nat.div_small by lia. lia. }
-  assert (E2 : ((q2 * B + r2) / B = q2)%nat).
-  { rewrite Nat.div_add_l by lia. rewrite Nat.div_small by lia. lia. }
-  assert (q1 = q2) by (rewrite <- E1, <- E2, Heq; reflexivity).
-  split; [assumption | subst; lia].
-Qed.
+Proof. exact MixedRadix.quot_rem_unique. Qed.
 
 Theorem pack_a_slot_bijective : forall i1 h1 i2 h2,
   (i1 < MR)%nat -> (i2 < MR)%nat -> (h1 < 2)%nat -> (h2 < 2)%nat ->
@@ -146,16 +143,13 @@ Proof.
   pose proof (Nat.div_mod_eq j2 16) as D2.
   pose proof (Nat.mod_upper_bound j1 16 ltac:(lia)) as M1.
   pose proof (Nat.mod_upper_bound j2 16 ltac:(lia)) as M2.
-  assert (Hq1 : (j1 / 16 < 4)%nat) by (apply Nat.Div0.div_lt_upper_bound; lia).
-  assert (Hq2 : (j2 / 16 < 4)%nat) by (apply Nat.Div0.div_lt_upper_bound; lia).
-  (* The index is a three-digit mixed-radix number: group (radix 4), lane
-     (radix 16), half (radix 2). Peel one digit at a time. *)
-  assert (Hg : (j1 / 16 = j2 / 16)%nat /\ ((j1 mod 16) * 2 + h1 = (j2 mod 16) * 2 + h2)%nat).
-  { apply (quot_rem_unique 32); lia. }
-  destruct Hg as [Hgrp Hrest].
-  assert (Hl : (j1 mod 16 = j2 mod 16)%nat /\ h1 = h2)
-    by (apply (quot_rem_unique 2); lia).
-  destruct Hl as [Hlane Hh]. split; [lia | exact Hh].
+  (* Three digits: group (radix 4), lane (radix 16), half (radix 2). The peel
+     is [MixedRadix.two_digit_unique]; only the reassociation is local. *)
+  assert (H : (j1 / 16)%nat = (j2 / 16)%nat
+              /\ (j1 mod 16)%nat = (j2 mod 16)%nat /\ h1 = h2).
+  { apply (MixedRadix.two_digit_unique 2 16); [ lia | lia | lia | lia | lia | lia | ].
+    replace (16 * 2)%nat with 32%nat by lia. lia. }
+  destruct H as [Hgrp [Hlane Hh]]. split; [ lia | exact Hh ].
 Qed.
 
 (** The emitted vector-group form is the plain interleave.

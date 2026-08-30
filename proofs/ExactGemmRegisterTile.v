@@ -40,6 +40,7 @@
 
 Require Import ZArith Lia Arith.
 Require ExactGemmSchedule.
+Require MixedRadix.
 Open Scope Z_scope.
 
 Module SCH := ExactGemmSchedule.
@@ -202,15 +203,17 @@ Theorem tile_position_in_range : forall v l,
   (v < NRV)%nat -> (l < 16)%nat -> (col_of v l < NR)%nat.
 Proof. intros v l Hv Hl. unfold col_of, SCH.col_of, NRV, SCH.NRV, NR, SCH.NR in *. lia. Qed.
 
+(** Onto: every column of the tile is some (vector, lane) pair, so no
+    accumulator lane is unused and none is written twice. `col_of v l` is
+    `16*v + l`, i.e. [MixedRadix.pack 16] with the operands the other way
+    round - the emitter writes the radix first - which is the only local step. *)
 Theorem tile_position_surjective : forall j,
   (j < NR)%nat -> exists v l, (v < NRV)%nat /\ (l < 16)%nat /\ col_of v l = j.
 Proof.
-  intros j Hj. exists (j / 16)%nat, (j mod 16)%nat.
-  pose proof (Nat.div_mod_eq j 16) as Hdm.
-  pose proof (Nat.mod_upper_bound j 16 ltac:(lia)) as Hub.
-  assert ((j / 16 < NRV)%nat).
-  { unfold NRV, SCH.NRV. apply Nat.Div0.div_lt_upper_bound.
-    unfold NR, SCH.NR in Hj. lia. }
+  intros j Hj.
+  destruct (MixedRadix.pack_onto 16 NRV j ltac:(lia)) as [v [l [Hv [Hl Hp]]]].
+  { unfold NRV, SCH.NRV, NR, SCH.NR in *. lia. }
+  exists v, l. unfold MixedRadix.pack in Hp.
   unfold col_of, SCH.col_of. repeat split; lia.
 Qed.
 
