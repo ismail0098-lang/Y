@@ -205,6 +205,61 @@ Qed.
 
 
 (* ------------------------------------------------------------------ *)
+(** ** The scratch tile starts at ZERO, which nothing had stated        *)
+(* ------------------------------------------------------------------ *)
+
+(** [gemm_position] models the driver as accumulating into `fun _ _ => 0` - a
+    scratch tile that starts at zero - because the emitted micro-kernel
+    ACCUMULATES rather than assigns. That is a hypothesis about the emitter
+    hidden inside a definition, and until now nothing connected it to anything
+    the compiler does.
+
+    It is not decorative. `%Ctile` is allocated once and reused for every
+    `(i, j)` tile, so a zeroing loop that stopped one slot short would carry
+    the PREVIOUS tile's accumulator into this one. The theorem would then be
+    about a kernel that is not the emitted one - the same shape as the
+    `N <= ldc` hypothesis whose absence turned out to be a live heap overflow.
+
+    `SCH.zero_tile_trips` is rendered from `cpu_gemm::zero_tile_loop`, the
+    `CountedLoop` the driver opens for `vg.z`. *)
+
+Theorem the_zeroing_loop_visits_each_slot_once : forall k,
+  SCH.zero_tile_visit k = k.
+Proof. intros k. unfold SCH.zero_tile_visit. lia. Qed.
+
+(** Every slot the fold-back can read is one the zeroing loop wrote. The
+    fold-back reads `fi * NR + fj` for `fi < tw <= MR` and `fj < tw <= NR`, so
+    the bound is the full tile even though a ragged one reads less of it. *)
+Theorem the_scratch_is_zeroed_wherever_the_fold_back_reads :
+  forall fi fj, (fi < RT.MR)%nat -> (fj < RT.NR)%nat ->
+    (fi * RT.NR + fj < SCH.zero_tile_trips)%nat.
+Proof.
+  intros fi fj Hi Hj.
+  unfold SCH.zero_tile_trips, RT.MR, RT.NR, SCH.MR, SCH.NR in *.
+  cbn. nia.
+Qed.
+
+(** ...and the loop covers the tile EXACTLY.
+
+    The inequality above is satisfied by any bound at least as large, and "at
+    least as large" is not safe here in either direction: one trip short leaves
+    a slot of `%Ctile` holding the previous tile's accumulator, and one trip
+    long writes past a buffer sized `MR * NR`. An equality is the only form
+    that pins both. *)
+Theorem the_zeroing_loop_covers_exactly_the_tile :
+  SCH.zero_tile_trips = (RT.MR * RT.NR)%nat.
+Proof. unfold SCH.zero_tile_trips, RT.MR, RT.NR, SCH.MR, SCH.NR. reflexivity. Qed.
+
+(** ...and one trip short is not enough, on the corner slot. Without this the
+    inequality above is satisfied by any bound at least as large, including one
+    the emitter does not have. *)
+Theorem one_trip_short_leaves_the_corner_stale :
+  ~ ((RT.MR - 1) * RT.NR + (RT.NR - 1) < SCH.zero_tile_trips - 1)%nat.
+Proof.
+  unfold SCH.zero_tile_trips, RT.MR, RT.NR, SCH.MR, SCH.NR. cbn. lia.
+Qed.
+
+(* ------------------------------------------------------------------ *)
 (** ** The tie to the output partition                                 *)
 (* ------------------------------------------------------------------ *)
 
@@ -256,5 +311,9 @@ Print Assumptions the_position_is_live_in_its_own_tile.
 Print Assumptions the_whole_output_holds_the_source_dot_products.
 Print Assumptions the_threaded_gemm_holds_the_source_dot_products.
 Print Assumptions the_position_decomposition_is_the_tilings.
+Print Assumptions the_zeroing_loop_visits_each_slot_once.
+Print Assumptions the_scratch_is_zeroed_wherever_the_fold_back_reads.
+Print Assumptions the_zeroing_loop_covers_exactly_the_tile.
+Print Assumptions one_trip_short_leaves_the_corner_stale.
 Print Assumptions the_whole_chain_is_not_vacuous.
 Print Assumptions both_bands_contribute.

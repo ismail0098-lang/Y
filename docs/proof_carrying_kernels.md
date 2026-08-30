@@ -2358,6 +2358,77 @@ Which loops exist, in what order, in which blocks, and what they call. Every
 loop in the exact-GEMM driver is now described; the *nest* is not.
 
 
+#### The scratch tile starts at zero, and nothing had said so · 2026-08-31
+
+`ExactGemmWhole.gemm_position` models the driver as accumulating into
+`fun _ _ => 0` — a scratch tile that starts at zero — because the emitted
+micro-kernel **accumulates** rather than assigns. That is a hypothesis about the
+emitter hidden inside a definition, and nothing connected it to anything the
+compiler does. It is exactly the shape of the `N <= ldc` hypothesis whose
+absence turned out to be a live heap overflow: a precondition the theorem needs,
+stated nowhere.
+
+It is not decorative. `%Ctile` is allocated once and reused for every `(i, j)`
+tile, so a zeroing loop one trip short carries the **previous tile's**
+accumulator into this one.
+
+`vg.z` is now a described `CountedLoop`, and the tie is an **equality**:
+
+```coq
+Theorem the_zeroing_loop_covers_exactly_the_tile :
+  SCH.zero_tile_trips = (RT.MR * RT.NR)%nat.
+
+Theorem the_scratch_is_zeroed_wherever_the_fold_back_reads :
+  forall fi fj, (fi < RT.MR)%nat -> (fj < RT.NR)%nat ->
+    (fi * RT.NR + fj < SCH.zero_tile_trips)%nat.
+```
+
+The inequality alone would be satisfied by any bound at least as large, and "at
+least as large" is unsafe in **both** directions here — one trip short leaves a
+stale slot, one trip long writes past a buffer sized `MR * NR`. The mutation
+table is what established that the equality is doing work rather than tidying.
+
+##### MUTATION TABLE — Z2 is the row that matters
+
+| mutation | schedule gate | `proofs_are_checked` | `packing_schedule` | `thread_inv` | `exact_thr` |
+|---|---|---|---|---|---|
+| Z1 zeroing one trip **short** (description + emitter) | ok | **FAIL** | ok | FAIL | FAIL |
+| **Z2 zeroing one trip long** (description + emitter) | ok | **FAIL** | **ok** | **ok** | **ok** |
+| Z3 emitter diverges from the description | **FAIL** | ok | ok | FAIL | FAIL |
+| N1 A packed inside the column loop | **FAIL** | ok | FAIL | ok | ok |
+
+**Z2 is a write past the end of the scratch buffer that no correctness suite
+observes, caught only by the Coq equality.** That is the second invisible
+out-of-bounds write this week, and it is the case that justifies stating the
+theorem as `=` rather than `<=`.
+
+Z1 and Z2 also show the standing limit of "one description, two consumers"
+honestly: when the description itself moves, both consumers move with it and the
+byte-identity gate is silent. **What catches a coherent-but-wrong description is
+a theorem tying it to something else** — here, the tile geometry `MR * NR` the
+register-tile file independently fixes.
+
+##### The nest, as a gate rather than an extraction
+
+`the_driver_nests_its_loops_the_way_it_claims_to` reads the emitted LLVM and
+checks each described loop lies inside the loop it is supposed to: `vg.i` inside
+`vg.j`, `vg.z` and `vg.fi` inside `vg.i`, `vg.fj` inside `vg.fi`, and the
+A-packing sweep inside **nothing** — packing A once for the whole matrix rather
+than once per column panel is what makes packing asymptotically free, and
+nesting it would be correct and `N/NR` times slower.
+
+It is a gate and not an extraction, deliberately. The nest's shape lives in the
+imperative order of `loop_begin`/`loop_end` calls, and there is no second
+description to remove; writing one down in Rust and asserting the emitter agrees
+would *create* the duplication this layer exists to delete. So it checks the
+property.
+
+**It diagnoses rather than isolates, and the table says so:** N1 is caught by
+`exact_gemm_packing_schedule` as well, which excises the callees and records the
+call order. What the nest gate adds is a name for the failure instead of a call
+sequence that is off by a factor of `N/NR`.
+
+
 ## 5. End goal
 
 You write the naive loop nest — the specification, readable and obviously
