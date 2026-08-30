@@ -41,9 +41,11 @@
 
 Require Import ZArith Lia Arith.
 Require ExactGemmSchedule.
+Require Decomposition.
 Open Scope Z_scope.
 
 Module SCH := ExactGemmSchedule.
+Module D := Decomposition.
 
 (* ------------------------------------------------------------------ *)
 (** ** Sums over a range                                               *)
@@ -57,16 +59,18 @@ Fixpoint sum_from (f : nat -> Z) (lo len : nat) : Z :=
   | S n => sum_from f lo n + f (lo + n)%nat
   end.
 
+(** [sum_from] IS [Decomposition.acc_range] at [Z.add]; the two were written in
+    different sessions for different obligations and are the same fold. *)
+Lemma sum_from_is_acc_range : forall f lo len,
+  sum_from f lo len = D.acc_range Z.add f lo len.
+Proof.
+  intros f lo len. induction len as [| n IH]; cbn [sum_from D.acc_range];
+    [ reflexivity | now rewrite IH ].
+Qed.
+
 Lemma sum_from_split : forall f lo a b,
   sum_from f lo (a + b) = sum_from f lo a + sum_from f (lo + a) b.
-Proof.
-  intros f lo a b. induction b as [| b IH].
-  - rewrite Nat.add_0_r. simpl. lia.
-  - replace (a + S b)%nat with (S (a + b))%nat by lia.
-    cbn [sum_from]. rewrite IH.
-    replace (lo + (a + b))%nat with (lo + a + b)%nat by lia.
-    lia.
-Qed.
+Proof. intros f lo a b. rewrite !sum_from_is_acc_range. apply D.sum_range_split. Qed.
 
 (* ------------------------------------------------------------------ *)
 (** ** The flush chunks partition the k-pair range                     *)
@@ -100,27 +104,40 @@ Fixpoint chunk_acc (n t : nat) : Z :=
   | S t' => chunk_acc n t' + sum_from f (coff t') (cw n t')
   end.
 
-Lemma chunk_acc_prefix : forall n t,
-  chunk_acc n t = sum_from f 0 (Nat.min (coff t) n).
+(** The flush chunking is [Decomposition]'s CONTIGUOUS shape at the CLAMPED
+    edge function `t |-> min(t*Fl, n)`, and it is the first instantiation whose
+    purpose is not to divide work: a flush interval is an overflow budget. The
+    schema does not care - a decomposition of a range is a decomposition of a
+    range, whatever it was chosen for.
+
+    The clamp is why the edge is `min(coff t, n)` and not `coff t`, and why
+    this bridge is a case split rather than [reflexivity]: `cw` clamps only its
+    RIGHT end, so a chunk entirely past `n` has width `min(coff (S t), n) -
+    coff t`, which truncates to 0 in [nat], while the schema's is `n - n`.
+    Both are zero; saying so is the work. *)
+Lemma chunk_acc_is_acc_parts : forall n t,
+  chunk_acc n t = D.acc_parts Z.add (fun u => Nat.min (coff u) n) f t.
 Proof.
   intros n t. induction t as [| t IH].
-  - cbn [chunk_acc coff]. rewrite ?Nat.mul_0_l. rewrite Nat.min_0_l. reflexivity.
-  - cbn [chunk_acc]. rewrite IH. rewrite cw_unfold.
+  - reflexivity.
+  - cbn [chunk_acc D.acc_parts]. rewrite IH, sum_from_is_acc_range, cw_unfold.
     destruct (Nat.le_gt_cases n (coff t)) as [Hle | Hgt].
-    + (* this chunk is entirely past the end: it is empty *)
+    + (* entirely past the end: both readings give an empty chunk *)
       rewrite (Nat.min_r (coff t) n) by lia.
       assert (Nat.min (coff (S t)) n = n) as ->.
       { apply Nat.min_r. unfold coff, SCH.coff in *. nia. }
       replace (n - coff t)%nat with O by lia.
-      cbn [sum_from]. lia.
-    + rewrite (Nat.min_l (coff t) n) by lia.
-      set (e := Nat.min (coff (S t)) n).
-      assert (coff t <= e)%nat as He.
-      { unfold e, coff, SCH.coff in *. apply Nat.min_glb; nia. }
-      replace e with (coff t + (e - coff t))%nat at 2 by lia.
-      rewrite sum_from_split. rewrite Nat.add_0_l.
-      replace (coff t + (e - coff t))%nat with e by lia.
-      reflexivity.
+      replace (n - n)%nat with O by lia. reflexivity.
+    + rewrite (Nat.min_l (coff t) n) by lia. reflexivity.
+Qed.
+
+Lemma chunk_acc_prefix : forall n t,
+  chunk_acc n t = sum_from f 0 (Nat.min (coff t) n).
+Proof.
+  intros n t. rewrite chunk_acc_is_acc_parts, sum_from_is_acc_range.
+  apply (D.acc_parts_prefix (fun u => Nat.min (coff u) n) f t).
+  - cbn beta. unfold coff, SCH.coff. rewrite Nat.mul_0_l. apply Nat.min_0_l.
+  - intros u. apply Nat.min_le_compat_r. unfold coff, SCH.coff. nia.
 Qed.
 
 (** The chunk count really does reach the end. *)
@@ -139,8 +156,11 @@ Qed.
 Theorem flush_exact : forall n,
   chunk_acc n (nchunks n) = sum_from f 0 n.
 Proof.
-  intros n. rewrite chunk_acc_prefix.
-  rewrite Nat.min_r by apply nchunks_spans. reflexivity.
+  intros n. rewrite chunk_acc_is_acc_parts, sum_from_is_acc_range.
+  apply (D.contiguous_exact (fun u => Nat.min (coff u) n) f (nchunks n) n).
+  - cbn beta. unfold coff, SCH.coff. rewrite Nat.mul_0_l. apply Nat.min_0_l.
+  - apply Nat.min_r, nchunks_spans.
+  - intros u. apply Nat.min_le_compat_r. unfold coff, SCH.coff. nia.
 Qed.
 
 (** The refutation: a loop that stopped at the last WHOLE interval would drop

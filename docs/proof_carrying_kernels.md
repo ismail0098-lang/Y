@@ -1914,13 +1914,26 @@ everywhere" from looking free. That distinction was prose scattered across two
 files and is now two theorems.
 
 **The honest headline is that it does not save lines — the total went up.**
-255 tactic lines across the three files became 269, plus 76 in the shared one.
-Two causes, both real: each kernel gained a ~5-line *bridge* saying its own fold
-IS the schema's fold (the price of leaving every statement unchanged), and
-`GemmBandSplit` gained a theorem that did not exist before. The proof burden was
-already thin because the informal reuse was already happening — `GemmBandSplit`
-reused `acc_range` and `sum_range_split` by name and copied the *shape* of the
-rest.
+Across the *five* files now instantiating it:
+
+| file | before | after | |
+|---|---|---|---|
+| `ExactGemmKsplit` | 30 | 32 | gained a bridge |
+| `GemmBandSplit` | 47 | 52 | gained a bridge **and a theorem that did not exist** |
+| `GridStrideSplit` | 36 | 36 | two bridges in, three inductions out |
+| `ExactGemmMicro` | 71 | **68** | the clamped-edge prefix was the most expensive of the five |
+| kernels | **184** | **188** | plus 42 in `Decomposition.v` |
+
+Each kernel gains a *bridge* saying its own fold IS the schema's fold — the
+price of leaving every statement unchanged — and the burden was already thin
+because the informal reuse was already happening: `GemmBandSplit` reused
+`acc_range` and `sum_range_split` by name and copied the *shape* of the rest.
+
+**(An earlier version of this section published 255 → 269 plus 76. Those were
+wrong: my line counter treated `Proof. … Qed.` written on one line as an
+unterminated proof and counted the rest of the file. Instantiating the schema
+introduces exactly that idiom, so the bug was created by the change it was
+measuring. The conclusion — the total goes up — survives; the numbers did not.)**
 
 What it buys instead:
 
@@ -1929,8 +1942,8 @@ What it buys instead:
   reduction out a third time was not worth it for a family used to cut rows and
   columns. Under the schema it costs one application and the three edge facts
   already proved. Measured against a straw-man written the old way, in the same
-  file, both compiling and proving the same thing: **11 tactic lines standalone,
-  7 through the schema** — so the marginal cost of a *new* decomposition is a
+  file, both compiling and proving the same thing: **10 tactic lines standalone,
+  6 through the schema** — so the marginal cost of a *new* decomposition is a
   bridge plus three facts, with **no new induction and no new reasoning about
   ranges**.
 - **The reuse becomes a checked dependency instead of a convention.** Same move
@@ -1939,9 +1952,20 @@ What it buys instead:
   by `proofs_are_checked` — drop either theorem's key hypothesis, declare the
   interleaved split contiguous, make `part` ignore its owner, instantiate the
   granule family with the *proportional* edge function.
+- **A fifth instantiation whose purpose is not dividing work.** The flush
+  chunking in `ExactGemmMicro` cuts the k-pair range into intervals of `Fl`
+  because `vpdpwssd` accumulates in int32 and must be widened before it wraps —
+  an *overflow budget*, not a work split, and this file's own notes say so while
+  warning against confusing the two. The schema does not care: a decomposition
+  of a range is a decomposition of a range, whatever it was chosen for. Its
+  edges are **clamped** (`t ↦ min(t·Fl, n)`), which is why its bridge is a case
+  split rather than `reflexivity` — `cw` clamps only its right end, so a chunk
+  entirely past `n` has width `min(coff (S t), n) − coff t`, truncating to 0 in
+  `nat`, where the schema's is `n − n`. Both zero; saying so is the work. It is
+  the only one of the five that got **smaller**.
 - **The standing limit, stated rather than gated:** nothing *forces* a kernel to
   instantiate the schema. The straw-man above compiles perfectly. What is
-  guaranteed is that the three which do instantiate it cannot drift from each
+  guaranteed is that the five which do instantiate it cannot drift from each
   other — a change to `contiguous_exact` breaks all of them at once.
 
 618 / 884 tests, both builds green. **Thirteen proofs, no axioms.**
