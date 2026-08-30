@@ -754,7 +754,7 @@ fn emit_vnni_gemm_driver() -> String {
     // up front and B once per column panel makes packing `M*K + N*K`, i.e.
     // asymptotically free.
     let panel_stride = b.mul(&kpairs, &(VNNI_MR * 2).to_string());
-    let pal = b.loop_begin("vg.pa", "0", m, &VNNI_MR.to_string());
+    let pal = b.loop_begin_counted(&row_panel_loop("vg.pa"));
     let pai = b.iv(&pal);
     let pa_env = |n: &'static str| match n {
         "ext" => m.to_string(),
@@ -774,7 +774,7 @@ fn emit_vnni_gemm_driver() -> String {
     ));
     b.loop_end(pal);
 
-    let jl = b.loop_begin("vg.j", "0", n, &VNNI_NR.to_string());
+    let jl = b.loop_begin_counted(&col_panel_loop());
     let j0 = b.iv(&jl);
     let nw = tile_width_ix().emit(&mut b, &|nm: &'static str| match nm {
         "ext" => n.to_string(),
@@ -788,7 +788,7 @@ fn emit_vnni_gemm_driver() -> String {
         bsub, ldb, k, nw, bp
     ));
 
-    let il = b.loop_begin("vg.i", "0", m, &VNNI_MR.to_string());
+    let il = b.loop_begin_counted(&row_panel_loop("vg.i"));
     let i0 = b.iv(&il);
     let i_env = |nm: &'static str| match nm {
         "ext" => m.to_string(),
@@ -1623,6 +1623,25 @@ impl IrBuilder {
     }
 
     /// `for (var = start; var < end; var += step)`, signed.
+    /// Open a loop from its [`CountedLoop`] description, so the emitter and
+    /// the proof generator read the same three expressions.
+    ///
+    /// The bounds must be operands - a parameter or a literal. Anything else
+    /// would need instructions emitted before the loop, which is a different
+    /// change and would break the byte-identity this refactor is checked by.
+    fn loop_begin_counted(&mut self, l: &CountedLoop) -> LoopCtx {
+        let op = |ix: &Ix| match ix {
+            Ix::Val(n) => format!("%{n}"),
+            Ix::Lit(k) => k.to_string(),
+            _ => panic!(
+                "a counted loop's bounds must be operands, not expressions; \
+                 `{}` needs its bound emitted through Ix first",
+                l.tag
+            ),
+        };
+        self.loop_begin(l.tag, &op(&l.start), &op(&l.end), &op(&l.step))
+    }
+
     fn loop_begin(&mut self, tag: &str, start: &str, end: &str, step: &str) -> LoopCtx {
         self.n += 1;
         let var = format!("%iv{}", self.n);
@@ -2242,6 +2261,98 @@ pub fn kpairs_ix() -> Ix {
 /// `Sub(T, 1)` would emit an instruction the compiler does not. The generated
 /// `the_emitted_tile_count_is_the_tiling_model` states that folding, and needs
 /// `0 < T` because `nat` subtraction truncates.
+/// A counted loop `for iv = start; iv < end; iv += step`, described once.
+///
+/// `IrBuilder::loop_begin` has always taken these three as strings, so the
+/// *skeleton* was already factored - what was not is the connection between
+/// that skeleton and the proofs. `ExactGemmTiling.toff` is a MODEL of the
+/// indices the emitted row-panel loop visits, and until now nothing said the
+/// loop visits them: a step of `MR - 1` would have been caught only by the
+/// answer, and a trip count one too many not at all (it clamps to a zero-width
+/// tile and writes nothing - see the schedule gate's own isolation result).
+///
+/// This is the first slice of Phase 2. The expression layer removed the second
+/// description of a schedule NUMBER; this removes it for a loop's ITERATION
+/// SPACE. What is still hand-written is which loops exist, in what order, and
+/// what they call.
+///
+/// **Bounds must be operands, not expressions.** Every loop extracted here has
+/// a parameter or a literal at each of the three positions, so nothing is
+/// emitted before the loop and byte-identity is preserved. The fold-back loops
+/// (`vg.fi`, `vg.fj`) walk builder-computed registers and are deliberately not
+/// described - handling those means emitting their bounds through [`Ix`] as
+/// well, which changes the instruction stream.
+#[derive(Clone)]
+pub struct CountedLoop {
+    /// Basic-block label prefix, as `loop_begin` uses it.
+    pub tag: &'static str,
+    /// Name for the generated Coq definitions.
+    pub name: &'static str,
+    pub start: Ix,
+    pub end: Ix,
+    pub step: Ix,
+}
+
+impl CountedLoop {
+    /// The index visited on trip `k`: `start + k*step`.
+    pub fn visit_ix(&self) -> Ix {
+        Ix::add(self.start.clone(), Ix::mul(Ix::val("k"), self.step.clone()))
+    }
+
+    /// How many trips the loop makes: `ceil((end - start) / step)`.
+    ///
+    /// The emitter never computes this - the loop tests `iv < end` - so unlike
+    /// [`visit_ix`] it is rendered to Coq only. That asymmetry is the point:
+    /// the trip count is a fact ABOUT the emitted loop, and stating it is what
+    /// lets [`ExactGemmTiling.ntiles`] be tied to something the compiler does.
+    pub fn trips_ix(&self) -> Ix {
+        Ix::div(
+            Ix::add(
+                Ix::sub(self.end.clone(), self.start.clone()),
+                Ix::sub(self.step.clone(), Ix::Lit(1)),
+            ),
+            self.step.clone(),
+        )
+    }
+
+    /// The two Coq definitions, over the loop's free names in the order given.
+    pub fn coq(&self, params: &[&str]) -> String {
+        let bind = |n: &'static str| n.to_string();
+        let sig = |extra: &str| {
+            let mut v: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+            if !extra.is_empty() {
+                v.push(extra.to_string());
+            }
+            if v.is_empty() {
+                String::new()
+            } else {
+                format!("({} : nat) ", v.join(" "))
+            }
+        };
+        format!(
+            "Definition {}_visit {}: nat := {}.\nDefinition {}_trips {}: nat := {}.\n",
+            self.name,
+            sig("k"),
+            self.visit_ix().coq(&bind),
+            self.name,
+            sig(""),
+            self.trips_ix().coq(&bind),
+        )
+    }
+}
+
+/// The driver's row-panel loop: `for i = 0; i < M; i += MR`. Two sites - the
+/// A-packing sweep and the tile loop - walk the same space, which is why they
+/// share one description rather than two that happen to agree.
+pub fn row_panel_loop(tag: &'static str) -> CountedLoop {
+    CountedLoop { tag, name: "row_panel", start: Ix::Lit(0), end: Ix::val("M"), step: Ix::Lit(VNNI_MR) }
+}
+
+/// The driver's column-panel loop: `for j = 0; j < N; j += NR`.
+pub fn col_panel_loop() -> CountedLoop {
+    CountedLoop { tag: "vg.j", name: "col_panel", start: Ix::Lit(0), end: Ix::val("N"), step: Ix::Lit(VNNI_NR) }
+}
+
 pub fn tile_count_ix() -> Ix {
     Ix::div(Ix::add(Ix::val("ext"), Ix::val("Tm1")), Ix::val("T"))
 }

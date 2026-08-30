@@ -140,6 +140,7 @@ use y::cpu_gemm::{
     granule_band_edge_ix, kpairs_ix, panel_index_ix, prop_band_edge_ix, tile_count_ix,
     tile_width_ix,
     KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
+    row_panel_loop, col_panel_loop,
 };
 use y::zero_drift::VnniExact;
 
@@ -239,6 +240,14 @@ fn render(s: &Schedule) -> String {
     let a_elem_body = a_i32_element_ix().coq(&coq_names);
     let prop_edge_body = prop_band_edge_ix().coq(&coq_names);
     let granule_edge_body = granule_band_edge_ix().coq(&coq_names);
+    // The loop descriptions the driver emits, rendered as Coq definitions.
+    // `row_panel_loop`'s tag differs between its two sites and its iteration
+    // space does not, which is why one description serves both.
+    let loop_defs = format!(
+        "{}\n{}",
+        row_panel_loop("vg.i").coq(&["M"]),
+        col_panel_loop().coq(&["N"])
+    );
     let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
 
     format!(
@@ -397,6 +406,21 @@ Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
 Definition toff (T t : nat) : nat := t * T.
 Definition ntiles (ext T : nat) : nat := (ext + T - 1) / T.
 
+(** The driver's two panel loops, **rendered from `cpu_gemm::CountedLoop`** -
+    the same description `IrBuilder::loop_begin_counted` emits.
+
+    This is the first slice of the loop NEST to be extracted rather than
+    modelled. [toff] and [ntiles] above describe what the row-panel loop does;
+    nothing said the emitted loop does it, and a trip count one too large is
+    invisible in the answer (the extra tile clamps to zero width and writes
+    nothing). `ExactGemmTiling` closes that with
+    [the_emitted_row_loop_enumerates_the_tiles].
+
+    Rendered, not restated: `_visit` comes from the emitter's `start`/`step`,
+    `_trips` from all three. The emitter never COMPUTES the trip count - the
+    loop tests `iv < end` - so that half is a fact about the loop rather than
+    an expression it emits. *)
+{loop_defs}
 (** `ksplit_bands`. The K-split reduction: `base = K/nthr`, `rem = K mod nthr`,
     and the first `rem` bands take one extra k, so the cuts are UNEVEN. A
     different decomposition from [tw] deliberately - do not unify them. *)
@@ -1315,6 +1339,98 @@ fn the_raw_emitted_sites_use_the_shared_schedule_expressions() {
 ///
 /// Counts are per site, for the reason recorded on the exact kernel's table: an
 /// existential search is satisfied while one site of several diverges.
+/// **The driver opens the loop it was described with.**
+///
+/// The description reaching Coq is only half the tie. `CountedLoop` renders
+/// `row_panel_visit` / `col_panel_trips` into `ExactGemmSchedule.v`, and
+/// `ExactGemmTiling` proves those ARE `toff` and `ntiles` - but nothing said
+/// the driver hands the right description to the right site. Handing
+/// `row_panel_loop` to the COLUMN loop was caught by three correctness suites
+/// and **not** by this file, which is the weaker guarantee: the answer noticed,
+/// the schedule did not.
+///
+/// So this recovers `(start, end, step)` from the emitted LLVM per loop tag and
+/// compares them against the description. It follows the loop's own dataflow -
+/// the `store` that seeds the induction variable, the `icmp slt` in its `.cond`
+/// block, and the `add` whose result is written back to the same slot - rather
+/// than matching a text window, so a reordering that leaves the structure
+/// alone still passes.
+#[test]
+fn the_driver_opens_the_loop_it_was_described_with() {
+    use y::cpu_gemm::{emit_vnni_gemm_module, Ix};
+
+    let ir = emit_vnni_gemm_module(64);
+    let mut checked = 0usize;
+    for (tag, l) in [
+        ("vg.pa", row_panel_loop("vg.pa")),
+        ("vg.i", row_panel_loop("vg.i")),
+        ("vg.j", col_panel_loop()),
+    ] {
+        let (start, end, step) = loop_operands(&ir, tag)
+            .unwrap_or_else(|| panic!("{tag}: no counted loop of that tag in the driver"));
+        let want = |ix: &Ix| match ix {
+            Ix::Val(n) => format!("%{n}"),
+            Ix::Lit(k) => k.to_string(),
+            other => panic!("{tag}: bound is not an operand: {other:?}"),
+        };
+        assert_eq!(start, want(&l.start), "{tag}: emitted start is not the described one");
+        assert_eq!(end, want(&l.end), "{tag}: emitted bound is not the described one");
+        assert_eq!(step, want(&l.step), "{tag}: emitted step is not the described one");
+        checked += 1;
+    }
+    // A sweep that finds no loops reports every loop correct.
+    assert_eq!(checked, 3, "the described loops went missing from the driver");
+}
+
+/// Recover `(start, end, step)` for the counted loop whose blocks are tagged
+/// `<tag>.cond` / `<tag>.body`, by following its induction variable's slot.
+fn loop_operands(ir: &str, tag: &str) -> Option<(String, String, String)> {
+    let lines: Vec<&str> = ir.lines().map(str::trim).collect();
+    // `IrBuilder::l` appends a counter to every label, so the block is
+    // `<tag>.cond.<n>` and the tag alone does not name it.
+    let cond = lines
+        .iter()
+        .find(|l| l.starts_with(&format!("{tag}.cond.")) && l.ends_with(':'))?
+        .trim_end_matches(':')
+        .to_string();
+
+    // The seed: the last `store i64 <start>, ptr <iv>` before the branch into
+    // this loop's cond block. Anchoring on the branch is what says WHICH store
+    // belongs to this loop.
+    let entry = lines.iter().position(|l| *l == format!("br label %{cond}"))?;
+    let seed = lines[..entry]
+        .iter()
+        .rev()
+        .find(|l| l.starts_with("store i64 ") && l.contains(", ptr %iv"))?;
+    let (start, iv) = {
+        let body = seed.strip_prefix("store i64 ")?;
+        let (v, p) = body.split_once(", ptr ")?;
+        (v.trim().to_string(), p.trim().to_string())
+    };
+
+    // The bound: in the cond block, `%a = load i64, ptr <iv>` then
+    // `%b = icmp slt i64 %a, <end>`.
+    let cb = lines.iter().position(|l| *l == format!("{cond}:"))?;
+    let load = lines[cb..]
+        .iter()
+        .find(|l| l.contains("= load i64, ptr ") && l.ends_with(iv.as_str()))?;
+    let reg = load.split_once(" =")?.0.trim();
+    let cmp = lines[cb..]
+        .iter()
+        .find(|l| l.contains(&format!("= icmp slt i64 {reg},")))?;
+    let end = cmp.rsplit_once(", ")?.1.trim().to_string();
+
+    // The step: the `add i64 _, <step>` whose result is written back to <iv>.
+    let wb = lines
+        .iter()
+        .filter(|l| l.starts_with("store i64 %") && l.ends_with(&format!(", ptr {iv}")))
+        .next_back()?;
+    let nx = wb.strip_prefix("store i64 ")?.split_once(',')?.0.trim().to_string();
+    let add = lines.iter().find(|l| l.starts_with(&format!("{nx} = add i64 ")))?;
+    let step = add.rsplit_once(", ")?.1.trim().to_string();
+    Some((start, end, step))
+}
+
 #[test]
 fn the_f32_kernel_emits_the_band_arithmetic_the_proof_describes() {
     use y::cpu_gemm::{emit_kernel_module, render_llvm, DEFAULT_TILE};

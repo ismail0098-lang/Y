@@ -299,6 +299,67 @@ Theorem row_stride_below_n_aliases :
   addr 4 0 0 0 4 = addr 4 0 1 0 0 /\ (0, 4) <> (1, 0).
 Proof. unfold addr. cbn. split; [reflexivity | discriminate]. Qed.
 
+(* ------------------------------------------------------------------ *)
+(** ** The EMITTED loop enumerates this tiling                         *)
+(* ------------------------------------------------------------------ *)
+
+(** Everything above describes a tiling. These two say the compiler's row-panel
+    loop IS that tiling - the first tie in this development between a proof and
+    the SHAPE of an emitted loop rather than the value of an emitted
+    expression.
+
+    `SCH.row_panel_visit` and `SCH.row_panel_trips` are rendered from
+    `cpu_gemm::row_panel_loop`, the same `CountedLoop` the driver opens at both
+    of its row-panel sites. Before this, `toff` and `ntiles` were a model of
+    what that loop does with nothing connecting the two: a step of `MR - 1`
+    would have been caught only by the answer, and a trip count one too large
+    **not at all** - the extra tile clamps to zero width and writes nothing,
+    which is the isolation result `tests/exact_gemm_schedule_proof.rs` already
+    records for `tile_count`. *)
+Theorem the_emitted_row_loop_enumerates_the_tiles : forall M k,
+  SCH.row_panel_visit M k = toff SCH.MR k.
+Proof. intros M k. unfold SCH.row_panel_visit, toff, SCH.toff, SCH.MR. lia. Qed.
+
+Theorem the_emitted_row_loop_runs_once_per_tile : forall M,
+  SCH.row_panel_trips M = ntiles M SCH.MR.
+Proof.
+  intros M. unfold SCH.row_panel_trips, ntiles, SCH.ntiles, SCH.MR.
+  (* The two ceil forms bracket differently - the loop description renders
+     `(M - 0) + (MR - 1)` and `ntiles` is written `(M + MR) - 1`. In `nat` they
+     agree only because `MR >= 1`; at a zero step they would not, which is why
+     `contiguous_exact`'s callers all carry `0 < T`. *)
+  replace (M - 0)%nat with M by lia.
+  replace (M + (6 - 1))%nat with (M + 6 - 1)%nat by lia. reflexivity.
+Qed.
+
+(** The column loop likewise, at the other tile extent. Stated separately
+    rather than as one lemma over `T`, because the two loops are two
+    descriptions in `cpu_gemm.rs` and the claim is about each of them. *)
+Theorem the_emitted_column_loop_enumerates_the_tiles : forall N k,
+  SCH.col_panel_visit N k = toff SCH.NR k.
+Proof. intros N k. unfold SCH.col_panel_visit, toff, SCH.toff, SCH.NR. lia. Qed.
+
+Theorem the_emitted_column_loop_runs_once_per_tile : forall N,
+  SCH.col_panel_trips N = ntiles N SCH.NR.
+Proof.
+  intros N. unfold SCH.col_panel_trips, ntiles, SCH.ntiles, SCH.NR.
+  replace (N - 0)%nat with N by lia.
+  replace (N + (64 - 1))%nat with (N + 64 - 1)%nat by lia. reflexivity.
+Qed.
+
+(** ...and that this is not the same theorem twice: the two loops walk
+    DIFFERENT spaces, so a single `CountedLoop` reused at both sites - the
+    obvious way to get the four theorems above for free - would be a bug the
+    answer catches and these would not. *)
+Theorem the_two_panel_loops_are_different :
+  SCH.row_panel_visit 100 1 <> SCH.col_panel_visit 100 1.
+Proof. vm_compute. discriminate. Qed.
+
+Print Assumptions the_emitted_row_loop_enumerates_the_tiles.
+Print Assumptions the_emitted_row_loop_runs_once_per_tile.
+Print Assumptions the_emitted_column_loop_enumerates_the_tiles.
+Print Assumptions the_emitted_column_loop_runs_once_per_tile.
+Print Assumptions the_two_panel_loops_are_different.
 Print Assumptions tiles_cover.
 Print Assumptions tile_index_in_range.
 Print Assumptions tile_index_injective.
