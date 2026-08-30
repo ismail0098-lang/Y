@@ -96,6 +96,8 @@ Require ExactGemmSchedule.
 Require ExactGemmPacking.
 Require ExactGemmMicro.
 Require ExactGemmRegisterTile.
+Require ExactGemmTiling.
+Require Decomposition.
 Open Scope Z_scope.
 
 (* ------------------------------------------------------------------ *)
@@ -348,11 +350,64 @@ Qed.
     little-endian order of an i32's halves. No proof over [Z] supplies those;
     `tests/cpu_gemm_vnni_micro.rs` does, on the real instruction. *)
 
+(* ------------------------------------------------------------------ *)
+(** ** The flush interval and the output tile are ONE decomposition     *)
+(* ------------------------------------------------------------------ *)
+
+(** [ExactGemmMicro] cuts the k-pair range into intervals of `Fl` because
+    `vpdpwssd` accumulates in int32 and must be widened before it wraps - an
+    OVERFLOW budget. [ExactGemmTiling] cuts the output axis into tiles of `T`
+    because the micro-kernel writes a fixed rectangle - a MEMORY partition.
+    CLAUDE.md's own note warns against confusing the two, and it is right about
+    their PURPOSE and wrong about their SHAPE: both are `t |-> min(t*X, ext)`.
+
+    The emitter does not make it obvious, because it computes them differently.
+    `chunk_end_ix` emits `min(iv + T, ext)` - an END, from which the width is
+    recovered by subtracting the offset - while `tile_width_ix` emits
+    `min(ext - iv, T)` - a WIDTH, directly. Two instruction sequences, one
+    function, and each proof file developed the three-regime reconciliation
+    from scratch.
+
+    Both are [Decomposition.clamped] now, and this is the theorem that says the
+    two spellings agree. Note what it is NOT: the emitter still emits two
+    different sequences, and it should - one site has the offset in hand and the
+    other has the end. This is a claim about the SCHEDULE, not about the code
+    generator. *)
+Theorem the_flush_interval_and_the_output_tile_are_the_same_family :
+  forall X ext t, ExactGemmSchedule.tw ext X t = ExactGemmSchedule.cw X ext t.
+Proof.
+  intros X ext t.
+  unfold ExactGemmSchedule.tw, ExactGemmSchedule.cw, ExactGemmSchedule.coff.
+  rewrite Nat.mul_succ_l. symmetry. apply Decomposition.min_shift.
+Qed.
+
+(** The agreement has to cover the RAGGED case or it says nothing: on a full
+    piece both spellings trivially give `X`, and every interesting property of
+    a clamped family lives at the boundary. At `ext = 5`, `X = 3`, `t = 1` the
+    piece is short - width 2, not 3 - and there the two forms are
+    `min(5 - 3, 3)` and `min(2*3, 5) - 3`, which arrive at 2 by different
+    routes.
+
+    This does NOT establish that the two are distinct expressions; nothing
+    inside Coq can, since `cw` defined as `tw` would make the theorem above
+    `reflexivity`. What guards that is `tests/exact_gemm_schedule_proof.rs`,
+    which regenerates `ExactGemmSchedule.v` from `cpu_gemm.rs` and requires
+    byte-identity - so neither definition can be edited here at all. *)
+Theorem the_agreement_covers_the_ragged_case :
+  (* the piece really is short - stated, not assumed, because a version of
+     this that merely evaluated both sides at some point passed perfectly
+     after being moved to a FULL piece, where the agreement is trivial *)
+  (ExactGemmSchedule.tw 5 3 1 < 3)%nat
+  /\ ExactGemmSchedule.tw 5 3 1 = ExactGemmSchedule.cw 3 5 1.
+Proof. split; [ vm_compute; lia | reflexivity ]. Qed.
+
 Print Assumptions packing_and_register_tile_agree_on_the_b_slot.
 Print Assumptions micro_and_register_tile_agree_on_the_b_slot.
 Print Assumptions packing_and_register_tile_agree_on_the_a_slot.
 Print Assumptions the_tile_shape_is_the_same_everywhere.
 Print Assumptions the_agreement_is_not_vacuous.
+Print Assumptions the_flush_interval_and_the_output_tile_are_the_same_family.
+Print Assumptions the_agreement_covers_the_ragged_case.
 Print Assumptions the_lane_accumulates_the_source_elements.
 Print Assumptions a_dead_row_contributes_nothing.
 Print Assumptions the_packed_panels_route_to_the_right_source_elements.

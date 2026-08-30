@@ -1963,10 +1963,40 @@ What it buys instead:
   entirely past `n` has width `min(coff (S t), n) − coff t`, truncating to 0 in
   `nat`, where the schema's is `n − n`. Both zero; saying so is the work. It is
   the only one of the five that got **smaller**.
+- **The finding: two obligations turned out to be one decomposition.** The
+  int32 flush interval is an *overflow budget*; the output tiling is a *memory
+  partition*; this document's own notes warn against confusing them. They are
+  right about the purpose and wrong about the shape — **both are
+  `t ↦ min(t·X, ext)`**, and each proof file developed the three-regime case
+  split from scratch. The emitter hides it by computing them differently:
+  `chunk_end_ix` emits `min(iv + T, ext)` — an END — and `tile_width_ix` emits
+  `min(ext - iv, T)` — a WIDTH. Two instruction sequences, one function.
+  `Decomposition.clamped` is the family; `clamped_width` reconciles the two
+  spellings once; and
+  `the_flush_interval_and_the_output_tile_are_the_same_family` states the
+  agreement in the file whose job is cross-file agreement. That is a claim
+  about the *schedule*, not the code generator — the emitter still emits two
+  sequences, and should, since one site has the offset in hand and the other
+  has the end.
+- **A second obligation family now shares the schema.** `acc_parts` folds
+  *values* over `Z`; an output tiling has nothing to fold and asks only that
+  the part *widths* add up with no gap and no double count. `width_sum` over
+  `nat` is that, and it needs no algebra at all — the sum telescopes. Same
+  decomposition, different consequence. `ExactGemmTiling`'s 16-line
+  three-regime `covered_closed` is **3 lines**, and the file is 6 smaller.
+  `ExactGemmMicro` went 3 *bigger*, because `cw` clamps only its right end and
+  so needs a width reconciliation *and* an offset one.
 - **The standing limit, stated rather than gated:** nothing *forces* a kernel to
   instantiate the schema. The straw-man above compiles perfectly. What is
-  guaranteed is that the five which do instantiate it cannot drift from each
-  other — a change to `contiguous_exact` breaks all of them at once.
+  guaranteed is that the seven files which do instantiate it cannot drift from
+  each other — a change to `contiguous_exact` or `clamped_width` breaks all of
+  them at once.
+- **One mutation of five survived, in a control written minutes earlier.** The
+  non-vacuity companion to the agreement theorem evaluated both spellings at a
+  ragged piece — and moving it to a *full* piece, where the agreement is
+  trivial, left everything green. It states the raggedness as a proposition now
+  (`tw 5 3 1 < 3`), which the move makes false. **A control that merely
+  exhibits the interesting case has not said the case is interesting.**
 
 618 / 884 tests, both builds green. **Thirteen proofs, no axioms.**
 
