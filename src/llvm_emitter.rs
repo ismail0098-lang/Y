@@ -228,6 +228,13 @@ pub struct LlvmEmitter {
     pub emit_errors: Vec<String>,
     /// One line per `@ZeroDrift` binding: what was chosen, and on what basis.
     pub drift_report: Vec<String>,
+    /// One entry per exact `vpdpwssd` GEMM this compilation SUBSTITUTED.
+    ///
+    /// The certificate is only meaningful where a kernel was actually swapped
+    /// in: a nest left on the scalar exact path is already the naive nest, so
+    /// there is nothing to certify equal to it. `main.rs` renders and writes
+    /// these; the emitter does no file I/O.
+    pub exact_gemm_certificates: Vec<crate::exact_gemm_certificate::Certificate>,
     /// Hint for the load() intrinsic: the declared LHS type of the current let
     current_load_hint: Option<String>,
     /// Track all function names called during emission
@@ -392,6 +399,7 @@ impl LlvmEmitter {
             drift_costs: crate::zero_drift::CostTable::new(),
             emit_errors: Vec::new(),
             drift_report: Vec::new(),
+            exact_gemm_certificates: Vec::new(),
             current_load_hint: None,
             called_functions: Vec::new(),
             defined_functions: Vec::new(),
@@ -1995,6 +2003,18 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         operand_magnitude,
                     } => {
                         self.emit_exact_gemm_call(&shape, scheme.flush_k_pairs)?;
+                        // The certificate is recorded HERE, at the one site
+                        // where the substitution actually happens, so it can
+                        // neither be emitted for a nest that stayed on the
+                        // scalar path nor forgotten for one that did not.
+                        self.exact_gemm_certificates.push(
+                            crate::exact_gemm_certificate::Certificate {
+                                operand_magnitude,
+                                flush_k_pairs: scheme.flush_k_pairs,
+                                extent_m: shape.m.clone(),
+                                extent_n: shape.n.clone(),
+                            },
+                        );
                         self.drift_report.push(format!(
                             "matmul {}x{}: EXACT vpdpwssd kernel substituted (operands \
                              |x| <= {}, flush every {} k-pairs). Integer addition is \
