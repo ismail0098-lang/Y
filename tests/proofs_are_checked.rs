@@ -474,7 +474,16 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "unclamped_tail_writes_out_of_bounds",
                 // ...and the precondition nothing in the compiler states.
                 "row_stride_below_n_aliases",
-            ][..],
+                            // The FIRST tie between a proof and the SHAPE of an emitted
+                // loop rather than the value of an emitted expression:
+                // `SCH.row_panel_*` is rendered from `cpu_gemm::CountedLoop`,
+                // the description the driver opens its loops from.
+                "the_emitted_row_loop_enumerates_the_tiles",
+                "the_emitted_row_loop_runs_once_per_tile",
+                "the_emitted_column_loop_enumerates_the_tiles",
+                "the_emitted_column_loop_runs_once_per_tile",
+                "the_two_panel_loops_are_different",
+][..],
         ),
         (
             "ExactGemmPacking.v",

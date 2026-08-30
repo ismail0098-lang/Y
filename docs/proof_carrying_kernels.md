@@ -2047,7 +2047,68 @@ statement true, provable and green. It refutes the **weakened theorem** now —
 witness can satisfy vacuously. **Twice in two increments: a control has to state
 what makes the case interesting as a proposition, not merely exhibit it.**
 
-618 / 884 tests, both builds green. **Fourteen proofs, no axioms.**
+#### Phase 2's first slice: a loop's ITERATION SPACE, not just an expression
+
+The `Ix` layer removed the second description of a schedule *number*. The loop
+nest's *shape* was still hand-written — so `ExactGemmTiling.toff` and `ntiles`
+were a **model** of what the driver's row-panel loop does, with nothing saying
+the loop does it.
+
+`IrBuilder::loop_begin(tag, start, end, step)` was already a counted loop, so
+the skeleton was factored; what was not was the tie to the proofs.
+`cpu_gemm::CountedLoop` names those three as `Ix` values and renders them **to
+LLVM and to Coq**, exactly as the expression layer does. All three emitted
+modules are byte-for-byte unchanged.
+
+```coq
+Definition row_panel_visit (M k : nat) : nat := (0 + (k * 6)).
+Definition row_panel_trips (M : nat) : nat := (((M - 0) + (6 - 1)) / 6).
+```
+
+and in `ExactGemmTiling`, the payoff — the first tie in this development
+between a proof and the **shape** of an emitted loop rather than the value of an
+emitted expression:
+
+```coq
+the_emitted_row_loop_enumerates_the_tiles  : row_panel_visit M k = toff MR k
+the_emitted_row_loop_runs_once_per_tile    : row_panel_trips M   = ntiles M MR
+```
+
+**`trips_ix` is rendered to Coq only, and that asymmetry is deliberate.** The
+emitter never computes a trip count — the loop tests `iv < end` — so it is a
+fact *about* the loop rather than an expression it emits. Which is why
+**mutating it to round down is caught by the schedule gate and by nothing
+else**: every correctness suite passes, because the emitted code is unchanged
+and only the proof's account of it moved. That is the divergence class this
+whole layer exists for.
+
+**My own gate had a gap, and the mutation sweep found it.** Handing the
+*column* loop the row description reaches Coq unchanged — the `.v` still renders
+both loops correctly — so the first version of the gate passed while the driver
+opened a 6-step loop over `%M` where the description says 64 over `%N`. Three
+correctness suites caught it; the schedule did not, which is the weaker
+guarantee. `the_driver_opens_the_loop_it_was_described_with` now recovers
+`(start, end, step)` from the emitted LLVM per tag by following the loop's own
+dataflow — the store that seeds the induction variable, the `icmp slt` in its
+`.cond` block, and the `add` written back to the same slot — and compares them
+against the description. **A description that reaches the proof is only half a
+tie; something has to check the emitter uses it at the right site.**
+
+| mutation | schedule gate | 3 correctness suites |
+|---|---|---|
+| row loop steps by `MR-1` | caught | caught |
+| **column loop given the row description** | **caught** *(was missed)* | caught |
+| row loop starts at 1 | caught | caught |
+| `trips_ix` rounds down | **caught** | **all ok** |
+| A-pack loop hand-written *identically* | ok | ok — the design control |
+
+**What is still hand-written:** which loops exist, in what order, in which
+blocks, and what they call. And only loops whose bounds are *operands* can be
+described this way — the fold-back loops walk builder-computed registers, and
+describing those means emitting their bounds through `Ix`, which changes the
+instruction stream. Both stated in the code rather than left to be rediscovered.
+
+619 / 885 tests, both builds green. **Fourteen proofs, no axioms.**
 
 ### Phase 2 — Turn the proof into a mechanism · 1–2 years
 

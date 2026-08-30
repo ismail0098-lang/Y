@@ -153,6 +153,26 @@ Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
 Definition toff (T t : nat) : nat := t * T.
 Definition ntiles (ext T : nat) : nat := (ext + T - 1) / T.
 
+(** The driver's two panel loops, **rendered from `cpu_gemm::CountedLoop`** -
+    the same description `IrBuilder::loop_begin_counted` emits.
+
+    This is the first slice of the loop NEST to be extracted rather than
+    modelled. [toff] and [ntiles] above describe what the row-panel loop does;
+    nothing said the emitted loop does it, and a trip count one too large is
+    invisible in the answer (the extra tile clamps to zero width and writes
+    nothing). `ExactGemmTiling` closes that with
+    [the_emitted_row_loop_enumerates_the_tiles].
+
+    Rendered, not restated: `_visit` comes from the emitter's `start`/`step`,
+    `_trips` from all three. The emitter never COMPUTES the trip count - the
+    loop tests `iv < end` - so that half is a fact about the loop rather than
+    an expression it emits. *)
+Definition row_panel_visit (M k : nat) : nat := (0 + (k * 6)).
+Definition row_panel_trips (M : nat) : nat := (((M - 0) + (6 - 1)) / 6).
+
+Definition col_panel_visit (N k : nat) : nat := (0 + (k * 64)).
+Definition col_panel_trips (N : nat) : nat := (((N - 0) + (64 - 1)) / 64).
+
 (** `ksplit_bands`. The K-split reduction: `base = K/nthr`, `rem = K mod nthr`,
     and the first `rem` bands take one extra k, so the cuts are UNEVEN. A
     different decomposition from [tw] deliberately - do not unify them. *)
