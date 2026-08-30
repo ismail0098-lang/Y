@@ -368,6 +368,10 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "the_interleaved_split_is_not_contiguous",
                 // The refutation every kernel used to carry its own copy of:
                 // the theorems are about the ACCUMULATE, not the indices.
+                // The clamped edge family, which two obligations turned out to
+                // share: the int32 flush interval and the output tiling.
+                "clamped_width",
+                "widths_cover_the_extent",
                 "rounding_breaks_a_contiguous_split",
                 "rounding_breaks_an_interleaved_split",
                 "exact_survives_the_same_split",
@@ -548,7 +552,13 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // proof-shaped version of a licence nothing can violate, and
                 // is the state this file was committed in once.
                 "the_packed_panels_route_to_the_right_source_elements",
-            ][..],
+                            // The two obligations that turned out to be one decomposition:
+                // an int32 overflow budget and a memory partition, both
+                // `t |-> min(t*X, ext)`, spelled as an END in one emitter site
+                // and as a WIDTH in the other.
+                "the_flush_interval_and_the_output_tile_are_the_same_family",
+                "the_agreement_covers_the_ragged_case",
+][..],
         ),
         (
             "ExactGemmChain.v",

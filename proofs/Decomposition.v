@@ -148,6 +148,95 @@ Proof.
 Qed.
 
 (* ------------------------------------------------------------------ *)
+(** ** The CLAMPED edge family, which two obligations share            *)
+(* ------------------------------------------------------------------ *)
+
+(** Cut `[0, ext)` into pieces of `T`, with the last one short:
+
+      edge t = min(t * T, ext)
+
+    The emitter writes this twice, in two spellings, for two different reasons -
+    `min(iv + T, ext)` for the int32 flush interval (an OVERFLOW budget) and
+    `min(ext - iv, T)` for the output tile width (a MEMORY partition). Neither
+    knows about the other; `ExactGemmMicro` and `ExactGemmTiling` each developed
+    it from scratch. It is one family. *)
+Definition clamped (T ext t : nat) : nat := Nat.min (t * T) ext.
+
+Lemma clamped_zero : forall T ext, clamped T ext 0 = 0%nat.
+Proof. intros T ext. unfold clamped. rewrite Nat.mul_0_l. apply Nat.min_0_l. Qed.
+
+Lemma clamped_monotone : forall T ext t,
+  (clamped T ext t <= clamped T ext (S t))%nat.
+Proof. intros T ext t. unfold clamped. apply Nat.min_le_compat_r. nia. Qed.
+
+(** The last edge reaches the extent exactly when the piece count spans it,
+    which is what `ntiles` and `nchunks` are both `ceil` for. *)
+Lemma clamped_last : forall T ext n,
+  (ext <= n * T)%nat -> clamped T ext n = ext.
+Proof. intros T ext n H. unfold clamped. now apply Nat.min_r. Qed.
+
+(** **The identity that ties both spellings to the schema.** A clamped edge
+    function's WIDTH is the `min(ext - t*T, T)` form, so a file that computes
+    widths directly and a file that computes ends are describing the same
+    decomposition. Each carried its own three-way case split for this; here it
+    is once. *)
+(** The arithmetic underneath both, isolated so neither has to repeat it: a
+    window `[a, a+w)` intersected with `[0, n)` has width `min(n - a, w)`. *)
+Lemma min_shift : forall a w n, (Nat.min (a + w) n - a)%nat = Nat.min (n - a) w.
+Proof.
+  intros a w n.
+  destruct (Nat.le_gt_cases n a) as [H1 | H1].
+  - rewrite Nat.min_r by lia. replace (n - a)%nat with O by lia.
+    rewrite Nat.min_0_l. lia.
+  - destruct (Nat.le_gt_cases n (a + w)) as [H2 | H2].
+    + rewrite Nat.min_r by lia. rewrite Nat.min_l by lia. reflexivity.
+    + rewrite Nat.min_l by lia. rewrite Nat.min_r by lia. lia.
+Qed.
+
+Lemma clamped_width : forall T ext t,
+  (clamped T ext (S t) - clamped T ext t)%nat = Nat.min (ext - t * T)%nat T.
+Proof.
+  intros T ext t. unfold clamped. rewrite Nat.mul_succ_l.
+  destruct (Nat.le_gt_cases ext (t * T)) as [Hpast | Hlive].
+  - rewrite (Nat.min_r (t * T) ext) by lia.
+    rewrite (Nat.min_r (t * T + T) ext) by lia.
+    replace (ext - t * T)%nat with 0%nat by lia.
+    rewrite Nat.min_0_l. lia.
+  - rewrite (Nat.min_l (t * T) ext) by lia. apply min_shift.
+Qed.
+
+(* ------------------------------------------------------------------ *)
+(** ** The same partition, counted in [nat]                            *)
+(* ------------------------------------------------------------------ *)
+
+(** [acc_parts] folds VALUES; an output tiling has no values to fold and asks
+    instead that the part WIDTHS add up to the extent - no gap and no double
+    count. Same decomposition, different consequence, and it needs no algebra
+    at all: the sum telescopes. *)
+Fixpoint width_sum (edge : nat -> nat) (t : nat) : nat :=
+  match t with
+  | O => O
+  | S t' => (width_sum edge t' + (edge (S t') - edge t'))%nat
+  end.
+
+Lemma width_sum_closed : forall edge t,
+  edge 0%nat = 0%nat ->
+  (forall u, (edge u <= edge (S u))%nat) ->
+  width_sum edge t = edge t.
+Proof.
+  intros edge t Hz Hm. induction t as [| t IH]; cbn [width_sum].
+  - symmetry. exact Hz.
+  - rewrite IH. specialize (Hm t). lia.
+Qed.
+
+Theorem widths_cover_the_extent : forall edge n N,
+  edge 0%nat = 0%nat ->
+  edge n = N ->
+  (forall u, (edge u <= edge (S u))%nat) ->
+  width_sum edge n = N.
+Proof. intros edge n N Hz Hn Hm. rewrite width_sum_closed by assumption. exact Hn. Qed.
+
+(* ------------------------------------------------------------------ *)
 (** ** Arbitrary parts: commutativity as well                          *)
 (* ------------------------------------------------------------------ *)
 
@@ -288,6 +377,9 @@ Theorem the_interleaved_split_is_not_contiguous :
 Proof. cbn. split; [ reflexivity | discriminate ]. Qed.
 
 Print Assumptions sum_range_split.
+Print Assumptions min_shift.
+Print Assumptions clamped_width.
+Print Assumptions widths_cover_the_extent.
 Print Assumptions acc_parts_prefix.
 Print Assumptions contiguous_exact.
 Print Assumptions contiguous_count_agrees.

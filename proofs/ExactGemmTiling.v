@@ -64,8 +64,10 @@
 
 From Stdlib Require Import ZArith Arith Lia.
 Require ExactGemmSchedule.
+Require Decomposition.
 
 Module SCH := ExactGemmSchedule.
+Module D := Decomposition.
 
 (* ------------------------------------------------------------------ *)
 (** ** One axis: uniform tiles with a clamped ragged tail              *)
@@ -95,25 +97,36 @@ Fixpoint covered (ext T n : nat) : nat :=
   | S n' => (covered ext T n' + tw ext T n')%nat
   end.
 
+(** The tile edges are [Decomposition.clamped T ext] - `t |-> min(t*T, ext)`,
+    and `tw` is that family's WIDTH.
+
+    The same family carries the int32 flush interval in [ExactGemmMicro], where
+    the emitter spells it `min(iv + T, ext)` (an END) instead of
+    `min(ext - iv, T)` (a WIDTH). Two files developed the three-regime case
+    split from scratch, for an overflow budget and for a memory partition; it
+    is [D.clamped_width] now, proved once. *)
+Lemma tile_edges_are_the_clamped_family : forall ext T t,
+  tw ext T t = (D.clamped T ext (S t) - D.clamped T ext t)%nat.
+Proof. intros ext T t. rewrite tw_unfold. symmetry. apply D.clamped_width. Qed.
+
+(** [covered] sums the part WIDTHS rather than folding values - an output
+    tiling has nothing to fold, and asks only that the widths add up with no
+    gap and no double count. That is [D.width_sum], and it needs no algebra at
+    all: the sum telescopes. *)
+Lemma covered_is_a_width_sum : forall ext T n,
+  covered ext T n = D.width_sum (D.clamped T ext) n.
+Proof.
+  intros ext T n. induction n as [| n IH]; cbn [covered D.width_sum].
+  - reflexivity.
+  - rewrite IH, tile_edges_are_the_clamped_family. reflexivity.
+Qed.
+
 Lemma covered_closed : forall ext T n,
   (0 < T)%nat -> covered ext T n = Nat.min (n * T) ext.
 Proof.
-  intros ext T n HT. induction n as [| n IH]; cbn [covered].
-  - rewrite Nat.min_0_l. reflexivity.
-  - rewrite IH. unfold tw, SCH.tw.
-    (* Three regimes: the tile is entirely past the end, straddles it, or is
-       full. `lia` closes each once `min` is resolved. *)
-    destruct (Nat.le_gt_cases ext (n * T)) as [Hpast | Hlive].
-    + rewrite (Nat.min_r (n * T) ext) by lia.
-      replace (ext - n * T)%nat with 0%nat by lia.
-      rewrite Nat.min_l by lia.
-      rewrite Nat.min_r by nia. lia.
-    + rewrite (Nat.min_l (n * T) ext) by lia.
-      destruct (Nat.le_gt_cases (ext - n * T) T) as [Hrag | Hfull].
-      * rewrite (Nat.min_l (ext - n * T) T) by lia.
-        rewrite Nat.min_r by nia. lia.
-      * rewrite (Nat.min_r (ext - n * T) T) by lia.
-        rewrite Nat.min_l by nia. lia.
+  intros ext T n HT. rewrite covered_is_a_width_sum.
+  rewrite D.width_sum_closed;
+    [ reflexivity | apply D.clamped_zero | intros u; apply D.clamped_monotone ].
 Qed.
 
 Lemma ntiles_spans : forall ext T,
@@ -129,8 +142,11 @@ Qed.
 Theorem tiles_cover : forall ext T,
   (0 < T)%nat -> covered ext T (ntiles ext T) = ext.
 Proof.
-  intros ext T HT. rewrite covered_closed by exact HT.
-  pose proof (ntiles_spans ext T HT). lia.
+  intros ext T HT. rewrite covered_is_a_width_sum.
+  apply (D.widths_cover_the_extent (D.clamped T ext) (ntiles ext T) ext);
+    [ apply D.clamped_zero
+    | apply D.clamped_last, ntiles_spans, HT
+    | intros u; apply D.clamped_monotone ].
 Qed.
 
 (** ** The bijection, which is the real obligation.

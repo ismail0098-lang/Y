@@ -110,34 +110,59 @@ Fixpoint chunk_acc (n t : nat) : Z :=
     schema does not care - a decomposition of a range is a decomposition of a
     range, whatever it was chosen for.
 
-    The clamp is why the edge is `min(coff t, n)` and not `coff t`, and why
-    this bridge is a case split rather than [reflexivity]: `cw` clamps only its
-    RIGHT end, so a chunk entirely past `n` has width `min(coff (S t), n) -
-    coff t`, which truncates to 0 in [nat], while the schema's is `n - n`.
-    Both are zero; saying so is the work. *)
+    The edge is [Decomposition.clamped Fl n] - `t |-> min(t*Fl, n)`. The same
+    family carries the OUTPUT tiling in [ExactGemmTiling], and the three-way
+    case split that reconciles a clamped edge's width with the `min(ext - t*T,
+    T)` spelling is [D.clamped_width], proved once there instead of twice
+    here. *)
+Lemma the_chunk_edge_is_the_clamped_family : forall n t,
+  Nat.min (coff t) n = D.clamped Fl n t.
+Proof. reflexivity. Qed.
+
+(** `cw` clamps only its RIGHT end (`min(coff (S t), n) - coff t`) where the
+    family clamps both; the two agree, and this is the only place the
+    difference has to be reconciled. *)
+Lemma cw_is_the_clamped_width : forall n t,
+  cw n t = (D.clamped Fl n (S t) - D.clamped Fl n t)%nat.
+Proof.
+  intros n t. rewrite cw_unfold, D.clamped_width.
+  unfold coff, SCH.coff. rewrite Nat.mul_succ_l. apply D.min_shift.
+Qed.
+
+(** The OFFSET needs reconciling as well as the width: `chunk_acc` starts its
+    range at the unclamped `coff t` where the family starts at `min(coff t, n)`.
+    They differ only past the end, where the width is zero and the start cannot
+    matter - so this is the one case split the family does not absorb. *)
+Lemma chunk_term_is_the_part : forall n t,
+  D.acc_range Z.add f (coff t) (cw n t)
+  = D.acc_range Z.add f (D.clamped Fl n t)
+      (D.clamped Fl n (S t) - D.clamped Fl n t)%nat.
+Proof.
+  intros n t. rewrite cw_is_the_clamped_width, D.clamped_width.
+  unfold coff, SCH.coff, D.clamped.
+  destruct (Nat.le_gt_cases n (t * Fl)) as [Hpast | Hlive].
+  - (* past the end: the width is zero, so the start cannot matter *)
+    rewrite (proj2 (Nat.sub_0_le n (t * Fl)) Hpast), Nat.min_0_l. reflexivity.
+  - rewrite (Nat.min_l (t * Fl) n) by (apply Nat.lt_le_incl; exact Hlive).
+    reflexivity.
+Qed.
+
 Lemma chunk_acc_is_acc_parts : forall n t,
-  chunk_acc n t = D.acc_parts Z.add (fun u => Nat.min (coff u) n) f t.
+  chunk_acc n t = D.acc_parts Z.add (D.clamped Fl n) f t.
 Proof.
   intros n t. induction t as [| t IH].
   - reflexivity.
-  - cbn [chunk_acc D.acc_parts]. rewrite IH, sum_from_is_acc_range, cw_unfold.
-    destruct (Nat.le_gt_cases n (coff t)) as [Hle | Hgt].
-    + (* entirely past the end: both readings give an empty chunk *)
-      rewrite (Nat.min_r (coff t) n) by lia.
-      assert (Nat.min (coff (S t)) n = n) as ->.
-      { apply Nat.min_r. unfold coff, SCH.coff in *. nia. }
-      replace (n - coff t)%nat with O by lia.
-      replace (n - n)%nat with O by lia. reflexivity.
-    + rewrite (Nat.min_l (coff t) n) by lia. reflexivity.
+  - cbn [chunk_acc D.acc_parts]. rewrite IH, sum_from_is_acc_range.
+    now rewrite chunk_term_is_the_part.
 Qed.
 
 Lemma chunk_acc_prefix : forall n t,
   chunk_acc n t = sum_from f 0 (Nat.min (coff t) n).
 Proof.
-  intros n t. rewrite chunk_acc_is_acc_parts, sum_from_is_acc_range.
-  apply (D.acc_parts_prefix (fun u => Nat.min (coff u) n) f t).
-  - cbn beta. unfold coff, SCH.coff. rewrite Nat.mul_0_l. apply Nat.min_0_l.
-  - intros u. apply Nat.min_le_compat_r. unfold coff, SCH.coff. nia.
+  intros n t. rewrite chunk_acc_is_acc_parts, sum_from_is_acc_range,
+    the_chunk_edge_is_the_clamped_family.
+  apply (D.acc_parts_prefix (D.clamped Fl n) f t);
+    [ apply D.clamped_zero | intros u; apply D.clamped_monotone ].
 Qed.
 
 (** The chunk count really does reach the end. *)
@@ -157,10 +182,10 @@ Theorem flush_exact : forall n,
   chunk_acc n (nchunks n) = sum_from f 0 n.
 Proof.
   intros n. rewrite chunk_acc_is_acc_parts, sum_from_is_acc_range.
-  apply (D.contiguous_exact (fun u => Nat.min (coff u) n) f (nchunks n) n).
-  - cbn beta. unfold coff, SCH.coff. rewrite Nat.mul_0_l. apply Nat.min_0_l.
-  - apply Nat.min_r, nchunks_spans.
-  - intros u. apply Nat.min_le_compat_r. unfold coff, SCH.coff. nia.
+  apply (D.contiguous_exact (D.clamped Fl n) f (nchunks n) n);
+    [ apply D.clamped_zero
+    | apply D.clamped_last, nchunks_spans
+    | intros u; apply D.clamped_monotone ].
 Qed.
 
 (** The refutation: a loop that stopped at the last WHOLE interval would drop
