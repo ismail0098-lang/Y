@@ -668,6 +668,13 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // the work.
                 "the_whole_chain_is_not_vacuous",
                 "both_bands_contribute",
+                // The scratch tile starts at ZERO - a hypothesis `gemm_position`
+                // hid inside a definition, now tied to the emitted `vg.z` loop.
+                // `%Ctile` is reused across tiles, so one trip short carries the
+                // previous tile's accumulator into this one.
+                "the_scratch_is_zeroed_wherever_the_fold_back_reads",
+                "the_zeroing_loop_covers_exactly_the_tile",
+                "one_trip_short_leaves_the_corner_stale",
             ][..],
         ),
     ]

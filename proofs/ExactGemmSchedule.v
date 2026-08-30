@@ -179,6 +179,9 @@ Definition fold_row_trips (ext iv T : nat) : nat := (((Nat.min (ext - iv) T - 0)
 Definition fold_col_visit (ext iv T k : nat) : nat := (0 + (k * 1)).
 Definition fold_col_trips (ext iv T : nat) : nat := (((Nat.min (ext - iv) T - 0) + (1 - 1)) / 1).
 
+Definition zero_tile_visit (k : nat) : nat := (0 + (k * 1)).
+Definition zero_tile_trips : nat := (((384 - 0) + (1 - 1)) / 1).
+
 (** `ksplit_bands`. The K-split reduction: `base = K/nthr`, `rem = K mod nthr`,
     and the first `rem` bands take one extra k, so the cuts are UNEVEN. A
     different decomposition from [tw] deliberately - do not unify them. *)

@@ -805,7 +805,7 @@ fn emit_vnni_gemm_driver() -> String {
     // into scratch and only the live part is folded back. Letting it write C
     // directly would run past the last row and column whenever M or N is not a
     // multiple of the tile - an out-of-bounds WRITE, not a wrong number.
-    let zl = b.loop_begin("vg.z", "0", &(VNNI_MR * VNNI_NR).to_string(), "1");
+    let zl = b.loop_begin_counted(&zero_tile_loop());
     let z = b.iv(&zl);
     let zp = b.gep("i64", ct, &z);
     b.w(&format!("store i64 0, ptr {}, align 8", zp));
@@ -2409,6 +2409,26 @@ pub fn fold_row_loop() -> CountedLoop {
         name: "fold_row",
         start: Ix::Lit(0),
         end: tile_width_ix(),
+        step: Ix::Lit(1),
+    }
+}
+
+/// The scratch tile's zeroing loop: `for z = 0; z < MR*NR; z += 1`.
+///
+/// **This is a PRECONDITION of the whole-of-C theorem and nothing stated it.**
+/// `ExactGemmWhole.gemm_position` models the driver as accumulating into
+/// `fun _ _ => 0` - a scratch tile that starts at zero - because the emitted
+/// micro-kernel accumulates rather than assigns. The buffer is reused across
+/// every tile, so a zeroing loop that stopped one slot short would carry the
+/// PREVIOUS tile's value into this one, and the theorem would be about a
+/// kernel that is not this one. Same shape as the `N <= ldc` hypothesis whose
+/// absence turned out to be a live heap overflow.
+pub fn zero_tile_loop() -> CountedLoop {
+    CountedLoop {
+        tag: "vg.z",
+        name: "zero_tile",
+        start: Ix::Lit(0),
+        end: Ix::Lit(VNNI_MR * VNNI_NR),
         step: Ix::Lit(1),
     }
 }

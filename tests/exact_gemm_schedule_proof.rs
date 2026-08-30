@@ -140,7 +140,7 @@ use y::cpu_gemm::{
     granule_band_edge_ix, kpairs_ix, panel_index_ix, prop_band_edge_ix, tile_count_ix,
     tile_width_ix,
     KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
-    row_panel_loop, col_panel_loop, fold_row_loop, fold_col_loop,
+    row_panel_loop, col_panel_loop, fold_row_loop, fold_col_loop, zero_tile_loop,
 };
 use y::zero_drift::VnniExact;
 
@@ -249,11 +249,12 @@ fn render(s: &Schedule) -> String {
     // than an extent. That is what lets `ExactGemmTiling` state that the loop
     // folding a tile back into C runs exactly `tw` times.
     let loop_defs = format!(
-        "{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}",
         row_panel_loop("vg.i").coq(&["M"]),
         col_panel_loop().coq(&["N"]),
         fold_row_loop().coq(&["ext", "iv", "T"]),
-        fold_col_loop().coq(&["ext", "iv", "T"])
+        fold_col_loop().coq(&["ext", "iv", "T"]),
+        zero_tile_loop().coq(&[])
     );
     let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
 
@@ -1364,7 +1365,7 @@ fn the_raw_emitted_sites_use_the_shared_schedule_expressions() {
 /// alone still passes.
 #[test]
 fn the_driver_opens_the_loop_it_was_described_with() {
-    use y::cpu_gemm::{emit_vnni_gemm_module, Ix};
+    use y::cpu_gemm::{emit_vnni_gemm_module, zero_tile_loop, Ix};
 
     let ir = emit_vnni_gemm_module(64);
     let mut checked = 0usize;
@@ -1372,6 +1373,12 @@ fn the_driver_opens_the_loop_it_was_described_with() {
         ("vg.pa", row_panel_loop("vg.pa")),
         ("vg.i", row_panel_loop("vg.i")),
         ("vg.j", col_panel_loop()),
+        // The scratch-zeroing loop. Its bound is a literal, so it belongs to
+        // the operand family - but it is here because `ExactGemmWhole` models
+        // the driver as accumulating into a tile that starts at ZERO, and
+        // `%Ctile` is reused across every tile. A loop one trip short carries
+        // the previous tile's accumulator into this one.
+        ("vg.z", zero_tile_loop()),
     ] {
         let (start, end, step) = loop_operands(&ir, tag)
             .unwrap_or_else(|| panic!("{tag}: no counted loop of that tag in the driver"));
@@ -1386,7 +1393,7 @@ fn the_driver_opens_the_loop_it_was_described_with() {
         checked += 1;
     }
     // A sweep that finds no loops reports every loop correct.
-    assert_eq!(checked, 3, "the described loops went missing from the driver");
+    assert_eq!(checked, 4, "the described loops went missing from the driver");
 }
 
 /// The other kind of loop: the fold-back's bound is not an operand but a value
@@ -1613,5 +1620,96 @@ fn the_f32_kernel_emits_the_band_arithmetic_the_proof_describes() {
         "the f32 kernel divides %K by the thread count directly, which is the \
          EXACT kernel's decomposition - the two splits are supposed to differ, \
          and GemmBandSplit.the_two_splits_are_different says so"
+    );
+}
+
+/// The described loops NEST the way the driver says they do.
+///
+/// Everything else in this file is about one loop at a time: its bounds, its
+/// trip count, the expression its bound comes from. **Which loop is inside
+/// which is a separate claim**, it is the half of "the loop nest" that no
+/// expression can carry, and nothing checked it.
+///
+/// It is a gate rather than an extraction, deliberately. The nest's shape lives
+/// in the imperative structure of `emit_vnni_gemm_driver` - the order of
+/// `loop_begin`/`loop_end` calls - and there is no second description of it to
+/// remove. Writing one down in Rust and asserting the emitter agrees would be
+/// two descriptions where there is currently one. So this reads the emitted
+/// LLVM and checks the property.
+///
+/// `loop_begin` emits `<tag>.body.<n>:` and `loop_end` emits `<tag>.end.<n>:`,
+/// so a loop's body is exactly the text between them and containment is a
+/// range check on line numbers.
+#[test]
+fn the_driver_nests_its_loops_the_way_it_claims_to() {
+    use y::cpu_gemm::emit_vnni_gemm_module;
+
+    let ir = emit_vnni_gemm_module(64);
+    let lines: Vec<&str> = ir.lines().map(str::trim).collect();
+    let span = |tag: &str| -> (usize, usize) {
+        let at = |suffix: &str| {
+            lines
+                .iter()
+                .position(|l| l.starts_with(&format!("{tag}.{suffix}.")) && l.ends_with(':'))
+                .unwrap_or_else(|| panic!("{tag}: no `{suffix}` block in the driver"))
+        };
+        (at("body"), at("end"))
+    };
+
+    // Each child, and the loop that must contain it. The A-packing sweep is
+    // deliberately listed as top-level: packing A once for the whole matrix
+    // rather than once per column panel is what makes packing asymptotically
+    // free, and putting it inside `vg.j` would be correct and `N/NR` times
+    // slower - invisible in the answer, which is why it is asserted here.
+    let nest: &[(&str, Option<&str>)] = &[
+        ("vg.pa", None),
+        ("vg.j", None),
+        ("vg.i", Some("vg.j")),
+        ("vg.z", Some("vg.i")),
+        ("vg.fi", Some("vg.i")),
+        ("vg.fj", Some("vg.fi")),
+    ];
+
+    let mut checked = 0usize;
+    for (child, parent) in nest {
+        let (cb, ce) = span(child);
+        assert!(cb < ce, "{child}: body does not precede end");
+        match parent {
+            Some(p) => {
+                let (pb, pe) = span(p);
+                assert!(
+                    pb < cb && ce < pe,
+                    "{child} is not inside {p}: {child} spans {cb}..{ce} and {p} \
+                     spans {pb}..{pe}"
+                );
+            }
+            None => {
+                // Top-level: inside no OTHER described loop.
+                for (other, _) in nest {
+                    if other == child {
+                        continue;
+                    }
+                    let (ob, oe) = span(other);
+                    assert!(
+                        !(ob < cb && ce < oe),
+                        "{child} is supposed to be top-level in the driver and \
+                         is nested inside {other}"
+                    );
+                }
+            }
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 6, "the nest lost a loop");
+
+    // Non-vacuity: the containment test must be able to FAIL. `vg.fj` inside
+    // `vg.j` is true (it is, transitively) - the claim that carries weight is
+    // that `vg.i` is NOT inside `vg.fi`, i.e. the relation is a real order and
+    // not something every pair satisfies.
+    let (fib, fie) = span("vg.fi");
+    let (ib, ie) = span("vg.i");
+    assert!(
+        !(fib < ib && ie < fie),
+        "the containment check is matching in both directions and means nothing"
     );
 }
