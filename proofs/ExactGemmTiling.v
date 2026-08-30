@@ -65,6 +65,7 @@
 From Stdlib Require Import ZArith Arith Lia.
 Require ExactGemmSchedule.
 Require Decomposition.
+Require MixedRadix.
 
 Module SCH := ExactGemmSchedule.
 Module D := Decomposition.
@@ -166,18 +167,13 @@ Qed.
     results below are. Stated once: a tile index against its width and a row
     index against the row stride are the same arithmetic fact, and writing it
     twice is how two copies of a rule drift apart. *)
+(** The second copy of this lemma lived here, with `ExactGemmPacking` holding
+    the other and neither file requiring the other. Both are [MixedRadix]'s
+    now; the statement is unchanged, so every use site below is untouched. *)
 Lemma quot_rem_unique : forall T q1 r1 q2 r2,
   (0 < T)%nat -> (r1 < T)%nat -> (r2 < T)%nat ->
   (q1 * T + r1 = q2 * T + r2)%nat -> q1 = q2 /\ r1 = r2.
-Proof.
-  intros T q1 r1 q2 r2 HT H1 H2 Heq.
-  assert (E1 : ((q1 * T + r1) / T = q1)%nat).
-  { rewrite Nat.div_add_l by lia. rewrite Nat.div_small by lia. lia. }
-  assert (E2 : ((q2 * T + r2) / T = q2)%nat).
-  { rewrite Nat.div_add_l by lia. rewrite Nat.div_small by lia. lia. }
-  assert (q1 = q2) by (rewrite <- E1, <- E2, Heq; reflexivity).
-  split; [assumption | subst; lia].
-Qed.
+Proof. exact MixedRadix.quot_rem_unique. Qed.
 
 (** Injective: two distinct (tile, offset) pairs never name the same position. *)
 Theorem tile_index_injective : forall ext T t1 f1 t2 f2,
@@ -191,21 +187,20 @@ Proof.
 Qed.
 
 (** Surjective: every position is named by some live (tile, offset). *)
+(** Onto: every live position of the axis belongs to some tile, so no element
+    is skipped. The digit pair comes from [MixedRadix.pack_onto]; what is local
+    is that the offset lands inside its tile's CLAMPED width, which the schema
+    knows nothing about. *)
 Theorem tile_index_surjective : forall ext T r,
   (0 < T)%nat -> (r < ext)%nat ->
   exists t f, (t < ntiles ext T)%nat /\ (f < tw ext T t)%nat /\ toff T t + f = r.
 Proof.
   intros ext T r HT Hr.
   pose proof (ntiles_spans ext T HT) as Hspan.
-  pose proof (Nat.div_mod_eq r T) as Hdm.
-  pose proof (Nat.mod_upper_bound r T ltac:(lia)) as Hmod.
-  exists (r / T)%nat, (r mod T)%nat.
-  assert (Hlt : (r / T < ntiles ext T)%nat).
-  { apply Nat.Div0.div_lt_upper_bound. nia. }
-  repeat split.
-  - exact Hlt.
-  - unfold tw, SCH.tw. nia.
-  - unfold toff, SCH.toff. nia.
+  destruct (MixedRadix.pack_onto T (ntiles ext T) r HT ltac:(lia))
+    as [t [f [Ht [Hf Hpack]]]].
+  exists t, f. unfold MixedRadix.pack in Hpack.
+  repeat split; [ exact Ht | unfold tw, SCH.tw | unfold toff, SCH.toff ]; nia.
 Qed.
 
 (* ------------------------------------------------------------------ *)

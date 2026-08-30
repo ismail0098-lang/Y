@@ -352,6 +352,29 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            "MixedRadix.v",
+            &[
+                // Positional indices, proved once. `quot_rem_unique` had TWO
+                // independent copies - ExactGemmTiling and ExactGemmPacking,
+                // neither requiring the other.
+                "quot_rem_unique",
+                "pack_unpack",
+                "unpack_pack",
+                // The leg that was rewritten in three files, and the one the
+                // "it is only six lines" argument for a local copy did not
+                // cover.
+                "pack_onto",
+                "pack_in_range",
+                // The two-digit peel `pack_b_slot_bijective` was doing by hand.
+                "two_digit_unique",
+                // ...and that the bound on the low digit is load-bearing, on
+                // the high one absent, rather than either being carried along.
+                "the_low_digit_bound_cannot_be_dropped",
+                "without_the_digit_bound_it_is_not_injective",
+                "the_high_digit_needs_no_bound",
+            ][..],
+        ),
+        (
             "Decomposition.v",
             &[
                 // The partition obligation, proved once and instantiated by
