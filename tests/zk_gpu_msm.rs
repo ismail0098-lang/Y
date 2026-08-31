@@ -395,6 +395,61 @@ fn binning_does_not_depend_on_the_thread_count() {
     }
 }
 
+/// The bucket kernel is launched at the TUNED block size, not the generic one.
+///
+/// This is a performance property and no correctness test can see it: a wrong
+/// block size computes exactly the right answer, slowly. It needs its own
+/// guard for the same reason the shared-memory swizzle and the
+/// constant-propagation fixpoint do.
+///
+/// It is not hypothetical. `crates/y-gpu` — the crate a caller links — held a
+/// second copy of this whole module and launched through a generic helper with
+/// a hardcoded 256-thread block, while the measurement, the knob and `Geom`'s
+/// divisibility assertion all lived in the test copy. Measured again on the
+/// merged code at n = 2^20, kernel time, 256 -> 128: nw=20 42.25 -> 29.46 ms
+/// (1.43x), nw=22 48.80 -> 32.73 (1.49x), nw=25 53.86 -> 40.80 (1.32x).
+///
+/// Needs no GPU: `bucket_launch_geometry` is the pure function
+/// `bucket_pass_staged` calls, so the decision is checkable without making it.
+#[test]
+fn the_bucket_kernel_is_launched_at_the_tuned_block() {
+    for nw in [20usize, 22, 25, 28, 31] {
+        let g = Geom::new(nw);
+        let (grid, block) = msm::bucket_launch_geometry(&g);
+
+        assert_eq!(
+            block,
+            (msm::bucket_block() as u32, 1, 1),
+            "nw = {nw}: the bucket kernel is not launched at bucket_block()"
+        );
+        // One thread per bucket, exactly - no tail block, because `Geom::new`
+        // refuses a bucket count that does not fill whole blocks.
+        assert_eq!(
+            grid.0 as usize * block.0 as usize,
+            g.nb,
+            "nw = {nw}: grid x block is {} threads for {} buckets",
+            grid.0 as usize * block.0 as usize,
+            g.nb
+        );
+        assert_eq!((grid.1, grid.2, block.1, block.2), (1, 1, 1, 1));
+    }
+
+    // The control. Every assertion above is satisfied by a `bucket_block()`
+    // that had drifted back to the generic 256, which is precisely the
+    // regression this exists to catch - so pin that the default is the
+    // measured one, and that the override still moves it.
+    assert_eq!(
+        msm::bucket_block(),
+        128,
+        "the default block size is no longer the measured optimum"
+    );
+    msm::set_bucket_block(Some(256));
+    let g = Geom::new(20);
+    let (_, block) = msm::bucket_launch_geometry(&g);
+    msm::set_bucket_block(None);
+    assert_eq!(block.0, 256, "the block size override no longer reaches the launch");
+}
+
 // ---------------------------------------------------------------------------
 // What it costs
 // ---------------------------------------------------------------------------

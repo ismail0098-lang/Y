@@ -2768,6 +2768,85 @@ still there; it is a refactor of a shipped crate and remains recorded rather
 than done.
 
 
+#### The fork itself, and the tests that dispatch had disarmed · 2026-08-31
+
+The previous two entries fixed what the library *embeds*. This one fixes what
+it *runs*, and the finding underneath it is worse than a stale copy.
+
+`crates/y-gpu/src/msm.rs` and `tests/common/msm.rs` were a **whole-module
+fork**, not a stale binner: 15 items byte-identical, 10 diverged, and the crate
+had nothing the tests did not. Every measured MSM improvement had landed in the
+test copy and none had reached the crate that ships — the parallel prefix
+(23.6 → 3.3 ms), the grouped scatter and its thread count (2.2x at nw = 20),
+the removal of a per-thread `to_vec` (1.34 ms), the exactly-once
+post-condition, and the 128-thread block.
+
+**That last one is a live performance regression in the shipped path**, and it
+is measured here rather than quoted: `crates/y-gpu` launched the bucket kernel
+through a generic helper with a hardcoded 256-thread block, and on the merged
+code at n = 2^20, kernel time, 256 → 128 gives nw=20 **42.25 → 29.46 ms
+(1.43x)**, nw=22 48.80 → 32.73 (1.49x), nw=25 53.86 → 40.80 (1.32x).
+
+##### It also made `CountingSort.v` a proof about code that does not ship
+
+`tests/msm_counting_sort_model.rs` tied the counting-sort theorems to the test
+copy. The library ran something else. That is the same gap as "proof-carrying
+described the repository, not the output", one layer further out, and it is the
+reason unifying is proof work rather than tidying.
+
+So there is one implementation now and it is the shipped one:
+`tests/common/msm.rs` went 966 → 466 lines and re-exports the host layer from
+`y_gpu::msm`. What stays behind is the harness a library must not have —
+locating and running the `Y` binary, compiling a `.ysu` to PTX, and the device
+layer's panic-on-error contract. The root package gains a **dev-dependency
+cycle** on `y-gpu`, which cargo supports because the cycle is only through
+dev-dependencies.
+
+##### The decisive experiment, and it is the one that justifies the whole change
+
+Put a cursor bug in the *shipped* binner — every scatter group seeded at
+`off[b]`, so the groups write over each other and `Idx` is corrupted — and run
+everything:
+
+| | `zk_gpu_msm` | `counting_sort_model` | `zk_gpu_groth16` | `cargo test -p y-gpu` |
+|---|---|---|---|---|
+| **before unification** | ok | ok | ok | **ok** |
+| **after unification** | FAIL | FAIL | — | FAIL |
+
+Before, that bug was invisible to **every test in the repository**. Two
+independent reasons, and the second was a surprise: the root's tests used the
+other copy, *and* the crate's own prover tests never reach the GPU at all.
+
+##### Dispatch had silently disarmed the crate's tests
+
+`crates/y-gpu/tests/prove.rs` runs 2,048 and 4,096 constraints. Both are far
+below `MSM_GPU_MIN_STAGED = 40,000`, so `gpu_is_worth_it` sends every MSM to
+the CPU and **the tests would have passed with the entire GPU MSM path
+deleted**. This document already records that exact trap for the root suite —
+*"at 4,096 constraints everything routed to the CPU and the GPU tests would
+have kept passing with the kernel deleted. They pass `force_gpu` and assert
+they got it"* — and the root suite was fixed for it while the crate was not.
+
+`prepare_forcing_gpu` is the same fix, and it is load-bearing rather than
+tidy: with it, the cursor bug fails both prover tests; revert it alone, leaving
+the bug in place, and `cargo test -p y-gpu` is **completely green**. The test
+also asserts at least three of the four queries actually went to the device, so
+it cannot quietly become a CPU test again.
+
+##### A performance property needs a performance guard
+
+Reverting the launch to 256 threads is caught by nothing — it computes the
+right answer, slowly. So the launch decision is extracted as a pure function,
+`bucket_launch_geometry`, and `the_bucket_kernel_is_launched_at_the_tuned_block`
+asserts it without needing a device: one thread per bucket, blocks of
+`bucket_block()`, grid × block exactly `nb`. Its control pins that the default
+is still the measured 128 and that the override still reaches the launch —
+without which a `bucket_block()` that had drifted back to 256 would satisfy
+every other assertion in the test.
+
+640 default / 906 zk / 8 y-gpu tests, all green.
+
+
 ## 5. End goal
 
 > **STATUS, 2026-08-31.** The end goal below is reached for **one kernel on one
