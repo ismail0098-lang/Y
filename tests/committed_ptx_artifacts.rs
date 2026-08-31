@@ -293,3 +293,137 @@ fn every_committed_artifact_still_has_a_source_that_compiles() {
         refused.join("\n  ")
     );
 }
+
+/// Every `.ptx` under `crates/y-gpu/ptx/` is embedded in the shipping library
+/// with `include_str!`, so it is not merely an artifact — it is the code that
+/// runs. This recompiles each one from its `.ysu` and requires **byte
+/// identity**.
+///
+/// **The crate has its own freshness test and it had been red for a week,
+/// because nothing runs it.** `cargo test` at this workspace root builds the
+/// root package only; `crates/y-gpu/tests/ptx_is_not_stale.rs` needs
+/// `cargo test -p y-gpu` or `--workspace`, and neither is in the documented
+/// build commands. Four of the five embedded kernels were stale by the whole
+/// carry-flag intrinsic series — `bn254_fr_mul_fast` shipped at 2,112 lines
+/// with **zero** `add.cc` against the current 1,255 — so the GPU ZK library
+/// was running the pre-carry-chain kernels. Same shape as `self_hosted/`,
+/// which "was named only in a documentation file, so it had rotted
+/// invisibly".
+///
+/// **The crate's own gate could not have passed anyway, and that is the more
+/// interesting half.** It compares the embedded copy against a compile *on the
+/// build machine*, and the whole point of these artifacts is that they are
+/// portable: they are committed at `.target sm_80`, while a fresh compile here
+/// probes an sm_89 card and says so. Those two requirements contradict each
+/// other, and the freshness one loses — a compiler that probes the local
+/// machine bakes that machine into its output, which is the bug the sm_80
+/// regeneration existed to fix. It also produced a false positive:
+/// `bn254_permute` was reported stale and was not, its body being identical.
+///
+/// So this gate does not choose a target. **It asks the artifact which target
+/// it claims and reproduces that**, pinning a `.ysu_hw_profile` in the working
+/// directory the way `ptx_portability::emitted_module_for` does. Whether that
+/// claimed target is legitimate is a different question, already answered by
+/// `every_committed_ptx_declares_the_version_floor_for_its_target` and by the
+/// `.target`-suffix gate in `ptx_portability.rs`.
+#[test]
+fn the_shipped_gpu_kernels_match_their_sources() {
+    let ptx_dir = repo_root().join("crates/y-gpu/ptx");
+    let mut shipped: Vec<PathBuf> = committed_ptx()
+        .into_iter()
+        .filter(|p| p.parent() == Some(ptx_dir.as_path()))
+        .collect();
+    shipped.sort();
+
+    let work = std::env::temp_dir().join(format!("y_shipped_ptx_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("temp dir");
+
+    let mut checked = 0usize;
+    let mut stale = Vec::new();
+    for art in &shipped {
+        let stem = art.file_stem().unwrap().to_string_lossy().into_owned();
+        let ysu = repo_root().join(format!("tests/{stem}.ysu"));
+        assert!(
+            ysu.exists(),
+            "crates/y-gpu/ptx/{stem}.ptx ships in the library and has no source at \
+             tests/{stem}.ysu, so nothing can say what it should contain"
+        );
+        let embedded = std::fs::read_to_string(art).expect("read the shipped PTX");
+        let target = header_value(&embedded, ".target").unwrap_or_else(|| {
+            panic!("crates/y-gpu/ptx/{stem}.ptx declares no .target")
+        });
+
+        // `PtxEmitter::new_with_profile` builds `sm_` + the version with the
+        // dot stripped, so sm_80 comes from "8.0" and sm_120 from "12.0".
+        let digits = target.trim_start_matches("sm_");
+        assert!(
+            digits.len() >= 2 && digits.bytes().all(|b| b.is_ascii_digit()),
+            "crates/y-gpu/ptx/{stem}.ptx declares an unusable .target `{target}`"
+        );
+        let dotted = format!("{}.{}", &digits[..digits.len() - 1], &digits[digits.len() - 1..]);
+
+        // A directory per kernel: the profile lives beside the source and the
+        // compiler writes its output next to the source too, so two kernels
+        // sharing a directory would be fine but two RUNS of this gate in
+        // different processes would not.
+        let dir = work.join(&stem);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("per-kernel temp dir");
+        std::fs::write(
+            dir.join(".ysu_hw_profile"),
+            format!("SM_VERSION={dotted}\nGPU_NAME=ShippedArtifact\nSM_COUNT=66\n"),
+        )
+        .expect("pin the profile");
+        let src = dir.join(format!("{stem}.ysu"));
+        std::fs::copy(&ysu, &src).expect("copy the kernel source");
+
+        let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+            .arg(&src)
+            .arg("--emit-ptx")
+            // The working directory is what decides which `.ysu_hw_profile` is
+            // read, so it must be the pinned one and NOT the repo. Running it
+            // from the repo silently targets whatever card is in this machine,
+            // which is exactly how the crate's own gate came to be unpassable.
+            .current_dir(&dir)
+            .output()
+            .expect("run Y");
+        assert!(
+            out.status.success(),
+            "tests/{stem}.ysu no longer compiles, so the kernel this library ships \
+             cannot be reproduced:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let fresh = std::fs::read_to_string(dir.join(format!("{stem}.ptx")))
+            .expect("no .ptx written");
+
+        // Counted after the run, not on finding the pair: an earlier gate in
+        // this file incremented before compiling, so neutering the loop left
+        // the floor intact and the mutation survived.
+        checked += 1;
+        if fresh.trim() != embedded.trim() {
+            stale.push(format!(
+                "  crates/y-gpu/ptx/{stem}.ptx: {} lines shipped, {} lines fresh",
+                embedded.lines().count(),
+                fresh.lines().count()
+            ));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert!(
+        stale.is_empty(),
+        "the library ships kernels that no longer match their source:\n{}\n\
+         Regenerate with a profile pinned to the artifact's own .target - NOT by \
+         compiling in the repo, which bakes in the build machine's card:\n  \
+         printf 'SM_VERSION=8.0\\n' > <tmp>/.ysu_hw_profile && cp tests/<k>.ysu <tmp>/ \\\n  \
+         && (cd <tmp> && Y ./<k>.ysu --emit-ptx) && cp <tmp>/<k>.ptx crates/y-gpu/ptx/",
+        stale.join("\n")
+    );
+    assert!(
+        checked >= 5,
+        "only {checked} shipped kernels were recompiled; the sweep found nothing to \
+         check, which it would also report if `crates/y-gpu/ptx` had been moved"
+    );
+}

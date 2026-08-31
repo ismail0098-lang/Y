@@ -2695,6 +2695,79 @@ is host Rust, not emitted code, so it is the `GridStrideSplit` grade of tie
 rather than the exact GEMM's.
 
 
+#### Pulling the same thread: the library ships kernels the repository never tested · 2026-08-31
+
+The counting-sort work ended with a note that `crates/y-gpu` — the
+consumer-facing crate, the one that ships — carries a stale fork of the host
+binner. Following that led somewhere worse: **`cargo test -p y-gpu` was red,
+and nothing in the documented build commands runs it.**
+
+`cargo test` at a workspace root with a root package builds *that package
+only*. The crate's own `ptx_is_not_stale.rs` needs `-p y-gpu` or `--workspace`,
+and neither appears in CLAUDE.md's build section. So the gate that exists
+precisely to stop the embedded kernels going stale had been failing, unseen.
+
+**Four of the five embedded kernels were stale by the whole carry-flag
+intrinsic series.** `bn254_fr_mul_fast` shipped at 2,112 lines with **zero**
+`add.cc`, against 1,255 now; `bn254_msm_bucket` at 34,343 against 18,222. The
+GPU ZK library — the MSM, the NTT, the Groth16 QAP — was running the
+pre-carry-chain kernels, which this document measures at 1.06x slower and 48
+registers instead of 36.
+
+##### The gate could not have passed anyway, and that is the more interesting half
+
+It compared the embedded copy against a compile **on the build machine**. The
+whole point of these artifacts is portability: they are committed at
+`.target sm_80`, and a fresh compile here probes an sm_89 card and says so.
+Those are contradictory requirements, and freshness is the one that has to
+give — *a compiler that probes the local machine bakes that machine into its
+output* is the finding the sm_80 regeneration existed to fix. It also produced
+a **false positive**: `bn254_permute` was reported stale and was not, its body
+being byte-identical.
+
+So the replacement does not choose a target. It **asks the artifact which
+target it claims** and pins a `.ysu_hw_profile` to that before recompiling,
+the way `ptx_portability::emitted_module_for` already does. Whether the claimed
+target is legitimate is a different question, and a different gate answers it.
+
+##### Three gates, and each of six mutations is caught by exactly one
+
+| mutation | freshness (root) | portability (root) | wiring (crate) |
+|---|---|---|---|
+| **Y1 one kernel reverted to the stale version** | **FAIL** | ok | ok |
+| **Y2 header re-targeted at the build machine's card** | ok | **FAIL** | ok |
+| **Y3 `include_str!` mis-wired to another kernel** | ok | ok | **FAIL** |
+| Y4 the `ALL` pairing swapped (right name, wrong module) | ok | — | **FAIL** |
+| Y5 the freshness gate compiles in the repo, not the pinned dir | **FAIL** | — | — |
+| Y6 the sweep finds nothing | **FAIL** | — | — |
+
+Y1 is the failure that was live for a week. Y5 is the one that matters for the
+design: compiling in the repo makes the gate fail *here*, which is exactly the
+state the crate's version was in — so the pin is load-bearing rather than
+tidy. Y2 passing the freshness gate is deliberate and not a hole: the gate
+reproduces the target the artifact names, so re-targeting changes both sides.
+Portability owns that question.
+
+Freshness now lives in `tests/committed_ptx_artifacts.rs`, under the plain
+`cargo test`. The crate keeps what only it can see — that the strings compiled
+into the binary really are those files, filed under entry names the driver will
+be asked for. A mis-wired `include_str!` embeds a kernel that is fresh,
+portable, assembles, and is the wrong one.
+
+##### The regeneration is confirmed by the prover, not by the diff
+
+The sm_80 and sm_89 bodies are **byte-identical** — only the two header lines
+differ — so what the GPU tests exercise at sm_89 is instruction-for-instruction
+what ships at sm_80. And `cargo test -p y-gpu` now runs
+`gpu_proof_matches_arkworks_sparse` and `_dense` on the newly embedded kernels:
+real Groth16 proofs, checked against arkworks, plus a tampered-statement
+rejection.
+
+639 default / 905 zk / 8 y-gpu tests, all green. The stale *binner* fork is
+still there; it is a refactor of a shipped crate and remains recorded rather
+than done.
+
+
 ## 5. End goal
 
 > **STATUS, 2026-08-31.** The end goal below is reached for **one kernel on one

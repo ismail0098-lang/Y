@@ -255,6 +255,31 @@ are per-function, so the first `%g12` in a module may belong to a different
 function entirely. That error compared a driver's fold-back against a packer's
 address arithmetic.
 
+The same rule governs the *build configuration*, and getting it wrong makes a
+gate unpassable rather than wrong. `crates/y-gpu` embeds five compiled kernels
+with `include_str!`, and its freshness test recompiled each one **on the build
+machine** and demanded byte identity. But those artifacts are deliberately
+portable — committed at `.target sm_80` — while a local compile probes whatever
+card is present and says `sm_89`. Two gates encoding contradictory
+requirements, and freshness is the one that has to give: a compiler that probes
+the local machine bakes that machine into its output.
+
+So the gate asks the artifact **which target it claims** and pins a
+`.ysu_hw_profile` to that before recompiling. Whether the claimed target is
+legitimate is a different question, answered by a different gate. Splitting
+them that way is what let each of six mutations be caught by exactly one:
+a stale kernel by freshness, a machine-specific target by portability, a
+mis-wired `include_str!` by the crate's own wiring check.
+
+**And a red test nobody runs is not a gate.** That freshness test had been
+failing for a week. `cargo test` at a workspace root with a root package builds
+*that package only*; the crate's tests need `-p y-gpu` or `--workspace`, and
+neither was in the documented commands. Four of the five embedded kernels were
+stale by an entire optimisation series — `bn254_fr_mul_fast` shipped at 2,112
+lines with zero carry-chain instructions against the current 1,255. Put the
+check where the documented command will run it, even if that means checking the
+files from outside the crate that embeds them.
+
 ---
 
 ## 4. Discharge the finite obligations by exhaustion, the unbounded ones with a solver
