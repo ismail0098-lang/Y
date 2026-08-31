@@ -83,12 +83,14 @@
 From Stdlib Require Import ZArith Arith Lia List Permutation.
 Require ExactGemmKsplit.
 Require Decomposition.
+Require AttentionSchedule.
 
 Import ListNotations.
 Open Scope Z_scope.
 
 Module KS := ExactGemmKsplit.
 Module D := Decomposition.
+Module AS := AttentionSchedule.
 
 (* ------------------------------------------------------------------ *)
 (** ** The decomposition                                               *)
@@ -100,16 +102,23 @@ Module D := Decomposition.
 Definition sum_upto (op : Z -> Z -> Z) (f : nat -> Z) (S : nat) : Z :=
   KS.acc_range op f 0 S.
 
-(** Worker `w` of `n`, from `emit`'s grid-stride loop:
+(** Worker `w` of `n`, from the emitted grid-stride loop: the induction
+    variable is seeded with the worker index and advanced by the worker count,
 
-      mad.lo.s32 %r7, %r4, %r5, %r6     ; worker = flat_cta * ntid.x + tid.x
-      mul.lo.s32 %r9, %r9, %r5          ; nworkers = nctaid.z * nctaid.x * ntid.x
-      mov.u32    %r14, %r7              ; i = worker
     LOOP_I:
       ...
-      add.s32    %r14, %r14, %r9        ; i += nworkers
+      add.s32 %r14, %r14, %r9
 
-    so worker `w` visits exactly the indices below `S` congruent to `w`. *)
+    so worker `w` visits exactly the indices below `S` congruent to `w`.
+
+    The two expressions this rests on - which thread is which worker, and how
+    many workers there are - USED TO BE QUOTED HERE, and the quotation had gone
+    stale: it showed `mul.lo.s32 %r9, %r9, %r5`, a two-writes-to-one-register
+    form the kernel stopped using. They live in [AttentionSchedule.v] now,
+    GENERATED from the emitter's own expressions, so a comment cannot drift
+    from the kernel it describes. See the corollary at the foot of this file
+    for what that buys: everything below is stated for an ABSTRACT `n`, and
+    only the generated file says the kernel's `n` is one of them. *)
 Fixpoint class_sum (op : Z -> Z -> Z) (f : nat -> Z) (w n S : nat) : Z :=
   match S with
   | O => 0
@@ -318,6 +327,48 @@ Theorem the_bound_is_one_unit_wide :
   /\ (MAX_EXACT_SEQ_LEN + 1) * ((2 ^ 28 - 1) * 127) >= 2 ^ 63.
 Proof. split; vm_compute; [ reflexivity | discriminate ]. Qed.
 
+(* ------------------------------------------------------------------ *)
+(** ** The kernel's own worker count                                   *)
+(* ------------------------------------------------------------------ *)
+
+(** Everything above is stated for an ABSTRACT `n`, which is the right
+    generality and is not by itself a statement about anything the compiler
+    emits. [AttentionSchedule.v] is the emitter's own `nworkers`, rendered from
+    the same expression the PTX is rendered from - so this instantiation is the
+    join, and it is what makes the theorem a claim about the shipped kernel
+    rather than about grid-stride loops in general.
+
+    The hypotheses are the launch's: a grid and a block with at least one of
+    everything. *)
+Corollary the_emitted_launch_geometry_visits_every_key_exactly_once :
+  forall f S ncz ncx ntx,
+    (0 < ncz)%nat -> (0 < ncx)%nat -> (0 < ntx)%nat ->
+    combine Z.add f (AS.nworkers_accum ncz ncx ntx) S
+            (AS.nworkers_accum ncz ncx ntx)
+      = sum_upto Z.add f S.
+Proof.
+  intros f S ncz ncx ntx Hz Hx Ht.
+  apply grid_stride_exact. unfold AS.nworkers_accum. nia.
+Qed.
+
+(** And the reason that instantiation is legitimate: the workers the reduction
+    folds over are EXACTLY the threads of the launch. [combine] folds ids
+    `0 .. n-1`; [AttentionSchedule.the_worker_is_below_the_worker_count] says
+    every thread lands in that range, [distinct_threads_are_distinct_workers]
+    that no two share an id, and [every_worker_is_some_thread] that none of the
+    ids is unclaimed. Without the last of those a residue class is folded into
+    the answer by nobody, and the sum is short by every key congruent to it. *)
+Corollary every_folded_worker_is_a_real_thread :
+  forall w ncz ncx ntx,
+    (0 < ncx)%nat -> (0 < ntx)%nat ->
+    (w < AS.nworkers_accum ncz ncx ntx)%nat ->
+    exists cz cx tx,
+      (cz < ncz)%nat /\ (cx < ncx)%nat /\ (tx < ntx)%nat /\
+      AS.worker_accum cz ncx cx ntx tx = w.
+Proof. intros. apply AS.every_worker_is_some_thread; assumption. Qed.
+
+Print Assumptions the_emitted_launch_geometry_visits_every_key_exactly_once.
+Print Assumptions every_folded_worker_is_a_real_thread.
 Print Assumptions grid_stride_exact.
 Print Assumptions any_worker_count_agrees.
 Print Assumptions atomics_may_land_in_any_order.

@@ -2015,28 +2015,28 @@ pub enum Ix {
 }
 
 impl Ix {
-    fn val(n: &'static str) -> Ix {
+    pub fn val(n: &'static str) -> Ix {
         Ix::Val(n)
     }
-    fn sub(a: Ix, b: Ix) -> Ix {
+    pub fn sub(a: Ix, b: Ix) -> Ix {
         Ix::Sub(Box::new(a), Box::new(b))
     }
-    fn add(a: Ix, b: Ix) -> Ix {
+    pub fn add(a: Ix, b: Ix) -> Ix {
         Ix::Add(Box::new(a), Box::new(b))
     }
-    fn mul(a: Ix, b: Ix) -> Ix {
+    pub fn mul(a: Ix, b: Ix) -> Ix {
         Ix::Mul(Box::new(a), Box::new(b))
     }
-    fn min(a: Ix, b: Ix) -> Ix {
+    pub fn min(a: Ix, b: Ix) -> Ix {
         Ix::Min(Box::new(a), Box::new(b))
     }
-    fn div(a: Ix, b: Ix) -> Ix {
+    pub fn div(a: Ix, b: Ix) -> Ix {
         Ix::Div(Box::new(a), Box::new(b))
     }
-    fn imod(a: Ix, b: Ix) -> Ix {
+    pub fn imod(a: Ix, b: Ix) -> Ix {
         Ix::Mod(Box::new(a), Box::new(b))
     }
-    fn sel_lt(a: Ix, b: Ix, x: Ix, y: Ix) -> Ix {
+    pub fn sel_lt(a: Ix, b: Ix, x: Ix, y: Ix) -> Ix {
         Ix::SelLt(Box::new(a), Box::new(b), Box::new(x), Box::new(y))
     }
 
@@ -2266,6 +2266,168 @@ pub fn render_llvm(ix: &Ix, bind: &dyn Fn(&'static str) -> String) -> Vec<String
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect()
+}
+
+// ------------------------------------------------------------------
+// The same expressions, rendered to PTX.
+//
+// [`Ix`] was built for the exact-GEMM driver, whose backend is LLVM. The
+// exact-attention kernel in `src/exact_attention.rs` is a SECOND backend -
+// raw PTX, written with `format!` - and its schedule (which thread is which
+// worker, and how many workers there are) was hand-written there while
+// `proofs/GridStrideSplit.v` described it in a COMMENT. That is the weakest
+// tie in the programme: every other proof shares one description with the
+// emitter, and this one quoted the instructions in prose and matched them
+// back with a dataflow walker over emitted text.
+//
+// So `Ix` now serves two backends. That is the point of the increment rather
+// than a side effect: an extraction layer that reaches exactly one code
+// generator is a one-off, and the question "does this generalise" is answered
+// by pointing it at a target with a different instruction set, different
+// register discipline (special registers must be `mov`'d before use) and a
+// fused multiply-add.
+//
+// Its home is arguably no longer `cpu_gemm`. Left here deliberately: moving
+// ~250 lines would bury the change that matters in a diff that changes
+// nothing.
+// ------------------------------------------------------------------
+
+/// Where a named value currently lives, for [`render_ptx`].
+///
+/// PTX cannot use a special register as an arithmetic operand, so `%ctaid.x`
+/// has to be `mov`'d into an ordinary one first. `bind` records what is
+/// already in a register; anything else is materialised with a `mov` at FIRST
+/// USE, taking the next name from the supply.
+///
+/// That lazy-at-first-use rule is not a stylistic choice - it is what the
+/// hand-written kernels already did, which is why the extraction reproduces
+/// them instruction for instruction.
+#[derive(Default)]
+pub struct PtxEnv {
+    bound: std::collections::HashMap<&'static str, String>,
+    /// The `mov`s materialised so far, in emission order.
+    pub movs: usize,
+}
+
+impl PtxEnv {
+    /// Pre-bind a name to a register the surrounding kernel already loaded.
+    pub fn bind(&mut self, name: &'static str, reg: &str) -> &mut Self {
+        self.bound.insert(name, reg.to_string());
+        self
+    }
+    /// What `name` is bound to, if anything.
+    pub fn get(&self, name: &str) -> Option<&String> {
+        self.bound.get(name)
+    }
+}
+
+/// One line of a rendered PTX sequence: the result register, and an optional
+/// trailing comment.
+pub type PtxName = (String, Option<&'static str>);
+
+/// Render an [`Ix`] to PTX, one instruction per line, at the four-space indent
+/// the kernels use.
+///
+/// `names` supplies the result register of each instruction in emission order,
+/// exactly as [`render_named`] does for the raw-LLVM sites - which is what lets
+/// an extracted expression reproduce a hand-written sequence byte for byte
+/// instead of merely computing the same value.
+///
+/// `Add(Mul(a, b), c)` is fused to `mad.lo.s32`, because that is the lowering
+/// PTX has and the one the kernels were written with. Everything outside
+/// `Val`/`Add`/`Sub`/`Mul` **panics**: this is a deliberately tiny renderer for
+/// launch-geometry arithmetic, and a silent fallback for an unhandled node is
+/// the exact defect the design-rule table in CLAUDE.md catalogues nineteen
+/// times over.
+pub fn render_ptx(
+    ix: &Ix,
+    names: &mut dyn Iterator<Item = PtxName>,
+    env: &mut PtxEnv,
+) -> (Vec<String>, String) {
+    let mut out = Vec::new();
+    let r = emit_ptx(ix, &mut out, names, env);
+    (out, r)
+}
+
+fn ptx_line(body: String, note: Option<&'static str>) -> String {
+    match note {
+        Some(n) => format!("    {body:<36}// {n}"),
+        None => format!("    {body}"),
+    }
+}
+
+fn emit_ptx(
+    ix: &Ix,
+    out: &mut Vec<String>,
+    names: &mut dyn Iterator<Item = PtxName>,
+    env: &mut PtxEnv,
+) -> String {
+    fn take(names: &mut dyn Iterator<Item = PtxName>) -> PtxName {
+        names
+            .next()
+            .expect("render_ptx ran out of result names for the expression")
+    }
+    match ix {
+        Ix::Lit(k) => k.to_string(),
+        Ix::Val(n) => {
+            if let Some(r) = env.bound.get(n) {
+                return r.clone();
+            }
+            let (r, note) = take(names);
+            out.push(ptx_line(format!("mov.u32 {r}, %{n};"), note));
+            env.bound.insert(n, r.clone());
+            env.movs += 1;
+            r
+        }
+        // `a*b + c` is one instruction on this target. Emitted as a fused
+        // `mad` rather than a `mul` and an `add` because that is what the
+        // kernels already contain; splitting it would compute the same value
+        // in one more instruction and forfeit the byte-identity check.
+        Ix::Add(m, c) if matches!(**m, Ix::Mul(_, _)) => {
+            let (a, b) = match &**m {
+                Ix::Mul(a, b) => (a, b),
+                _ => unreachable!("guarded by the match arm"),
+            };
+            let a = emit_ptx(a, out, names, env);
+            let b = emit_ptx(b, out, names, env);
+            let c = emit_ptx(c, out, names, env);
+            let (r, note) = take(names);
+            out.push(ptx_line(format!("mad.lo.s32 {r}, {a}, {b}, {c};"), note));
+            r
+        }
+        Ix::Add(a, b) => {
+            let (a, b) = (
+                emit_ptx(a, out, names, env),
+                emit_ptx(b, out, names, env),
+            );
+            let (r, note) = take(names);
+            out.push(ptx_line(format!("add.s32 {r}, {a}, {b};"), note));
+            r
+        }
+        Ix::Sub(a, b) => {
+            let (a, b) = (
+                emit_ptx(a, out, names, env),
+                emit_ptx(b, out, names, env),
+            );
+            let (r, note) = take(names);
+            out.push(ptx_line(format!("sub.s32 {r}, {a}, {b};"), note));
+            r
+        }
+        Ix::Mul(a, b) => {
+            let (a, b) = (
+                emit_ptx(a, out, names, env),
+                emit_ptx(b, out, names, env),
+            );
+            let (r, note) = take(names);
+            out.push(ptx_line(format!("mul.lo.s32 {r}, {a}, {b};"), note));
+            r
+        }
+        other => panic!(
+            "render_ptx has no lowering for {other:?}. Add one deliberately - \
+             a fallback that emits something plausible is how `pipe.wait(t)` \
+             came to emit nothing at all"
+        ),
+    }
 }
 
 /// k-pairs in a K panel of `kc`, rounded up: `(kc + 1) / 2`.

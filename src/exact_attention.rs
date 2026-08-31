@@ -10,6 +10,7 @@
 //! over the sequence is an exact integer one, so the answer does not depend on
 //! `blockDim.x`, `gridDim.x`, `gridDim.z`, or the order the atomics land.
 
+use crate::cpu_gemm::{render_ptx, Ix, PtxEnv};
 use crate::fixed_exp::ptx_device_function;
 
 /// The largest `seq_len` this kernel is exact for.
@@ -30,6 +31,105 @@ use crate::fixed_exp::ptx_device_function;
 /// one comes from recombining in float64 (`2^53`), and this kernel recombines
 /// in integers.
 pub const MAX_EXACT_SEQ_LEN: usize = (1usize << 63) / (((1usize << 28) - 1) * 127);
+
+// ------------------------------------------------------------------
+// The launch-geometry schedule, as ONE description.
+//
+// `proofs/GridStrideSplit.v` proves that worker `w` of `n` taking
+// `{ i < S : i mod n = w }` visits every index exactly once, in any order, at
+// any worker count. That theorem is stated over an abstract `n` - and until
+// now nothing said the kernel's `n` was the right one. The instructions were
+// hand-written in the template below, `GridStrideSplit.v` quoted them in a
+// COMMENT, and `tests/exact_attention_schedule.rs` matched the two back up by
+// parsing emitted PTX with a reaching-definition walker.
+//
+// That is the weakest tie in the programme. Every other proof here shares one
+// description with the emitter, so a divergence is a byte-identity failure;
+// this one read text, and CLAUDE.md already records two traps where a
+// structural pattern matched more than one thing.
+//
+// So the schedule is an [`Ix`] now - the same type the exact-GEMM driver's
+// schedule is extracted into - rendered to PTX by the emitter and to Coq by
+// `tools/gen_attention_schedule` (`tests/exact_attention_schedule.rs` with
+// `Y_REWRITE_ATTENTION_PROOF=1`). The obligation `GridStrideSplit.v` needs is
+// then a theorem about the emitted expressions rather than about a comment.
+// ------------------------------------------------------------------
+
+/// `attn_scores`: one worker per thread of a 1-D grid.
+///
+/// `worker = ctaid.x * ntid.x + tid.x`, `nworkers = nctaid.x * ntid.x`.
+pub fn sched_scores() -> (Ix, Ix) {
+    (
+        Ix::add(
+            Ix::mul(Ix::val("ctaid.x"), Ix::val("ntid.x")),
+            Ix::val("tid.x"),
+        ),
+        Ix::mul(Ix::val("nctaid.x"), Ix::val("ntid.x")),
+    )
+}
+
+/// `attn_accum` and `attn_accum_naive`: the sequence is ALSO partitioned across
+/// `ctaid.z`, so the CTA index is flattened first.
+///
+/// `worker = (ctaid.z * nctaid.x + ctaid.x) * ntid.x + tid.x`,
+/// `nworkers = nctaid.z * nctaid.x * ntid.x`.
+///
+/// The pairing is the whole obligation: `nworkers` must be the product of
+/// exactly the extents of the hardware indices `worker` depends on. Fewer and
+/// two threads share a residue class - they accumulate the same keys twice;
+/// more and some class is claimed by no thread, so keys are dropped. Neither
+/// shows up as a crash. `AttentionSchedule.the_worker_index_is_a_bijection`
+/// is that statement, and it is a mixed-radix positional index - the third
+/// consumer of `proofs/MixedRadix.v`, and the first reached from a GPU launch
+/// geometry rather than from a GEMM tile.
+pub fn sched_accum() -> (Ix, Ix) {
+    (
+        Ix::add(
+            Ix::mul(
+                Ix::add(
+                    Ix::mul(Ix::val("ctaid.z"), Ix::val("nctaid.x")),
+                    Ix::val("ctaid.x"),
+                ),
+                Ix::val("ntid.x"),
+            ),
+            Ix::val("tid.x"),
+        ),
+        Ix::mul(
+            Ix::mul(Ix::val("nctaid.z"), Ix::val("nctaid.x")),
+            Ix::val("ntid.x"),
+        ),
+    )
+}
+
+/// Render one entry's `(worker, nworkers)` pair as a contiguous PTX block.
+///
+/// `regs` supplies the result register of each instruction in emission order.
+/// `pre` names values the surrounding kernel has already `mov`'d into a
+/// register, so they are not materialised twice - which is what makes
+/// `attn_accum`, whose `%ntid.x` and `%tid.x` are loaded far above, render to
+/// the same instructions as `attn_accum_naive`, whose are not.
+fn render_sched(
+    sched: (Ix, Ix),
+    pre: &[(&'static str, &str)],
+    regs: &[(&str, Option<&'static str>)],
+) -> String {
+    let (worker, nworkers) = sched;
+    let mut env = PtxEnv::default();
+    for (n, r) in pre {
+        env.bind(n, r);
+    }
+    let mut names = regs.iter().map(|(r, n)| (r.to_string(), *n));
+    let (mut lines, _) = render_ptx(&worker, &mut names, &mut env);
+    let (rest, _) = render_ptx(&nworkers, &mut names, &mut env);
+    lines.extend(rest);
+    assert!(
+        names.next().is_none(),
+        "render_sched was given more result registers than the schedule has \
+         instructions - the extra ones are silently unused, which is how a \
+         renumbering drifts"
+    );
+    lines.join("\n")
+}
 
 /// The two entry points: `attn_scores` (exact int32 scores + global integer
 /// max) and `attn_accum` / `attn_accum_naive` (Q0.28 weights via the integer
@@ -68,7 +168,58 @@ pub fn attention_ptx(head_dim: usize, seq_len: usize) -> Result<String, String> 
              is a wrong answer, not an imprecise one"
         ));
     }
+    // The three schedule sites, rendered from `sched_scores` / `sched_accum`.
+    // The register names are supplied here, in emission order, so the rendered
+    // block reproduces what was hand-written - which is what lets this
+    // extraction be checked by byte-identity rather than by reading it.
+    let blk_scores = render_sched(
+        sched_scores(),
+        &[],
+        &[
+            ("%r1", None),
+            ("%r2", None),
+            ("%r3", None),
+            ("%r4", Some("i = worker")),
+            ("%r20", None),
+            ("%r21", Some("nworkers")),
+        ],
+    );
+    // `%ntid.x` and `%tid.x` are already in `%r5` / `%r6` here: the zeroing
+    // loop above needs them, so they are loaded long before the schedule.
+    let blk_accum = render_sched(
+        sched_accum(),
+        &[("ntid.x", "%r5"), ("tid.x", "%r6")],
+        &[
+            ("%r1", None),
+            ("%r2", None),
+            ("%r3", None),
+            ("%r4", Some("flat CTA index")),
+            ("%r7", Some("worker")),
+            ("%r8", None),
+            ("%r20", None),
+            ("%r9", Some("nworkers")),
+        ],
+    );
+    let blk_naive = render_sched(
+        sched_accum(),
+        &[],
+        &[
+            ("%r1", None),
+            ("%r2", None),
+            ("%r3", None),
+            ("%r4", None),
+            ("%r5", None),
+            ("%r6", None),
+            ("%r7", None),
+            ("%r8", None),
+            ("%r20", None),
+            ("%r9", None),
+        ],
+    );
     let body = KERNELS
+        .replace("$SCHED_SCORES", &blk_scores)
+        .replace("$SCHED_ACCUM", &blk_accum)
+        .replace("$SCHED_NAIVE", &blk_naive)
         .replace("$D8", &(head_dim * 8).to_string())
         .replace("$D", &head_dim.to_string())
         .replace("$S", &seq_len.to_string());
@@ -110,12 +261,12 @@ const KERNELS: &str = r#"
     cvta.to.global.u64 %rd3, %rd3;
     cvta.to.global.u64 %rd4, %rd4;
 
-    mov.u32 %r1, %ctaid.x;
-    mov.u32 %r2, %ntid.x;
-    mov.u32 %r3, %tid.x;
-    mad.lo.s32 %r4, %r1, %r2, %r3;      // i = worker
-    mov.u32 %r20, %nctaid.x;
-    mul.lo.s32 %r21, %r20, %r2;         // nworkers
+    // The launch-geometry schedule, RENDERED rather than written: see
+    // `sched_scores` below and `proofs/AttentionSchedule.v`, which is the same
+    // expression rendered to Coq. `GridStrideSplit.v` used to quote these
+    // instructions in a comment and a test used to recover them from emitted
+    // text with a dataflow walker; there is one description now.
+$SCHED_SCORES
     mov.u32 %r5, %ctaid.y;              // b
 
     // [Y SEQUENCE REDUCTION] grid-stride over S, stride = nworkers.
@@ -256,18 +407,14 @@ ZSKIP:
     cvta.to.global.u64 %rd5, %rd5;
     cvta.to.global.u64 %rd6, %rd6;
 
-    mov.u32 %r1, %ctaid.z;
-    mov.u32 %r2, %nctaid.x;
-    mov.u32 %r3, %ctaid.x;
-    mad.lo.s32 %r4, %r1, %r2, %r3;      // flat CTA index
-    mad.lo.s32 %r7, %r4, %r5, %r6;      // worker
-    mov.u32 %r8, %nctaid.z;
-    // nworkers, in two steps and TWO registers. Writing %r9 twice is legal
-    // PTX and was a trap for anything reading this back: a reaching-definition
-    // walk that resolves an operand at the USE finds the same instruction
-    // again. Nothing here needs the reuse.
-    mul.lo.s32 %r20, %r8, %r2;
-    mul.lo.s32 %r9, %r20, %r5;          // nworkers
+    // Rendered from `sched_accum` - see the note in `attn_scores`. The worker
+    // count comes out in two steps and TWO registers because the name supply
+    // hands a fresh register to every instruction. Writing `%r9` twice is
+    // legal PTX and was a trap for anything reading this back: a
+    // reaching-definition walk that resolves an operand at the USE finds the
+    // same instruction again. Nothing needs the reuse, and now nothing can
+    // reintroduce it by hand.
+$SCHED_ACCUM
     mov.u32 %r10, %ctaid.y;             // b
 
     mul.wide.s32 %rd10, %r10, 4;
@@ -417,16 +564,10 @@ FSKIP:
     cvta.to.global.u64 %rd5, %rd5;
     cvta.to.global.u64 %rd6, %rd6;
 
-    mov.u32 %r1, %ctaid.z;
-    mov.u32 %r2, %nctaid.x;
-    mov.u32 %r3, %ctaid.x;
-    mad.lo.s32 %r4, %r1, %r2, %r3;
-    mov.u32 %r5, %ntid.x;
-    mov.u32 %r6, %tid.x;
-    mad.lo.s32 %r7, %r4, %r5, %r6;
-    mov.u32 %r8, %nctaid.z;
-    mul.lo.s32 %r20, %r8, %r2;
-    mul.lo.s32 %r9, %r20, %r5;
+    // Rendered from `sched_accum`, the SAME description `attn_accum` uses.
+    // The two entries must partition the sequence identically or the
+    // differential between them compares two different schedules.
+$SCHED_NAIVE
     mov.u32 %r10, %ctaid.y;
 
     mul.wide.s32 %rd10, %r10, 4;

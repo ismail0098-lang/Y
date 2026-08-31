@@ -1,6 +1,6 @@
 # The process: taking a kernel from *fast* to *verified*
 
-This is the method, written down after fifteen proof files and about twenty
+This is the method, written down after sixteen proof files and about twenty
 gates. It is not a plan — every step here has been executed, and the parts that
 did not work are recorded as such.
 
@@ -9,7 +9,7 @@ K-split, multi-threaded kernel that is **bit-identical** to the naive triple
 loop it replaces. Two other kernels have been through parts of it (the f32 GEMM,
 the exact int8 attention PTX), and the differences are noted where they matter.
 
-Current state: **fifteen `.v` files, ~255 theorems, no axioms, nothing
+Current state: **sixteen `.v` files, ~265 theorems, no axioms, nothing
 admitted**, all checked by `cargo test`. The counts are approximate on purpose:
 an exact one goes stale every session, and a gate on it would fail on every
 proof added.
@@ -199,6 +199,26 @@ step in this programme has left all four emitted LLVM modules byte-for-byte
 unchanged, and that is the whole argument that the description is what the
 compiler was already doing.
 
+The rule survives a **second backend**, which is the evidence the layer is not
+shaped around one code generator. The same `Ix` renders to PTX for the
+exact-attention kernel — a target with a different instruction set, a different
+register discipline (special registers must be `mov`'d into ordinary ones
+before use) and a fused multiply-add — and reproduced three hand-written
+sequences **instruction for instruction**, register numbering and `mov`
+placement included. Only comments moved.
+
+That was not arranged. A renderer that materialises a special register at
+**first use** and fuses `a*b + c` into one instruction emits what a person
+writing PTX by hand emits, because both are following the target's own grain.
+**If an extracted expression does not reproduce the hand-written sequence, the
+first hypothesis is that the renderer is fighting the target, not that the old
+code was arbitrary.**
+
+Where the emitted text must genuinely change — a comment moving, say — say so
+and fall back to comparing the **instruction stream** with comments and blank
+lines stripped. Claiming byte-identity you do not have is worse than the weaker
+check honestly stated.
+
 It also constrains the design. When a loop's bound is a value the driver has
 already computed, `loop_begin_over` names the existing register rather than
 re-emitting the expression — re-emitting would add instructions the compiler
@@ -222,6 +242,38 @@ Theorem the_zeroing_loop_covers_exactly_the_tile :
 
 against the tile geometry another file fixes. **Prefer `=` to `<=` whenever both
 directions are unsafe.**
+
+### A GENERATED SIGNATURE ABSORBS A RELABELLING
+
+Sharpest instance of the limit above, and it survived a green sweep.
+
+The attention schedule's Coq definitions have their **parameter list derived**
+from the emitted expression's free names — deliberately, so a schedule that
+gains or loses an index changes the signature and the hand-written theorems
+stop compiling. Swapping two radices in the emitter and regenerating then left
+everything green: the parameters were renamed in step, every theorem applies
+the definition **positionally**, and the result is the same function under
+different labels. No proof can see a relabelling.
+
+The fix is a theorem that is **half generated and half fixed** — binders from
+the expression, right-hand side from the author:
+
+```coq
+Theorem the_worker_index_is_a_mixed_radix_number :
+  forall <derived binders> : nat,
+    worker_accum <derived binders>
+      = ctaid_z * (nctaid_x * ntid_x) + ctaid_x * ntid_x + tid_x.
+Proof. intros. unfold worker_accum. ring. Qed.
+```
+
+Swap the radices and the binder list moves while the equation does not, so
+`ring` fails. Drop an extent and it is caught harder: the binder disappears
+while the right-hand side still names it, so the reference is unbound.
+
+**The general rule: if a generated artifact's *names* carry meaning, something
+must pin the names, because a prover compares terms and not labels.** And note
+which layer catches it — the byte-identity gate passes, correctly, because
+description and proof agree perfectly. `coqc` is the only thing left.
 
 ---
 
@@ -248,12 +300,33 @@ Three results from this repository, each caught by exactly one row:
   schedule gate alone; five separate instances so far.
 - **A write past the end of a scratch buffer.** The zeroing loop one trip long.
   Every correctness suite passes. Caught by the Coq equality alone.
+- **A relabelled definition.** Two radices swapped in the emitter *and*
+  regenerated, so the description and the proof agree perfectly and the
+  byte-identity row passes. Caught by `coqc` alone, and only once the role
+  theorem above existed.
+- **A stride register holding a partial product.** The rendered block is
+  correct and present; the loop reads the wrong register out of it. Nothing in
+  the rendering can see that. Caught by the dataflow gate alone.
 
 And the one that should be read twice: an **unclamped fold-back loop**, a
 genuine out-of-bounds write past the last row of C, is **not observed by two of
 the four correctness suites** — including the one running `M = 53` against a
 6-row tile, the most ragged shape in the repo. The overrun lands in memory the
 process already owns and the answer stays correct.
+
+### Rendering says what the code computes; a dataflow gate says the code reads it
+
+Once a schedule is rendered from one description, it is tempting to delete the
+text-reading gate it replaced. Do not, without running the mutation. Rendering
+establishes that the emitted block is the right arithmetic; it establishes
+nothing about whether the loop **consumes** it. Swapping two result registers
+in the attention kernel's worker count leaves the block correct and present
+while the loop strides by the partial product — a real launch-invariance bug,
+invisible to the renderer and to the proof, caught by the walker alone.
+
+The two are complementary, not redundant: one is the decorative-codegen
+question (*is this block used?*) and the other is the drift question (*is this
+block right?*).
 
 ### Where a tie needs an anchor, anchor on what the artifact SAYS
 
@@ -412,6 +485,14 @@ returns the gate's body and it then fails for the wrong reason. Anchor on the
 definition (`"\nfn name("`), and probe it with the mutation it exists to catch
 before believing it.
 
+A second survivor of that kind, found the same way: **a proof cannot see a
+relabelling**, because a prover compares terms and not names. If a generated
+definition's parameter list is derived, swapping two roles renames the
+parameters in step and every positionally-applied theorem stays true. The fix
+is above in §2; the point here is that it was found by a mutation that
+regenerated *both* sides on purpose. **Mutate the description, not only the
+emitter** — the mutations that move one side are the easy ones.
+
 Two recurring traps:
 
 - **A mutation table row says which tests went red, not which tests detected the
@@ -475,9 +556,12 @@ For the exact GEMM, three things are outside:
 
 - [Proof-carrying kernels](proof_carrying_kernels.md) — the roadmap and the
   chronological log, including the measurements that decided each step
-- `proofs/` — the fifteen files, each with its own header stating scope
+- `proofs/` — the sixteen files, each with its own header stating scope
 - `tests/proofs_are_checked.rs` — the gate that runs them, with content controls
 - `tests/exact_gemm_schedule_proof.rs` — the generator and the schedule ties
 - `tests/exact_gemm_certificate.rs` — the emitted certificate
 - `proofs/CountingSort.v` and `tests/msm_counting_sort_model.rs` — the
   placement obligation, and the fourth kernel
+- `proofs/AttentionSchedule.v` and `tests/exact_attention_schedule.rs` — the
+  same extraction layer rendering to a second backend, and the relabelling
+  hole it exposed

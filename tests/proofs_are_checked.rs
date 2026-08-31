@@ -456,6 +456,25 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            "AttentionSchedule.v",
+            &[
+                // GENERATED from the emitter's own launch-geometry
+                // expressions. The bijection is the whole obligation: every
+                // thread is a worker the reduction folds, no two share an id,
+                // and no id is unclaimed.
+                "the_worker_is_below_the_worker_count",
+                "distinct_threads_are_distinct_workers",
+                "every_worker_is_some_thread",
+                // The pairing is load-bearing, stated by refuting the
+                // weakened claim rather than by exhibiting a collision.
+                "dropping_the_z_extent_overflows_the_worker_count",
+                // ... and the control that stops that refutation being read
+                // as "attn_scores is wrong": at one CTA in z the two
+                // schedules are the same map, so one proof covers both.
+                "the_scores_schedule_is_the_accumulate_schedule_at_one_z",
+            ],
+        ),
+        (
             "GridStrideSplit.v",
             &[
                 // The third kernel, and the first that is not a GEMM: the
@@ -471,6 +490,11 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // their operands in whatever order the hardware chooses, so
                 // this one needs commutativity and not just associativity.
                 "atomics_may_land_in_any_order",
+                // The join to the emitted kernel. Everything else in that
+                // file is stated for an ABSTRACT worker count; this is the
+                // one theorem that says the compiler emits one of them.
+                "the_emitted_launch_geometry_visits_every_key_exactly_once",
+                "every_folded_worker_is_a_real_thread",
                 // Both halves are about the ACCUMULATE - and the second is a
                 // failure the GEMM kernels cannot exhibit at all, since they
                 // fold their bands in index order.

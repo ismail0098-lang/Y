@@ -184,10 +184,13 @@ impl OnCurve for G1Projective {
 // here is the harness the crate cannot have: locating and running the `Y`
 // binary, compiling a `.ysu` to PTX, and the device layer's panic-on-error
 // contract, which a library must not adopt.
+// `allow`, not a trimmed list: this module is compiled into several test
+// binaries and each uses a different subset, so any list is unused somewhere.
+#[allow(unused_imports)]
 pub use y_gpu::msm::{
-    bin_by_digit, bucket_block, bucket_launch_geometry, gpu_is_worth_it, last_bin_trace, last_scatter_shape, pick_windows,
-    set_bucket_block, set_scatter_threads, window_digit, BinTrace, Geom, MSM_GPU_MIN_COLD,
-    MSM_GPU_MIN_STAGED,
+    bin_by_digit, bucket_block, bucket_launch_geometry, gpu_is_worth_it, last_bin_trace,
+    last_scatter_shape, pick_windows, set_bucket_block, set_scatter_threads, window_digit,
+    BinTrace, Geom, MSM_GPU_MIN_COLD, MSM_GPU_MIN_STAGED,
 };
 
 /// Where the wall clock went. Reported separately because the lesson from the

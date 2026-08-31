@@ -28,16 +28,41 @@
 //! is that check, and it is the one assertion here that is not just a
 //! transcription of the template.
 //!
-//! **This tie is weaker than the GEMM kernels' and is named as such.** Those
-//! render their schedule from an `Ix` shared with the proof generator, so a
-//! divergence is a byte-identity failure. This kernel is a PTX string template,
-//! so the best available check is reading the emitted text. Making it an `Ix`
-//! would mean routing the attention kernel through `IrBuilder`, which is a
-//! larger change than this file.
+//! **That tie used to be the weakest in the programme, and this file said so.**
+//! The two GEMM kernels render their schedule from an `Ix` shared with the
+//! proof generator, so a divergence is a byte-identity failure; this one read
+//! emitted text with a reaching-definition walker, and `GridStrideSplit.v`
+//! quoted the instructions in a COMMENT that had already gone stale.
+//!
+//! It is an `Ix` now - `sched_scores` / `sched_accum` in
+//! `src/exact_attention.rs` - rendered to PTX by the emitter and to Coq by the
+//! generator at the foot of this file. **The extraction reproduced all three
+//! hand-written sequences instruction for instruction**, register numbering,
+//! `mad` fusion and lazy `mov` placement included, so the refactor is checked
+//! by the artifact rather than by reading it; only comments moved.
+//!
+//! What that buys is the theorem `GridStrideSplit.v` could not state. Its
+//! partition is proved for an ABSTRACT worker count, and nothing said the
+//! kernel's count was one of them: `AttentionSchedule.v` is the emitter's own
+//! `nworkers`, and `the_emitted_launch_geometry_visits_every_key_exactly_once`
+//! is the instantiation.
+//!
+//! The dataflow walker below is KEPT rather than deleted. It answers a
+//! question the rendering cannot: whether the sequence loop actually READS the
+//! schedule it was given. A block that is emitted and used by nothing is the
+//! decorative-codegen failure this repository catalogues.
 //!
 //! Run with:  cargo test --release --test exact_attention_schedule
 
-use y::exact_attention::{attention_ptx, MAX_EXACT_SEQ_LEN};
+use std::path::PathBuf;
+
+use y::cpu_gemm::{render_ptx, Ix, PtxEnv};
+use y::exact_attention::{attention_ptx, sched_accum, sched_scores, MAX_EXACT_SEQ_LEN};
+
+/// The repository root, from the test binary's own manifest directory.
+fn repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
 
 const HEAD_DIM: usize = 64;
 const SEQ_LEN: usize = 512;
@@ -414,4 +439,448 @@ fn the_dependency_walk_handles_a_redefined_register() {
     .map(|s| s.to_string())
     .collect();
     assert_eq!(deps(&body, "%r9"), deps(&ssa, "%r9"));
+}
+
+// ==================================================================
+// The generated half: one description, rendered to PTX and to Coq.
+// ==================================================================
+
+/// Bind a hardware index's PTX name to a legal Coq identifier.
+///
+/// `%ctaid.x` cannot be a Coq name, and that is the only transformation. The
+/// expression itself is not transcribed - it is the same [`Ix`] the emitter
+/// renders to PTX, so a divergence between the proof's arithmetic and the
+/// kernel's is not expressible.
+fn coq_name(n: &'static str) -> String {
+    match n {
+        "ctaid.x" | "ctaid.y" | "ctaid.z" | "tid.x" | "ntid.x" | "nctaid.x" | "nctaid.z" => {
+            n.replace('.', "_")
+        }
+        other => panic!(
+            "the attention schedule gained an unbound name `{other}`. Add it \
+             here deliberately: an unrecognised hardware index silently \
+             renamed is how a proof comes to be about a different kernel"
+        ),
+    }
+}
+
+/// The free names of an expression, in first-occurrence order.
+///
+/// Derived rather than hardcoded, so a schedule that grows or loses an index
+/// changes the generated Coq SIGNATURE - at which point the hand-written
+/// theorems below stop compiling. A hardcoded parameter list would absorb the
+/// change silently and leave the theorems talking about the old kernel.
+fn free_names(ix: &Ix, out: &mut Vec<&'static str>) {
+    match ix {
+        Ix::Val(n) => {
+            if !out.contains(n) {
+                out.push(n);
+            }
+        }
+        Ix::Lit(_) => {}
+        Ix::Add(a, b) | Ix::Sub(a, b) | Ix::Mul(a, b) | Ix::Min(a, b) | Ix::Div(a, b)
+        | Ix::Mod(a, b) => {
+            free_names(a, out);
+            free_names(b, out);
+        }
+        Ix::SelLt(a, b, c, d) => {
+            for x in [a, b, c, d] {
+                free_names(x, out);
+            }
+        }
+    }
+}
+
+/// The derived parameter list of a rendered definition, space separated.
+fn binders(ix: &Ix) -> String {
+    let mut ns = Vec::new();
+    free_names(ix, &mut ns);
+    ns.iter().map(|n| coq_name(n)).collect::<Vec<_>>().join(" ")
+}
+
+fn coq_def(name: &str, ix: &Ix) -> String {
+    let mut ns = Vec::new();
+    free_names(ix, &mut ns);
+    let params: Vec<String> = ns.iter().map(|n| coq_name(n)).collect();
+    format!(
+        "Definition {name} ({} : nat) : nat := {}.",
+        params.join(" "),
+        ix.coq(&coq_name)
+    )
+}
+
+fn attention_schedule_path() -> PathBuf {
+    repo().join("proofs").join("AttentionSchedule.v")
+}
+
+/// Render `proofs/AttentionSchedule.v`.
+///
+/// The DEFINITIONS come from the emitter's own expressions. The THEOREMS are
+/// fixed text, deliberately: that is what makes the file bite. Move a radix in
+/// `sched_accum` and the definitions move under theorems that did not, so
+/// `coqc` rejects the file rather than quietly proving something true of a
+/// kernel nobody ships.
+fn render_attention_schedule(scores: (Ix, Ix), accum: (Ix, Ix)) -> String {
+    let defs = [
+        coq_def("worker_scores", &scores.0),
+        coq_def("nworkers_scores", &scores.1),
+        coq_def("worker_accum", &accum.0),
+        coq_def("nworkers_accum", &accum.1),
+    ]
+    .join("\n");
+
+    // The binders of the ROLE theorems below are derived; their right-hand
+    // sides are fixed text. That asymmetry is the whole point - see the
+    // comment on those theorems.
+    let bind_ws = binders(&scores.0);
+    let bind_ns = binders(&scores.1);
+    let bind_wa = binders(&accum.0);
+    let bind_na = binders(&accum.1);
+
+    format!(
+        r#"(** * The exact-attention kernel's launch geometry.
+
+    GENERATED from [src/exact_attention.rs]'s `sched_scores` / `sched_accum` by
+    `tests/exact_attention_schedule.rs`. Do not edit: regenerate with
+
+      << Y_REWRITE_ATTENTION_PROOF=1 cargo test --release --test exact_attention_schedule >>
+
+    Why it exists. [GridStrideSplit.v] proves that worker `w` of `n` taking
+    `{{ i < S : i mod n = w }}` visits every index exactly once, in any order,
+    at any worker count - and it proves it for an ABSTRACT `n`. Nothing said
+    the kernel's `n` was the right one. The instructions were hand-written in
+    a PTX template, this proof quoted them in a comment, and a test recovered
+    them from emitted text with a reaching-definition walker. That was the
+    weakest tie in the programme, and the quoted comment had already gone
+    stale: it showed `mul.lo.s32 %r9, %r9, %r5`, a two-writes-to-one-register
+    form the kernel stopped using.
+
+    Now the emitter and this file render ONE expression. The definitions below
+    are not a transcription.
+
+    The obligation is the PAIRING. `worker` mixes three hardware indices with
+    two radices; `nworkers` must be the product of exactly those three indices'
+    EXTENTS. Drop a factor and two threads share a residue class, so their keys
+    are accumulated twice; add one and some class is claimed by no thread, so
+    its keys are dropped. Neither is a crash, and on random data neither is
+    reliably a wrong-looking number.
+
+    That statement is a BIJECTION from the launch geometry's coordinate box
+    onto `[0, nworkers)`, and it is a mixed-radix positional index - so
+    [MixedRadix.v] discharges the injectivity with no new reasoning. Third
+    consumer of that schema, and the first reached from a GPU launch geometry
+    rather than from a GEMM tile.
+
+    What is NOT claimed: nothing here is about the per-thread body, the integer
+    exp, the Q0.28 weight or the int8 load. This file is the schedule and only
+    the schedule. *)
+
+Require Import Arith Lia.
+Require MixedRadix.
+
+Module MR := MixedRadix.
+
+Open Scope nat_scope.
+
+(* ------------------------------------------------------------------ *)
+(** ** The emitted expressions                                         *)
+(* ------------------------------------------------------------------ *)
+
+{defs}
+
+(* ------------------------------------------------------------------ *)
+(** ** Which index plays which role                                    *)
+(* ------------------------------------------------------------------ *)
+
+(** **The theorems below are half generated and half fixed, and the asymmetry
+    is load-bearing.** Their BINDERS come from the emitted expression's own
+    parameter list; their right-hand sides are fixed text naming the roles.
+
+    Without them a relabelling is invisible. Every other theorem here applies
+    `worker_accum` POSITIONALLY, and the parameter list is derived from the
+    expression - so swapping two radices in the emitter renames the parameters
+    in step, the definition stays the same function under different labels,
+    and the byte-identity gate passes because the generated file moved too.
+    That mutation survived a green sweep until these were added.
+
+    Here the binder list moves and the right-hand side does not, so a swap
+    makes the equation false and `coqc` rejects the file. Dropping an extent
+    is caught harder still: the binder disappears while the right-hand side
+    still names it, so the reference is unbound. *)
+
+Theorem the_worker_index_is_a_mixed_radix_number :
+  forall {bind_wa} : nat,
+    worker_accum {bind_wa}
+      = ctaid_z * (nctaid_x * ntid_x) + ctaid_x * ntid_x + tid_x.
+Proof. intros. unfold worker_accum. ring. Qed.
+
+Theorem the_worker_count_is_the_product_of_the_extents :
+  forall {bind_na} : nat,
+    nworkers_accum {bind_na} = nctaid_z * nctaid_x * ntid_x.
+Proof. intros. unfold nworkers_accum. ring. Qed.
+
+Theorem the_scores_worker_index_is_a_mixed_radix_number :
+  forall {bind_ws} : nat,
+    worker_scores {bind_ws} = ctaid_x * ntid_x + tid_x.
+Proof. intros. unfold worker_scores. ring. Qed.
+
+Theorem the_scores_worker_count_is_the_product_of_the_extents :
+  forall {bind_ns} : nat,
+    nworkers_scores {bind_ns} = nctaid_x * ntid_x.
+Proof. intros. unfold nworkers_scores. ring. Qed.
+
+(* ------------------------------------------------------------------ *)
+(** ** One digit of a positional index                                 *)
+(* ------------------------------------------------------------------ *)
+
+(** The bound both radices need, in one place. *)
+Lemma digit_bound : forall q r Q R, q < Q -> r < R -> q * R + r < Q * R.
+Proof. intros. nia. Qed.
+
+(* ------------------------------------------------------------------ *)
+(** ** The worker map is a bijection onto the worker count             *)
+(* ------------------------------------------------------------------ *)
+
+(** **In range.** Every thread of the launch is a worker the reduction folds. *)
+Theorem the_worker_is_below_the_worker_count :
+  forall cz cx tx ncz ncx ntx,
+    cz < ncz -> cx < ncx -> tx < ntx ->
+    worker_accum cz ncx cx ntx tx < nworkers_accum ncz ncx ntx.
+Proof.
+  intros cz cx tx ncz ncx ntx Hz Hx Ht.
+  unfold worker_accum, nworkers_accum.
+  assert (H1 : cz * ncx + cx < ncz * ncx) by (apply digit_bound; assumption).
+  assert (H2 : (cz * ncx + cx) * ntx + tx < (ncz * ncx) * ntx)
+    by (apply digit_bound; assumption).
+  lia.
+Qed.
+
+(** **Injective.** Two threads never share a worker id, so no key is
+    accumulated twice. Discharged by [MixedRadix.two_digit_unique]: the worker
+    index IS `q*(B1*B0) + m*B0 + r` at `B0 = ntid.x`, `B1 = nctaid.x`. *)
+Theorem distinct_threads_are_distinct_workers :
+  forall cz1 cx1 tx1 cz2 cx2 tx2 ncx ntx,
+    0 < ncx -> 0 < ntx ->
+    cx1 < ncx -> cx2 < ncx -> tx1 < ntx -> tx2 < ntx ->
+    worker_accum cz1 ncx cx1 ntx tx1 = worker_accum cz2 ncx cx2 ntx tx2 ->
+    cz1 = cz2 /\ cx1 = cx2 /\ tx1 = tx2.
+Proof.
+  intros cz1 cx1 tx1 cz2 cx2 tx2 ncx ntx Hncx Hntx Hx1 Hx2 Ht1 Ht2 Heq.
+  unfold worker_accum in Heq.
+  apply (MR.two_digit_unique ntx ncx cz1 cx1 tx1 cz2 cx2 tx2);
+    try assumption.
+  transitivity ((cz1 * ncx + cx1) * ntx + tx1); [ ring | ].
+  rewrite Heq. ring.
+Qed.
+
+(** **Onto.** Every worker id the reduction folds is some thread's, so no
+    residue class goes unclaimed and no key is dropped. *)
+Theorem every_worker_is_some_thread :
+  forall w ncz ncx ntx,
+    0 < ncx -> 0 < ntx ->
+    w < nworkers_accum ncz ncx ntx ->
+    exists cz cx tx,
+      cz < ncz /\ cx < ncx /\ tx < ntx /\
+      worker_accum cz ncx cx ntx tx = w.
+Proof.
+  intros w ncz ncx ntx Hncx Hntx Hw.
+  unfold nworkers_accum in Hw.
+  exists (w / (ncx * ntx)), ((w / ntx) mod ncx), (w mod ntx).
+  assert (Hdd : w / (ncx * ntx) = w / ntx / ncx).
+  {{ rewrite Nat.Div0.div_div. f_equal. ring. }}
+  assert (E1 : (w / ntx / ncx) * ncx + (w / ntx) mod ncx = w / ntx).
+  {{ rewrite Nat.mul_comm. symmetry. apply Nat.div_mod_eq. }}
+  assert (E2 : (w / ntx) * ntx + w mod ntx = w).
+  {{ rewrite Nat.mul_comm. symmetry. apply Nat.div_mod_eq. }}
+  split; [ | split; [ | split ] ].
+  - apply Nat.Div0.div_lt_upper_bound. nia.
+  - apply Nat.mod_upper_bound. lia.
+  - apply Nat.mod_upper_bound. lia.
+  - unfold worker_accum. rewrite Hdd, E1, E2. reflexivity.
+Qed.
+
+(* ------------------------------------------------------------------ *)
+(** ** The pairing is load-bearing                                     *)
+(* ------------------------------------------------------------------ *)
+
+(** **The refutation.** Drop `%nctaid.z` from the product - which is exactly
+    what the worker count of `attn_scores` is - and the in-range property is
+    FALSE, so workers alias.
+
+    Stated as a refuted theorem rather than an exhibited witness: a witness
+    shows the case exists, a refutation shows no proof of the weakened claim
+    can exist. *)
+Theorem dropping_the_z_extent_overflows_the_worker_count :
+  ~ (forall cz cx tx ncz ncx ntx,
+       cz < ncz -> cx < ncx -> tx < ntx ->
+       worker_accum cz ncx cx ntx tx < nworkers_scores ncx ntx).
+Proof.
+  intro H. specialize (H 1 0 0 2 1 1).
+  unfold worker_accum, nworkers_scores in H. simpl in H. lia.
+Qed.
+
+(** **The control.** The refutation above must not be read as "`attn_scores`'s
+    worker count is wrong". It is right FOR ITS OWN KERNEL, which is launched
+    with one CTA in z and does not read `%ctaid.z` at all: at `nctaid.z = 1`
+    the two schedules are the same map. So one proof covers both entries. *)
+Theorem the_scores_schedule_is_the_accumulate_schedule_at_one_z :
+  forall cx tx ncx ntx,
+    worker_accum 0 ncx cx ntx tx = worker_scores cx ntx tx
+    /\ nworkers_accum 1 ncx ntx = nworkers_scores ncx ntx.
+Proof.
+  intros. unfold worker_accum, worker_scores, nworkers_accum, nworkers_scores.
+  split; ring.
+Qed.
+
+Print Assumptions the_worker_is_below_the_worker_count.
+Print Assumptions distinct_threads_are_distinct_workers.
+Print Assumptions every_worker_is_some_thread.
+Print Assumptions dropping_the_z_extent_overflows_the_worker_count.
+Print Assumptions the_scores_schedule_is_the_accumulate_schedule_at_one_z.
+Print Assumptions the_worker_index_is_a_mixed_radix_number.
+Print Assumptions the_worker_count_is_the_product_of_the_extents.
+Print Assumptions the_scores_worker_index_is_a_mixed_radix_number.
+Print Assumptions the_scores_worker_count_is_the_product_of_the_extents.
+Print Assumptions digit_bound.
+"#
+    )
+}
+
+/// The gate. Regenerates and compares byte for byte.
+#[test]
+fn the_committed_attention_schedule_is_what_the_emitter_generates() {
+    let want = render_attention_schedule(sched_scores(), sched_accum());
+    let path = attention_schedule_path();
+
+    if std::env::var("Y_REWRITE_ATTENTION_PROOF").is_ok() {
+        std::fs::write(&path, &want).expect("write AttentionSchedule.v");
+        eprintln!("rewrote {}", path.display());
+        return;
+    }
+
+    let have = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "proofs/AttentionSchedule.v is missing ({e}). It is GENERATED and \
+             committed; regenerate with `Y_REWRITE_ATTENTION_PROOF=1 cargo \
+             test --release --test exact_attention_schedule`."
+        )
+    });
+    if have == want {
+        return;
+    }
+    let first = have
+        .lines()
+        .zip(want.lines())
+        .enumerate()
+        .find(|(_, (a, b))| a != b)
+        .map(|(i, (a, b))| format!("line {}:\n  committed: {a}\n  generated: {b}", i + 1))
+        .unwrap_or_else(|| {
+            format!(
+                "no differing line - the files differ in length ({} vs {})",
+                have.lines().count(),
+                want.lines().count()
+            )
+        });
+    panic!(
+        "proofs/AttentionSchedule.v is not what src/exact_attention.rs \
+         generates.\n\n{first}\n\nThe launch geometry has one source. Either \
+         `sched_scores` / `sched_accum` moved and the proof still describes \
+         the old kernel, or this generated file was edited by hand. \
+         Regenerate with `Y_REWRITE_ATTENTION_PROOF=1 cargo test --release \
+         --test exact_attention_schedule` and re-check the proofs."
+    );
+}
+
+/// The control, and it is the one the exact-GEMM gate had to learn the hard
+/// way: a byte-identity gate is only as good as its generator, and a generator
+/// neutered to echo the committed file passes forever while checking nothing.
+///
+/// Asserting the output CONTAINS the shipped definitions does not catch that -
+/// the committed file contains them. What catches it is rendering a schedule
+/// that is NOT the shipped one and requiring the result to differ.
+#[test]
+fn the_generator_is_a_function_of_the_schedule_not_of_the_committed_file() {
+    let committed =
+        std::fs::read_to_string(attention_schedule_path()).expect("read the committed proof");
+
+    // A worker count with the z extent dropped - the exact bug the refutation
+    // in the generated file is about.
+    let perturbed = (
+        sched_accum().0,
+        Ix::mul(Ix::val("nctaid.x"), Ix::val("ntid.x")),
+    );
+    let out = render_attention_schedule(sched_scores(), perturbed);
+    assert_ne!(
+        out, committed,
+        "the generator ignored its argument: a schedule with `nctaid.z` \
+         dropped from the worker count rendered the committed file. A \
+         generator that echoes cannot fail its own byte-identity gate"
+    );
+    assert!(
+        out.contains("Definition nworkers_accum (nctaid_x ntid_x : nat)"),
+        "the perturbed schedule did not reach the rendered definition"
+    );
+
+    // And the signature really is derived: dropping an index must change the
+    // parameter list, not just the body.
+    assert!(
+        committed.contains("Definition nworkers_accum (nctaid_z nctaid_x ntid_x : nat)"),
+        "the shipped worker count is no longer the product of the three \
+         extents. That is either a real schedule change or a rendering bug, \
+         and the difference matters: this parameter list IS the pairing \
+         obligation"
+    );
+}
+
+/// The tie to the artifact: the rendered blocks are what the kernel contains.
+///
+/// The byte-identity gate above ties the PROOF to the description. This ties
+/// the DESCRIPTION to the emitted PTX. Without it both could be perfectly
+/// consistent with each other and with nothing the compiler produces - which
+/// is the shape of "proof-carrying described the repository, not the output".
+#[test]
+fn the_emitted_kernels_contain_the_rendered_schedule() {
+    let p = ptx();
+
+    // `attn_accum_naive`: no pre-bound registers, no trailing comments, so the
+    // block is exactly what a fresh render produces.
+    let mut env = PtxEnv::default();
+    let regs: Vec<(String, Option<&'static str>)> = ["%r1", "%r2", "%r3", "%r4", "%r5", "%r6",
+        "%r7", "%r8", "%r20", "%r9"]
+        .iter()
+        .map(|r| (r.to_string(), None))
+        .collect();
+    let mut it = regs.into_iter();
+    let (worker, nworkers) = sched_accum();
+    let (mut lines, wreg) = render_ptx(&worker, &mut it, &mut env);
+    let (rest, nreg) = render_ptx(&nworkers, &mut it, &mut env);
+    lines.extend(rest);
+    let block = lines.join("\n");
+
+    let naive = entry_body(&p, "attn_accum_naive");
+    assert!(
+        p.contains(&block),
+        "the emitted module does not contain the rendered schedule block. \
+         Either the emitter stopped rendering it or the register supply \
+         changed.\n--- rendered ---\n{block}\n--- attn_accum_naive ---\n{naive}"
+    );
+
+    // And the loop must actually USE what was rendered. A block that is
+    // present but read by nothing is the decorative-codegen failure this
+    // repository catalogues: `mov.u32 %r14, %r7` seeds the induction variable
+    // with the worker, `add.s32 %r14, %r14, %r9` strides by the worker count.
+    let body = norm(&entry_body(&p, "attn_accum"));
+    let (counter, stride) = loop_counter_and_stride(&body);
+    assert_eq!(
+        stride, nreg,
+        "the sequence loop strides by {stride}, but the rendered worker count \
+         is in {nreg}. A grid-stride loop whose stride is not the worker count \
+         does not partition anything"
+    );
+    assert!(
+        body.iter()
+            .any(|l| l.starts_with(&format!("mov.u32 {counter}, {wreg}"))),
+        "the sequence loop's induction variable {counter} is not seeded from \
+         the rendered worker index {wreg}"
+    );
 }
