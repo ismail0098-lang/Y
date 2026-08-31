@@ -2154,6 +2154,27 @@ async tokens are consumed exactly once — a property this backend was
   per-translation. **This must be stated in the certificate, never papered
   over.**
 
+**Inventory correction, measured 2026-08-31.** "XOR bank swizzling" reads as a
+transformation that exists and needs a proof. It does not exist in any path a
+kernel can take. `src/bank_conflict.rs` is real — the type checker searches for
+a conflict-free swizzle when a program declares an `SmemLayout` and prints
+`[Optimization] Auto-swizzling SharedMemoryTile RxC ...` — and **that result
+reaches no backend**, because every way of getting an indexable tile is either
+a syntax error, refused, or (until it was fixed) emitted PTX `ptxas` rejects.
+`docs/y_language_documentation.md` §21 documents the type as an API; the
+section now opens with a status note saying otherwise.
+
+The shared-memory surface that ships is `shared_alloc_u32` / `shared_load_v4` /
+`shared_store_v4` / `barrier_sync`, and **it has no swizzle at all** — the
+BN254 kernels apply one in generated source
+(`tools/gen_bn254_kernels.py::swizzle`), where it is a bijection because bits 3
+and up pass through unchanged, argued in a comment and checked by nothing.
+
+So Phase 3's swizzle obligation is not "prove the existing pass correct". It is
+"there is a hand-written swizzle in a generator whose bijectivity is prose, and
+a compiler pass that computes swizzles nothing applies". Naming which of those
+to build on is the first decision, and it was not visible before this.
+
 ### Phase 4 — Bounded error where exactness is impossible · 3–4 years
 
 Exact accumulation covers reductions and fixed-point pipelines. It does not

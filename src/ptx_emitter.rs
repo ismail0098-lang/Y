@@ -1567,6 +1567,80 @@ or `shared_alloc_u32` for a shared-memory array.",
         ));
     }
 
+    /// The `.param` slot a kernel parameter occupies, refusing what this
+    /// backend cannot lower.
+    ///
+    /// **This replaces a `_ => ".param .b32"`, which is the design-rule
+    /// table's shape at the ABI boundary.** A parameter type the backend does
+    /// not recognise took a 32-bit slot and the body then used it as an
+    /// address. Found with
+    ///
+    /// ```text
+    /// kernel k(T: SmemLayout<F16, rows=16, cols=64>, C: GlobalMemory<F16>) {
+    ///     let v: F16 = T[3];
+    ///     store(C, 0, v);
+    /// }
+    /// ```
+    ///
+    /// which compiled clean, printed "Compilation Successful!", exited 0, and
+    /// emitted `add.u64 %rd3, %r0, %rd2` - a `.b32` register added to a `.b64`
+    /// one - that `ptxas` rejects outright with "Arguments mismatch for
+    /// instruction 'add'". The indexed read also produced no value, so the
+    /// store wrote a literal `0`, and the address shift was 4 bytes for a
+    /// 2-byte element type. Three wrongs under a green banner, on a surface
+    /// `docs/y_language_documentation.md` §21 documents as an API.
+    ///
+    /// No `.ysu` in `tests/` declares an `SmemLayout`, which is why 60 of 60
+    /// freshly compiled modules assemble and this went unseen: it is reachable
+    /// from the surface syntax and exercised by nothing - the same profile as
+    /// the Hopper intrinsics that were deleted rather than fixed.
+    ///
+    /// **Called from two sites, and only one of them is covered.** The split
+    /// paged-decode shape emits a second `.visible .entry` with the same
+    /// parameter list, and CLAUDE.md's standing rule is to enumerate the SITES
+    /// rather than the match arms - so both call this. Mutation says the second
+    /// is not reachable with a bad type: the main entry is emitted first over
+    /// the same `kernel.params`, so it refuses and the compile aborts before
+    /// the reduce entry is written. Reverting site 2 alone is caught by
+    /// nothing. Kept as defence, and said out loud rather than counted as
+    /// covered.
+    ///
+    /// **Known and deliberately still permissive:** a `Type::Ident` naming a
+    /// declared struct rather than a scalar still takes a `.b32` slot. That is
+    /// the status quo, it is a different bug, and narrowing it needs the
+    /// emitter to know the struct table.
+    fn param_slot(&mut self, kernel_name: &str, param: &Param) -> &'static str {
+        match &param.ty {
+            Type::Generic { base, .. } if base == "GlobalMemory" => ".param .u64",
+            Type::Primitive(p, _) | Type::Ident(p, _) => {
+                if ScalarTy::from_name(p).map_or(false, |t| t.is_64()) {
+                    ".param .b64"
+                } else {
+                    ".param .b32"
+                }
+            }
+            other => {
+                let what = match other {
+                    Type::Generic { base, .. } => format!("`{base}<...>`"),
+                    Type::Array { .. } => "an array type".to_string(),
+                    Type::Reference { .. } => "a reference type".to_string(),
+                    Type::BlockTile { .. } => "`BlockTile<...>`".to_string(),
+                    _ => "this type".to_string(),
+                };
+                self.emit_errors.push(format!(
+                    "[PTX] kernel `{}`'s parameter `{}` has type {}, which this backend \
+                     cannot pass in a `.param` slot for target {}. It used to take a \
+                     32-bit slot and be used as an address, which emits PTX `ptxas` \
+                     rejects. Shared memory is `shared_alloc_u32(n)` with \
+                     `shared_load_v4` / `shared_store_v4` and `barrier_sync()`; global \
+                     buffers are `GlobalMemory<T>`.",
+                    kernel_name, param.name, what, self.sm_target
+                ));
+                ".param .b32"
+            }
+        }
+    }
+
     fn unsupported_intrinsic(&mut self, name: &str, reason: &str) {
         self.emit_errors.push(format!(
             "[PTX] `{}(...)` cannot be lowered for target {}: {}.",
@@ -1841,15 +1915,7 @@ or `shared_alloc_u32` for a shared-memory array.",
             // Must agree with the `ld.param` widths chosen above: a `.param
             // .b32` slot read with `ld.param.u64` is a host-ABI mismatch, not
             // a type error, so nothing downstream would catch it.
-            let ptx_type = match &param.ty {
-                Type::Generic { base, .. } if base == "GlobalMemory" => ".param .u64",
-                Type::Primitive(p, _) | Type::Ident(p, _)
-                    if ScalarTy::from_name(p).map_or(false, |t| t.is_64()) =>
-                {
-                    ".param .b64"
-                }
-                _ => ".param .b32",
-            };
+            let ptx_type = self.param_slot(&kernel.name, param);
 
             write!(
                 &mut self.ptx_buffer,
@@ -10182,10 +10248,7 @@ declare it as a Q format.",
         let mut entry = String::new();
         writeln!(&mut entry, ".visible .entry {}_reduce(", kernel_name).unwrap();
         for (i, param) in kernel.params.iter().enumerate() {
-            let ptx_type = match &param.ty {
-                Type::Generic { base, .. } if base == "GlobalMemory" => ".param .u64",
-                _ => ".param .b32",
-            };
+            let ptx_type = self.param_slot(&kernel.name, param);
             write!(&mut entry, "    {} {}_{}", ptx_type, param.name, i).unwrap();
             if i + 1 < kernel.params.len() {
                 writeln!(&mut entry, ",").unwrap();
