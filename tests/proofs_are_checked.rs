@@ -403,6 +403,59 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            "CountingSort.v",
+            &[
+                // The obligation the schema did not have: a decomposition
+                // whose consequence is PLACEMENT, not a folded value.
+                // `Decomposition.widths_cover_the_extent` says the widths add
+                // up, which is strictly weaker - a decomposition writing one
+                // slot twice and another never has exactly the right total.
+                "slot_injective",
+                "slot_onto",
+                "every_slot_is_written_exactly_once",
+                // ...and that it IS the same schema and not a rival to it:
+                // the width-derived edges satisfy `Decomposition`'s three
+                // hypotheses, and its fold theorem instantiates on them.
+                "the_bucket_edges_are_a_decomposition_edge_function",
+                "the_reduction_theorem_still_applies",
+                // The claim a code comment in `scatter` had been making with
+                // nothing checking it: the cursors ALONE - each group stopped
+                // where the next one started, the last at `off[b+1]` - imply
+                // the runs tile the bucket. It assumes nothing about the
+                // histogram, which is what makes the runtime check worth its
+                // 0.2-1.0 ms.
+                "the_chained_runs_tile_the_bucket",
+                "the_chained_runs_do_not_overlap",
+                "a_chained_run_stays_in_the_bucket",
+                // ...and both refutations that make the chaining hypothesis
+                // load-bearing, stated as refutations of the WEAKENED theorem
+                // rather than as witnesses, so no fixture drift can make them
+                // vacuous.
+                "without_the_chaining_a_slot_can_go_unwritten",
+                "without_the_chaining_two_groups_can_write_one_slot",
+                // The empty-group case, which is what `scatter`'s own
+                // post-condition got wrong the first time it was written.
+                "an_empty_group_still_chains",
+                // Two levels - buckets outside, scatter groups inside. No
+                // instantiation had composed two before, and the whole cost
+                // of the second one is the single hypothesis below, which is
+                // `scatter`'s own grouping assertion.
+                "dest_injective",
+                "dest_onto",
+                "every_idx_slot_is_written_exactly_once",
+                "the_group_widths_exhaust_every_bucket",
+                // `MixedRadix` does not cover it, and that is a property of
+                // the decomposition rather than of how it is written: the
+                // inner extent is the bucket's own width, and bucket widths
+                // differ because they count data.
+                "no_uniform_radix_describes_this",
+                // Concrete, because every theorem above is satisfied by a
+                // histogram that counted nothing and by one bucket with one
+                // group.
+                "the_msm_instance_is_not_vacuous",
+            ][..],
+        ),
+        (
             "GridStrideSplit.v",
             &[
                 // The third kernel, and the first that is not a GEMM: the
