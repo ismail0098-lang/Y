@@ -399,29 +399,48 @@ about range or reduction, and the exhaustion says nothing about `K`.
 1,048,447 to spare and `m = 4096` exceeds `i32::MAX` by exactly one. An
 off-by-one in the `floor(sqrt(..))` derivation is invisible to any sampled test.
 
-### A RANGE CHECK IS WHAT MAKES A SOLVER QUERY DECIDABLE
+### DECOMPOSE THE QUERY: THE SOLVER LIMIT WAS A TIMEOUT, NOT AN UNDECIDABILITY
 
-`CLAUDE.md` records Z3 *failing* on a question of exactly this shape: "is there
-any satisfying assignment with `out != (a < b)`" for the 32-bit comparison
-gadget "did **not** finish, because 254-bit modular arithmetic over `Int`
-defeats the solver". That is true, and it is easy to read as "Z3 does not scale
-to this backend". It is not the right reading.
+`CLAUDE.md` recorded Z3 *failing* on exactly this shape: "is there any
+satisfying assignment with `out != (a < b)`" for the 32-bit comparison gadget
+"did **not** finish, because 254-bit modular arithmetic over `Int` defeats the
+solver". That is easy to read as "Z3 does not scale to this backend", and that
+reading is wrong. Measured, same question, same solver, in
+`tests/zk_gadget_soundness.rs`:
 
-The same question for the **division** gadget is decided in well under a second
-(`tests/zk_divmod_soundness.rs`), and the reason is structural rather than
-lucky: the gadget's own range checks bound every variable below `2^n`, so the
-products in play are below `2^2n` and **the modulus never enters the query**.
-The first thing that file proves is precisely that — `q * b + r` cannot reach
-the modulus — and every later step is ordinary integer reasoning licensed by it.
+| posing                                            | result | time      |
+|---------------------------------------------------|--------|-----------|
+| whole gadget in the field, nothing bounded        | unsat  | 560,498ms |
+| bounded, range checks as separately proved facts  | unsat  |      15ms |
 
-So the rule is not "Z3 works here, not there". It is:
+**37,000x — and the slow one terminates.** So the earlier failure was a
+timeout. The fix is not a better solver, it is *decomposition*: prove the bound
+first, then state the property over the bounded domain.
 
-> A field question is undecidable in practice; the same question restricted by
+> A field question is intractable in practice; the same question restricted by
 > the range checks the circuit already enforces is small. Ask the bounded one,
-> and make the bound the first thing you prove.
+> and **make the bound the first thing you prove** — that is what keeps the
+> bounded posing faithful rather than merely weaker.
+
+The same file demonstrates it on itself twice over. "Is there a bit assignment
+with `(mod (sum 2^i b_i) p) = p - 1`" — the documented claim that a negative
+operand is *unprovable rather than answered* — does not return in 120 seconds.
+Split into "the sum is bounded" (5ms) and "a bounded value is not `p - 1`"
+(4ms), it is **13,000x** faster. A 254-bit modulus over a symbolic sum is the
+thing to decompose away; a modulus alone is not the problem, and a `mod` whose
+argument is already bounded simplifies for free.
 
 Two consequences worth carrying:
 
+- **A model is not a tie, and the mutation table has to say which is which.**
+  The comparison, bitwise and shift queries *restate* their gadget's arithmetic,
+  so they check that the arithmetic is right and not that the emitter uses it:
+  an off-by-one in the shift index map, and swapped `|`/`^` scale factors, both
+  pass that file and fail the behavioural `zk_integer_ops`. What closes the gap
+  cheaply is a **structural count** — `emit_num2bits(x, k)` is `k + 1`
+  constraints, so the model predicts 101, 99 and 34 exactly, and a dropped
+  operand range check or a difference decomposed one bit short fails *with the
+  derivation attached* instead of being re-pinned as a cost change.
 - **Sharing a constant with the code under test is correct when the solver is
   the independent oracle.** `the_dividend_bound_is_exactly_the_supremum` reads
   the emitter's own `max_representable_dividend()`. Moving that constant *up*
@@ -606,5 +625,6 @@ For the exact GEMM, three things are outside:
 - `proofs/AttentionSchedule.v` and `tests/exact_attention_schedule.rs` — the
   same extraction layer rendering to a second backend, and the relabelling
   hole it exposed
-- `tests/zk_divmod_soundness.rs` — a solver question this repo had recorded as
-  *undecidable*, decided, because the range checks bound the domain
+- `tests/zk_gadget_soundness.rs` — a solver question this repo had recorded as
+  defeating Z3, decided in 15ms by decomposing it; plus decomposition
+  uniqueness, which is the obligation the bitwise and shift gadgets rest on
