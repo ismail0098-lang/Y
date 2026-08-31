@@ -553,7 +553,7 @@ is above in §2; the point here is that it was found by a mutation that
 regenerated *both* sides on purpose. **Mutate the description, not only the
 emitter** — the mutations that move one side are the easy ones.
 
-Two recurring traps:
+Recurring traps:
 
 - **A mutation table row says which tests went red, not which tests detected the
   thing.** One row here read "caught by 6 model suites"; the real story was that
@@ -565,6 +565,20 @@ Two recurring traps:
   or a digit collision stayed green when the fixture moved to a boring value.
   Refute the *weakened theorem* instead — no choice of witness can satisfy that
   vacuously.
+- **A mechanism inferred from a correlation between two probes is a
+  hypothesis, not the mechanism.** Two programs differing only in a return
+  value behaved differently, and the recipes their output wires received
+  differed too; recording *that* as the cause was wrong by one layer. The
+  recipe was a symptom — which of the two a wire gets is decided by whether its
+  defining constraint's `C` has one term or two — and the defect was in the
+  consumer, which marked a wire solved from its recipe's KIND instead of from
+  its operands. **Instrument the pass before writing the mechanism down.** A
+  probe that distinguishes two runs has not explained either of them.
+- **A survivor can be conservative-only, which is a fourth flavour of
+  confirmation.** Walking a dependency-marking pass by index instead of in
+  topological order can only *under*-mark, and under-marking costs completeness
+  (a later step has more work to redo) rather than correctness. Record which it
+  is, in the code; do not manufacture a test that has to construct the stall.
 
 ---
 

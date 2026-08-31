@@ -279,30 +279,60 @@ pub fn solve_r1cs_witness(
     }
 
     // Everything the forward pass above actually computed counts as solved.
-    // The linear-combination recipes MUST be included: they are computed
-    // directly, but if they are left unmarked then any constraint referencing a
-    // gadget's advice wire looks like it still has an unknown, back-propagation
-    // refuses to fire on it, and the wire it would have determined - typically
-    // the circuit's own output - stays at zero. That is subtle to spot, because
-    // it only shows up when the correct answer is NOT zero.
-    // `Unknown` is deliberately excluded; that is the whole point of it.
-    for (node_idx, op) in witness_ir.nodes.iter().enumerate() {
-        if let WitnessOp::Const(_)
-        | WitnessOp::LoadInput { .. }
-        | WitnessOp::HintBlock { .. }
-        | WitnessOp::IsZeroLc(_)
-        | WitnessOp::InvOrZeroLc(_)
-        | WitnessOp::BitOfLc { .. }
-        | WitnessOp::MulLc(..)
-        | WitnessOp::MulAddLc(..)
-        | WitnessOp::DivLc(..)
-        | WitnessOp::IntDivLc(..)
-        | WitnessOp::IntModLc(..)
-        | WitnessOp::IfZeroLc(..) = op
-        {
-            if node_idx < solved_mask.len() {
-                solved_mask[node_idx] = true;
-            }
+    // The recipes MUST be included: they are computed directly, but if they are
+    // left unmarked then any constraint referencing a gadget's advice wire looks
+    // like it still has an unknown, back-propagation refuses to fire on it, and
+    // the wire it would have determined - typically the circuit's own output -
+    // stays at zero. That is subtle to spot, because it only shows up when the
+    // correct answer is NOT zero.
+    //
+    // BUT THE MARK IS TRANSITIVE, and it used to be taken from the node's KIND
+    // ALONE. `execute_host_witness_ir` evaluates a recipe unconditionally and
+    // `eval_lc` reads an unassigned wire as ZERO, so a recipe standing on an
+    // `Unknown` dependency still produces a number - the wrong one. Marking it
+    // solved on the strength of its kind then tells back-propagation the wire is
+    // settled, and nothing revisits it even after the dependency IS
+    // rediscovered. The result is a SATISFIABLE circuit reported unprovable,
+    // with the sole failing constraint being the one that reads the poisoned
+    // wire. Measured on
+    //
+    //     for i0 in 0..2 { if (9 >= p0) { return p0; } } return 0;
+    //
+    // at `p0 = 2`: the `ret_mux` the loop's predicated return builds is pinned
+    // by a constraint whose `C` has two terms, so neither scan in
+    // `build_witness_ir` can give it a recipe and it is `Unknown`; the output
+    // binding above it IS a recipe and read that zero. Back-propagation then
+    // recovered the mux correctly and left the output at 0.
+    //
+    // So a node counts as solved iff its own kind is directly computable AND
+    // every wire it reads is already marked. The walk is `topological_order`,
+    // which is the order the forward pass itself used, so one pass suffices -
+    // a dependency is always marked (or not) before anything that reads it.
+    //
+    // NOT COVERED BY A TEST, and deliberately: walking by wire index instead can
+    // only UNDER-mark (a node whose dependency has a higher index is visited
+    // first, left unmarked, and never revisited), and under-marking is safe -
+    // back-propagation simply re-derives the wire. It costs completeness, not
+    // correctness, and no circuit in the corpus needs the difference. Pinning it
+    // would mean constructing a case where the extra unknown makes a constraint
+    // stall with two of them.
+    //
+    // `Unknown` is excluded because that is the whole point of it, and
+    // `AssertEq` because it writes no wire.
+    let mut deps: Vec<usize> = Vec::new();
+    for sig in &witness_ir.topological_order {
+        let node_idx = sig.0;
+        if node_idx == 0 || node_idx >= witness_ir.nodes.len() || node_idx >= solved_mask.len() {
+            continue;
+        }
+        let op = &witness_ir.nodes[node_idx];
+        if matches!(op, WitnessOp::Unknown | WitnessOp::AssertEq(..)) {
+            continue;
+        }
+        deps.clear();
+        crate::zk_emitter::ZkEmitter::witness_op_deps(op, &mut deps);
+        if deps.iter().all(|d| *d < solved_mask.len() && solved_mask[*d]) {
+            solved_mask[node_idx] = true;
         }
     }
 

@@ -1798,7 +1798,7 @@ impl ZkEmitter {
     /// Exhaustive on purpose. A variant missing from here is not a compile
     /// error but a *silent* one: its dependencies look empty, the sort places
     /// it before the wires it needs, and it evaluates them as zero.
-    fn witness_op_deps(op: &WitnessOp, out: &mut Vec<usize>) {
+    pub fn witness_op_deps(op: &WitnessOp, out: &mut Vec<usize>) {
         let mut lc = |l: &LinearCombination| out.extend(l.terms.iter().map(|(w, _)| *w));
         match op {
             WitnessOp::Const(_) | WitnessOp::Unknown | WitnessOp::LoadInput { .. } => {}

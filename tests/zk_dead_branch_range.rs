@@ -131,40 +131,78 @@ fn the_attribution_recognises_both_kinds() {
     );
 }
 
-/// **KNOWN BUG, diagnosed and not fixed.** A satisfiable circuit is reported
-/// unprovable, because the witness solver assigns 0 to the output wire.
+/// A recipe standing on an `Unknown` dependency must not count as SOLVED.
 ///
-/// Reduced from an unattributed over-refusal in the 3.2M sweep. The shape is
-/// the canonical search loop, and the trigger is startlingly narrow: a
-/// ONE-SIDED conditional `return` inside a loop of two or more iterations whose
-/// condition is true, with a tail of exactly `return 0`. Tails of `1`, `9` or a
-/// parameter all work; so does a loop of one, an unconditional return, an
-/// if/else where both arms return, and a conditional assignment.
+/// Reduced from an unattributed over-refusal in the 3.2M sweep, and the shape
+/// is the canonical search loop. A satisfiable circuit was reported unprovable
+/// because the witness solver assigned 0 to the output wire, so
+/// `--target=r1cs --witness` refused to write a `.wtns` for a circuit that has
+/// one - the worst-shaped failure this backend can produce short of a wrong
+/// answer, because it reads as "your circuit is impossible".
 ///
-/// It is NOT the constraints and NOT an optimisation pass - with CSE, linear
-/// substitution and wire compaction all disabled it still fails, and patching
-/// the single wire the failing constraint names makes the whole system
-/// satisfiable. The emitter registers a `MulLc` recipe for the output wire in
-/// the zero-tail case where it registers `Unknown` otherwise, and `Unknown` is
-/// the one that works, because it falls through to `build_witness_ir`'s
-/// second-chance scan which reconstructs the value correctly.
+/// # The mechanism
 ///
-/// The user-visible face is the bad one: `--target=r1cs --witness` refuses to
-/// write a `.wtns`, reporting that no satisfying witness exists, for a circuit
-/// that has one.
+/// `execute_host_witness_ir` evaluates a recipe unconditionally, and `eval_lc`
+/// reads an unassigned wire as ZERO - so a recipe whose operand is `Unknown`
+/// still produces a number. `solve_r1cs_witness` then marked a wire solved from
+/// its node's KIND alone, which told back-propagation the wire was settled;
+/// nothing revisited it even once the dependency was rediscovered.
 ///
-/// `#[ignore]` because it fails. Remove the attribute when it is fixed.
+/// Here the loop's predicated return builds a `ret_mux` pinned by a constraint
+/// whose `C` has two terms (`-1*prev + 1*mux`), which neither scan in
+/// `build_witness_ir` can turn into a recipe, so it is `Unknown`. The output
+/// binding above it IS a recipe and read that zero. Back-propagation recovered
+/// the mux correctly - and left the output at 0.
+///
+/// # Why the trigger looked so narrow
+///
+/// A NON-ZERO tail makes the output binding's own `C` two-term as well
+/// (`-9*one + 1*out`), so the output is `Unknown` too and back-propagation owns
+/// both wires. That is why `return 9;` always worked and `return 0;` did not,
+/// and why the first hypothesis - that the returned value being a parameter was
+/// the trigger - was wrong. Bisection settled it; the difference is which side
+/// of the solver owns the wire, not the program's shape.
+///
+/// The narrow-looking trigger is therefore a coincidence of two arithmetic
+/// facts, so the assertions below sweep the axes it was bisected along rather
+/// than pinning the one reproducer.
 #[test]
-#[ignore]
-fn a_zero_tail_after_a_conditional_return_in_a_loop_is_solvable() {
-    let src = "fn main(p0: I32) -> I32 {\n    @invariant(i0 >= 0)\n    for i0 in 0..2 {\n        if (9 >= p0) {\n            return p0;\n        }\n    }\n    return 0;\n}\n";
+fn a_recipe_standing_on_an_unknown_is_not_solved() {
+    let mk = |iters: u32, tail: &str| {
+        format!(
+            "fn main(p0: I32) -> I32 {{\n    @invariant(i0 >= 0)\n    for i0 in 0..{} {{\n        if (9 >= p0) {{\n            return p0;\n        }}\n    }}\n    return {};\n}}\n",
+            iters, tail
+        )
+    };
+    // The reproducer. Two iterations, one-sided return, zero tail.
     assert_eq!(
-        eval(src, &[2]),
+        eval(&mk(2, "0"), &[2]),
         Outcome::Value(y::zk_field::Fr::from_u64(2)),
         "the loop returns p0 on its first iteration, so the answer is 2"
     );
-    // The same program with a non-zero tail already works, which is what makes
-    // the zero case a bug rather than a limitation of predicated returns.
-    let nine = src.replace("return 0;", "return 9;");
-    assert_eq!(eval(&nine, &[2]), Outcome::Value(y::zk_field::Fr::from_u64(2)));
+    // Both axes it was bisected along. The non-zero tails always worked - they
+    // are the CONTROL that says the fix did not simply stop solving.
+    for tail in ["0", "1", "9"] {
+        for iters in [1u32, 2, 3, 4] {
+            let src = mk(iters, tail);
+            assert_eq!(
+                eval(&src, &[2]),
+                Outcome::Value(y::zk_field::Fr::from_u64(2)),
+                "iters={} tail={}: the condition holds, so the loop returns p0",
+                iters,
+                tail
+            );
+            // And when the condition is FALSE the tail decides, which is the
+            // other half of the mux and would be silently right if the solver
+            // had simply started answering 0 everywhere.
+            let expect: u64 = tail.parse().unwrap();
+            assert_eq!(
+                eval(&src, &[40]),
+                Outcome::Value(y::zk_field::Fr::from_u64(expect)),
+                "iters={} tail={}: 9 >= 40 is false, so the tail decides",
+                iters,
+                tail
+            );
+        }
+    }
 }
