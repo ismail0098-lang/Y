@@ -218,3 +218,101 @@ fn main(a: I32) -> I32 {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// An ASSIGNMENT merge, not a return merge.
+//
+// `Stmt::If` clones the scope, emits each branch against its own copy, restores
+// the pre-`if` scope, and then reconciles the two. The reconciliation built a
+// multiplexer `cond * (then - else) = out - else` for every variable whose two
+// bindings DIFFER - and did nothing at all when they agreed.
+//
+// Doing nothing is not "keep the merged value", because the scope was restored:
+// it is "keep the value from BEFORE the `if`". So
+//
+//     let v = 100; if c { v = p; } else { v = p; } return v;
+//
+// returned 100, for either setting of `c`. A circuit computing a different
+// function than its source, satisfiable, and provable by Groth16.
+//
+// CONSTANTS HID IT for three years' worth of tests: `const_bindings` is merged
+// separately, keeping any binding the two branches agree on, so `v = 11` in both
+// branches was answered correctly by that path. Only a value the emitter cannot
+// fold - a parameter, or anything derived from one - reaches the broken path.
+//
+// Found by the generative fuzzer at 3.2M programs. NOT found at 20,000, and the
+// minimised witness uses only `<=` and assignment, so this one was reachable by
+// the generator all along and simply needed the seeds.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn both_branches_assigning_the_same_value_still_assigns_it() {
+    let src = "
+fn main(p: I32, c: I32) -> I32 {
+    let v: I32 = 100;
+    if (c <= 5) {
+        v = p;
+    } else {
+        v = p;
+    }
+    return v;
+}
+";
+    // Both settings of the condition, because the bug was insensitive to it -
+    // a test that only exercised one would look like an ordinary branch bug.
+    expect(src, &[7, 1], 7, "condition true, both branches assign p");
+    expect(src, &[7, 9], 7, "condition false, both branches assign p");
+}
+
+/// **The control.** The bug is invisible when the assigned value is a constant,
+/// because a separate const-binding merge supplies the right answer. Without
+/// this case it is easy to "fix" the wrong path and believe it.
+#[test]
+fn the_constant_folded_merge_was_never_the_broken_path() {
+    let src = "
+fn main(p: I32, c: I32) -> I32 {
+    let v: I32 = 100;
+    if (c <= 5) {
+        v = 11;
+    } else {
+        v = 11;
+    }
+    return v;
+}
+";
+    expect(src, &[7, 1], 11, "constant in both branches, condition true");
+    expect(src, &[7, 9], 11, "constant in both branches, condition false");
+}
+
+/// **The other control.** A merge that just overwrote the scope with the `then`
+/// binding unconditionally would pass both tests above. Differing branches must
+/// still select on the condition.
+#[test]
+fn differing_branches_still_select_on_the_condition() {
+    let src = "
+fn main(p: I32, c: I32) -> I32 {
+    let v: I32 = 100;
+    if (c <= 5) {
+        v = p;
+    } else {
+        v = 22;
+    }
+    return v;
+}
+";
+    expect(src, &[7, 1], 7, "condition true takes the parameter");
+    expect(src, &[7, 9], 22, "condition false takes the constant");
+    // And a variable assigned in only ONE branch keeps its old value on the
+    // other path - the case the mux has always handled.
+    let one = "
+fn main(p: I32, c: I32) -> I32 {
+    let v: I32 = 100;
+    if (c <= 5) {
+        v = p;
+    }
+    return v;
+}
+";
+    expect(one, &[7, 1], 7, "one-sided, condition true");
+    expect(one, &[7, 9], 100, "one-sided, condition false");
+}

@@ -135,6 +135,7 @@ fn every_generated_program_parses() {
 fn the_generated_corpus_is_not_vacuous() {
     let (mut ifs, mut loops, mut cmps, mut returns, mut assigns) = (0, 0, 0, 0, 0);
     let mut compounds = 0;
+    let mut gadgets = [0usize; 7];
     for i in 0..400u64 {
         let mut rng = Seeded(0xBEEF + i);
         let bytes = rng.bytes(512);
@@ -156,6 +157,19 @@ fn the_generated_corpus_is_not_vacuous() {
         if src.contains(" += ") || src.contains(" -= ") || src.contains(" *= ") {
             compounds += 1;
         }
+        // The gadget-backed operators, counted individually. A combined
+        // counter would let six of the seven vanish while the floor still
+        // passed, and each one is a separate gadget with a separate range
+        // check. `" & "` cannot match `" && "` - the spellings differ in the
+        // character after the first `&` - and likewise for `|`.
+        for (i, sp) in [" / ", " % ", " & ", " | ", " ^ ", " << ", " >> "]
+            .iter()
+            .enumerate()
+        {
+            if src.contains(sp) {
+                gadgets[i] += 1;
+            }
+        }
     }
     assert!(ifs > 100, "only {} programs contained an `if`", ifs);
     assert!(loops > 50, "only {} programs contained a `for`", loops);
@@ -175,6 +189,18 @@ fn the_generated_corpus_is_not_vacuous() {
          carried all four control-flow bugs are not being generated",
         returns
     );
+    for (name, n) in ["/", "%", "&", "|", "^", "<<", ">>"].iter().zip(gadgets) {
+        assert!(
+            n > 20,
+            "only {} of 400 programs contain `{}`. Each gadget-backed operator \
+             costs 33-135 constraints and carries its own range check; `/` in \
+             particular was refusing constant dividends the gadget accepts, and \
+             the fuzzer could not write one until the grammar was widened. A \
+             generator that cannot reach an operator proves nothing about it.",
+            n,
+            name
+        );
+    }
 }
 
 /// Print one seed's program and every oracle's verdict, for investigating a
@@ -220,7 +246,14 @@ fn dump_seed() {
 #[test]
 #[ignore]
 fn extended_sweep() {
-    let findings = sweep(1, 20_000);
+    // Shardable so a multi-million run can use more than the one core `sweep`
+    // occupies. Reading the environment is safe here where writing it would
+    // not be: nothing else in the suite depends on these.
+    let env = |k: &str, d: u64| -> u64 {
+        std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d)
+    };
+    let (base, count) = (env("Y_FUZZ_BASE", 1), env("Y_FUZZ_COUNT", 20_000));
+    let findings = sweep(base, count);
     let mut wrong = 0;
     let mut refusal = 0;
     let mut fold = 0;
@@ -258,9 +291,9 @@ fn extended_sweep() {
         }
     }
     println!(
-        "\n20,000 programs: {} wrong-value, {} parse failure, {} folding divergence, \
-         {} over-refusal ({} of them UNATTRIBUTED)",
-        wrong, parse_fail, fold, refusal, unattributed
+        "\nSHARD base={} count={}: {} wrong-value, {} parse failure, \
+         {} folding divergence, {} over-refusal ({} of them UNATTRIBUTED)",
+        base, count, wrong, parse_fail, fold, refusal, unattributed
     );
     assert_eq!(wrong, 0, "wrong-value findings");
     assert_eq!(parse_fail, 0, "parse failures");

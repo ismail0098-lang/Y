@@ -123,6 +123,18 @@ pub enum Op {
     Ge,
     And,
     Or,
+    // The gadget-backed operators. Each lowers to an `emit_num2bits`
+    // decomposition of one or both operands, so each costs 33-135 constraints
+    // against the 3 an `+` costs - and each carries a range check whose
+    // soundness argument is written down in `CLAUDE.md` and was, until now,
+    // tested by nothing this generator could write.
+    Div,
+    Mod,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 impl Op {
@@ -139,6 +151,13 @@ impl Op {
             Op::Ge => ">=",
             Op::And => "&&",
             Op::Or => "||",
+            Op::Div => "/",
+            Op::Mod => "%",
+            Op::BitAnd => "&",
+            Op::BitOr => "|",
+            Op::BitXor => "^",
+            Op::Shl => "<<",
+            Op::Shr => ">>",
         }
     }
 
@@ -150,6 +169,22 @@ impl Op {
     /// Operators that require both operands to already be booleans.
     fn is_logical(self) -> bool {
         matches!(self, Op::And | Op::Or)
+    }
+
+    /// `/` and `%`, which share one gadget.
+    fn is_divmod(self) -> bool {
+        matches!(self, Op::Div | Op::Mod)
+    }
+
+    /// Bitwise operators, which decompose BOTH operands to 32 bits.
+    fn is_bitwise(self) -> bool {
+        matches!(self, Op::BitAnd | Op::BitOr | Op::BitXor)
+    }
+
+    /// Shifts, which decompose only the shifted value and require the amount
+    /// to be a compile-time constant.
+    fn is_shift(self) -> bool {
+        matches!(self, Op::Shl | Op::Shr)
     }
 }
 
@@ -411,7 +446,7 @@ fn gen_expr(e: &mut Entropy, cfg: &GenConfig, ctx: &Ctx, depth: usize) -> FExpr 
     if depth >= cfg.max_depth || e.flip(35) {
         return gen_atom(e, ctx);
     }
-    let op = match e.choose(9) {
+    let op = match e.choose(16) {
         0 => Op::Add,
         1 => Op::Sub,
         2 => Op::Mul,
@@ -420,10 +455,26 @@ fn gen_expr(e: &mut Entropy, cfg: &GenConfig, ctx: &Ctx, depth: usize) -> FExpr 
         5 => Op::Lt,
         6 => Op::Le,
         7 => Op::Gt,
-        _ => Op::Ge,
+        8 => Op::Ge,
+        9 => Op::Div,
+        10 => Op::Mod,
+        11 => Op::BitAnd,
+        12 => Op::BitOr,
+        13 => Op::BitXor,
+        14 => Op::Shl,
+        _ => Op::Shr,
     };
     let l = gen_expr(e, cfg, ctx, depth + 1);
-    let r = gen_expr(e, cfg, ctx, depth + 1);
+    // A variable shift amount is REFUSED by the emitter - it would be a
+    // multiplexer over all 32 amounts - so the generator writes a literal one.
+    // The range deliberately spans 32, because `amount >= 32` is not out of
+    // range, it is "everything shifted out", which the gadget and the fold
+    // both answer as 0; that is a boundary the two could disagree on.
+    let r = if op.is_shift() {
+        FExpr::Lit(e.choose(36) as u64)
+    } else {
+        gen_expr(e, cfg, ctx, depth + 1)
+    };
     FExpr::Bin(op, Box::new(l), Box::new(r))
 }
 
@@ -904,6 +955,50 @@ fn apply(op: Op, a: Fr, b: Fr) -> Option<Fr> {
         _ if op.is_logical() => {
             let (x, y) = (as_bit(a)?, as_bit(b)?);
             Some(bit(if op == Op::And { x && y } else { x || y }))
+        }
+        _ if op.is_divmod() => {
+            // `emit_int_div_mod` range-checks the QUOTIENT, the remainder and
+            // the DIVISOR - and not the dividend, which is pinned instead by
+            // `q * b = a - r`. So a dividend may be up to 2^64 and still be
+            // provable, while a divisor may not, and `b = 0` makes `r < b`
+            // unsatisfiable. This asymmetry is the gadget's, not a choice made
+            // here: the oracle states what the constraints admit.
+            if b == Fr::zero() || !in_32_bit_range(b) {
+                return None;
+            }
+            let (q, r) = a.int_div_rem(&b);
+            if !in_32_bit_range(q) {
+                return None;
+            }
+            Some(if op == Op::Div { q } else { r })
+        }
+        _ if op.is_bitwise() => {
+            // Both operands are decomposed, so both are range-checked.
+            if !in_32_bit_range(a) || !in_32_bit_range(b) {
+                return None;
+            }
+            let (x, y) = (a.to_u64()?, b.to_u64()?);
+            Some(Fr::from_u64(match op {
+                Op::BitAnd => x & y,
+                Op::BitOr => x | y,
+                _ => x ^ y,
+            }))
+        }
+        _ if op.is_shift() => {
+            // Only the shifted VALUE is decomposed; the amount is a literal.
+            if !in_32_bit_range(a) {
+                return None;
+            }
+            let (v, amount) = (a.to_u64()?, b.to_u64()?);
+            let n = COMPARISON_BITS as u64;
+            let mask = (1u64 << n) - 1;
+            Some(Fr::from_u64(if amount >= n {
+                0
+            } else if op == Op::Shl {
+                (v << amount) & mask
+            } else {
+                (v & mask) >> amount
+            }))
         }
         _ => unreachable!(),
     }

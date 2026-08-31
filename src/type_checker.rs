@@ -3470,7 +3470,7 @@ tracked variable in a way this verifier cannot see",
 /// puts one in `venv/bin/z3`, which the old two-entry search missed - this
 /// repo had exactly that, while the type checker reported the solver as
 /// missing and waved every invariant through.
-fn z3_candidates() -> Vec<String> {
+pub fn z3_candidates() -> Vec<String> {
     let mut v = Vec::new();
     if let Ok(p) = std::env::var("Y_Z3_PATH") {
         if !p.is_empty() {

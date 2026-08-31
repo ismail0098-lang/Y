@@ -399,6 +399,47 @@ about range or reduction, and the exhaustion says nothing about `K`.
 1,048,447 to spare and `m = 4096` exceeds `i32::MAX` by exactly one. An
 off-by-one in the `floor(sqrt(..))` derivation is invisible to any sampled test.
 
+### A RANGE CHECK IS WHAT MAKES A SOLVER QUERY DECIDABLE
+
+`CLAUDE.md` records Z3 *failing* on a question of exactly this shape: "is there
+any satisfying assignment with `out != (a < b)`" for the 32-bit comparison
+gadget "did **not** finish, because 254-bit modular arithmetic over `Int`
+defeats the solver". That is true, and it is easy to read as "Z3 does not scale
+to this backend". It is not the right reading.
+
+The same question for the **division** gadget is decided in well under a second
+(`tests/zk_divmod_soundness.rs`), and the reason is structural rather than
+lucky: the gadget's own range checks bound every variable below `2^n`, so the
+products in play are below `2^2n` and **the modulus never enters the query**.
+The first thing that file proves is precisely that — `q * b + r` cannot reach
+the modulus — and every later step is ordinary integer reasoning licensed by it.
+
+So the rule is not "Z3 works here, not there". It is:
+
+> A field question is undecidable in practice; the same question restricted by
+> the range checks the circuit already enforces is small. Ask the bounded one,
+> and make the bound the first thing you prove.
+
+Two consequences worth carrying:
+
+- **Sharing a constant with the code under test is correct when the solver is
+  the independent oracle.** `the_dividend_bound_is_exactly_the_supremum` reads
+  the emitter's own `max_representable_dividend()`. Moving that constant *up*
+  makes the achievability query unsat; moving it *down* makes the supremum query
+  sat. Both directions fail, so this is a two-sided pin rather than the
+  both-sides-move-together silence that a generated description can produce.
+- **Ask whether two bounds are independent, because they usually are not.** The
+  fold path for `/` grew two guards — a quotient-range check and a dividend
+  bound. Z3 says the first *subsumes* the second whenever both operands are
+  constant, and that the converse fails. So the dividend bound's only live case
+  is a constant dividend with a **variable** divisor, and the test that exercises
+  it has to be written for that case specifically. A conjunction of plausible
+  bounds is not a set of independent obligations.
+
+`unknown` and a timeout are treated as **failures** in that file, not skips: the
+whole claim being made is that these queries are decidable, so a solver that
+cannot decide one has refuted the claim.
+
 ---
 
 ## 5. Emit the certificate
@@ -565,3 +606,5 @@ For the exact GEMM, three things are outside:
 - `proofs/AttentionSchedule.v` and `tests/exact_attention_schedule.rs` — the
   same extraction layer rendering to a second backend, and the relabelling
   hole it exposed
+- `tests/zk_divmod_soundness.rs` — a solver question this repo had recorded as
+  *undecidable*, decided, because the range checks bound the domain
