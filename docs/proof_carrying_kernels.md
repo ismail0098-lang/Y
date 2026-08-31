@@ -2847,6 +2847,98 @@ every other assertion in the test.
 640 default / 906 zk / 8 y-gpu tests, all green.
 
 
+### The weakest tie, and the mutation that survived it · 2026-08-31
+
+`GridStrideSplit.v` proves that the exact-attention kernel's grid-stride
+reduction visits every key exactly once, in any order, at any worker count.
+It proves it for an **abstract** worker count — and nothing said the kernel's
+count was one of them. The two expressions it rests on, which thread is which
+worker and how many workers there are, were hand-written in a PTX template;
+the proof quoted them in a **comment**; and `tests/exact_attention_schedule.rs`
+matched the two back up by parsing emitted PTX with a reaching-definition
+walker. This file said so in as many words: *"this tie is weaker than the GEMM
+kernels' and is named as such"*.
+
+The quoted comment had already gone stale. It showed
+`mul.lo.s32 %r9, %r9, %r5` — the two-writes-to-one-register form the kernel
+stopped using when that reuse was found to be a trap for anything reading the
+PTX back. A proof's account of the code drifted from the code, silently, which
+is the whole argument for not keeping accounts in prose.
+
+**`Ix` now serves two backends, and that is the increment rather than a side
+effect.** The schedule is `sched_scores` / `sched_accum` in
+`src/exact_attention.rs`, rendered to PTX by `Ix::render_ptx` and to Coq by the
+generator in the test file. An extraction layer that reaches exactly one code
+generator is a one-off; pointing it at a target with a different instruction
+set, a different register discipline (special registers must be `mov`'d before
+use) and a fused multiply-add is what answers "does this generalise".
+
+- **The extraction reproduced all three hand-written sequences instruction for
+  instruction** — register numbering, `mad` fusion and lazy `mov` placement
+  included. Only comments moved. That was not arranged: a renderer that
+  materialises a special register at first use and fuses `a*b + c` produces
+  exactly what someone writing PTX by hand produces, which is why the refactor
+  is checked by the artifact instead of by reading it.
+- **What it buys is the theorem `GridStrideSplit.v` could not state.**
+  `proofs/AttentionSchedule.v` is the emitter's own `nworkers`, and
+  `the_emitted_launch_geometry_visits_every_key_exactly_once` instantiates the
+  partition at it. The obligation is the **pairing**: `worker` mixes three
+  hardware indices with two radices and `nworkers` must be the product of
+  exactly those three indices' extents. Drop a factor and two threads share a
+  residue class, so their keys are accumulated twice; add one and some class is
+  claimed by nobody, so its keys are dropped. Neither is a crash and neither is
+  reliably a wrong-looking number on random data.
+- That statement is a **bijection** from the launch geometry's coordinate box
+  onto `[0, nworkers)` — a mixed-radix positional index, so `MixedRadix.v`
+  discharges the injectivity with no new reasoning. **Third consumer of that
+  schema, and the first reached from a GPU launch geometry rather than a GEMM
+  tile.**
+
+**THE SURVIVING MUTATION IS THE FINDING, AND IT IS A HOLE IN THE GENERATOR'S
+OWN DESIGN.** Swap two radices in the emitter *and regenerate* — so the
+byte-identity gate passes because both sides moved — and the whole sweep stayed
+green. The cause: the generated parameter list is **derived** from the
+expression's free names, so a swap renames the parameters in step, and every
+theorem applies `worker_accum` **positionally**. The definition remains the
+same function under different labels, and no proof can see a relabelling.
+
+- Deriving the list is right and stays: a schedule that gains or loses an index
+  must change the signature. What was missing is anything that pins **which
+  index plays which role**.
+- The fix is a theorem whose **binders are generated and whose right-hand side
+  is fixed text**: `worker_accum <derived binders> = ctaid_z * (nctaid_x *
+  ntid_x) + ctaid_x * ntid_x + tid_x`. Swap the radices and the binder list
+  moves while the equation does not, so `ring` fails and `coqc` rejects the
+  file. Drop an extent and it is caught harder: the binder disappears while the
+  right-hand side still names it, so the reference is unbound.
+- **That mutation is then caught by `coqc` and by nothing else** — the
+  byte-identity gate correctly passes, because the description and the proof
+  agree with each other perfectly. It is the two-layer property demonstrated
+  rather than asserted, and it is the same standing limit already recorded for
+  the exact-GEMM schedule: *when the description moves, both consumers move
+  with it and byte-identity is silent.*
+
+**The dataflow walker is KEPT, and a mutation says why.** Swapping the last two
+result registers of `attn_accum`'s worker count leaves the loop striding by the
+**partial** product `nctaid.z * nctaid.x`. The rendered block is still correct
+and still present; what is wrong is which register the loop reads. Caught by
+`the_worker_index_and_the_worker_count_use_paired_registers` and by nothing
+else. Rendering says what the kernel computes; the walker says the loop
+actually reads it, which is the decorative-codegen question one layer over.
+
+**Eleven mutations, all caught, and the split is the useful part.** A radix
+swap with the instruction count unchanged (**schedule gate alone**); the same
+swap regenerated (**`coqc` alone**); the stride-register swap (**walker
+alone**); a generator neutered to echo the committed file (**the
+function-of-its-argument control alone**); the join corollary deleted from
+`GridStrideSplit.v` (**content control alone**). Dropping `nctaid.z`, removing
+`mad` fusion, giving the naive entry a different schedule and hand-editing the
+committed proof are each caught by two to four suites — diagnosis by name
+rather than isolation, and the entry says which is which.
+
+643 default / 909 zk / 8 y-gpu tests, all green.
+
+
 ## 5. End goal
 
 > **STATUS, 2026-08-31.** The end goal below is reached for **one kernel on one
