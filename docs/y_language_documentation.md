@@ -462,7 +462,12 @@ let cache_ptr: L2Memory<I32> = ...;
 #### 3. SharedMemory
 GPU-resident Local SRAM. Shared across threads in a warp or block. Subject to bank conflicts.
 ```ysu
-let smem_buffer = SharedMemory::alloc<SmemLayout<F32, rows=8, cols=32, swizzle=0>>();
+// NOT IMPLEMENTED - this spelling is a syntax error and the `SmemLayout` type
+// is refused by every backend. See the status note at the head of section 21.
+// The surface that works:
+let smem = shared_alloc_u32(1024);      // 1024 x 16 bytes, module-scope .shared
+let v: U32x4 = shared_load_v4(smem, 3); // indexed in 16-byte units
+barrier_sync();
 ```
 
 #### 4. RegisterFile
@@ -3317,6 +3322,31 @@ error[E0308]: mismatched types — use explicit `as` cast
 ## 21. `SmemLayout` & `Pipeline` API Reference
 
 ### 21.1 `SmemLayout<T, rows, cols, swizzle>`
+
+> **STATUS: NOT IMPLEMENTED. No backend can lower this type, and the section
+> below describes a design rather than a shipping API.** Measured 2026-08-31,
+> against the release binary:
+>
+> | form | result |
+> | :--- | :--- |
+> | `SharedMemory::alloc<SmemLayout<F32, rows=8, cols=32, swizzle=0>>()` (the inline form used elsewhere in this document) | **syntax error** — it does not parse |
+> | `type T = SmemLayout<...>; SharedMemory::alloc<T>()` | parses, prints `[Optimization] ... bank conflicts`, then **refused by `--emit-ptx`, `--emit-llvm`, `--emit-native` and `--emit-cpu`** |
+> | `kernel k(T: SmemLayout<...>)` | compiled clean and emitted PTX that `ptxas` **rejects** (`Arguments mismatch for instruction 'add'`), under "Compilation Successful!" and exit 0. **Refused by name now.** |
+>
+> The bank-conflict prover in `src/bank_conflict.rs` is real and does run — the
+> type checker searches for a conflict-free swizzle and prints
+> `[Optimization] Auto-swizzling SharedMemoryTile RxC ...`. **That result
+> reaches no backend**, because no reachable path can index the tile it
+> describes. Treat the swizzle tables below as reference material about GPU
+> bank conflicts, not as a description of what the compiler emits.
+>
+> **The shared-memory surface that works** is `shared_alloc_u32(n)` with
+> `shared_load_v4` / `shared_store_v4` and `barrier_sync()` — indexed in
+> 16-byte units, 48 KB static cap, gated by `tests/ptx_shared_memory.rs`, which
+> assembles the result *and* runs a cross-thread exchange on the device. It has
+> no swizzle; a kernel that needs one applies it in source, as
+> `tools/gen_bn254_kernels.py` does.
+
 
 `SmemLayout` defines the physical layout of a tile in GPU shared memory, including optional bank-conflict-eliminating swizzle.
 

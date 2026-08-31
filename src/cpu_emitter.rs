@@ -17,15 +17,11 @@ use std::fmt::Write;
 /// Anything else that is a bare identifier in call position is refused. Keep
 /// this in step with the prelude written in `CpuEmitter::new`.
 const PRELUDE_FNS: &[&str] = &[
-    "y_shared_alloc_f32",
     "y_pipeline_init",
     "y_pipe_wait",
     "y_barrier_sync",
     "println",
     "print_int",
-    "cp_async",
-    "ldmatrix",
-    "mma_sync",
     "store",
 ];
 
@@ -171,7 +167,7 @@ impl CpuEmitter {
                 }
             }
             Type::Ident(name, _) => name.clone(),
-            Type::Generic { base, args, .. } => {
+            Type::Generic { base, args, span } => {
                 if base == "GlobalMemory" {
                     "*mut f32".into()
                 } else if base == "Vec" {
@@ -193,6 +189,16 @@ impl CpuEmitter {
                         format!("Vec<{}, {}>", inner_ty, alloc)
                     }
                 } else {
+                    // `_ => "()"` used to live here, and the unit type is not
+                    // a conservative default - it is a DIFFERENT type with no
+                    // operations. `kernel k(T: SmemLayout<F16, rows=16,
+                    // cols=64>)` emitted `pub unsafe fn k(T: (), ...)` and
+                    // then called `T.add(3)` on it, under "Compilation
+                    // Successful!" and exit 0. This backend prints Rust for a
+                    // human to paste, so that reaches their source with no
+                    // compiler in between.
+                    let span = span.clone();
+                    self.unsupported_gpu_intrinsic(&format!("{base}<...>"), &span);
                     "()".into()
                 }
             }
@@ -532,6 +538,53 @@ impl CpuEmitter {
         "/* unsupported size */".into()
     }
 
+    /// A GPU intrinsic with no host meaning.
+    ///
+    /// **These had "lowerings" that were substitutions, not translations**, and
+    /// `--emit-cpu` prints Rust for a human to PASTE - so Y never compiles the
+    /// output and nothing downstream ever gets a chance to object. That is the
+    /// same reason `@ZeroDrift` is refused here rather than quietly dropped.
+    ///
+    /// What was emitted before, and why each is wrong:
+    ///
+    ///   - `SharedMemory::alloc<ATile>()` -> `y_shared_alloc_f32()`, a FIXED
+    ///     8192-element f32 scratch. The element type and both dimensions are
+    ///     discarded, so `SmemLayout<F16, rows=16, cols=64>` became an f32
+    ///     buffer of an unrelated size - and the swizzle the type checker had
+    ///     just announced (`[Optimization] Auto-swizzling ...`) was dropped.
+    ///   - `cp_async(src, dst, n)` -> `copy_nonoverlapping(src, dst, 32)`. The
+    ///     byte count is DISCARDED - the identical bug the PTX backend had and
+    ///     fixed, with a different constant - and Rust's `count` is in ELEMENTS
+    ///     of `T`, not bytes, so even the literal is a unit error. The
+    ///     direction is right; that was checked against the PTX lowering rather
+    ///     than assumed.
+    ///   - `ldmatrix(p)` -> `Y256f32::load_aligned_ptr(p as *const f32)`: a
+    ///     warp-cooperative f16 matrix-fragment load rendered as an 8-wide f32
+    ///     load.
+    ///   - `mma_sync(a, b, c)` -> `a.fmadd(b, c)`: an m16n8k16 matrix multiply
+    ///     rendered as a vector FMA.
+    ///
+    /// **`Pipeline::init`, `barrier.sync` and `pipe.wait` are deliberately NOT
+    /// here.** They lower to empty host functions, and on a single-threaded
+    /// blob that is what they mean - a no-op barrier is correct, not fake. The
+    /// line drawn is "the substitution computes something different", which is
+    /// true of the four above and false of the three no-ops.
+    ///
+    /// None of the four was reachable from any `.ysu` in `tests/`: the prelude
+    /// defines them and no corpus program calls one. Reachable from the surface
+    /// syntax and exercised by nothing is the profile the Hopper intrinsics
+    /// had, and they were deleted rather than fixed for the same reason.
+    fn unsupported_gpu_intrinsic(&mut self, what: &str, span: &Span) -> String {
+        self.emit_errors.push(format!(
+            "[CPU Backend] `{}` (line {}, col {}) is a GPU intrinsic with no host \
+             equivalent. This backend targets host code and prints Rust for you to \
+             paste, so a plausible-looking substitution would reach your source with \
+             no compiler between it and you. Compile GPU kernels with --emit-ptx.",
+            what, span.line, span.col
+        ));
+        "/* unsupported GPU intrinsic */".into()
+    }
+
     fn unsupported_expr(&mut self, what: &str, span: &Span) -> String {
         self.emit_errors.push(format!(
             "[CPU Backend] {} (line {}, col {}) cannot be lowered to host code.",
@@ -570,15 +623,9 @@ impl CpuEmitter {
             arg_strs.push(self.emit_expr(a));
         }
 
-        if fname == "cp_async" {
-            return format!(
-                "std::ptr::copy_nonoverlapping({}, {}, 32)",
-                arg_strs[0], arg_strs[1]
-            );
-        } else if fname == "ldmatrix" {
-            return format!("Y256f32::load_aligned_ptr({} as *const f32)", arg_strs[0]);
-        } else if fname == "mma_sync" {
-            return format!("{}.fmadd({}, {})", arg_strs[0], arg_strs[1], arg_strs[2]);
+        if matches!(fname.as_str(), "cp_async" | "ldmatrix" | "mma_sync") {
+            let span = func.span();
+            return self.unsupported_gpu_intrinsic(&fname, &span);
         } else if fname == "store" {
             return format!(
                 "{}.store_aligned_ptr({} as *mut f32)",
@@ -685,7 +732,8 @@ impl CpuEmitter {
                     return "Y256f32::zero".into();
                 }
                 if namespace == "SharedMemory" && member == "alloc" {
-                    return "y_shared_alloc_f32".into();
+                    let span = span.clone();
+                    return self.unsupported_gpu_intrinsic("SharedMemory::alloc", &span);
                 }
                 if namespace == "File" && member == "read" {
                     // Prototype runtime binding for filesystem access!
