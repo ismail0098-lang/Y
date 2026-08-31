@@ -729,6 +729,67 @@ fn require_gadget_range(
     Ok(())
 }
 
+/// The largest dividend any witness of `emit_int_div_mod` can represent.
+///
+/// `a = q * b + r` with `q, b < 2^n` and `r < b`, so `a` is maximised at
+/// `q = b = 2^n - 1`, `r = b - 1`, giving `(2^n - 1)^2 + 2^n - 2`. Above that no
+/// divisor makes the circuit satisfiable, so a CONSTANT dividend there can be
+/// refused with a line number instead of compiling to an unsatisfiable circuit.
+///
+/// This is what keeps the documented negative-operand diagnostic: `-1` is
+/// `p - 1`, far above this bound, so `-1 / b` is still refused by name.
+pub fn max_representable_dividend() -> Fr {
+    debug_assert!(
+        ZK_COMPARISON_BITS <= 32,
+        "the u64 arithmetic below overflows above 32 bits"
+    );
+    let m = (1u64 << ZK_COMPARISON_BITS) - 1;
+    Fr::from_u64(m * m + m - 1)
+}
+
+fn require_dividend_representable(
+    lc: &LinearCombination,
+    op_name: &str,
+    span: &Span,
+) -> Result<(), String> {
+    if let Some(v) = lc.is_constant() {
+        if v > max_representable_dividend() {
+            return Err(format!(
+                "Circuit target error: `{}` pins its dividend by `q * b = a - r` with a \
+                 {}-bit quotient, remainder and divisor, so the dividend {} is too large \
+                 for any divisor and no witness could satisfy it. Line {}",
+                op_name,
+                ZK_COMPARISON_BITS,
+                v.to_decimal_string(),
+                span.line
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The quotient obligation `/` and `%` carry, discharged at compile time.
+///
+/// `emit_int_div_mod` constrains `q < 2^n`, and `q` is `a / b` whatever the
+/// dividend's magnitude - so this, and NOT a range check on the dividend, is
+/// what makes an oversized operand unprovable. It is also what keeps a negative
+/// dividend unprovable, which is the documented behaviour: `-1` is `p - 1`, and
+/// `(p - 1) / b` is astronomically larger than `2^32` for every legal `b`.
+///
+/// Stated over the folded constants so the fold refuses exactly the pairs the
+/// gadget cannot satisfy, and no others.
+fn require_quotient_range(l: u64, r: u64, op_name: &str, span: &Span) -> Result<(), String> {
+    let q = l / r;
+    if q >= 1u64 << ZK_COMPARISON_BITS {
+        return Err(format!(
+            "Circuit target error: `{}` range-checks its quotient to {} bits, and \
+             {} / {} = {} exceeds that, so no witness could satisfy it. Line {}",
+            op_name, ZK_COMPARISON_BITS, l, r, q, span.line
+        ));
+    }
+    Ok(())
+}
+
 /// Both operands of a 32-bit gadget, checked together.
 fn require_gadget_range2(
     a: &LinearCombination,
@@ -2683,6 +2744,28 @@ impl ZkEmitter {
 
                                 // Update the actual scope level i with the multiplexed wire binding!
                                 self.scopes[i].insert(var.clone(), WireBinding::Wire(merged_wire));
+                            } else if let Some(agreed) = then_val {
+                                // BOTH BRANCHES LEFT THE SAME BINDING, so no
+                                // multiplexer is needed - but the agreed
+                                // binding still has to be written back.
+                                // `self.scopes` was restored to its pre-`if`
+                                // state after each branch was emitted, so
+                                // skipping the write does not mean "keep the
+                                // merged value", it means "keep the value from
+                                // BEFORE the `if`".
+                                //
+                                // `if c { v = p0; } else { v = p0; }` therefore
+                                // returned v's OLD value, for either setting of
+                                // the condition - a circuit computing a
+                                // different function than its source, which
+                                // Groth16 proves as readily as the right one.
+                                //
+                                // Constants hid it: `const_bindings` is merged
+                                // separately just above and DOES keep a value
+                                // both branches agree on, so `v = 11` in both
+                                // branches was answered correctly by that path
+                                // while `v = p0` fell through to this one.
+                                self.scopes[i].insert(var.clone(), agreed);
                             }
                         }
                     }
@@ -3022,7 +3105,20 @@ impl ZkEmitter {
                         // a way that still produces a valid proof. It also has
                         // to match `%`: with field division,
                         // `(a/b)*b + a%b == a` fails.
-                        require_gadget_range2(&left_lc, &right_lc, "/", span)?;
+                        // ONLY THE DIVISOR carries a compile-time range
+                        // obligation. `emit_int_div_mod` range-checks the
+                        // quotient, the remainder and the divisor; the dividend
+                        // is pinned instead by `q * b = a - r`, so it may be up
+                        // to 2^64 and still be provable. This used to call
+                        // `require_gadget_range2`, which refused a constant
+                        // dividend above 2^32 with the message "no witness
+                        // could satisfy it" - and `p0 / 4` at `p0 = 2^33` has
+                        // one. The same program therefore meant two different
+                        // things depending on whether the compiler could see
+                        // the value. Fail-closed, so never an unsound proof,
+                        // but the fold must not refuse what the gadget accepts.
+                        require_gadget_range(&right_lc, "/", span)?;
+                        require_dividend_representable(&left_lc, "/", span)?;
                         if let (Some(l), Some(r)) = (lc_u64(&left_lc), lc_u64(&right_lc)) {
                             if r == 0 {
                                 return Err(format!(
@@ -3030,6 +3126,7 @@ impl ZkEmitter {
                                     span.line
                                 ));
                             }
+                            require_quotient_range(l, r, "/", span)?;
                             return Ok(LinearCombination::constant(Fr::from_u64(l / r)));
                         }
                         let (quot, _) =
@@ -3154,7 +3251,11 @@ impl ZkEmitter {
                         }
                     }
                     BinaryOp::Mod => {
-                        require_gadget_range2(&left_lc, &right_lc, "%", span)?;
+                        // Divisor only - see the `/` arm. `%` shares one
+                        // gadget with `/`, so it inherits the quotient range
+                        // check even though it discards the quotient.
+                        require_gadget_range(&right_lc, "%", span)?;
+                        require_dividend_representable(&left_lc, "%", span)?;
                         if let (Some(l), Some(r)) = (lc_u64(&left_lc), lc_u64(&right_lc)) {
                             if r == 0 {
                                 return Err(format!(
@@ -3162,6 +3263,7 @@ impl ZkEmitter {
                                     span.line
                                 ));
                             }
+                            require_quotient_range(l, r, "%", span)?;
                             return Ok(LinearCombination::constant(Fr::from_u64(l % r)));
                         }
                         let (_, rem) =

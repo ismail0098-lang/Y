@@ -36,8 +36,12 @@ fn an_out_of_range_constant_operand_is_refused_by_every_gadget() {
         (">", "fn main(p: I32) -> I32 { return (p > 4294967296); }"),
         ("<=", "fn main(p: I32) -> I32 { return (p <= 4294967296); }"),
         (">=", "fn main(p: I32) -> I32 { return (p >= 4294967296); }"),
-        ("/", "fn main(p: I32) -> I32 { return (4294967296 / p); }"),
-        ("%", "fn main(p: I32) -> I32 { return (4294967296 % p); }"),
+        // `/` and `%` in the DIVISOR position. The dividend position is a
+        // different question and has its own test below - this list had only
+        // ever exercised the dividend, so the divisor's range check was
+        // covered by nothing.
+        ("/", "fn main(p: I32) -> I32 { return (p / 4294967296); }"),
+        ("%", "fn main(p: I32) -> I32 { return (p % 4294967296); }"),
         ("&", "fn main(p: I32) -> I32 { return (p & 4294967296); }"),
         ("|", "fn main(p: I32) -> I32 { return (p | 4294967296); }"),
         ("^", "fn main(p: I32) -> I32 { return (p ^ 4294967296); }"),
@@ -54,13 +58,55 @@ fn an_out_of_range_constant_operand_is_refused_by_every_gadget() {
     }
 }
 
+/// `/` and `%` do NOT range-check their dividend, and must not pretend to.
+///
+/// `emit_int_div_mod` range-checks the quotient, the remainder and the divisor.
+/// The dividend is pinned by `q * b = a - r` instead, so it may be as large as
+/// `(2^n - 1)^2 + 2^n - 2` and still be provable. The list above used to assert
+/// `4294967296 / p` was refused "which its gadget cannot range-check" - but the
+/// gadget proves it: at `p = 2` the quotient is `2^31`, comfortably in range.
+///
+/// So this is not a relaxation of the test, it is a correction of it. The
+/// obligation the dividend really carries is the quotient's, and that is
+/// asserted here by exhibiting both sides of it.
+#[test]
+fn the_dividend_is_bounded_by_its_quotient_not_by_the_gadget_width() {
+    for (name, src, input, want) in [
+        ("/", "fn main(p: I32) -> I32 { return (4294967296 / p); }", 2u64, Some("2147483648")),
+        ("%", "fn main(p: I32) -> I32 { return (4294967296 % p); }", 3, Some("1")),
+        // p = 1 makes the quotient 2^32, one past its range check. Same
+        // dividend, same program, unprovable - which is what says the bound
+        // being enforced is the quotient's and not the dividend's.
+        ("/", "fn main(p: I32) -> I32 { return (4294967296 / p); }", 1, None),
+    ] {
+        assert!(
+            compile(src).is_ok(),
+            "`{}` refused a 2^32 dividend at compile time, but the gadget does \
+             not range-check the dividend - only its quotient, which is a \
+             runtime property of the divisor",
+            name
+        );
+        let got = match run_circuit(src, &[input]) {
+            Outcome::Value(v) => Some(v.to_decimal_string()),
+            _ => None,
+        };
+        assert_eq!(
+            got.as_deref(),
+            want,
+            "`{}` with a 2^32 dividend at p = {}",
+            name,
+            input
+        );
+    }
+}
+
 /// **The control.** Refusing everything would satisfy the test above. The
 /// largest representable operand must still compile.
 #[test]
 fn the_largest_in_range_operand_still_compiles() {
     for (name, src) in [
         ("<", "fn main(p: I32) -> I32 { return (p < 4294967295); }"),
-        ("/", "fn main(p: I32) -> I32 { return (4294967295 / p); }"),
+        ("/", "fn main(p: I32) -> I32 { return (p / 4294967295); }"),
         ("&", "fn main(p: I32) -> I32 { return (p & 4294967295); }"),
         ("<<", "fn main(p: I32) -> I32 { return (4294967295 << 1); }"),
     ] {

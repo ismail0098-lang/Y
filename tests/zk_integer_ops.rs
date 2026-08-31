@@ -264,3 +264,107 @@ fn forged_quotient_is_rejected() {
          proves 7 % 2 == 0"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The fold path for `/` and `%` must accept exactly what the gadget accepts.
+//
+// `emit_int_div_mod` range-checks the QUOTIENT, the remainder and the DIVISOR.
+// It does NOT range-check the dividend, which `q * b = a - r` pins instead - so
+// a dividend up to `(2^n - 1)^2 + 2^n - 2` is provable. The fold used to apply
+// `require_gadget_range2`, refusing any constant operand above `2^n` including
+// the dividend, with the message "no witness could satisfy it". One does.
+//
+// Found by the generative fuzzer's metamorphic oracle within seconds of the
+// generator learning to write a `/` at all, and independently by hand before
+// that. Fail-closed, so never an unsound proof - but the same program meant two
+// different things depending on whether the compiler could see the value, which
+// is the property that oracle exists to check.
+// ---------------------------------------------------------------------------
+
+/// Compiles `fn main() -> I32 { return <expr>; }` with no parameters, so every
+/// operand is a literal and the emitter takes its constant-folding path.
+fn compile_folded(expr: &str) -> Result<(), String> {
+    let src = format!("@unsafe\nfn main() -> I32 {{\n    return {};\n}}\n", expr);
+    let tokens = Lexer::new(&src).tokenize();
+    let program = Parser::new(tokens).parse_program().expect("parse");
+    ZkEmitter::new().emit_program(&program).map(|_| ())
+}
+
+#[test]
+fn a_dividend_above_the_gadget_width_still_folds() {
+    // 2^33 / 4 = 2^31, an in-range quotient. The gadget proves it - verified
+    // directly by `eval`, which drives the parameterised path - so the fold
+    // must not refuse it.
+    assert_eq!(
+        eval("x / y", 8589934592, 4).as_deref(),
+        Some("2147483648"),
+        "the gadget path must prove a 2^33 dividend with an in-range quotient"
+    );
+    assert!(
+        compile_folded("8589934592 / 4").is_ok(),
+        "the folded form of a program the gadget proves must not be refused"
+    );
+    assert!(
+        compile_folded("8589934592 % 4").is_ok(),
+        "`%` shares the gadget and must agree with `/`"
+    );
+}
+
+#[test]
+fn an_unrepresentable_quotient_is_refused_when_folded() {
+    // 2^34 / 4 = 2^32, one past the quotient's range check, so the gadget is
+    // unsatisfiable. Dropping `require_quotient_range` makes the fold answer
+    // 4294967296 instead - a value no witness of this gadget can hold.
+    //
+    // The fuzzer CANNOT catch this: its folding oracle deliberately permits a
+    // folded form to be provable where the parameterised form is not, because
+    // branch pruning legitimately does exactly that. So it needs a pin here.
+    assert_eq!(
+        eval("x / y", 17179869184, 4),
+        None,
+        "a quotient of 2^32 fails its range check, so the gadget is unsatisfiable"
+    );
+    let err = compile_folded("17179869184 / 4").expect_err("must be refused");
+    assert!(
+        err.contains("quotient"),
+        "the refusal must name the quotient, which is what is out of range - \
+         not the dividend, which is not. Got: {}",
+        err
+    );
+    // One unit below, the same expression is fine. Without this the test is
+    // satisfied by refusing every large dividend, which is the original bug.
+    assert!(
+        compile_folded("17179869180 / 4").is_ok(),
+        "4 * (2^32 - 1) has an in-range quotient and must still fold"
+    );
+}
+
+#[test]
+fn a_negative_dividend_is_still_refused_by_name() {
+    // `-1` is `p - 1`, far above any representable dividend, so no divisor
+    // makes it provable. That is the documented behaviour of every 32-bit
+    // gadget here and it must survive the relaxation above - which it does for
+    // a different reason than before: not a range check on the dividend, but
+    // the fact that `(p - 1) / b` overflows the quotient's.
+    let err = compile_folded("(0 - 1) / 4").expect_err("must be refused");
+    assert!(
+        err.contains("dividend") || err.contains("quotient"),
+        "a negative dividend must be refused with a reason. Got: {}",
+        err
+    );
+    // And with a VARIABLE divisor, where the quotient cannot be computed at
+    // compile time. This is the only case in which the dividend bound does any
+    // work - Z3 shows the quotient check subsumes it whenever both operands are
+    // constant (`tests/zk_divmod_soundness.rs`).
+    let src = "@unsafe\nfn main(y: I32) -> I32 {\n    return (0 - 1) / y;\n}\n";
+    let tokens = Lexer::new(src).tokenize();
+    let program = Parser::new(tokens).parse_program().expect("parse");
+    let err = ZkEmitter::new()
+        .emit_program(&program)
+        .expect_err("a constant dividend above the bound is unprovable for every divisor");
+    assert!(
+        err.contains("dividend"),
+        "with a variable divisor only the dividend bound can fire. Got: {}",
+        err
+    );
+}
