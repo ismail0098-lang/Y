@@ -2442,6 +2442,229 @@ call order. What the nest gate adds is a name for the failure instead of a call
 sequence that is off by a factor of `N/NR`.
 
 
+#### The fourth kernel, and the first whose parts do not FOLD · 2026-08-31
+
+`Decomposition.v` states its own limit and this document repeats it: five
+files instantiate the schema and every one of them is a **reduction**. The
+parts fold into a value, the theorem is "the partials combine to the naive
+fold", and the two schema theorems differ only in whether that fold spends
+associativity or commutativity as well. Two of the kernels are GEMMs and the
+third is a softmax, so the axes coincide. Phase 2's stated risk — *if
+obligations don't compose, the thing is a one-off proof rather than a
+compiler* — is only half answered by five members of one family.
+
+The test did not need a new kernel either. **The MSM binning is a parallel
+counting sort**, and its parts do not fold: they TILE a destination array.
+Per-chunk histograms, an exclusive prefix over buckets, and an unsynchronised
+scatter through a private cursor per (writer, bucket). Real, shipped,
+performance-critical code — `bin` is still the largest host phase of the GPU
+MSM — and pure host arithmetic, so unlike `GridStrideSplit` the tie needs no
+GPU and never skips.
+
+`proofs/CountingSort.v`, 24 `Print Assumptions`, no axioms, nothing admitted.
+15 proofs; 638 default / 904 zk tests, both builds green. No `src/` change, so
+the emitted modules are byte-identical by construction.
+
+##### The result is POSITIVE and the honest form of it is narrow
+
+Three things could have gone wrong and none did:
+
+- **The edges are DATA-DEPENDENT.** Every edge function instantiated before
+  this — `blen`/`boff`, the proportional and granule-snapped families, residue
+  classes, `Decomposition.clamped` — is a static function of the extents.
+  These come out of a histogram of the input. The schema's `edge : nat -> nat`
+  turns out to be general enough, and `the_bucket_edges_are_a_decomposition_
+  edge_function` hands its three hypotheses over unchanged.
+- **The direction is inverted.** Every decomposition so far supplies an `edge`
+  and derives its widths; a counting sort *measures* its widths and derives
+  the edges. That is one four-line `Fixpoint` and a bridge
+  (`widths_of_an_edge_recover_it`) through `Decomposition.width_sum_closed`.
+- **`the_reduction_theorem_still_applies`.** The same edges that place the
+  entries reproduce a naive fold over them. Nothing in the MSM uses this — a
+  counting sort has no values to add — and it is in the file because the
+  alternative claim, *a placement decomposition is a different family*, would
+  be wrong.
+
+**What the schema did not have is the CONSEQUENCE.**
+`Decomposition.widths_cover_the_extent` says the part widths add up, with no
+gap and no double count *in aggregate*. That is strictly weaker than
+exactly-once placement: a decomposition that writes one slot twice and another
+never has exactly the right total width. What is needed is a bijection —
+`slot_injective`, `slot_onto`, `slot_in_range` — and it is not derivable from
+the fold theorems. About 90 lines.
+
+**Composing two levels then costs one hypothesis.** `Idx` is cut by bucket and
+each bucket's slice is cut again by scatter group; `dest_injective` is two
+applications of the one-level bijection and nothing else. The single
+hypothesis is `groups_exhaust_the_buckets`, and that is not an assumption
+invented for the proof — see below.
+
+##### `MixedRadix` does not cover it, and that is a property of the decomposition
+
+The obvious reading of a two-level index is `MixedRadix.pack B q r`. It does
+not apply: a positional index needs one radix per digit, and here the inner
+extent is the bucket's own width, which differs between buckets *because it
+counts data*. Refuted over a bucket set of widths 1 and 2
+(`no_uniform_radix_describes_this`) rather than asserted.
+
+##### The finding: `scatter`'s three `assert_eq!` are the proof's hypotheses
+
+Two of them turn out to be exactly what the theorems need, which was not
+arranged:
+
+| runtime assertion | proof |
+|---|---|
+| `"scatter grouping does not tile the input"` | `the_group_widths_exhaust_every_bucket` |
+| `"bucket offsets disagree with the entry total"` | `edge tot nb = total` |
+| `"scatter group {} of bucket {} wrote {} entries too {}"` | **`the_chained_runs_tile_the_bucket`** |
+
+The third is the one worth reading. Its comment says
+
+> Post-condition, and it is a PROOF rather than a spot check. … If every group
+> stopped exactly where the next one STARTED — and the last stopped at
+> `off[b+1]` — then the groups' runs tile `off[b]..off[b+1]` exactly: every
+> slot of `idx` was written, by exactly one thread, in bounds.
+
+That is a **sufficiency claim about an observable**, argued in a comment and
+checked by nothing. It is now three theorems. The route is that the observed
+starts ARE the prefix edges of the (unknown) written counts
+(`chained_starts_are_prefix_edges`), at which point the bijection applies —
+and crucially it assumes **nothing about the histogram**, which is what makes
+running the check on every call worth its 0.2–1.0 ms. Both directions of
+dropping it are refuted as weakened theorems, not exhibited as witnesses:
+`without_the_chaining_a_slot_can_go_unwritten` (a hole, which in `Idx` reads
+back as the perfectly legitimate point index 0) and
+`without_the_chaining_two_groups_can_write_one_slot`.
+
+The empty-group case is stated separately (`an_empty_group_still_chains`)
+because it is the case that check got wrong the first time it was written —
+for an empty group, "where the next one started" and "where the next one
+stopped" differ.
+
+##### A third member of `clamped`, arrived at from a counting sort
+
+A scatter group is a contiguous run of `grp` histogram chunks, clamped at
+`nchunk`. That is `Decomposition.clamped`, whose two previous members are the
+int32 flush interval (an overflow budget) and the output tile width (a memory
+partition) — obligations this document already records as looking different
+and being one family. This is the third, and it was reached from a different
+kernel entirely.
+
+##### The tie, and the oracle that did not exist
+
+`zk_gpu_msm.rs`'s `binning_does_not_depend_on_the_thread_count` compares the
+binner **against itself at one writer**. That is a strong check on the grouping
+arithmetic and blind by construction to anything wrong at every thread count.
+The MSM tests above it check the final curve *sum*, and this document already
+records that an entry in the wrong bucket still yields a valid curve point.
+**Nothing compared `Idx` against an independent placement.**
+
+`tests/msm_counting_sort_model.rs` does, in two ways. A plain sequential
+stable counting sort is the specification — the same relationship the naive
+triple loop has to the tiled GEMM — and it deliberately shares `window_digit`
+and the `base[w] + d` numbering, which decide which bucket an entry belongs to
+rather than where it is placed and are checked against arkworks elsewhere.
+Then `the_destination_map_is_the_one_the_proof_describes` evaluates
+`CountingSort.dest` on real data: it recomputes both levels of edges from the
+histogram and asserts every entry sits at the slot the map names. That is
+stronger than the sequence comparison, which would accept two different cursor
+tables that happen to yield the same order.
+
+`scatter` records `(ngroup, span)` rather than the test recomputing them —
+re-deriving `ceil(nchunk / group)` in the harness is a second copy of the
+schedule, which is the defect `ExactGemmSchedule.v` exists to remove, in the
+harness instead of the emitter.
+
+##### MUTATION TABLE
+
+| mutation | `counting_sort_model` | `zk_gpu_msm` | `proofs_are_checked` |
+|---|---|---|---|
+| **C1 `scatter_threads` always 1** | **FAIL** | ok | ok |
+| C2 bucket numbering off by one, histogram AND scatter | FAIL | FAIL | ok |
+| C3 post-condition deleted **and** all groups seeded at `off[b]` | FAIL | FAIL | ok |
+| C4 post-condition deleted only | ok | ok | ok |
+| C5 group base index `gi*chunk` not `gi*chunk*group` | FAIL | FAIL | ok |
+| **C6 recorded `ngroup` wrong** | **FAIL** | ok | ok |
+| P1 rank bound relaxed to `r <= w t` | ok | ok | FAIL |
+| P2 `groups_exhaust_the_buckets` relaxed to `<=` | ok | ok | FAIL |
+| P3 `dest` reads bucket 0's inner edges | ok | ok | FAIL |
+| P4 span hypothesis dropped | ok | ok | FAIL |
+| P5 `edge`'s base case `S O` | ok | ok | FAIL |
+| P6 empty-group control moved to a non-empty group | ok | ok | FAIL |
+| **T1 the oracle replaced by the implementation** | **FAIL** (after the fix below) | ok | ok |
+
+**C1 is the row that matters.** With `ngroup` forced to 1 the second level of
+the decomposition silently collapses, the scatter stops being parallel, the
+runtime post-condition passes, and
+`binning_does_not_depend_on_the_thread_count` passes *trivially* — every arm
+becomes identical to its own one-writer reference.
+`feedback-null-metrics-pass-dead-components`, in the one place a
+self-comparison cannot help. C6 is the same shape aimed at the harness.
+
+C2, C3 and C5 are caught by both suites: what the new file adds there is a
+diagnosis by name (*"entry (point 13750, bucket 5881) is not at
+dest = off[5881] + edge(gw[5881])[1] + 0"*) instead of a wrong curve point.
+**Run the obvious mutations against the other suites before claiming
+isolation** — three of six do not isolate.
+
+C4 is a **confirmation**: deleting a redundant runtime check changes no
+answer, and nothing should catch it. A "did you call my function" gate was
+considered and rejected for the reason the `Ix` gate records.
+
+##### The survivor was a real hole, and the fix had to be structural
+
+**T1 replaces `reference_bins`' body with a call to `bin_by_digit`.** Every
+comparison in the file then compares the binner against itself, and every
+control still passes — they are computed from the (now identical) output.
+
+It is not fixable by testing harder, and that generalises to every
+differential in this repo. **A specification and a correct implementation
+agree exactly**, so no behavioural check can distinguish "the oracle is right"
+from "the oracle IS the implementation" — precisely when the implementation is
+right, which is the property under test. What separates them is structural, so
+`the_reference_does_not_call_the_implementation_it_is_the_oracle_for` reads
+this test's own source and requires the reference not to reach into the
+parallel binner.
+
+**Writing that gate produced its own bug, twice.** Anchoring on
+`src.find("fn reference_bins")` matched the **string literal on the gate's own
+line**, so the extraction returned the gate's body and it then failed for the
+wrong reason. Anchored on `"\nfn reference_bins("` — the definition at column
+0 — it fires with the right diagnosis, verified by three probes: the function
+renamed out from under it, the body no longer placing into buckets, and T1
+itself. Two of my first three probes were *mis-aimed* rather than
+informative: a global `sed` rename is a consistent rename and correctly passes,
+and `inline_entries(scalars, g)` contains the substring `entries(scalars, g)`.
+
+##### Found on the way: the shipped crate has a stale fork of the binner
+
+`crates/y-gpu/src/msm.rs` — the consumer-facing library, where arkworks is a
+real dependency — carries its own `bin_by_digit`, and it is the
+**pre-optimisation** one: a serial `O(nchunk * nb)` cursor build (the 23.6 ms
+phase this document records being cut to 3.3), one cursor row per histogram
+chunk with no scatter grouping (the 2.2x this document records at nw = 20),
+`cur0.to_vec()` per thread per call (the 1.34 ms this document records
+deleting), and **no post-condition at all**. The measured binning work landed
+in `tests/common/msm.rs` and never reached the crate that ships.
+
+The theorems cover it regardless, and that is worth stating: it is the same
+two-level map at `group = 1`, so `CountingSort.v` describes both. **A
+decomposition is not a loop.** What it does not have is the runtime check or
+any tie. Unifying the two is a refactor of a shipped crate and is recorded
+here rather than done.
+
+##### What is NOT claimed
+
+`CountingSort.v` is facts about `nat`. Nothing in it is about memory, a `u32`
+or a thread — the u32 width obligation is `scatter`'s own
+`n * nw < u32::MAX` assertion, discharged there. Nothing says the histogram is
+*right*, only that whatever it counted is placed exactly once; the bucket
+numbering is checked against arkworks by the MSM tests. And the tie is by
+running the real binner and comparing, not by byte-identity through `Ix`: this
+is host Rust, not emitted code, so it is the `GridStrideSplit` grade of tie
+rather than the exact GEMM's.
+
+
 ## 5. End goal
 
 > **STATUS, 2026-08-31.** The end goal below is reached for **one kernel on one

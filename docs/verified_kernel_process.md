@@ -1,6 +1,6 @@
 # The process: taking a kernel from *fast* to *verified*
 
-This is the method, written down after fourteen proof files and about twenty
+This is the method, written down after fifteen proof files and about twenty
 gates. It is not a plan — every step here has been executed, and the parts that
 did not work are recorded as such.
 
@@ -9,7 +9,7 @@ K-split, multi-threaded kernel that is **bit-identical** to the naive triple
 loop it replaces. Two other kernels have been through parts of it (the f32 GEMM,
 the exact int8 attention PTX), and the differences are noted where they matter.
 
-Current state: **fourteen `.v` files, ~215 theorems, no axioms, nothing
+Current state: **fifteen `.v` files, ~255 theorems, no axioms, nothing
 admitted**, all checked by `cargo test`. The counts are approximate on purpose:
 an exact one goes stale every session, and a gate on it would fail on every
 proof added.
@@ -76,21 +76,25 @@ history: *"twelve address computations in the CPU GEMM were correct only because
 Equality is a coincidence that hides address bugs, and it hid a live heap
 overflow here until a proof forced the hypothesis `N <= ldc` to be *stated*.
 
-### The obligation families, and there are only two so far
+### The obligation families, and the split is by CONSEQUENCE as much as by shape
 
 ```coq
 (* Decomposition.v *)
 Theorem contiguous_exact    (* consecutive parts: needs ASSOCIATIVITY only *)
 Theorem decomposition_exact (* arbitrary owner map: needs COMMUTATIVITY *)
+
+(* CountingSort.v *)
+Theorem slot_injective      (* the parts TILE a buffer rather than folding *)
+Theorem slot_onto
 ```
 
-Seven proof files instantiate these. A new decomposition costs a **bridge lemma
-plus three edge facts** — measured at 6 tactic lines against a hand-written
-straw-man's 10, with the straw-man compiled in the same file so the comparison
-was real rather than estimated. (It was first published as 7-against-11, from a
-line counter that mis-parsed `Proof. … Qed.` on one line — the idiom the change
-itself introduced. **When a measuring instrument is found broken, re-derive
-every number it produced.**)
+Seven proof files instantiate the first two. A new decomposition costs a
+**bridge lemma plus three edge facts** — measured at 6 tactic lines against a
+hand-written straw-man's 10, with the straw-man compiled in the same file so
+the comparison was real rather than estimated. (It was first published as
+7-against-11, from a line counter that mis-parsed `Proof. … Qed.` on one line
+— the idiom the change itself introduced. **When a measuring instrument is
+found broken, re-derive every number it produced.**)
 
 **The honest headline is that the schema does not save lines.** Total tactic
 lines went *up* (184 → 188 plus 42 shared) because each kernel gained a bridge
@@ -98,9 +102,24 @@ saying its own fold is the schema's fold. What it buys is that the seven files
 cannot drift from each other, and that the marginal cost of the *next*
 decomposition is small.
 
-Two findings worth transferring:
+A third kind arrived later, and the difference is not the shape of the
+decomposition but what is *wanted* from it. The five reduction instantiations
+fold their parts into a value. A counting sort's parts tile a destination
+array, and the question is whether every slot is written exactly once.
+`Decomposition`'s `widths_cover_the_extent` says the widths add up **in
+aggregate**, which is strictly weaker: a decomposition writing one slot twice
+and another never has exactly the right total width. The bijection is ~90
+lines and is not derivable from the fold theorems — but the *edges* are the
+same schema, hypotheses handed over unchanged, including data-dependent ones
+built from a histogram. Composing two levels of decomposition then cost one
+hypothesis and nothing else.
 
-- **The two theorems are not derivable from each other.** The general form
+If a fourth kind appears, expect it to reuse the edges and to need its own
+consequence.
+
+Three findings worth transferring:
+
+- **The two fold theorems are not derivable from each other.** The general form
   would give the contiguous one only by inverting the edge function, and would
   then demand commutativity the contiguous case does not need — a *weaker*
   result presented as a simpler one.
@@ -109,7 +128,15 @@ Two findings worth transferring:
   *memory partition*; the code's own comments warn against confusing them. They
   are right about the purpose and wrong about the shape — both are
   `t |-> min(t*X, ext)`, and the emitter hides it by computing one as an END
-  and the other as a WIDTH.
+  and the other as a WIDTH. A third member turned up later, from a counting
+  sort rather than a GEMM: a scatter thread owns a clamped run of histogram
+  chunks.
+- **Two `assert_eq!` in a shipped scatter turned out to BE the proof's
+  hypotheses**, and a third's *sufficiency* was a sentence in a code comment
+  ("this is a PROOF rather than a spot check") that nothing checked. Read the
+  runtime assertions before inventing hypotheses: a defensive check somebody
+  wrote is often the precondition, already stated in the only place it was
+  ever going to be.
 
 ---
 
@@ -319,6 +346,22 @@ Survivors sort into three kinds, and the sorting is where the learning is:
 | **Mis-aimed mutation** | `s.replace(old, new, 1)` hit a *docstring* forty lines above the code; a mutation whose `cargo build` failed left the previous binary in place and the driver reported a clean run | re-aim; **assert the build succeeded and grep the generated artifact before reading any result** |
 | **Confirmation of a design claim** | a hand-written *identical* copy of an extracted expression passes — and should, because the gate checks the property, not the plumbing | keep, and say so in the test |
 
+There is one survivor that is a real hole and **cannot be closed by testing
+harder**: replacing a differential's oracle with the implementation it is the
+oracle for. Every comparison then passes, and every control passes with it,
+because they are computed from the now-identical output. No behavioural check
+can separate "the oracle is right" from "the oracle IS the implementation" —
+the two agree exactly when the implementation is correct, which is the property
+under test. Every differential in this repository has that hole. What
+distinguishes them is structural, so gate it structurally: read the test's own
+source and require the reference not to call the thing it is checking.
+
+Writing that gate has its own trap. Anchoring on `src.find("fn reference_bins")`
+matches the **string literal on the gate's own line**, so the extraction
+returns the gate's body and it then fails for the wrong reason. Anchor on the
+definition (`"\nfn name("`), and probe it with the mutation it exists to catch
+before believing it.
+
 Two recurring traps:
 
 - **A mutation table row says which tests went red, not which tests detected the
@@ -382,7 +425,9 @@ For the exact GEMM, three things are outside:
 
 - [Proof-carrying kernels](proof_carrying_kernels.md) — the roadmap and the
   chronological log, including the measurements that decided each step
-- `proofs/` — the fourteen files, each with its own header stating scope
+- `proofs/` — the fifteen files, each with its own header stating scope
 - `tests/proofs_are_checked.rs` — the gate that runs them, with content controls
 - `tests/exact_gemm_schedule_proof.rs` — the generator and the schedule ties
 - `tests/exact_gemm_certificate.rs` — the emitted certificate
+- `proofs/CountingSort.v` and `tests/msm_counting_sort_model.rs` — the
+  placement obligation, and the fourth kernel

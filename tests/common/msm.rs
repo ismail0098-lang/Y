@@ -370,6 +370,26 @@ pub struct BinTrace {
     pub scatter: f64,
 }
 
+/// The shape of the most recent scatter: `(ngroup, span)` — how many writers
+/// shared the destination, and how many POINTS each of them owned.
+///
+/// Recorded by `scatter` itself rather than recomputed by the caller. Both
+/// values are already derived there and re-deriving them anywhere else would
+/// be a second copy of `ceil(nchunk / group)` — the defect
+/// `proofs/ExactGemmSchedule.v` exists to remove, in the harness instead of
+/// the emitter. `tests/msm_counting_sort_model.rs` needs them to evaluate the
+/// two-level destination map on real data, and to assert it is genuinely two
+/// levels rather than an `ngroup == 1` degenerate case.
+thread_local! {
+    static LAST_SHAPE: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+/// `(ngroup, span)` for the most recent `bin_by_digit` on this thread.
+pub fn last_scatter_shape() -> (usize, usize) {
+    LAST_SHAPE.with(|c| c.get())
+}
+
 thread_local! {
     static LAST_TRACE: std::cell::Cell<BinTrace> =
         const { std::cell::Cell::new(BinTrace {
@@ -552,6 +572,7 @@ fn scatter(
 ) -> Vec<u32> {
     let nchunk = counts.len();
     let ngroup = nchunk.div_ceil(group);
+    LAST_SHAPE.with(|c| c.set((ngroup, chunk * group)));
 
     // Both writes below are through a raw pointer shared across threads, so
     // the preconditions that make them disjoint and in bounds are asserted
