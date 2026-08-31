@@ -176,6 +176,22 @@ year — so the generator is a `#[test]` with `Y_REWRITE_SCHEDULE_PROOF=1`.
 (`tools/extract_poseidon.py` parses, because *its* input is foreign circomlib.
 That is the distinction.)
 
+### One implementation, and it must be the one that ships
+
+Removing the second description is not finished when both copies agree — it is
+finished when there is one. A GPU MSM module here was forked between the crate
+that ships and a copy under `tests/`, and **every measured improvement landed
+in the test copy**: a parallel prefix worth 23.6 → 3.3 ms, a scatter thread
+count worth 2.2x, a launch geometry worth 1.43x, and the post-condition that
+proves the scatter writes each slot once. The shipped one kept the version from
+before all of them.
+
+It also quietly invalidated a proof. The counting-sort theorems were tied to
+the test copy by a behavioural test, so the tie covered code the library does
+not run — the same gap as a certificate that describes the repository rather
+than the output, one layer further out. **Check which copy your tie is
+attached to.**
+
 ### Byte-identity is the evidence a refactor is faithful
 
 Capture the emitted modules **before** touching the emitter. Every extraction
@@ -270,6 +286,15 @@ legitimate is a different question, answered by a different gate. Splitting
 them that way is what let each of six mutations be caught by exactly one:
 a stale kernel by freshness, a machine-specific target by portability, a
 mis-wired `include_str!` by the crate's own wiring check.
+
+**A dispatcher disarms tests silently, and the check is not "did it pass" but
+"which path did it take".** A GPU MSM library's own prover tests ran 2,048 and
+4,096 constraints, both below the size at which dispatch chooses the GPU, so
+every one of them exercised the CPU fallback — they would have passed with the
+accelerated path deleted. Combined with a forked implementation, that made a
+corrupted-output bug in the shipped binner invisible to *every* test in the
+repository. Force the path under test and **assert you got it**; a test that
+can silently become a test of the fallback is a test of the fallback.
 
 **And a red test nobody runs is not a gate.** That freshness test had been
 failing for a week. `cargo test` at a workspace root with a root package builds

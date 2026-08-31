@@ -95,7 +95,21 @@ fn run(n: usize, dense: bool) {
         p.instance_assignment[1..].to_vec()
     };
 
-    let key = prover.prepare(&pk, &matrices).expect("prepare");
+    // FORCED onto the GPU. These circuits are 2,048 and 4,096 constraints,
+    // both far below `MSM_GPU_MIN_STAGED`, so plain `prepare` sends every MSM
+    // to the CPU — and this test would then pass with the entire GPU MSM path
+    // deleted. It did, for as long as this crate has existed: the binner and
+    // the kernels it ships had drifted several optimisations behind the ones
+    // under test in the root suite, and nothing here could see it because
+    // nothing here ran them.
+    let key = prover.prepare_forcing_gpu(&pk, &matrices).expect("prepare");
+    let on_gpu = key.gpu_queries();
+    assert!(
+        on_gpu.len() >= 3,
+        "n={n} dense={dense}: only {on_gpu:?} went to the GPU, so this test is \
+         mostly checking the CPU fallback"
+    );
+
     let proof = prover
         .prove(&pk, &key, &matrices, &full, r, s)
         .expect("prove");

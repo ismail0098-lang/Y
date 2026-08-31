@@ -39,7 +39,12 @@ pub struct StagedQuery<'a> {
 }
 
 impl<'a> StagedQuery<'a> {
-    fn new(ctx: &CudaContext, bases: &'a [G1Affine], len: usize) -> Result<Self> {
+    fn new(
+        ctx: &CudaContext,
+        bases: &'a [G1Affine],
+        len: usize,
+        force_gpu: bool,
+    ) -> Result<Self> {
         // `add-2007-bl` cannot represent the point at infinity, and a proving
         // key is full of them: `a_query[i]` is `A_i(tau) * G`, and `A_i` is the
         // zero polynomial for every variable absent from the `A` matrix.
@@ -56,7 +61,16 @@ impl<'a> StagedQuery<'a> {
             .map(|i| i as u32)
             .collect();
         let len = len.min(bases.len());
-        let dev = if gpu_is_worth_it(keep.len(), true) {
+        // `force_gpu` exists for the correctness tests and for nothing else.
+        // Dispatch silently disarms them otherwise: this crate's own prover
+        // tests run 2,048 and 4,096 constraints, both far below
+        // `MSM_GPU_MIN_STAGED`, so every MSM routed to the CPU and the tests
+        // would have passed with the GPU path DELETED. It was worse than that
+        // in practice — the shipped binner was several optimisations behind
+        // the one under test and nothing could see it, because nothing ran it.
+        // The same trap is recorded for the root suite, which was fixed for it
+        // and this crate was not.
+        let dev = if force_gpu || gpu_is_worth_it(keep.len(), true) {
             let pts: Vec<G1Projective> =
                 keep.iter().map(|&i| bases[i as usize].into_group()).collect();
             Some(stage_bases(ctx, &pts)?)
@@ -132,6 +146,28 @@ impl GpuProver {
         pk: &'a ProvingKey<Bn254>,
         matrices: &ConstraintMatrices<Fr>,
     ) -> Result<PreparedKey<'a>> {
+        self.prepare_inner(pk, matrices, false)
+    }
+
+    /// `prepare`, but every G1 query is staged on the device whatever its
+    /// size. For tests that must exercise the GPU path at a circuit size the
+    /// dispatcher would send to the CPU — see the note in `StagedQuery::new`.
+    /// A caller who wants the fast path should use `prepare` and let the
+    /// measured thresholds decide.
+    pub fn prepare_forcing_gpu<'a>(
+        &self,
+        pk: &'a ProvingKey<Bn254>,
+        matrices: &ConstraintMatrices<Fr>,
+    ) -> Result<PreparedKey<'a>> {
+        self.prepare_inner(pk, matrices, true)
+    }
+
+    fn prepare_inner<'a>(
+        &self,
+        pk: &'a ProvingKey<Bn254>,
+        matrices: &ConstraintMatrices<Fr>,
+        force_gpu: bool,
+    ) -> Result<PreparedKey<'a>> {
         let ni = matrices.num_instance_variables;
         let nc = matrices.num_constraints;
         let domain = GeneralEvaluationDomain::<Fr>::new(nc + ni).ok_or_else(|| {
@@ -142,10 +178,10 @@ impl GpuProver {
         let assign_len = ni + aux_len - 1;
 
         Ok(PreparedKey {
-            h: StagedQuery::new(&self.ctx, &pk.h_query, domain_size - 1)?,
-            l: StagedQuery::new(&self.ctx, &pk.l_query, aux_len)?,
-            a: StagedQuery::new(&self.ctx, &pk.a_query[1..], assign_len)?,
-            b_g1: StagedQuery::new(&self.ctx, &pk.b_g1_query[1..], assign_len)?,
+            h: StagedQuery::new(&self.ctx, &pk.h_query, domain_size - 1, force_gpu)?,
+            l: StagedQuery::new(&self.ctx, &pk.l_query, aux_len, force_gpu)?,
+            a: StagedQuery::new(&self.ctx, &pk.a_query[1..], assign_len, force_gpu)?,
+            b_g1: StagedQuery::new(&self.ctx, &pk.b_g1_query[1..], assign_len, force_gpu)?,
             qap: GpuQap::new(&self.ctx, domain_size)?,
             domain_size,
         })
