@@ -2653,6 +2653,36 @@ decomposition is not a loop.** What it does not have is the runtime check or
 any tie. Unifying the two is a refactor of a shipped crate and is recorded
 here rather than done.
 
+##### Found by running the suite: the `.ptx` race, in three more binaries
+
+Verifying this increment made the zk suite fail once, in
+`ptx_expression_coverage::a_v4_lane_is_still_a_member_access_that_works`, with
+*"the v4 kernel emitted no loads"* — after many clean runs, which is this
+repository's documented signature for the `.ptx` race. It did not reproduce in
+three runs at HEAD or in three with the change, so it is **latent and
+pre-existing**, not caused by the new work; adding a test binary shifts the
+scheduling that makes it fire.
+
+The mechanism is unambiguous. `--emit-ptx` writes next to its source, and
+**three test binaries compile `tests/bn254_fr_mul_fast.ysu` in place** —
+`ptx_expression_coverage`, `zk_gpu_field`, and `zk_gpu_groth16` through
+`common/qap.rs`. `cargo test` runs them in parallel, so one truncates the file
+while another reads it. The `ptx_for` helpers hold a mutex, and **a mutex is
+per process**; there are five independent copies of that helper and none of
+them can see the other binaries.
+
+Fixed the way `committed_ptx_artifacts.rs` already does it: compile a copy in a
+per-process temp directory, keeping `current_dir` at the repo so
+`.ysu_hw_profile` is still found. Enumerating the cross-binary collisions first
+showed there was exactly one — `bn254_fr_mul_fast` — so the fix is three sites
+rather than the whole surface. Four consecutive zk runs and two default runs
+clean afterwards, and no committed artifact is rewritten by a test run any
+more.
+
+CLAUDE.md already recorded the general rule — *"a gate that emits must run on a
+COPY, and mine did not"* — and only the two artifact gates were fixed then. The
+same defect was sitting in the kernel harnesses.
+
 ##### What is NOT claimed
 
 `CountingSort.v` is facts about `nat`. Nothing in it is about memory, a `u32`

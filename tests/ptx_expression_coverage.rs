@@ -360,8 +360,21 @@ fn main() {}
 fn a_v4_lane_is_still_a_member_access_that_works() {
     let src = repo().join("tests/bn254_fr_mul_fast.ysu");
     assert!(src.exists(), "the v4 fixture is missing");
+    // Compile a COPY in a per-process temp directory. `--emit-ptx` writes next
+    // to its source, and THREE test binaries compile this same fixture - this
+    // one, `zk_gpu_field.rs`, and `zk_gpu_groth16.rs` through `common/qap.rs`.
+    // `cargo test` runs them in parallel, so in-place compilation had them
+    // truncating and reading one repo path at once; this test read a torn file
+    // and reported "the v4 kernel emitted no loads" after many clean runs,
+    // which is the documented signature of that race. The per-process mutex in
+    // the `ptx_for` helpers cannot help across processes.
+    let dir = std::env::temp_dir().join(format!("y_v4_lane_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let tmp = dir.join("bn254_fr_mul_fast.ysu");
+    std::fs::copy(&src, &tmp).expect("copy the v4 fixture");
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
-        .arg(&src)
+        .arg(&tmp)
         .arg("--emit-ptx")
         .current_dir(repo())
         .output()
@@ -372,12 +385,13 @@ fn a_v4_lane_is_still_a_member_access_that_works() {
         out.status.success(),
         "a kernel reading `.x/.y/.z/.w` off a v4 load must still compile:\n{text}"
     );
-    let ptx = std::fs::read_to_string(repo().join("tests/bn254_fr_mul_fast.ptx"))
+    let ptx = std::fs::read_to_string(dir.join("bn254_fr_mul_fast.ptx"))
         .expect("emitted PTX");
     assert!(
         ptx.lines().filter(|l| l.contains("ld.global")).count() > 0,
         "the v4 kernel emitted no loads, so the lanes reached nothing"
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The class-wide structural gate: an emitted instruction may never have a

@@ -115,8 +115,25 @@ fn ptx_for(entry: &str) -> String {
     if let Some(p) = guard.get(entry) {
         return p.clone();
     }
+    // Compile a COPY in a per-process temp directory. The mutex above makes
+    // this safe WITHIN a process and cannot help ACROSS them: `cargo test`
+    // runs the test binaries in parallel, and three of them compile
+    // `bn254_fr_mul_fast.ysu` — this file, `zk_gpu_field.rs`, and
+    // `zk_gpu_groth16.rs` through `common/qap.rs`. `--emit-ptx` writes next
+    // to its source, so in-place compilation had them truncating and reading
+    // one repo path at once. Observed as
+    // `the_v4_kernel_emitted_no_loads` after several clean runs, which is the
+    // documented signature of this race. Same fix `committed_ptx_artifacts.rs`
+    // already uses; `current_dir` stays the repo so `.ysu_hw_profile` is still
+    // found.
+    let dir = std::env::temp_dir().join(format!("y_ptx_{}_{}", std::process::id(), entry));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir for the emitted PTX");
+    let src = dir.join(format!("{}.ysu", entry));
+    std::fs::copy(repo().join(format!("tests/{}.ysu", entry)), &src)
+        .expect("copy the kernel source");
     let out = Command::new(bin())
-        .arg(repo().join(format!("tests/{}.ysu", entry)))
+        .arg(&src)
         .arg("--emit-ptx")
         .current_dir(repo())
         .output()
@@ -128,8 +145,9 @@ fn ptx_for(entry: &str) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let ptx = std::fs::read_to_string(repo().join(format!("tests/{}.ptx", entry)))
+    let ptx = std::fs::read_to_string(dir.join(format!("{}.ptx", entry)))
         .expect("no .ptx written");
+    let _ = std::fs::remove_dir_all(&dir);
     guard.insert(entry.to_string(), ptx.clone());
     ptx
 }
