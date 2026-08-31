@@ -759,8 +759,25 @@ fn exec_block(stmts: &[FStmt], env: &mut Env) -> Flow {
     Flow::Normal
 }
 
-/// Whether some branch this input does NOT take contains an expression whose
-/// range check cannot be satisfied.
+/// Whether some branch this input does NOT take carries a constraint that
+/// cannot be satisfied.
+///
+/// TWO KINDS, and this looked only for the first - which is how 22,526
+/// findings in a 3.2M sweep came to be filed as "something else" when they are
+/// this same limitation reached one constraint over:
+///
+///   * a RANGE check, from `emit_num2bits` on a gadget operand;
+///   * a BOOLEANITY check, from a dynamic `if` whose condition is neither 0 nor
+///     1. `Stmt::If` merges with `cond * (then - else) = out - else`, which
+///     selects a branch only for `cond` in {0, 1}, so the emitter constrains
+///     it - and like every other constraint here it is emitted for the branch
+///     whether or not this input takes it.
+///
+/// The interpreter models booleanity too (`exec_block` returns `Stuck` on a
+/// non-bit condition), but only for conditions it REACHES, and that asymmetry
+/// is the whole finding: a violation on the live path makes both sides refuse
+/// and produces no finding at all, while a dead one makes only the circuit
+/// refuse.
 ///
 /// A circuit has no control flow. Both arms of an `if` are emitted, and the
 /// range check inside `emit_num2bits` is unconditional, so an operand that
@@ -777,7 +794,7 @@ fn exec_block(stmts: &[FStmt], env: &mut Env) -> Flow {
 /// This exists to *attribute* over-refusals rather than to excuse them: it lets
 /// the sweep say how many of its findings are this one known limitation and how
 /// many are something else.
-pub fn dead_branch_range_violation(prog: &FProgram, inputs: &[u64]) -> bool {
+pub fn dead_branch_violation(prog: &FProgram, inputs: &[u64]) -> bool {
     let mut env = Env {
         params: (0..prog.nparams)
             .map(|i| Fr::from_u64(inputs.get(i).copied().unwrap_or(0)))
@@ -788,7 +805,7 @@ pub fn dead_branch_range_violation(prog: &FProgram, inputs: &[u64]) -> bool {
     arm_has_violation(&prog.body, &mut env)
 }
 
-/// Does any expression in this arm fail its range check, ignoring control flow?
+/// Does any constraint in this arm fail, ignoring control flow?
 fn arm_has_violation(stmts: &[FStmt], env: &mut Env) -> bool {
     for st in stmts {
         match st {
@@ -806,8 +823,15 @@ fn arm_has_violation(stmts: &[FStmt], env: &mut Env) -> bool {
                 then_b,
                 else_b,
             } => {
-                if eval(cond, env).is_none() {
-                    return true;
+                match eval(cond, env) {
+                    None => return true,
+                    Some(c) => {
+                        // The booleanity constraint the merge needs. Emitted
+                        // for this `if` whether or not the input reaches it.
+                        if c != Fr::zero() && c != Fr::one() {
+                            return true;
+                        }
+                    }
                 }
                 if arm_has_violation(then_b, env) {
                     return true;
@@ -1134,8 +1158,8 @@ pub fn check(prog: &FProgram, inputs: &[u64]) -> Vec<Finding> {
                 "interpreter says {}, compiler says {}{}",
                 describe(&expected),
                 describe(&actual),
-                if dead_branch_range_violation(prog, inputs) {
-                    " [attributed: unconditional range check in an untaken branch]"
+                if dead_branch_violation(prog, inputs) {
+                    " [attributed: unconditional range or booleanity constraint in an untaken branch]"
                 } else {
                     " [UNATTRIBUTED]"
                 }
