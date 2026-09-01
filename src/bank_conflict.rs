@@ -7,7 +7,6 @@
 //  like `ldmatrix`) is conflict-free across 32 threads.
 // ============================================================
 
-#![allow(dead_code)]
 
 /// Swizzle mode specifying hardware swizzling parameters.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,11 +34,16 @@ pub struct SmemLayout {
     pub bytes_per_element: u32,
 }
 
-/// Simulated memory access for a specific thread in a warp.
+/// The bank one simulated thread of a warp lands in.
+///
+/// It held `thread_id` and `linear_byte_address` as well, and NEITHER WAS EVER
+/// READ - which is not tidiness, it is the evidence that the check below is
+/// weaker than its name. Distinguishing a hardware bank CONFLICT (two threads,
+/// one bank, DIFFERENT addresses - serialised) from a BROADCAST (two threads,
+/// one bank, the SAME address - free) needs exactly the address, and nothing
+/// here looks at it. See `prove_ldmatrix_m16n8` for what is actually decided.
 #[derive(Debug)]
 struct ThreadAccess {
-    thread_id: u32,
-    linear_byte_address: u32,
     bank: u32,
 }
 
@@ -91,9 +95,26 @@ impl BankConflictProver {
         }
     }
 
-    /// Validates an `ldmatrix.sync.aligned.m16n8` pattern against the provided layout.
-    /// This simulates 32 threads executing the ldmatrix and checks if any two threads
-    /// within the warp hit the same bank simultaneously.
+    /// Scores an `ldmatrix.sync.aligned.m16n8` pattern against the provided layout:
+    /// 32 simulated threads, one 4-byte bank each, rejected when any bank is
+    /// touched more than four times.
+    ///
+    /// **It does not check what its old doc comment claimed** - "whether any two
+    /// threads within the warp hit the same bank simultaneously". Two threads on
+    /// one bank pass; four do. Measured on the unswizzled F16 tile this pass is
+    /// handed, at `cols = 16`, four threads land in one bank at four DISTINCT
+    /// addresses - a 4-way serialisation on real hardware - and this returns
+    /// `Ok`. At `cols` of 32, 64 and 128 it returns `Err`, so the threshold is
+    /// live rather than vacuous.
+    ///
+    /// Two further gaps, stated rather than repaired: a broadcast is counted as a
+    /// conflict (see `ThreadAccess`), and one thread is charged ONE bank where an
+    /// `ldmatrix` row-fetch is 16 bytes spanning FOUR - which the sibling
+    /// `prove_ldmatrix_m8n8_x4` and `ptx_emitter::max_bank_hits` both model and
+    /// this one does not. Left alone because the only consumer is the type
+    /// checker's auto-swizzle advisory, and every backend refuses the `SmemLayout`
+    /// surface that advisory is about, so tightening the predicate would change a
+    /// message nothing acts on. `ptx_emitter`'s own copy is the one that runs.
     pub fn prove_ldmatrix_m16n8(layout: &SmemLayout) -> Result<(), String> {
         let banks_count = 32;
         let bank_width_bytes = 4; // 32 banks, 4 bytes wide on modern NVIDIA GPUs.
@@ -109,11 +130,7 @@ impl BankConflictProver {
             let byte_addr = Self::swizzle_byte_address(raw_byte_addr, row, layout);
             let bank = (byte_addr / bank_width_bytes) % banks_count;
 
-            accesses.push(ThreadAccess {
-                thread_id: tid,
-                linear_byte_address: byte_addr,
-                bank,
-            });
+            accesses.push(ThreadAccess { bank });
         }
 
         let mut bank_counts = vec![0; banks_count as usize];

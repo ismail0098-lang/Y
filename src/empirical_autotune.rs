@@ -46,7 +46,6 @@
 //      kernel that writes nothing is otherwise extremely fast.
 // ============================================================
 
-#![allow(dead_code)]
 
 use std::time::Instant;
 

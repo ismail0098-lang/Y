@@ -598,11 +598,49 @@ of the soundness predicate the whole programme rests on** — `bool`-returning,
 so it read as maintained. Deleting it is the fix; the gate is that every
 licence-named function either *is* the original or *delegates to* it.
 
-Do not reach for `#[allow(dead_code)]` before asking which of three things a
+Do not reach for `#[allow(dead_code)]` before asking which of four things a
 warning is: a leftover of something deleted (delete it), a **confirmation that
 a fix is in place** (a hoisting scan that no longer needs `mut` because the fix
-was to stop scanning), or a genuine configuration-dependent path (allow it, and
-write the configuration down next to it).
+was to stop scanning), a genuine configuration-dependent path (prefer `#[cfg]`
+to `#[allow]` — it is the truer statement *and* it stops the build compiling
+what that configuration cannot reach), or the one worth hunting for: **a second
+implementation of a rule that already has one.** Both category-4 finds here were
+that, and both were latent rather than live — a licence predicate missing one of
+two refusals, and a driver binding resolving the legacy ABI symbol its sibling
+documents as wrong. Neither had produced a wrong answer, because the live inputs
+never reached the boundary. **Find them while the path is still dead.**
+
+### Read the census's ATTRIBUTION before reading the census
+
+A build's warnings are only a census if each one means what it appears to mean,
+and the first question is *which crate emitted it*. Here 62 of 69 came from the
+`Y` binary, because `main.rs` re-declared thirty `mod`s that `lib.rs` already
+owned — so every source file was compiled into **two crates**, and in the second
+one a `pub` item is dead unless `main.rs` itself calls it. The warnings said
+"main.rs does not call this", which is a far weaker claim than "nothing uses
+this", and twenty-six blanket `#![allow(dead_code)]` attributes existed to
+silence them. Deleting the second compilation took the bin's count 62 → 0 and
+left a nine-item census that could be read.
+
+It cost more than legibility. The same duplication ran every `#[cfg(test)] mod
+tests` **twice** — 134 unit tests in the default build, 170 under `--features
+zk` — so the project's headline test count had been inflated by that much for as
+long as the duplication existed. A duplicated test run is not coverage.
+
+Two mechanical facts, both of which made a probe look like a survivor:
+`dead_code` deliberately exempts identifiers beginning with `_`, and a
+**derived** trait impl does not count as a construction (`PtxEnv is never
+constructed` while `PtxEnv::default()` is called on the next line — rustc says
+so in a `note:` that is easy to scroll past).
+
+Warnings are not observable from inside a test binary, so a gate for them has to
+shell out. Give each configuration its **own** `CARGO_TARGET_DIR`: two feature
+sets of one package sharing a directory invalidate each other's units, which
+turned every run into two full rebuilds — 12.3s against 0.11s. A gate that is
+expensive gets `#[ignore]`d and then never runs. And put the non-vacuity
+assertions in first: a gate that counts warnings is passed perfectly by a build
+that never happened, which was confirmed by pointing one configuration at a
+package that does not exist and watching the controls removed make it green.
 
 
 Every gate is expected to fail when the mechanism it guards is removed. Run each
@@ -749,9 +787,11 @@ weakens every theorem above it.
 10. **Mutation-test**, one target at a time, and sort every survivor.
 11. **Write down what is not covered**, in the artifact.
 12. **Come back and read step 11's list.** It is the next increment's queue.
-13. **Read the build's warnings.** They are a free census of the defect
-    class in step 6, and the harness that reports "green" must fail on a
-    target that did not compile.
+13. **Read the build's warnings** — and check *which crate* emitted each one
+    before believing it. They are a free census of the defect class in step 6,
+    and the harness that reports "green" must fail on a target that did not
+    compile. A module-wide opt-out (`#![allow(dead_code)]`) is how the census
+    stops being one.
 
 ---
 
@@ -771,6 +811,9 @@ weakens every theorem above it.
 - `tests/zk_gadget_soundness.rs` — a solver question this repo had recorded as
   defeating Z3, decided in 15ms by decomposing it; plus decomposition
   uniqueness, which is the obligation the bitwise and shift gadgets rest on
+- `tests/build_is_warning_free.rs` and `tests/cuda_driver_abi_versions.rs` — the
+  gates that keep the warning census readable, and the agreement assertion whose
+  limit its own control demonstrates
 - `proofs/SoftmaxErrorBound.v` and `tests/softmax_error_bound.rs` — the first
   BOUND rather than an equality, and the answer to whether the schema extends
   to approximate arithmetic

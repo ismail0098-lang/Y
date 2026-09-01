@@ -8,50 +8,21 @@
 //  selected backend (LLVM IR, PTX, CPU, R1CS, Co-Processor).
 // ============================================================
 
-mod ast;
-mod avx_wrapper;
-mod bank_conflict;
-mod cpu_emitter;
-mod lexer;
-mod linear_tracker;
-mod llvm_emitter;
-mod parser;
-mod ptx_emitter;
-mod sentinel;
-mod type_checker;
-mod native_emitter;
-mod ir_grapher;
-mod rt_core_emitter;
-mod quantization_pass;
-mod coprocessor_scheduler;
-mod autotuner;
-mod cuda_runtime;
-mod empirical_autotune;
-mod zero_drift;
-mod cpu_specializer;
-mod cpu_gemm;
-mod exact_gemm_certificate;
+// The compiler's modules live in the `y` library crate (`src/lib.rs`) and are
+// USED from here rather than re-declared with `mod`. Re-declaring them compiled
+// every one of these files a SECOND time, as private modules of this binary —
+// two crates from one set of sources. That doubled the build and, worse, made
+// `cargo build`'s dead-code census meaningless: 62 of 69 warnings were "main.rs
+// does not call this", which is a far weaker claim than "nothing uses this",
+// and the 26 blanket `#![allow(dead_code)]` attributes existed to silence them.
+// The two module lists had already drifted apart.
+use y::{
+    ast, autotuner, coprocessor_scheduler, cpu_emitter, exact_gemm_certificate, ir_grapher, lexer,
+    llvm_emitter, native_emitter, parser, ptx_emitter, sentinel, type_checker, zero_drift,
+};
 
 #[cfg(feature = "zk")]
-mod zk_emitter;
-#[cfg(feature = "zk")]
-mod zk_poseidon_constants;
-#[cfg(feature = "zk")]
-mod mini_json;
-#[cfg(feature = "zk")]
-mod circom_lexer;
-#[cfg(feature = "zk")]
-mod circom_ast;
-#[cfg(feature = "zk")]
-mod circom_parser;
-#[cfg(feature = "zk")]
-mod circom_lower;
-#[cfg(feature = "zk")]
-mod zk_field;
-#[cfg(feature = "zk")]
-mod zk_solidity;
-#[cfg(feature = "zk")]
-mod zk_witness;
+use y::{circom_lower, mini_json, zk_emitter, zk_solidity, zk_witness};
 
 /// Resident and peak memory, for the `Y_ZK_TIMING` phase report.
 ///

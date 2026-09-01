@@ -14,7 +14,6 @@
 //  to partition work across both accelerators within a single SM.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 

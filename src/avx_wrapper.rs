@@ -17,7 +17,6 @@
 //    - AVX-512 paths behind `avx512f` feature gate.
 // ============================================================
 
-#![allow(dead_code)]
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;

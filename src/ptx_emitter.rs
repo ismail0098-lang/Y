@@ -9,7 +9,6 @@
 //  [3D BLOCK POINTER EXTENSIONS INCLUDED]
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use crate::autotuner::{Autotuner, Precision};
@@ -1556,10 +1555,18 @@ or `shared_alloc_u32` for a shared-memory array.",
 
     /// A `WitnessOp` the GPU witness generator cannot lower.
     ///
+    /// Gated on `zk` because its only callers are in
+    /// `emit_witness_generator_ptx`, which is: a `WitnessOp` does not exist
+    /// without the ZK front end. This is category 3 of the dead-code
+    /// taxonomy - a genuine configuration-dependent path - and `#[cfg]` is
+    /// preferred over `#[allow(dead_code)]` because it also stops the default
+    /// build from compiling code no default build can reach.
+    ///
     /// Refusing is the fix, not a stopgap. A witness slot silently filled with
     /// zero produces a kernel that assembles, launches, and hands back an
     /// assignment satisfying nothing - and the caller has no way to tell that
     /// from a working one.
+    #[cfg(feature = "zk")]
     fn unsupported_witness_op(&mut self, signal: usize, name: &str, reason: &str) {
         self.emit_errors.push(format!(
             "[PTX witness generator] signal {} is a `{}`: {}.",

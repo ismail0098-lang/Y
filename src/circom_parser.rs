@@ -11,7 +11,6 @@
 // proves — it just proves something weaker than the author wrote. That failure
 // is invisible in every artifact downstream.
 
-#![allow(dead_code)]
 
 use crate::circom_ast::*;
 use crate::circom_lexer::{Lexer, Tok, Token};

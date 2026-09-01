@@ -34,7 +34,6 @@
 //     arkworks) and `tests/zk_integer_ops.rs`. A pinned digest must never be
 //     "updated" to accommodate a change here — if one moves, the field is wrong.
 
-#![allow(dead_code)]
 
 use std::cell::{Cell, RefCell};
 

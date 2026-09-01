@@ -7,7 +7,6 @@
 //  run mathematically-verified code on any PC unconditionally.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use std::fmt::Write;

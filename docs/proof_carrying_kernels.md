@@ -3420,7 +3420,242 @@ Each isolated to exactly one gate, and the control is what stops the licence
 gate degenerating into "no wrappers allowed".
 
 `661 / 948 / 8` tests, both builds **warning-free**, no committed artifact
-changed.
+changed. (Those first two counts are INFLATED — the entry below shows 134 and 170
+unit tests were being run twice, because `main.rs` compiled the whole compiler
+a second time. The real figures at this commit are `527 / 778 / 8`.)
+
+#### The dead-code census was 90% noise, because the compiler was compiled twice · 2026-09-01
+
+The previous increment read the build's nine warnings and found two of them
+were the soundness core. Twenty-six modules opt out of that census entirely
+with a crate-level `#![allow(dead_code)]` — every emitter, `type_checker.rs`,
+`zk_emitter.rs`, `cpu_gemm.rs`, `parser.rs`, `ast.rs` — and `src/zero_drift.rs`,
+where the finding surfaced, is one of the few soundness-critical files without
+one. Stripping all twenty-six surfaces **69 warnings** in the default build and
+**85** under `--features zk`.
+
+**Almost none of them mean what they appear to mean, and that is the increment.**
+
+##### `src/main.rs` re-declared thirty modules, so the compiler was compiled twice
+
+```
+warning: `Y-compiler` (lib) generated  6 warnings
+warning: `Y-compiler` (bin "Y") generated 62 warnings
+warning: `Y-compiler` (bin "ysu_gpu_probe") generated 1 warning
+```
+
+`src/lib.rs` declares the modules `pub mod`; `src/main.rs` declared the same
+thirty files again as **private** `mod`s of the `Y` binary. Two crates from one
+set of sources. In the lib a `pub` item is reachable from outside and is not
+flagged; in the bin it is dead unless `main.rs` itself calls it. So 62 of the
+69 warnings said *"main.rs does not call this"* — a far weaker claim than
+*"nothing uses this"* — and they are what made the blanket allows look
+necessary. `CpuShapeDispatcher`, `OperatorFusionPass`, the fusion enum's four
+variants, `pack_a_slot`, `ksplit_bands`, `CountedLoop::coq`, `render_ptx`: all
+of them are used, by the lib's other modules or by the integration tests, and
+every one appeared in that list.
+
+`main.rs` uses `use y::{..}` now. The bin's dead-code count went **62 → 0**, and
+its import list shrank from thirty modules to fourteen plus five under `zk` —
+the other eleven had never been named by `main.rs` at all; they existed only so
+that *other* modules of the duplicate crate could reach each other. The two
+module lists had already drifted (`lib.rs` carries `fixed_exp`,
+`exact_attention`, `c_api` and `zk_fuzz`; `main.rs` did not), which is the
+ordinary end state of two descriptions of one thing.
+
+**`PtxEnv is never constructed` was listed as a question rather than a finding,
+and chasing it is what explains the rest.** `exact_attention::render_sched`
+visibly calls `PtxEnv::default()`. rustc's note says why: *"has a derived impl
+for the trait `Default`, but this is intentionally ignored during dead code
+analysis."* A derived-trait construction does not count. Two of the 69 are that.
+
+##### What the real census contains: nine items
+
+With the duplicate compilation gone and all twenty-six allows removed, the two
+builds report **8 warnings each, 9 distinct items** across both feature sets.
+Sorted by last session's taxonomy:
+
+| item | kind |
+|---|---|
+| `lexer::Lexer::matches_next` | 1 — leftover; every call site spells `peek()` + `advance()` |
+| `LlvmEmitter::w` | 1 — the no-newline twin of `wln`; nothing emits a partial line |
+| `cpu_gemm::b_sub1` | 1 — `x - 1` as raw IR, superseded by `IrBuilder::sub`, which is what `Ix::Sub` renders through |
+| `circom_lower::resolve_signal_wire` | 1 — an unused wrapper over `resolve_signal_slot` |
+| `QuantizationPass::{reg_f16, alloc_f16}` | 1 — a *scalar* f16 register class the packed form replaced |
+| `bank_conflict::ThreadAccess::{thread_id, linear_byte_address}` | 1 — and evidence of a doc-vs-code gap, below |
+| `ysu_gpu_probe`'s `cuMemcpyDtoH` | 1 — bound, never called; and the thread that led to the category-4 find |
+| `PtxEmitter::unsupported_witness_op` | **3** — every caller is in `#[cfg(feature = "zk")] emit_witness_generator_ptx` |
+| the probe's driver binding | **4** — a rule that already had one implementation |
+
+`unsupported_witness_op` takes `#[cfg(feature = "zk")]` rather than
+`#[allow(dead_code)]`: a `WitnessOp` does not exist without the ZK front end, so
+the cfg is the truer statement *and* it stops the default build compiling code
+no default build can reach.
+
+##### Category 4: a second binding of the CUDA driver, following the opposite convention
+
+The probe's unused `cuMemcpyDtoH` is one field of a **complete second copy of
+the CUDA Driver API binding**, separate from `src/cuda_runtime.rs`. The two do
+not agree. `cuda_runtime.rs` resolves the `_v2` symbol for `cuCtxCreate`,
+`cuCtxDestroy`, `cuMemAlloc`, `cuMemFree`, `cuMemcpyHtoD`, `cuMemcpyDtoH` and
+`cuEventDestroy`, with the reason written beside the macro:
+
+> the unsuffixed `cuMemAlloc` symbol is the *legacy* 32-bit-size form, and
+> calling it with a `usize` byte count silently truncates above 4GB
+
+`ysu_gpu_probe.rs` resolved the **legacy** names for all six it uses. Confirmed
+rather than assumed: `nm -D /usr/lib/libcuda.so.1` shows `cuMemAlloc` at
+`0x39afb0` and `cuMemAlloc_v2` at `0x36a240` — two different functions. C code
+never meets this because `cuda.h` `#define`s the plain names to the `_v2` ones;
+a hand-written `dlsym` binding does.
+
+It has never produced a wrong answer: the largest thing the probe allocates is
+a 64MB array, four orders of magnitude below where the truncation begins. So
+this is the `VnniExact::licenses` shape exactly — **a rule with one written-down
+implementation, implemented differently a second time, latent because the live
+inputs never reach the boundary** — and it surfaced from the same place, a
+`never used` warning a blanket allow was hiding.
+
+Both bindings now use the same `resolve_v2!`. `tests/cuda_driver_abi_versions.rs`
+asserts they AGREE rather than re-deriving the table (a third copy is the bug,
+not the fix), with the limit of an agreement assertion stated: flattening *both*
+to the legacy form satisfies it, which is why a per-file floor sits beside it.
+
+##### The bank-conflict prover's doc comment claimed a check it does not perform
+
+`ThreadAccess` recorded `thread_id` and `linear_byte_address` and read neither.
+That is not tidiness — the address is exactly what separates a hardware bank
+**conflict** (two threads, one bank, *different* addresses — serialised) from a
+**broadcast** (same address — free), and nothing looked at it. Measured on the
+unswizzled F16 tile the pass is handed:
+
+| `cols` | max threads/bank | distinct addresses in that bank | verdict |
+|---|---|---|---|
+| 16 | 4 | **4** | `Ok` |
+| 32 | 8 | 8 | `Err` |
+| 64 | 16 | 16 | `Err` |
+| 128 | 16 | 16 | `Err` |
+
+So at `cols = 16` a genuine 4-way serialisation is returned as proved
+conflict-free, by a function whose doc comment said it "checks if any two
+threads within the warp hit the same bank simultaneously". A second gap in the
+same twenty lines: one thread is charged ONE bank where an `ldmatrix` row-fetch
+is 16 bytes spanning FOUR — which the sibling `prove_ldmatrix_m8n8_x4` and
+`ptx_emitter::max_bank_hits` both model and this one does not.
+
+**Recorded, not repaired.** Its only consumer is the type checker's auto-swizzle
+advisory, and every backend refuses the `SmemLayout` surface that advisory is
+about, so tightening the predicate would change a message nothing acts on;
+`ptx_emitter`'s own copy is the one that runs. What was fixed is the comment,
+which now states what is decided and what is not.
+
+##### The gate, and what it can and cannot see
+
+`cargo build`'s warnings are not observable from inside a test binary, so
+`tests/build_is_warning_free.rs` shells out — three configurations (default,
+`--features zk`, and `-p y-gpu`, which the documented `cargo test` does not
+build), each with **its own** `CARGO_TARGET_DIR` under `target/warning-gate`.
+Separate directories are not tidiness: two feature sets of one package sharing a
+target dir invalidate each other's units, which turns every run into two full
+rebuilds — **12.3s against 0.11s** measured. A gate that is expensive gets
+`#[ignore]`d and then never runs, which this repository has already paid for.
+Cold cost is 18s; warm is 0.11s.
+
+It sees every warning rustc emits for the root package's lib and four binaries,
+in both feature sets, plus `crates/y-gpu`. It does **not** see warnings in
+`tests/*.rs` (those targets are not built here — deliberate; a harness is
+allowed scaffolding), anything under an item-level `#[allow]`, or a lint that is
+off by default. Two source-level gates sit beside it for the parts it cannot
+reach: no crate-level `#![allow(dead_code)]` anywhere in `src/`, and `main.rs`
+may not re-declare a module `lib.rs` owns. Item-level `#[allow(dead_code)]`
+stays legal — category 3 needs it, and `main`'s `counts()` is one.
+
+##### The test count was inflated too, by exactly the same mechanism
+
+`661 / 948` was the recorded headline. It is now `532 / 783`, and **nothing was
+lost**: every module carrying a `#[cfg(test)] mod tests` was compiled into two
+crates, so its unit tests were built and executed **twice** — once from the lib
+and once from the `Y` binary. Measured against a `git worktree` at HEAD:
+
+```
+HEAD   lib 141 passed  +  bin "Y" 134 passed        (default)
+HEAD   lib 177 passed  +  bin "Y" 170 passed        (--features zk)
+now    lib 141 passed  +  bin "Y"   0 passed
+now    lib 177 passed  +  bin "Y"   0 passed
+```
+
+and the arithmetic closes exactly: `532 - 5 (new gates) + 134 = 661`, and
+`783 - 5 + 170 = 948`. A duplicated test run is not coverage.
+
+(The worktree's own run **aborted at target 24** on `cargo test` — it had no
+`target/release/Y`, and `cpu_gemm_end_to_end` says so by name. A reminder of why
+the per-target sweep exists beside the aggregate, delivered by the baseline
+measurement rather than by the subject.)
+
+##### Mutation table — 8 probes, each `--test` target run separately
+
+| probe | warning-free | census | binary-uses-lib | cuda-abi |
+|---|---|---|---|---|
+| G1 a crate-level `#![allow(dead_code)]` returns | ok | **FAIL** | ok | ok |
+| G2 `main.rs` reverted to `mod` declarations | **FAIL** | ok | **FAIL** | ok |
+| G3 a dead private `fn` added to the lib | **FAIL** | ok | ok | ok |
+| G4a a build configuration that cannot run | **FAIL** (by name) | ok | ok | ok |
+| G4b the same, with the non-vacuity controls removed | **ok** — the hazard | ok | ok | ok |
+| G5 `unsupported_witness_op`'s `#[cfg]` removed | **FAIL** | ok | ok | ok |
+| G6 the probe reverted to the legacy symbols | ok | ok | ok | **FAIL** (both) |
+| G7 *control* — both bindings flattened to `resolve!` | ok | ok | ok | **FAIL** (floor only) |
+
+**G7 is the standing limit of an agreement assertion, demonstrated rather than
+asserted:** flattened together, the two bindings agree, and
+`the_two_driver_bindings_agree...` passes. Only the per-file floor fails. A
+consistent wrong choice for one symbol in both files remains uncaught, and
+closing that needs a third copy of the table — which is the bug, not the fix.
+
+**G1 is the most informative row, and it is a confirmation rather than a
+catch.** Putting an allow back in `type_checker.rs` no longer resurrects a
+single warning — because the module it silenced is no longer compiled a second
+time. The twenty-six attributes were load-bearing only against noise that the
+`main.rs` fix deleted.
+
+**G4b is the null-metric hazard demonstrated.** With the `status.success()` and
+`Finished`-line assertions removed, a configuration that never runs passes the
+gate perfectly: a metric that counts bad things is passed by a component that
+does nothing.
+
+**Two probes were mis-aimed, and both misattributions were instructive.** G3
+first used `fn __probe_dead_helper`, which produced no warning at all —
+rustc's `dead_code` lint deliberately exempts identifiers beginning with `_`, so
+an underscore-prefixed name is invisible to the census and the probe looked like
+a survivor. And G6/G7 first failed the *warning* gate as well as the ABI one,
+which read as coverage it does not have: the regex that reverted the calls left
+an unused `macro_rules! resolve_v2` behind, and that has its own warning.
+Removing the macro too gives the isolated rows above. **A mutation's side effects
+are not the mutation.**
+
+##### And the restore left cargo replaying the mutation
+
+`tar xzf` restores the archive's **mtimes**, which are older than the mutation's,
+so cargo decided nothing had changed and replayed the mutated build's
+diagnostics — one probe appeared to fail for the right reason when it was
+reading a stale unit. The stale-binary trap this repository already records,
+wearing a timestamp instead of a build product. `touch` after every restore, and
+the standing rule holds in both directions: verify the mutation is in the built
+artifact, *and* that the restore is.
+
+##### A separate observation, not acted on
+
+The GPU probe's own output moved 22.66 → 4.29 cycles for FMA latency across the
+change, which reads exactly like a regression. It is not: five consecutive runs
+of the **same** binary gave 4.29, 43.89, 4.30, 4.09, 4.11 — a 10x run-to-run
+spread with no warm-up discipline, and `.ysu_hw_profile` caches whatever the
+first run happened to say. The clock-ramp lesson this repository already
+records, in the tool that measures the machine. These numbers feed the analytic
+cost-model fallback, so a wrong one is a suboptimal tile rather than an error.
+
+**532 / 783 / 8** tests, zero failures across 123 per-target binaries in both
+feature sets plus the aggregate; both builds warning-free; all four emitted LLVM
+modules and every emitted attention PTX byte-for-byte unchanged; no committed
+artifact touched.
 
 ## 5. End goal
 

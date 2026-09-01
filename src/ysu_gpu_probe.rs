@@ -1,5 +1,4 @@
 #![allow(non_snake_case)]
-#![allow(dead_code)]
 
 use std::process::Command;
 
@@ -58,7 +57,6 @@ struct CudaDriver {
     cuMemAlloc: unsafe extern "C" fn(dptr: *mut usize, bytesize: usize) -> CUresult,
     cuMemFree: unsafe extern "C" fn(dptr: usize) -> CUresult,
     cuMemcpyHtoD: unsafe extern "C" fn(dstDevice: usize, srcHost: *const std::ffi::c_void, bytesize: usize) -> CUresult,
-    cuMemcpyDtoH: unsafe extern "C" fn(dstHost: *mut std::ffi::c_void, srcDevice: usize, bytesize: usize) -> CUresult,
     cuLaunchKernel: unsafe extern "C" fn(
         f: *mut std::ffi::c_void,
         gridDimX: u32, gridDimY: u32, gridDimZ: u32,
@@ -142,24 +140,43 @@ impl CudaDriver {
             };
         }
 
+        // Several driver entry points were ABI-versioned when 64-bit sizes
+        // arrived in CUDA 3.2, and `libcuda` exports BOTH names at different
+        // addresses: the unsuffixed `cuMemAlloc` is the legacy 32-bit-size
+        // form, so a `usize` byte count truncates above 4GB. `cuda.h` `#define`s
+        // the plain names to the `_v2` ones, which is why C code never meets
+        // this. `cuda_runtime.rs` has resolved `_v2` first, with that reason
+        // written beside it, since it was written - and THIS second binding of
+        // the same API resolved the legacy names for all six. It has never
+        // produced a wrong answer because the largest thing the probe allocates
+        // is a 64MB array, four orders of magnitude below where the truncation
+        // starts. Kept identical to `cuda_runtime.rs` so the two cannot
+        // disagree again.
+        macro_rules! resolve_v2 {
+            ($name:ident) => {
+                let sym = get_symbol(lib, concat!(stringify!($name), "_v2"))
+                    .or_else(|| get_symbol(lib, stringify!($name)))?;
+                let $name = std::mem::transmute::<*mut std::ffi::c_void, _>(sym);
+            };
+        }
+
         resolve!(cuInit);
         resolve!(cuDeviceGet);
         resolve!(cuDeviceGetAttribute);
-        resolve!(cuCtxCreate);
-        resolve!(cuCtxDestroy);
+        resolve_v2!(cuCtxCreate);
+        resolve_v2!(cuCtxDestroy);
         resolve!(cuModuleLoadData);
         resolve!(cuModuleGetFunction);
-        resolve!(cuMemAlloc);
-        resolve!(cuMemFree);
-        resolve!(cuMemcpyHtoD);
-        resolve!(cuMemcpyDtoH);
+        resolve_v2!(cuMemAlloc);
+        resolve_v2!(cuMemFree);
+        resolve_v2!(cuMemcpyHtoD);
         resolve!(cuLaunchKernel);
         resolve!(cuCtxSynchronize);
         resolve!(cuEventCreate);
         resolve!(cuEventRecord);
         resolve!(cuEventSynchronize);
         resolve!(cuEventElapsedTime);
-        resolve!(cuEventDestroy);
+        resolve_v2!(cuEventDestroy);
 
         Some(CudaDriver {
             cuInit,
@@ -172,7 +189,6 @@ impl CudaDriver {
             cuMemAlloc,
             cuMemFree,
             cuMemcpyHtoD,
-            cuMemcpyDtoH,
             cuLaunchKernel,
             cuCtxSynchronize,
             cuEventCreate,

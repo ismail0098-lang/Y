@@ -12,7 +12,6 @@
 //    - Hardware targets, cache policies, MMA ops
 // ============================================================
 
-#![allow(dead_code)]
 
 // ────────────────────────────────────────────────────────────
 //  Token kinds
@@ -269,15 +268,6 @@ impl Lexer {
             self.col += 1;
         }
         Some(ch)
-    }
-
-    fn matches_next(&mut self, expected: char) -> bool {
-        if self.peek() == Some(expected) {
-            self.advance();
-            true
-        } else {
-            false
-        }
     }
 
     fn skip_whitespace(&mut self) {

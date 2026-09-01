@@ -8,7 +8,6 @@
 //  to support Ada Lovelace, Hopper, and CPU fallbacks.
 // ============================================================
 
-#![allow(dead_code)]
 
 /// Represents a source code location.
 #[derive(Debug, Clone, PartialEq)]
