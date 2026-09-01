@@ -752,7 +752,12 @@ fn emit_vnni_gemm_driver() -> String {
     // At MR=6 that is a sixth of the total run spent copying B. Packing A once
     // up front and B once per column panel makes packing `M*K + N*K`, i.e.
     // asymptotically free.
-    let panel_stride = b.mul(&kpairs, &(VNNI_MR * 2).to_string());
+    // The stride between packed A panels, from the same description the
+    // allocation is sized by - see `panel_a_stride_ix`.
+    let panel_stride = panel_a_stride_ix().emit(&mut b, &|n: &'static str| match n {
+        "kpairs" => kpairs.clone(),
+        other => unreachable!("unbound schedule name {other}"),
+    });
     let pal = b.loop_begin_counted(&row_panel_loop("vg.pa"));
     let pai = b.iv(&pal);
     let pa_env = |n: &'static str| match n {
@@ -955,6 +960,38 @@ pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
         },
     );
     let kpairs_b_ir = kpairs_b_ir.join("\n");
+    // The four allocation sizes. They were five raw `mul` lines per arm with
+    // `2*MR` and `2*NR` spelled as format arguments, which is a second
+    // description of the panel geometry sitting next to the `malloc` it sizes -
+    // and the proofs' notion of a panel's extent was a third. One description
+    // now, rendered here and into `ExactGemmSchedule.v`.
+    let alloc_ir = |names: [&str; 3], kp: &str| {
+        let (a_lines, _) = render_named(
+            &panel_a_bytes_ix(),
+            &mut names.into_iter().map(String::from),
+            &|n| match n {
+                "mtiles" => "%mtiles".into(),
+                "kpairs" => kp.to_string(),
+                other => unreachable!("unbound schedule name {other}"),
+            },
+        );
+        a_lines.join("\n")
+    };
+    let alloc_b_ir = |names: [&str; 2], kp: &str| {
+        let (b_lines, _) = render_named(
+            &panel_b_bytes_ix(),
+            &mut names.into_iter().map(String::from),
+            &|n| match n {
+                "kpairs" => kp.to_string(),
+                other => unreachable!("unbound schedule name {other}"),
+            },
+        );
+        b_lines.join("\n")
+    };
+    let panel_a_ir = alloc_ir(["%apn", "%apn2", "%apb"], "%kps");
+    let panel_b_ir = alloc_b_ir(["%bpn", "%bpb"], "%kps");
+    let panel_a_b_ir = alloc_ir(["%apnb", "%apn2b", "%apbb"], "%kpsb");
+    let panel_b_b_ir = alloc_b_ir(["%bpnb", "%bpbb"], "%kpsb");
     let (band_len, _) = render_named(
         &band_len_ix(),
         &mut ["%extra", "%inc", "%klen"].into_iter().map(String::from),
@@ -1067,11 +1104,8 @@ zero.done:
 
 single:
 {kpairs_ir}
-  %apn = mul i64 %mtiles, %kps
-  %apn2 = mul i64 %apn, {mr2}
-  %apb = mul i64 %apn2, 2
-  %bpn = mul i64 %kps, {nr2}
-  %bpb = mul i64 %bpn, 2
+{panel_a_ir}
+{panel_b_ir}
   %ap1 = call ptr @malloc(i64 %apb)
   %bp1 = call ptr @malloc(i64 %bpb)
   %ct1 = call ptr @malloc(i64 {ctb})
@@ -1104,11 +1138,8 @@ spawn.body:
 {band_len}
 
 {kpairs_b_ir}
-  %apnb = mul i64 %mtiles, %kpsb
-  %apn2b = mul i64 %apnb, {mr2}
-  %apbb = mul i64 %apn2b, 2
-  %bpnb = mul i64 %kpsb, {nr2}
-  %bpbb = mul i64 %bpnb, 2
+{panel_a_b_ir}
+{panel_b_b_ir}
   %apt = call ptr @malloc(i64 %apbb)
   %bpt = call ptr @malloc(i64 %bpbb)
   %ctt = call ptr @malloc(i64 {ctb})
@@ -1267,9 +1298,11 @@ cleanup:
 "#,
         maxthr = 64,
         minband = KSPLIT_MIN_BAND,
-        mr2 = mr * 2,
-        nr2 = nr * 2,
         ctb = mr * nr * 8,
+        panel_a_ir = panel_a_ir,
+        panel_b_ir = panel_b_ir,
+        panel_a_b_ir = panel_a_b_ir,
+        panel_b_b_ir = panel_b_b_ir,
         jobb = job_bytes,
         gemm = VNNI_GEMM_NAME,
         threaded = VNNI_THREADED_NAME,
@@ -2700,6 +2733,46 @@ pub fn a_i32_element_ix() -> Ix {
 /// the roadmap catalogues.
 pub fn panel_index_ix() -> Ix {
     Ix::div(Ix::val("iv"), Ix::val("T"))
+}
+
+/// The stride between two packed A panels, in i16 ELEMENTS: `kpairs * 2 * MR`.
+///
+/// A is packed once for the whole matrix - the packing sweep is outside every
+/// tile loop, which is what makes it asymptotically free - so the buffer holds
+/// `ntiles(M, MR)` of these back to back and the row panel at row `i0` starts
+/// at `panel_index(i0, MR) * panel_a_stride`.
+///
+/// It is the same number as the group span `ExactGemmPacking` calls
+/// `kp * (2 * width)` at `width = MR`, and until this was extracted nothing
+/// said so: the proof's panel width and the emitted stride were two
+/// expressions that happened to agree.
+pub fn panel_a_stride_ix() -> Ix {
+    Ix::mul(Ix::val("kpairs"), Ix::Lit(2 * VNNI_MR))
+}
+
+/// Bytes to `malloc` for the packed A buffer: `mtiles * panel_a_stride * 2`.
+///
+/// The trailing `* 2` is `sizeof(i16)`, not part of the pair interleave - the
+/// interleave is already inside [`panel_a_stride_ix`] as the `2 * MR`. Two
+/// factors of two, one an element width and one a schedule constant, in an
+/// expression whose operands are all called something ending in `2`: that is
+/// the shape §1 of the roadmap catalogues, so both are named here rather than
+/// spelled as literals at the site.
+pub fn panel_a_bytes_ix() -> Ix {
+    Ix::mul(
+        Ix::mul(Ix::mul(Ix::val("mtiles"), Ix::val("kpairs")), Ix::Lit(2 * VNNI_MR)),
+        Ix::Lit(2),
+    )
+}
+
+/// Bytes to `malloc` for the packed B buffer: `kpairs * 2 * NR * 2`.
+///
+/// ONE column panel, not `ntiles(N, NR)` of them: B is re-packed inside the
+/// column loop, which `tests/exact_gemm_packing_schedule.rs` pins as an event
+/// order. So this buffer is the proof's `kp * (2 * width)` at `width = NR`
+/// exactly, with no outer multiplier.
+pub fn panel_b_bytes_ix() -> Ix {
+    Ix::mul(Ix::mul(Ix::val("kpairs"), Ix::Lit(2 * VNNI_NR)), Ix::Lit(2))
 }
 
 /// The **proportional** split's band edge: `(t * ext) / n`.

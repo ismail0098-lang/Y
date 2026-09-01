@@ -56,8 +56,18 @@
       nest is not extracted, so the tie is between two models rather than to
       the LLVM. That gap is named in every file of this series and is what
       Phase 2 exists to close.
-    - The threaded wrapper's `pthread` mechanics, the panel buffers' sizes and
-      the scratch tile's allocation are not modelled at all.
+    - **The packing buffers' sizes and the scratch tile's allocation ARE
+      modelled**, in [ExactGemmAllocation.v] - every slot the packers and the
+      flush write lands inside the `malloc` sized for it, and the allocation is
+      not one element larger than the write set. What is left outside is the
+      allocation FAILING: the emitted driver uses its nine
+      returned pointers unchecked, so an out-of-memory condition is a null
+      dereference rather than an error, where the f32 kernel in this same file
+      falls back to a static panel.
+    - The threaded wrapper's `pthread` mechanics - the job struct's layout, the
+      spawn/join protocol and the per-thread private C buffer - are not
+      modelled at all. This file proves what the K bands COMPUTE and says
+      nothing about how they are dispatched.
 
     Build:  coqc proofs/ExactGemmWhole.v      (Rocq 9.1)
 *)
@@ -70,6 +80,7 @@ Require ExactGemmRegisterTile.
 Require ExactGemmTiling.
 Require ExactGemmKsplit.
 Require ExactGemmMicro.
+Require ExactGemmAllocation.
 Open Scope Z_scope.
 
 Module SCH := ExactGemmSchedule.
@@ -78,6 +89,7 @@ Module PK := ExactGemmPacking.
 Module TL := ExactGemmTiling.
 Module KS := ExactGemmKsplit.
 Module CH := ExactGemmChain.
+Module AL := ExactGemmAllocation.
 
 (** Every position of C is live in its OWN tile: `r` lands in tile `r / T` at
     offset `r mod T`, and the clamped width of that tile is wide enough. *)
@@ -309,7 +321,23 @@ Proof. split; vm_compute; reflexivity. Qed.
 
 Print Assumptions the_position_is_live_in_its_own_tile.
 Print Assumptions the_whole_output_holds_the_source_dot_products.
+(** *** The allocation bound, re-exported.
+
+    [ExactGemmAllocation.v] proves it; it is restated here so that this file is
+    genuinely the ROOT of the exact-GEMM chain rather than one of two. That
+    matters mechanically as well as tidily: `tests/proofs_are_checked.rs`
+    derives which files may state a global negative from the `Require` graph,
+    and `tests/certificate_states_its_trust_boundary.rs` requires the emitted
+    certificate to mirror the root's exclusion list. A second root would be a
+    second list nothing reconciles. *)
+Corollary the_packing_buffers_hold_every_slot_written :
+  forall t p i h mtiles kp,
+    (t < mtiles)%nat -> (p < kp)%nat -> (i < SCH.MR)%nat -> (h < 2)%nat ->
+    (AL.a_write t p i h kp < SCH.panel_a_elems mtiles kp)%nat.
+Proof. exact AL.pack_a_write_is_inside_the_allocation. Qed.
+
 Print Assumptions the_threaded_gemm_holds_the_source_dot_products.
+Print Assumptions the_packing_buffers_hold_every_slot_written.
 Print Assumptions the_position_decomposition_is_the_tilings.
 Print Assumptions the_zeroing_loop_visits_each_slot_once.
 Print Assumptions the_scratch_is_zeroed_wherever_the_fold_back_reads.

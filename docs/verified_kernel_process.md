@@ -1,6 +1,6 @@
 # The process: taking a kernel from *fast* to *verified*
 
-This is the method, written down after seventeen proof files and about twenty
+This is the method, written down after eighteen proof files and about twenty
 gates. It is not a plan — every step here has been executed, and the parts that
 did not work are recorded as such.
 
@@ -9,7 +9,7 @@ K-split, multi-threaded kernel that is **bit-identical** to the naive triple
 loop it replaces. Two other kernels have been through parts of it (the f32 GEMM,
 the exact int8 attention PTX), and the differences are noted where they matter.
 
-Current state: **seventeen `.v` files, ~300 theorems, no axioms, nothing
+Current state: **eighteen `.v` files, ~360 theorems, no axioms, nothing
 admitted**, all checked by `cargo test`. The counts are approximate on purpose:
 an exact one goes stale every session, and a gate on it would fail on every
 proof added.
@@ -119,6 +119,28 @@ Theorem decomposition_exact (* arbitrary owner map: needs COMMUTATIVITY *)
 Theorem slot_injective      (* the parts TILE a buffer rather than folding *)
 Theorem slot_onto
 ```
+
+A third family arrived with the allocation bound, and it is the one whose
+second half nothing else supplies:
+
+```coq
+(* ExactGemmAllocation.v *)
+Theorem pack_a_write_is_inside_the_allocation      (* CONTAINMENT: write set  buffer *)
+Theorem the_a_allocation_is_exactly_the_write_set  (* TIGHTNESS: and not one larger *)
+```
+
+**Prove both directions of any sizing obligation.** Containment alone is
+satisfied by a buffer of any larger size, and an over-allocation changes no
+answer, occupies memory the process owns, and is therefore invisible to every
+correctness test that exists — this repository has one in its history, caught by
+a schedule gate and by nothing else. Containment is what a heap corruption would
+*eventually* reveal; tightness is what nothing would. State it as
+`S (max_written_index) = size`, which is one line once the maximum is known.
+
+Pair each with a **refutation** — that the size one element smaller admits a
+write past the end — so the bound is known tight rather than merely sufficient,
+and phrase it as the negation of the weakened theorem rather than by exhibiting
+a witness at a convenient size.
 
 Seven proof files instantiate the first two. A new decomposition costs a
 **bridge lemma plus three edge facts** — measured at 6 tactic lines against a
@@ -784,6 +806,26 @@ next increments in this programme, and it is honest by construction — an item
 is on it because a previous session decided it could not be discharged *then*,
 not because it cannot be discharged.
 
+### The trust boundary is the better queue, because each item carries its route
+
+§5's `Check::Unchecked(what_would_close_it)` field turns the certificate's own
+trust boundary into a work list that is ranked and actionable: an item is on it
+because nothing would fail if it were false, and it carries the sentence saying
+what closing it would take. The increment after that list was written was
+chosen by reading its first entry, and the entry named its own method.
+
+**Discharging an item is usually SPLITTING it**, and that is where the bijection
+gate earns its place a second time. Proving the buffer sizes left the allocation
+*failing* still unproved, so one item became two — and the split had to land in
+the capstone's exclusion list and in the rendered boundary together, because
+either alone fails the gate. A prose list in two files cannot be kept in step by
+intention. This one is kept in step by a test.
+
+Keep the residue honest when you split. Half-fixing the second half — checking
+some pointers, or adding a fallback for one of the buffers — would have been
+worse than naming it, because a partly-handled failure mode reads as a handled
+one.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:
@@ -904,7 +946,7 @@ weakens every theorem above it.
 
 - [Proof-carrying kernels](proof_carrying_kernels.md) — the roadmap and the
   chronological log, including the measurements that decided each step
-- `proofs/` — the seventeen files, each with its own header stating scope
+- `proofs/` — the eighteen files, each with its own header stating scope
 - `tests/proofs_are_checked.rs` — the gate that runs them, with content controls
 - `tests/exact_gemm_schedule_proof.rs` — the generator and the schedule ties
 - `tests/exact_gemm_certificate.rs` — the emitted certificate

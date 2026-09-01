@@ -3873,13 +3873,87 @@ the real proof chain, three `Print Assumptions`, all `Closed under the global
 context`. No committed `.ptx` or `.ll` changed — certificates are generated per
 compilation and none is committed.
 
+#### The trust boundary's top item, half discharged - and the half that is left is a real gap · 2026-09-01
+
+The list built the same day is a work queue, and its first `Unchecked` item
+named its own route: *"the panel buffers' sizes and the scratch tile's
+allocation are not modelled at all - closing it means modelling the allocations
+and tying them to the emitted `malloc` the way `Ix` already ties the index
+arithmetic."* Done. `proofs/ExactGemmAllocation.v`, 13 `Print Assumptions`, no
+axioms, nothing admitted.
+
+**What no test can replace, in BOTH directions.** An allocation that is too
+large is invisible - every write lands in memory the process owns, every answer
+is right, and the only symptom is bytes. An allocation that is too small
+corrupts the heap, which surfaces as a crash somewhere else, on some shapes,
+sometimes. Neither is a property of the ANSWER, and the answer is what every
+exact-GEMM suite in this repository compares. The over-allocation half is not
+hypothetical: one of exactly that shape is in this repository's history, caught
+by the schedule gate and by nothing else.
+
+So the file proves both halves:
+
+- `pack_a_write_is_inside_the_allocation` / `pack_b_write_is_inside_the_allocation`
+  / `the_scratch_store_is_inside_the_tile` - every live write lands below the
+  element count the driver allocated.
+- `the_a_allocation_is_exactly_the_write_set` and its two siblings - **the last
+  slot written is the last slot allocated.** This is the half no answer reveals.
+- Three refutations, so the bounds are known tight rather than merely
+  sufficient.
+
+**The join is what stops it being an arithmetic exercise.**
+`the_stride_is_the_packing_proofs_panel_extent` proves the emitted A-panel
+stride IS the `kp * (2 * width)` that `ExactGemmPacking.panel_is_the_only_solution`
+quantifies over, and one B panel is that extent at `width = NR`. Before it, the
+panel geometry existed **three** times - `2*MR` and `2*NR` spelled into the
+emitter's `malloc` arithmetic, `kp * (2 * width)` in the packing proof, and the
+driver's own separate `panel_stride` multiply - with nothing saying they agreed.
+All three now render from `cpu_gemm::panel_a_stride_ix` / `panel_a_bytes_ix` /
+`panel_b_bytes_ix`, and **the emitted module is byte-for-byte what it was**,
+which is the evidence the refactor is faithful.
+
+**THE FINDING: nine `malloc` calls in the exact path, zero null checks - and
+the f32 kernel in the same emitter has a static fallback for exactly that.**
+`@__y_gemm_fallback` is a 2.5M-float reserve with `icmp ne ptr %g5, null`
+guarding its use; the exact driver `memset`s straight through every pointer it
+gets back. On out-of-memory that is a null dereference, not an error return.
+
+Recorded rather than fixed, deliberately: the entry point returns `void`, so
+"what should it do on failure" is a design question with a real answer to
+choose, not a missing line. It is now a **named** trust-boundary item carrying
+its own route to closing, which is what `Check::Unchecked` is for and is more
+honest than a half-fix.
+
+**The bijection gate from the same morning did its job, and that was the test
+of it.** Discharging half an item means SPLITTING it, and the split had to
+happen in `ExactGemmWhole.v` and in `TRUST_BOUNDARY` together - change one and
+the gate fails, because a bullet would be claimed by no item or an item would
+find no bullet. A prose list in two files cannot be kept in step by intention;
+this one is kept in step by a test.
+
+The chain was also **re-rooted**: `ExactGemmWhole.v` now `Require`s the
+allocation proof and re-exports its bound as a corollary, so there is exactly
+one capstone. Two roots would be two exclusion lists with nothing reconciling
+them - and `tests/proofs_are_checked.rs` derives which files may state a global
+negative from that same `Require` graph, so the structure has to be right for
+two gates rather than one.
+
+**A correction to a recorded process rule.** This repository's constraints say
+multi-target sweeps must run from a script file because "the shell is fish and
+`for S in $SUITES` passes the whole list as one word". The symptom is real and
+has bitten four times; the cause is wrong. The shell here reports **zsh**, which
+also does not word-split unquoted expansions - so the remedy (a `#!/bin/bash`
+script file, or an explicit list) is right and the reason given for it is not.
+Caught by a backup verification refusing to proceed on a 0-entry archive, which
+is the check added after the last time this went wrong.
+
 ## 5. End goal
 
 > **STATUS, 2026-09-01.** The end goal below is reached for **one kernel on one
 > backend**: `Y gemm.ysu --emit-llvm` substitutes the exact `vpdpwssd` GEMM and
 > writes a `.v` beside the `.ll` that an auditor can check with `coqc` and the
 > proofs, without trusting the compiler. What is *not* reached is the scope —
-> one kernel family, one backend, and the **six** items the certificate now
+> one kernel family, one backend, and the **seven** items the certificate now
 > enumerates as its trusted computing base, each with the check that would fail
 > if it were false or an explicit statement that nothing would:
 > `exact_gemm_certificate::TRUST_BOUNDARY`. This paragraph said *three* until

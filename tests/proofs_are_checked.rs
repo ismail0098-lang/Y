@@ -256,6 +256,26 @@ fn nothing_in_any_proof_is_admitted() {
 fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
     vec![
         (
+            // The allocation bound. Its two halves are graded differently on
+            // purpose: the IN-BOUNDS direction is what a heap corruption would
+            // eventually reveal, while the EXACTNESS direction - the buffer is
+            // not one element larger than the write set - is invisible to every
+            // answer this kernel can produce, and an over-allocation of exactly
+            // that shape is in this repository's history.
+            "ExactGemmAllocation.v",
+            &[
+                "Print Assumptions pack_a_write_is_inside_the_allocation",
+                "Print Assumptions the_a_allocation_is_exactly_the_write_set",
+                // The join. Without it the file proves that some numbers fit
+                // inside other numbers; with it, the buffer the driver
+                // allocates is the buffer the packing proof describes.
+                "the_stride_is_the_packing_proofs_panel_extent",
+                // The refutations, so the bounds are known tight rather than
+                // merely sufficient.
+                "one_element_short_overflows_the_a_panel",
+            ][..],
+        ),
+        (
             "ZkControlFlow.v",
             &[
                 // The shipped lowering agrees with the operational semantics.
@@ -845,7 +865,9 @@ fn each_proof_still_proves_the_thing_it_exists_for() {
 ///
 /// It is a hole in the gate that guards the whole directory, not in one entry,
 /// and it is pre-existing - it was found by mutating a new file and applies to
-/// all seventeen.
+/// every entry. (Seventeen at the time; eighteen since
+/// `proofs/ExactGemmAllocation.v`. The count is deliberately not restated - it
+/// is derived from the directory, and a number here would go stale silently.)
 fn names_something_real(src: &str, needle: &str) -> bool {
     // `Print Assumptions foo` IS the site it names; match it literally.
     if needle.starts_with("Print Assumptions ") {
