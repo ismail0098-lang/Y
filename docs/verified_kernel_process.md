@@ -9,7 +9,7 @@ K-split, multi-threaded kernel that is **bit-identical** to the naive triple
 loop it replaces. Two other kernels have been through parts of it (the f32 GEMM,
 the exact int8 attention PTX), and the differences are noted where they matter.
 
-Current state: **sixteen `.v` files, ~265 theorems, no axioms, nothing
+Current state: **seventeen `.v` files, ~290 theorems, no axioms, nothing
 admitted**, all checked by `cargo test`. The counts are approximate on purpose:
 an exact one goes stale every session, and a gate on it would fail on every
 proof added.
@@ -46,6 +46,38 @@ enough** — the counterexample needs a large term the small ones vanish against
 
 The corollary is that the f32 GEMM which ships for ordinary Y programs
 **provably cannot** get this treatment, and saying so is part of the process.
+
+### When a stage genuinely cannot be exact, split it from the reduction
+
+`exp` is not exact in any representation, so a softmax cannot be handled by an
+equality — and that was the whole reason to expect the method to stop at
+reductions. It does not, and the reason is worth stating precisely because it
+is also the boundary of where it *will* work:
+
+> **Ask whether the approximation is introduced BEFORE the decomposition or BY
+> it.**
+
+In the exact-attention kernel the softmax weight is approximated *per element*
+and then summed in exact integers, so `GridStrideSplit`'s partition theorem
+applies verbatim and the per-element error enters the fold as **data**. The
+`Decomposition` schema needed no approximate variant at all. In an f32 softmax
+the error is produced *by* the reduction, so the bound would have to be
+re-derived for every decomposition — which is the case this method has nothing
+to say about.
+
+So the addressable set widens to **pipelines whose approximation is
+per-element**, not to approximate reductions in general. State it that
+narrowly; the wider claim is false.
+
+The bound itself then has a shape worth recognising. An *additive* error (a
+table's ulp) and a *multiplicative* one (a rounded exponent) do not add — they
+compose as `EPS*w + b`, and the additive term is only negligible relative to a
+**floor** on the total. In a softmax that floor is the max subtraction: the
+argmax's delta is zero, so one weight is exactly full scale. Usually described
+as an overflow guard; it is also the thing that makes the table's absolute
+error irrelevant, and the refutation (without it, every weight rounds to zero
+and there is no denominator at all) is a failure this repository had already
+observed empirically at a narrower fixed-point width.
 
 The cost of exactness was measured before anything was built: exact VNNI is
 **1.88× faster** than the f32 path. Exactness here trades *range*, not speed.
@@ -459,6 +491,35 @@ Two consequences worth carrying:
 whole claim being made is that these queries are decidable, so a solver that
 cannot decide one has refuted the claim.
 
+### The no-axioms gate forbids Reals, and that forces a design decision
+
+Every `Print Assumptions` here must report `Closed under the global context`.
+Coq's `R` is axiomatized, so one `Require Import Reals` puts seventeen axioms
+under a whole file. Anything about a transcendental therefore has to be stated
+over `Z` and `Q`.
+
+That is not merely inconvenient. **The obvious interface for an exponential —
+exact homogeneity `W(u+v)·S = W(u)·W(v)` plus one exact halving — is
+INCONSISTENT over Q**: it forces the midpoint weight to be a rational square
+root, and an inconsistent hypothesis set proves everything. The interface has
+to be a two-sided rational **bracket** instead, and both directions of *check
+your premise is satisfiable* have to be run: exhibit a Q-valued model, and
+prove the rational inequality that fixes each quantitative constant. For a
+per-unit decay factor `c`, "one unit costs at most `2^-k` in log2" is exactly
+`c^(2^k) <= 1/2` — a checkable rational statement standing in for a
+real-analytic one, discharged by Bernoulli (`(1+x)^n >= 1+nx` and
+`(1-x)^n(1+nx) <= 1`).
+
+**And a big exponent is a mechanical landmine.** `ring` and `auto` NORMALISE,
+so a goal mentioning `q^(2^32)` asks for four billion multiplications:
+`Stack overflow`, after 85 seconds, **at `Qed` rather than at the tactic**.
+`remember` does not help — it leaves a let-binding `ring` zeta-reduces through.
+Prove the algebra over abstract variables and `apply` it, so the big term only
+ever meets first-order unification. `lra`/`nra` are safe (they abstract atoms),
+and so is the kernel: a theorem that *states* the big term checks in
+milliseconds. Bisect for this rather than guessing; the failure points at the
+wrong line.
+
 ---
 
 ## 5. Emit the certificate
@@ -545,6 +606,15 @@ returns the gate's body and it then fails for the wrong reason. Anchor on the
 definition (`"\nfn name("`), and probe it with the mutation it exists to catch
 before believing it.
 
+A third, and it was in a **gate** rather than in a subject: a content control
+that guards seventeen proof files was a bare `src.contains(theorem_name)`.
+Every proof here names its own theorems in its header doc comment, so deleting
+a theorem *together with its `Print Assumptions` line* — the line has to go
+too, or `coqc` catches the dangling reference — left the whole gate green. It
+requires a **declaration site** now. It is a pre-existing hole, found by
+mutating a newly added file, and the lesson is to run the sweep against the
+gate and not only against the subject.
+
 A second survivor of that kind, found the same way: **a proof cannot see a
 relabelling**, because a prover compares terms and not names. If a generated
 definition's parameter list is derived, swapping two roles renames the
@@ -601,6 +671,20 @@ For the exact GEMM, three things are outside:
 - **Nothing here is a statement about LLVM, `clang`, or machine code.** There is
   no IR semantics in this repository and there is not going to be one.
 
+And one that generalises past this kernel: **a theorem about one transcription
+of a function is a theorem about the others only because something pins them
+together.** The fixed-point `exp2` here has four transcriptions — Rust, PTX,
+and two Python — held together by an FNV digest over the whole domain. Say so
+in the artifact; it is easy to assume and false the moment the digest goes.
+
+Related, and it is the cheapest kind of gap to leave behind: **a hypothesis
+discharged by exhaustion is discharged over the domain the sweep actually
+walks, which is not always the domain the code admits.** Here the sweep stopped
+at `31<<16` and the emitted saturate admitted `2^30`, 528 times further out.
+Name the swept bound as a constant, state the hypothesis over that constant,
+and prove the extension — otherwise a later narrowing of the sweep silently
+weakens every theorem above it.
+
 ---
 
 ## Checklist
@@ -642,3 +726,6 @@ For the exact GEMM, three things are outside:
 - `tests/zk_gadget_soundness.rs` — a solver question this repo had recorded as
   defeating Z3, decided in 15ms by decomposing it; plus decomposition
   uniqueness, which is the obligation the bitwise and shift gadgets rest on
+- `proofs/SoftmaxErrorBound.v` and `tests/softmax_error_bound.rs` — the first
+  BOUND rather than an equality, and the answer to whether the schema extends
+  to approximate arithmetic
