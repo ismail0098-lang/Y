@@ -3947,6 +3947,72 @@ script file, or an explicit list) is right and the reason given for it is not.
 Caught by a backup verification refusing to proceed on a 0-entry archive, which
 is the check added after the last time this went wrong.
 
+#### The out-of-memory path, from undefined to defined - and a mutation that removed the bug instead of the check · 2026-09-02
+
+The entry above found nine `malloc` calls in the exact path with zero null
+checks, and **recorded it rather than fixing it** on the grounds that "what
+should a void-returning entry point do on failure" is a design choice. Coming
+back to it is the queue discipline working; the design choice had an answer.
+
+**It is now one checked allocator.** `@__y_gemm_exact_alloc` prints the byte
+count and exits 1; all nine sites call it. The emitted diff is exactly those
+nine lines plus the helper.
+
+**Exit, not fallback, and the reason is a property of this kernel.** The f32
+kernel in the same emitter falls back to `@__y_gemm_fallback`, a static panel
+guarded by `icmp ne ptr %g5, null` - it can, because it blocks by `kc`/`mc`/`nc`
+so a fixed reserve covers every shape. **The exact kernel packs the whole of A
+at once**, which is exactly the property that makes its packing asymptotically
+free, so its panel size is unbounded in M and K and no fixed reserve exists. A
+blocked fallback variant is a feature to build, not a branch to add. Until it
+exists the choice is between a defined failure and an undefined one, and §0's
+rule settles it: a wrong answer under a certificate claiming exactness is the
+failure this programme exists to prevent.
+
+**The hazard was not remote.** The per-thread private C copy is `M * N * 8`
+bytes **per thread** - a 4096x4096 GEMM on 16 threads asks for 2.1 GB in that
+one allocation, and it was `memset` through unchecked.
+
+**The test injects the failure rather than waiting for it.**
+`-Wl,--wrap=malloc` returns NULL on the n-th call, and every n is swept in both
+arms. The assertion is `status.code() == Some(1)`: **a process killed by
+SIGSEGV has no exit code at all**, so this distinguishes the defined failure
+from the undefined one it replaced, rather than merely observing that the run
+did not succeed. The control - `fail_at = 0` must produce the right answer AND
+report a non-zero wrapped count - is what stops the file passing against a
+kernel that allocates nothing.
+
+**THE MIS-AIMED MUTATION IS THE FINDING.** Reverting one site (`%cpt`) to a
+raw `malloc` left the sweep green, which reads as a test hole. It is not:
+`clang -O2` **promotes an unchecked `malloc`/`free` pair whose pointer does not
+escape into an `alloca`**, so wrapped allocations went 14 -> 10 and that site
+stopped being a runtime allocation at all. The mutation removed the bug rather
+than the check. Re-aimed at `%jobs`, which is handed to `pthread_create` and
+therefore escapes, it is caught.
+
+Two consequences worth carrying. The sweep is over the allocations that
+**survive to runtime**, not over the ones in the IR - 2 and 14 rather than 3
+and 18 - and the file says so. And *verify a mutation created the condition it
+names*: this repository already records "confirm a mutation changes the program
+before recording a survivor", and this is the same rule one level down, where
+the mutation changed the program in a way that deleted the hazard.
+
+**A pre-existing failure was hiding, and the CONTROL ROW is what exposed it.**
+`exact_gemm_micro_model` failed on all six mutations *including the control* -
+which means it was already failing in the clean state. Adding `printf`/`exit`
+calls to the threaded module broke the one harness that emits it standalone
+with its own `declare` list; I had predicted exactly that, written it down, and
+then not done it. A mutation table where every row fails the same suite is
+reporting the state of the tree, not the mutation. **Read the control row
+first.**
+
+**The trust boundary moved, and the bijection gate forced both halves.** The
+item went from `Check::Unchecked` to `Check::Pinned("tests/exact_gemm_allocation_failure.rs")`,
+its claim changed from "uses every `malloc` result without checking it" to
+"there is no FALLBACK when an allocation fails: the kernel exits", and
+`ExactGemmWhole.v`'s bullet had to change in the same commit or the gate fails.
+Second increment running, second time it has held two files together.
+
 ## 5. End goal
 
 > **STATUS, 2026-09-01.** The end goal below is reached for **one kernel on one

@@ -875,6 +875,42 @@ pub const VNNI_THREADED_NAME: &str = "__y_gemm_exact_vnni_threaded";
 /// `need_libc_decls` is false when the f32 module is also being emitted, since
 /// it declares the same libc entry points and **a duplicate `declare` is an
 /// invalid redefinition in LLVM, not a duplicate that gets merged**.
+/// The checked allocator every exact-GEMM heap allocation goes through.
+///
+/// `internal`, so it costs nothing at runtime once inlined, and one place
+/// decides what running out of memory means. See the comment at its emission
+/// site for why this exits instead of falling back.
+const EXACT_ALLOC: &str = r#"define internal ptr @__y_gemm_exact_alloc(i64 %n) {
+entry:
+  %p = call ptr @malloc(i64 %n)
+  %ok = icmp ne ptr %p, null
+  br i1 %ok, label %alloc.done, label %alloc.oom
+
+alloc.oom:
+  call i32 (ptr, ...) @printf(ptr @.y_exact_oom, i64 %n)
+  call void @exit(i32 1)
+  unreachable
+
+alloc.done:
+  ret ptr %p
+}"#;
+
+/// Escape a Rust string for an LLVM `c"..."` constant.
+///
+/// LLVM takes printable ASCII literally and everything else as `\XX`. `"` and
+/// `\` must be escaped even though they are printable.
+fn llvm_escape(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b == b'"' || b == b'\\' || !(0x20..0x7f).contains(&b) {
+            out.push_str(&format!("\\{b:02X}"));
+        } else {
+            out.push(b as char);
+        }
+    }
+    out
+}
+
 pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
     let mut s = String::new();
     if need_libc_decls {
@@ -892,6 +928,39 @@ pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
         &mut s,
         "@__y_gemm_exact_nthreads = internal global i64 0, align 8"
     );
+
+    // Every heap allocation on this path goes through ONE checked wrapper.
+    //
+    // The nine `malloc` calls below used to be used unchecked - `memset`
+    // straight through the returned pointer - so an out-of-memory condition
+    // was a null dereference rather than an error. That is not a remote
+    // hazard: the per-thread private C copy is `M * N * 8` bytes PER THREAD,
+    // which at 4096x4096 on 16 threads asks for 2.1 GB.
+    //
+    // **It exits rather than falling back, and that is a decision with a
+    // reason.** The f32 kernel in this same emitter falls back to a static
+    // panel (`@__y_gemm_fallback`), and this kernel cannot: it packs the WHOLE
+    // A matrix once, outside every tile loop, which is the property that makes
+    // its packing asymptotically free - so its panel size is unbounded in M
+    // and K and no fixed reserve covers it. A blocked fallback variant is a
+    // feature to build, not a branch to add, and until it exists the choice is
+    // between a defined failure and an undefined one. Exiting is also what the
+    // repository's design rule asks for: a wrong answer under a certificate
+    // claiming exactness is precisely the failure this programme exists to
+    // prevent.
+    //
+    // `printf` and `exit` come from `llvm_emitter`'s prelude, exactly as
+    // `malloc` and `free` do - neither `cpu_gemm` module is self-contained
+    // when emitted standalone, and a harness that emits one supplies them.
+    let msg = "Y: the exact GEMM could not allocate %lld bytes. Exiting rather than \
+               computing a wrong answer under a certificate that claims exactness.\n";
+    let _ = writeln!(
+        &mut s,
+        "@.y_exact_oom = private unnamed_addr constant [{} x i8] c\"{}\\00\"",
+        msg.len() + 1,
+        llvm_escape(msg),
+    );
+    let _ = writeln!(&mut s, "{}", EXACT_ALLOC);
 
     // Job slots, 8 bytes each: A B C M N K lda ldb ldc Ap Bp Ct.
     let job_bytes = 96usize;
@@ -1106,9 +1175,9 @@ single:
 {kpairs_ir}
 {panel_a_ir}
 {panel_b_ir}
-  %ap1 = call ptr @malloc(i64 %apb)
-  %bp1 = call ptr @malloc(i64 %bpb)
-  %ct1 = call ptr @malloc(i64 {ctb})
+  %ap1 = call ptr @__y_gemm_exact_alloc(i64 %apb)
+  %bp1 = call ptr @__y_gemm_exact_alloc(i64 %bpb)
+  %ct1 = call ptr @__y_gemm_exact_alloc(i64 {ctb})
   call void @llvm.memset.p0.i64(ptr %ap1, i8 0, i64 %apb, i1 false)
   call void @llvm.memset.p0.i64(ptr %bp1, i8 0, i64 %bpb, i1 false)
   call void @llvm.memset.p0.i64(ptr %ct1, i8 0, i64 {ctb}, i1 false)
@@ -1120,9 +1189,9 @@ single:
 
 many:
   %jobsb = mul i64 %nthr, {jobb}
-  %jobs = call ptr @malloc(i64 %jobsb)
+  %jobs = call ptr @__y_gemm_exact_alloc(i64 %jobsb)
   %tidsb = mul i64 %nthr, 8
-  %tids = call ptr @malloc(i64 %tidsb)
+  %tids = call ptr @__y_gemm_exact_alloc(i64 %tidsb)
 {band_pre}
   br label %spawn.head
 
@@ -1140,10 +1209,10 @@ spawn.body:
 {kpairs_b_ir}
 {panel_a_b_ir}
 {panel_b_b_ir}
-  %apt = call ptr @malloc(i64 %apbb)
-  %bpt = call ptr @malloc(i64 %bpbb)
-  %ctt = call ptr @malloc(i64 {ctb})
-  %cpt = call ptr @malloc(i64 %cb)
+  %apt = call ptr @__y_gemm_exact_alloc(i64 %apbb)
+  %bpt = call ptr @__y_gemm_exact_alloc(i64 %bpbb)
+  %ctt = call ptr @__y_gemm_exact_alloc(i64 {ctb})
+  %cpt = call ptr @__y_gemm_exact_alloc(i64 %cb)
   call void @llvm.memset.p0.i64(ptr %apt, i8 0, i64 %apbb, i1 false)
   call void @llvm.memset.p0.i64(ptr %bpt, i8 0, i64 %bpbb, i1 false)
   call void @llvm.memset.p0.i64(ptr %ctt, i8 0, i64 {ctb}, i1 false)

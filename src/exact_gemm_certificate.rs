@@ -176,20 +176,19 @@ pub const TRUST_BOUNDARY: &[TrustItem] = &[
         stated_in: Some((CAPSTONE, "The loop STRUCTURE is modelled")),
     },
     TrustItem {
-        claim: "The emitted driver uses every `malloc` result without checking it.",
+        claim: "There is no FALLBACK when an allocation fails: the kernel exits.",
         because: "The buffers' SIZES are proved - `ExactGemmAllocation.v` shows every slot \
                   the packers and the flush write lands inside the allocation, and that the \
-                  allocation is not one element larger than the write set. What no proof \
-                  covers is the allocation FAILING: nine pointers are used unchecked, so an \
-                  out-of-memory condition is a null dereference rather than an error. The \
-                  f32 kernel in the same emitter falls back to a static panel; this one \
-                  does not.",
-        check: Check::Unchecked(
-            "deciding what a void-returning entry point should do on failure, and then \
-             either checking the pointers or giving the exact path the static fallback the \
-             f32 path already has",
-        ),
-        stated_in: Some((CAPSTONE, "returned pointers unchecked")),
+                  allocation is not one element larger than the write set. Failure is \
+                  DEFINED rather than proved: every allocation goes through \
+                  `@__y_gemm_exact_alloc`, which prints the byte count and exits 1, so an \
+                  out-of-memory condition is a diagnosis rather than a null dereference. \
+                  What it cannot do is what the f32 kernel in this same emitter does - fall \
+                  back to a static panel - because this kernel packs the WHOLE of A at \
+                  once, which is the property that makes its packing asymptotically free \
+                  and leaves its panel size unbounded in M and K.",
+        check: Check::Pinned("tests/exact_gemm_allocation_failure.rs"),
+        stated_in: Some((CAPSTONE, "packs the whole of A at once")),
     },
     TrustItem {
         claim: "The threaded wrapper's `pthread` mechanics: the job struct's layout, the \

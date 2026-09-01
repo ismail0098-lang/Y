@@ -228,8 +228,14 @@ fn exceeding_the_bound_by_one_really_does_go_wrong() {
     // The sibling tests do not hit this because they compile a `.ysu` through
     // the real binary and inherit the prelude.
     let ir = format!(
-        "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n{}\n{}",
+        "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n\
+         declare i32 @printf(ptr, ...)\ndeclare void @exit(i32) noreturn\n{}\n{}",
         y::cpu_gemm::emit_vnni_gemm_module(VnniExact::DEFAULT_FLUSH_K_PAIRS),
+        // `printf` and `exit` join `malloc` and `free` here for the same
+        // reason: neither `cpu_gemm` module is self-contained when emitted
+        // standalone - they come from `llvm_emitter`'s prelude in a real
+        // compile - and the threaded module calls all four now that every
+        // allocation goes through the checked `@__y_gemm_exact_alloc`.
         y::cpu_gemm::emit_vnni_threaded_module(true)
     );
     let ll = dir.join("m.ll");

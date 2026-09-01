@@ -826,6 +826,39 @@ some pointers, or adding a fallback for one of the buffers — would have been
 worse than naming it, because a partly-handled failure mode reads as a handled
 one.
 
+### Inject the failure; do not wait for it
+
+A failure path nothing exercises is a failure path nobody has run. The
+out-of-memory branch here is reachable in production and unreachable in a test
+suite, so the test **makes it happen**: `-Wl,--wrap=malloc` returns NULL on the
+n-th call, and every n is swept.
+
+Two details carry:
+
+- **Assert the exit CODE, not merely that the run failed.** A process killed by
+  SIGSEGV has no exit code, so `status.code() == Some(1)` is what separates a
+  defined failure from the undefined one it replaced. "Did not succeed" is
+  satisfied by both.
+- **A mutation can remove the bug instead of the check.** Reverting one
+  allocation to an unchecked `malloc` left the sweep green — because
+  `clang -O2` promotes an unchecked `malloc`/`free` pair whose pointer does not
+  escape into an `alloca`, so the site stopped being a runtime allocation.
+  Re-aim at one that escapes. The standing rule is *confirm a mutation changes
+  the program before recording a survivor*; this is the same rule one level
+  down, where the change deleted the hazard rather than the guard.
+
+And a corollary about the sweep's own scope: it covers the allocations that
+**survive to runtime**, not the ones in the IR. Say which, in the file.
+
+### Read the control row of a mutation table FIRST
+
+A row where every mutation fails the same suite is reporting the state of the
+tree, not the mutation — and the control row makes that unmissable, because a
+control that fails is a contradiction in terms. Here `exact_gemm_micro_model`
+failed on all six probes including the control: it had been broken in the clean
+state by the very change under test, and three suites run by hand after the
+edit had not covered it.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:
