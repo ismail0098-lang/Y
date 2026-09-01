@@ -8,7 +8,6 @@
 //  It enforces exactly-once consumption by `pipe.wait`.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::Span;
 use std::collections::HashMap;

@@ -6,7 +6,6 @@
 //  hierarchical AST defined in ast.rs.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use crate::lexer::{Token, TokenKind};

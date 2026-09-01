@@ -11,7 +11,6 @@
 //  see `docs/cpu_gemm_tuning.md` for the sweep they came from.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use crate::zero_drift::OperandBounds;
@@ -5377,13 +5376,6 @@ fn emit_entry() -> String {
          i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {})",
         KERNEL_NAME, a, bb, c, m, n, k, lda, ldb_c, ldc
     ))
-}
-
-/// `x - 1`, as a fresh temporary.
-fn b_sub1(b: &mut IrBuilder, x: &str) -> String {
-    let r = b.t();
-    b.w(&format!("{} = sub nsw i64 {}, 1", r, x));
-    r
 }
 
 /// The whole GEMM support module: globals, packing routines, micro-kernel and

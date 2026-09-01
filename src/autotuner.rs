@@ -27,7 +27,6 @@
 //     ranks; it does not measure. Treat any number it produces as a guess.
 // ============================================================
 
-#![allow(dead_code)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;

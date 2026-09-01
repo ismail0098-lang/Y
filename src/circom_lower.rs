@@ -19,7 +19,6 @@
 // missing a constraint still produces proofs, of a weaker statement than its
 // author wrote, and no artifact downstream records the difference.
 
-#![allow(dead_code)]
 
 use crate::circom_ast::*;
 use crate::zk_emitter::{LinearCombination, WitnessOp, ZkEmitter};
@@ -1580,13 +1579,6 @@ impl<'a> Lowerer<'a> {
             }
             other => Err(err(other.pos(), "left-hand side of a signal assignment must be a signal")),
         }
-    }
-
-    /// Resolve an lvalue to the wire of a signal. `resolve_signal_slot` plus
-    /// the requirement that it name a single one.
-    fn resolve_signal_wire(&mut self, e: &Expr, f: &mut Frame, pos: Pos) -> LResult<usize> {
-        let name = Self::base_name(e).unwrap_or_else(|| "this signal".to_string());
-        Ok(*self.resolve_signal_slot(e, f, pos)?.leaf(pos, &name)?)
     }
 
     // ────────────────────────────────────────────────────

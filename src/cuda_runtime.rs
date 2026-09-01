@@ -23,7 +23,6 @@
 // ============================================================
 
 #![allow(non_snake_case)]
-#![allow(dead_code)]
 
 use std::ffi::{c_void, CStr, CString};
 

@@ -6,7 +6,6 @@
 //  of the form (A · x) * (B · x) = C · x over the BN254 Fr field.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use crate::zk_poseidon_constants::{

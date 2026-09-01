@@ -3,7 +3,6 @@
 //  circom_ast.rs
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::zk_field::BigUint;
 

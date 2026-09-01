@@ -12,7 +12,6 @@
 // `\` as integer division against `/` as FIELD division) and folding them
 // together would make both harder to reason about.
 
-#![allow(dead_code)]
 
 use crate::zk_field::BigUint;
 

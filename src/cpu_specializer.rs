@@ -11,7 +11,6 @@
 //    5. DeepK            - K >> M,N (Split-K multi-thread reduction)
 // ============================================================
 
-#![allow(dead_code)]
 
 
 

@@ -20,7 +20,6 @@
 //    - In-register packing avoids SMEM round-trips where possible
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ir_grapher::Precision;
 use crate::sentinel::HardwareProfile;
@@ -29,7 +28,6 @@ use std::fmt::Write;
 /// Emits vectorized quantization/packing PTX code.
 pub struct QuantizationPass {
     reg_f32: u32,
-    reg_f16: u32,
     reg_u32: u32,
     reg_u64: u32,
     reg_pred: u32,
@@ -40,7 +38,6 @@ impl QuantizationPass {
     pub fn new() -> Self {
         Self {
             reg_f32: 0,
-            reg_f16: 0,
             reg_u32: 0,
             reg_u64: 0,
             reg_pred: 0,
@@ -51,12 +48,6 @@ impl QuantizationPass {
     fn alloc_f32(&mut self) -> String {
         let r = format!("%qf{}", self.reg_f32);
         self.reg_f32 += 1;
-        r
-    }
-
-    fn alloc_f16(&mut self) -> String {
-        let r = format!("%qh{}", self.reg_f16);
-        self.reg_f16 += 1;
         r
     }
 

@@ -8,7 +8,6 @@
 //  0-Bank-Conflict math prover.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use crate::bank_conflict::{BankConflictProver, SmemLayout as ProverLayout, SwizzlePattern};

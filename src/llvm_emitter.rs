@@ -22,7 +22,6 @@
 //    &mut T         ptr
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use std::collections::{BTreeMap, HashMap};
@@ -935,10 +934,6 @@ impl LlvmEmitter {
         );
         self.string_constants.push(decl);
         format!("@.str.{}", id)
-    }
-
-    fn w(&mut self, s: &str) {
-        write!(&mut self.output, "{}", s).unwrap();
     }
 
     fn wln(&mut self, s: &str) {

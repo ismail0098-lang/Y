@@ -22,7 +22,6 @@
 //  Tensor Core execution within a single SM.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ir_grapher::*;
 use crate::rt_core_emitter::RtCoreEmitter;
