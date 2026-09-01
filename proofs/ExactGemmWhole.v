@@ -59,11 +59,12 @@
     - **The packing buffers' sizes and the scratch tile's allocation ARE
       modelled**, in [ExactGemmAllocation.v] - every slot the packers and the
       flush write lands inside the `malloc` sized for it, and the allocation is
-      not one element larger than the write set. What is left outside is the
-      allocation FAILING: the emitted driver uses its nine
-      returned pointers unchecked, so an out-of-memory condition is a null
-      dereference rather than an error, where the f32 kernel in this same file
-      falls back to a static panel.
+      not one element larger than the write set. What is left outside is a
+      FALLBACK when the allocation fails: every allocation is checked now and
+      exits with a diagnosis rather than dereferencing null, but this kernel
+      packs the whole of A at once - the property that makes its packing
+      asymptotically free - so its panel size is unbounded and no fixed reserve
+      covers it, where the f32 kernel in this same file has one.
     - The threaded wrapper's `pthread` mechanics - the job struct's layout, the
       spawn/join protocol and the per-thread private C buffer - are not
       modelled at all. This file proves what the K bands COMPUTE and says
