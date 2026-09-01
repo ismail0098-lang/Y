@@ -46,6 +46,24 @@
 /// Fractional bits in the result. `exp2_neg_q16_16(0) == 1 << EXP2_FRAC_BITS`.
 pub const EXP2_FRAC_BITS: u32 = 28;
 
+/// The upper end of the domain the exhaustive accuracy sweep covers.
+///
+/// It was a bare `31 << 16` repeated in four places, and it is not an
+/// arbitrary sweep width: it is what `it_is_sub_ulp_accurate_everywhere`,
+/// `it_is_monotonically_non_increasing` and the whole-domain digest actually
+/// walk, and therefore exactly the domain over which the sub-ulp headline is
+/// established.
+///
+/// **The kernel admits arguments far past it.** `attn_accum` saturates to
+/// `2^30` before the call - 528 times further out - so a claim stated over
+/// this bound says nothing about the region between unless something closes
+/// the gap. `proofs/SoftmaxErrorBound.v`'s
+/// `the_swept_domain_covers_the_admitted_one` closes it (above the table the
+/// result is 0 and the true weight is below a quarter of an ulp), and
+/// `tests/softmax_error_bound.rs` asserts the proof's hypothesis is stated
+/// over THIS number rather than over a number that used to be this one.
+pub const EXP2_DOMAIN_BITS_SWEPT: u32 = 31 << 16;
+
 /// `round(ln 2 * 2^30)`.
 pub const LN2_Q30: u64 = 744_261_118;
 
@@ -216,7 +234,7 @@ mod tests {
     #[test]
     fn the_whole_domain_digest_is_the_cross_language_anchor() {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for t in 0..(31u32 << 16) {
+        for t in 0..EXP2_DOMAIN_BITS_SWEPT {
             h ^= exp2_neg_q16_16(t) as u64;
             h = h.wrapping_mul(0x0000_0100_0000_01B3);
         }
@@ -237,7 +255,7 @@ mod tests {
         // headline "0.908 ulp" a measurement rather than a proof. The domain is
         // 31 * 2^16 values and the sweep costs about 4 ms, so the sampling
         // bought nothing.
-        for t in 0..(31u32 << 16) {
+        for t in 0..EXP2_DOMAIN_BITS_SWEPT {
             let want = (1u64 << EXP2_FRAC_BITS) as f64 * (-(t as f64) / 65536.0).exp2();
             let err = (exp2_neg_q16_16(t) as f64 - want).abs();
             if err > worst {
@@ -268,7 +286,7 @@ mod tests {
         // The whole domain. It used to stop at 2^20, i.e. n < 16, so the half
         // of the range where the shift dominates was unchecked - including the
         // step down to zero, which is where a cliff would be.
-        for t in 0..(31u32 << 16) {
+        for t in 0..EXP2_DOMAIN_BITS_SWEPT {
             let v = exp2_neg_q16_16(t);
             assert!(
                 v <= prev,

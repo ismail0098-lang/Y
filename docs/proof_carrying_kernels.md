@@ -2188,6 +2188,17 @@ already in the type checker.
 - **Why it matters** — without this the addressable set is "kernels that are
   pure reductions", which is too narrow to build a company on.
 
+**FIRST THEOREM LANDED, 2026-09-01.** `proofs/SoftmaxErrorBound.v` bounds the
+exact-attention kernel's fixed-point softmax against the ideal one — `7/100`
+on a `+-127` output range at 65,536 keys, with the argument reduction's
+*multiplicative* error and the exp table's *additive* ulp composed, and the max
+subtraction carried through as the floor that makes the second negligible. See
+the dated entry at the foot of this document. The generalisable result is that
+**the `Decomposition` schema needed no approximate variant, because the error
+is introduced BEFORE the decomposition rather than by it** — which is exactly
+the property that does *not* hold for an f32 softmax, and therefore the shape
+of the addressable set: pipelines whose approximation is per-element.
+
 ### Phase 5 — Emit the certification packet · 4–6 years
 
 A proof is not evidence until it is in the form an auditor accepts. Generate
@@ -2958,6 +2969,194 @@ committed proof are each caught by two to four suites — diagnosis by name
 rather than isolation, and the entry says which is which.
 
 643 default / 909 zk / 8 y-gpu tests, all green.
+
+
+#### PHASE 4'S FIRST THEOREM: a PROVED error bound for the fixed-point softmax · 2026-09-01
+
+Phase 4's Done-when is "a softmax or a normalization layer carries a proven
+error bound rather than an empirical one", and it is the phase that decides
+whether the addressable set is wider than pure reductions. **Every theorem in
+`proofs/` before this one is an EXACTNESS or a COVERAGE claim** — which is not
+a stylistic preference, it is §0 of the process doc, the precondition that
+makes the relationship between kernel and specification an equality.
+
+`proofs/SoftmaxErrorBound.v`, 15 `Print Assumptions`, no axioms, nothing
+admitted. **653 default / 940 zk / 8 y-gpu, all green** (up 6, the new tie
+file). No `src/` behaviour change, so every emitted module is byte-identical.
+
+##### The ingredients all shipped, and the COMPOSITION was bounded by nothing
+
+Each piece was pinned individually and well:
+
+- `fixed_exp::exp2_neg_q16_16` — `it_is_sub_ulp_accurate_everywhere` is
+  EXHAUSTIVE over `0 .. 31<<16` against `f64::exp2`, worst 0.908 ulp.
+- `MAX_EXACT_SEQ_LEN` is *derived* (`2^63 / ((2^28-1)*127)`), so the int64
+  accumulator provably cannot wrap.
+- the `min.s64 ..., 1073741824` saturate has its own necessity test.
+
+What existed for the OUTPUT was `tests/attention_quantization_error.rs`, whose
+own stated bar is comparative and empirical — *"is it more wrong than the f32
+online softmax that production flash attention already ships?"* — on synthetic
+score distributions. That sentence is what this replaces.
+
+**The interesting part is not the exp.** Exhaustion over a finite domain is
+stronger than a proof about the table and the series would be, so the exp
+enters as a HYPOTHESIS. The chain around it is what nothing covered:
+
+    m - s -> ((m - s)*KFix + 2^15) >> 16 -> min(.., 2^30) -> Q0.28 -> exact
+             int64 accumulate -> divide
+
+##### Three joints, and the second is the one that existed nowhere
+
+- **The argument reduction rounds an EXPONENT**, so its error is
+  *multiplicative* in the weight while the exp's ulp is *additive*. They
+  compose as `EPS*w + 1`, not as a single number, and that shape is what makes
+  the max subtraction load-bearing below.
+- **The saturate is outside the swept domain.** The exhaustive sweep stops at
+  `31<<16 = 2,031,616`; the emitted `min.s64` admits arguments to `2^30`, **528
+  times further out**. `the_swept_domain_covers_the_admitted_one` is the
+  two-line argument that closes it — above the table the implementation returns
+  0 and the ideal weight is below a quarter of an ulp, because `31*2^32` is
+  past thirty halvings of `2^28`. So the "0.908 ulp everywhere" headline does
+  hold on the whole domain the kernel can reach; it simply had never been
+  established. *A number in a comment is not a check*, in the one place the
+  number was not even in a comment.
+- **The max subtraction had to be carried through.** It is usually described as
+  an overflow guard. It is also what makes the table's ABSOLUTE error
+  relatively negligible: `delta` is zero at the argmax, so one weight is
+  exactly `2^28` and `Wtot >= 2^28` — the additive term is `n` ulps against a
+  total of at least `2^28` of them.
+  `a_total_weight_below_one_ulp_admits_a_zero_denominator` is the refutation,
+  and it is not hypothetical: it is the F=16 attention-sink failure
+  `attention_quantization_error.rs` already records, one layer up — every
+  non-sink weight rounded to zero and the whole tail disappeared.
+
+##### THE ANSWER TO THE PHASE 2 QUESTION: bounds compose here for a stateable reason
+
+The question was whether the `Decomposition` schema extends to approximate
+arithmetic. **It does, and narrowly: the error is introduced BEFORE the
+decomposition, not by it.** `L` and `O` are exact integer reductions, so
+`GridStrideSplit.grid_stride_exact` applies verbatim and the per-element error
+enters the fold as *data*.
+`the_bound_holds_at_every_launch_geometry` is that join — the bound is a
+property of the kernel rather than of one launch.
+
+An f32 softmax has no such split: its error is produced BY the reduction, so
+the bound would have to be re-derived per decomposition. **That contrast is the
+actual content of "bounds compose differently", and it says the addressable set
+widens to pipelines whose approximation is PER-ELEMENT, not to approximate
+reductions in general.**
+
+##### The bound as a number, and how tight it is
+
+`2*VMAX*(EPS*Wtot + n) / L`, with `EPS = 2^-16` the argument reduction's
+relative term and `n` the exp table's absolute one. At **65,536 keys** with
+int8 `V` the expression evaluates to `4318/65519 = 0.0659`, so the corollary
+states `7/100` — the round number above it, not a fitted constant. At `n = 2^20`
+the same expression is `0.99998`, i.e. still under one unit of `V` but only
+just, which is a real statement about where Q0.28 runs out.
+
+Measured tightness, from the tie: the **per-element** bracket is tight — worst
+observed error is **0.49 of the allowance** over 3,540 points. The end-to-end
+output bound is 180–10,000x loose on random data, because per-element errors
+cancel in the sum. Both numbers are reported; a bound quoted without its
+slack is half a claim.
+
+##### No Reals, and that forced a real design decision
+
+`tests/proofs_are_checked.rs` requires every `Print Assumptions` to report
+`Closed under the global context`. Coq's `R` is axiomatized, so one
+`Require Import Reals` puts seventeen axioms under the file. Everything is `Z`
+and `Q`.
+
+**The obvious interface for the ideal weight is INCONSISTENT over Q.** Exact
+homogeneity `W(u+v)*2^28 = W(u)*W(v)` plus one exact halving forces
+`W(2^31)^2 = 2^55`, and no rational squares to it —
+`exact_homogeneity_is_unsatisfiable_over_Q`, on top of a from-scratch
+`no_rational_squares_to_two` (prime 2 divides both numerator and denominator of
+a fraction in lowest terms). An inconsistent hypothesis set proves everything,
+so this is not pedantry: the file would have been worthless.
+
+So the interface is a two-sided rational **bracket**, and both directions of
+*check your premise is satisfiable* are run: `the_interface_is_satisfiable`
+exhibits the model `2^28 * (1 - 2^-32)^u`, and
+`the_per_unit_factor_is_what_one_unit_of_log2_costs` proves the rational
+inequality `(1 - 2^-32)^(2^32) <= 1/2` that fixes the constant — the
+real-analytic fact `2^(-2^-32) >= 1 - 2^-32`, made checkable without ever
+mentioning a real.
+
+##### A mechanical trap worth carrying: `ring` NORMALISES, and a big power is a landmine
+
+`ring` (and `auto`) on a goal mentioning `qpow BETA (Z.to_nat 4294967296)` asks
+for four billion multiplications: **`Stack overflow`, after 85 seconds, at
+`Qed` rather than at the tactic**. `remember` does not help — it leaves a
+let-binding `ring` zeta-reduces through. The fix is to prove the algebra over
+ABSTRACT rationals and `apply` it, so the big term only ever meets first-order
+unification. `lra`/`nra` are safe (they abstract atoms) and so is the kernel:
+the theorem that STATES the big term checks in milliseconds. Diagnosed by
+bisection, not guessed.
+
+##### MUTATION TABLE — nine mutations, each `--test` target run separately
+
+| mutation | `proofs_are_checked` | `softmax_error_bound` | `exact_attention_bounds` | `attention_quantization_error` | `__lib__` |
+|---|---|---|---|---|---|
+| M1 proof's `HALF` halved | **FAIL** | **FAIL** | ok | ok | ok |
+| M2 twenty halvings, not thirty | **FAIL** | ok | ok | ok | ok |
+| M3 `EPS` too tight for `ALPHA` | **FAIL** | ok | ok | ok | ok |
+| M4 `VMAXQ` dropped from the bound | **FAIL** | ok | ok | ok | ok |
+| M5 emitter loses the saturate | ok | **FAIL** | **FAIL** | ok | ok |
+| M6 emitter loses round-to-nearest | ok | **FAIL** | **ok** | ok | ok |
+| M7 the swept domain narrows | ok | **FAIL** | ok | ok | **FAIL** |
+| M8 exp loses its early return | ok | **FAIL** | ok | **FAIL** | **FAIL** |
+| M9 the zero-denominator refutation deleted | **ok → FAIL** | ok | ok | ok | ok |
+
+**M2, M3 and M4 are caught by `coqc` alone**, which is the taxonomy working:
+the emitted code is unchanged, so there is nothing for a behavioural suite to
+see. **M6 is caught by the new file alone** — `exact_attention_bounds` pins the
+`>> 16` and the `min.s64` and *not* the `+ 32768`, so the round-to-nearest
+addend was covered by nothing until the proof's `HALF` had to equal it.
+
+##### M9 WAS A REAL SURVIVOR, AND THE HOLE WAS IN THE GATE THAT GUARDS ALL 17 PROOFS
+
+`each_proof_still_proves_the_thing_it_exists_for` was a bare
+`src.contains(needle)`. **Every proof file names its own theorems in its header
+doc comment** (`[the_name]`), so deleting a theorem *together with its
+`Print Assumptions` line* — the line has to go too, or `coqc` catches the
+dangling reference — left the whole gate green. Measured, not reasoned about:
+all four tests passed on a `SoftmaxErrorBound.v` with the refutation removed.
+
+`names_something_real` requires a declaration site now (`Theorem`/`Lemma`/… at
+the start of a line, name ending there), or the literal `Print Assumptions`.
+All 17 files pass unchanged, so no existing entry was relying on the hole, and
+the fix was confirmed to generalise by deleting a header-mentioned theorem from
+`GridStrideSplit.v` and watching it fire.
+
+**It is a pre-existing hole found by mutating a new file.** That is the
+argument for running the mutation sweep against the *gate* and not only against
+the subject.
+
+##### What this does NOT claim
+
+- **It is not a statement about `f64::exp2` or the real exponential.** `W` is
+  abstract, constrained by four properties the true function has; nothing here
+  proves it has them. That is a TCB item and it sits beside `vpdpwssd`'s
+  semantics rather than above them.
+- **The exp's accuracy is a hypothesis**, discharged by exhaustion in Rust over
+  the *swept* domain. The extension to the admitted domain is proved here.
+- **`KFix` is itself a rounded temperature** and this file does not price that;
+  it is a uniform reparameterisation of the exponent, and
+  `the_temperature_multiplier_carries_two_to_the_thirty_two` is where it lives.
+- **Nothing here is about int8 quantization of Q, K or V.**
+- **The tie is the `GridStrideSplit` grade** — `tests/softmax_error_bound.rs`
+  runs the real `exp2_neg_q16_16` and the real emitted arithmetic and reads the
+  proof's constants out of the `.v` — not the exact GEMM's byte-identity.
+- **`exp2_neg_q16_16` has FOUR transcriptions** (this Rust one, the PTX in
+  `ptx_device_function`, and two Python ones). A theorem about one of them is a
+  theorem about all four **only** because `EXP2_DOMAIN_DIGEST` pins them
+  together over the whole domain. Said here because it is easy to assume and
+  wrong if the digest ever goes.
+
+653 default / 940 zk / 8 y-gpu tests, all green.
 
 
 ## 5. End goal

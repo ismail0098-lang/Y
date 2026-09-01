@@ -507,6 +507,48 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            // Phase 4's first theorem, and the first BOUND in this directory -
+            // every other file states an exactness or a coverage claim.
+            "SoftmaxErrorBound.v",
+            &[
+                // The headline: the emitted chain's output against the ideal
+                // softmax, and the same expression evaluated at a long context.
+                "the_attention_output_is_within_the_bound",
+                "Print Assumptions the_attention_output_is_within_the_bound",
+                "the_output_quotient_is_within_the_bound",
+                "the_bound_at_a_long_context",
+                // The three joints, each of which was covered by nothing. The
+                // exp itself is NOT one of them - it is discharged
+                // exhaustively in Rust, which is stronger than a proof here.
+                "an_unsaturated_argument_is_within_a_half_ulp",
+                "the_weight_is_within_a_relative_ulp",
+                "the_max_subtraction_puts_a_floor_under_the_total_weight",
+                // The domain gap: the exhaustive sweep stops at 31<<16 and the
+                // emitted saturate admits 2^30. Two lines, and they existed
+                // nowhere.
+                "the_swept_domain_covers_the_admitted_one",
+                "saturation_means_the_exact_exponent_is_astronomically_large",
+                // The refutation that makes the max subtraction load-bearing
+                // rather than decorative: without its floor the same bracket
+                // admits an all-zero denominator.
+                "a_total_weight_below_one_ulp_admits_a_zero_denominator",
+                // The answer to "does the Decomposition schema extend to
+                // approximate arithmetic": the reduction is still EXACT, so
+                // GridStrideSplit applies verbatim and the per-element error
+                // enters the fold as data.
+                "the_bound_holds_at_every_launch_geometry",
+                // A hypothesis nothing is shown to satisfy is the proof-shaped
+                // version of a licence nothing can violate. Both directions:
+                // the obvious interface is INCONSISTENT over Q, and the one
+                // used here has a model.
+                "exact_homogeneity_is_unsatisfiable_over_Q",
+                "no_rational_squares_to_two",
+                "the_interface_is_satisfiable",
+                // ...and the constant the bracket turns on is not magic.
+                "the_per_unit_factor_is_what_one_unit_of_log2_costs",
+            ][..],
+        ),
+        (
             "GemmBandSplit.v",
             &[
                 // The f32 kernel is the SECOND kernel, and its K-split is a
@@ -765,13 +807,56 @@ fn each_proof_still_proves_the_thing_it_exists_for() {
             .unwrap_or_else(|e| panic!("read proofs/{name}: {e}"));
         for needle in required {
             assert!(
-                src.contains(needle),
-                "proofs/{name} no longer contains `{needle}`, which is what makes \
+                names_something_real(&src, needle),
+                "proofs/{name} no longer STATES `{needle}`, which is what makes \
                  the file worth checking. It is gone or renamed; point this gate \
-                 at whatever replaced it rather than deleting the entry."
+                 at whatever replaced it rather than deleting the entry. \
+                 (A mention in the file's header prose does not count - see \
+                 `names_something_real`.)"
             );
         }
     }
+}
+
+/// A needle must appear at a **declaration site**, not merely somewhere in the
+/// file.
+///
+/// This used to be a bare `src.contains(needle)`, and that is satisfied by the
+/// theorem's own name in the header doc comment - which every proof here has,
+/// because each file's header explains what it proves and refers to its
+/// theorems as `[the_name]`. Measured rather than reasoned about: deleting
+/// `a_total_weight_below_one_ulp_admits_a_zero_denominator` from
+/// `SoftmaxErrorBound.v` **together with its `Print Assumptions` line** left
+/// all four tests in this file green, because the header still named it. The
+/// `Print Assumptions` line has to go too or `coqc` catches the dangling
+/// reference; with both gone, nothing did.
+///
+/// It is a hole in the gate that guards the whole directory, not in one entry,
+/// and it is pre-existing - it was found by mutating a new file and applies to
+/// all seventeen.
+fn names_something_real(src: &str, needle: &str) -> bool {
+    // `Print Assumptions foo` IS the site it names; match it literally.
+    if needle.starts_with("Print Assumptions ") {
+        return src.contains(needle);
+    }
+    const KEYWORDS: [&str; 9] = [
+        "Theorem", "Lemma", "Corollary", "Definition", "Fixpoint", "Example",
+        "Remark", "Fact", "Proposition",
+    ];
+    // ...and a bare name is also satisfied by its own `Print Assumptions`,
+    // which cannot survive the theorem being deleted.
+    if src.contains(&format!("Print Assumptions {needle}")) {
+        return true;
+    }
+    KEYWORDS.iter().any(|kw| {
+        src.match_indices(&format!("{kw} {needle}")).any(|(i, m)| {
+            // The declaration must start a line, and the name must end there:
+            // `Lemma foo_bar` must not satisfy a needle of `foo`.
+            let starts_line = i == 0 || src.as_bytes()[i - 1] == b'\n';
+            let after = src.as_bytes().get(i + m.len()).copied().unwrap_or(b' ');
+            starts_line && !(after.is_ascii_alphanumeric() || after == b'_' || after == b'\'')
+        })
+    })
 }
 
 /// A new `.v` file must arrive with a content control, or it gets the two weak
