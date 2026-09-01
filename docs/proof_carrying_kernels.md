@@ -2199,6 +2199,12 @@ is introduced BEFORE the decomposition rather than by it** — which is exactly
 the property that does *not* hold for an f32 softmax, and therefore the shape
 of the addressable set: pipelines whose approximation is per-element.
 
+**Extended the same day**: the softmax's *temperature* is itself quantized
+(`KFix = round(C * 2^32)`), which the first pass named as unpriced. Priced now,
+and it is a head_dim question rather than a `KFix` one — under `1/2048` on any
+weight at head_dim 128. Two multipliers are refused rather than bounded, and
+both preconditions had lived only as a bare `continue` in a Python script.
+
 ### Phase 5 — Emit the certification packet · 4–6 years
 
 A proof is not evidence until it is in the form an auditor accepts. Generate
@@ -3158,6 +3164,139 @@ the subject.
 
 653 default / 940 zk / 8 y-gpu tests, all green.
 
+
+#### The temperature was quantized too, and its two preconditions lived in a Python script · 2026-09-01
+
+`proofs/SoftmaxErrorBound.v` landed earlier the same day with a **"what this
+does NOT claim"** section, and one of its four items was reachable:
+
+> **`KFix` is itself a rounded temperature** and this file does not price
+> that. `KFix = round(C * 2^32)` for a real `C = q_scale*k_scale/sqrt(d)`, so
+> the kernel computes the exact-for-KFix softmax of a slightly different
+> temperature.
+
+It is priced now — Part 6b, seven new theorems, still no axioms and nothing
+admitted — and the increment is worth reading for what pricing it *turned up*
+rather than for the bound.
+
+##### The shape of the answer is a head_dim question, not a KFix one
+
+Rounding the multiplier moves the exponent by `delta * |KFix - C*2^32|`, so at
+most `(delta + 1)/2` in units of `2^-32` log2. That error is proportional to
+the **score delta** and **independent of `KFix`** — which is not what you would
+guess, and it means a bound on the delta is the whole bound. The delta is
+bounded by the head_dim: `|s| <= 127^2 * hd` for an int8 pipeline, so
+`delta = m - s_i <= 2 * 127^2 * hd`, a compile-time function of one parameter.
+
+At head_dim 128 that is a factor under **1/2048** on any ideal weight
+(`at_head_dim_128_the_temperature_moves_a_weight_by_under_a_two_thousandth`).
+Measured: the exponent bound is attained **exactly** — 1.000 of its half-delta
+allowance — and the weight bound is **1.47x** slack, the slack coming from
+Bernoulli's linearisation of `BETA^n` and from rounding `n` up to `(d+1)/2`.
+Report the slack, not just the bound.
+
+##### THE FINDING: `round(C * 2^32)` had SEVEN transcriptions and was CHECKED IN ONE
+
+Every test that needed a multiplier wrote `(c * 2f64.powi(32)).round()` itself
+— four sites in `tests/softmax_error_bound.rs`, two in
+`tests/exact_attention_bounds.rs` — and `src/` had none. The only place the
+result was validated at all was `tools/ptx_bridge.py`:
+
+```python
+kfix = int(round(c * 2.0 ** 32))
+if kfix <= 0 or kfix >= 2 ** 31:
+    continue
+```
+
+A bare `continue`, so a temperature outside the representable range **silently
+removed a case from a measurement** instead of failing it —
+`feedback-conditional-gates-skip-silently`, in the script whose whole job is to
+validate the kernel against a real model. Skips are counted and printed now.
+
+Both bounds are real, and neither was derived anywhere:
+
+* **`KFix == 0`**, reachable whenever `C < 2^-33`. Then `t = (0 + 2^15) >> 16`
+  is `0` for **every** key, so every weight is exactly `2^28` and the softmax
+  is **uniform** — it carries no information about the scores at all. That is
+  the same symptom `ptx_bridge.py`'s own finding 06 records from the opposite
+  cause (the bridge passed `C * 2^16`, a multiplier `2^16` too small), and its
+  differential could not see it because both arms replicate the kernel's
+  formula and agree bit for bit on a uniform answer.
+* **`KFix >= 2^31`**. The parameter is declared `.param .u32 q6` and consumed
+  by `mul.wide.s32` — a **signed** wide multiply. The two readings are
+  different numbers, and not by a rounding: at `KFix = 2^31` and one unit of
+  delta the unsigned reading gives argument `32768`, a weight of
+  `2^28 * 2^(-1/2)`, while the signed one gives `-32768`, which the
+  `cvt.u32.u64` below the saturate wraps to `4294934528` — far above the
+  table, so the weight is **zero**. The key vanishes. Note the saturate cannot
+  help: `min.s64` bounds from *above* and the product is negative.
+
+Both are `exact_attention::temperature_fixed_point` now, which refuses them by
+name and says why, and both are theorems
+(`a_zero_multiplier_gives_every_key_the_same_weight`,
+`the_two_readings_of_the_multiplier_disagree_above_two_to_the_thirty_one`,
+`the_signed_reading_zeroes_a_weight_the_unsigned_one_keeps` — the last
+discharged from the exp's own early-return hypothesis, so it is the *proof* that
+says the key vanishes, not an observation).
+
+**The quantization error itself is NOT refused**, and saying so is the point of
+having the bound: it is bounded rather than catastrophic, so a compiler that
+refused it would be refusing every temperature.
+
+##### A `nat` literal is UNARY, and that is the same landmine as the `ring` one
+
+`at_head_dim_128_...` needs `n = 2,064,513`. Writing that as a `nat` literal
+builds **two million constructors**, and the first version of the proof hung —
+`simpl`, `Z.of_nat` and `lia` all normalise through it. `Z.to_nat 2064513` is a
+*term*, and `Z2Nat.id` recovers the integer; the file goes from not finishing
+to **13.9 s**.
+
+This is the second instance of one lesson in two sessions. The first was `ring`
+reflexively normalising `qpow BETA (Z.to_nat 4294967296)`. The rule to carry:
+**in a proof about fixed-point arithmetic, the constants are large, and any
+tactic that normalises will try to evaluate them.** Keep every large number in
+`Z`, and let `nat` see only `Z.to_nat` of it.
+
+##### Mutation table — 10 mutations, each `--test` target run separately
+
+| mutation | proofs_are_checked | softmax_error_bound | exact_attention_bounds |
+|---|---|---|---|
+| T1 exponent bound loses its `+1` | **FAIL** | ok | ok |
+| T2 the proof's score span coefficient | **FAIL** | **FAIL** | ok |
+| T3 the head_dim-128 corollary claims 1/8192 | **FAIL** | ok | ok |
+| T4 the bracket lemma's hypothesis weakened | **FAIL** | ok | ok |
+| T5 compiler stops refusing `KFix = 0` | ok | **FAIL** | ok |
+| T6 compiler stops refusing the signed limit | ok | **FAIL** | ok |
+| T7 `score_delta_span` drops its factor of two | ok | **FAIL** | **FAIL** |
+| T8 compiler's signed limit disagrees with the proof's | ok | **FAIL** | ok |
+| T9 *control* — refuse every temperature | ok | **FAIL** | **FAIL** |
+| T10 the worst-case temperature leaves the sweep | ok | **FAIL** (after the fix below) | ok |
+
+`attention_quantization_error`, `exact_attention_schedule` and the lib/bin unit
+tests are `ok` for all ten, which is the taxonomy working: T1–T4 change no
+emitted code, so no behavioural suite can see them.
+
+**T10 SURVIVED, and the hole it exposed is one this repository already has a
+name for.** The sweep's non-vacuity floor asserted the worst *weight* factor
+reached a quarter of the allowance — and the realistic temperatures alone reach
+**57%** of it, so removing the deliberately-worst-case `C` left the floor
+passing. What the worst case actually buys is the **exponent** bound being
+*attained*, and that number was `println!`ed rather than asserted. Both this
+document and the proof's header claim the bound is tight; *a number in a
+comment is not a check*, and a number in a `println!` is not either. The test
+now asserts `worst_exp > 0.99`, and T10 fails with the right diagnosis (`worst
+was 0.837 of it`). 10/10.
+
+##### Where this leaves the "what this does not claim" list
+
+Three of the four items stand and are structural rather than reachable: the
+exp's accuracy is a hypothesis discharged by exhaustion in Rust (which is
+*stronger* than a proof about the table would be); nothing here is about int8
+quantization of Q, K or V; and the tie is the `GridStrideSplit` grade — the
+proof is read against the running code, not rendered with it from one `Ix`.
+The fourth is gone.
+
+`657 / 944 / 8` tests, both builds, no committed artifact changed.
 
 ## 5. End goal
 

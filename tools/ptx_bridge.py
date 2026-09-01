@@ -149,6 +149,7 @@ def main():
 
     print(f"captured {len(captured)} attention calls from a real forward pass")
     checked = mismatched = 0
+    skipped = []  # temperatures the kernel cannot represent; see below
     worst_spread = 0.0
 
     for li in (0, 8, 16, 23):
@@ -190,9 +191,20 @@ def main():
             # formula, so they still agreed bit for bit, and the check passed
             # 12/12 while validating a computation with no temperature in it.
             # That is why `spread` is tracked and asserted at the end.
+            #
+            # The two bounds below are the compiler's, not this script's:
+            # `exact_attention::temperature_fixed_point` refuses the same two
+            # multipliers and says why, and `SoftmaxErrorBound.v` proves what
+            # each one does to the answer (`a_zero_multiplier_gives_every_key_
+            # the_same_weight`, `the_two_readings_of_the_multiplier_disagree_
+            # above_two_to_the_thirty_one`). They lived HERE, as a bare
+            # `continue`, until 2026-09-01 -- so a temperature outside the
+            # representable range silently removed a case from a measurement
+            # instead of failing it. Skips are counted and reported now.
             c = float(sq) * float(sk) * sc * math.log2(math.e)
             kfix = int(round(c * 2.0 ** 32))
             if kfix <= 0 or kfix >= 2 ** 31:
+                skipped.append((c, kfix))
                 continue
 
             qb = qi.to(torch.int8).contiguous()
@@ -228,6 +240,12 @@ def main():
     print(f"bit-identical            : {checked - mismatched}")
     print(f"mismatched               : {mismatched}")
     print(f"worst max(p)/mean(p)     : {worst_spread:.1f}  (1.0 = uniform)")
+    print(f"skipped (unrepresentable): {len(skipped)}")
+    if skipped:
+        # Loud, because a silent skip of an unrepresentable temperature is a
+        # measurement quietly shrinking rather than failing.
+        for c, kf in skipped[:5]:
+            print(f"    C = {c:e} -> KFix = {kf}, outside (0, 2^31)")
     if checked > 0 and worst_spread < 2.0:
         print("\nFAIL: every softmax weight came back within a factor of two of the")
         print("mean, i.e. the weights are uniform and the temperature is doing")
