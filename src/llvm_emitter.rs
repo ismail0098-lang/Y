@@ -1616,16 +1616,12 @@ impl LlvmEmitter {
                     });
                     let req = crate::zero_drift::Requirement::for_type_with_bounds(&ty_name, range);
                     match crate::zero_drift::select_repr(&req, &self.drift_costs) {
-                        Some(decision) => {
-                            self.drift_report.push(format!(
-                                "{}: {} -> {} ({})",
+                        Ok(decision) => {
+                            self.drift_report.push(crate::zero_drift::report_line(
                                 name,
-                                ty_name,
-                                decision.repr.name(),
-                                match decision.cost_ps {
-                                    Some(c) => format!("measured {:.0} ps/acc", c),
-                                    None => "no device measurements, narrowest sufficient".into(),
-                                }
+                                &ty_name,
+                                &decision,
+                                crate::zero_drift::explain_requested(),
                             ));
                             self.locals.insert(name.clone(), decision.repr.llvm_type().to_string());
                             self.locals_ast_type.insert(name.clone(), ty_name.clone());
@@ -1638,13 +1634,16 @@ impl LlvmEmitter {
                             )
                             .unwrap();
                         }
-                        None => {
+                        Err(why) => {
                             self.emit_errors.push(format!(
                                 "Line {}: @ZeroDrift on `{}: {}` cannot be honoured. No exact \
 representation holds that range at that resolution, and only exact (integer or fixed-point) \
 accumulation is drift-free - f64 is the same non-associative arithmetic with more mantissa. \
-Add @bounds(min, max) to state the accumulator's real range, or declare it as a Q format.",
-                                span.line, name, ty_name
+Add @bounds(min, max) to state the accumulator's real range, or declare it as a Q format.\n{}",
+                                span.line,
+                                name,
+                                ty_name,
+                                crate::zero_drift::explain_rejections(&why)
                             ));
                             // Fall back to the declared type so the rest of the
                             // function still emits; the error above fails the build.

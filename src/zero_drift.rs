@@ -153,15 +153,6 @@ impl DriftRepr {
         (2f64).powi(self.frac_bits() as i32)
     }
 
-    /// The C type used to hold it.
-    pub fn c_type(self) -> &'static str {
-        match self {
-            DriftRepr::FixedQ16_16 => "int32_t",
-            DriftRepr::FixedQ32_32 | DriftRepr::Int64 => "int64_t",
-            DriftRepr::Float64 => "double",
-            DriftRepr::KahanF32 => "float",
-        }
-    }
 }
 
 /// What the declared type needs from an accumulator.
@@ -291,8 +282,19 @@ pub struct Decision {
     pub rejected: Vec<(DriftRepr, String)>,
     /// Cost used to break the tie, when one was available.
     pub cost_ps: Option<f64>,
-    /// True when the choice came from measurement rather than the fallback order.
-    pub measured: bool,
+}
+
+impl Decision {
+    /// True when the choice came from measurement rather than the fallback
+    /// order.
+    ///
+    /// This was a `measured: bool` FIELD, set in lockstep with `cost_ps` and
+    /// read by nothing outside this file's own unit tests. Two fields encoding
+    /// one fact is how the "two fallbacks disagreeing, with the exposed one
+    /// unsafe" shape starts; derived, they cannot.
+    pub fn measured(&self) -> bool {
+        self.cost_ps.is_some()
+    }
 }
 
 /// Picks the cheapest exact representation that satisfies `req`.
@@ -355,7 +357,66 @@ pub fn running_sum<'e>(
     }
 }
 
-pub fn select_repr(req: &Requirement, costs: &CostTable) -> Option<Decision> {
+/// Render the per-candidate rejection reasons for a user-facing error.
+///
+/// The list is what `select_repr` computed on its way to refusing, one entry
+/// per representation. Before this existed it was discarded at the `None`
+/// return, so the compiler could say only that nothing worked - never which
+/// four things it tried or why each failed.
+pub fn explain_rejections(rejected: &[(DriftRepr, String)]) -> String {
+    if rejected.is_empty() {
+        return "  (no candidate representations were considered)".to_string();
+    }
+    rejected
+        .iter()
+        .map(|(r, why)| format!("  {} rejected: {}", r.name(), why))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The advisory line a backend prints for one `@ZeroDrift` accumulator.
+///
+/// Shared by the LLVM and PTX emitters so they cannot drift apart on it - they
+/// each carried their own `match decision.cost_ps` - and so that
+/// [`Decision::rejected`] is actually READ. That field was populated on every
+/// selection and consumed by nothing outside this file's unit tests, while the
+/// struct's own doc comment said it existed "so the compiler can report a real
+/// reason rather than an advisory".
+///
+/// `explain` is a parameter rather than an environment read so this stays pure
+/// and testable; the call sites read `Y_DRIFT_EXPLAIN`.
+pub fn report_line(name: &str, ty_name: &str, d: &Decision, explain: bool) -> String {
+    let how = match d.cost_ps {
+        Some(c) => format!("measured {c:.0} ps/acc"),
+        None => "no device measurements, narrowest sufficient".to_string(),
+    };
+    debug_assert_eq!(d.measured(), d.cost_ps.is_some());
+    let mut line = format!(
+        "{}: {} -> {} ({}, {} of {} representations rejected{})",
+        name,
+        ty_name,
+        d.repr.name(),
+        how,
+        d.rejected.len(),
+        d.rejected.len() + 1,
+        if explain { "" } else { "; Y_DRIFT_EXPLAIN=1 for why" }
+    );
+    if explain {
+        line.push('\n');
+        line.push_str(&explain_rejections(&d.rejected));
+    }
+    line
+}
+
+/// Whether the caller asked for the per-candidate reasons.
+pub fn explain_requested() -> bool {
+    std::env::var("Y_DRIFT_EXPLAIN").is_ok()
+}
+
+pub fn select_repr(
+    req: &Requirement,
+    costs: &CostTable,
+) -> Result<Decision, Vec<(DriftRepr, String)>> {
     let mut rejected = Vec::new();
     let mut viable = Vec::new();
 
@@ -398,16 +459,28 @@ pub fn select_repr(req: &Requirement, costs: &CostTable) -> Option<Decision> {
         for (r, c) in with_cost.iter().skip(1) {
             rejected.push((*r, format!("slower: {:.1} ps/acc vs {:.1}", c, cost)));
         }
-        Some(Decision { repr, rejected, cost_ps: Some(cost), measured: true })
+        Ok(Decision { repr, rejected, cost_ps: Some(cost) })
     } else {
         let mut sorted = viable.clone();
         sorted.sort_by_key(|r| r.total_bits());
-        sorted.first().map(|repr| {
-            for r in sorted.iter().skip(1) {
-                rejected.push((*r, "wider than necessary (no measurements available)".to_string()));
+        match sorted.first() {
+            Some(repr) => {
+                for r in sorted.iter().skip(1) {
+                    rejected
+                        .push((*r, "wider than necessary (no measurements available)".to_string()));
+                }
+                Ok(Decision { repr: *repr, rejected, cost_ps: None })
             }
-            Decision { repr: *repr, rejected, cost_ps: None, measured: false }
-        })
+            // The reasons were computed above, one per candidate, and used to be
+            // DROPPED here - `sorted.first().map(..)` returned `None` and took
+            // `rejected` with it. So the user's error said "no exact
+            // representation holds that range at that resolution" and could not
+            // say which representations were tried or why each failed, three
+            // lines after working it out. `Decision::rejected` was a field the
+            // struct's own doc comment said existed "so the compiler can report
+            // a real reason rather than an advisory", and no backend read it.
+            None => Err(rejected),
+        }
     };
 
     best
@@ -512,18 +585,24 @@ impl VnniExact {
         (f64::from(i32::MAX) / products).sqrt().floor()
     }
 
-    /// Whether operands bounded by `m` in magnitude are licensed.
+    /// Licence the scheme for operands bounded by `m`, or say why not.
+    ///
+    /// **There is exactly one of these, deliberately.** A `bool`-returning twin
+    /// `licenses(&self, m) -> bool` used to sit here, reading as the cheap form
+    /// of the same question. It was `m.is_finite() && m >= 0.0 && m <=
+    /// max_operand_magnitude()` - i.e. it never grew the `m < 1` refusal below,
+    /// the fix for the unsoundness where `@bounds(-0.001, 0.001)` was licensed
+    /// at magnitude 0.001 and every such operand stages to int16 ZERO. Measured
+    /// before deleting it: `licenses(0.001)` was `true` while `license(0.001)`
+    /// is an `Err`. It had no callers, so it never shipped a wrong answer - the
+    /// same reason the original bug was findable at all, and the same reason to
+    /// remove it now rather than after something calls it.
     ///
     /// `m` is in the scheme's own integer domain - the int16 operand values
     /// actually fed to `vpdpwssd` - **not** the real-valued range of the source
     /// matrices. Converting one to the other is the quantization scale, and it
     /// is the caller's job precisely because getting it wrong is a wrong answer
     /// rather than a slow one.
-    pub fn licenses(&self, m: f64) -> bool {
-        m.is_finite() && m >= 0.0 && m <= self.max_operand_magnitude()
-    }
-
-    /// Licence the scheme for operands bounded by `m`, or say why not.
     pub fn license(&self, m: f64) -> Result<(), String> {
         // The licence must be about the values the KERNEL sees, and `m` arrives
         // from `@bounds` on the source matrices - real numbers. Those coincide
@@ -885,13 +964,13 @@ mod tests {
     fn an_unknown_type_name_is_refused_not_guessed() {
         let costs = CostTable::new();
         assert!(
-            select_repr(&Requirement::for_type("F32"), &costs).is_none(),
+            select_repr(&Requirement::for_type("F32"), &costs).is_err(),
             "F32's requirement must be unsatisfiable -- the unknown-type \
              default leans on exactly that"
         );
         for name in ["Widget", "", "Q", "Qx.y", "f80", "I128"] {
             assert!(
-                select_repr(&Requirement::for_type(name), &costs).is_none(),
+                select_repr(&Requirement::for_type(name), &costs).is_err(),
                 "an unrecognised type name ({name:?}) must be refused, not \
                  given a representation chosen for a type nobody identified"
             );
@@ -899,7 +978,7 @@ mod tests {
         // The control: the default must not be refusing EVERYTHING, or the
         // assertions above would hold with `for_type` returning garbage.
         assert!(
-            select_repr(&Requirement::for_type("I32"), &costs).is_some(),
+            select_repr(&Requirement::for_type("I32"), &costs).is_ok(),
             "a type that IS representable must still be accepted"
         );
         // And `@bounds` is the documented way to make a wide type work.
@@ -908,7 +987,7 @@ mod tests {
                 &Requirement::for_type_with_bounds("F32", Some((-1000.0, 1000.0))),
                 &costs
             )
-            .is_some(),
+            .is_ok(),
             "@bounds must rescue a declared F32 by stating its real range"
         );
     }
@@ -950,12 +1029,67 @@ mod tests {
             DriftRepr::FixedQ32_32,
             "the wider representation must win when it measures faster"
         );
-        assert!(d.measured);
+        assert!(d.measured());
 
         // Flip the measurements and the choice must flip with them.
         costs.insert(DriftRepr::FixedQ16_16, 100.0);
         let d = select_repr(&coarse, &costs).expect("a representation");
         assert_eq!(d.repr, DriftRepr::FixedQ16_16);
+    }
+
+    /// The advisory both backends print, as a pure function.
+    ///
+    /// `Decision::rejected` and `Decision::measured` were BOTH dead: populated
+    /// on every selection and read by nothing outside this module. The field's
+    /// own doc comment said it existed "so the compiler can report a real
+    /// reason rather than an advisory", and the two backends each carried
+    /// their own `match decision.cost_ps` and printed only the winner.
+    ///
+    /// `explain` is a parameter rather than an environment read so this test
+    /// does not race the rest of the suite - the same reason
+    /// `measurement_beats_model` is pure.
+    #[test]
+    fn the_report_names_what_lost_and_not_only_what_won() {
+        let mut costs = CostTable::new();
+        costs.insert(DriftRepr::FixedQ32_32, 1922.0);
+        costs.insert(DriftRepr::Int64, 2106.0);
+        let req = Requirement::for_type_with_bounds("F32", Some((-1000.0, 1000.0)));
+        let d = select_repr(&req, &costs).expect("a bounded F32 is satisfiable");
+
+        let quiet = report_line("acc", "F32", &d, false);
+        assert!(quiet.contains(d.repr.name()), "{quiet}");
+        assert!(quiet.contains("ps/acc"), "the measured cost must be named: {quiet}");
+        assert!(
+            quiet.contains(&format!("{} of ", d.rejected.len())),
+            "the count of rejected candidates must appear, or `rejected` is \
+             dead again: {quiet}"
+        );
+        assert!(quiet.contains("Y_DRIFT_EXPLAIN"), "{quiet}");
+        assert_eq!(quiet.lines().count(), 1, "the quiet form is one line: {quiet}");
+
+        let loud = report_line("acc", "F32", &d, true);
+        assert!(!loud.contains("Y_DRIFT_EXPLAIN"), "already explaining: {loud}");
+        assert_eq!(
+            loud.lines().count(),
+            1 + d.rejected.len(),
+            "one line per rejected representation: {loud}"
+        );
+        // Non-vacuity: something must actually have been rejected, or every
+        // assertion above holds for a decision with nothing to explain.
+        assert!(!d.rejected.is_empty());
+        assert!(
+            loud.contains("not exact"),
+            "the float representations must be named as rejected for being \
+             inexact - that is the whole content of @ZeroDrift: {loud}"
+        );
+
+        // And the fallback phrasing, where no measurement broke the tie.
+        let fb = select_repr(&req, &CostTable::new()).expect("still satisfiable");
+        assert!(!fb.measured());
+        assert!(
+            report_line("acc", "F32", &fb, false).contains("no device measurements"),
+            "the fallback must say it is one"
+        );
     }
 
     /// Without measurements the answer must still be deterministic.
@@ -964,7 +1098,7 @@ mod tests {
         let coarse = Requirement { max_magnitude: 1000.0, resolution: Some(2f64.powi(-10)) };
         let d = select_repr(&coarse, &CostTable::new()).expect("a representation");
         assert_eq!(d.repr, DriftRepr::FixedQ16_16);
-        assert!(!d.measured);
+        assert!(!d.measured());
         assert!(d.cost_ps.is_none());
     }
 
@@ -988,7 +1122,7 @@ mod tests {
     #[test]
     fn impossible_requirement_returns_none() {
         let req = Requirement { max_magnitude: 1e30, resolution: Some(2f64.powi(-40)) };
-        assert!(select_repr(&req, &CostTable::new()).is_none());
+        assert!(select_repr(&req, &CostTable::new()).is_err());
     }
 
     /// A bare `F32` accumulator cannot be made exact; a bounded one can.
@@ -1002,7 +1136,7 @@ mod tests {
     fn bounds_make_a_float_accumulator_satisfiable() {
         let unbounded = Requirement::for_type_with_bounds("F32", None);
         assert!(
-            select_repr(&unbounded, &CostTable::new()).is_none(),
+            select_repr(&unbounded, &CostTable::new()).is_err(),
             "an unbounded F32 accumulator has no exact representation"
         );
 
@@ -1166,8 +1300,8 @@ mod tests {
     #[test]
     fn an_overflowing_nest_is_refused_with_a_workable_reason() {
         let v = VnniExact::default();
-        assert!(v.licenses(4095.0));
-        assert!(!v.licenses(4096.0));
+        assert!(v.license(4095.0).is_ok());
+        assert!(v.license(4096.0).is_err());
 
         let err = v.license(8192.0).expect_err("8192 must not be licensed at 64 k-pairs");
         assert!(err.contains("overflow"), "must say what goes wrong: {err}");
@@ -1176,7 +1310,7 @@ mod tests {
         assert!(suggested > 0 && suggested.is_power_of_two(), "got {suggested}");
         let fixed = VnniExact::new(suggested).unwrap();
         assert!(
-            fixed.licenses(8192.0),
+            fixed.license(8192.0).is_ok(),
             "the interval the error suggests ({suggested}) must license the operand it was \
              computed for, or the message sends the user in a circle"
         );
@@ -1236,7 +1370,7 @@ mod tests {
     fn the_measured_probe_configuration_is_licensed() {
         let v = VnniExact::new(64).expect("the probe's FLUSH_T");
         assert!(
-            v.licenses(1024.0),
+            v.license(1024.0).is_ok(),
             "the configuration measured at 1.88x must be licensed by its own checker"
         );
     }

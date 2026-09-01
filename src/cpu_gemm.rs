@@ -2167,7 +2167,7 @@ fn emit_named(
     names: &mut dyn Iterator<Item = String>,
     bind: &dyn Fn(&'static str) -> String,
 ) -> String {
-    let mut take = |names: &mut dyn Iterator<Item = String>| {
+    let take = |names: &mut dyn Iterator<Item = String>| {
         names
             .next()
             .expect("render_named ran out of result names for the expression")

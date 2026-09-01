@@ -247,3 +247,125 @@ fn an_over_wide_operand_is_diagnosed_as_a_width_problem_not_an_overflow_one() {
         );
     }
 }
+
+// ------------------------------------------------- one licence, not two
+
+/// **The magnitude rule must live in exactly one place, and it must return a
+/// reason.**
+///
+/// A `bool`-returning twin `VnniExact::licenses(&self, m) -> bool` sat beside
+/// `license` until 2026-09-01, reading as the cheap form of the same question
+/// and `pub` so anything could call it. It was
+/// `m.is_finite() && m >= 0.0 && m <= self.max_operand_magnitude()` — i.e. it
+/// never grew the `m < 1` refusal that
+/// [a_magnitude_below_one_is_not_representable_and_is_refused] exists for.
+/// Measured before deleting it: `licenses(0.001)` was **true** while
+/// `license(0.001)` is an `Err`, so the dead twin certified exactly the
+/// magnitudes the live one had been fixed to refuse — every operand of that
+/// magnitude stages to int16 ZERO and the kernel computes the zero matrix
+/// under a licence claiming exactness.
+///
+/// It had no callers, so it never shipped a wrong answer. That is the same
+/// reason the original unsoundness was findable at all, and the reason to
+/// remove it now rather than after something calls it: *find these while the
+/// path is still dead.*
+///
+/// This reads the source rather than the API because the failure is an
+/// ADDITION — a second predicate that forgets one of the two refusals — and no
+/// behavioural test can see a function nothing calls. Same shape as
+/// `no_source_file_hardcodes_a_ptx_version_above_the_floor`.
+///
+/// **The first version of this test asserted there was exactly ONE
+/// licence-named function and immediately failed on `license_vnni_exact`,
+/// which is legitimate**: it is the free function `cpu_gemm` calls, and it
+/// *delegates* the magnitude question rather than re-deciding it. A wrapper is
+/// not a second implementation. So the property is "delegates or is the
+/// original", not "is unique" — the gate's statement was wrong, not the code.
+#[test]
+fn the_magnitude_rule_lives_in_exactly_one_place_and_gives_a_reason() {
+    let src = std::fs::read_to_string("src/zero_drift.rs")
+        .expect("src/zero_drift.rs must exist - it is where the licence lives");
+
+    // (name, signature line, body)
+    let mut found: Vec<(String, String, String)> = Vec::new();
+    let bytes = src.as_bytes();
+    let mut at = 0usize;
+    while let Some(rel) = src[at..].find("pub fn ") {
+        let start = at + rel;
+        at = start + 7;
+        let name = src[at..].split(['(', '<']).next().unwrap_or("").to_string();
+        if !name.contains("licens") {
+            continue;
+        }
+        // Body by brace counting from the first `{` after the signature. The
+        // signature is everything up to it - `license_vnni_exact` wraps over
+        // three lines, and taking only the first said it returned nothing.
+        let Some(open) = src[start..].find('{').map(|k| start + k) else { continue };
+        let sig = src[start..open].split_whitespace().collect::<Vec<_>>().join(" ");
+        let (mut depth, mut j) = (0i32, open);
+        while j < bytes.len() {
+            match bytes[j] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        found.push((name, sig, src[open..j.min(src.len())].to_string()));
+    }
+
+    assert!(
+        !found.is_empty(),
+        "no licence function found at all - this gate is reading the wrong file \
+         or the wrong shape, and would pass forever"
+    );
+    assert!(
+        found.iter().any(|(n, _, _)| n == "license"),
+        "`VnniExact::license` must still exist and still be the one that \
+         decides; found {:?}",
+        found.iter().map(|(n, _, _)| n).collect::<Vec<_>>()
+    );
+
+    for (name, sig, body) in &found {
+        assert!(
+            sig.contains("-> Result<"),
+            "`{name}` must return a REASON, not a bool: a caller handed `false` \
+             cannot tell an unrepresentable magnitude from an overflowing one, \
+             and those have different repairs. Signature was: {sig}"
+        );
+        if name == "license" {
+            continue;
+        }
+        assert!(
+            body.contains(".license("),
+            "`{name}` names itself a licence but does not delegate to \
+             `VnniExact::license`. A second decision about which operand \
+             magnitudes are safe is a second implementation of the soundness \
+             core, and the last one to exist was missing the `m < 1` refusal \
+             entirely"
+        );
+    }
+
+    // ...and the two magnitudes that separate the deleted twin from the live
+    // one are still refused, with the diagnoses that make them different bugs.
+    let v = VnniExact::default();
+    let below = v.license(0.001).expect_err("a fractional bound must be refused");
+    assert!(
+        below.contains("not representable as int16"),
+        "0.001 must be diagnosed as a REPRESENTABILITY problem, not an \
+         overflow one: {below}"
+    );
+    let over = v.license(1.0e9).expect_err("a huge bound must be refused");
+    assert!(
+        over.contains("do not fit int16") || over.contains("can overflow"),
+        "{over}"
+    );
+    // The control: an ordinary magnitude is still licensed, or "refuse
+    // everything" satisfies every assertion above.
+    v.license(4095.0).expect("4095 is licensed at the shipping interval");
+}

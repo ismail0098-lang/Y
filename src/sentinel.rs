@@ -65,7 +65,7 @@ pub fn host_x86_uarch() -> Option<String> {
         use std::arch::x86_64::__cpuid;
 
         // Vendor string from CPUID leaf 0, as EBX:EDX:ECX.
-        let v = unsafe { __cpuid(0) };
+        let v = __cpuid(0);
         let mut vendor = [0u8; 12];
         vendor[0..4].copy_from_slice(&v.ebx.to_le_bytes());
         vendor[4..8].copy_from_slice(&v.edx.to_le_bytes());
@@ -75,7 +75,7 @@ pub fn host_x86_uarch() -> Option<String> {
         }
 
         // Family = base + extended, per AMD's encoding.
-        let f = unsafe { __cpuid(1) };
+        let f = __cpuid(1);
         let base_family = (f.eax >> 8) & 0xF;
         let ext_family = (f.eax >> 20) & 0xFF;
         let family = if base_family == 0xF {

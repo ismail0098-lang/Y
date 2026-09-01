@@ -588,6 +588,23 @@ no counterpart.
 
 ## 6. Mutation-test everything, and sort the survivors
 
+### Read the compiler's own warnings as a defect-class sweep
+
+A `never used` warning reports exactly the class this method is built around:
+code nothing calls cannot be wrong, which is why it is where the wrong things
+sit. Nine warnings in one build turned out to include a **second, weaker copy
+of the soundness predicate the whole programme rests on** — `bool`-returning,
+`pub`, missing one of the two refusals, and carrying four unit tests of its own,
+so it read as maintained. Deleting it is the fix; the gate is that every
+licence-named function either *is* the original or *delegates to* it.
+
+Do not reach for `#[allow(dead_code)]` before asking which of three things a
+warning is: a leftover of something deleted (delete it), a **confirmation that
+a fix is in place** (a hoisting scan that no longer needs `mut` because the fix
+was to stop scanning), or a genuine configuration-dependent path (allow it, and
+write the configuration down next to it).
+
+
 Every gate is expected to fail when the mechanism it guards is removed. Run each
 `--test` target **separately** — `cargo test` aborts the remaining binaries
 after one fails, which has silently left the important target unmeasured.
@@ -732,6 +749,9 @@ weakens every theorem above it.
 10. **Mutation-test**, one target at a time, and sort every survivor.
 11. **Write down what is not covered**, in the artifact.
 12. **Come back and read step 11's list.** It is the next increment's queue.
+13. **Read the build's warnings.** They are a free census of the defect
+    class in step 6, and the harness that reports "green" must fail on a
+    target that did not compile.
 
 ---
 

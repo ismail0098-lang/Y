@@ -148,6 +148,10 @@ static ALLOC: counting_alloc::Counting = counting_alloc::Counting;
 /// `(0, 0)` when the counting allocator is not compiled in.
 #[cfg(not(feature = "alloc-stats"))]
 mod counting_alloc {
+    // Every caller is on the `--features zk` path (`Y_ZK_TIMING`'s allocation
+    // readout), so in a default build this is genuinely unreachable rather
+    // than forgotten.
+    #[allow(dead_code)]
     pub fn counts() -> (u64, u64) {
         (0, 0)
     }
