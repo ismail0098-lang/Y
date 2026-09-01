@@ -137,7 +137,8 @@ use std::path::PathBuf;
 
 use y::cpu_gemm::{
     a_i32_element_ix, a_row_base_ix, band_base_ix, band_len_ix, band_rem_ix, chunk_end_ix,
-    granule_band_edge_ix, kpairs_ix, panel_index_ix, prop_band_edge_ix, tile_count_ix,
+    granule_band_edge_ix, kpairs_ix, panel_a_bytes_ix, panel_a_stride_ix, panel_b_bytes_ix,
+    panel_index_ix, prop_band_edge_ix, tile_count_ix,
     tile_width_ix,
     KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
     row_panel_loop, col_panel_loop, fold_row_loop, fold_col_loop, zero_tile_loop,
@@ -223,6 +224,12 @@ fn coq_names(n: &'static str) -> String {
         "g" => "g".into(),
         "count" => "count".into(),
         "gran" => "gran".into(),
+        // The allocation sizes' free names. They are already-computed
+        // schedule numbers rather than extents, which is why they arrive as
+        // names: `mtiles` is `tile_count` and `kpairs` is `kpairs`, and the
+        // emitter has both in registers by the time it sizes the buffers.
+        "mtiles" => "mtiles".into(),
+        "kpairs" => "kpairs".into(),
         other => panic!("the schedule expressions gained an unbound name `{other}`"),
     }
 }
@@ -240,6 +247,13 @@ fn render(s: &Schedule) -> String {
     let a_elem_body = a_i32_element_ix().coq(&coq_names);
     let prop_edge_body = prop_band_edge_ix().coq(&coq_names);
     let granule_edge_body = granule_band_edge_ix().coq(&coq_names);
+    let panel_a_stride_body = panel_a_stride_ix().coq(&coq_names);
+    let panel_a_bytes_body = panel_a_bytes_ix().coq(&coq_names);
+    let panel_b_bytes_body = panel_b_bytes_ix().coq(&coq_names);
+    // Not an `Ix`: no instruction computes it, the byte count is a literal in
+    // the emitted `malloc` call. Generated from the same constants regardless,
+    // so a tile-shape change cannot leave the proof's scratch size behind.
+    let scratch_tile_bytes = s.mr * s.nr * 8;
     // The loop descriptions the driver emits, rendered as Coq definitions.
     // `row_panel_loop`'s tag differs between its two sites and its iteration
     // space does not, which is why one description serves both.
@@ -408,6 +422,40 @@ Definition panel_half (s width : nat) : nat := (s mod (2 * width)) mod 2.
     wrapper. Every packing and flush theorem is stated in terms of this number
     and nothing said the compiler computed the same one. *)
 Definition kpairs (kc : nat) : nat := {kpairs_body}.
+
+(* ------------------------------------------------------------------ *)
+(** ** The packing buffers the driver allocates                        *)
+(* ------------------------------------------------------------------ *)
+
+(** The stride between two packed A panels in i16 ELEMENTS, and the byte counts
+    the driver hands to `malloc`.
+
+    **Rendered from `cpu_gemm::panel_a_stride_ix` / `panel_a_bytes_ix` /
+    `panel_b_bytes_ix`.** Until these were extracted the panel geometry existed
+    THREE times: as `2 * MR` and `2 * NR` spelled into the emitter's `malloc`
+    arithmetic, as `kp * (2 * width)` in [ExactGemmPacking]'s notion of how far
+    a panel runs, and as the driver's own separate `panel_stride` multiply.
+    Nothing said the three agreed.
+
+    A divergence in the SAFE direction - a buffer larger than the write set -
+    changes no answer, so no correctness test in this repository can see one.
+    That is not hypothetical: an over-allocation of exactly this shape was
+    caught by the schedule gate and by nothing else.
+
+    [ExactGemmAllocation.v] turns these into a bound on the packers' writes.
+    Note the trailing `* 2` is `sizeof(i16)` while the inner one is the k-pair
+    interleave - two different twos, both named rather than spelled. *)
+Definition panel_a_stride (kpairs : nat) : nat := {panel_a_stride_body}.
+Definition panel_a_bytes (mtiles kpairs : nat) : nat := {panel_a_bytes_body}.
+Definition panel_b_bytes (kpairs : nat) : nat := {panel_b_bytes_body}.
+
+(** The same sizes in ELEMENTS, which is the unit every slot map is in. *)
+Definition panel_a_elems (mtiles kpairs : nat) : nat :=
+  (panel_a_bytes mtiles kpairs) / 2.
+Definition panel_b_elems (kpairs : nat) : nat := (panel_b_bytes kpairs) / 2.
+
+(** The scratch tile, in bytes as the emitted `malloc` spells it. *)
+Definition SCRATCH_TILE_BYTES : nat := {scratch_tile_bytes}.
 
 (** `mn_tiles`. The output partition: a single ragged tail, clamped. *)
 Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
@@ -1248,6 +1296,51 @@ fn the_raw_emitted_sites_use_the_shared_schedule_expressions() {
     ];
 
     let mut cases = cases;
+
+    // The four packing-buffer sizes: the A and B panels, in each of the
+    // threaded wrapper's two arms. `proofs/ExactGemmAllocation.v` proves every
+    // slot the packers write lands below these numbers AND that the numbers
+    // are not one element larger than the write set - and an over-allocation
+    // changes no answer, so this tie is the only thing that can see one.
+    for (label, names, kp) in [
+        ("panel_a_bytes_ix @ single", vec!["%apn", "%apn2", "%apb"], "%kps"),
+        ("panel_a_bytes_ix @ spawn", vec!["%apnb", "%apn2b", "%apbb"], "%kpsb"),
+    ] {
+        cases.push((
+            label,
+            "the threaded wrapper",
+            vec![],
+            render_named(
+                &y::cpu_gemm::panel_a_bytes_ix(),
+                &mut names.into_iter().map(String::from),
+                &|n| match n {
+                    "mtiles" => "%mtiles".to_string(),
+                    "kpairs" => kp.to_string(),
+                    other => panic!("unbound {other}"),
+                },
+            )
+            .0,
+        ));
+    }
+    for (label, names, kp) in [
+        ("panel_b_bytes_ix @ single", vec!["%bpn", "%bpb"], "%kps"),
+        ("panel_b_bytes_ix @ spawn", vec!["%bpnb", "%bpbb"], "%kpsb"),
+    ] {
+        cases.push((
+            label,
+            "the threaded wrapper",
+            vec![],
+            render_named(
+                &y::cpu_gemm::panel_b_bytes_ix(),
+                &mut names.into_iter().map(String::from),
+                &|n| match n {
+                    "kpairs" => kp.to_string(),
+                    other => panic!("unbound {other}"),
+                },
+            )
+            .0,
+        ));
+    }
 
     // The A panel index, at the micro-kernel's hoisted base and at all MR
     // unrolled rows. `ExactGemmRegisterTile.the_i32_load_is_the_packed_pair` is

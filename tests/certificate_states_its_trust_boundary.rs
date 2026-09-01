@@ -337,3 +337,82 @@ fn the_certificate_states_the_boundary_below_the_model_too() {
         );
     }
 }
+
+/// Every proof of the exact-GEMM chain must be reachable from the capstone.
+///
+/// **This closes a hole a mutation found rather than a hazard I anticipated.**
+/// The certificate mirrors ONE file's exclusion list -
+/// [`exact_gemm_certificate::CAPSTONE`] - so a second root is a second list
+/// with nothing reconciling it against the certificate. Removing
+/// `ExactGemmWhole.v`'s `Require ExactGemmAllocation.` makes the allocation
+/// proof exactly that, and every other gate stays green: the bijection still
+/// holds (it is stated against the capstone), `only_the_capstone_states_a_global_negative`
+/// permits a capstone to state one, and `coqc` does not care.
+///
+/// What it CANNOT see: a proof outside the `ExactGemm*` naming convention. The
+/// convention is what makes "the chain" mechanically identifiable, and a file
+/// deliberately named otherwise is outside this check by construction - which
+/// is stated rather than implied.
+#[test]
+fn every_proof_of_the_chain_is_reachable_from_the_capstone() {
+    let dir = repo().join("proofs");
+    let mut requires: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for e in std::fs::read_dir(&dir).expect("read proofs/") {
+        let path = e.expect("dir entry").path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if n.ends_with(".v") => n.to_string(),
+            _ => continue,
+        };
+        let src = std::fs::read_to_string(&path).expect("read proof");
+        let deps: Vec<String> = src
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("Require "))
+            // `Require Import X Y Z.` lists several; `Require X.` lists one.
+            .flat_map(|r| {
+                r.trim_end_matches('.')
+                    .split_whitespace()
+                    .filter(|w| *w != "Import" && *w != "Export")
+                    .map(|w| format!("{w}.v"))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        requires.insert(name, deps);
+    }
+    assert!(
+        requires.len() >= 15,
+        "only {} proofs found; the sweep would be near-vacuous",
+        requires.len()
+    );
+
+    let root = CAPSTONE.rsplit('/').next().expect("capstone file name");
+    assert!(requires.contains_key(root), "{CAPSTONE} is not in proofs/");
+
+    // Transitive closure from the root.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stack = vec![root.to_string()];
+    while let Some(f) = stack.pop() {
+        if !seen.insert(f.clone()) {
+            continue;
+        }
+        for d in requires.get(&f).map(|v| v.as_slice()).unwrap_or(&[]) {
+            stack.push(d.clone());
+        }
+    }
+
+    let chain: Vec<&String> = requires
+        .keys()
+        .filter(|k| k.starts_with("ExactGemm"))
+        .collect();
+    assert!(chain.len() >= 8, "only {} chain files found", chain.len());
+    for f in chain {
+        assert!(
+            seen.contains(f),
+            "proofs/{f} is part of the exact-GEMM chain and is NOT reachable from \
+             {CAPSTONE} by `Require`. It is therefore a second root, with its own \
+             exclusion list that no certificate mirrors and nothing reconciles. Add \
+             a `Require` (and USE it - an unused one is a comment) or say why the \
+             file is deliberately outside the chain."
+        );
+    }
+}

@@ -149,8 +149,13 @@ pub struct TrustItem {
 /// hand-copied subset in the certificate's own header - and the copy had
 /// DROPPED one of the capstone's three bullets while adding one of its own, so
 /// both lists were three long and a count would have called them equal. The
-/// dropped one is the buffer sizing, which is where this repository's two
+/// dropped one was the buffer sizing, which is where this repository's two
 /// documented out-of-bounds writes were.
+///
+/// That item has since been **split by being half discharged**:
+/// `ExactGemmAllocation.v` proves the sizes, and what is left of it is the
+/// allocation failing. The split had to happen in the capstone and here
+/// together, which is the bijection gate doing its job.
 pub const TRUST_BOUNDARY: &[TrustItem] = &[
     TrustItem {
         claim: "`vpdpwssd`'s arithmetic, and the little-endian order of an i32's two halves.",
@@ -171,15 +176,32 @@ pub const TRUST_BOUNDARY: &[TrustItem] = &[
         stated_in: Some((CAPSTONE, "The loop STRUCTURE is modelled")),
     },
     TrustItem {
-        claim: "The threaded wrapper's `pthread` mechanics, the panel buffers' sizes, and the \
-                scratch tile's allocation.",
-        because: "Not modelled at all. `tests/exact_gemm_thread_invariance.rs` and \
-                  `tests/cpu_gemm_exact_threaded.rs` run this kernel at ragged shapes with \
-                  every stride differing from its extent - but they compare ANSWERS, and a \
-                  buffer sized wrongly in the safe direction changes no answer.",
+        claim: "The emitted driver uses every `malloc` result without checking it.",
+        because: "The buffers' SIZES are proved - `ExactGemmAllocation.v` shows every slot \
+                  the packers and the flush write lands inside the allocation, and that the \
+                  allocation is not one element larger than the write set. What no proof \
+                  covers is the allocation FAILING: nine pointers are used unchecked, so an \
+                  out-of-memory condition is a null dereference rather than an error. The \
+                  f32 kernel in the same emitter falls back to a static panel; this one \
+                  does not.",
         check: Check::Unchecked(
-            "modelling the allocations and tying them to the emitted `malloc` the way `Ix` \
-             already ties the index arithmetic",
+            "deciding what a void-returning entry point should do on failure, and then \
+             either checking the pointers or giving the exact path the static fallback the \
+             f32 path already has",
+        ),
+        stated_in: Some((CAPSTONE, "returned pointers unchecked")),
+    },
+    TrustItem {
+        claim: "The threaded wrapper's `pthread` mechanics: the job struct's layout, the \
+                spawn/join protocol, and the per-thread private C buffer.",
+        because: "Not modelled at all. `ExactGemmKsplit.v` proves what the K bands COMPUTE \
+                  and says nothing about how they are dispatched. The behavioural cover is \
+                  `tests/exact_gemm_thread_invariance.rs`, which compares ANSWERS across \
+                  thread counts - so a dispatch bug that produces the right answer is \
+                  invisible to it.",
+        check: Check::Unchecked(
+            "modelling the job struct and the spawn/join protocol, which is a concurrency \
+             obligation rather than an arithmetic one",
         ),
         stated_in: Some((CAPSTONE, "pthread")),
     },

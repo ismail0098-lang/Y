@@ -148,6 +148,40 @@ Definition panel_half (s width : nat) : nat := (s mod (2 * width)) mod 2.
     and nothing said the compiler computed the same one. *)
 Definition kpairs (kc : nat) : nat := ((kc + 1) / 2).
 
+(* ------------------------------------------------------------------ *)
+(** ** The packing buffers the driver allocates                        *)
+(* ------------------------------------------------------------------ *)
+
+(** The stride between two packed A panels in i16 ELEMENTS, and the byte counts
+    the driver hands to `malloc`.
+
+    **Rendered from `cpu_gemm::panel_a_stride_ix` / `panel_a_bytes_ix` /
+    `panel_b_bytes_ix`.** Until these were extracted the panel geometry existed
+    THREE times: as `2 * MR` and `2 * NR` spelled into the emitter's `malloc`
+    arithmetic, as `kp * (2 * width)` in [ExactGemmPacking]'s notion of how far
+    a panel runs, and as the driver's own separate `panel_stride` multiply.
+    Nothing said the three agreed.
+
+    A divergence in the SAFE direction - a buffer larger than the write set -
+    changes no answer, so no correctness test in this repository can see one.
+    That is not hypothetical: an over-allocation of exactly this shape was
+    caught by the schedule gate and by nothing else.
+
+    [ExactGemmAllocation.v] turns these into a bound on the packers' writes.
+    Note the trailing `* 2` is `sizeof(i16)` while the inner one is the k-pair
+    interleave - two different twos, both named rather than spelled. *)
+Definition panel_a_stride (kpairs : nat) : nat := (kpairs * 12).
+Definition panel_a_bytes (mtiles kpairs : nat) : nat := (((mtiles * kpairs) * 12) * 2).
+Definition panel_b_bytes (kpairs : nat) : nat := ((kpairs * 128) * 2).
+
+(** The same sizes in ELEMENTS, which is the unit every slot map is in. *)
+Definition panel_a_elems (mtiles kpairs : nat) : nat :=
+  (panel_a_bytes mtiles kpairs) / 2.
+Definition panel_b_elems (kpairs : nat) : nat := (panel_b_bytes kpairs) / 2.
+
+(** The scratch tile, in bytes as the emitted `malloc` spells it. *)
+Definition SCRATCH_TILE_BYTES : nat := 3072.
+
 (** `mn_tiles`. The output partition: a single ragged tail, clamped. *)
 Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
 Definition toff (T t : nat) : nat := t * T.
