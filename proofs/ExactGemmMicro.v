@@ -24,12 +24,21 @@
 
     *** What this does NOT prove. ***
 
-    The 2-D register tile and the masked tails are not modelled: a lane's
+    The 2-D register tile and the masked tails are not modelled HERE: a lane's
     contribution `f p` is taken as given rather than derived from the packed
-    panels, so nothing here says the `<16 x i32>` accumulator for row `i` is
-    fed row `i`'s broadcast. That, and the `vpdpwssd` semantics themselves, are
-    ISA facts pinned by `tests/cpu_gemm_vnni_micro.rs` running the real
-    instruction against a scalar reference.
+    panels, so nothing in this file says the `<16 x i32>` accumulator for row
+    `i` is fed row `i`'s broadcast. Both are PROVED elsewhere - the routing in
+    `ExactGemmRegisterTile.v`, the masked tails in `ExactGemmPacking.v`, and
+    composed with this file's flush in `ExactGemmChain.v`.
+
+    What is outside every proof in this series is narrower: the semantics of
+    `vpdpwssd` itself and the little-endian order of an i32's two halves.
+    Those are ISA facts, pinned by `tests/cpu_gemm_vnni_micro.rs` running the
+    real instruction against a scalar reference, and they are the TCB boundary.
+
+    CORRECTED 2026-09-01. This paragraph used to put the register tile and the
+    masked tails on the ISA side of that boundary, overstating the TCB by
+    three proof files and pointing a reader at work already done.
 
     Nor does the int32 model here have anything to say about the WIDTH of the
     operands - that they fit int16 at all is the other half of the licence,

@@ -3657,6 +3657,139 @@ feature sets plus the aggregate; both builds warning-free; all four emitted LLVM
 modules and every emitted attention PTX byte-for-byte unchanged; no committed
 artifact touched.
 
+#### The work queue itself had rotted: seven false items on the programme's own "not proved" lists · 2026-09-01
+
+Step 12 of the checklist says to read each proof's "what this does NOT prove"
+section back as the next increment's queue. It has produced two increments —
+the temperature quantization came off the softmax bound's list, and the licence
+predicate off the warning census. So the lists are load-bearing. **Audited all
+seventeen: seven items were false, across four files, and every one of them
+understated what is proved.**
+
+| file | claim | why it is false |
+|---|---|---|
+| `ExactGemmChain.v` | "The third is not proved anywhere: the **kc-panel loop**" | **No such loop exists.** `emit_vnni_gemm_driver` passes the full `K` to both packers and `kpairs = (K+1)/2` to the micro-kernel; the only cut of the K axis is the thread K-split, so `kc` in every file of the series *is* K |
+| `ExactGemmChain.v` | the tiling and band layers "are not joined to this one" | `ExactGemmWhole.the_threaded_gemm_holds_the_source_dot_products` joins them |
+| `ExactGemmKsplit.v` | "THE MICRO-KERNEL IS NOT VERIFIED. Packing, the 2-D register tile, the masked tails and the periodic int32 → int64 flush are all assumed" | all four are proved — `ExactGemmPacking.v`, `ExactGemmRegisterTile.v`, `ExactGemmMicro.v`, composed in `ExactGemmChain.v` |
+| `ExactGemmKsplit.v` | "The M and N partitioning … is not modelled" | `ExactGemmTiling.c_written_exactly_once` |
+| `ExactGemmMicro.v` | the register tile and the masked tails are "ISA facts pinned by `tests/cpu_gemm_vnni_micro.rs`" | they are **proved**; only `vpdpwssd`'s semantics and the i32 half-order are TCB. This one overstates the trusted base by three proof files |
+| `GridStrideSplit.v` | "this one's schedule is a PTX string template rather than an emitted expression … weaker than the byte-identity the `Ix` layer gives" | the schedule is an `Ix` (`sched_scores` / `sched_accum`), rendered to PTX and to Coq — contradicted by the file's own `Require AttentionSchedule` |
+| `GridStrideSplit.v` | "The per-thread body — the integer exp, the Q0.28 weight, the int8 `V` load — is not modelled" | `SoftmaxErrorBound.v` sits **above** this file and bounds the first two |
+
+**The kc-panel item had already been diagnosed and the diagnosis filed
+elsewhere.** The session that wrote `ExactGemmWhole.v` read the emitter,
+established there is no such loop, and recorded it in *that* file's header —
+leaving this copy of the claim intact. So the queue has already cost one
+session the time to re-derive a phantom.
+
+##### The cause is structural, and the fix is derived rather than chosen
+
+Each file states a **global** negative — a claim about what the programme
+leaves open — and nothing updates a sibling's prose when a later file
+discharges what it names.
+
+The files whose lists stayed true are exactly the **dependency roots**:
+`ExactGemmWhole.v`, `SoftmaxErrorBound.v`, `CountingSort.v`, `GemmBandSplit.v`,
+`ZkControlFlow.v` — the five proofs nothing else `Require`s. That is not a
+coincidence and it is not a choice: a capstone is rewritten every time the
+chain below it closes, and a file with something above it *cannot* know what
+the programme leaves open, because the file above it may have closed it.
+`SoftmaxErrorBound.v`'s own list even carries "It was NOT priced when this file
+was first written, and it is now."
+
+So `only_the_capstone_states_a_global_negative` **derives** the capstones from
+the `Require` graph rather than listing them — a hardcoded list would be a
+third copy of the dependency graph, which is the mistake `ExactGemmSchedule.v`
+exists to avoid. Outside a root, a negative must carry a scoping marker
+("not modelled **HERE**; `X.v` proves it"), which makes the claim owned by the
+file making it.
+
+##### The gate found the seventh item, and I had dismissed it
+
+`GridStrideSplit.v`'s per-thread-body claim was in the gate's first offender
+list and I classified it a false positive — it reads like an honest global
+statement about something no file covers. It is not: `SoftmaxErrorBound.v`
+`Require`s that file and bounds the integer exp and the Q0.28 weight. Only the
+int8 `V` load is genuinely unmodelled. **Checking before dismissing is the
+whole of that finding**, and it is the same move as the licence gate's first
+version, where the gate's *statement* was wrong and running it said so — here
+the gate was right and my reading was wrong. Both directions happen; the
+measurement settles it either way.
+
+##### `"anywhere"` contains `"here"`
+
+The first version of the gate exempted any line containing `here`, as a scoping
+marker. `"not proved anywhere"` contains it. So the gate exempted **the exact
+phrase it exists to catch**, and the mutation that restored the kc-panel
+paragraph came back green — a survivor that was a real hole in a gate written
+minutes earlier. The markers are delimited now (`" here "`, `" here,"`,
+`" here."`, `"HERE"`), and P5 in the table below pins it. *A scoping word that
+occurs inside the global claim is not a scoping word.*
+
+##### The second gate, and the one live find it had
+
+`every_path_a_proof_or_a_gate_cites_exists` resolves every repo-relative path
+named in `proofs/*.v`, `tests/*.rs` and `src/*.rs` — **327 citations, one
+stale**: `tests/zk_integer_ops.rs` pointed at `zk_divmod_soundness.rs`, renamed
+to `zk_gadget_soundness.rs` when it grew past division. Cheap, and the class has
+three prior instances here (three verification scripts named in `docs/` that were
+never in the tree; `self_hosted/` rotting because it was named only in a doc; a
+`zk_fuzz.rs` docstring citing a test file that did not exist).
+
+**Anchor the start of the path.** The first sweep did not, so
+`crates/y-gpu/tests/ptx_is_not_stale.rs` matched as `tests/ptx_is_not_stale.rs`
+and was reported missing while existing — two of that sweep's three findings
+were that. And the gate then fired on its own docstring, which cited the two
+stale paths as examples: the self-reference trap already recorded for
+`src.find("fn reference_bins")`, hit again the same afternoon.
+
+##### Mutation table — 8 probes, each run against the whole gate file
+
+| probe | capstone gate | path gate | the four pre-existing checks |
+|---|---|---|---|
+| P1 `ExactGemmChain.v`'s kc-panel claim restored | **FAIL** | ok | ok |
+| P2 `GridStrideSplit.v`'s per-thread-body claim restored | **FAIL** | ok | ok |
+| P3 `ExactGemmKsplit.v`'s "NOT VERIFIED" restored | **FAIL** | ok | ok |
+| P4 the `Require` parse broken, so every file looks like a capstone | **FAIL** (the derived-capstone floor) | ok | ok |
+| P5 the scoping markers un-delimited, with P1's claim restored | **ok** — the substring hole | ok | ok |
+| P6 a citation to a file that does not exist | ok | **FAIL** | ok |
+| P7 the path sweep resolves nothing | ok | **FAIL** (the floor) | ok |
+| P8 *control* — `ExactGemmTiling.v`'s legitimate "not modelled **here**" | ok | ok | ok |
+
+`coqc` stays green throughout, correctly: every edit is inside a comment.
+
+##### What these gates cannot see
+
+They catch the **form** of the failure — a proof with something above it making
+a claim about the whole programme, and a citation to a file that no longer
+exists. They cannot see a wrong claim phrased in words they do not know. Prose
+staleness is not mechanically decidable, which is precisely why
+`ExactGemmSchedule.v` is *generated* rather than checked; this is the reachable
+part, and the unreachable part is stated in the gate rather than implied.
+
+##### And I deleted nineteen tracked files
+
+The mutation harness needed a `restore2.sh` and a `state2.tgz`. The shell here
+is fish, and defining a function named `g` collided with an alias — a **parse**
+error, which aborts the whole block before executing anything, so neither the
+tarball nor the restore script was created. The next command then ran
+`rm -rf proofs tests/proofs_are_checked.rs tests/zk_integer_ops.rs` and
+extracted a backup that did not exist.
+
+Recovered with `git checkout` — all nineteen were tracked and clean at HEAD, so
+only the day's uncommitted edits were lost and they were re-applied from the
+transcript. The restore script **verifies the archive before deleting anything**
+now, and the check is a real one: the failed `tar czf` had left a 45-byte empty
+archive behind, so a size or entry-count check catches exactly this. Two
+process rules, both already in this file in other forms, and both violated
+within an hour of each other: *verify the restore took effect*, and now *verify
+the backup exists before you rely on it*.
+
+**534 / 785 / 8** tests, zero failures across 122 per-target binaries in both
+feature sets plus the aggregates; both builds warning-free; `coqc` clean over
+all seventeen proofs with no axioms and nothing admitted; no `src/` change, so
+every emitted module is byte-identical by construction.
+
 ## 5. End goal
 
 > **STATUS, 2026-08-31.** The end goal below is reached for **one kernel on one

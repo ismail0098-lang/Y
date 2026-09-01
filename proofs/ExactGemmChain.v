@@ -94,15 +94,22 @@
 
     *** What this does NOT do, stated rather than implied. ***
 
-    - **It does not reach the whole of C.** Three layers sit above the tile.
-      `ExactGemmTiling.v`'s output partition and `ExactGemmKsplit.v`'s band
-      reduction are each proved over their own model and are not joined to
-      this one. The third is not proved anywhere: the **kc-panel loop**, which
-      cuts K into panels of `kc` inside one thread. That is the same
-      decomposition shape as `ExactGemmKsplit.bands_tile` - a clamped or
-      uneven cut of `[0, K)` whose parts sum - so it is probably cheap, but
-      "probably cheap" is not "done", and it is named here rather than left to
-      be discovered.
+    - **This file does not reach the whole of C**; `ExactGemmWhole.v` is where
+      that happens, by joining this tile theorem to `ExactGemmTiling.v`'s
+      output partition and `ExactGemmKsplit.v`'s band reduction.
+
+      CORRECTED 2026-09-01. This bullet used to name a THIRD layer - a
+      "kc-panel loop" cutting K into panels of `kc` inside one thread - and
+      said it was proved by nothing. **No such loop exists.**
+      `emit_vnni_gemm_driver` passes the full `K` to both packers and
+      `kpairs = (K+1)/2` to the micro-kernel, so the only cut of the K axis is
+      the thread K-split and `kc` in every file of this series IS K. The
+      session that wrote `ExactGemmWhole.v` established that by reading the
+      emitter and recorded it THERE; this copy was left behind. That is the
+      hazard `docs/verified_kernel_process.md` step 12 creates by treating
+      these lists as the work queue - a false item sends the next session at a
+      layer that is not there. The list of what the PROGRAMME leaves open has
+      one owner, `ExactGemmWhole.v`; this section is about this file.
     - **The ISA facts are still definitions.** `vpdpwssd`'s semantics and the
       little-endian order of an i32's halves are pinned by
       `tests/cpu_gemm_vnni_micro.rs` on the real instruction, not here.
