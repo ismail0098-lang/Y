@@ -584,6 +584,66 @@ it is about and evaluates the model it claims to. The committed proofs already
 had `every_proof_has_a_content_control` for exactly this; the generated one had
 no counterpart.
 
+### The certificate must carry its TRUST BOUNDARY, and that is not its caveat list
+
+A caveat list says what is not proved. A **trust boundary** says, for each
+item, *whether anything would fail if it were false*. They look alike and only
+the second is worth handing to someone deciding whether to rely on the kernel —
+and the difference is one struct field:
+
+```rust
+pub enum Check {
+    Pinned(&'static str),      // something here can FAIL on it - the file
+    Unchecked(&'static str),   // nothing can - what closing it would take
+}
+```
+
+**Two grades, not three.** "A test exercises it" is not a grade in between
+unless the test can *fail* on the thing. This programme's thread-invariance
+suite runs the kernel at ragged shapes with every stride differing from its
+extent, and compares **answers** — which a buffer sized wrongly in the safe
+direction does not change. Grading that as checked is how an over-allocation
+survived here, caught in the end by a schedule gate and by nothing else.
+
+**Name the bottom.** Include the toolchain below the emitted IR, the proof
+checker, and the processor executing its own ISA. Not because they are
+actionable, but because a list that stops before them trails off, and a reader
+cannot tell a boundary that ends from one that was abandoned. `Unchecked`
+carries what closing it would take, so an unchecked item reads as a work item
+rather than an excuse.
+
+### Derive the certificate's exclusions from the capstone; do not copy them
+
+Found by measurement, not supposed: this repository's certificate carried a
+**hand-copy** of its capstone's exclusion list that had **dropped one bullet
+and added one of its own**. Both lists were three bullets long, so a count
+called them equal — which rules out the obvious gate before you write it. The
+dropped item was the buffer sizing, i.e. exactly where both of this
+repository's documented out-of-bounds writes had been.
+
+Three consequences worth carrying to any certificate:
+
+- **Render the list from one place**, the same move that removes schedule-
+  constant drift. Prose in two files diverges; nothing reports it.
+- **Gate it as a BIJECTION**, not a count: every bullet of the capstone's list
+  claimed by exactly one item, and every attributed item finding exactly one
+  bullet. Both directions, because the failure was one of each.
+- **Which file to mirror is derived, not chosen.** Only a dependency root can
+  truthfully state a global negative (§7), so the capstone is exactly the file
+  whose exclusion list is the aggregate — and exactly the one a certificate
+  instantiating it may not understate.
+
+The standing limit, stated in the gate rather than implied: it cannot see a
+bullet *reworded around its locator phrase* into a different claim. Prose
+staleness is not mechanically decidable, which is the same reason the schedule
+proof is generated rather than checked.
+
+A fourth test is needed that the bijection can never supply. A proof over `Z`
+has no opinion about a toolchain, so the capstone correctly does not mention
+one — meaning the items *below the model* are unconstrained by the bijection,
+and deleting them all leaves it green while the certificate stops saying it
+makes no claim about machine code. Confirmed by mutation, not assumed.
+
 ---
 
 ## 6. Mutation-test everything, and sort the survivors
@@ -821,7 +881,11 @@ weakens every theorem above it.
    directions are unsafe.
 8. **Exhaust the finite obligations**; use a solver only on the unbounded axes,
    and write the ceiling down.
-9. **Emit the certificate**, and gate its *text*, not just that `coqc` accepts it.
+9. **Emit the certificate**, and gate its *text*, not just that `coqc` accepts
+   it. Include its **trust boundary** — every item with the check that would
+   fail if it were false, or an explicit statement that nothing would — and
+   derive that list from the capstone's rather than copying it, gated as a
+   bijection in both directions.
 10. **Mutation-test**, one target at a time, and sort every survivor.
 11. **Write down what is not covered**, in the artifact.
 12. **Come back and read step 11's list — and check it is still true.**
