@@ -334,7 +334,9 @@ impl CpuEmitter {
     fn emit_block(&mut self, block: &Block) {
         for stmt in &block.stmts {
             match stmt {
-                Stmt::Let { name, init, zero_drift: Some(_), span, .. } => {
+                // `init` is deliberately unbound: this arm REFUSES, so the
+                // initialiser is never lowered. See the refusal below.
+                Stmt::Let { name, zero_drift: Some(_), span, .. } => {
                     // `@ZeroDrift` is a CORRECTNESS CLAIM, and this backend has
                     // no exact-accumulation lowering - zero references to
                     // `zero_drift` in the whole file. Emitting the accumulator

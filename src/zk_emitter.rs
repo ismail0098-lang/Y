@@ -2830,7 +2830,10 @@ impl ZkEmitter {
             // point for a correct implementation, and `tests/zk_llvm_differential.rs`
             // is now the gate that would have caught this. Re-enabling it
             // without that gate green is not on.
-            Stmt::While { condition, body, max_iterations, span, .. } => {
+            // `condition`, `body` and `max_iterations` are deliberately unbound:
+            // this arm REFUSES. The masked-unroll lowering that consumed them
+            // computed the wrong function - see the message below.
+            Stmt::While { span, .. } => {
                 return Err(format!(
                     "Line {}: error[Z0010]: 'while' is not supported in ZK circuit mode.\n                       The `@max_iterations(N)` unrolling was withdrawn: it ran the body when \
                      the condition was false on entry (N=1), and produced unsatisfiable \

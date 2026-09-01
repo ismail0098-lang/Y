@@ -3298,6 +3298,130 @@ The fourth is gone.
 
 `657 / 944 / 8` tests, both builds, no committed artifact changed.
 
+#### Nine compiler warnings, and two of them were the soundness core · 2026-09-01
+
+Both builds carried warnings — 9 in the default configuration and 11 under
+`--features zk` — and had done for long enough that nobody read them. They are
+zero now, and the sweep is worth recording because the class this repository
+already tracks is exactly what a `never used` warning reports: **dead code is
+where the bugs hide**, which is why `run_all_optimization_passes`,
+`c_emitter.rs` and the `SmemLayout` surface each turned out to be findings
+rather than tidying.
+
+Seven were mechanical, and two carried a claim.
+
+##### `VnniExact::licenses` was a SECOND, WEAKER licence predicate
+
+Phase 0's soundness core is `VnniExact::license` — the rule that says a tiled,
+threaded, K-split GEMM may use `vpdpwssd` and still be bit-identical to the
+naive nest. A `bool`-returning twin sat beside it, `pub`, reading as the cheap
+form of the same question:
+
+```rust
+pub fn licenses(&self, m: f64) -> bool {
+    m.is_finite() && m >= 0.0 && m <= self.max_operand_magnitude()
+}
+```
+
+That is `license` **without the `m < 1` refusal** — the fix for the
+unsoundness this document records one entry above, where `@bounds(-0.001,
+0.001)` was licensed at magnitude 0.001 and every such operand stages to int16
+*zero*, so the kernel computes the zero matrix under a certificate claiming
+exactness. Measured before deleting it:
+
+```
+m=0.001  licenses()=true   license()=Err(not representable as int16)
+m=0.5    licenses()=true   license()=Err(not representable as int16)
+m=4095   licenses()=true   license()=Ok
+m=4096   licenses()=false  license()=Err(can overflow the int32 accumulator)
+```
+
+It had no *callers* — but it had **unit tests**, four of them, asserting its
+behaviour. So it read as maintained code, and the only thing saying otherwise
+was a warning nobody looked at. Deleted; its tests now drive `license`, which
+strengthens them, since one of the four is the tie between the licence and
+`ExactGemmMicro`'s proof hypothesis and it now compares the *shipping*
+predicate against the proof.
+
+**The gate is `the_magnitude_rule_lives_in_exactly_one_place_and_gives_a_reason`,
+and its first version was wrong in an instructive way.** It asserted there was
+exactly ONE licence-named function and failed immediately on
+`license_vnni_exact` — which is legitimate: it is the free function
+`cpu_gemm` calls, and it *delegates* the magnitude question rather than
+re-deciding it. A wrapper is not a second implementation. So the property is
+"delegates, or is the original", not "is unique" — **the gate's statement was
+wrong, not the code**, and running it is what said so. It also requires the
+signature to return `Result<_, String>`: a caller handed `false` cannot tell an
+unrepresentable magnitude from an overflowing one, and those have different
+repairs.
+
+##### The refusal computed its reasons and threw them away
+
+`select_repr` walks the four candidate representations and records why each
+lost — "not exact: floating-point addition is not associative", "insufficient
+range or resolution (holds |x| < 3.277e4 at 16 fractional bits)". On success it
+returned them in `Decision::rejected`; on failure it returned `None` and
+**dropped the list three lines after building it**. So a user hitting
+
+> `@ZeroDrift on 'acc: F32' cannot be honoured. No exact representation holds
+> that range at that resolution`
+
+could not be told which four things were tried or why each failed. The struct's
+own doc comment said the field existed "so the compiler can report a real
+reason rather than an advisory", and no backend read it — `rejected` and
+`measured` were both reported as never-read by `cargo build`.
+
+`select_repr` returns `Result<Decision, Vec<(DriftRepr, String)>>` now, both
+backends print the reasons on refusal, and the success path names how many
+candidates lost (`Y_DRIFT_EXPLAIN=1` for the list). `measured` was a `bool`
+field set in lockstep with `cost_ps` — two fields encoding one fact, which is
+how "two fallbacks disagreeing, with the exposed one unsafe" starts — and is a
+derived method. The advisory line itself is one shared function, because the
+two backends each carried their own copy of the phrasing.
+
+##### The mechanical seven, and why each was correct to be a warning
+
+Two are *confirmations that a fix is in place*, which is worth knowing before
+reaching for `#[allow]`: `ptx_emitter`'s barrier-hoisting scan no longer needs
+`let mut j`, because the fix was to **stop** at the first statement it cannot
+hoist rather than `j += 1` past it — the warning is that unsoundness being
+visible from outside. `zk_emitter`'s `Stmt::While` arm binds `condition`,
+`body` and `max_iterations` and uses none of them, because the
+`@max_iterations` masked-unroll lowering was **withdrawn** for computing the
+wrong function. Likewise `cpu_emitter`'s `@ZeroDrift` arm, which refuses. Those
+are `..` patterns now, with the reason beside them. The rest: `DriftRepr::c_type`
+was a leftover of the deleted C backend; `sentinel`'s two `unsafe` blocks around
+`__cpuid` are redundant in this Rust; `cpu_gemm`'s `take` closure no longer
+mutates; and `main`'s `counts()` is genuinely unreachable in a default build
+because every caller is on the `--features zk` timing path — the one case that
+takes an `#[allow]`, with that sentence next to it.
+
+##### AND MY OWN SWEEP HARNESS HAD THE NULL-METRIC BUG
+
+Fixing the last `licenses` caller left `tests/exact_gemm_micro_model.rs`
+**failing to compile** — and the per-target sweep script reported a completely
+green run, twice. A target that does not build emits no `test result` line at
+all, and the script's `[ -z "$LINE" ] && LINE="test result: NONE"` did not match
+its `*FAILED*` case. *Null metrics pass dead components*, in the harness written
+to apply that rule. It counts a missing result line as a failure now, and the
+aggregate `cargo test` is what caught it.
+
+##### Mutation table — 5 mutations, each `--test` target run separately
+
+| mutation | licence gate | micro_model | backend_agreement | lib unit |
+|---|---|---|---|---|
+| L1 the `bool` twin returns verbatim | **FAIL** | ok | ok | ok |
+| L2 a `Result` twin that does not delegate | **FAIL** | ok | ok | ok |
+| L3 the refusal drops the reasons again | ok | ok | **FAIL** | ok |
+| L4 the report stops naming what lost | ok | ok | ok | **FAIL** |
+| L5 *control* — a legitimate delegating wrapper | ok | ok | ok | ok |
+
+Each isolated to exactly one gate, and the control is what stops the licence
+gate degenerating into "no wrappers allowed".
+
+`661 / 948 / 8` tests, both builds **warning-free**, no committed artifact
+changed.
+
 ## 5. End goal
 
 > **STATUS, 2026-08-31.** The end goal below is reached for **one kernel on one

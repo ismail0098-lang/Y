@@ -101,12 +101,16 @@ fn the_licence_is_the_bound_the_proof_assumes() {
                 <= u128::from(i32::MAX as u32);
             // The real function also refuses non-representable widths and
             // sub-integer magnitudes, which the proof does not model; restrict
-            // the comparison to the domain the proof is about.
+            // the comparison to the domain the proof is about. Every `m` here
+            // is a non-negative INTEGER, which is exactly the domain on which
+            // the shipping `license` and the `licenses` bool this used to call
+            // agree - so switching to `license` strengthens the tie rather
+            // than weakening it: it is now the predicate the compiler uses.
             if m > 32767 {
                 continue;
             }
             assert_eq!(
-                v.licenses(m as f64),
+                v.license(m as f64).is_ok(),
                 proof_bound,
                 "flush={flush} m={m}: the licence and \
                  `operand_bound_gives_no_overflow`'s hypothesis disagree"
@@ -120,8 +124,8 @@ fn the_licence_is_the_bound_the_proof_assumes() {
 #[test]
 fn the_default_interval_boundary_is_one_unit_wide() {
     let v = VnniExact::new(VnniExact::DEFAULT_FLUSH_K_PAIRS).unwrap();
-    assert!(v.licenses(4095.0));
-    assert!(!v.licenses(4096.0));
+    assert!(v.license(4095.0).is_ok());
+    assert!(v.license(4096.0).is_err());
     // `the_4096_case_exceeds_by_exactly_one`, in the same arithmetic.
     assert_eq!(2i64 * 64 * 4096 * 4096, i64::from(i32::MAX) + 1);
     assert_eq!(i64::from(i32::MAX) - 2 * 64 * 4095 * 4095, 1_048_447);

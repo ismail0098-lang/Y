@@ -429,3 +429,64 @@ fn no_backend_accepts_zero_drift_in_silence() {
     );
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// **The refusal must name what it tried, in both backends.**
+///
+/// `select_repr` computes one rejection reason per candidate representation on
+/// its way to refusing — and used to DROP the list at its `None` return, three
+/// lines after working it out. So the user's error said only "no exact
+/// representation holds that range at that resolution" and could not say which
+/// four things were tried or why each failed. `Decision::rejected` was a field
+/// whose own doc comment said it existed "so the compiler can report a real
+/// reason rather than an advisory", and no backend read it; `cargo build`
+/// reported it as never-read for however long that had been true.
+///
+/// A bare `F32` with no `@bounds` is the case: nothing exact holds `3.4e38` at
+/// `2^-24`, which is correct and is *why* `@bounds` exists. The message has to
+/// carry the reader from there to the repair.
+///
+/// Both backends are checked, because the two error strings are separate
+/// literals and the whole subject of this file is that they had already
+/// diverged once.
+#[test]
+fn a_refusal_names_the_representations_it_tried_and_why_each_lost() {
+    let d = dir("drift_refusal_reasons");
+    // No `@bounds`, so `Requirement::for_type` asks for the full F32 range.
+    let src = "\
+kernel probe(Out: GlobalMemory<F32>, N: I32) {
+    @ZeroDrift let mut acc: F32 = 0.0;
+    acc += 1.0;
+    Out[0] = acc;
+}
+fn main() {}
+";
+    for (flag, ext) in [("--emit-ptx", "ptx"), ("--emit-llvm", "ll")] {
+        let (ok, text, _) = compile(&d, "refusal", src, flag, ext);
+        assert!(!ok, "{flag}: an unbounded F32 drift accumulator must be refused");
+        assert!(
+            text.contains("cannot be honoured"),
+            "{flag}: the refusal must still be the drift one: {text}"
+        );
+        // The part that was missing: which candidates lost, and why.
+        for named in ["Q16.16", "Q32.32", "I64", "F64"] {
+            assert!(
+                text.contains(named),
+                "{flag}: the refusal must name `{named}` as a representation it \
+                 tried; without the per-candidate reasons the user is told only \
+                 that nothing worked. Message was:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("not exact") && text.contains("insufficient range"),
+            "{flag}: BOTH kinds of rejection must be distinguishable - a float \
+             loses for being inexact and a narrow fixed-point one for range, \
+             and those point at different repairs. Message was:\n{text}"
+        );
+        // The control: the repair the message recommends must actually work,
+        // or the reasons are decoration on a dead end.
+        let fixed = src.replace("@ZeroDrift let", "@ZeroDrift @bounds(-1024.0, 1024.0) let");
+        let (ok, text, _) = compile(&d, "repaired", &fixed, flag, ext);
+        assert!(ok, "{flag}: @bounds must rescue it, as the message says:\n{text}");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}

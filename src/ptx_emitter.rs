@@ -2114,7 +2114,11 @@ or `shared_alloc_u32` for a shared-memory array.",
                 // memory; the pass was live code guarding a barrier that did
                 // not exist. Guarded now by
                 // `tests/ptx_shared_memory.rs::hoisting_cannot_cross_a_real_dependency`.
-                let mut j = i + 1;
+                // Not `mut`: the scan STOPS at the first statement it cannot
+                // hoist. `j += 1` on the miss path is precisely the unsoundness
+                // described above, so the compiler warning that this needs no
+                // `mut` is the fix being visible from outside.
+                let j = i + 1;
                 let mut hoisted = Vec::new();
                 while j < stmts.len() && hoist_count < budget {
                     let value = match &stmts[j] {
@@ -2183,17 +2187,13 @@ or `shared_alloc_u32` for a shared-memory array.",
                 });
                 let req = crate::zero_drift::Requirement::for_type_with_bounds(&ty_name, range);
                 match crate::zero_drift::select_repr(&req, &self.drift_costs) {
-                    Some(decision) => {
+                    Ok(decision) => {
                         let repr = decision.repr;
-                        self.drift_report.push(format!(
-                            "{}: {} -> {} ({})",
+                        self.drift_report.push(crate::zero_drift::report_line(
                             name,
-                            ty_name,
-                            repr.name(),
-                            match decision.cost_ps {
-                                Some(c) => format!("measured {:.0} ps/acc", c),
-                                None => "no device measurements, narrowest sufficient".into(),
-                            }
+                            &ty_name,
+                            &decision,
+                            crate::zero_drift::explain_requested(),
                         ));
                         writeln!(
                             &mut self.ptx_buffer,
@@ -2244,13 +2244,16 @@ or `shared_alloc_u32` for a shared-memory array.",
                         self.zero_drift.insert(name.clone(), (acc.clone(), repr, integer_domain));
                         self.variables.insert(name.clone(), acc);
                     }
-                    None => {
+                    Err(why) => {
                         self.emit_errors.push(format!(
                             "Line {}: @ZeroDrift on `{}: {}` cannot be honoured. No exact \
 representation holds that range at that resolution, and only exact (integer or fixed-point) \
 accumulation is drift-free. Add @bounds(min, max) to state the accumulator's real range, or \
-declare it as a Q format.",
-                            span.line, name, ty_name
+declare it as a Q format.\n{}",
+                            span.line,
+                            name,
+                            ty_name,
+                            crate::zero_drift::explain_rejections(&why)
                         ));
                     }
                 }
