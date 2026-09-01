@@ -1,6 +1,6 @@
 # The process: taking a kernel from *fast* to *verified*
 
-This is the method, written down after sixteen proof files and about twenty
+This is the method, written down after seventeen proof files and about twenty
 gates. It is not a plan — every step here has been executed, and the parts that
 did not work are recorded as such.
 
@@ -9,7 +9,7 @@ K-split, multi-threaded kernel that is **bit-identical** to the naive triple
 loop it replaces. Two other kernels have been through parts of it (the f32 GEMM,
 the exact int8 attention PTX), and the differences are noted where they matter.
 
-Current state: **seventeen `.v` files, ~290 theorems, no axioms, nothing
+Current state: **seventeen `.v` files, ~300 theorems, no axioms, nothing
 admitted**, all checked by `cargo test`. The counts are approximate on purpose:
 an exact one goes stale every session, and a gate on it would fail on every
 proof added.
@@ -520,6 +520,16 @@ and so is the kernel: a theorem that *states* the big term checks in
 milliseconds. Bisect for this rather than guessing; the failure points at the
 wrong line.
 
+**A `nat` literal is UNARY, and that is the same landmine wearing a different
+hat.** A proof about fixed-point arithmetic needs constants like 2,064,513;
+written as a `nat` it is two million constructors, and `simpl`, `Z.of_nat` and
+`lia` all normalise through it. Keep every large number in `Z` and let `nat`
+see only `Z.to_nat` of it, recovering the integer with `Z2Nat.id`. One file
+went from not finishing to 13.9 s on that one change. The general rule, now
+that it has cost two sessions: **in a proof about fixed-point arithmetic the
+constants are large, and any tactic that normalises will try to evaluate
+them.**
+
 ---
 
 ## 5. Emit the certificate
@@ -654,6 +664,20 @@ Recurring traps:
 
 ## 7. Say what is not covered, in the artifact itself
 
+And then **read that list back as a work queue.** It is the cheapest source of
+next increments in this programme, and it is honest by construction — an item
+is on it because a previous session decided it could not be discharged *then*,
+not because it cannot be discharged.
+
+The softmax bound's list had four items. Three are structural (an exhaustive
+Rust discharge that is *stronger* than the proof would be; a different layer's
+question; the grade of the tie). The fourth said the temperature multiplier
+`round(C * 2^32)` was unpriced — and pricing it took one afternoon, produced
+seven theorems, and turned up two preconditions that existed nowhere in the
+compiler and one silently-skipping guard in a script. **The item that looks
+like an admission of incompleteness is usually the one with a bug behind it.**
+
+
 Every proof file in this repository carries its own "what this does not claim"
 section, and the emitted certificate repeats it in its header. A certificate
 that overstates its scope is worse than none.
@@ -707,6 +731,7 @@ weakens every theorem above it.
 9. **Emit the certificate**, and gate its *text*, not just that `coqc` accepts it.
 10. **Mutation-test**, one target at a time, and sort every survivor.
 11. **Write down what is not covered**, in the artifact.
+12. **Come back and read step 11's list.** It is the next increment's queue.
 
 ---
 
@@ -714,7 +739,7 @@ weakens every theorem above it.
 
 - [Proof-carrying kernels](proof_carrying_kernels.md) — the roadmap and the
   chronological log, including the measurements that decided each step
-- `proofs/` — the sixteen files, each with its own header stating scope
+- `proofs/` — the seventeen files, each with its own header stating scope
 - `tests/proofs_are_checked.rs` — the gate that runs them, with content controls
 - `tests/exact_gemm_schedule_proof.rs` — the generator and the schedule ties
 - `tests/exact_gemm_certificate.rs` — the emitted certificate

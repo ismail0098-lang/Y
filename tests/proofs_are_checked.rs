@@ -546,6 +546,18 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "the_interface_is_satisfiable",
                 // ...and the constant the bracket turns on is not magic.
                 "the_per_unit_factor_is_what_one_unit_of_log2_costs",
+                // The TEMPERATURE is itself quantized, and the shape of that
+                // error is what makes it a head_dim question rather than a
+                // KFix one: rounding `C * 2^32` moves the exponent by at most
+                // half a score delta, INDEPENDENTLY of KFix.
+                "the_quantized_temperature_shifts_the_exponent_by_at_most_half_a_delta",
+                "the_ideal_weights_at_two_close_exponents_bracket_each_other",
+                "at_head_dim_128_the_temperature_moves_a_weight_by_under_a_two_thousandth",
+                // ...and the two multipliers that are not approximations of
+                // anything. Both were a bare `continue` in a Python script.
+                "a_zero_multiplier_gives_every_key_the_same_weight",
+                "the_two_readings_of_the_multiplier_disagree_above_two_to_the_thirty_one",
+                "the_signed_reading_zeroes_a_weight_the_unsigned_one_keeps",
             ][..],
         ),
         (

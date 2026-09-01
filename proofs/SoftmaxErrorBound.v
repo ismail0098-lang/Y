@@ -64,6 +64,36 @@
       `tests/attention_quantization_error.rs` records, where the whole tail of
       the softmax rounded to zero.
 
+    ** The fourth joint - the temperature is quantized too
+
+    Everything above compares the computed weight against the ideal at the
+    multiplier the kernel was HANDED. `KFix = round(C * 2^32)`, so that is not
+    the ideal at the temperature the caller meant, and the difference was
+    priced nowhere.
+
+    [the_quantized_temperature_shifts_the_exponent_by_at_most_half_a_delta]
+    prices it, and the shape of the answer is the point: the exponent moves by
+    at most `(delta + 1)/2` in units of `2^-32` log2, so the error is
+    proportional to the SCORE DELTA and INDEPENDENT of `KFix`. A bound on the
+    delta is therefore the whole bound - and the delta is bounded by the
+    head_dim, since `|s| <= 127^2 * hd` for an int8 pipeline. At head_dim 128
+    that is a factor under `1/2048` on any weight
+    ([at_head_dim_128_the_temperature_moves_a_weight_by_under_a_two_thousandth]),
+    measured tight to 1.000 of its half-delta allowance on the exponent and
+    1.47x slack on the weight.
+
+    Two multipliers are REFUSED rather than bounded, because they are not
+    approximations of anything: `KFix = 0` gives every key the same argument,
+    so the softmax is uniform and carries no information about the scores
+    ([a_zero_multiplier_gives_every_key_the_same_weight]); and at or above
+    `2^31` the `.u32` parameter and the `mul.wide.s32` that consumes it are
+    different numbers, so a key that should weigh `2^28 * 2^(-1/2)` weighs
+    exactly zero ([the_two_readings_of_the_multiplier_disagree_above_two_to_the
+    _thirty_one], [the_signed_reading_zeroes_a_weight_the_unsigned_one_keeps]).
+    Both bounds were already in `tools/ptx_bridge.py` as a bare `continue` -
+    a silent skip of a measurement. They are derived here and enforced by
+    `exact_attention::temperature_fixed_point`.
+
     ** Does the Decomposition schema extend to approximate arithmetic?
 
     That is the question this file was written to answer, and the answer is
@@ -108,12 +138,8 @@
     - **The exp's accuracy is a hypothesis, not a theorem.** It is discharged
       by exhaustion in Rust, over the *swept* domain; the extension to the
       admitted domain is proved here.
-    - **`KFix` is itself a rounded temperature** and this file does not price
-      that. `KFix = round(C * 2^32)` for a real `C = q_scale*k_scale/sqrt(d)`,
-      so the kernel computes the exact-for-KFix softmax of a slightly different
-      temperature. That is a uniform reparameterisation of the exponent, not an
-      error in this chain, and `the_temperature_multiplier_carries_two_to_the_
-      thirty_two` in `tests/exact_attention_bounds.rs` is where it lives.
+    - **`KFix` is itself a rounded temperature.** It was NOT priced when this
+      file was first written, and it is now - Part 6b, and see the joint below.
     - **Nothing here is about int8 quantization of Q, K or V.** The scores are
       taken as given; `docs/deterministic_inference.md` and
       `tests/attention_quantization_error.rs` own that question.
@@ -909,6 +935,249 @@ Proof.
     apply qsum_ext. intros. rewrite inject_Z_mult. reflexivity.
 Qed.
 
+(* ------------------------------------------------------------------ *)
+(** ** Part 6b - the TEMPERATURE is itself quantized                   *)
+(* ------------------------------------------------------------------ *)
+
+(** Everything above compares the computed weight against `W (delta * KFix)` -
+    the ideal at the multiplier the kernel was HANDED. `KFix` is itself
+    `round(C * 2^32)`, so that is not the ideal at the temperature the caller
+    meant, and the difference was priced nowhere: the "what this does not
+    claim" section says so in as many words.
+
+    It is priced here, and the shape of the answer is the interesting part.
+    The exponent error from rounding the multiplier is `delta * |KFix - C*2^32|
+    <= delta / 2` in units of `2^-32` log2 - so it is proportional to the SCORE
+    DELTA and INDEPENDENT of `KFix`. A bound on the delta is therefore the
+    whole bound, and the delta is bounded by the head_dim: `|s| <= 127^2 * hd`
+    for an int8 pipeline, so `delta = m - s_i <= 2 * 127^2 * hd`. That is a
+    compile-time function of one parameter, which is why
+    [`exact_attention::score_delta_span`] can compute it.
+
+    Two multipliers are refused rather than bounded, because they are not
+    approximations of anything - see [a_zero_multiplier_gives_every_key_the
+    _same_weight] and [the_two_readings_of_the_multiplier_disagree_above_two
+    _to_the_thirty_one]. Both bounds were already in `tools/ptx_bridge.py` as a
+    bare `continue`; what is new is that they are derived, enforced in the
+    compiler by `exact_attention::temperature_fixed_point`, and stated. *)
+
+Definition TWO32Q : Q := inject_Z TWO32.
+
+(** `|s| <= 127^2 * hd` for int8 operands, and the delta is between two
+    scores. Kept as a definition rather than a literal so the tie test can
+    compare it against `score_delta_span` rather than against a number. *)
+Definition SCORE_DELTA_SPAN (hd : Z) : Z := 2 * 127 * 127 * hd.
+
+(** The kernel declares `.param .u32 q6` and consumes it with
+    `mul.wide.s32`, so at or above `2^31` the two readings are different
+    numbers. *)
+Definition KFIX_SIGNED_LIMIT : Z := 2147483648.
+Definition as_s32 (k : Z) : Z := if (k <? KFIX_SIGNED_LIMIT)%Z then k else (k - TWO32)%Z.
+
+Lemma beta_unit : 0 <= BETA /\ BETA <= 1.
+Proof. unfold BETA. split; unfold Qle; simpl; lia. Qed.
+
+Lemma qpow_mono : forall q (a b : nat), 0 <= q -> q <= 1 -> (a <= b)%nat ->
+  qpow q b <= qpow q a.
+Proof.
+  intros q a b Hq H1 Hab.
+  replace b with (a + (b - a))%nat by lia.
+  rewrite qpow_add.
+  assert (0 <= qpow q a) by (apply qpow_nonneg; auto).
+  assert (qpow q (b-a)%nat <= 1) by (apply qpow_le_1; auto).
+  nra.
+Qed.
+
+(** Two exponents within `n` of each other give ideal weights within a factor
+    `BETA^n`, in BOTH directions - which is what makes it a bracket rather
+    than a one-sided decay claim. Stated symmetrically so no division
+    appears. *)
+Lemma the_ideal_weights_at_two_close_exponents_bracket_each_other :
+  forall u1 u2 (n : nat),
+    (0 <= u1)%Z -> (0 <= u2)%Z ->
+    (Z.abs (u1 - u2) <= Z.of_nat n)%Z ->
+    qpow BETA n * W u1 <= W u2 /\ qpow BETA n * W u2 <= W u1.
+Proof.
+  intros u1 u2 n H1 H2 Hd.
+  destruct beta_unit as [Hb0 Hb1].
+  assert (Hle : forall a b, (0 <= a)%Z -> (0 <= b)%Z -> (a <= b)%Z ->
+                (Z.abs (a - b) <= Z.of_nat n)%Z ->
+                qpow BETA n * W a <= W b /\ qpow BETA n * W b <= W a).
+  { intros a b Ha Hb Hab Habs.
+    set (k := (b - a)%Z).
+    assert (Hk : (0 <= k)%Z) by (unfold k; lia).
+    assert (Hkn : (Z.to_nat k <= n)%nat) by (rewrite Z.abs_neq in Habs by lia; lia).
+    destruct (W_span a k Ha Hk) as [Hlo Hhi].
+    replace (a + k)%Z with b in Hlo, Hhi by (unfold k; lia).
+    assert (HWa : 0 <= W a) by (apply W_nonneg; auto).
+    assert (HWb : 0 <= W b) by (apply W_nonneg; auto).
+    assert (Hm : qpow BETA n <= qpow BETA (Z.to_nat k)) by (apply qpow_mono; auto).
+    assert (H1n : qpow BETA n <= 1) by (apply qpow_le_1; auto).
+    split; nra. }
+  destruct (Z_le_gt_dec u1 u2) as [H|H].
+  - apply Hle; auto.
+  - assert (Hs : (Z.abs (u2 - u1) <= Z.of_nat n)%Z) by lia.
+    destruct (Hle u2 u1 H2 H1 ltac:(lia) Hs) as [A B]. split; auto.
+Qed.
+
+Lemma inject_Z_sub : forall a b : Z, inject_Z (a - b)%Z == inject_Z a - inject_Z b.
+Proof.
+  intros a b. replace (a - b)%Z with (a + (- b))%Z by ring.
+  rewrite inject_Z_plus, inject_Z_opp. reflexivity.
+Qed.
+
+(** The exponent statement, and the only place a rational temperature appears.
+    `k` is the kernel's multiplier and `vtrue` the nearest integer to the true
+    exponent `delta * C * 2^32`; both roundings are to nearest, so both are
+    within a half, and the two halves compose to `(delta + 1) / 2` - stated as
+    `2 * |..| <= delta + 1` so it is an integer fact with no division in it. *)
+Theorem the_quantized_temperature_shifts_the_exponent_by_at_most_half_a_delta :
+  forall (C : Q) (k d vtrue : Z),
+    (0 <= d)%Z ->
+    Qabs (inject_Z k - C * TWO32Q) <= 1#2 ->
+    Qabs (inject_Z vtrue - inject_Z d * (C * TWO32Q)) <= 1#2 ->
+    (2 * Z.abs (u_exact d k - vtrue) <= d + 1)%Z.
+Proof.
+  intros C k d vtrue Hd Hk Hv.
+  assert (Hdq : 0 <= inject_Z d)
+    by (change 0 with (inject_Z 0); rewrite <- Zle_Qle; lia).
+  assert (Hsplit :
+    inject_Z (u_exact d k - vtrue)
+    == inject_Z d * (inject_Z k - C * TWO32Q)
+       + (inject_Z d * (C * TWO32Q) - inject_Z vtrue)).
+  { unfold u_exact. rewrite inject_Z_sub, inject_Z_mult. ring. }
+  assert (Ha : Qabs (inject_Z (u_exact d k - vtrue)) <= inject_Z d * (1#2) + (1#2)).
+  { rewrite Hsplit.
+    eapply Qle_trans; [ apply Qabs_triangle | ].
+    assert (T1 : Qabs (inject_Z d * (inject_Z k - C * TWO32Q))
+                 <= inject_Z d * (1#2)).
+    { rewrite Qabs_Qmult.
+      assert (Qabs (inject_Z d) == inject_Z d) by (apply Qabs_pos; auto).
+      assert (0 <= Qabs (inject_Z k - C * TWO32Q)) by apply Qabs_nonneg.
+      nra. }
+    assert (T2 : Qabs (inject_Z d * (C * TWO32Q) - inject_Z vtrue) <= 1#2).
+    { assert (E : inject_Z d * (C * TWO32Q) - inject_Z vtrue
+                  == - (inject_Z vtrue - inject_Z d * (C * TWO32Q))) by ring.
+      rewrite E, Qabs_opp. exact Hv. }
+    lra. }
+  rewrite Qabs_inject_Z in Ha.
+  assert (Hz : inject_Z (2 * Z.abs (u_exact d k - vtrue)) <= inject_Z (d + 1)).
+  { rewrite inject_Z_plus, inject_Z_mult.
+    change (inject_Z 2) with (2#1). change (inject_Z 1) with 1. lra. }
+  rewrite <- Zle_Qle in Hz. exact Hz.
+Qed.
+
+(** The weight consequence: rounding the temperature moves the ideal weight by
+    at most `BETA^n` where `2n >= delta + 1`. Note `n ~ delta/2`, not `delta`
+    - the half is the whole point of the previous theorem and dropping it
+    doubles the bound. *)
+Corollary the_quantized_temperature_moves_the_ideal_weight_by_at_most_a_beta_power :
+  forall (C : Q) (k d vtrue : Z) (n : nat),
+    (0 <= d)%Z -> (0 <= u_exact d k)%Z -> (0 <= vtrue)%Z ->
+    Qabs (inject_Z k - C * TWO32Q) <= 1#2 ->
+    Qabs (inject_Z vtrue - inject_Z d * (C * TWO32Q)) <= 1#2 ->
+    (d + 1 <= 2 * Z.of_nat n)%Z ->
+    qpow BETA n * W (u_exact d k) <= W vtrue /\ qpow BETA n * W vtrue <= W (u_exact d k).
+Proof.
+  intros C k d vtrue n Hd Hu Hv Hk Hvr Hn.
+  apply the_ideal_weights_at_two_close_exponents_bracket_each_other; auto.
+  pose proof (the_quantized_temperature_shifts_the_exponent_by_at_most_half_a_delta
+                C k d vtrue Hd Hk Hvr) as H. lia.
+Qed.
+
+(** `BETA^n >= 1 - n * 2^-32` - Bernoulli, so no power is ever evaluated. *)
+Lemma beta_power_is_above_its_linearisation : forall n : nat,
+  1 - inject_Z (Z.of_nat n) * (1#4294967296) <= qpow BETA n.
+Proof.
+  intros n.
+  assert (Hb : BETA == 1 + (- (1#4294967296)))
+    by (unfold BETA, Qeq; simpl; lia).
+  assert (Hq : qpow BETA n == qpow (1 + (- (1#4294967296))) n)
+    by (apply qpow_Qeq; exact Hb).
+  rewrite Hq.
+  pose proof (bernoulli n (- (1#4294967296)) ltac:(unfold Qle; simpl; lia)) as B.
+  lra.
+Qed.
+
+(** The headline, at the head_dim this kernel is used at. `2 * 127^2 * 128` is
+    4,129,024, so `n = 2,064,513` satisfies `d + 1 <= 2n` for every delta an
+    int8 pipeline can produce, and `1 - n*2^-32 > 1 - 1/2048`.
+
+    Measured against the real arithmetic the worst observed exponent error is
+    0.837 of this allowance and the worst weight factor is 1.00028 against the
+    1/2048 = 1.00049 stated here, so it is loose by about 1.7x - report the
+    slack, not just the bound. *)
+Corollary at_head_dim_128_the_temperature_moves_a_weight_by_under_a_two_thousandth :
+  forall (C : Q) (k d vtrue : Z),
+    (0 <= d)%Z -> (d <= SCORE_DELTA_SPAN 128)%Z ->
+    (0 <= u_exact d k)%Z -> (0 <= vtrue)%Z ->
+    Qabs (inject_Z k - C * TWO32Q) <= 1#2 ->
+    Qabs (inject_Z vtrue - inject_Z d * (C * TWO32Q)) <= 1#2 ->
+    (1 - (1#2048)) * W (u_exact d k) <= W vtrue
+    /\ (1 - (1#2048)) * W vtrue <= W (u_exact d k).
+Proof.
+  intros C k d vtrue Hd Hspan Hu Hv Hk Hvr.
+  (* `Z.to_nat 2064513`, NOT the nat literal: a `nat` literal in Coq is UNARY,
+     so writing 2064513 here builds two million constructors and every tactic
+     that normalises hangs. This is the same reason Part 0 says nothing is
+     ever evaluated at a large literal. *)
+  set (n := Z.to_nat 2064513).
+  assert (Hid : Z.of_nat n = 2064513%Z) by (unfold n; apply Z2Nat.id; lia).
+  assert (Hn : (d + 1 <= 2 * Z.of_nat n)%Z)
+    by (rewrite Hid; unfold SCORE_DELTA_SPAN in Hspan; lia).
+  destruct (the_quantized_temperature_moves_the_ideal_weight_by_at_most_a_beta_power
+              C k d vtrue n Hd Hu Hv Hk Hvr Hn) as [A B].
+  assert (HL : 1 - (1#2048) <= qpow BETA n).
+  { eapply Qle_trans; [ | apply beta_power_is_above_its_linearisation ].
+    rewrite Hid. change (inject_Z 2064513) with (2064513#1).
+    unfold Qle; simpl; lia. }
+  assert (HWu : 0 <= W (u_exact d k)) by (apply W_nonneg; auto).
+  assert (HWv : 0 <= W vtrue) by (apply W_nonneg; auto).
+  split; nra.
+Qed.
+
+(** REFUSAL 1. `C < 2^-33` rounds the multiplier to zero, and then the
+    argument is `(0 + 2^15) >> 16 = 0` for EVERY key - so every weight is
+    exactly `2^28` and the softmax is uniform. This is the same symptom
+    `tools/ptx_bridge.py` finding 06 records from a multiplier `2^16` too
+    small, and its own differential could not see it: both arms replicate the
+    kernel's formula, so they agree bit for bit on a uniform answer. *)
+Theorem a_zero_multiplier_gives_every_key_the_same_weight :
+  forall d1 d2, (0 <= d1)%Z -> (0 <= d2)%Z ->
+    arg d1 0 = 0%Z /\ arg d2 0 = 0%Z /\ expf (arg d1 0) = expf (arg d2 0).
+Proof.
+  intros d1 d2 _ _.
+  assert (H : forall d, arg d 0 = 0%Z).
+  { intros d. unfold arg, HALF, ULP, SAT. rewrite Z.mul_0_r. reflexivity. }
+  rewrite !H. auto.
+Qed.
+
+(** REFUSAL 2. `mul.wide.s32` on a `.u32` parameter. At `KFix = 2^31` and one
+    unit of score delta the unsigned reading gives argument 32768 - a weight
+    of `2^28 * 2^(-1/2)`, i.e. a key that contributes - while the signed one
+    gives -32768, which the `cvt.u32.u64` under the saturate wraps to
+    4294934528. That is far above the table, so the weight is ZERO. Not a
+    rounding difference: the key vanishes.
+
+    Note the saturate cannot help. `min.s64` bounds from ABOVE, and the signed
+    product is negative. *)
+Theorem the_two_readings_of_the_multiplier_disagree_above_two_to_the_thirty_one :
+  arg 1 KFIX_SIGNED_LIMIT = 32768%Z
+  /\ as_s32 KFIX_SIGNED_LIMIT = (-2147483648)%Z
+  /\ arg 1 (as_s32 KFIX_SIGNED_LIMIT) = (-32768)%Z
+  /\ ((arg 1 (as_s32 KFIX_SIGNED_LIMIT)) mod TWO32)%Z = 4294934528%Z.
+Proof. repeat split; vm_compute; reflexivity. Qed.
+
+Theorem the_signed_reading_zeroes_a_weight_the_unsigned_one_keeps :
+  expf ((arg 1 (as_s32 KFIX_SIGNED_LIMIT)) mod TWO32)%Z = 0%Z
+  /\ 0 < W (u_of_arg (arg 1 KFIX_SIGNED_LIMIT)).
+Proof.
+  split.
+  - apply exp_is_zero_above_the_table. vm_compute. discriminate.
+  - apply W_pos. vm_compute. discriminate.
+Qed.
+
+
 End Ideal.
 
 (* ------------------------------------------------------------------ *)
@@ -1095,3 +1364,10 @@ Print Assumptions the_bound_holds_at_every_launch_geometry.
 Print Assumptions no_rational_squares_to_two.
 Print Assumptions exact_homogeneity_is_unsatisfiable_over_Q.
 Print Assumptions the_interface_is_satisfiable.
+Print Assumptions the_ideal_weights_at_two_close_exponents_bracket_each_other.
+Print Assumptions the_quantized_temperature_shifts_the_exponent_by_at_most_half_a_delta.
+Print Assumptions the_quantized_temperature_moves_the_ideal_weight_by_at_most_a_beta_power.
+Print Assumptions at_head_dim_128_the_temperature_moves_a_weight_by_under_a_two_thousandth.
+Print Assumptions a_zero_multiplier_gives_every_key_the_same_weight.
+Print Assumptions the_two_readings_of_the_multiplier_disagree_above_two_to_the_thirty_one.
+Print Assumptions the_signed_reading_zeroes_a_weight_the_unsigned_one_keeps.

@@ -32,6 +32,97 @@ use crate::fixed_exp::ptx_device_function;
 /// in integers.
 pub const MAX_EXACT_SEQ_LEN: usize = (1usize << 63) / (((1usize << 28) - 1) * 127);
 
+/// The smallest multiplier the kernel's `mul.wide.s32` reads as positive.
+///
+/// The parameter is declared `.param .u32 q6` and consumed by a SIGNED wide
+/// multiply, so the two readings diverge at `2^31`. Nothing in the emitter can
+/// check a runtime value; [`temperature_fixed_point`] is where the check goes,
+/// and `proofs/SoftmaxErrorBound.v`'s
+/// `the_two_readings_of_the_multiplier_disagree_above_two_to_the_thirty_one`
+/// exhibits the divergence: at `KFix = 2^31` and one unit of score delta, the
+/// unsigned reading gives argument `32768` (a weight of `2^28 * 2^-0.5`) and
+/// the signed one gives `-32768`, which the `cvt.u32.u64` below the saturate
+/// wraps to `4294934528` -- above the table, so the weight is ZERO. Not a
+/// rounding difference: one key contributes and the other does not.
+pub const KFIX_SIGNED_LIMIT: u64 = 1 << 31;
+
+/// `KFix = round(C * 2^32)`, the kernel's fixed-point temperature.
+///
+/// `C` is log2 units per unit of integer score -- for an int8 pipeline,
+/// `q_scale * k_scale * log2(e) / sqrt(head_dim)`. The kernel forms the exp's
+/// Q16.16 argument as `t = ((m - s) * KFix + 2^15) >> 16`, so one factor of
+/// `2^16` is consumed by the shift and `KFix` must carry `2^32`.
+///
+/// **This existed in seven transcriptions and was checked in one.** Every test
+/// that needs a multiplier wrote `(c * 2f64.powi(32)).round()` itself, and only
+/// `tools/ptx_bridge.py` guarded the result -- with a bare `continue`, so a
+/// temperature outside the representable range silently removed a case from a
+/// measurement rather than failing it. Both bounds below come from that guard;
+/// what is new is that they are derived rather than asserted, enforced in the
+/// compiler rather than in a script, and stated as hypotheses of a theorem.
+///
+/// The two refusals are the two ways the multiplier stops meaning a
+/// temperature, and both are silent in the kernel:
+///
+/// * **`KFix == 0`** -- reachable whenever `C < 2^-33`. Then `t` is `0` for
+///   EVERY key (`(0 + 2^15) >> 16 == 0`), so every weight is exactly `2^28`
+///   and the softmax is UNIFORM. That is the same symptom
+///   `tools/ptx_bridge.py`'s finding 06 records from the opposite cause -- the
+///   bridge passed `C * 2^16`, i.e. a multiplier `2^16` too small -- and its
+///   differential could not see it, because both arms replicate the kernel's
+///   formula and agree bit for bit on a uniform answer just as readily.
+///   `a_zero_multiplier_gives_every_key_the_same_weight` is the proof of it.
+/// * **`KFix >= 2^31`** -- see [`KFIX_SIGNED_LIMIT`].
+///
+/// What is NOT refused is the quantization error itself, because it is bounded
+/// rather than catastrophic: rounding `C * 2^32` to an integer moves the
+/// exponent by at most `delta / 2` in Q32 log2 units, i.e. `delta * 2^-33` log2
+/// units, INDEPENDENTLY of `KFix`. Use [`score_delta_span`] to price it for a
+/// given head_dim; at head_dim 128 it is a factor of 1.00034 on any weight.
+pub fn temperature_fixed_point(c: f64) -> Result<u32, String> {
+    if !c.is_finite() || c <= 0.0 {
+        return Err(format!(
+            "the softmax temperature C must be finite and positive, got {c:e}; \
+             it is log2 units per unit of integer score, so a non-positive value \
+             is not a temperature"
+        ));
+    }
+    let scaled = (c * 4294967296.0).round();
+    if scaled < 1.0 {
+        return Err(format!(
+            "C = {c:e} rounds to KFix = 0 (C < 2^-33), which makes the exp's \
+             argument 0 for every key: every weight is exactly 2^28 and the \
+             softmax is UNIFORM. That is a wrong answer, not an imprecise one, \
+             and nothing downstream can see it"
+        ));
+    }
+    if scaled >= KFIX_SIGNED_LIMIT as f64 {
+        return Err(format!(
+            "C = {c:e} gives KFix = {scaled:.0}, at or above {KFIX_SIGNED_LIMIT}; \
+             the kernel's `mul.wide.s32` reads the .u32 parameter as SIGNED, so \
+             the product is negative, the saturate bounds nothing and the \
+             narrowing wraps -- keys get the weight of an unrelated argument"
+        ));
+    }
+    Ok(scaled as u32)
+}
+
+/// The largest `m - s_i` an int8 score pipeline can produce at this head_dim.
+///
+/// `s = sum_d q_d * k_d` with `|q|, |k| <= 127`, so `|s| <= 127^2 * head_dim`
+/// and the delta between the maximum and any other score is at most twice
+/// that. This is the quantity the temperature's quantization error is stated
+/// over -- the exponent moves by at most `span / 2` in Q32 log2 units, so a
+/// bound on the span IS the bound on the error, and it is a compile-time
+/// function of head_dim alone.
+///
+/// It is not a refusal: an `i32` score holds `127^2 * head_dim` for every
+/// head_dim this kernel accepts (the 48 KB shared-memory limit caps head_dim at
+/// 6143, where `127^2 * 6143` is 99,059,807, well inside `i32`).
+pub fn score_delta_span(head_dim: usize) -> u64 {
+    2 * 127 * 127 * head_dim as u64
+}
+
 // ------------------------------------------------------------------
 // The launch-geometry schedule, as ONE description.
 //

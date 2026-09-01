@@ -24,7 +24,7 @@
 //!
 //! Run with:  cargo test --release --test exact_attention_bounds
 
-use y::exact_attention::{attention_ptx, MAX_EXACT_SEQ_LEN};
+use y::exact_attention::{attention_ptx, score_delta_span, temperature_fixed_point, MAX_EXACT_SEQ_LEN};
 
 /// The bound is arithmetic, not a magic number: a Q0.28 weight times an int8
 /// value, summed, must stay inside a signed 64-bit accumulator.
@@ -143,7 +143,7 @@ fn the_temperature_multiplier_carries_two_to_the_thirty_two() {
     // Score deltas span what an int8 dot product over head_dim <= 128 can
     // produce, and `c` spans the per-tensor scales real activations give.
     for &c in &[7.0e-5f64, 4.5e-4, 1.8e-3, 3.0e-2] {
-        let kfix = (c * 2f64.powi(32)).round() as i64;
+        let kfix = temperature_fixed_point(c).expect("a legal temperature") as i64;
         let wrong = (c * 65536.0).round() as i64; // what the bridge passed
         for &ds in &[1i64, 97, 10_000, 100_000, 500_000, 2_064_512] {
             let want = demo_t(ds, c);
@@ -268,8 +268,8 @@ fn the_saturate_is_what_stops_a_far_key_wrapping_into_a_large_weight() {
     // C = 3.0e-2 is the largest scale swept above; head_dim 128 bounds an int8
     // dot product by 127*127*128, so a score delta spans twice that.
     const C: f64 = 3.0e-2;
-    let kfix = (C * 2f64.powi(32)).round() as i64;
-    let ds_max = 2 * 127 * 127 * 128;
+    let kfix = temperature_fixed_point(C).expect("a legal temperature") as i64;
+    let ds_max = score_delta_span(128) as i64;
 
     // The first delta whose 64-bit argument crosses 2^32 and lands back near
     // zero. Found by search rather than asserted, so the case cannot go stale
