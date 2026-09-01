@@ -43,13 +43,17 @@
     [blen]/[boff] against this file's theorem over a finite range and against
     the emitted kernel's observed thread count.
 
-    Three abstractions are deliberate and each one is a real gap:
+    Three abstractions are deliberate, and all three are scoped to THIS FILE.
+    Two of them are discharged elsewhere in the series; the third is an
+    obligation on the caller rather than a gap.
 
     - A band's partial is modelled as [acc_range], the exact sum over that
-      band's indices. THE MICRO-KERNEL IS NOT VERIFIED. Packing, the 2-D
-      register tile, the masked tails and the periodic int32 -> int64 flush are
-      all assumed to compute that sum. This file proves the schedule around
-      them; Phase 1's other half is proving they fill it.
+      band's indices. This file assumes the micro-kernel computes that sum and
+      proves the schedule around it. What fills it is proved: packing and the
+      masked tails in `ExactGemmPacking.v`, the 2-D register tile's routing in
+      `ExactGemmRegisterTile.v`, the periodic int32 -> int64 flush in
+      `ExactGemmMicro.v`, and the three composed into one lane and then one
+      tile in `ExactGemmChain.v`.
     - Accumulators are [Z], which is unbounded. Nothing here says a partial
       sum fits in int32 between flushes - that is the licence obligation, and
       it is discharged separately and EXHAUSTIVELY (over all 32768 int16
@@ -57,8 +61,15 @@
       [Z] plus an exhaustive check over the finite domain is stronger than
       either alone, but only because both are present.
     - Only the K axis is split here. The M and N partitioning inside the
-      driver is a disjoint decomposition of the OUTPUT, which is a different
-      obligation (every element written once) and is not modelled.
+      driver is a disjoint decomposition of the OUTPUT - a different
+      obligation, every element written exactly once - and it is modelled, in
+      `ExactGemmTiling.c_written_exactly_once`.
+
+    CORRECTED 2026-09-01. The first and third bullets previously read "THE
+    MICRO-KERNEL IS NOT VERIFIED ... Phase 1's other half is proving they fill
+    it" and "is not modelled". Both were true when this file landed and
+    neither was true afterwards, because nothing updates a sibling's prose
+    when a later file discharges what it names.
 
     Build:  coqc proofs/ExactGemmKsplit.v      (Rocq 9.1)
 *)

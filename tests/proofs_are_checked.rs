@@ -888,3 +888,249 @@ fn every_proof_has_a_content_control() {
          `content_controls()` naming its load-bearing theorem."
     );
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+//  The scope disclaimers, which are the programme's own work queue
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Every proof here carries a "what this does NOT prove" section, and
+// `docs/verified_kernel_process.md` step 12 says to read those back as the next
+// increment's queue - which has produced two increments already. A FALSE item
+// on that queue costs a whole one: it sends the next session at work that is
+// already done, and that has happened. Audited 2026-09-01: SEVEN false claims
+// across four files, every one UNDERSTATING what is proved.
+//
+//   ExactGemmChain.v    named a "kc-panel loop" as proved by nothing. No such
+//                       loop exists - the driver passes the full K to both
+//                       packers - and the session that wrote `ExactGemmWhole.v`
+//                       had already established that and recorded it THERE.
+//                       Also said the tiling and band layers "are not joined
+//                       to this one"; `ExactGemmWhole.v` joins them.
+//   ExactGemmKsplit.v   "THE MICRO-KERNEL IS NOT VERIFIED. Packing, the 2-D
+//                       register tile, the masked tails and the periodic
+//                       int32 -> int64 flush are all assumed" - all four are
+//                       proved, in Packing, RegisterTile, Micro and Chain. And
+//                       "the M and N partitioning ... is not modelled", which
+//                       is `ExactGemmTiling.c_written_exactly_once`.
+//   ExactGemmMicro.v    put the register tile and the masked tails on the ISA
+//                       side of the TCB boundary, overstating the TCB by three
+//                       proof files.
+//   GridStrideSplit.v   said the per-thread body was unmodelled, when the file
+//                       one level ABOVE it bounds two thirds of it; and called
+//                       its schedule "a PTX string template rather than an
+//                       emitted expression", contradicted by the file's own
+//                       `Require AttentionSchedule`.
+//
+// The cause is structural rather than careless: each file states a GLOBAL
+// negative, and nothing updates a sibling's prose when a later file discharges
+// what it names. The files whose lists stayed true are the dependency ROOTS -
+// `ExactGemmWhole.v`, `SoftmaxErrorBound.v`, `CountingSort.v` - for the reason
+// that makes them the right owners: a capstone is rewritten every time the
+// chain below it closes.
+//
+// **What these two gates can and cannot see.** They catch the FORM of the
+// failure - a proof with something above it making a claim about the whole
+// programme, and a citation to a file that no longer exists. They cannot see a
+// wrong claim phrased in words they do not know. Prose staleness is not
+// mechanically decidable in general, which is why `ExactGemmSchedule.v` is
+// GENERATED rather than checked; these are the reachable part, and the
+// unreachable part is stated here rather than implied.
+
+/// A global negative may only be stated by a file with nothing above it.
+///
+/// The capstones are DERIVED, not listed: a proof is one exactly when no other
+/// proof `Require`s it. That is the principled form of the rule - a file with
+/// something above it cannot know what the programme leaves open, because the
+/// file above it may have closed it. Deriving also keeps this from becoming a
+/// third copy of the dependency graph, which is the mistake `ExactGemmSchedule.v`
+/// exists to avoid.
+///
+/// **It earned its place on the first run.** `GridStrideSplit.v` said the
+/// per-thread body - "the integer exp, the Q0.28 weight, the int8 `V` load" -
+/// was not modelled. `SoftmaxErrorBound.v` `Require`s it and bounds the first
+/// two. That hit was classified as a false positive and it was not; checking
+/// before dismissing turned it into the seventh finding.
+///
+/// The escape is a SCOPING marker on the line, not an exemption list: a claim
+/// that says "not modelled HERE" is owned by the file making it and cannot rot
+/// when a sibling changes. `ExactGemmTiling.v` writes it that way and passes
+/// unchanged - that is the control, and without it this gate would ban a
+/// correct sentence.
+#[test]
+fn only_the_capstone_states_a_global_negative() {
+    /// Phrases that assert something about the PROGRAMME rather than about the
+    /// file containing them. Every one is verbatim from a claim that was false
+    /// when audited, so this list is evidence rather than taste.
+    const GLOBAL: &[&str] = &[
+        "not proved anywhere",
+        "IS NOT VERIFIED",
+        "is not modelled",
+        "are not joined to this one",
+        "rather than an emitted expression",
+        "Phase 1's other half",
+    ];
+    /// A claim carrying one of these is scoped to its own file and cannot rot
+    /// when a sibling changes.
+    ///
+    /// The markers are DELIMITED, and that is not fussiness: a bare `"here"`
+    /// is a substring of **"anywhere"**, so the first version of this gate
+    /// exempted the exact phrase `"not proved anywhere"` it exists to catch,
+    /// and the mutation restoring that paragraph came back green. A scoping
+    /// word that occurs inside the global claim is not a scoping word.
+    const SCOPED: &[&str] = &[" here ", " here,", " here.", "HERE", "this file", "in this one"];
+
+    let sources = proof_sources();
+
+    // Derive the capstones: a proof nothing else `Require`s.
+    let mut required: std::collections::BTreeSet<String> = Default::default();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for p in &sources {
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(p).expect("proof source is utf-8");
+        for line in src.lines() {
+            let l = line.trim();
+            let rest = l
+                .strip_prefix("Require Import ")
+                .or_else(|| l.strip_prefix("Require "));
+            if let Some(rest) = rest {
+                for m in rest.trim_end_matches('.').split_whitespace() {
+                    required.insert(format!("{m}.v"));
+                }
+            }
+        }
+        files.push((name, src));
+    }
+    let capstones: Vec<&str> = files
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .filter(|n| !required.contains(*n))
+        .collect();
+
+    // Non-vacuity, BOTH directions. A sweep over no files agrees perfectly,
+    // and a `Require` parse that found nothing would make every file exempt.
+    assert!(
+        files.len() >= 15,
+        "only {} proof files were scanned; the sweep is not looking where it thinks",
+        files.len()
+    );
+    assert!(
+        capstones.len() < files.len() / 2,
+        "{} of {} proofs came out as capstones - the `Require` scan is not parsing \
+         the dependency graph, so nearly every file would be exempt",
+        capstones.len(),
+        files.len()
+    );
+
+    let mut offenders = Vec::new();
+    for (name, src) in &files {
+        if capstones.contains(&name.as_str()) {
+            continue;
+        }
+        let lines: Vec<&str> = src.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !GLOBAL.iter().any(|g| line.contains(g)) {
+                continue;
+            }
+            if SCOPED.iter().any(|w| line.contains(w)) {
+                continue;
+            }
+            // A correction note is allowed to QUOTE the claim it retracts,
+            // otherwise the fix cannot explain itself - the same scoping the
+            // README layout gate needed for the same reason.
+            let lo = i.saturating_sub(4);
+            let near = lines[lo..(i + 2).min(lines.len())].join(" ");
+            if near.contains("CORRECTED") || near.contains("previously") {
+                continue;
+            }
+            offenders.push(format!("{name}:{}: {}", i + 1, line.trim()));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "a proof that is not a dependency ROOT states a negative about the whole \
+         programme. Those rot silently - nothing updates a sibling's prose when a \
+         later file discharges what it names, and seven such claims were false when \
+         audited, every one understating what is proved. Scope it to this file \
+         (\"not modelled HERE; `X.v` proves it\") and leave the global list to the \
+         capstone. Capstones here: {capstones:?}\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// A repo-relative path named in a proof, a gate or a source file must exist.
+///
+/// The cheapest kind of documentation rot, and one this repo has recorded three
+/// times: `docs/` naming three verification scripts that were never in the tree,
+/// `self_hosted/` rotting because it was named only in a doc, and a
+/// `src/zk_fuzz.rs` docstring citing a test file that did not exist. Found one
+/// live instance when written - a citation to `zk_divmod_soundness.rs`, renamed
+/// to `zk_gadget_soundness.rs` when it grew past division.
+///
+/// **Anchor the START of the path.** The first version of this sweep did not, so
+/// a path under `crates/y-gpu/tests/` matched as though it were under `tests/`
+/// and was reported missing while existing - two of that sweep's three findings
+/// were that. A blanket pattern is only safe when it names one thing.
+#[test]
+fn every_path_a_proof_or_a_gate_cites_exists() {
+    const ROOTS: &[&str] = &["proofs", "tests", "src", "tools", "docs", "crates", "fuzz"];
+    /// `python/` is a SIBLING of the cargo project, not a child of it.
+    const SIBLING: &[&str] = &["python"];
+    const EXT: &[&str] = &[".v", ".rs", ".py", ".md", ".circom"];
+
+    let root = repo();
+    let mut checked = 0usize;
+    let mut missing = Vec::new();
+
+    let mut files: Vec<PathBuf> = proof_sources();
+    for dir in ["tests", "src"] {
+        for e in std::fs::read_dir(root.join(dir)).expect("directory is readable") {
+            let p = e.expect("entry").path();
+            if p.extension().and_then(|s| s.to_str()) == Some("rs") {
+                files.push(p);
+            }
+        }
+    }
+
+    for f in &files {
+        let src = std::fs::read_to_string(f).unwrap_or_default();
+        let here = f.strip_prefix(&root).unwrap_or(f).display().to_string();
+        // Splitting on non-path characters is what anchors the START: a token
+        // is a whole path or it is not one at all.
+        for tok in src.split(|c: char| !(c.is_alphanumeric() || "._/-".contains(c))) {
+            let Some(slash) = tok.find('/') else { continue };
+            let head = &tok[..slash];
+            let sibling = SIBLING.contains(&head);
+            if !ROOTS.contains(&head) && !sibling {
+                continue;
+            }
+            if !EXT.iter().any(|e| tok.ends_with(e)) {
+                continue;
+            }
+            checked += 1;
+            let exists = root.join(tok).exists()
+                || (sibling && root.parent().map(|p| p.join(tok).exists()).unwrap_or(false));
+            if !exists {
+                missing.push(format!("{here} -> {tok}"));
+            }
+        }
+    }
+
+    // Non-vacuity: counts CITATIONS RESOLVED, not candidate files - a sweep
+    // that parsed nothing reports "none missing" perfectly.
+    assert!(
+        checked > 200,
+        "only {checked} path citations were resolved; the scan is not reading what \
+         it thinks it is"
+    );
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "{} citation(s) name a file that does not exist. A docstring pointing at a \
+         renamed or deleted file is how a claim about what pins something becomes \
+         unfalsifiable:\n  {}",
+        missing.len(),
+        missing.join("\n  ")
+    );
+}

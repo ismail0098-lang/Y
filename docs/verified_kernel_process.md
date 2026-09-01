@@ -724,6 +724,44 @@ next increments in this programme, and it is honest by construction — an item
 is on it because a previous session decided it could not be discharged *then*,
 not because it cannot be discharged.
 
+### But check the queue is still TRUE before working from it
+
+The lists rot, and they rot in one direction. Audited across seventeen proofs:
+**seven items were false, in four files, every one understating what is
+proved** — a layer named as unproved that *does not exist*; four obligations
+listed as "assumed" that three later files discharge; a trusted base overstated
+by three proof files; and a tie described as "weaker than byte-identity" that is
+byte-identity, contradicted by the file's own `Require`.
+
+The cause is structural rather than careless. Each file states a **global**
+negative — a claim about what the *programme* leaves open — and nothing updates
+a sibling's prose when a later file closes it. One of those items had already
+been diagnosed by a previous session, which recorded the correction in the file
+it was working on and left the original claim standing; so the queue had
+already cost a session the time to re-derive a phantom.
+
+**The files whose lists stayed true are exactly the dependency roots** — the
+proofs nothing else `Require`s. That is the rule, and it is derived rather than
+chosen: a capstone is rewritten every time the chain below it closes, and a file
+with something above it *cannot* know what the programme leaves open, because
+the file above it may have closed it. So a global negative belongs to a root;
+everywhere else, scope the claim to the file making it ("not modelled **here**;
+`X.v` proves it") and it can no longer go stale behind your back.
+
+Two mechanical checks are reachable and worth their few lines — a non-root proof
+may not state a global negative, and every repo-relative path a proof or a gate
+cites must exist (327 citations here, one stale from a rename). Neither can see
+a wrong claim phrased in words it does not know; prose staleness is not
+decidable, which is exactly why the schedule proof is *generated* rather than
+checked. State that limit in the gate.
+
+Two traps in writing such a gate, both hit within an hour. A scoping marker that
+is a **substring of the global claim** exempts the claim: `"anywhere"` contains
+`"here"`, so the first version excused the phrase it existed to catch and the
+mutation came back green. And a gate whose prose *quotes* the stale citations it
+was written for will flag itself — the same self-reference trap as anchoring on
+a function name that also appears as a string literal on the gate's own line.
+
 The softmax bound's list had four items. Three are structural (an exhaustive
 Rust discharge that is *stronger* than the proof would be; a different layer's
 question; the grade of the tie). The fourth said the temperature multiplier
@@ -786,7 +824,10 @@ weakens every theorem above it.
 9. **Emit the certificate**, and gate its *text*, not just that `coqc` accepts it.
 10. **Mutation-test**, one target at a time, and sort every survivor.
 11. **Write down what is not covered**, in the artifact.
-12. **Come back and read step 11's list.** It is the next increment's queue.
+12. **Come back and read step 11's list — and check it is still true.**
+    It is the next increment's queue, and it rots in one direction: seven of
+    the items here turned out to understate what is proved. A global negative
+    belongs to a dependency ROOT; everywhere else, scope it to the file.
 13. **Read the build's warnings** — and check *which crate* emitted each one
     before believing it. They are a free census of the defect class in step 6,
     and the harness that reports "green" must fail on a target that did not
@@ -814,6 +855,9 @@ weakens every theorem above it.
 - `tests/build_is_warning_free.rs` and `tests/cuda_driver_abi_versions.rs` — the
   gates that keep the warning census readable, and the agreement assertion whose
   limit its own control demonstrates
+- `tests/proofs_are_checked.rs` — the six checks on `proofs/`, including the two
+  that keep the scope disclaimers from rotting: capstones derived from the
+  `Require` graph, and every cited path resolved
 - `proofs/SoftmaxErrorBound.v` and `tests/softmax_error_bound.rs` — the first
   BOUND rather than an equality, and the answer to whether the schema extends
   to approximate arithmetic

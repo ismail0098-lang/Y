@@ -355,7 +355,8 @@ fn a_negative_dividend_is_still_refused_by_name() {
     // And with a VARIABLE divisor, where the quotient cannot be computed at
     // compile time. This is the only case in which the dividend bound does any
     // work - Z3 shows the quotient check subsumes it whenever both operands are
-    // constant (`tests/zk_divmod_soundness.rs`).
+    // constant (`tests/zk_gadget_soundness.rs`, renamed from `zk_divmod_soundness.rs`
+    // when it grew to cover every gadget resting on the same decomposition).
     let src = "@unsafe\nfn main(y: I32) -> I32 {\n    return (0 - 1) / y;\n}\n";
     let tokens = Lexer::new(src).tokenize();
     let program = Parser::new(tokens).parse_program().expect("parse");

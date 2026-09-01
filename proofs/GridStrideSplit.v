@@ -67,15 +67,34 @@
 
     ** What is NOT proved.
 
-    The per-thread body - the integer exp, the Q0.28 weight, the int8 `V` load
-    - is not modelled; `f` is an arbitrary function of the index. The
-    accumulator width obligation is [the_bound_is_one_unit_wide] here and is
-    enforced in `src/exact_attention.rs` and checked in
-    `tests/exact_attention_bounds.rs`. And unlike the two GEMM kernels this
-    one's schedule is a PTX string template rather than an emitted expression,
-    so the tie to the artifact is `tests/exact_attention_schedule.rs` reading
-    the emitted text - weaker than the byte-identity the `Ix` layer gives, and
-    named as such rather than glossed.
+    The per-thread body is not modelled HERE: `f` is an arbitrary function of
+    the index, which is exactly what makes the partition theorem independent
+    of it. Two thirds of that body ARE modelled, one file up - the integer exp
+    and the Q0.28 weight are what `SoftmaxErrorBound.v` bounds, and it
+    `Require`s this file to join its per-element bound to every launch
+    geometry. What no proof in this series models is the int8 `V` load.
+
+    The accumulator width obligation is [the_bound_is_one_unit_wide] here and
+    is enforced in `src/exact_attention.rs` and checked in
+    `tests/exact_attention_bounds.rs`.
+
+    The tie to the artifact is `tests/exact_attention_schedule.rs`, and it has
+    two halves. The schedule is an `Ix` - `exact_attention::sched_scores` and
+    `sched_accum` - rendered to PTX by `cpu_gemm::render_ptx` and to Coq as
+    `AttentionSchedule.v`, which this file `Require`s, so a divergence between
+    the emitter and the proof is a byte-identity failure exactly as it is for
+    the two GEMM kernels. What a rendering cannot see is whether the loop
+    CONSUMES the block it rendered, so the same file also walks the emitted
+    PTX's reaching definitions: a mutation swapping two result registers
+    leaves the block correct and present while the loop strides by a partial
+    product, and only the walker catches that.
+
+    CORRECTED 2026-09-01, and the second half was corrected by the gate rather
+    than by reading. This said the whole per-thread body was unmodelled, which
+    stopped being true when the softmax bound landed above it; and it called
+    the schedule "a PTX string template rather than an emitted expression",
+    which stopped being true when `Ix` gained a PTX renderer - a change this
+    file's own `Require AttentionSchedule` records.
 
     Build:  coqc proofs/GridStrideSplit.v      (Rocq 9.1)
 *)
