@@ -3790,16 +3790,101 @@ feature sets plus the aggregates; both builds warning-free; `coqc` clean over
 all seventeen proofs with no axioms and nothing admitted; no `src/` change, so
 every emitted module is byte-identical by construction.
 
+#### The certificate did not state its own trust boundary, and the list it copied had dropped the item with teeth · 2026-09-01
+
+Three turns of conversation about *"can this ever be 100% proven, or does SASS
+mean never"* produced the right answer — **no proof has a zero trusted
+computing base, and the bar is whether the TCB is stated, small, and each item
+independently checked** — and then the obvious question: does the certificate
+this compiler actually ships say what its TCB is?
+
+It said something. **It was a hand-copy of `ExactGemmWhole.v`'s exclusion list,
+and it had dropped one of the capstone's three bullets while adding one of its
+own.** Both lists were three bullets long, so a count called them equal:
+
+| | `ExactGemmWhole.v` | emitted certificate |
+|---|---|---|
+| `vpdpwssd` + i32 half-order are definitions | yes | yes |
+| loop structure modelled, not extracted | yes | yes |
+| **`pthread` mechanics, panel buffer sizes, scratch allocation not modelled** | yes | **no** |
+| nothing about LLVM / `clang` | — | yes (correctly added) |
+
+**The dropped item is where both of this repository's documented out-of-bounds
+writes were** — the three `ldc` sites in `emit_vnni_threaded_module`, observed
+as `double free or corruption` and found only by writing `ExactGemmTiling.v`,
+and the tile-count over-allocation that is *caught by the schedule gate and by
+nothing else because it changes no answer*. So the certificate was silent about
+exactly the class of defect this kernel has actually shipped, while its own
+module doc said "a certificate that overstates its scope is worse than none".
+
+**The fix is the one this repository already knows: derive, do not check.**
+`exact_gemm_certificate::TRUST_BOUNDARY` is one list rendered into every
+certificate, the same move `proofs/ExactGemmSchedule.v` made for the schedule
+constants. Six items, and each carries a field the prose never had:
+
+```rust
+pub enum Check {
+    Pinned(&'static str),      // something here can FAIL on it - the file
+    Unchecked(&'static str),   // nothing can - what closing it would take
+}
+```
+
+**A caveat list says what is not proved; a trust boundary says what would
+notice.** Only the second is worth handing to someone deciding whether to rely
+on the kernel, and the difference is one struct field. Three items are
+`Pinned` (`cpu_gemm_vnni_micro.rs` for the ISA facts, `exact_gemm_schedule_proof.rs`
+for the extracted half of the nest, `proofs_are_checked.rs` for the checker
+itself); three are `Unchecked` (the buffer sizing, everything below the emitted
+IR, and the processor executing its own ISA). Naming the last one is what makes
+the list **finite** rather than trailing off.
+
+**Two grades, not three, and the missing one is deliberate.** "A test exercises
+it" is not a grade between `Pinned` and `Unchecked` unless the test can *fail*
+on the thing. `exact_gemm_thread_invariance.rs` runs this kernel at ragged
+shapes with every stride differing from its extent — and compares **answers**,
+which a buffer sized wrongly in the safe direction does not change. That is not
+a hypothetical: it is how the over-allocation survived.
+
+**The gate is a BIJECTION and that is the whole design, because a count is
+exactly what would have passed.** Every bullet of the capstone's exclusion list
+must be claimed by exactly one `TrustItem`, and every item attributed to the
+capstone must find exactly one bullet. It cannot see a bullet reworded around
+its locator phrase into a different claim — prose staleness is not mechanically
+decidable, which is the same limit that makes `ExactGemmSchedule.v` generated
+rather than checked, and it is stated in the file rather than implied.
+
+**Which file the certificate must mirror is DERIVED from last increment's
+result, not chosen.** Only a dependency root can truthfully state a global
+negative, because a proof with something above it cannot know what the
+programme still leaves open. The capstone is therefore exactly the file whose
+exclusion list is the aggregate one — and exactly the file a certificate
+instantiating it may not understate. The two increments fit; that was not
+planned.
+
+**A fourth test exists because the bijection can never require the items below
+the model.** A proof over `Z` has no opinion about `clang`, so the capstone
+correctly does not mention a toolchain — which means deleting every
+`stated_in: None` item leaves the bijection green while the certificate stops
+saying it makes no claim about machine code. Confirmed by mutation (M8), not
+assumed.
+
+Verified end to end: the regenerated certificate compiles under `coqc` against
+the real proof chain, three `Print Assumptions`, all `Closed under the global
+context`. No committed `.ptx` or `.ll` changed — certificates are generated per
+compilation and none is committed.
+
 ## 5. End goal
 
-> **STATUS, 2026-08-31.** The end goal below is reached for **one kernel on one
+> **STATUS, 2026-09-01.** The end goal below is reached for **one kernel on one
 > backend**: `Y gemm.ysu --emit-llvm` substitutes the exact `vpdpwssd` GEMM and
 > writes a `.v` beside the `.ll` that an auditor can check with `coqc` and the
 > proofs, without trusting the compiler. What is *not* reached is the scope —
-> one kernel family, one backend, and three things the certificate's own header
-> declares outside it: `vpdpwssd`'s semantics (a definition pinned on hardware),
-> the loop nest's structure (partly extracted, partly gated), and anything at
-> all about LLVM or machine code. The repeatable method is in
+> one kernel family, one backend, and the **six** items the certificate now
+> enumerates as its trusted computing base, each with the check that would fail
+> if it were false or an explicit statement that nothing would:
+> `exact_gemm_certificate::TRUST_BOUNDARY`. This paragraph said *three* until
+> 2026-09-01, which was the certificate's own count, and that count was wrong —
+> see the dated entry on the trust boundary. The repeatable method is in
 > [The process](verified_kernel_process.md).
 
 You write the naive loop nest — the specification, readable and obviously

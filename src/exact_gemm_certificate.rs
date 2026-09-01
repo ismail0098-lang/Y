@@ -28,14 +28,26 @@
 //! - the same one-unit edge `tests/exact_gemm_licence_obligations.rs` finds by
 //! exhausting the int16 domain, reproduced here by a different tool.
 //!
-//! # What the certificate does NOT claim
+//! # The trust boundary, and why it is a LIST rather than a paragraph
 //!
-//! Everything the library files already exclude, and nothing new: `vpdpwssd`'s
-//! semantics and the little-endian i32 half-order are definitions pinned on
-//! hardware by `tests/cpu_gemm_vnni_micro.rs`; the loop nest's structure is
-//! partly extracted (`cpu_gemm::Ix`, `cpu_gemm::CountedLoop`) and partly
-//! modelled. The certificate inherits those limits and says so in its header,
-//! because a certificate that overstates its scope is worse than none.
+//! A certificate that overstates its scope is worse than none, so the emitted
+//! file carries what it does not prove. That section used to be prose copied
+//! by hand from `ExactGemmWhole.v`, and **the copy had dropped one of the
+//! capstone's three bullets while adding one of its own** - so both lists were
+//! three bullets long and a count would have called them equal. The dropped
+//! one is the panel buffers' sizing and the scratch tile's allocation, which
+//! is where both of this repository's documented out-of-bounds writes were.
+//!
+//! [`TRUST_BOUNDARY`] is now the single list, rendered into every certificate,
+//! and each item carries a third field the prose never had: **whether anything
+//! in this repository would FAIL if the item were false.** A caveat list says
+//! what is not proved; a trust boundary says what would notice. Only the
+//! second is worth handing to someone deciding whether to rely on the kernel.
+//!
+//! `tests/certificate_states_its_trust_boundary.rs` gates it, including the
+//! direction that failed here: every bullet of the capstone's own exclusion
+//! list must be claimed by exactly one item, so a proof file that adds an
+//! exclusion cannot leave the certificate behind.
 
 /// One substituted exact GEMM, and the numbers its certificate is about.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +87,177 @@ pub fn integer_bound(magnitude: f64) -> u32 {
         return 0;
     }
     magnitude.ceil() as u32
+}
+
+/// The file whose exclusion list this certificate must mirror.
+///
+/// It is the CAPSTONE of the exact-GEMM chain - the proof nothing else
+/// `Require`s - and that is not an arbitrary choice of file. A proof with
+/// something above it cannot know what the programme still leaves open, so
+/// only a dependency root can truthfully state a global negative; that rule is
+/// derived and gated by `tests/proofs_are_checked.rs`. The capstone is
+/// therefore exactly the file whose exclusion list is the AGGREGATE one, and
+/// exactly the file a certificate instantiating it must not understate.
+pub const CAPSTONE: &str = "proofs/ExactGemmWhole.v";
+
+/// Whether anything in this repository can FAIL on a trust-boundary item.
+///
+/// Two grades rather than three, and the missing third one is deliberate.
+/// "A test exercises it" is not a grade between these two unless the test can
+/// fail on the thing. `tests/exact_gemm_thread_invariance.rs` runs the
+/// threaded kernel at ragged shapes and compares answers; a panel buffer sized
+/// wrongly in the safe direction changes no answer, and this repository has
+/// found that exact shape twice - an over-allocation caught by the schedule
+/// gate and by nothing else, and three `ldc` sites whose overrun was invisible
+/// until `ExactGemmTiling.v` was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    /// Something here can fail on it. The string is the repo-relative file.
+    Pinned(&'static str),
+    /// Nothing here can. The string says what closing it would take, because
+    /// an unchecked item with no route to closing it reads as an excuse rather
+    /// than as a work item.
+    Unchecked(&'static str),
+}
+
+/// One item of the certificate's trusted computing base.
+///
+/// The point of the struct is that `check` is not optional. A caveat list
+/// says what is not proved; a trust boundary says, for each item, whether
+/// anything would notice if it were false. Those are different documents and
+/// only the second is worth handing to an auditor.
+#[derive(Debug, Clone, Copy)]
+pub struct TrustItem {
+    /// What is trusted, as the certificate states it.
+    pub claim: &'static str,
+    /// Why no proof in `proofs/` supplies it.
+    pub because: &'static str,
+    /// Whether anything can fail on it.
+    pub check: Check,
+    /// The proof file stating this exclusion, and a phrase distinctive enough
+    /// to locate its bullet. `None` for the items BELOW the model - a proof
+    /// about `Z` has no opinion on a toolchain, so the capstone correctly does
+    /// not mention one, and a certificate that omitted them would be silent
+    /// about the half of its trust boundary a reader most needs.
+    pub stated_in: Option<(&'static str, &'static str)>,
+}
+
+/// The trusted computing base of the emitted exact-GEMM certificate.
+///
+/// **This list existed nowhere.** It was prose in `ExactGemmWhole.v`, prose in
+/// `ExactGemmMicro.v`, prose in `docs/proof_carrying_kernels.md`, and a
+/// hand-copied subset in the certificate's own header - and the copy had
+/// DROPPED one of the capstone's three bullets while adding one of its own, so
+/// both lists were three long and a count would have called them equal. The
+/// dropped one is the buffer sizing, which is where this repository's two
+/// documented out-of-bounds writes were.
+pub const TRUST_BOUNDARY: &[TrustItem] = &[
+    TrustItem {
+        claim: "`vpdpwssd`'s arithmetic, and the little-endian order of an i32's two halves.",
+        because: "These are ISA facts. No proof over `Z` can supply one, so they are \
+                  DEFINITIONS in `ExactGemmRegisterTile.v` rather than theorems, and every \
+                  result above them is conditional on their being right.",
+        check: Check::Pinned("tests/cpu_gemm_vnni_micro.rs"),
+        stated_in: Some((CAPSTONE, "little-endian order of an i32")),
+    },
+    TrustItem {
+        claim: "The structure of the emitted loop nest.",
+        because: "The nest's ARITHMETIC is extracted - one description in `cpu_gemm::Ix` and \
+                  `cpu_gemm::CountedLoop` is rendered both to the emitted IR and to these \
+                  proofs, so a divergence is a byte-identity failure. Which loops exist, in \
+                  what order, in which blocks and calling what is still hand-written, so for \
+                  that part the tie is between two models rather than to the IR.",
+        check: Check::Pinned("tests/exact_gemm_schedule_proof.rs"),
+        stated_in: Some((CAPSTONE, "The loop STRUCTURE is modelled")),
+    },
+    TrustItem {
+        claim: "The threaded wrapper's `pthread` mechanics, the panel buffers' sizes, and the \
+                scratch tile's allocation.",
+        because: "Not modelled at all. `tests/exact_gemm_thread_invariance.rs` and \
+                  `tests/cpu_gemm_exact_threaded.rs` run this kernel at ragged shapes with \
+                  every stride differing from its extent - but they compare ANSWERS, and a \
+                  buffer sized wrongly in the safe direction changes no answer.",
+        check: Check::Unchecked(
+            "modelling the allocations and tying them to the emitted `malloc` the way `Ix` \
+             already ties the index arithmetic",
+        ),
+        stated_in: Some((CAPSTONE, "pthread")),
+    },
+    TrustItem {
+        claim: "Everything below the LLVM IR this compilation emitted: `clang`, its optimiser, \
+                the assembler and the linker.",
+        because: "The proofs stop at the IR. Nothing here is a statement about the machine \
+                  code, and the guarantee above is void if the translation to it is not \
+                  faithful.",
+        check: Check::Unchecked(
+            "translation validation - checking THIS object against THIS IR per compilation, \
+             which is not performed",
+        ),
+        stated_in: None,
+    },
+    TrustItem {
+        claim: "Rocq's kernel, and the `coqc` that checks this file.",
+        because: "A proof is worth exactly what its checker is worth.",
+        check: Check::Pinned("tests/proofs_are_checked.rs"),
+        stated_in: None,
+    },
+    TrustItem {
+        claim: "The processor executes its own ISA as documented.",
+        because: "Naming the bottom is what makes this list finite rather than open-ended. \
+                  Errata are published for every part in production.",
+        check: Check::Unchecked(
+            "hardware validation, which no software check in any repository can \
+             substitute for",
+        ),
+        stated_in: None,
+    },
+];
+
+/// Render [`TRUST_BOUNDARY`] as the certificate's exclusion section.
+///
+/// Every item is rendered, including the unchecked ones - which is the whole
+/// point, since a renderer that skipped them would turn the honest half of the
+/// list into silence.
+pub fn render_trust_boundary() -> String {
+    let mut out = String::new();
+    for item in TRUST_BOUNDARY {
+        out.push_str(&wrap(item.claim, "    - ", "      "));
+        out.push_str(&wrap(item.because, "      ", "      "));
+        let line = match item.check {
+            Check::Pinned(f) => format!("Checked by: {f}"),
+            Check::Unchecked(what) => format!("NOT CHECKED. Closing it means {what}."),
+        };
+        out.push_str(&wrap(&line, "      ", "      "));
+    }
+    // The section is spliced into a Coq comment, so the trailing newline the
+    // last bullet carries is the blank line before what follows.
+    out
+}
+
+/// Greedy wrap to the width the rest of this file is written at.
+fn wrap(text: &str, first: &str, rest: &str) -> String {
+    const WIDTH: usize = 76;
+    let mut out = String::new();
+    let mut line = String::from(first);
+    let mut empty = true;
+    for word in text.split_whitespace() {
+        if !empty && line.chars().count() + 1 + word.chars().count() > WIDTH {
+            out.push_str(line.trim_end());
+            out.push('\n');
+            line = String::from(rest);
+            empty = true;
+        }
+        if !empty {
+            line.push(' ');
+        }
+        line.push_str(word);
+        empty = false;
+    }
+    if !empty {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
 }
 
 /// Render the certificate for one substituted kernel.
@@ -126,19 +309,16 @@ pub fn render(cert: &Certificate, source: &str, stem: &str) -> String {
     is accepted and `4096` is refused - and a bound Y should have rejected
     makes this file fail to compile rather than certifying anything.
 
-    ** What is NOT claimed, inherited from the library and repeated because a
-       certificate that overstates its scope is worse than no certificate.
+    ** THE TRUST BOUNDARY - what this certificate rests on and does not
+       prove, with, for each item, whether anything in the compiler's own
+       repository would FAIL if it were false.
 
-    - `vpdpwssd`'s semantics and the little-endian order of an i32's two halves
-      are DEFINITIONS. No proof over `Z` can supply them;
-      `tests/cpu_gemm_vnni_micro.rs` pins them on the real instruction.
-    - The emitted loop NEST is partly extracted from one description shared
-      with these proofs (`cpu_gemm::Ix`, `cpu_gemm::CountedLoop`) and partly
-      modelled. Which loops exist, in what order, and what they call is still
-      hand-written.
-    - Nothing here is a statement about LLVM, about `clang`, or about the
-      machine code either of them produces.
+       It is rendered from ONE list (`exact_gemm_certificate::TRUST_BOUNDARY`)
+       rather than copied. It used to be copied, and the copy had silently
+       dropped the buffer-sizing item while adding one of its own - both lists
+       three bullets long, so a count called them equal.
 
+{trust}
     Check with:
 
     <<  coqc -Q <dir with proofs/*.v> "" {stem}.v  >>
@@ -211,6 +391,7 @@ Print Assumptions the_certificate_is_not_vacuous.
         m = m,
         fl = fl,
         stem = module_stem(stem),
+        trust = render_trust_boundary(),
     )
 }
 
