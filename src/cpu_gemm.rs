@@ -963,7 +963,7 @@ pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
     let _ = writeln!(&mut s, "{}", EXACT_ALLOC);
 
     // Job slots, 8 bytes each: A B C M N K lda ldb ldc Ap Bp Ct.
-    let job_bytes = 96usize;
+    let job_bytes = job_bytes();
     let mr = VNNI_MR;
     let nr = VNNI_NR;
 
@@ -1061,6 +1061,40 @@ pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
     let panel_b_ir = alloc_b_ir(["%bpn", "%bpb"], "%kps");
     let panel_a_b_ir = alloc_ir(["%apnb", "%apn2b", "%apbb"], "%kpsb");
     let panel_b_b_ir = alloc_b_ir(["%bpnb", "%bpbb"], "%kpsb");
+    // The threading layer's three allocation sizes. `%jobsb` and `%tidsb` were
+    // raw `mul` lines with `96` and `8` spelled at the site; `%cb` was the one
+    // whose two readings - `M*N` and `M*ldc` - differ, and getting it wrong was
+    // a heap overflow rather than a wrong answer. One description now, rendered
+    // here and into `ExactGemmSchedule.v`, which is what lets
+    // `ExactGemmThreading.v` state a bound on the writes rather than assume one.
+    let (jobs_bytes_ir, _) = render_named(
+        &jobs_bytes_ix(),
+        &mut ["%jobsb"].into_iter().map(String::from),
+        &|n| match n {
+            "nthr" => "%nthr".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let jobs_bytes_ir = jobs_bytes_ir.join("\n");
+    let (tids_bytes_ir, _) = render_named(
+        &tids_bytes_ix(),
+        &mut ["%tidsb"].into_iter().map(String::from),
+        &|n| match n {
+            "nthr" => "%nthr".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let tids_bytes_ir = tids_bytes_ir.join("\n");
+    let (private_c_ir, _) = render_named(
+        &private_c_bytes_ix(),
+        &mut ["%cn", "%cb"].into_iter().map(String::from),
+        &|n| match n {
+            "M" => "%M".into(),
+            "N" => "%N".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let private_c_ir = private_c_ir.join("\n");
     let (band_len, _) = render_named(
         &band_len_ix(),
         &mut ["%extra", "%inc", "%klen"].into_iter().map(String::from),
@@ -1141,8 +1175,7 @@ define void @{threaded}(ptr %A, ptr %B, ptr %C, i64 %M, i64 %N, i64 %K, i64 %lda
 entry:
   ; `C` is ASSIGNED by the nest this replaces, while the kernel accumulates
   ; INTO it - which is exactly what lets the K-bands be summed.
-  %cn = mul i64 %M, %N
-  %cb = mul i64 %cn, 8
+{private_c_ir}
   %rowb = mul i64 %N, 8
   br label %zero.head
 
@@ -1188,9 +1221,9 @@ single:
   ret void
 
 many:
-  %jobsb = mul i64 %nthr, {jobb}
+{jobs_bytes_ir}
   %jobs = call ptr @__y_gemm_exact_alloc(i64 %jobsb)
-  %tidsb = mul i64 %nthr, 8
+{tids_bytes_ir}
   %tids = call ptr @__y_gemm_exact_alloc(i64 %tidsb)
 {band_pre}
   br label %spawn.head
@@ -1376,6 +1409,9 @@ cleanup:
         gemm = VNNI_GEMM_NAME,
         threaded = VNNI_THREADED_NAME,
         band_pre = band_pre,
+        jobs_bytes_ir = jobs_bytes_ir,
+        tids_bytes_ir = tids_bytes_ir,
+        private_c_ir = private_c_ir,
         band_len = band_len,
         tile_count_ir = tile_count_ir,
         kpairs_ir = kpairs_ir,
@@ -2842,6 +2878,52 @@ pub fn panel_a_bytes_ix() -> Ix {
 /// exactly, with no outer multiplier.
 pub fn panel_b_bytes_ix() -> Ix {
     Ix::mul(Ix::mul(Ix::val("kpairs"), Ix::Lit(2 * VNNI_NR)), Ix::Lit(2))
+}
+
+/// Fields in one worker's job record, 8 bytes each.
+///
+/// `A B C M N K lda ldb ldc Ap Bp Ct` - twelve, and `96` was spelled as a bare
+/// literal at the `malloc` until this constant existed. That literal is the
+/// record's stride as well as its size, so a thirteenth field added without
+/// moving it would have the writer store at offset 96 - the FIRST slot of the
+/// next thread's record, and past the end of the allocation entirely for the
+/// last thread. Neither is visible in an answer.
+pub const JOB_SLOTS: usize = 12;
+
+/// One job record's size in bytes: `JOB_SLOTS * 8`.
+pub fn job_bytes() -> usize {
+    JOB_SLOTS * 8
+}
+
+/// Bytes to `malloc` for the job array: `nthr * JOB_SLOTS * 8`.
+///
+/// The array is indexed twice over - by thread and then by field - so it is a
+/// two-digit positional index, and `MixedRadix.pack` is what says thread `t`'s
+/// record cannot overlap thread `t'`'s. See [`ExactGemmThreading.v`].
+pub fn jobs_bytes_ix() -> Ix {
+    Ix::mul(Ix::val("nthr"), Ix::Lit(JOB_SLOTS * 8))
+}
+
+/// Bytes to `malloc` for the `pthread_t` array: `nthr * 8`.
+///
+/// One slot per spawned thread, written by `pthread_create` on success and by
+/// the inline-fallback arm on failure - so every slot is defined before the
+/// join loop reads it, which matters because this buffer is NOT zeroed and the
+/// join uses `tid == 0` as its "never started" sentinel.
+pub fn tids_bytes_ix() -> Ix {
+    Ix::mul(Ix::val("nthr"), Ix::Lit(8))
+}
+
+/// Bytes to `malloc` for one worker's PRIVATE C buffer: `M * N * 8`.
+///
+/// `M * N`, not `M * ldc`. The worker is handed `N` as its output stride
+/// precisely so this buffer can be compact whatever the caller's padding is;
+/// passing `%ldc` here instead wrote `(M-1)*(ldc-N)` elements past the end.
+/// The reduction reads it back at stride `N` over the same rectangle, so the
+/// allocation is exactly its write set - see
+/// `ExactGemmThreading.the_private_c_allocation_is_exactly_the_reduced_set`.
+pub fn private_c_bytes_ix() -> Ix {
+    Ix::mul(Ix::mul(Ix::val("M"), Ix::val("N")), Ix::Lit(8))
 }
 
 /// The **proportional** split's band edge: `(t * ext) / n`.

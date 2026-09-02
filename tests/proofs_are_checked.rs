@@ -276,6 +276,24 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            // The threading layer. The two halves of this file's claim are
+            // deliberately both named: the LAYOUT bound - a worker's record
+            // cannot overlap another's - and the JOIN, which says the emitted
+            // reduction loop is the fold `ExactGemmKsplit` proves exact rather
+            // than a fold that resembles it.
+            "ExactGemmThreading.v",
+            &[
+                "Print Assumptions job_slot_injective",
+                "Print Assumptions the_reduction_is_the_ksplit_sum",
+                // The tightness half, invisible to every answer.
+                "the_private_c_allocation_is_exactly_the_reduced_set",
+                // The refutation that names the historical heap overflow, and
+                // the one that makes the separate zeroing loop load-bearing.
+                "reading_the_private_buffer_at_the_callers_stride_leaves_it",
+                "a_destination_that_is_not_zeroed_is_wrong",
+            ][..],
+        ),
+        (
             "ZkControlFlow.v",
             &[
                 // The shipped lowering agrees with the operational semantics.

@@ -1,6 +1,6 @@
 # The process: taking a kernel from *fast* to *verified*
 
-This is the method, written down after eighteen proof files and about twenty
+This is the method, written down after nineteen proof files and about twenty
 gates. It is not a plan — every step here has been executed, and the parts that
 did not work are recorded as such.
 
@@ -9,7 +9,7 @@ K-split, multi-threaded kernel that is **bit-identical** to the naive triple
 loop it replaces. Two other kernels have been through parts of it (the f32 GEMM,
 the exact int8 attention PTX), and the differences are noted where they matter.
 
-Current state: **eighteen `.v` files, ~360 theorems, no axioms, nothing
+Current state: **nineteen `.v` files, ~380 theorems, no axioms, nothing
 admitted**, all checked by `cargo test`. The counts are approximate on purpose:
 an exact one goes stale every session, and a gate on it would fail on every
 proof added.
@@ -826,6 +826,43 @@ some pointers, or adding a fallback for one of the buffers — would have been
 worse than naming it, because a partly-handled failure mode reads as a handled
 one.
 
+### Split an unchecked item by ASKING WHETHER IT IS ARITHMETIC
+
+The third item taken off the queue named four things at once: a job record's
+layout, a thread-id array, a per-thread output buffer, and the happens-before
+edge a join establishes. Three are positional indices, so the existing
+`MixedRadix` schema carries their disjointness with no new reasoning. The
+fourth is not arithmetic at any level and needs a memory model.
+
+That is a general test for an item that looks too big: **which part of it is a
+statement about numbers?** The numeric part is usually most of the surface area
+and all of the silent bugs, and closing it makes the residue smaller *and*
+sharper — "the concurrency" is a better queue entry than "the pthread
+mechanics", because the first names a discipline and the second names a file.
+
+Two warnings from doing it. Splitting again means both halves must land in the
+capstone and the rendered boundary in one commit, or the bijection gate fails —
+second and third time that gate has held two files in step. And the closed half
+must not be over-claimed: the layout proof says nothing about which OFFSET a
+field lives at, because that is a property of emitted text rather than of any
+number, so the offsets went to a separate text-reading gate and the certificate
+says which claim belongs to which.
+
+### A `memset` shorter than its `malloc` is invisible on a fresh process
+
+A new check class, and the hazard is worth stating because it defeats the
+obvious test. **A large `malloc` is served by a fresh `mmap`, which is already
+zero.** So a buffer zeroed one byte short gives exactly the right answer on the
+first call of a process, and a wrong one on a later call, once the allocator has
+recycled a block the previous iteration freed. An answer-comparing test sees
+nothing unless it happens to run two passes in one process at a size above the
+allocator's mmap threshold — which is a coincidence, not coverage.
+
+The gate is cheap and mechanical: for every allocation the module zeroes, the
+`memset` length must be the *same operand* as the allocation size. Pair it with
+an explicit list of the allocations that are deliberately not zeroed, each with
+the reason — otherwise "stop zeroing something" passes by reclassification.
+
 ### Inject the failure; do not wait for it
 
 A failure path nothing exercises is a failure path nobody has run. The
@@ -979,7 +1016,7 @@ weakens every theorem above it.
 
 - [Proof-carrying kernels](proof_carrying_kernels.md) — the roadmap and the
   chronological log, including the measurements that decided each step
-- `proofs/` — the eighteen files, each with its own header stating scope
+- `proofs/` — the nineteen files, each with its own header stating scope
 - `tests/proofs_are_checked.rs` — the gate that runs them, with content controls
 - `tests/exact_gemm_schedule_proof.rs` — the generator and the schedule ties
 - `tests/exact_gemm_certificate.rs` — the emitted certificate

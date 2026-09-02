@@ -65,10 +65,21 @@
       packs the whole of A at once - the property that makes its packing
       asymptotically free - so its panel size is unbounded and no fixed reserve
       covers it, where the f32 kernel in this same file has one.
-    - The threaded wrapper's `pthread` mechanics - the job struct's layout, the
-      spawn/join protocol and the per-thread private C buffer - are not
-      modelled at all. This file proves what the K bands COMPUTE and says
-      nothing about how they are dispatched.
+    - **The threading layer's LAYOUT is modelled**, in
+      [ExactGemmThreading.v]. The job array is a `(thread, field)` positional
+      index, so no worker's record can overlap another's and the array is
+      exactly one record per thread; each worker's private C buffer is exactly
+      the rectangle the reduction reads back, at the worker's own compact
+      stride rather than the caller's; and the emitted `reduce.head` loop over
+      a destination the zeroing loop left at zero IS
+      [ExactGemmKsplit.acc_bands], so [ExactGemmKsplit.ksplit_exact] is about
+      the loop that runs rather than a fold that resembles it.
+    - The CONCURRENCY is not. Nothing here says a worker's stores are visible
+      to the reducer, that `pthread_join` orders them, or that the spawn
+      loop's inline-fallback arm leaves the `pthread_t` array in a state the
+      join loop can read - and that join's `tid == 0` sentinel is an
+      assumption about the C library's representation of a thread id. Closing
+      it needs a memory model, not more arithmetic.
 
     Build:  coqc proofs/ExactGemmWhole.v      (Rocq 9.1)
 *)
@@ -82,6 +93,7 @@ Require ExactGemmTiling.
 Require ExactGemmKsplit.
 Require ExactGemmMicro.
 Require ExactGemmAllocation.
+Require ExactGemmThreading.
 Open Scope Z_scope.
 
 Module SCH := ExactGemmSchedule.
@@ -91,6 +103,7 @@ Module TL := ExactGemmTiling.
 Module KS := ExactGemmKsplit.
 Module CH := ExactGemmChain.
 Module AL := ExactGemmAllocation.
+Module TH := ExactGemmThreading.
 
 (** Every position of C is live in its OWN tile: `r` lands in tile `r / T` at
     offset `r mod T`, and the clamped width of that tile is wide enough. *)
@@ -337,8 +350,36 @@ Corollary the_packing_buffers_hold_every_slot_written :
     (AL.a_write t p i h kp < SCH.panel_a_elems mtiles kp)%nat.
 Proof. exact AL.pack_a_write_is_inside_the_allocation. Qed.
 
+(** The threading layer, re-exported for the same reason [AL] is: so this file
+    is the single ROOT of the exact-GEMM chain.
+
+    [thread_sum_is_the_emitted_reduction] is not only plumbing. [thread_sum]
+    above is a MODEL of how the per-thread partials are combined, and nothing
+    said the emitted `reduce.head` loop combines them that way; it says the two
+    folds are the same one, started from what the separate zeroing loop left. *)
+Lemma thread_sum_is_the_emitted_reduction :
+  forall A B M N K Fl nthr r c t,
+    thread_sum A B M N K Fl nthr r c t
+    = TH.reduce_into 0
+        (fun u =>
+           gemm_position (fun i k => A i (KS.boff K nthr u + k)%nat)
+                         (fun k j => B (KS.boff K nthr u + k)%nat j)
+                         M N (KS.blen K nthr u) Fl r c) t.
+Proof.
+  intros A B M N K Fl nthr r c t.
+  induction t as [| t IH]; cbn [thread_sum TH.reduce_into];
+    [ reflexivity | rewrite IH; reflexivity ].
+Qed.
+
+Corollary the_workers_records_cannot_overlap : forall t1 k1 t2 k2,
+  (k1 < SCH.JOB_SLOTS)%nat -> (k2 < SCH.JOB_SLOTS)%nat ->
+  TH.job_slot t1 k1 = TH.job_slot t2 k2 -> t1 = t2 /\ k1 = k2.
+Proof. exact TH.job_slot_injective. Qed.
+
 Print Assumptions the_threaded_gemm_holds_the_source_dot_products.
 Print Assumptions the_packing_buffers_hold_every_slot_written.
+Print Assumptions thread_sum_is_the_emitted_reduction.
+Print Assumptions the_workers_records_cannot_overlap.
 Print Assumptions the_position_decomposition_is_the_tilings.
 Print Assumptions the_zeroing_loop_visits_each_slot_once.
 Print Assumptions the_scratch_is_zeroed_wherever_the_fold_back_reads.

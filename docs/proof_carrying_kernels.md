@@ -4013,13 +4013,82 @@ its claim changed from "uses every `malloc` result without checking it" to
 `ExactGemmWhole.v`'s bullet had to change in the same commit or the gate fails.
 Second increment running, second time it has held two files together.
 
+#### The threading layer splits into an arithmetic half that is provable and a concurrency half that is not · 2026-09-02
+
+Reading the trust boundary back as a work queue for the third time. Its
+remaining software-side `Unchecked` items were the `pthread` mechanics, the
+toolchain below the IR, and the hardware. **The first one is not one item.**
+
+Three of the four things it named - the job record's layout, the `pthread_t`
+array, and the per-thread private C buffer - are **positional indices**, so
+`MixedRadix.pack` carries their disjointness with no new reasoning: the fourth
+consumer of that schema, and the first reached from a concurrency layout rather
+than a GEMM tile. The fourth thing - the happens-before edge `pthread_join`
+establishes between a worker's last store and the reducer's first load - is not
+arithmetic at any level, and needs a memory model. `proofs/ExactGemmThreading.v`
+proves the first three (19 `Print Assumptions`, no axioms); the item splits,
+and the concurrency half stays `Unchecked` with the route named.
+
+**The join is the part that is not bookkeeping.** `ExactGemmKsplit.ksplit_exact`
+proves the band partials sum to the naive sum, and the capstone's `thread_sum`
+is a MODEL of how they are combined. Nothing said the emitted `reduce.head`
+loop combines them that way. `the_reduction_is_acc_bands` says the loop IS
+`acc_bands`, and `thread_sum_is_the_emitted_reduction` - in the capstone, so
+the `Require` is real - says the capstone's fold is that loop started from what
+the separate zeroing loop left. Two models meeting became a model tied to a
+loop.
+
+**`a_destination_that_is_not_zeroed_is_wrong` makes the zeroing loop
+load-bearing rather than defensive.** This kernel ACCUMULATES into C - which is
+what lets the bands be summed at all - so a destination carrying anything but
+zero adds it to the answer.
+
+**`96` was a bare literal that was the record's SIZE and its STRIDE at once.**
+It is `JOB_SLOTS * 8` now, rendered into `ExactGemmSchedule.v` alongside the
+other three threading sizes, with the emitted module byte-for-byte unchanged.
+`a_thirteenth_field_is_the_next_threads_first` is the sharp form of why the two
+roles have to move together: `job_slot t JOB_SLOTS = job_slot (S t) 0`, so a
+field added at one role and not the other does not run into slack - it runs
+into a live neighbour whose worker may already be executing, and off the
+allocation entirely for the last thread.
+
+**THE NEW CLASS OF CHECK IS THE `memset`, AND ITS HAZARD IS THE SHARPEST HERE.**
+`every_zeroed_buffer_is_zeroed_for_its_whole_allocation` asserts each allocation
+that is zeroed is zeroed for exactly the byte count it was allocated with. **A
+large `malloc` comes from a fresh `mmap` and is already zero**, so a buffer
+zeroed one byte short is right on the first call of a process and wrong on a
+later one, once the allocator has recycled the block the previous band freed -
+and the per-thread buffers here are freed and re-allocated every call. No
+answer-comparing test can be relied on to see that, and none in this repository
+runs two GEMMs in one process at a size that would. The same gate names the two
+allocations that are deliberately NOT zeroed (`%jobs`, `%tids`) with the reason
+- every slot of each is written before anything reads it - so "stop zeroing
+something" cannot pass by being reclassified.
+
+**The offsets are the test's claim, not the proof's, and the split is
+principled.** Which OFFSET a field is written and read at is a property of the
+emitted text rather than of any number, so `tests/exact_gemm_threading_layout.rs`
+recovers the writer's stores, the worker's loads and the reducer's loads from
+three distinct base registers (`%j`, `%arg`, `%rj`) and asserts the three
+readers agree with the one writer. **The two consistent-renaming cases are
+deliberately not claimed** - shifting every offset by a slot, or permuting
+writer and reader together, is a relabelling, and `AttentionSchedule.v` already
+records that a prover cannot see one either. What is claimed is agreement, and
+that the record is exactly `JOB_SLOTS` slots wide with no gap and no overhang.
+
+**One line of emitted text is asserted directly**, because its other reading is
+this repository's documented heap overflow: the worker's output-stride slot
+must store `%N` and not `%ldc`. The private buffer is sized `M * N * 8`, so the
+caller's stride there wrote `(M-1)*(ldc-N)` elements past the end - invisible
+at every call site in the compiler, because they all pass `ldc == N`.
+
 ## 5. End goal
 
-> **STATUS, 2026-09-01.** The end goal below is reached for **one kernel on one
+> **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one
 > backend**: `Y gemm.ysu --emit-llvm` substitutes the exact `vpdpwssd` GEMM and
 > writes a `.v` beside the `.ll` that an auditor can check with `coqc` and the
 > proofs, without trusting the compiler. What is *not* reached is the scope —
-> one kernel family, one backend, and the **seven** items the certificate now
+> one kernel family, one backend, and the **eight** items the certificate now
 > enumerates as its trusted computing base, each with the check that would fail
 > if it were false or an explicit statement that nothing would:
 > `exact_gemm_certificate::TRUST_BOUNDARY`. This paragraph said *three* until
