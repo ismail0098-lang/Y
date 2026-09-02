@@ -182,6 +182,49 @@ Definition panel_b_elems (kpairs : nat) : nat := (panel_b_bytes kpairs) / 2.
 (** The scratch tile, in bytes as the emitted `malloc` spells it. *)
 Definition SCRATCH_TILE_BYTES : nat := 3072.
 
+(* ------------------------------------------------------------------ *)
+(** ** The threading layer's three allocations                         *)
+(* ------------------------------------------------------------------ *)
+
+(** Fields in one worker's job record: `A B C M N K lda ldb ldc Ap Bp Ct`.
+
+    **Generated from `cpu_gemm::JOB_SLOTS`**, which the emitter's `malloc`
+    arithmetic now derives its `96` from. That number is the record's STRIDE as
+    well as its size, so the two roles have to move together: a thirteenth
+    field with the stride left behind puts the writer's last store in the next
+    thread's record, and past the end of the array entirely for the last
+    thread. [jobs_bytes_is_a_record_per_thread] is what states they agree. *)
+Definition JOB_SLOTS : nat := 12.
+
+(** **Rendered from `cpu_gemm::jobs_bytes_ix` / `tids_bytes_ix` /
+    `private_c_bytes_ix`.**
+
+    `private_c_bytes` is `rows * cols`, NOT `rows * ldc`, and that distinction
+    is not cosmetic: the worker is handed `cols` as its output stride precisely
+    so its buffer can be compact whatever padding the caller's C carries.
+    Sizing it from `ldc` while writing at stride `cols` over-allocates, which no
+    answer can see; sizing it from `cols` while WRITING at `ldc` put
+    `(rows-1)*(ldc-cols)` elements past the end, which was observed as
+    `double free or corruption`. *)
+Definition jobs_bytes (nthr : nat) : nat := (nthr * 96).
+Definition tids_bytes (nthr : nat) : nat := (nthr * 8).
+Definition private_c_bytes (rows cols : nat) : nat := ((rows * cols) * 8).
+
+(** The same sizes in the unit each index map is stated in: job slots, thread
+    slots, and i64 elements. *)
+Definition jobs_slots_total (nthr : nat) : nat := (jobs_bytes nthr) / 8.
+Definition tids_slots (nthr : nat) : nat := (tids_bytes nthr) / 8.
+Definition private_c_elems (rows cols : nat) : nat :=
+  (private_c_bytes rows cols) / 8.
+
+(** The array's stride IS one record. Self-fulfilling under generation in the
+    sense that both sides come from `JOB_SLOTS` - and that is the point: before
+    the extraction the `malloc` carried a literal `96` that no definition of
+    `JOB_SLOTS` could have contradicted. *)
+Theorem jobs_bytes_is_a_record_per_thread : forall nthr,
+  jobs_bytes nthr = (nthr * (JOB_SLOTS * 8))%nat.
+Proof. intro nthr. unfold jobs_bytes, JOB_SLOTS. reflexivity. Qed.
+
 (** `mn_tiles`. The output partition: a single ragged tail, clamped. *)
 Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
 Definition toff (T t : nat) : nat := t * T.

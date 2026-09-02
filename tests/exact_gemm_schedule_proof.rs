@@ -138,6 +138,7 @@ use std::path::PathBuf;
 use y::cpu_gemm::{
     a_i32_element_ix, a_row_base_ix, band_base_ix, band_len_ix, band_rem_ix, chunk_end_ix,
     granule_band_edge_ix, kpairs_ix, panel_a_bytes_ix, panel_a_stride_ix, panel_b_bytes_ix,
+    jobs_bytes_ix, private_c_bytes_ix, tids_bytes_ix, JOB_SLOTS,
     panel_index_ix, prop_band_edge_ix, tile_count_ix,
     tile_width_ix,
     KSPLIT_MAX_THREADS, KSPLIT_MIN_BAND, VNNI_MR, VNNI_NR, VNNI_NRV,
@@ -169,6 +170,7 @@ struct Schedule {
     flush: usize,
     minband: usize,
     maxthr: usize,
+    job_slots: usize,
 }
 
 impl Schedule {
@@ -190,6 +192,7 @@ impl Schedule {
             flush: VnniExact::DEFAULT_FLUSH_K_PAIRS as usize,
             minband: KSPLIT_MIN_BAND,
             maxthr: KSPLIT_MAX_THREADS,
+            job_slots: JOB_SLOTS,
         }
     }
 }
@@ -230,6 +233,11 @@ fn coq_names(n: &'static str) -> String {
         // emitter has both in registers by the time it sizes the buffers.
         "mtiles" => "mtiles".into(),
         "kpairs" => "kpairs".into(),
+        // The threading layer's extents. Spelled out rather than `M`/`N`
+        // because Coq's `N` is the stdlib's binary naturals, and shadowing it
+        // inside a file about `nat` arithmetic is legal and unreadable.
+        "M" => "rows".into(),
+        "N" => "cols".into(),
         other => panic!("the schedule expressions gained an unbound name `{other}`"),
     }
 }
@@ -254,6 +262,9 @@ fn render(s: &Schedule) -> String {
     // the emitted `malloc` call. Generated from the same constants regardless,
     // so a tile-shape change cannot leave the proof's scratch size behind.
     let scratch_tile_bytes = s.mr * s.nr * 8;
+    let jobs_bytes_body = jobs_bytes_ix().coq(&coq_names);
+    let tids_bytes_body = tids_bytes_ix().coq(&coq_names);
+    let private_c_body = private_c_bytes_ix().coq(&coq_names);
     // The loop descriptions the driver emits, rendered as Coq definitions.
     // `row_panel_loop`'s tag differs between its two sites and its iteration
     // space does not, which is why one description serves both.
@@ -270,7 +281,8 @@ fn render(s: &Schedule) -> String {
         fold_col_loop().coq(&["ext", "iv", "T"]),
         zero_tile_loop().coq(&[])
     );
-    let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr } = *s;
+    let Schedule { mr, nrv, lanes, nr, vec_elems: ve, flush, minband, maxthr, job_slots } =
+        *s;
 
     format!(
         r#"(** * The exact-GEMM schedule: constants and index maps, in ONE place.
@@ -456,6 +468,49 @@ Definition panel_b_elems (kpairs : nat) : nat := (panel_b_bytes kpairs) / 2.
 
 (** The scratch tile, in bytes as the emitted `malloc` spells it. *)
 Definition SCRATCH_TILE_BYTES : nat := {scratch_tile_bytes}.
+
+(* ------------------------------------------------------------------ *)
+(** ** The threading layer's three allocations                         *)
+(* ------------------------------------------------------------------ *)
+
+(** Fields in one worker's job record: `A B C M N K lda ldb ldc Ap Bp Ct`.
+
+    **Generated from `cpu_gemm::JOB_SLOTS`**, which the emitter's `malloc`
+    arithmetic now derives its `96` from. That number is the record's STRIDE as
+    well as its size, so the two roles have to move together: a thirteenth
+    field with the stride left behind puts the writer's last store in the next
+    thread's record, and past the end of the array entirely for the last
+    thread. [jobs_bytes_is_a_record_per_thread] is what states they agree. *)
+Definition JOB_SLOTS : nat := {job_slots}.
+
+(** **Rendered from `cpu_gemm::jobs_bytes_ix` / `tids_bytes_ix` /
+    `private_c_bytes_ix`.**
+
+    `private_c_bytes` is `rows * cols`, NOT `rows * ldc`, and that distinction
+    is not cosmetic: the worker is handed `cols` as its output stride precisely
+    so its buffer can be compact whatever padding the caller's C carries.
+    Sizing it from `ldc` while writing at stride `cols` over-allocates, which no
+    answer can see; sizing it from `cols` while WRITING at `ldc` put
+    `(rows-1)*(ldc-cols)` elements past the end, which was observed as
+    `double free or corruption`. *)
+Definition jobs_bytes (nthr : nat) : nat := {jobs_bytes_body}.
+Definition tids_bytes (nthr : nat) : nat := {tids_bytes_body}.
+Definition private_c_bytes (rows cols : nat) : nat := {private_c_body}.
+
+(** The same sizes in the unit each index map is stated in: job slots, thread
+    slots, and i64 elements. *)
+Definition jobs_slots_total (nthr : nat) : nat := (jobs_bytes nthr) / 8.
+Definition tids_slots (nthr : nat) : nat := (tids_bytes nthr) / 8.
+Definition private_c_elems (rows cols : nat) : nat :=
+  (private_c_bytes rows cols) / 8.
+
+(** The array's stride IS one record. Self-fulfilling under generation in the
+    sense that both sides come from `JOB_SLOTS` - and that is the point: before
+    the extraction the `malloc` carried a literal `96` that no definition of
+    `JOB_SLOTS` could have contradicted. *)
+Theorem jobs_bytes_is_a_record_per_thread : forall nthr,
+  jobs_bytes nthr = (nthr * (JOB_SLOTS * 8))%nat.
+Proof. intro nthr. unfold jobs_bytes, JOB_SLOTS. reflexivity. Qed.
 
 (** `mn_tiles`. The output partition: a single ragged tail, clamped. *)
 Definition tw (ext T t : nat) : nat := Nat.min (ext - t * T) T.
@@ -1341,6 +1396,60 @@ fn the_raw_emitted_sites_use_the_shared_schedule_expressions() {
             .0,
         ));
     }
+
+    // The threading layer's three sizes. `private_c_bytes_ix` is the one with
+    // a history: `M * N` and `M * ldc` are different buffers, and the second
+    // reading wrote `(M-1)*(ldc-N)` elements past the end. Both of its
+    // readings ALSO satisfy every answer-comparing test in this repository -
+    // `M * ldc` merely over-allocates - so this is the tie that can see it.
+    //
+    // These three were added to the generator before they were added here, and
+    // a mutation binding `N` to `%ldc` came back GREEN across ten suites. An
+    // expression rendered into the proofs but not checked against the emitted
+    // site is half an extraction.
+    cases.push((
+        "jobs_bytes_ix",
+        "the threaded wrapper",
+        vec![],
+        render_named(
+            &y::cpu_gemm::jobs_bytes_ix(),
+            &mut ["%jobsb"].into_iter().map(String::from),
+            &|n| match n {
+                "nthr" => "%nthr".to_string(),
+                other => panic!("unbound {other}"),
+            },
+        )
+        .0,
+    ));
+    cases.push((
+        "tids_bytes_ix",
+        "the threaded wrapper",
+        vec![],
+        render_named(
+            &y::cpu_gemm::tids_bytes_ix(),
+            &mut ["%tidsb"].into_iter().map(String::from),
+            &|n| match n {
+                "nthr" => "%nthr".to_string(),
+                other => panic!("unbound {other}"),
+            },
+        )
+        .0,
+    ));
+    cases.push((
+        "private_c_bytes_ix",
+        "the threaded wrapper",
+        vec![],
+        render_named(
+            &y::cpu_gemm::private_c_bytes_ix(),
+            &mut ["%cn", "%cb"].into_iter().map(String::from),
+            &|n| match n {
+                "M" => "%M".to_string(),
+                "N" => "%N".to_string(),
+                other => panic!("unbound {other}"),
+            },
+        )
+        .0,
+    ));
 
     // The A panel index, at the micro-kernel's hoisted base and at all MR
     // unrolled rows. `ExactGemmRegisterTile.the_i32_load_is_the_packed_pair` is

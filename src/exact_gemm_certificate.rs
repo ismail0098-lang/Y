@@ -191,18 +191,36 @@ pub const TRUST_BOUNDARY: &[TrustItem] = &[
         stated_in: Some((CAPSTONE, "packs the whole of A at once")),
     },
     TrustItem {
-        claim: "The threaded wrapper's `pthread` mechanics: the job struct's layout, the \
-                spawn/join protocol, and the per-thread private C buffer.",
-        because: "Not modelled at all. `ExactGemmKsplit.v` proves what the K bands COMPUTE \
-                  and says nothing about how they are dispatched. The behavioural cover is \
-                  `tests/exact_gemm_thread_invariance.rs`, which compares ANSWERS across \
-                  thread counts - so a dispatch bug that produces the right answer is \
-                  invisible to it.",
+        claim: "The threading layer's LAYOUT: one job record per worker, one private C \
+                buffer per worker, and a reduction that reads each of them once.",
+        because: "Proved, in `ExactGemmThreading.v`. The job array is a `(thread, field)` \
+                  positional index, so no worker's record can overlap another's and the \
+                  array is exactly one record per thread; each private C buffer is exactly \
+                  the rectangle the reduction reads back, at the worker's own compact \
+                  stride rather than the caller's; and the emitted reduction loop over a \
+                  zeroed destination IS the fold `ExactGemmKsplit.ksplit_exact` is about. \
+                  Which OFFSET each field is written and read at is not a number and is \
+                  checked against the emitted text instead.",
+        check: Check::Pinned("tests/exact_gemm_threading_layout.rs"),
+        stated_in: Some((CAPSTONE, "threading layer's LAYOUT is modelled")),
+    },
+    TrustItem {
+        claim: "The CONCURRENCY those records are dispatched with: that a worker's stores \
+                are visible to the reduction, and that the join loop can read the thread \
+                ids the spawn loop left.",
+        because: "Not modelled. Nothing here says `pthread_join` orders a worker's last \
+                  store before the reducer's first load, nor that the spawn loop's \
+                  inline-fallback arm leaves the thread-id array in a readable state - and \
+                  that loop's `tid == 0` sentinel is an assumption about the C library's \
+                  representation of a thread id rather than about any arithmetic. The \
+                  behavioural cover is `tests/exact_gemm_thread_invariance.rs`, which \
+                  compares ANSWERS across thread counts, so a dispatch bug that produces \
+                  the right answer is invisible to it.",
         check: Check::Unchecked(
-            "modelling the job struct and the spawn/join protocol, which is a concurrency \
-             obligation rather than an arithmetic one",
+            "a memory model, which is a concurrency obligation rather than an arithmetic \
+             one",
         ),
-        stated_in: Some((CAPSTONE, "pthread")),
+        stated_in: Some((CAPSTONE, "The CONCURRENCY is not")),
     },
     TrustItem {
         claim: "Everything below the LLVM IR this compilation emitted: `clang`, its optimiser, \
