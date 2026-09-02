@@ -4203,6 +4203,86 @@ f32 path plus a collision waiting for the next feature. It wants its own
 increment with its own before/after measurement, and mixing an unrelated
 emitter change into this one would make the mutation table ambiguous.
 
+### 2026-09-02 - the duplicate attribute group was not a performance bug, and the first two measurements of it were of dead code
+
+The entry above deferred this and **got its severity wrong in both
+directions**. It is not a performance regression; it is an **illegal
+instruction on any host without AVX-512**. Fixed in `src/cpu_gemm.rs`, gated by
+`tests/emitted_attribute_groups.rs`. **562 / 813 / 8 tests, zero failures
+across 128 per-target binaries in both feature sets plus all three aggregates;
+both builds warning-free; no committed `.ptx`/`.ll` changed.**
+
+**THE FIRST TWO MEASUREMENTS WERE OF A FUNCTION THAT IS NOT IN THE OUTPUT.**
+The obvious fixture - the exact `@ZeroDrift` nest alone - emits
+`__y_sgemm_f32_avx512` as `internal` with no caller, so `-O2` deletes it. Both
+arms then reported **zero `zmm` outside the VNNI kernels** and the generated
+assembly came back **byte-identical**, which reads exactly like "the f32 path
+is unaffected" and would have retired the question. A fixture declaring BOTH
+kernels shows four f32 functions changing. `feedback-null-metrics-pass-dead-components`,
+in the measurement written to check the claim.
+
+**WITH THE f32 PATH LIVE, THE BUG IS A SIGILL.** Rewrite the prelude group to
+`target-cpu="haswell" target-features="+avx2,+avx,+fma"` - a machine with no
+AVX-512 - and compile. Before: `f32_matmul` **464** `zmm`, `__y_gemm_run`
+**721**, `__y_gemm_small_m` **450**, `__y_pool_worker` **2**. That is 1,637
+AVX-512 register references the target cannot execute, in code that has nothing
+to do with the exact kernel. After: zero outside the two VNNI functions, which
+legitimately need it. Same class as the recorded `cpu_emitter` AVX-512 default
+("AVX2 runs everywhere AVX-512 does; the reverse crashes"), found again in the
+LLVM backend, from an attribute-group collision instead of a bad default.
+
+**PERFORMANCE IS A GENUINE WASH, MEASURED TWICE.** 512x512x2048, interleaved,
+best of 40 reps x 8 rounds: f32 **0.727 ms before, 0.729 after**; the exact
+kernel 6.99 both, its codegen unchanged by construction. `target-cpu="znver5"`
+buys `f32_matmul` **+395 lines of assembly** and nothing measurable. Both
+checksums are identical in every run, float sum included.
+
+**THE GROUP CANNOT BE DELETED, WHICH IS WHY THIS IS A RENUMBERING.** With the
+VNNI kernels left on a host group lacking `+avx512vnni`, `clang` does not emit
+worse code - it aborts: `fatal error: Do not know how to split the result of
+this operator!` in `__y_gemm_micro_vnni`. So the second group was load-bearing
+all along and the defect is only that it reused `#0`. `#1` now, with
+`finish_in` naming the group explicitly; `finish` keeps `#0`.
+
+**A SECOND INSTANCE OF THE SAME SLOPPINESS WAS UNDERNEATH IT**:
+`__y_gemm_exact_vnni` carried `#0 #0` - the driver's signature wrote one and
+`IrBuilder::finish` stamped another. `llvm-as` accepts that silently too.
+
+**THE GATE IS THE DEFECT'S SIGNATURE, NOT ITS SITE**, so the next collision is
+caught without anyone guessing which emitter introduces it: no group defined
+twice, no group named but undefined, no signature naming one group twice, the
+declared `target-cpu` survives an `llvm-as`/`llvm-dis` round trip, and - the
+bug itself rather than its shape - on a non-AVX-512 target only the VNNI
+kernels may use `zmm`. **S8 confirms the symmetry**: introducing the collision
+from the *prelude* side instead is caught identically.
+
+**MUTATION TABLE, 9 probes, each `--test` target run separately over nine
+suites.** S1 group back to `#0` (the original bug) / S2b the same group twice /
+S5 `finish_in` ignores its argument / S8 the collision introduced from the
+prelude: **`emitted_attribute_groups` ONLY**, all four. S3 the group definition
+deleted / S7 `+avx512vnni` dropped from it: six suites each, because `clang`
+aborts - the confirmation that the group is required. S6 CONTROL, `#7` instead
+of `#1`: green everywhere, so the gate checks distinctness rather than a
+number. S4 probes the gate itself - stop stripping the `# @name` comment from
+an assembly label and its **non-vacuity floor fires** rather than reporting "no
+offenders" while parsing nothing.
+
+**S2 WAS MIS-AIMED AND THE RE-AIM IS THE INTERESTING PART.** Restoring the
+driver's trailing `#0` on top of the fix emits `#0 #1`, which is not a
+duplicate at all - LLVM **unions** two distinct groups, so that is legal and
+arguably better code. It reproduced no defect. Re-aimed at ` #1`, the shape the
+bug actually had at the new number, it is caught. *Confirm a mutation
+reproduces the defect before recording a survivor.*
+
+**RECORDED, NOT FIXED - `plan_exact_gemm` consults no hardware at all.** It
+licenses the exact `vpdpwssd` kernel on operand magnitudes alone, so Y emits
+`vpdpwssd` on a machine that has none; after this fix the f32 path is safe
+there and the exact kernel would still fault if called. This repository's own
+rule is that *the one genuine hardware requirement must REFUSE, not emit* - the
+`require_fp8_hardware` shape. It is a separate increment with its own gate and
+its own mutation table, and folding it in here would make the table above
+ambiguous.
+
 ## 5. End goal
 
 > **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one

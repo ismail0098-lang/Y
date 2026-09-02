@@ -416,6 +416,36 @@ fn emit_vnni_flush(out: &mut String, prefix: &str) {
 /// `kpairs` is not required to be a multiple of `flush_k_pairs`: the loop
 /// flushes on the interval boundary and again at exit, so a partial final
 /// interval is carried out correctly rather than dropped.
+/// The attribute group the exact `vpdpwssd` kernels are compiled under, and
+/// **it is deliberately not `#0`**.
+///
+/// `llvm_emitter::emit_prelude` writes `attributes #0` from the probed host,
+/// and this module is spliced into that one. Two definitions of the same group
+/// number is not a redefinition error: `llvm-as` accepts it silently and the
+/// LAST one wins, so a second `#0` here does not add its features to the
+/// host's - it REPLACES them, for every function in the module.
+///
+/// Measured before this was split out: on a host whose prelude declared
+/// `target-cpu="haswell" target-features="+avx2,+avx,+fma"`, the emitted module
+/// still compiled to **358 `zmm` references**, byte-identical to the AVX-512
+/// host's - because this group overrode the host's for the f32 GEMM as well.
+/// That is an illegal-instruction fault on a machine with no AVX-512, in a
+/// kernel that has nothing to do with the exact path. On the AVX-512 host it
+/// was silently discarding `target-cpu="znver5"`, `+fma`, `+avx512cd`,
+/// `+avx512dq`, `+avx512vl` and `+avx512bf16` from everything.
+///
+/// The group is still REQUIRED: dropping it and letting the VNNI kernels fall
+/// on a host group without `+avx512vnni` does not degrade codegen, it crashes
+/// the backend (`Do not know how to split the result of this operator!` in
+/// `__y_gemm_micro_vnni`). So the fix is a distinct number, not a deletion.
+pub const VNNI_ATTR_GROUP: &str = "#1";
+
+/// The target features `vpdpwssd` needs, independent of what the host probe
+/// found. A standalone `emit_vnni_micro_module` is a complete module and
+/// carries its own group; spliced into the LLVM backend's output it coexists
+/// with the host's `#0` rather than overwriting it.
+pub const VNNI_TARGET_FEATURES: &str = "+avx512f,+avx512bw,+avx512vnni";
+
 pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
     let mut out = String::new();
     writeln!(out, "; Exact vpdpwssd micro-kernel, MR={VNNI_MR} NR={VNNI_NR}, flush every {flush_k_pairs} k-pairs.").unwrap();
@@ -424,7 +454,7 @@ pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
     writeln!(
         out,
         "define void @{VNNI_MICRO_NAME}(ptr noalias %Ap, ptr noalias %Bp, ptr noalias %C, \
-         i64 %ldc, i64 %kpairs) #0 {{"
+         i64 %ldc, i64 %kpairs) {VNNI_ATTR_GROUP} {{"
     )
     .unwrap();
     writeln!(out, "entry:").unwrap();
@@ -573,7 +603,7 @@ pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
     writeln!(out, "}}\n").unwrap();
     writeln!(
         out,
-        "attributes #0 = {{ \"target-features\"=\"+avx512f,+avx512bw,+avx512vnni\" }}"
+        "attributes {VNNI_ATTR_GROUP} = {{ \"target-features\"=\"{VNNI_TARGET_FEATURES}\" }}"
     )
     .unwrap();
     out
@@ -636,11 +666,12 @@ fn emit_vnni_pack_a() -> String {
         }
     }
     b.loop_end(pl);
-    b.finish(&format!(
+    let sig = format!(
         "define internal void @__y_gemm_vnni_pack_a(ptr noalias {}, i64 {}, i64 {}, i64 {}, \
          ptr noalias {})",
         src, lda, mrows, kc, dst
-    ))
+    );
+    b.finish_in(&sig, VNNI_ATTR_GROUP)
 }
 
 /// Pack a `kc x NR` panel of int16 `B` into the micro-kernel's `Bp` layout.
@@ -707,11 +738,12 @@ fn emit_vnni_pack_b() -> String {
 
     b.loop_end(jl);
     b.loop_end(pl);
-    b.finish(&format!(
+    let sig = format!(
         "define internal void @__y_gemm_vnni_pack_b(ptr noalias {}, i64 {}, i64 {}, i64 {}, \
          ptr noalias {})",
         src, ldb, kc, ncols, dst
-    ))
+    );
+    b.finish_in(&sig, VNNI_ATTR_GROUP)
 }
 
 /// The blocked exact GEMM: `C += A * B`, int16 in, int64 out.
@@ -845,12 +877,13 @@ fn emit_vnni_gemm_driver() -> String {
     b.loop_end(il);
     b.loop_end(jl);
 
-    b.finish(&format!(
+    let sig = format!(
         "define void @{}(ptr noalias {}, ptr noalias {}, ptr noalias {}, \
          i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, i64 {}, \
-         ptr noalias {}, ptr noalias {}, ptr noalias {}) #0",
+         ptr noalias {}, ptr noalias {}, ptr noalias {})",
         VNNI_GEMM_NAME, a, bb, c, m, n, k, lda, ldb, ldc, ap, bp, ct
-    ))
+    );
+    b.finish_in(&sig, VNNI_ATTR_GROUP)
 }
 
 /// Name of the threaded entry point that splits K across workers.
@@ -1924,8 +1957,18 @@ impl IrBuilder {
     /// a ~7x slowdown that shows up only after an unrelated change stops the
     /// inliner from firing, which is how it was found.
     fn finish(&mut self, signature: &str) -> String {
+        self.finish_in(signature, "#0")
+    }
+
+    /// [`finish`](Self::finish) naming the attribute group explicitly.
+    ///
+    /// The exact `vpdpwssd` kernels pass [`VNNI_ATTR_GROUP`]: they need
+    /// features the probed host may not have, and stamping them `#0` would
+    /// mean this module's group and the prelude's collide - see that
+    /// constant's doc comment for what that measured.
+    fn finish_in(&mut self, signature: &str, attrs: &str) -> String {
         let mut s = String::new();
-        let _ = writeln!(&mut s, "{} #0 {{", signature);
+        let _ = writeln!(&mut s, "{} {} {{", signature, attrs);
         let _ = writeln!(&mut s, "entry:");
         for a in &self.entry {
             let _ = writeln!(&mut s, "{}", a);

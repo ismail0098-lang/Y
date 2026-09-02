@@ -974,6 +974,71 @@ failed on all six probes including the control: it had been broken in the clean
 state by the very change under test, and three suites run by hand after the
 edit had not covered it.
 
+### `-O2` deletes the component you are measuring, and the result looks like a clean bill of health
+
+Measuring the cost of a compiler defect means choosing a fixture, and the
+obvious fixture is the smallest one that reproduces the *emitted text*. That is
+the wrong criterion: what matters is whether the affected code survives to the
+output.
+
+A duplicate LLVM attribute group was suspected of degrading the f32 GEMM. The
+fixture was the one kernel that triggers the collision. Both arms reported
+**zero** AVX-512 registers outside the exact kernels and **byte-identical**
+generated assembly — a clean, confident, two-sided null. The f32 entry point is
+`internal`, nothing in that fixture calls it, and `-O2` had deleted it. With a
+fixture declaring both kernels, four f32 functions change and the collision
+turns out to be an illegal instruction rather than a slowdown.
+
+The check costs one line — `grep` the *assembly* for the symbol, not the IR —
+and it belongs in the fixture's own assertions, so the next person cannot
+measure a ghost. A differential over a dead component is perfectly invariant.
+
+### A mutation must reproduce the defect, not merely edit the line it was on
+
+After renumbering a colliding attribute group, the obvious mutation restored
+the stray group reference on the one signature that had carried it twice. It
+came back green across nine suites, which reads as a hole in a gate written
+minutes earlier.
+
+It was not. With the group renumbered, the restored reference names a
+*different* group, and LLVM **unions** two distinct attribute groups — legal,
+and arguably better code. The mutation had edited the right line and
+reproduced nothing. Re-aimed at the duplicate the bug actually was, it is
+caught immediately.
+
+This is the companion to *check where the mutation landed*: there, the edit
+missed the code; here, the edit hit the code and the code had moved underneath
+it. Both produce a survivor that is really a statement about the probe. Before
+recording one, say out loud what defect the mutated program now has — if you
+cannot, the mutation is not testing anything.
+
+### Deletion is not the fix when the duplicate is load-bearing
+
+The tempting repair for two definitions of one attribute group is to delete the
+later one, since it is the one being silently dropped. Try it and the backend
+*aborts*: `Do not know how to split the result of this operator!`. The second
+group carried the only `+avx512vnni` the module had, and without it the kernel
+cannot be lowered at all.
+
+So the defect was never the group's existence — it was that the group reused a
+number the prelude had already defined. **Establish what breaks without the
+thing before removing it**, particularly when it looks redundant: a duplicate
+that is silently discarded and a duplicate that is silently *winning* look
+identical in the source and have opposite repairs.
+
+### Gate the defect's signature, so the next instance needs no prophet
+
+Two emitters independently wrote `attributes #0`. Gating "`cpu_gemm` must use
+`#1`" would pin this instance and miss the next one. The gate instead asserts
+the *shape* — no attribute group defined twice, none named but undefined, none
+named twice by one signature — which is checkable from the emitted text with no
+knowledge of which emitter is at fault.
+
+The mutation that proves this is worth having is the symmetric one: introduce
+the collision from the **other** emitter, the one the fix never touched. Caught
+identically. A gate written against one site and validated only at that site
+has not been shown to generalise, however general its wording.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:
