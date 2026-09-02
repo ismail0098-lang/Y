@@ -1107,7 +1107,12 @@ pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
         r#"
 define internal i64 @__y_gemm_exact_threads(i64 %K) {{
 entry:
-  %c = load i64, ptr @__y_gemm_exact_nthreads, align 8
+  ; RELAXED ATOMIC, not a plain load/store. Two application threads calling the
+  ; exact GEMM at once both find the memo unset and both write it - measured at
+  ; 4 to 8 of 8 concurrent callers entering this path on every run - which is a
+  ; data race on a mutable global even though every writer stores the same
+  ; value. `monotonic` costs a plain `mov` on x86 and makes it defined.
+  %c = load atomic i64, ptr @__y_gemm_exact_nthreads monotonic, align 8
   %need = icmp eq i64 %c, 0
   br i1 %need, label %resolve, label %have
 resolve:
@@ -1127,7 +1132,7 @@ clamp:
   %r1 = select i1 %lo, i64 1, i64 %raw
   %hi = icmp sgt i64 %r1, {maxthr}
   %r2 = select i1 %hi, i64 {maxthr}, i64 %r1
-  store i64 %r2, ptr @__y_gemm_exact_nthreads, align 8
+  store atomic i64 %r2, ptr @__y_gemm_exact_nthreads monotonic, align 8
   br label %have
 have:
   %ceil = phi i64 [ %c, %entry ], [ %r2, %clamp ]

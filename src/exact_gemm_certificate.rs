@@ -209,20 +209,16 @@ pub const TRUST_BOUNDARY: &[TrustItem] = &[
     TrustItem {
         claim: "The ORDER the concurrency imposes: that a worker's stores are visible to \
                 the reduction that reads and then frees its buffers.",
-        because: "Not modelled, and it is now the ORDERING alone: nothing here says \
-                  `pthread_join` makes a worker's last store visible to the reducer's \
-                  first load. WHICH threads are joined is proved and gated - the join \
-                  loop reads a flag `pthread_create` set rather than testing the thread \
-                  id against zero, and `tests/exact_gemm_spawn_failure.rs` runs the \
-                  inline-fallback arm that failure takes. What remains needs a memory \
-                  model. Note the behavioural cover for anything here can only be \
-                  `tests/exact_gemm_thread_invariance.rs`, which compares ANSWERS across \
-                  thread counts, so a dispatch bug that produces the right answer is \
-                  invisible to it.",
-        check: Check::Unchecked(
-            "a memory model, which is a concurrency obligation rather than an arithmetic \
-             one",
-        ),
+        because: "Not PROVED - it is an ordering claim and would need a memory model. It \
+                  is CHECKED dynamically: the kernel runs under ThreadSanitizer at four \
+                  thread counts and with eight concurrent callers, and TSan reasons \
+                  about happens-before rather than about observed interleavings, so one \
+                  execution is enough to find a missing edge. What that does not give is \
+                  every schedule. Note also that `clang -fsanitize=thread` over an \
+                  emitted `.ll` instruments almost nothing - the memory-access checks \
+                  are gated on a function attribute the C frontend adds - so the gate \
+                  adds it and asserts that it did.",
+        check: Check::Pinned("tests/exact_gemm_thread_sanitizer.rs"),
         stated_in: Some((CAPSTONE, "The CONCURRENCY is not")),
     },
     TrustItem {

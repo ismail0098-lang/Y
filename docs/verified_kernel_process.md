@@ -878,6 +878,42 @@ The rule that falls out: **an injection should differ from reality in exactly
 the property under test, and in nothing else.** If the fixed version crashes on
 an injection the broken version survived, that is usually the injection's fault.
 
+### A sanitizer is a null metric until you prove it is looking
+
+`clang -fsanitize=thread` over an emitted `.ll` does almost nothing: the
+memory-access checks are gated on the `sanitize_thread` function attribute,
+which the C frontend adds and a hand-written module does not carry. Measured
+here, zero `__tsan_read`/`__tsan_write` checks in the kernel before the
+attribute was added and 33 after.
+
+**A partially-live tool is worse than a dead one.** Three things still worked
+without the attribute — `__tsan_func_entry`/`_exit`, the `__tsan_atomic*`
+lowering, and the malloc/free and pthread interceptors — so a probe with the
+join loop deleted reported `data race ... in free` and read like coverage. The
+signal was real and it was not the signal being claimed.
+
+Three assertions make a sanitizer gate honest, and each of them was arrived at
+by getting it wrong:
+
+- **Count the specific family under test.** Counting `@__tsan_` wholesale made
+  an uninstrumented module look instrumented, because the families that survive
+  are the ones a function gets for free.
+- **Assert per function, and find the DEFINITION.** Walking back from the first
+  mention of a name lands in whichever function calls it.
+- **Carry a runtime canary** — a deliberate race the tool must report. Without
+  it the whole file passes against a build where the tool is linked, running,
+  and watching nothing.
+
+### A dynamic check can close a trust-boundary item, if the `because` says what it is
+
+The two grades are "something can fail on it" and "nothing can". A sanitizer
+can fail on it, so an item it covers is `Pinned` — but the sentence beside it
+has to say the check is dynamic and covers the schedules those runs explore.
+TSan is stronger than an interleaving test (it reasons about happens-before, so
+one execution finds a missing edge) and weaker than a proof (it says nothing
+about schedules it did not run). Write both halves; a reader deciding whether
+to rely on the kernel needs the second one more than the first.
+
 ### Assert the deterministic observable, not the symptom
 
 The symptom of a skipped join here is a use-after-free, and it fired at four
