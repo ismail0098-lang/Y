@@ -1039,6 +1039,67 @@ the collision from the **other** emitter, the one the fix never touched. Caught
 identically. A gate written against one site and validated only at that site
 has not been shown to generalise, however general its wording.
 
+### A biconditional's skip guard must not be the function under test
+
+A hardware gate needs both halves: refuse without the feature, and *still take
+the fast path with it*. Without the second, "refuse always" passes every
+assertion about the refusal and silently deletes a working path.
+
+The second half can only run where the hardware exists, so it needs a skip
+guard — and the obvious guard is the predicate the gate is about. That is
+circular in exactly the way that matters: the mutation the biconditional exists
+to catch is an over-refusal, an over-refusal makes the predicate answer "no
+hardware", and the test then **skips itself and reports ok**. Measured: four
+other suites went red while the file that owns the property was green.
+
+Guard with a different mechanism — here `/proc/cpuinfo` against the std feature
+macro's CPUID+XGETBV — and add one test that cannot skip at all, asserting the
+two readings agree. Two independent sources can only agree by both being right.
+
+### Ask the hardware question where it cannot reach the proof
+
+A licence that says "this substitution is exact" and a check that says "this
+machine can run it" look like the same gate and must not be the same function.
+The licence here is exhausted over the whole int16 domain by a test, and the
+emitted Coq certificate instantiates it; folding a host check into it would make
+the *certificate* depend on the machine that compiled it.
+
+So the hardware check lives one level up, in the planner, before the licence is
+consulted. The gate that keeps it there is a source assertion that the licence
+module never names the host — worth having because the mutation is otherwise
+invisible: on a machine that *has* the feature, a host-dependent licence passes
+the exhaustive licence test unchanged.
+
+Ordering matters too, for a reason that is about the user rather than
+correctness: a hardware failure is not actionable from the source, so reporting
+it before a bounds problem stops sending people to fix the wrong thing. That
+ordering is a message-quality property, not a behavioural one — the control
+that swaps it is green everywhere, and should be.
+
+### An escape hatch for a hardware check may only go DOWN
+
+Test hooks that override a probe are routine. When the probe guards an
+instruction the machine may not have, the hook must be one-directional: it can
+say *pretend this feature is absent*, never *pretend it is present*. The second
+lets a caller produce a binary that faults, which is the failure the check
+exists to prevent, reachable by setting a variable.
+
+Pin it at the source — the override-guarded return must be the conservative
+value — because there is no way to test the absence of an environment variable
+by running the compiler.
+
+### Never run the aggregate and a per-target sweep at once
+
+`cargo test` and a per-target loop contend on the target directory, on shared
+temp directories, and on any probe cache the tests read. Run concurrently, the
+aggregate reported **275 passed, 7 failed, 21 result lines** — an aborted run
+whose shape is indistinguishable from a real regression. Serially: **819
+passed, 0 failed, 135 lines**.
+
+The tell is the *line count*, not the failures: an aggregate that stops early
+reports far fewer result lines than there are targets. Check that first, and
+re-run anything surprising serially before spending time on it.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:

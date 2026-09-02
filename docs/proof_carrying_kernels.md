@@ -4283,6 +4283,87 @@ rule is that *the one genuine hardware requirement must REFUSE, not emit* - the
 its own mutation table, and folding it in here would make the table above
 ambiguous.
 
+### 2026-09-02 - the exact GEMM licensed hardware it never asked about, and the biconditional's guard was the function under test
+
+The item recorded one entry up. `plan_exact_gemm` consulted no hardware at all,
+so Y emitted `vpdpwssd` on a machine that has none. This repository's rule is
+that **the one genuine hardware requirement must REFUSE, not emit** -
+`require_fp8_hardware` for `e4m3` tensor cores - and there was no counterpart on
+the CPU side. Gated by `tests/exact_gemm_requires_its_hardware.rs`. **568 / 819
+/ 8 tests, zero failures across 129 per-target binaries in both feature sets
+plus all three aggregates; both builds warning-free; no committed
+`.ptx`/`.ll`/`.v` changed.**
+
+**THE REFUSAL IS CHEAPER THAN THE FP8 ONE AND THE REASON MATTERS.**
+`require_fp8_hardware` must refuse the whole kernel: the instruction is absent
+and nothing else computes it. This refuses only the FAST path - the scalar
+lowering still honours `@ZeroDrift` and is still bit-for-bit exact. So the cost
+of refusing is time, and `the_refusal_does_not_change_the_answer` turns that
+from a claim into a measurement: compile both arms, run both, compare a 64-bit
+checksum *and* a position-weighted sum (a plain sum can agree by cancellation).
+At 512x512x2048 the substituted kernel is **7.5 ms** and the scalar path **510
+ms** - 68x - with **identical** integer results.
+
+**THE GATE BELONGS IN `plan_exact_gemm`, NOT IN THE LICENCE, AND THAT IS A
+CONSTRAINT FROM THE PROOFS.** `VnniExact::license` is a statement about operand
+magnitudes and int32 overflow; `tests/exact_gemm_licence_obligations.rs`
+exhausts it over the whole int16 domain and `exact_gemm_certificate`
+instantiates it in the emitted Coq. A licence that consulted the host would make
+the **certificate** consult the host. `the_licence_does_not_consult_the_host`
+pins that `zero_drift.rs` never reaches for the machine - and T4b shows that
+gate has unique coverage: making the licence host-dependent is **invisible to
+the exhaustive licence test**, because on a machine that has the feature the
+added check simply passes.
+
+**`is_x86_feature_detected!`, NOT RAW CPUID, AND THAT IS NOT A CONVENIENCE.** A
+CPU can report an AVX-512 feature in CPUID while the OS has not enabled the
+register state in `XCR0` - under a hypervisor that masks it, or a kernel booted
+with the state off - and the instruction then faults exactly as if the silicon
+lacked it. The std macro does the `XGETBV` check. **Recorded, not fixed:
+`probe_cpu_features` reads leaf 7 EBX bit 16 directly and has that gap**, so
+`HardwareProfile::has_avx512` can answer `true` on a machine where AVX-512
+faults; correcting it moves a value cached in `.ysu_hw_profile` that also feeds
+the analytic cost model, so it wants its own measurement.
+
+**THE ESCAPE HATCH CAN ONLY GO DOWN.** `Y_NO_AVX512_VNNI=1` forces the refusal;
+there is deliberately no variable that CLAIMS hardware, because that one could
+produce a binary that faults.
+`the_override_cannot_claim_hardware_the_machine_lacks` reads the source and pins
+that the predicate's only override-guarded return is `false`.
+
+**THE HOLE IN MY OWN GATE: THE BICONDITIONAL'S SKIP GUARD WAS THE FUNCTION
+UNDER TEST.** "Refuse always" satisfies every assertion about a refusal while
+silently deleting a working path, so the file carries
+`the_fast_path_is_still_taken_on_hardware_that_has_it`. Its first version
+skipped when `sentinel::host_has_avx512_vnni()` was false - **so T2, an
+over-refusal making exactly that function answer `false`, made the test SKIP
+ITSELF and report ok** while four other suites went red.
+`feedback-conditional-gates-skip-silently`, inside the test written to prevent
+it. The guard reads `/proc/cpuinfo` now - a different mechanism entirely - and a
+non-skippable `the_predicate_agrees_with_the_machine` compares the two readings
+directly. With that, T2 is caught.
+
+**MUTATION TABLE, 8 probes, each `--test` target run separately over nine
+suites.** T1 the gate removed (the original bug) / T3 the override able to
+return `true` / T4b the licence itself consulting the host / T5 the advisory
+naming neither the hardware nor the exactness: **`exact_gemm_requires_its_hardware`
+ONLY**, all four - so the original bug was invisible to every other suite. T2
+over-refusal: the new gate plus four others, after the fix above. T7 the
+substituted kernel off by one per element: the new gate plus four others, which
+is what settles that its 0.20s really does compile and run two binaries rather
+than skipping. T6 CONTROL, the hardware checked *after* the licence instead of
+before: green everywhere, so the gate checks the outcome and not the ordering.
+T4 was mis-aimed - a `use` inserted before the module doc comment, which is a
+build failure rather than a result.
+
+**A PROCESS NOTE THAT COST TWENTY MINUTES: the aggregate and a per-target sweep
+must not run concurrently.** `cargo test --features zk` launched detached while
+a per-target sweep was running reported **275 passed, 7 failed, 21 result
+lines** - an aborted run that reads exactly like a real regression. Re-run
+serially it is **819 passed, 0 failed, 135 lines**. They contend on `target/`,
+on shared temp directories, and on `.ysu_hw_profile`. *Re-run a surprising
+result serially before believing it.*
+
 ## 5. End goal
 
 > **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one

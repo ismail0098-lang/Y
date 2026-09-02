@@ -295,6 +295,33 @@ pub fn recogniser_disabled() -> bool {
 }
 
 pub fn plan_exact_gemm(drift: &DriftAccumulator) -> ExactGemmPlan {
+    // The HARDWARE question first, and before the licence, for two reasons.
+    //
+    // It is not actionable from the source - no choice of `@bounds` puts
+    // `vpdpwssd` on a CPU that lacks it - so reporting a bounds problem to
+    // someone whose machine cannot run the kernel either way sends them to fix
+    // the wrong thing.
+    //
+    // And it is deliberately NOT folded into `license_vnni_exact`. That licence
+    // is a statement about operand magnitudes and int32 overflow; it is
+    // exhausted over the whole int16 domain by
+    // `tests/exact_gemm_licence_obligations.rs`, and
+    // `exact_gemm_certificate` instantiates it in the emitted Coq. A licence
+    // that consulted the host would make the certificate consult the host.
+    //
+    // Unlike `require_fp8_hardware`, which has to refuse the whole kernel
+    // because no fallback exists, this refuses only the FAST path: the scalar
+    // lowering still honours `@ZeroDrift` and is still bit-for-bit exact. So
+    // the consequence of getting this wrong in the conservative direction is
+    // slow, and in the permissive direction is SIGILL.
+    if !crate::sentinel::host_has_avx512_vnni() {
+        return ExactGemmPlan::Unavailable(
+            "this machine does not have AVX-512 VNNI, so `vpdpwssd` would fault at \
+             runtime (checked with CPUID plus the OS XSAVE state, not CPUID alone). \
+             The scalar lowering below is still exact."
+                .to_string(),
+        );
+    }
     let operands = drift.operand_bounds();
     match crate::zero_drift::license_vnni_exact(
         operands,
