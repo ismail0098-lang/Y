@@ -259,7 +259,7 @@ over a native ELF. Unrecognised options are a hard error now.
 | *(none)* | Compile with the LLVM backend → native binary via clang |
 | `--emit-llvm` / `--target=llvm` | LLVM IR |
 | `--emit-ptx` / `--target=ptx` | NVIDIA PTX |
-| `--emit-cpu` / `--target=cpu` | Host Rust/AVX source, **printed for you to paste** — Y never compiles it |
+| `--emit-cpu` / `--target=cpu` | **Scalar** host Rust source, **printed for you to paste** — Y never compiles it. It emits no SIMD; see 9.7 |
 | `--emit-native` / `--target=native` | Direct x86-64 ELF. A straight-line integer subset; anything outside it is refused with a line number |
 | `--emit-coprocessor` / `--target=coprocessor` | Fused RT Core + Tensor Core co-processor PTX |
 | `--emit-attention-ptx` | Paged decode attention PTX |
@@ -744,17 +744,26 @@ for i in 0..1000000 {
 }
 ```
 
-### 9.7 `@ptx_emit`, `@avx_emit`, and `@hdl_emit`
-* **Syntax**: `@ptx_emit`, `@avx_emit`, `@hdl_emit`
-* **Usage**: Annotations on functions or kernels.
-* **Function**: Forces the compiler to lower the decorated function to a specific backend assembly format (NVIDIA PTX, CPU AVX, or Verilog/HDL).
-* **Example**:
-```ysu
-@ptx_emit
-fn gpu_special_op(a: F32) -> F32 {
-    // Lowers directly to PTX instructions
-}
-```
+### 9.7 `@ptx_emit`, `@avx_emit`, and `@hdl_emit` — NOT IMPLEMENTED
+
+**None of these three does anything, and they do not even fail the same way.**
+Measured against the shipping binary:
+
+| directive | what actually happens |
+|---|---|
+| `@avx_emit` | **hard syntax error** — `Line 1: Error: Unexpected top-level item` |
+| `@ptx_emit` | parses, is ignored, exits 0 |
+| `@hdl_emit` | parses, is ignored, exits 0 |
+
+`@avx_emit` is lexed (it has its own `TokenKind`) and matched by no parser arm,
+so it is fail-closed with an unhelpful message. The other two are accepted and
+read by nothing, which is the worse direction: a user selecting a backend gets
+a clean compile and no indication the annotation was discarded.
+
+**There is no "CPU AVX" backend for anything to lower to.** `--emit-cpu` emits
+scalar Rust and contains no vector intrinsic at all. Select a backend with the
+CLI flag (`--emit-ptx`, `--emit-llvm`, `--emit-cpu`) rather than with an
+annotation.
 
 ### 9.8 `@inline` and `@noinline`
 * **Syntax**: `@inline`, `@noinline`

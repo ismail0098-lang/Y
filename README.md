@@ -1409,7 +1409,7 @@ throughout.
 | `--emit-llvm` | LLVM IR | real |
 | `--emit-ptx` | NVIDIA PTX | real |
 | `--emit-native` | standalone x86-64 ELF | **straight-line integer subset only**; refuses the rest by name |
-| `--emit-cpu` | prints Rust/AVX source **for you to paste** — Y never compiles it | real, but not a build step; gated on `rustc` accepting what it prints |
+| `--emit-cpu` | prints **scalar host Rust** source **for you to paste** — Y never compiles it | real, but not a build step; gated on `rustc` accepting what it prints, verbatim. **It emits no SIMD**: measured, 0 of 46 corpus blobs contain a vector intrinsic, vector type or `target_feature` |
 | `--emit-attention-ptx <head_dim> <seq_len>` | the exact-attention kernel, to stdout | real; both positional arguments are required and refused by name if absent |
 | `--emit-coprocessor` | RT + Tensor Core fused schedule | **a scheduling simulation** — see "What is real". It writes a complete module whose `.version`/`.target` are gated against the PTX backend's |
 | `--emit-c`, `--c`, `--target=c` | removed; reports so and exits 1 | gone |

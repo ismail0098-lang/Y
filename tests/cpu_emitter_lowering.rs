@@ -1,7 +1,7 @@
 //! The CPU backend emitted Rust that never compiled, and dropped whole
 //! statements while doing it.
 //!
-//! `--emit-cpu` prints a Rust/AVX blob for the host. Three defects, all of them
+//! `--emit-cpu` prints a scalar host Rust blob. Three defects, all of them
 //! the design-rule shape CLAUDE.md catalogues - a missing case answered with
 //! something plausible rather than refused:
 //!
@@ -56,7 +56,7 @@ fn emit_cpu(name: &str, src: &str) -> String {
     // dropped statement.
     let mut lines = stdout.lines();
     for l in lines.by_ref() {
-        if l.contains("GENERATED RUST/AVX BLOB") {
+        if l.contains("GENERATED RUST BLOB") {
             break;
         }
     }

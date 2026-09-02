@@ -168,16 +168,27 @@ the source's magnitude, not the kernel's. `I16`/`I64` *is* the kernel's
 contract, so nothing is converted. An `F32` `@ZeroDrift` nest still falls back
 to scalar exact lowering, permanently.
 
-**The "both backends" clause is NOT met, and its premise needs correcting.**
-`--emit-cpu` cannot express the recognised nest at all — it refuses
-`block_ptr2d_load` by name, since it targets host code and that is a GPU
-intrinsic. Its GEMM kernels come from a different mechanism entirely: a shape
-dispatcher keyed on literal `M`/`N`/`K` that emits hand-written Rust/AVX, with
-no `@ZeroDrift` path anywhere in the file (zero references). So satisfying this
-clause is not "wire the same kernel into a second emitter" but "write a second
-exact GEMM, in Rust source form, for a backend Y never compiles" — the
-`--emit-cpu` output is printed for the user to paste. Re-scope it deliberately
-or drop it; do not quietly treat the LLVM result as covering it.
+**The "both backends" clause is DROPPED, and the premise it rested on was
+wrong twice over.** `--emit-cpu` cannot express the recognised nest at all — it
+refuses `block_ptr2d_load` by name, since it targets host code and that is a
+GPU intrinsic — and it has no `@ZeroDrift` path anywhere in the file.
+
+This paragraph used to add that "its GEMM kernels come from a different
+mechanism entirely: a shape dispatcher keyed on literal `M`/`N`/`K` that emits
+hand-written Rust/AVX". **Measured 2026-09-02, both halves of that are false.**
+`emit_specialized_cpu_kernel_dispatch` — the whole five-regime machinery,
+`CpuShapeDispatcher` and all five `emit_*_kernel` methods — has exactly ONE
+caller in the repository and it is a test. No `.ysu` compilation reaches it, so
+`--emit-cpu` has no GEMM kernels at all. And what it does emit is not AVX: 0 of
+46 corpus blobs contain a vector intrinsic, a vector type or a `target_feature`
+attribute, and the crate's only SIMD (`src/avx_wrapper.rs`) was dead and has
+been deleted.
+
+So the clause is not "hard", it is **empty**: there is no second GEMM to be
+exact in. It is dropped rather than left standing as a target, and Phase 0's
+exactness result stands on the LLVM backend alone — which is stated here so
+nobody reads the single-backend result as a shortfall against a clause that
+was measuring nothing.
 - **Exit value** — deterministic GEMM is independently saleable. Reproducible
   numerics across thread counts and hardware is a real, unmet want in regulated
   ML and financial model validation.
@@ -4705,6 +4716,139 @@ the tests are what make it look alive**. It is left in place deliberately:
 deleting a SIMD abstraction layer is its own increment with its own measurement,
 and `tests/source_surface.rs`'s rule is satisfied either way since it is a
 declared module. Named here so the next reader does not have to rediscover it.
+
+### 2026-09-02 - `--emit-cpu` claimed AVX in six places and emits no SIMD anywhere
+
+The residue recorded one entry down was `src/avx_wrapper.rs`: referenced by
+nothing, 556 lines, four passing tests. Pulling on it produced the increment,
+because the module was not merely dead - it was **the thing that made the word
+"AVX" look backed** everywhere it appeared.
+
+**576 / 827 / 8 tests, zero failures across 131 per-target binaries in both
+feature sets plus all three aggregates; both builds warning-free; corpus
+unchanged at 46 accept / 39 refuse; no committed `.ptx`/`.ll`/`.v` changed.**
+The totals are unchanged from the previous increment and the arithmetic closes
+exactly: **+4 integration tests, -4 deleted `avx_wrapper` unit tests.**
+
+#### The census, and the measurement that settles it
+
+| site | claim |
+|---|---|
+| `main.rs` CLI banner | `Emitting CPU AVX-512 Host Code...` |
+| `main.rs` blob marker | `======= GENERATED RUST/AVX BLOB =======` |
+| `README.md` flag table | "prints **Rust/AVX** source" |
+| `docs/y_language_documentation.md` flag table | "Host **Rust/AVX** source" |
+| `docs/y_language_documentation.md` §9.7 | documents an `@avx_emit` directive |
+| `docs/proof_carrying_kernels.md` §Phase 0 | "a shape dispatcher ... that emits hand-written **Rust/AVX**" |
+
+Measured against the shipping binary, over the whole corpus:
+
+```
+blobs emitted: 46   containing a vector intrinsic, vector type,
+                    `x86_64::` path or `target_feature`:  0
+```
+
+`_mm256` and `_mm512` appear **zero** times in `cpu_emitter.rs`. This is the
+`@zk_target(scheme = "plonkish")` shape - an artifact naming a capability it did
+not use - and unlike most entries here it is fail-loud in **no** direction: it
+misleads quietly, which is why nothing caught it.
+
+#### Two things underneath the census were worse than the naming
+
+**The shape dispatcher the roadmap cited is unreachable.**
+`emit_specialized_cpu_kernel_dispatch` - `CpuShapeDispatcher`, `classify_shape`,
+all five `CpuMatrixRegime` variants and all five `emit_*_kernel` methods - has
+exactly ONE caller in the repository and **it is a test**. No `.ysu`
+compilation reaches it. So `--emit-cpu` does not have GEMM kernels that are
+scalar; it has **no GEMM kernels at all**. Same shape as
+`run_all_optimization_passes`.
+
+*This also corrects the previous increment*, which described
+`probe_cpu_hardware_profile`'s consumer as "a performance fallback, not a
+correctness one". True, and understated: the consumer is not reached by any
+compilation.
+
+**And the dead module contained real defects**, which is the whole reason a
+dead-code census is worth running rather than a deletion being worth doing:
+
+- `Y256f32::load_aligned_ptr(src: *const f32)` and `store_aligned_ptr` are
+  **safe `pub fn`s that dereference a raw pointer**. They assert non-null and
+  32-byte alignment; neither establishes that the pointer is valid or that
+  eight floats are readable. A safe function must not permit UB.
+- The **entire AVX2 surface** calls `_mm256_*` with no `#[target_feature]` and
+  no runtime guard. `require_avx2()`, whose doc comment says *"Call once at
+  start-up. Panics if AVX2 is unavailable"*, has **zero callers** - so the
+  module's documented safety protocol was never enforced. Exactly the shape of
+  `Y512f32`'s "Only constructed if `has_avx512f()` returns true", where
+  `has_avx512f()` also had zero callers.
+
+Four passing tests made all of that look maintained. **A dead module with tests
+is worse than a dead module.**
+
+#### The fix
+
+Delete the module; correct all six claims. The blob marker is parsed by two
+harnesses, so it moves with them (`======= GENERATED RUST BLOB =======`).
+§9.7 now states what was measured rather than what was intended: **`@avx_emit`
+is a hard syntax error** (`Line 1: Error: Unexpected top-level item`), while
+`@ptx_emit` and `@hdl_emit` **parse, are ignored, and exit 0** - the worse
+direction, since a user selecting a backend gets a clean compile and no
+indication the annotation was discarded.
+
+##### The Phase 0 "both backends" clause is DROPPED, not deferred
+
+That clause instructed a future reader to *"re-scope it deliberately or drop
+it"*. It is dropped, and on evidence rather than fatigue: the premise it rested
+on was false twice over. There is no second GEMM in `--emit-cpu` to be exact in -
+the dispatcher is unreachable and what is emitted is scalar - so the clause was
+not hard, it was **empty**. Phase 0's exactness result stands on the LLVM
+backend alone, stated so nobody reads the single-backend result as a shortfall
+against a clause that was measuring nothing.
+
+#### What could NOT be measured, stated rather than glossed
+
+Whether a reader's `rustc` auto-vectorizes the emitted scalar loops is **not
+claimed here**. Two attempts to measure it produced nulls - once because the
+crate-type emitted no code for an unused function, once because the symbol was
+eliminated - and the honest framing is that this is a property of the reader's
+compiler, not of what Y emits. "Rust source that some compiler may vectorize"
+describes all Rust. The claim gated here is the static one: **the emitted text
+contains no SIMD**, which is what "AVX source" asserted and what is false.
+
+#### Mutation table - 8 probes, each `--test` target run separately over nine suites
+
+| probe | caught by |
+|---|---|
+| **C1** the banner claims AVX-512 again | **`emit_cpu_claims_no_simd` ONLY** |
+| **C3** the README row claims Rust/AVX again | **`emit_cpu_claims_no_simd` ONLY** |
+| **C4** §9.7 drops "NOT IMPLEMENTED" | **`emit_cpu_claims_no_simd` ONLY** |
+| **C6** the blob sweep neutered, floor kept | **the floor ONLY** |
+| **C5** the emitter emits `_mm256_…` | `emit_cpu_claims_no_simd`, two of its tests |
+| **C2** the marker claims RUST/AVX again | the new gate + both blob harnesses |
+| **C8** the backend emits a header and nothing else | the new control + both harnesses |
+| **C7 CONTROL** two entries of the marker list reordered | green everywhere |
+
+Read the control first: **C7 is green in all nine suites.**
+
+**C1, C3, C4 and C6 are the result: four of the claim sites were invisible to
+every other suite**, which is why six of them accumulated. C2 and C8 are
+diagnosis-by-name rather than isolation - the harnesses already fail on them,
+just less legibly.
+
+**C8 was mis-aimed on the first pass** (`self.buffer` is not a field) and
+BUILD FAILED. Re-aimed at a return that yields only the header, it is caught.
+*Confirm a mutation compiles and reproduces the defect before recording
+anything about it.*
+
+#### The citation gate caught me, on a live case
+
+`every_path_a_proof_or_a_gate_cites_exists` failed on the first run of the new
+suite: its module docstring cited `src/avx_wrapper.rs`, which this increment
+deletes. That is the gate doing precisely its job - *"a docstring pointing at a
+renamed or deleted file is how a claim about what pins something becomes
+unfalsifiable"*. The fix is to name the deleted module **without a resolvable
+path**, and to say in the docstring why it is named that way, so the next reader
+does not "helpfully" restore the citation.
 
 ## 5. End goal
 

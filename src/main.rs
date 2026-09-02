@@ -1691,7 +1691,7 @@ fn main() {
         println!("{}", ptx_output);
         println!("==================================");
     } else if emit_cpu {
-        log_step!("4/4", "Emitting CPU AVX-512 Host Code...");
+        log_step!("4/4", "Emitting Host Rust Source...");
         let mut emitter = CpuEmitter::new();
         let cpu_output = emitter.emit_program(&ast);
 
@@ -1706,7 +1706,7 @@ fn main() {
             exit(1);
         }
 
-        println!("======= GENERATED RUST/AVX BLOB =======");
+        println!("======= GENERATED RUST BLOB =======");
         println!("{}", cpu_output);
         println!("=======================================");
     } else {
