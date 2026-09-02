@@ -4138,6 +4138,71 @@ claim: that the `pthread_join` the loop performs is what makes a worker's
 stores visible to the reduction. That needs a memory model and nothing else
 will do.
 
+#### A sanitizer that was not looking, and the race it found once it was · 2026-09-02
+
+The trust boundary's remaining software-side entry after the last two
+increments was the ORDER: that a worker's stores are visible to the reduction
+that reads and then frees its buffers. `ExactGemmThreading.v` proves WHICH
+threads are joined; the ordering a join imposes is not arithmetic and no proof
+here speaks about it. **ThreadSanitizer does** - it reasons about
+happens-before rather than about observed interleavings, so a single execution
+finds a missing edge.
+
+**THE TRAP, AND IT IS THE MOST DANGEROUS SHAPE OF NULL METRIC IN THIS
+REPOSITORY SO FAR.** `clang -fsanitize=thread` over an emitted `.ll`
+instruments almost nothing. TSan's memory-access checks are gated on the
+`sanitize_thread` FUNCTION attribute, which the C frontend adds and a
+hand-written module does not carry. Measured on the exact kernel:
+`__y_gemm_exact_vnni_threaded` carries **zero** `__tsan_read`/`__tsan_write`
+checks under the flag alone and **33** once the attribute is added; the worker
+0 against 12.
+
+What it *does* carry either way is `__tsan_func_entry`/`_exit` and, since the
+fix below, `__tsan_atomic64_*` - atomics go through a different lowering. And
+the malloc/free and pthread INTERCEPTORS live in the runtime and fire
+regardless. So the first probe run against an uninstrumented kernel with the
+join loop deleted **did** report `data race ... in free` plus a thread leak,
+which reads exactly like working coverage. **A partially-live tool is worse
+than a dead one**: it produces enough signal to be believed.
+
+Three things make the gate mean something, and each was arrived at by being
+wrong first. It counts only `__tsan_read`/`__tsan_write` and not the `func_`
+or `atomic` families - counting `@__tsan_` wholesale made the un-rewritten
+module look instrumented. It asserts per function, having first walked back
+from the first *mention* of a name and landed in whichever function called it.
+And it carries a runtime canary: a deliberate unsynchronised global in the
+driver that TSan must report, or the silence everywhere else means nothing.
+
+**THE FINDING.** `@__y_gemm_exact_nthreads`, the memoised thread count, was a
+plain load/store on a mutable global. Two application threads entering the
+exact GEMM at once both find it unset and both write it - **measured at 4 to 8
+of 8 concurrent callers taking that path on every run**, by counting entries to
+the `getenv` inside it. Every writer stores the same value and an aligned `i64`
+cannot tear on x86, so it has never produced a wrong answer. It is undefined
+behaviour all the same, in a kernel that ships a certificate claiming
+exactness, and the fix is `monotonic` on two lines - a plain `mov`.
+
+**The answer could not have found it and neither could the eight callers'
+agreement**, which is `same 1` either way. What found it was asking TSan, and
+what let TSan answer was noticing it had not been.
+
+**The item moved `Unchecked` -> `Pinned`, and the `because` says what a dynamic
+check does not give**: these runs cover the schedules they explore, at these
+shapes, and that is not every schedule. Two `Unchecked` items are left on the
+whole boundary - everything below the LLVM IR, and the hardware.
+
+**RECORDED, NOT FIXED: the emitted module defines `attributes #0` TWICE and the
+second one wins.** Found while adding the attribute group. `llvm-as` accepts it
+silently and `llvm-dis` shows the result: every function in the module,
+including the entire f32 GEMM the first group was written for, ends up with
+`"target-features"="+avx512f,+avx512bw,+avx512vnni"` and **loses
+`target-cpu="znver5"`, `+fma`, `+avx512cd`, `+avx512dq`, `+avx512vl` and
+`+avx512bf16`**. Nothing is wrong - both groups carry `+avx512vnni`, which is
+what the exact kernel needs - and it is a silent performance regression in the
+f32 path plus a collision waiting for the next feature. It wants its own
+increment with its own before/after measurement, and mixing an unrelated
+emitter change into this one would make the mutation table ambiguous.
+
 ## 5. End goal
 
 > **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one

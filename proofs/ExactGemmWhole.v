@@ -80,8 +80,12 @@
       and violating it is a use-after-free rather than a wrong number.
     - The CONCURRENCY is not. Nothing here says a worker's stores are visible
       to the reducer, or that the `pthread_join` the loop above performs is
-      what makes them so. That is an ORDERING claim; closing it needs a memory
-      model, not more arithmetic.
+      what makes them so. That is an ORDERING claim and needs a memory model,
+      not more arithmetic. It is checked DYNAMICALLY instead:
+      `tests/exact_gemm_thread_sanitizer.rs` runs the kernel under
+      ThreadSanitizer, which reasons about happens-before rather than about
+      observed interleavings - so one execution finds a missing edge - but
+      covers the schedules those runs explore and no more.
 
     Build:  coqc proofs/ExactGemmWhole.v      (Rocq 9.1)
 *)
