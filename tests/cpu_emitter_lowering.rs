@@ -73,13 +73,13 @@ fn emit_cpu(name: &str, src: &str) -> String {
 /// Compiles the blob plus a driver `main` with rustc and runs it, returning the
 /// exit code. `None` means rustc is unavailable.
 fn build_and_run(name: &str, blob: &str, driver: &str) -> Option<i32> {
-    // `use crate::avx_wrapper::*;` cannot resolve outside the host crate; it is
-    // the only line that depends on one, and no probe here touches a Y256f32.
-    let body: String = blob
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("use crate::"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    // The blob is used VERBATIM. This used to filter out `use crate::…`,
+    // which is how that import survived being unresolvable for every reader
+    // outside the Y crate: two separate harnesses removed it before checking,
+    // so neither could see that the artifact as emitted does not compile.
+    // `no_emitted_blob_imports_a_path_only_the_compiler_can_resolve` in
+    // `cpu_emitter_output_compiles.rs` now refuses the whole class.
+    let body: String = blob.to_string();
     let dir = scratch(name);
     let rs = dir.join(format!("{}.rs", name));
     std::fs::write(&rs, format!("#![allow(unused, non_snake_case)]\n{}\n{}\n", body, driver))

@@ -1176,6 +1176,55 @@ survivor to be dismissed; it is often the half of a pair that only removes a
 guard, and the defect appears when it is composed with the one that needs the
 guard gone.
 
+### A harness that normalises its input certifies something the producer never emitted
+
+The rule already recorded for benchmarks — *a harness that re-wraps the
+compiler's output is measuring something the compiler did not emit* — applies
+with more force to a test, because a test is what licenses the claim in the
+README.
+
+A gate compiled the emitted source blob after **deleting one line from it**. The
+deleted line was an import that could not resolve for the intended reader, so
+what the gate certified was an artifact that does not exist: as emitted the blob
+failed for every program in the corpus; as checked it passed. The strip carried
+a comment justifying itself, and that comment contradicted the README one file
+away. Nobody compared them, because the strip is what removed the evidence.
+
+**Every fixup step in a harness is a claim, and it should be read as one.** When
+a gate trims, filters, patches or substitutes before checking, ask what the
+artifact does without the fixup, and whether anyone downstream performs the same
+fixup. If the answer is "nobody", the fixup is hiding a defect rather than
+adapting to one.
+
+The repair is almost always to **fix the producer so the fixup is unnecessary**,
+not to keep the fixup and document it. Here that meant removing the import and
+refusing the single construct that required it — after which the gate could
+check the artifact verbatim, which is the property worth having.
+
+#### And the gate must not read the fixup's output
+
+The obvious way to write the follow-up gate — "no emitted blob may contain this
+import" — reads the extractor that the gate file already owns. That extractor is
+the thing that hid the defect. A re-added strip filters the offending line out on
+its way past, and the new gate reports a clean sweep.
+
+Confirmed by mutation, and only by a **compound** one: restoring the strip alone
+reproduces nothing once the producer is fixed, and restoring the producer's bug
+alone is caught. Only both together defeat a gate that reads the filtered
+output. Scan the raw producer output instead.
+
+### A refusal family is a family; check the arms next to the one you fixed
+
+Four fake lowerings had been refused, with a docstring listing them and stating
+the rule that selected them ("the substitution computes something different").
+A fifth sat **one match arm away**, in the same file, matching the same operand
+type, doing the same thing — and it survived, because the sweep enumerated the
+cases it had thought of rather than the arms that existed.
+
+When a fix is justified by a rule, apply the rule to every sibling in the same
+dispatch and write the census down. The docstring listing the four was the best
+evidence available that a fifth had been missed, and it read as completeness.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:
