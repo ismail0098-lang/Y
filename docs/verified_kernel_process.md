@@ -1225,6 +1225,61 @@ When a fix is justified by a rule, apply the rule to every sibling in the same
 dispatch and write the census down. The docstring listing the four was the best
 evidence available that a fifth had been missed, and it read as completeness.
 
+### A capability claim is an artifact; gate it like one
+
+`@ZeroDrift` doing nothing, `scheme = "plonkish"` naming an arithmetization the
+emitter never used, and a backend advertised as emitting AVX while emitting no
+vector instruction at all are the same defect. The output is well-formed, every
+test passes, the exit code is 0 — and the artifact asserts a property nobody
+supplied.
+
+It is worse than the failures this process usually chases, in one specific way:
+**it is fail-loud in no direction.** A wrong answer eventually surfaces; a
+refusal surfaces immediately; a claim that nothing checks simply persists, and
+accumulates copies. Six sites had accumulated here — a CLI banner, a marker
+string, two documentation tables, a directive reference, and a roadmap
+paragraph — because each was written by someone reading one of the others.
+
+Two rules follow.
+
+**Gate the claim where the claim lives.** Whether a compiler *prints* "AVX" is a
+property of a string literal; running it on a machine where it emits scalar code
+tells you nothing about the banner. So half of such a gate is necessarily
+source-level, exactly like pinning which CPUID reading a predicate uses, or
+pinning the absence of an environment override.
+
+**Pair it with the structural fact it is a claim about.** "The emitted text
+contains no vector intrinsic" is checkable over the whole corpus with a floor
+that counts artifacts *scanned*. Neither half is sufficient: the source gate
+alone permits an emitter that grows SIMD while the docs stay silent, and the
+corpus gate alone permits the docs to keep advertising what is not there.
+
+#### Do not let the claim widen while you are measuring it
+
+The temptation is to prove the stronger thing — here, that the emitted scalar
+code cannot become SIMD downstream. That question is about the *reader's*
+compiler, not about what is emitted, and two attempts to measure it produced
+nulls (an unused function emitted no code; then the symbol was eliminated).
+"Source that some compiler may vectorize" describes all source. State the claim
+you can hold — *the emitted text contains no SIMD* — and record the one you
+dropped and why.
+
+### Deleting dead code is not the finding; auditing it before deleting is
+
+A module reachable from nothing cannot be wrong, which is exactly why the wrong
+things collect there. The value is in reading it *before* it goes, and the
+justification for removing it should be what the reading found, not the fact
+that it was unused.
+
+Here the audit found a safe `pub fn` dereferencing a raw pointer, and an entire
+vector surface calling target-specific intrinsics with no `target_feature` and
+no runtime guard — while the function documented as *"call once at start-up;
+panics if the feature is unavailable"* had zero callers. Its four passing tests
+are what had made all of it look maintained.
+
+**A dead module with tests is worse than a dead module.** The tests are the
+thing that makes it look alive, and they are why nobody re-reads it.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:

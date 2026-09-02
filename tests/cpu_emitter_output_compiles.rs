@@ -62,7 +62,7 @@ fn emit_cpu(src_path: &Path) -> Emit {
     // `=` too, so splitting on the closing marker as a substring truncates it
     // to two characters. (Which it did, and the test caught it by asserting on
     // a specific missing definition rather than just "rustc was unhappy".)
-    const OPEN: &str = "======= GENERATED RUST/AVX BLOB =======";
+    const OPEN: &str = "======= GENERATED RUST BLOB =======";
     const CLOSE: &str = "=======================================";
     let mut body: Vec<&str> = Vec::new();
     let mut inside = false;
@@ -80,8 +80,8 @@ fn emit_cpu(src_path: &Path) -> Emit {
         }
         // NOTHING IS STRIPPED. This used to drop `use crate::avx_wrapper::*;`
         // on the grounds that "the blob is written to be pasted INTO this
-        // crate" - which contradicts the README, where `--emit-cpu` "prints
-        // Rust/AVX source **for you to paste**". The strip is what made the
+        // crate" - which contradicted the README, where `--emit-cpu` prints
+        // source "for you to paste". The strip is what made the
         // contradiction invisible: measured, ALL 46 corpus blobs carried that
         // import, NONE referenced a symbol from it, and every one of them
         // failed as delivered with `error[E0432]: unresolved import
@@ -389,7 +389,7 @@ fn a_matrix_fragment_has_no_host_equivalent() {
         "refused without naming the construct:\n{text}"
     );
     assert!(
-        !text.contains("GENERATED RUST/AVX BLOB"),
+        !text.contains("GENERATED RUST BLOB"),
         "printed a blob anyway. main() must fail before printing, or the \
          refusal reaches the user's clipboard as a success:\n{text}"
     );

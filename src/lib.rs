@@ -1,5 +1,4 @@
 pub mod ast;
-pub mod avx_wrapper;
 pub mod bank_conflict;
 pub mod cpu_emitter;
 pub mod lexer;
