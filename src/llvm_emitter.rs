@@ -2628,23 +2628,34 @@ representation, and whether that is lossless depends on the expression.",
                 .unwrap();
                 self.emit_store(&result, &addr, &ty);
             }
-            Stmt::Chisel(block, _) => {
+            Stmt::Chisel(block, span) => {
                 if self.in_ptx_emit {
-                    // PTX-targeted: emit chisel string literals as NVPTX inline asm
-                    self.wln("  ; --- CHISEL INLINE PTX (nvptx target) ---");
-                    for stmt in &block.stmts {
-                        if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
-                            // Emit PTX instruction as side-effecting inline asm
-                            // On nvptx backend, constraints differ from x86
-                            self.wln(&format!(
-                                "  call void asm sideeffect \"{}\", \"\"()",
-                                s.replace('\\', "\\\\").replace('"', "\\\"")
-                            ));
-                        } else {
-                            self.emit_stmt(stmt, ret_type);
-                        }
-                    }
-                    self.wln("  ; --- END CHISEL PTX ---");
+                    // This arm emitted the `chisel` lines as inline asm with an
+                    // EMPTY constraint string, on the reading that a module
+                    // retargeted to NVPTX wants different constraints from x86.
+                    // `emit_prelude` writes `Self::host_triple()` and there is
+                    // no path in this backend that emits an `nvptx` triple, so
+                    // the reading never applies: what came out was PTX text
+                    // inside an `x86_64-unknown-linux-gnu` module. Measured -
+                    // the compiler printed "Compilation Successful!", exited 0,
+                    // and the `clang` line it told the user to run answered
+                    // `<inline asm>:1:10: error: invalid register name`.
+                    //
+                    // Both branches failed identically there, so `@ptx_emit`'s
+                    // one live consumer could not change an outcome. Refusing
+                    // by name is what makes that status honest: `--emit-ptx` is
+                    // where PTX `chisel` is lowered, and it resolves `%name`
+                    // against the variables in scope (`resolve_chisel_registers`).
+                    self.emit_errors.push(format!(
+                        "[LLVM] a `chisel` block inside a `@ptx_emit` function (line {}, \
+                         col {}) would put PTX instructions into a `{}` module, which \
+                         `clang` rejects with `invalid register name`. This backend emits \
+                         host code only. Use `--emit-ptx` with a `kernel`, or drop \
+                         `@ptx_emit` and write host assembly.",
+                        span.line,
+                        span.col,
+                        Self::host_triple().0
+                    ));
                 } else {
                     self.wln("  ; --- CHISEL INLINE ASM ---");
                     for stmt in &block.stmts {

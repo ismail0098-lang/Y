@@ -3013,7 +3013,7 @@ Each line is a string literal containing a single PTX statement, terminated with
 
 ### 16.2 Variable Scoping Inside `chisel`
 
-Y variables declared before the `chisel` block are accessible using their PTX register names. The naming convention follows the Y compiler's register allocator:
+Y variables declared before the `chisel` block are accessible **by their Y name**, written with a `%` prefix. The compiler rewrites each such reference to the register it allocated:
 
 | Y Declaration | PTX Register Name |
 | :--- | :--- |
@@ -3021,6 +3021,14 @@ Y variables declared before the `chisel` block are accessible using their PTX re
 | `let v: I32 = ...;` | `%v` (I32 scalar) |
 | `let ptr: ptr = ...;` | `%ptr` (u64 address register) |
 | Struct fields | Not directly accessible — load to a local variable first |
+| `let v: U32x4 = ...;` | **Refused** — a `U32x4` is four registers, not one; read the lane into a scalar `let` first |
+
+A `%name` that is neither a variable in scope nor a PTX special register
+(`%tid.x`, `%ctaid.y`, `%globaltimer`, …) is **refused at compile time**, with
+the line and column of the `chisel` block. Before this was enforced the line
+went out verbatim, so every example in this section produced PTX that `ptxas`
+answers with `Unknown symbol` — under a success banner. Gated by
+`tests/chisel_register_scope.rs`.
 
 ```ysu
 let val: F32 = 1.0;
@@ -3082,7 +3090,8 @@ chisel {
 
 ### 16.5 Restrictions
 
-- PTX must be valid for the target `sm_XX` architecture. Invalid PTX will cause `CUDA_ERROR_INVALID_PTX` at JIT load time.
+- An unresolvable `%name` is caught at **compile time** (see 16.2). Everything else about the instruction is not: PTX must be valid for the target `sm_XX` architecture, and an invalid opcode or operand shape surfaces as a `ptxas` error, or as `CUDA_ERROR_INVALID_PTX` at JIT load time.
+- `chisel` is lowered by `--emit-ptx`. In a `@ptx_emit` function the LLVM backend **refuses** it: `--emit-llvm` emits a host (`x86_64-…`) module, so PTX text there cannot assemble.
 - Do not declare new `.reg` or `.shared` variables inside `chisel` — all registers must come from Y declarations. New PTX declarations will conflict with the compiler's symbol table.
 - `chisel {}` cannot span multiple Y scopes (no jumping into or out of `if`/`for`/`while` blocks).
 
@@ -3091,7 +3100,7 @@ chisel {
 ## 17. Frequently Asked Questions
 
 **Do I need CUDA drivers and a GPU to use Y?**
-No — not for all backends. The LLVM (`--llvm`), C (`--c`), x86-64 (`--cpu`), and ZK (`--emit-r1cs`) backends work entirely on the CPU with no GPU required. The PTX (`--ptx`) and co-processor (`--emit-coprocessor`) backends require an NVIDIA GPU and CUDA toolkit. The hardware Sentinel probe also requires CUDA for GPU measurements, but will gracefully skip GPU probing and detect CPU-only capabilities if no GPU is present.
+No — not for all backends. The LLVM (`--emit-llvm`), host Rust source (`--emit-cpu`), x86-64 ELF (`--emit-native`), and ZK (`--target=r1cs`, in a build with the `zk` feature) backends work entirely on the CPU with no GPU required. **There is no C backend** — the previous version of this answer listed one; `--emit-c` is still a recognised flag but reports that the backend was removed and exits 1. The PTX (`--emit-ptx`) and co-processor (`--emit-coprocessor`) backends emit for an NVIDIA GPU; emitting needs no device, running the result does. Three of the flag spellings this answer used (`--llvm`, `--cpu`, `--ptx`) are not options at all — unrecognised options are a hard error, so each exited 1 with `unrecognised option`. Run `Y <file> --nonsense` to see the authoritative list. The hardware Sentinel probe also requires CUDA for GPU measurements, but will gracefully skip GPU probing and detect CPU-only capabilities if no GPU is present.
 
 ---
 

@@ -1280,6 +1280,90 @@ are what had made all of it look maintained.
 **A dead module with tests is worse than a dead module.** The tests are the
 thing that makes it look alive, and they are why nobody re-reads it.
 
+### A documented convention is a claim; compile the manual's own example
+
+The strongest single move available when auditing a documented surface is to
+copy its worked example out of the reference and compile it. §16.2 of the Y
+language reference gave a register naming table for `chisel {}` blocks; running
+its own three-line example produced PTX that `ptxas` answers with
+`Unknown symbol`, under `Compilation Successful!` and exit 0. Every example in
+the section that followed had the same defect.
+
+This costs a minute and it is not a documentation check — it is the cheapest
+available test of the feature, because the reference is where a user learns
+what to type. A surface no fixture exercises is exactly where the manual is the
+only specification, and therefore exactly where nobody has run it.
+
+The corollary is about severity, not about docs: the failure arrived at the
+ASSEMBLER, on whichever machine eventually runs the kernel, while the compiler
+that produced it reported success. **Fail-loud one step further out is
+indistinguishable from fail-silent at the point where someone has to act.**
+
+### An unhandled name inside a STRING is the same hole as one in the AST
+
+This repository's design rule — an unhandled node in a soundness-critical pass
+must reject — has been applied to match arms many times, and once to sites
+(`enumerate the SITES, not the variants`). The `chisel` bug is a third reading:
+the emitter's `Expr::Ident` arm had already been fixed to refuse an unbound
+name rather than splice it into instruction text, and the identical hole
+survived in a *string literal* that the same emitter wrote to the same buffer.
+
+A fix expressed over one data type does not travel to another representation of
+the same thing. When closing a hole, ask **what else reaches this buffer** —
+not just what else matches this enum.
+
+### Prefer a resolver to a refusal when a working path exists inside the broken one
+
+Refusing every `chisel` block would have satisfied every safety argument and
+deleted a path that works: a block naming no register (`bar.sync 0;`) assembled
+cleanly the whole time. The surface was half-working, which is both why the bug
+survived and why "refuse it all" is the wrong repair.
+
+Splitting the cases is more work than refusing and is what makes the documented
+contract true rather than merely safe. The discipline that keeps it honest is
+the control test — a fixture exercising the half that must keep working — and a
+fail-closed default on the ambiguous case (an allowlist that is short refuses a
+legitimate program; an allowlist that is permissive re-opens the bug).
+
+### A substitution gate that checks the old name is gone cannot tell a map from a constant
+
+A mutation that resolved every variable to one fixed register produced
+`mul.f32 %f1, %f1, %f1`. The gate asserted the source names had disappeared and
+that the operands were f32 registers; both hold. It failed only because an
+unrelated variable happened to sort first and gave the wrong register CLASS.
+
+Assert the structure the map is supposed to have: two occurrences of one
+variable must be the same register, and two different variables must be
+different registers. That is the property; "the old spelling is absent" is a
+consequence of it and is satisfied by a constant function.
+
+The general form: **whenever a gate checks that a rewrite happened, ask what a
+degenerate rewrite would look like** — the identity, a constant, or a rewrite
+that maps everything to the same target.
+
+### Ask the tool for its own list rather than transcribing it
+
+A doc gate on flag names could carry a list of valid flags. That list is a
+second copy that drifts, which is the defect being gated. The CLI already
+prints `Known options:` when it rejects an unrecognised flag, so the gate feeds
+it a deliberate non-flag and parses the reply.
+
+Same rule as asserting two producers AGREE rather than re-deriving a table, and
+the same limit applies: an agreement gate cannot see a claim both sides make
+wrongly. Here that is covered because one side is the compiler's own behaviour.
+
+### Correct an overstatement the moment the measurement contradicts it
+
+The first version of the FAQ correction said all five documented flag spellings
+were wrong. Measuring against the CLI's own list showed `--emit-r1cs` is valid
+and `--emit-c` is recognised (it reports the removal); only three spellings are
+unrecognised. `--emit-r1cs` had exited 1 for an unrelated reason — the fixture
+had a loop the ZK backend refuses.
+
+An exit code is not a diagnosis. Read the message before attributing the
+failure, especially when the attribution is about to be written into a
+document as a measured fact.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:

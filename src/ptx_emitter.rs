@@ -562,6 +562,46 @@ impl ScalarTy {
     }
 }
 
+/// The PTX ISA's special registers, by base name (the `.x`/`.y`/`.z` suffix is
+/// stripped before the lookup). A `%name` inside a `chisel {}` block that is
+/// one of these is hardware-provided and passes through verbatim.
+///
+/// Deliberately generous, and fail-closed if it is short: a special register
+/// missing from this list makes a legitimate program refuse by name, which
+/// costs a user five minutes. The alternative - passing an unrecognised
+/// `%name` through - is the bug this list exists to close.
+const PTX_SPECIAL_REGISTERS: &[&str] = &[
+    "tid", "ntid", "laneid", "warpid", "nwarpid", "ctaid", "nctaid", "smid", "nsmid", "gridid",
+    "is_explicit_cluster", "clusterid", "nclusterid", "cluster_ctaid", "cluster_nctaid",
+    "cluster_ctarank", "cluster_nctarank",
+    "lanemask_eq", "lanemask_le", "lanemask_lt", "lanemask_ge", "lanemask_gt",
+    "clock", "clock_hi", "clock64", "globaltimer", "globaltimer_lo", "globaltimer_hi",
+    "total_smem_size", "aggr_smem_size", "dynamic_smem_size",
+    "reserved_smem_offset_begin", "reserved_smem_offset_end", "reserved_smem_offset_cap",
+    "reserved_smem_offset_0", "reserved_smem_offset_1",
+    "current_graph_exec",
+];
+
+/// True for a name this backend's own register allocator could have produced:
+/// `%r<n>`, `%rd<n>`, `%f<n>`, `%fd<n>`, `%h<n>`, `%p<n>`. A `chisel` author
+/// reading the emitted PTX may name one deliberately, so these pass through.
+///
+/// Note the ambiguity this creates and does NOT resolve silently: a Y variable
+/// may legally be called `r0`, and then `%r0` names both. `variables` is
+/// consulted FIRST, so the Y variable wins - which is what §16.2 of the
+/// language reference documents, and what `chisel`'s own §16.5 ("all registers
+/// must come from Y declarations") assumes.
+fn is_emitter_register_name(name: &str) -> bool {
+    for prefix in ["rd", "fd", "r", "f", "h", "p"] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub struct PtxEmitter {
     pub ptx_buffer: String,
 
@@ -1501,6 +1541,98 @@ or `shared_alloc_u32` for a shared-memory array.",
             },
             _ => ZeroInitKind::Unrepresentable,
         }
+    }
+
+    /// Rewrites the `%name` register references in one `chisel {}` line.
+    ///
+    /// §16.2 of the language reference documents a naming convention - "Y
+    /// variables declared before the `chisel` block are accessible using their
+    /// PTX register names", with a table saying `let x: F32` is `%x`. **That
+    /// convention did not exist.** The line was written to the module
+    /// VERBATIM, and this backend's allocator names registers `%f0`/`%r0`/
+    /// `%rd0`, never after the source variable - so the reference's own
+    /// example
+    ///
+    /// ```text
+    /// let val: F32 = 1.0;  let result: F32 = 0.0;
+    /// chisel { "mul.f32 %result, %val, %val;"; }
+    /// ```
+    ///
+    /// compiled clean, printed "Compilation Successful!", exited 0, and wrote
+    /// a file `ptxas` answers with `Unknown symbol '%result'`. Every worked
+    /// example in §16.4 has the same defect. It is the `Expr::Ident` hole one
+    /// layer over - an unbound name spliced into instruction text - reached
+    /// through a string rather than through the AST, which is why the fix
+    /// there did not cover it.
+    ///
+    /// Three outcomes, and the third is the point:
+    ///
+    /// * a Y variable in scope  -> substituted, making §16.2 true;
+    /// * a PTX special register (`%tid.x`, `%globaltimer`) or one of this
+    ///   backend's own allocator names -> passed through;
+    /// * anything else -> REFUSED by name, so a typo costs a line number
+    ///   rather than a `ptxas` error on whichever machine runs the kernel.
+    ///
+    /// A `U32x4` is deliberately refused rather than substituted: it names
+    /// FOUR registers (`vec_vars`) and a single `%v` cannot stand for them.
+    fn resolve_chisel_registers(&mut self, text: &str, span: &Span) -> String {
+        let bytes: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != '%' {
+                out.push(bytes[i]);
+                i += 1;
+                continue;
+            }
+            // Read the identifier after '%'. A special register may carry a
+            // `.x`/`.y`/`.z` suffix, which is not part of the name.
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len()
+                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == '_')
+            {
+                end += 1;
+            }
+            if end == start {
+                // A bare '%' with no identifier. Not something valid PTX
+                // contains; pass it through rather than crashing, and let the
+                // assembler have the last word.
+                out.push('%');
+                i += 1;
+                continue;
+            }
+            let name: String = bytes[start..end].iter().collect();
+            if let Some(reg) = self.variables.get(&name) {
+                out.push_str(reg);
+            } else if self.vec_vars.contains_key(&name) {
+                self.emit_errors.push(format!(
+                    "[PTX] `chisel` block (line {}, col {}) refers to `%{}`, which is a \
+                     4-wide vector: it names four registers, not one. Read the lane you \
+                     want into a scalar `let` first and name that.",
+                    span.line, span.col, name
+                ));
+                out.push('%');
+                out.push_str(&name);
+            } else if PTX_SPECIAL_REGISTERS.contains(&name.as_str())
+                || is_emitter_register_name(&name)
+            {
+                out.push('%');
+                out.push_str(&name);
+            } else {
+                self.emit_errors.push(format!(
+                    "[PTX] `chisel` block (line {}, col {}) refers to `%{}`, which is \
+                     neither a variable in scope nor a PTX special register. `ptxas` \
+                     would answer `Unknown symbol '%{}'`. Declare it with a `let` before \
+                     the block (see §16.2), or check the spelling.",
+                    span.line, span.col, name, name
+                ));
+                out.push('%');
+                out.push_str(&name);
+            }
+            i = end;
+        }
+        out
     }
 
     fn unsupported_stmt(&mut self, what: &str, span: &Span) {
@@ -2563,15 +2695,28 @@ declare it as a Q format.\n{}",
                 self.emit_block(body, hw_profile);
             }
             Stmt::CompileTimeAssert { .. } => {}
-            Stmt::Chisel(block, _) => {
+            Stmt::Chisel(block, chisel_span) => {
                 writeln!(&mut self.ptx_buffer, "    // --- CHISEL INLINE PTX ---").unwrap();
                 for stmt in &block.stmts {
-                    if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
-                        writeln!(&mut self.ptx_buffer, "    {}", s).unwrap();
+                    if let Stmt::Expr(Expr::StringLit(s, lit_span)) = stmt {
+                        // Resolve `%name` against the variables in scope. The
+                        // line used to go out verbatim, so §16.2's documented
+                        // naming convention produced `Unknown symbol` at
+                        // `ptxas` under a green banner - see
+                        // `resolve_chisel_registers`.
+                        let span = if lit_span.line != 0 { lit_span } else { chisel_span };
+                        let resolved = self.resolve_chisel_registers(s, span);
+                        writeln!(&mut self.ptx_buffer, "    {}", resolved).unwrap();
                     } else {
                         self.emit_stmt(stmt, hw_profile);
                     }
                 }
+                // The block had an opening marker and no closing one, so
+                // nothing reading the artifact could say where it ended - the
+                // LLVM backend's chisel arm has written both since it was
+                // added. `tests/chisel_register_scope.rs` needs the boundary
+                // to check WHICH lines were substituted.
+                writeln!(&mut self.ptx_buffer, "    // --- END CHISEL PTX ---").unwrap();
             }
             Stmt::If {
                 condition,
