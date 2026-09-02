@@ -18,6 +18,15 @@
 //! from "this looks like Rust", which is the same reason the PTX backend is
 //! gated on `ptxas` rather than on substring assertions.
 //!
+//! **And for a while it was rustc applied to something else.** The extractor
+//! deleted the blob's own `use crate::avx_wrapper::*;` before compiling it, so
+//! what passed was a MODIFIED artifact. As delivered every blob failed with
+//! `error[E0432]: unresolved import`, because `crate::` names the Y compiler's
+//! own crate and the reader is pasting into theirs. Stripping did not rescue
+//! it either - it only moved the failure, to `error[E0433]: cannot find type
+//! Y256f32` on the one construct that needed the import. Both readings were
+//! measured. Nothing is stripped now, and the blob is self-contained.
+//!
 //! Run with:  cargo test --test cpu_emitter_output_compiles
 
 use std::path::{Path, PathBuf};
@@ -69,11 +78,16 @@ fn emit_cpu(src_path: &Path) -> Emit {
             inside = false;
             break;
         }
-        // The blob is written to be pasted INTO this crate, so its
-        // `use crate::avx_wrapper::*;` cannot resolve standalone.
-        if t.starts_with("use crate::avx_wrapper") {
-            continue;
-        }
+        // NOTHING IS STRIPPED. This used to drop `use crate::avx_wrapper::*;`
+        // on the grounds that "the blob is written to be pasted INTO this
+        // crate" - which contradicts the README, where `--emit-cpu` "prints
+        // Rust/AVX source **for you to paste**". The strip is what made the
+        // contradiction invisible: measured, ALL 46 corpus blobs carried that
+        // import, NONE referenced a symbol from it, and every one of them
+        // failed as delivered with `error[E0432]: unresolved import
+        // crate::avx_wrapper`. So this gate was certifying an artifact the
+        // compiler does not emit - the same defect as the Python harnesses
+        // that stripped the PTX header and substituted their own.
         body.push(line);
     }
     let blob = if body.is_empty() { None } else { Some(body.join("\n")) };
@@ -265,4 +279,150 @@ fn a_gpu_intrinsic_is_refused_rather_than_transcribed() {
         "refused without saying which backend:\n{}",
         text
     );
+}
+
+/// Refuse a GPU intrinsic by name, given a tagged temp dir of its own.
+///
+/// The tag is in the signature rather than in a comment asking the caller to
+/// remember: two tests sharing a temp-dir name is a race this repository has
+/// hit five times.
+fn refusal_of(tag: &str, source: &str) -> (bool, String) {
+    let dir = std::env::temp_dir().join(format!("y_cpuref_{tag}_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("k.ysu");
+    std::fs::write(&src, source).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&src)
+        .arg("--emit-cpu")
+        .current_dir(repo())
+        .output()
+        .expect("run Y");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    (out.status.success(), text)
+}
+
+/// No blob may import a path that only resolves inside the compiler's own
+/// crate.
+///
+/// This gates the DEFECT'S SIGNATURE rather than the one instance of it, so
+/// the next one needs no prophet. `use crate::…` in text the reader pastes
+/// into their own project cannot resolve by construction, whatever it names;
+/// `crate` is the pasting crate, and that is never this one.
+///
+/// The floor counts blobs actually EMITTED AND SCANNED, not `.ysu` files
+/// found: a sweep that compiled nothing would report "no bad imports"
+/// perfectly.
+#[test]
+fn no_emitted_blob_imports_a_path_only_the_compiler_can_resolve() {
+    let mut scanned = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(repo().join("tests"))
+        .expect("tests dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "ysu"))
+        .collect();
+    sources.sort();
+
+    for src in &sources {
+        let e = emit_cpu(src);
+        if e.blob.is_none() {
+            continue;
+        }
+        // THE RAW OUTPUT, not `e.blob`. The extractor is in this file and is
+        // exactly what hid this defect before, by filtering the offending line
+        // out on its way past. A gate that reads the extractor's output cannot
+        // see a strip being re-added; mutation confirmed it - B1+B4 defeats
+        // both this and the compile gate when it reads `e.blob`.
+        scanned += 1;
+        for (i, line) in e.text.lines().enumerate() {
+            let t = line.trim();
+            if t.starts_with("use crate::") || t.starts_with("pub use crate::") {
+                offenders.push(format!(
+                    "{}:{} {}",
+                    src.file_name().unwrap().to_string_lossy(),
+                    i + 1,
+                    t
+                ));
+            }
+        }
+    }
+
+    assert!(
+        scanned >= 40,
+        "only {scanned} blobs were emitted and scanned; this sweep is supposed \
+         to cover the whole corpus, and a sweep that compiles nothing reports \
+         no offenders perfectly"
+    );
+    assert!(
+        offenders.is_empty(),
+        "{} blob line(s) import a path that resolves only inside the Y crate, \
+         so the text the user is told to paste cannot compile for them \
+         (error[E0432]):\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+/// `Fragment::zero` is refused, and it is the fifth member of a family the
+/// original sweep left at four.
+///
+/// A warp-cooperative matrix fragment rendered as eight lanes of host f32 is
+/// the same substitution as `ldmatrix(p) -> Y256f32::load_aligned_ptr`, which
+/// that sweep DID refuse - it sat one match arm away. It was also the only
+/// consumer of the blob's `crate::avx_wrapper` import.
+#[test]
+fn a_matrix_fragment_has_no_host_equivalent() {
+    let (ok, text) = refusal_of(
+        "frag",
+        "kernel k(A: GlobalMemory<F32>) {\n    let acc = Fragment::zero();\n    return;\n}\nfn main() { return; }\n",
+    );
+    assert!(!ok, "exited 0 on Fragment::zero:\n{text}");
+    assert!(
+        text.contains("Fragment::zero"),
+        "refused without naming the construct:\n{text}"
+    );
+    assert!(
+        !text.contains("GENERATED RUST/AVX BLOB"),
+        "printed a blob anyway. main() must fail before printing, or the \
+         refusal reaches the user's clipboard as a success:\n{text}"
+    );
+}
+
+/// THE CONTROL. "Refuse everything" satisfies both tests above while deleting
+/// the backend.
+///
+/// It also pins the half that the import removal could have broken: an
+/// ordinary host program must still emit a blob, and that blob must still
+/// compile VERBATIM - which is the property the strip was hiding.
+#[test]
+fn an_ordinary_host_program_still_emits_a_blob_that_compiles_verbatim() {
+    let dir = std::env::temp_dir().join(format!("y_cpuctl_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("plain.ysu");
+    std::fs::write(
+        &src,
+        "fn add(a: I32, b: I32) -> I32 { return a + b; }\nfn main() { let x: I32 = add(2, 3); return; }\n",
+    )
+    .unwrap();
+
+    let e = emit_cpu(&src);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(e.ok, "an ordinary host program was refused:\n{}", e.text);
+    let blob = e.blob.expect("an ordinary host program must emit a blob");
+    assert!(
+        blob.contains("fn add"),
+        "the blob does not contain the program:\n{blob}"
+    );
+    if let Err(msg) = rustc_check(&blob) {
+        panic!("the blob does not compile as emitted:\n{msg}");
+    }
 }

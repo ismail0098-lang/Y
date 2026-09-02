@@ -58,7 +58,15 @@ impl CpuEmitter {
             "// ==========================================================="
         )
         .unwrap();
-        writeln!(&mut buffer, "use crate::avx_wrapper::*;").unwrap();
+        // NO `use crate::avx_wrapper::*;`. It was emitted unconditionally into
+        // every blob - measured, 46 of 46 corpus programs carried it and NONE
+        // referenced a symbol from it - and `crate::` resolves to the Y
+        // compiler's own crate, so the blob this backend tells the user to
+        // paste could not compile anywhere the user could paste it
+        // (`error[E0432]: unresolved import`). Its single consumer was the
+        // `Fragment::zero` lowering, refused below for the reason its four
+        // siblings already were. The blob is self-contained now, which is what
+        // lets `cpu_emitter_output_compiles` check it VERBATIM.
         writeln!(&mut buffer, "use std::cell::RefCell;").unwrap();
         writeln!(&mut buffer, "").unwrap();
         writeln!(&mut buffer, "thread_local! {{").unwrap();
@@ -730,7 +738,18 @@ impl CpuEmitter {
                 span,
             } => {
                 if namespace == "Fragment" && member == "zero" {
-                    return "Y256f32::zero".into();
+                    // The FIFTH member of the family documented above, and the
+                    // one that sweep missed: it sat one match arm from
+                    // `ldmatrix(p) -> Y256f32::load_aligned_ptr`, which was
+                    // refused for being a warp-cooperative f16 matrix-fragment
+                    // load rendered as an 8-wide f32 load. `Fragment::zero` is
+                    // the same substitution with the same operand type - a
+                    // matrix fragment rendered as eight lanes of host f32 -
+                    // and every operation one could then perform on it
+                    // (`mma_sync`) is already refused. It was also the only
+                    // reason the blob imported `crate::avx_wrapper`.
+                    let span = span.clone();
+                    return self.unsupported_gpu_intrinsic("Fragment::zero", &span);
                 }
                 if namespace == "SharedMemory" && member == "alloc" {
                     let span = span.clone();

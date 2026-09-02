@@ -4579,6 +4579,133 @@ it is not demonstrated end to end, because doing so needs a hypervisor masking
 end to end. The source-level gate is what covers Route A, and it covers the
 reading rather than the consequence.
 
+### 2026-09-02 - the gate certified an artifact the compiler does not emit, because it edited it first
+
+Found by reading the previous increment's own census back as a work queue. It
+named `avx_wrapper::has_avx512f` as one of the readings of "does this machine
+have AVX-512" and then dropped it from the gate; checking why turned up that it
+has **zero callers**, which led to the module around it, which led here.
+
+`--emit-cpu` is described in the README as printing "Rust/AVX source **for you
+to paste** - Y never compiles it", and as being "gated on `rustc` accepting what
+it prints". The first half is true. **The second was false, and the gate is what
+made that invisible.** **576 / 827 / 8 tests, zero failures across 130
+per-target binaries in both feature sets plus all three aggregates; both builds
+warning-free; corpus unchanged at 46 accept / 39 refuse; no committed
+`.ptx`/`.ll`/`.v` changed.**
+
+#### The measurement
+
+`CpuEmitter::new` wrote `use crate::avx_wrapper::*;` into every blob
+unconditionally. Swept over the corpus:
+
+```
+blobs emitted: 46   carrying the import: 46   referencing a symbol from it: 0
+```
+
+`crate::` names the Y compiler's own crate. The reader is pasting into theirs.
+So the artifact this backend exists to produce failed, as delivered, for every
+program, with `error[E0432]: unresolved import crate::avx_wrapper` - for a
+module none of the 46 used.
+
+**Both harnesses that compile the blob deleted that line before compiling it.**
+`cpu_emitter_output_compiles` filtered it with the comment *"the blob is written
+to be pasted INTO this crate"* - which contradicts the README one file away, and
+the strip is precisely what stopped anyone noticing the contradiction.
+`cpu_emitter_lowering` did the same.
+
+**Stripping does not rescue it; it moves the failure.** Measured on the one
+construct that needs the import:
+
+```
+as the user receives it   -> error[E0432]: unresolved import `crate::avx_wrapper`
+as the gate checked it    -> error[E0433]: cannot find type `Y256f32` in this scope
+```
+
+The blob did not compile either way. The gate passed only because **no corpus
+program reaches the construct that references `Y256f32`** - so the strip was
+harmless for the 46 programs the gate happens to see, and blind for the one that
+needed it. The working path masking the broken one, again.
+
+#### `Fragment::zero` is the fifth member of a family the sweep left at four
+
+`Expr::Path { namespace: "Fragment", member: "zero" }` lowered to
+`Y256f32::zero`. The docstring immediately above that match arm lists four
+substitutions refused for *computing something different* - including
+`ldmatrix(p) -> Y256f32::load_aligned_ptr(p)`, described there as "a
+warp-cooperative f16 matrix-fragment load rendered as an 8-wide f32 load".
+
+`Fragment::zero -> Y256f32::zero` is that same substitution, on the same operand
+type, **one match arm away**, and it survived the sweep that refused the other
+four. It was also the blob's only reason to import `crate::avx_wrapper` at all.
+It is refused by name now, through the same `unsupported_gpu_intrinsic` whose
+message states the principle exactly: this backend "prints Rust for you to
+paste, so a plausible-looking substitution would reach your source with no
+compiler between it and you."
+
+#### Severity, stated honestly
+
+This is **fail-loud**, not silent: the reader pastes the blob and rustc rejects
+it immediately. Nobody ships a wrong answer. What was wrong is a *claim* - the
+README's "gated on `rustc` accepting what it prints", which was true of a
+modified artifact and false of the emitted one. That claim is true now.
+
+#### The fix, and what it lets the gate do
+
+Drop the import; refuse `Fragment::zero`; and then **both harnesses use the blob
+verbatim**, which is only possible because the blob became self-contained. The
+corpus is unchanged in both directions - 46 accept / 39 refuse before and after -
+because no corpus program used the refused construct, so the refusal is purely
+additive.
+
+The durable part is a gate on the **defect's signature** rather than on the one
+instance: no emitted blob may contain `use crate::…`, whatever it names, because
+`crate` is the pasting crate and that is never this one.
+
+##### The signature gate must not read the extractor's output
+
+Written the obvious way it reads `emit_cpu(..).blob` - and the extractor is *in
+the same file* and is exactly what hid the defect. A re-added strip would filter
+the offending line out on its way past and the gate would report a clean sweep.
+It scans the raw compiler output instead. Confirmed by mutation rather than
+reasoning: **B1+B4** - the import restored *and* the strip restored - defeats a
+gate that reads `e.blob`, and is caught by one that reads the raw text.
+
+#### Mutation table - 8 probes, each `--test` target run separately over nine suites
+
+| probe | defect the mutated program has | caught by |
+|---|---|---|
+| **B1** the import restored | every blob unresolvable for its reader | `cpu_emitter_output_compiles` + `cpu_emitter_lowering` |
+| **B2** `Fragment::zero -> Y256f32::zero` restored | a blob referencing an undefined type | **`a_matrix_fragment_has_no_host_equivalent` ONLY** |
+| **B3** both restored (the state at HEAD) | the original defect | both cpu_emitter suites |
+| **B1+B4** import restored AND the gate strips again | the gate hides the defect it exists to catch | both cpu_emitter suites |
+| **B6** the sweep neutered, floor left in place | a gate that scans nothing reports no offenders | **the floor ONLY** |
+| **B7** over-refusal: refuse every program | the backend deleted | 3 suites, incl. the control |
+| **B4** the gate strips again, alone | *none - nothing left to strip* | mis-aimed, green |
+| **B5 CONTROL** two banner `writeln!`s reordered | none | green everywhere |
+
+Read the control row first: **B5 is green in all nine suites.**
+
+**B2 is the isolation result.** `no_emitted_blob_is_invalid_rust` - the sweep
+that compiles all 46 blobs - **passes** under it, verified by name rather than
+inferred. No corpus program uses `Fragment::zero`, so the broad sweep is
+structurally incapable of seeing it; only the named refusal test can.
+
+**B4 alone is mis-aimed and that is the honest reading**: after the fix there is
+no import for a strip to remove, so re-adding the strip reproduces no defect.
+The compound B1+B4 is the probe that means something, and it is what justified
+reading the raw text.
+
+#### Recorded, not fixed: `src/avx_wrapper.rs` is now referenced by nothing
+
+556 lines, four `#[test]`s, and after this change the only mention of it anywhere
+is its own `pub mod` line in `lib.rs`. That is the `VnniExact::licenses` shape
+exactly - **a dead module with tests, which is worse than a dead module, because
+the tests are what make it look alive**. It is left in place deliberately:
+deleting a SIMD abstraction layer is its own increment with its own measurement,
+and `tests/source_surface.rs`'s rule is satisfied either way since it is a
+declared module. Named here so the next reader does not have to rediscover it.
+
 ## 5. End goal
 
 > **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one
