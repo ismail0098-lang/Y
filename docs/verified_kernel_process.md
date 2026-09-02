@@ -1100,6 +1100,82 @@ The tell is the *line count*, not the failures: an aggregate that stops early
 reports far fewer result lines than there are targets. Check that first, and
 re-run anything surprising serially before spending time on it.
 
+### Agreement is not enough when the producers agree by luck
+
+The standing rule for a duplicated decision is *assert the producers AGREE
+rather than re-deriving the table*. It has a failure mode, and it is the case
+where the duplication is most dangerous: **when the machine you can run on makes
+every producer agree, an agreement gate is silent.**
+
+Four sites answered "does this machine have AVX-512". Three read CPUID directly;
+one used a reading that additionally checks whether the OS has enabled the
+register state. On the development machine the OS *had* enabled it, so all four
+returned the same value and an agreement assertion passed with the defect fully
+restored — confirmed by mutation, not supposed: reverting a site to the raw
+reading is caught only by a source-level test.
+
+What separated the producers was not their output but **which input each
+consumed**. So the gate has to pin the *reading*:
+
+- assert the authority uses the predicate that consults the extra input;
+- assert it does **not** use the raw one;
+- assert the raw derivation cannot reappear anywhere else in the file.
+
+This is the same device as pinning the absence of an environment override, and
+for the same reason: the property cannot be observed by running the program on a
+machine where it holds. **When you write an agreement gate, ask what it would
+report if every producer were wrong in the same direction.** If the answer is
+"pass", the agreement is not the property — the input is.
+
+The corollary for the behavioural half: an assertion that pairs two derived
+values is vacuous wherever they coincide. Pairing a SIMD width with a masking
+flag says nothing on a machine that has the feature, because both readings are
+the same number either way. A property that cannot fail on this machine needs a
+check that does not run on it.
+
+### Cache the expensive measurement; re-probe the cheap fact
+
+A probe cache turns a measurement into an assertion. If the loader skips the
+probe whenever the file exists, the cached value is no longer something the
+machine said — it is something the file claims, and it stays authoritative until
+someone deletes it.
+
+The distinction that decides what may be cached is **what the validation costs**,
+and it has to be re-derived per field rather than inherited from the file as a
+whole. Here one cache held both a GPU architecture — whose validation costs
+driver initialisation, more than the compiler's entire front end, so caching it
+is right — and a CPU feature bit, whose validation is a single instruction with
+no syscall. The reasoning that justified skipping the first had been silently
+extended to the second, and the file alone then decided between
+`target-cpu=znver5 +avx512f,…` and `target-cpu=haswell +avx2` on one unchanged
+machine.
+
+Two rules fall out. Re-probe in **both** directions: an AND against the cached
+value still lets a stale `false` suppress a real capability, which is a
+regression nothing can see. And **report the disagreement** rather than
+correcting it silently — the same principle as naming the assumed device instead
+of validating it, so a stale cache is visible rather than merely harmless.
+
+### A control wants a second leg on a different mechanism
+
+A control exists to catch the over-refusal that satisfies every other assertion —
+"always answer no" deletes a working path while passing every test about
+refusals. The established rule is that its skip guard must not be computed by the
+function under test, and that is necessary but thin: it protects one assertion
+through one mechanism.
+
+Compose the two mutations and the thinness shows. Making the authority always
+answer `false` *and* routing the control's guard back through that authority
+turns the control into a tautology — measured, it reports `ok`. What still caught
+it was a different assertion entirely: a one-way implication against a *sibling*
+predicate that reads the machine through its own independent path. Neither leg is
+redundant, because subverting the guard does not reach the sibling.
+
+**Run the compound mutation.** A probe that is a no-op on its own is not a
+survivor to be dismissed; it is often the half of a pair that only removes a
+guard, and the defect appears when it is composed with the one that needs the
+guard gone.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:

@@ -84,19 +84,53 @@ pub fn host_has_avx512_vnni() -> bool {
     }
 }
 
-/// Whether the host can execute AVX-512, checked the way
-/// [`host_has_avx512_vnni`] is.
+/// Whether the host can execute AVX-512. **This is the authority.**
 ///
-/// **This is not yet what `HardwareProfile::has_avx512` reports.** That field
-/// comes from `probe_cpu_features`, which reads CPUID leaf 7 EBX bit 16 and
-/// performs no `XCR0` check, so it can answer `true` on a machine where
-/// executing AVX-512 faults. Correcting it moves a value that is cached in
-/// `.ysu_hw_profile` and feeds the analytic cost model, so it is a separate
-/// change with its own measurement rather than a side effect of this one.
+/// Every answer to "does this machine have AVX-512" comes from here:
+/// `HardwareProfile::has_avx512` on both the fresh and the cached path,
+/// `CpuHardwareProfile::supports_avx512_masking`, and the guard on the
+/// `vpaddd zmm` throughput probe. There used to be three readings and the
+/// wrong one fed the emitter - see [`host_has_avx`] for why the reading
+/// matters, and `tests/avx512_probes_agree.rs` for the gate that keeps them
+/// down to one.
+///
+/// There is deliberately no override in either direction. `--portable` lowers
+/// `HardwareProfile` after the probe returns, which is the right layer for a
+/// user preference; this function answers a question about the silicon and the
+/// OS, and nothing should be able to talk it into a different answer.
 pub fn host_has_avx512() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         std::arch::is_x86_feature_detected!("avx512f")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether the host can execute AVX/AVX2, checked the way [`host_has_avx512`]
+/// is.
+///
+/// **The reading is the whole point, and raw CPUID is the wrong one.** A CPU
+/// reports a vector feature in CPUID whether or not the OS has enabled the
+/// register state in `XCR0`; a hypervisor masking the state, or a kernel
+/// booted without it, leaves the CPUID bit set while the instruction faults
+/// exactly as if the silicon lacked it. `is_x86_feature_detected!` performs
+/// the `XGETBV` check, `__cpuid` cannot. Verified rather than assumed: the
+/// std macro's detection path compiles to code containing `xgetbv` and a raw
+/// leaf-7 read does not.
+///
+/// `has_avx` had the identical defect as `has_avx512` and is fixed with it -
+/// it selects the `haswell` / `+avx2` fallback in
+/// `llvm_emitter::host_cpu_attrs`, so a wrong-high answer there is the same
+/// illegal instruction one feature level down. Fixing one and not the other
+/// would be `feedback-guards-consulted-at-one-site`.
+pub fn host_has_avx() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("avx")
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -253,6 +287,20 @@ fn measure_avx2_throughput(has_avx2: bool) -> f64 {
     }
 }
 
+/// Times a `vpaddd zmm` chain. `has_avx512` MUST come from
+/// [`host_has_avx512`], not from a raw CPUID bit.
+///
+/// This is the one place in the compiler that EXECUTES an AVX-512 instruction,
+/// so guarding it on "the silicon reports the feature" rather than "the
+/// instruction will execute" made the hardware prober fault on exactly the
+/// machines it exists to characterise - a SIGILL inside the probe, rather than
+/// a wrong answer out of it.
+///
+/// Its result is stored in `.ysu_hw_profile` as `AVX512_THROUGHPUT`, printed,
+/// and read by nothing: there is no consumer of
+/// `HardwareProfile::avx512_throughput_cycles` anywhere in `src/`. Left in
+/// place because the profile format is what it is; recorded here so nobody
+/// re-derives a cost model from it believing it was ever consulted.
 fn measure_avx512_throughput(has_avx512: bool) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -538,9 +586,34 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             .filter(|s| !s.is_empty())
             .collect();
 
+        // CPU FEATURES ARE RE-PROBED, NOT LOADED. The reasoning above - that
+        // nothing here queries the device, because that would cost every
+        // CPU-only compile - is right about the GPU, where validating the
+        // profile costs `cuInit`. It does not transfer to CPUID, which is one
+        // instruction and no syscall. Left cached, `AVX512=true` in a profile
+        // copied from another machine reached `attributes #0` unchallenged and
+        // put AVX-512 into every function of the module; measured, the file
+        // alone decided between `target-cpu=znver5 +avx512f...` and
+        // `target-cpu=haswell +avx2`.
+        //
+        // A disagreement is REPORTED rather than silently corrected, on the
+        // same principle as naming the assumed card above: a stale profile
+        // should be visible.
+        let cached_avx = parse_bool_field(&contents, "AVX").unwrap_or(false);
+        let cached_avx512 = parse_bool_field(&contents, "AVX512").unwrap_or(false);
+        let live_avx = host_has_avx();
+        let live_avx512 = host_has_avx512();
+        if cached_avx != live_avx || cached_avx512 != live_avx512 {
+            println!(
+                "    -> NOTE: {} says AVX={} AVX512={}, this machine reports AVX={} AVX512={}. \
+                 Using the machine. Delete the file to re-probe.",
+                profile_path, cached_avx, cached_avx512, live_avx, live_avx512
+            );
+        }
+
         let profile = HardwareProfile {
-            has_avx: parse_bool_field(&contents, "AVX").unwrap_or(false),
-            has_avx512: parse_bool_field(&contents, "AVX512").unwrap_or(false),
+            has_avx: live_avx,
+            has_avx512: live_avx512,
             l2_line_size: parse_u32_field(&contents, "L2_LINE").unwrap_or(64),
             l1_latency_cycles: parse_u64_field(&contents, "L1_CYCLES").unwrap_or(4),
             l2_latency_cycles: parse_u64_field(&contents, "L2_CYCLES").unwrap_or(12),
@@ -740,8 +813,18 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let mut features = [0u32; 4];
 
     probe_cpu_features(&mut features);
-    let has_avx = (features[0] & (1 << 28)) != 0;
-    let has_avx512 = (features[2] & (1 << 16)) != 0;
+    // The FEATURE bits come from `host_has_avx`/`host_has_avx512`, not from
+    // `features`. Leaf 1 ECX[28] and leaf 7 EBX[16] answer "is the silicon
+    // capable", and the question the emitter is really asking is "will this
+    // instruction execute", which additionally needs the OS to have enabled
+    // the register state in XCR0. `probe_cpu_features` still supplies the L2
+    // line size, which is not gated on any OS state.
+    //
+    // The old leaf 1 ECX[28] reading was wrong a second way: it is the AVX
+    // bit, and `llvm_emitter::host_cpu_attrs` turns it into `target-cpu=haswell`
+    // with `+avx2`. A Sandy Bridge has AVX and not AVX2.
+    let has_avx = host_has_avx();
+    let has_avx512 = host_has_avx512();
     let l2_line_size = features[3] & 0xFF;
 
     println!("      -> CPU Features: AVX={}, AVX-512={}, L2 Cache Line Size={}", has_avx, has_avx512, l2_line_size);
@@ -1178,10 +1261,14 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
 
 /// Probes host CPU cache capacities and ISA vector widths to produce a CpuHardwareProfile.
 pub fn probe_cpu_hardware_profile() -> crate::cpu_specializer::CpuHardwareProfile {
-    let mut out_buffer = [0u32; 4];
-    probe_cpu_features(&mut out_buffer);
-
-    let has_avx512 = (out_buffer[2] & (1 << 16)) != 0;
+    // Same authority as `check_or_probe_hardware`, for the same reason: this
+    // feeds `CpuShapeDispatcher`, which picks the `--emit-cpu` kernel regime.
+    // Today every regime it can pick emits scalar Rust, so a wrong-high answer
+    // here is a suboptimal kernel rather than a fault - but that is a property
+    // of the emitter, not of this decision, and the emitter is one intrinsic
+    // away from changing it. `CpuHardwareProfile::default()` guessing AVX-512
+    // is how `--emit-cpu` came to emit AVX-512 dispatch on every machine.
+    let has_avx512 = host_has_avx512();
     let simd_w = if has_avx512 { 16 } else { 8 };
 
     crate::cpu_specializer::CpuHardwareProfile {
