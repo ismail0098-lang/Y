@@ -73,13 +73,15 @@
       stride rather than the caller's; and the emitted `reduce.head` loop over
       a destination the zeroing loop left at zero IS
       [ExactGemmKsplit.acc_bands], so [ExactGemmKsplit.ksplit_exact] is about
-      the loop that runs rather than a fold that resembles it.
+      the loop that runs rather than a fold that resembles it. The join loop
+      visits exactly the workers `pthread_create` reported success for, from an
+      explicit flag rather than from the thread id - the `tid == 0` sentinel it
+      replaced was an assumption about the C library that POSIX does not give,
+      and violating it is a use-after-free rather than a wrong number.
     - The CONCURRENCY is not. Nothing here says a worker's stores are visible
-      to the reducer, that `pthread_join` orders them, or that the spawn
-      loop's inline-fallback arm leaves the `pthread_t` array in a state the
-      join loop can read - and that join's `tid == 0` sentinel is an
-      assumption about the C library's representation of a thread id. Closing
-      it needs a memory model, not more arithmetic.
+      to the reducer, or that the `pthread_join` the loop above performs is
+      what makes them so. That is an ORDERING claim; closing it needs a memory
+      model, not more arithmetic.
 
     Build:  coqc proofs/ExactGemmWhole.v      (Rocq 9.1)
 *)

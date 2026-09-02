@@ -1225,6 +1225,13 @@ many:
   %jobs = call ptr @__y_gemm_exact_alloc(i64 %jobsb)
 {tids_bytes_ir}
   %tids = call ptr @__y_gemm_exact_alloc(i64 %tidsb)
+  ; One byte per thread, ZERO meaning "never started". The join loop used to
+  ; read that from the thread id itself - `tid == 0` - which is an assumption
+  ; about the C library's representation rather than about this schedule, and
+  ; violating it is a use-after-free rather than a wrong number: the reduction
+  ; frees a worker's four buffers while it is still writing into them.
+  %live = call ptr @__y_gemm_exact_alloc(i64 %nthr)
+  call void @llvm.memset.p0.i64(ptr %live, i8 0, i64 %nthr, i1 false)
 {band_pre}
   br label %spawn.head
 
@@ -1294,11 +1301,15 @@ spawn.body:
   ; A thread that fails to start must still be accounted for, or the join
   ; below waits on a tid that was never written. Run its band inline instead.
   %failed = icmp ne i32 %rc, 0
-  br i1 %failed, label %spawn.inline, label %spawn.next
+  br i1 %failed, label %spawn.inline, label %spawn.live
+
+spawn.live:
+  %lp = getelementptr i8, ptr %live, i64 %t
+  store i8 1, ptr %lp, align 1
+  br label %spawn.next
 
 spawn.inline:
   call ptr @__y_gemm_exact_worker(ptr %j)
-  store i64 0, ptr %tp, align 8
   br label %spawn.next
 
 spawn.next:
@@ -1312,13 +1323,17 @@ joinloop.head:
   br i1 %jmore, label %joinloop.body, label %reduce.head
 
 joinloop.body:
+  %jlp = getelementptr i8, ptr %live, i64 %jt
+  %lv = load i8, ptr %jlp, align 1
+  %started = icmp ne i8 %lv, 0
+  br i1 %started, label %joinloop.do, label %joinloop.skip
+
+; `%tids` is read ONLY here, and only for a thread the flag says `pthread_create`
+; reported success for - which is exactly when POSIX says it wrote the id.
+joinloop.do:
   %jtb = mul i64 %jt, 8
   %jtp = getelementptr i8, ptr %tids, i64 %jtb
   %tid = load i64, ptr %jtp, align 8
-  %live = icmp ne i64 %tid, 0
-  br i1 %live, label %joinloop.do, label %joinloop.skip
-
-joinloop.do:
   %jrc = call i32 @pthread_join(i64 %tid, ptr null)
   br label %joinloop.skip
 
@@ -1395,6 +1410,7 @@ reduce.done:
 cleanup:
   call void @free(ptr %jobs)
   call void @free(ptr %tids)
+  call void @free(ptr %live)
   ret void
 }}
 "#,

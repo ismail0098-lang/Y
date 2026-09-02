@@ -848,6 +848,48 @@ field lives at, because that is a property of emitted text rather than of any
 number, so the offsets went to a separate text-reading gate and the certificate
 says which claim belongs to which.
 
+### Prefer DELETING an assumption to proving it
+
+A not-proved list has three kinds of entry: things to prove, things to state as
+trusted, and — the best kind, and the easiest to miss — things the code did not
+have to depend on in the first place. A join loop that decides "did this thread
+start" by testing its `pthread_t` against zero is depending on the C library's
+representation of an opaque type. One zeroed byte per thread removes the
+dependency, and then there is nothing to prove and nothing to trust.
+
+Scan a trust boundary for these before working down it in order. An item that
+can be deleted is worth more than an item that can be discharged, because a
+discharged item still needs its check kept alive.
+
+### When the fix changes what the injected value does, redesign the injection
+
+Failure injection has an assumption of its own: that the *same* injection is
+meaningful against both versions of the code. It often is not, and the failure
+mode is quiet — you measure your simulation instead of the subject.
+
+Three versions were needed here. Running the worker body synchronously on the
+calling thread made the answer right whatever the join did. Creating a real
+thread and hiding its id broke the *fixed* code, which dutifully joined a
+fabricated id that belongs to no thread. Only aliasing the real id — so that a
+join of the injected value still reaches the right thread — leaves exactly one
+difference between the two versions: whether the kernel joins at all.
+
+The rule that falls out: **an injection should differ from reality in exactly
+the property under test, and in nothing else.** If the fixed version crashes on
+an injection the broken version survived, that is usually the injection's fault.
+
+### Assert the deterministic observable, not the symptom
+
+The symptom of a skipped join here is a use-after-free, and it fired at four
+aliased workers and not at one or two — the answer came back right every time
+in the small cases. Asserting the answer would have produced a test that passes
+on a bug most of the time.
+
+The join count is deterministic: it must equal the number of `pthread_create`
+calls that returned success, whatever ids the library handed out. Look for the
+counting observable next to any race; it is usually there and it is usually
+cheap to expose with a second `--wrap`.
+
 ### A `memset` shorter than its `malloc` is invisible on a fresh process
 
 A new check class, and the hazard is worth stating because it defeats the

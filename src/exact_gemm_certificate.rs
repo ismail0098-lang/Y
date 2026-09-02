@@ -199,23 +199,26 @@ pub const TRUST_BOUNDARY: &[TrustItem] = &[
                   the rectangle the reduction reads back, at the worker's own compact \
                   stride rather than the caller's; and the emitted reduction loop over a \
                   zeroed destination IS the fold `ExactGemmKsplit.ksplit_exact` is about. \
+                  The join loop visits exactly the workers `pthread_create` reported \
+                  success for, from an explicit flag rather than from the thread id. \
                   Which OFFSET each field is written and read at is not a number and is \
                   checked against the emitted text instead.",
         check: Check::Pinned("tests/exact_gemm_threading_layout.rs"),
         stated_in: Some((CAPSTONE, "threading layer's LAYOUT is modelled")),
     },
     TrustItem {
-        claim: "The CONCURRENCY those records are dispatched with: that a worker's stores \
-                are visible to the reduction, and that the join loop can read the thread \
-                ids the spawn loop left.",
-        because: "Not modelled. Nothing here says `pthread_join` orders a worker's last \
-                  store before the reducer's first load, nor that the spawn loop's \
-                  inline-fallback arm leaves the thread-id array in a readable state - and \
-                  that loop's `tid == 0` sentinel is an assumption about the C library's \
-                  representation of a thread id rather than about any arithmetic. The \
-                  behavioural cover is `tests/exact_gemm_thread_invariance.rs`, which \
-                  compares ANSWERS across thread counts, so a dispatch bug that produces \
-                  the right answer is invisible to it.",
+        claim: "The ORDER the concurrency imposes: that a worker's stores are visible to \
+                the reduction that reads and then frees its buffers.",
+        because: "Not modelled, and it is now the ORDERING alone: nothing here says \
+                  `pthread_join` makes a worker's last store visible to the reducer's \
+                  first load. WHICH threads are joined is proved and gated - the join \
+                  loop reads a flag `pthread_create` set rather than testing the thread \
+                  id against zero, and `tests/exact_gemm_spawn_failure.rs` runs the \
+                  inline-fallback arm that failure takes. What remains needs a memory \
+                  model. Note the behavioural cover for anything here can only be \
+                  `tests/exact_gemm_thread_invariance.rs`, which compares ANSWERS across \
+                  thread counts, so a dispatch bug that produces the right answer is \
+                  invisible to it.",
         check: Check::Unchecked(
             "a memory model, which is a concurrency obligation rather than an arithmetic \
              one",

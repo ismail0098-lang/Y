@@ -288,15 +288,79 @@ fn every_zeroed_buffer_is_zeroed_for_its_whole_allocation() {
         zeroed.insert(ptr);
     }
 
-    // The two that are deliberately NOT zeroed, with the reason: every slot of
-    // each is written before anything reads it. `%tids` matters most - the
-    // join loop uses `0` as its "never started" sentinel, so a slot left
-    // uninitialised would be read as a thread id.
+    // The two that are deliberately NOT zeroed, with the reason. Every slot of
+    // `%jobs` is written before anything reads it. A slot of `%tids` may NOT
+    // be - `pthread_create` is only required to store the id when it succeeds
+    // - and that is safe exactly because the join loop reads slot `t` only
+    // when `%live[t]` says it succeeded. `%live` itself is therefore zeroed,
+    // and it is the one buffer here whose zeroing is load-bearing rather than
+    // defensive.
     let unzeroed: Vec<&String> = alloc.keys().filter(|k| !zeroed.contains(*k)).collect();
     assert_eq!(
         unzeroed,
         vec![&"%jobs".to_string(), &"%tids".to_string()],
         "an allocation is neither zeroed nor fully written before it is read"
+    );
+}
+
+/// The join loop decides from the started-flag, not from the thread id.
+///
+/// The `tid == 0` sentinel this replaced was an assumption about the C
+/// library: POSIX does not say a live thread's `pthread_t` is non-zero, and
+/// glibc's happens to be a pointer. Violating it is not a wrong number - the
+/// join is skipped, and the reduction then reads the worker's private buffer
+/// and `free`s the four buffers it is still writing into.
+///
+/// Measured before this was written, with `-Wl,--wrap=pthread_create` handing
+/// out a zero id for a thread that really runs: the join count fell from 4 to
+/// 3 to 2 as more workers were aliased, and with all four aliased the process
+/// **segfaulted on every run**. `tests/exact_gemm_spawn_failure.rs` is the
+/// behavioural half; this is the structural one.
+#[test]
+fn the_join_loop_reads_the_started_flag_and_not_the_thread_id() {
+    let m = emit_vnni_threaded_module(true);
+
+    assert!(
+        !m.contains("icmp ne i64 %tid, 0"),
+        "the join loop is testing the thread id against zero again"
+    );
+    assert!(
+        m.contains("%lv = load i8, ptr %jlp, align 1")
+            && m.contains("%started = icmp ne i8 %lv, 0"),
+        "the join loop must branch on the started-flag byte"
+    );
+    assert!(
+        m.contains("store i8 1, ptr %lp, align 1"),
+        "nothing sets the started flag"
+    );
+
+    // The flag is set on the SUCCESS arm only. If the inline-fallback arm set
+    // it too, the join loop would wait on a thread that was never created.
+    let inline = m
+        .split("spawn.inline:")
+        .nth(1)
+        .expect("no inline-fallback block")
+        .split("\n\n")
+        .next()
+        .expect("inline block body");
+    assert!(
+        !inline.contains("store i8 1"),
+        "the inline-fallback arm sets the started flag: `{inline}`"
+    );
+
+    // The thread id is loaded INSIDE the guarded block, not before the branch.
+    // Reading it unconditionally would be harmless today and is exactly the
+    // shape that invites the sentinel back.
+    let guarded = m
+        .split("joinloop.do:")
+        .nth(1)
+        .expect("no joinloop.do block")
+        .split("\n\n")
+        .next()
+        .expect("joinloop.do body");
+    assert!(
+        guarded.contains("%tid = load i64"),
+        "the thread id is not loaded under the flag's guard"
     );
 }
 

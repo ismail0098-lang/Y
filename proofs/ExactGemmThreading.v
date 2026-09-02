@@ -43,6 +43,11 @@
     - [reading_the_private_buffer_at_the_callers_stride_leaves_it] - the
       concrete form of the bug that was observed as `double free or
       corruption`: `rows * cols` and `rows * ldc` are different buffers.
+    - [the_flag_joins_exactly_the_threads_that_started] and
+      [a_live_thread_with_id_zero_is_not_joined] - the join loop's predicate
+      is now the flag `pthread_create` set, and the `tid == 0` sentinel it
+      replaced was an assumption about the C library that POSIX does not give.
+      Violating it is a use-after-free rather than a wrong number.
     - [the_reduction_is_the_ksplit_sum] - the join. The emitted `reduce.head`
       loop, started from what the zeroing loop left, is
       [ExactGemmKsplit.acc_bands], so [ExactGemmKsplit.ksplit_exact] applies to
@@ -57,9 +62,9 @@
       reducer, that `pthread_join` orders them, or that the spawn loop's
       inline-fallback arm leaves the `tid` array in a state the join loop can
       read. Those are the remaining `Check::Unchecked` half.
-    - That a successfully created thread never gets `pthread_t = 0`. The join
-      loop uses `0` as its "never started" sentinel, which is an assumption
-      about the C library's representation, not about this arithmetic.
+    - The ORDER. [the_flag_joins_exactly_the_threads_that_started] says the
+      join loop visits exactly the workers that started; nothing here says the
+      join it performs makes that worker's stores visible to the reduction.
     - The sizes are read from [ExactGemmSchedule], which is GENERATED from
       `src/cpu_gemm.rs` and byte-identity-gated, so "the number here is the
       number emitted" is that gate's claim rather than this file's. Which
@@ -202,6 +207,70 @@ Proof. intros nthr t H. rewrite tids_slots_unfold. exact H. Qed.
 Theorem the_tid_array_is_exactly_the_thread_set : forall nthr,
   0 < nthr -> S (tid_slot (nthr - 1)) = SCH.tids_slots nthr.
 Proof. intros nthr H. rewrite tids_slots_unfold. unfold tid_slot. lia. Qed.
+
+(* ------------------------------------------------------------------ *)
+(** ** The started-flag array, and the sentinel it replaced            *)
+(* ------------------------------------------------------------------ *)
+
+(** One byte per thread, zero meaning "never started".
+
+    Not a rendered `Ix`: no instruction computes it, the emitted `malloc` and
+    `memset` take `%nthr` itself, and `tests/exact_gemm_threading_layout.rs` is
+    what checks they do. *)
+Definition live_bytes (nthr : nat) : nat := nthr.
+Definition live_slot (t : nat) : nat := t.
+
+Theorem live_slot_in_range : forall nthr t,
+  t < nthr -> live_slot t < live_bytes nthr.
+Proof. intros nthr t H. exact H. Qed.
+
+Theorem the_live_array_is_exactly_the_thread_set : forall nthr,
+  0 < nthr -> S (live_slot (nthr - 1)) = live_bytes nthr.
+Proof. intros nthr H. unfold live_slot, live_bytes. lia. Qed.
+
+(** Which threads the join loop visits, under the two readings of "did this
+    one start". `started t` is what `pthread_create` returned. *)
+Definition joined_by_flag (started : nat -> bool) (t : nat) : bool := started t.
+Definition joined_by_sentinel (tid : nat -> nat) (t : nat) : bool :=
+  negb (Nat.eqb (tid t) 0).
+
+(** The flag reading needs no hypothesis at all: the join set IS the set of
+    threads `pthread_create` reported success for. *)
+Theorem the_flag_joins_exactly_the_threads_that_started : forall started t,
+  joined_by_flag started t = started t.
+Proof. reflexivity. Qed.
+
+(** The sentinel reading agrees with it only under an assumption about the C
+    LIBRARY - that no live thread is ever handed the id 0 - which is not a
+    property of this schedule and which POSIX does not give. *)
+Theorem the_sentinel_agrees_only_if_no_live_thread_has_id_zero :
+  forall tid started,
+    (forall t, started t = true -> tid t <> 0) ->
+    (forall t, started t = false -> tid t = 0) ->
+    forall t, joined_by_sentinel tid t = joined_by_flag started t.
+Proof.
+  intros tid started Hlive Hdead t.
+  unfold joined_by_sentinel, joined_by_flag.
+  destruct (started t) eqn:E.
+  - assert (H : Nat.eqb (tid t) 0 = false) by (apply Nat.eqb_neq, (Hlive t E)).
+    rewrite H. reflexivity.
+  - rewrite (proj2 (Nat.eqb_eq (tid t) 0) (Hdead t E)). reflexivity.
+Qed.
+
+(** ...and it is FALSE without it: a thread that started and was handed id 0 is
+    not joined.
+
+    What that costs is outside this file, because it is not arithmetic: the
+    reduction reads the skipped worker's private buffer and then `free`s the
+    four buffers it is still writing into. Measured rather than argued - with
+    every worker reporting a zero id the process segfaults on every run, and
+    with one or two it does not, which is why the gate for this asserts the
+    JOIN COUNT rather than the answer. A race that does not fire is not a
+    test. *)
+Theorem a_live_thread_with_id_zero_is_not_joined :
+  exists tid started t,
+    started t = true /\ joined_by_sentinel tid t = false.
+Proof. exists (fun _ => 0), (fun _ => true), 0. split; reflexivity. Qed.
 
 (* ------------------------------------------------------------------ *)
 (** ** The private C buffer, and the reduction that reads it           *)
@@ -349,6 +418,11 @@ Print Assumptions one_slot_short_overflows_the_job_array.
 Print Assumptions a_thirteenth_field_is_the_next_threads_first.
 Print Assumptions tid_slot_in_range.
 Print Assumptions the_tid_array_is_exactly_the_thread_set.
+Print Assumptions live_slot_in_range.
+Print Assumptions the_live_array_is_exactly_the_thread_set.
+Print Assumptions the_flag_joins_exactly_the_threads_that_started.
+Print Assumptions the_sentinel_agrees_only_if_no_live_thread_has_id_zero.
+Print Assumptions a_live_thread_with_id_zero_is_not_joined.
 Print Assumptions private_slot_in_range.
 Print Assumptions the_private_c_is_read_back_exactly_once.
 Print Assumptions every_element_of_the_private_buffer_is_reached.

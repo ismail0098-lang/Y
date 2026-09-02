@@ -291,6 +291,11 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // the one that makes the separate zeroing loop load-bearing.
                 "reading_the_private_buffer_at_the_callers_stride_leaves_it",
                 "a_destination_that_is_not_zeroed_is_wrong",
+                // The join loop's predicate, and the refutation of the
+                // `tid == 0` sentinel it replaced - which was an assumption
+                // about the C library rather than about this schedule.
+                "the_flag_joins_exactly_the_threads_that_started",
+                "a_live_thread_with_id_zero_is_not_joined",
             ][..],
         ),
         (

@@ -4082,6 +4082,62 @@ must store `%N` and not `%ldc`. The private buffer is sized `M * N * 8`, so the
 caller's stride there wrote `(M-1)*(ldc-N)` elements past the end - invisible
 at every call site in the compiler, because they all pass `ldc == N`.
 
+#### An assumption deleted rather than proved, and a probe that had to be redesigned twice · 2026-09-02
+
+The item split off yesterday listed, among the things it does not prove, "that
+a successfully created thread never gets `pthread_t = 0`. The join loop uses
+`0` as its 'never started' sentinel, which is an assumption about the C
+library's representation, not about this arithmetic." Reading one's own
+not-proved list back is step 12; this is the first time it pointed at something
+that could be **removed** instead of established, which is strictly better -
+an assumption that is gone needs no check at all.
+
+**MEASURE FIRST, AND THE FIRST MEASUREMENT WAS A CONFIRMATION.** `-Wl,--wrap=
+pthread_create` returning `EAGAIN` exercises the wrapper's inline-fallback arm,
+which ships and which nothing in this repository had ever run - `pthread_create`
+does not fail on a test machine. It is correct: bit-identical answers at every
+failure mask. Worth having, and worth recording as a confirmation rather than a
+finding.
+
+**THE SECOND MEASUREMENT WAS NOT.** With `pthread_create` handing out a zero id
+for a thread that really runs, at `M=53 N=71 K=4099` on four threads: the join
+count fell **4 -> 3 -> 2** as more workers were aliased, and with all four
+aliased the process **segfaulted on six runs out of six**. Skipping a join does
+not lose a band quietly - the reduction reads that worker's private buffer and
+then `free`s the four buffers it is still writing into.
+
+**THE PROBE HAD TO BE REDESIGNED TWICE, AND THAT IS THE PROCESS LESSON.** The
+first version ran the worker body synchronously on the calling thread, so the
+work was already done and the answer was right whatever the join did - a
+simulation too kind to observe anything. The second created a real thread and
+hid its id, which broke the FIXED code instead: the kernel now joins whatever
+id it was given, and joining a fabricated `0` is undefined. That version was
+measuring the simulation, not the kernel. The third aliases the real id so a
+join of `0` still reaches the right thread - so the only difference between the
+two versions of the kernel is **whether it joins at all**. *When a fix changes
+what the code does with an injected value, the injection has to be redesigned
+so that both arms remain measurable.*
+
+**THE ASSERTION IS THE JOIN COUNT, NOT THE ANSWER.** At one or two aliased
+workers the answer came back right every time; only at four did anything
+crash. A race that does not fire is not a test - the same lesson this
+repository already records about a missing `bar.sync`. The join count is
+deterministic and is `creates - failed` in every arm.
+
+**The fix is an explicit started-flag**: one zeroed byte per thread, set on the
+success arm of `pthread_create` and read by the join loop. `%tids` is then read
+only where the flag says the id was written, which is exactly when POSIX says
+it was. `the_flag_joins_exactly_the_threads_that_started` needs **no hypothesis
+at all**; `the_sentinel_agrees_only_if_no_live_thread_has_id_zero` needs one
+about the C library, and `a_live_thread_with_id_zero_is_not_joined` refutes it.
+
+**The residue got sharper, which is what a good split does.** The `Unchecked`
+item is no longer "the concurrency those records are dispatched with" - WHICH
+threads are joined is proved and gated now. What is left is purely an ORDERING
+claim: that the `pthread_join` the loop performs is what makes a worker's
+stores visible to the reduction. That needs a memory model and nothing else
+will do.
+
 ## 5. End goal
 
 > **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one
