@@ -4364,6 +4364,221 @@ serially it is **819 passed, 0 failed, 135 lines**. They contend on `target/`,
 on shared temp directories, and on `.ysu_hw_profile`. *Re-run a surprising
 result serially before believing it.*
 
+### 2026-09-02 - three answers to "does this machine have AVX-512", and the wrong one fed the emitter
+
+`sentinel::probe_cpu_features` reads CPUID leaf 7 EBX bit 16 and performs no
+`XGETBV` check. Its answer becomes `HardwareProfile::has_avx512`, which
+`llvm_emitter::host_cpu_attrs` turns into the prelude's `attributes #0` - the
+group the previous increment established is applied to **every function in the
+module**. Two other readings existed and both did the check the emitter's did
+not: `avx_wrapper::has_avx512f` and `sentinel::host_has_avx512`, the latter
+added one increment ago and unused. Nothing asserted they agreed.
+
+This is the `VnniExact::licenses` / CUDA driver-binding shape the repository
+already tracks: a rule with one written-down implementation, implemented
+differently a second time. **573 / 824 / 8 tests, zero failures across 130
+per-target binaries in both feature sets plus all three aggregates; both builds
+warning-free; all 55 emitted LLVM modules byte-for-byte unchanged.**
+
+#### There were FOUR producers, not three, and the fourth is the one that ships
+
+Counting sites rather than names - the discipline this file records as
+*enumerate the SITES, not the variants* - the census is:
+
+| site | input | XCR0 checked | consumer | wrong-high consequence |
+|---|---|---|---|---|
+| `check_or_probe_hardware`, fresh probe | CPUID.7.0:EBX[16] | **no** | `HardwareProfile::has_avx512` -> `attributes #0` | **SIGILL** |
+| `check_or_probe_hardware`, **cached** | **the profile file** | **no probe at all** | the same | **SIGILL** |
+| `probe_cpu_hardware_profile` | CPUID.7.0:EBX[16] | **no** | `CpuShapeDispatcher` -> `--emit-cpu` regime | a worse kernel |
+| `host_has_avx512_vnni` | `is_x86_feature_detected!` | yes | the exact GEMM gate | - |
+
+The cached row is the one that had never been counted. It is not a probe with a
+gap in it; it is **no probe at all**, and it is the row that ships, because
+`check_or_probe_hardware` skips the probe whenever `.ysu_hw_profile` merely
+exists.
+
+#### Measure first: can they disagree, and is it latent?
+
+**Route A - XCR0 - is LATENT ON THIS MACHINE, and the mechanism is confirmed.**
+A CPU reports a vector feature in CPUID whether or not the OS has enabled the
+register state in `XCR0`; under a hypervisor masking the state, or a kernel
+booted without it, the CPUID bit stays set and the instruction faults exactly as
+if the silicon lacked it. Measured here: `CPUID.7.0:EBX[16] = true`,
+`XCR0 = 0x2e7` with SSE, YMM, opmask, ZMM_Hi256 and Hi16_ZMM all set, and every
+reading answers `true`. So all four agree, **by luck of this machine's
+configuration and not by construction**. That the two readings consume different
+inputs was verified rather than assumed: the std macro's detection path compiles
+to code containing `xgetbv` and a raw leaf-7 read cannot.
+
+**Route B - the cached profile - is REACHABLE RIGHT NOW and needs no exotic
+machine.** Measured, one machine, one unchanged binary, the file the only thing
+varied:
+
+```
+profile AVX512=true  -> attributes #0 = { "target-cpu"="znver5"  "target-features"="+avx512f,+avx512cd,..." }
+profile AVX512=false -> attributes #0 = { "target-cpu"="haswell" "target-features"="+avx2,+avx,+fma" }
+```
+
+A profile copied from a better machine - or committed, which **has happened in
+this repository** with `SM_VERSION=8.9` - put AVX-512 into every function of the
+module on a machine that may not have it. So the answer to "is this latent" is
+**no, on the route nobody was looking at**.
+
+There is an incoherence inside Route B worth naming on its own: `host_x86_uarch()`
+IS probed live, from CPUID vendor and family, while `has_avx512` came from the
+file. The two halves of `attributes #0` were therefore describing two different
+machines.
+
+##### The cache reasoning was right about the GPU and was silently extended
+
+The comment justifying the skip says nothing here queries the driver "because
+that would cost every CPU-only compile". That is **correct for the GPU**:
+validating `SM_VERSION` costs `cuInit`, which this file records as more than the
+compiler's entire ZK front end. It does not transfer to CPUID, which is one
+instruction, no syscall, no library load. *Cache the expensive measurement;
+re-probe the cheap fact.* The rule that made the GPU decision right is the rule
+that makes the CPU decision wrong, and nobody re-derived it at the second site.
+
+#### The blast radius was NARROWER than the brief assumed, and saying so is part of the work
+
+The caution carried into this increment was that `has_avx512` "also feeds the
+analytic cost model". **It does not.** Exhaustively, outside `sentinel.rs`:
+
+- `llvm_emitter.rs:1457` - `host_cpu_attrs`, the SIGILL path.
+- `llvm_emitter.rs:1476` - the prelude's comment banner, cosmetic.
+- `main.rs:733-734` - `--portable`, which lowers both flags after the probe
+  returns and is left exactly as it was.
+
+And `avx512_throughput_cycles`, the only thing `has_avx512` gates inside the
+probe, **is read by nothing**: it is measured, serialized, parsed back, printed,
+and reaches no cost model in `src/`. Re-derive a blast radius rather than
+inheriting one - the same correction this file already records for the phantom
+"kc-panel loop".
+
+#### Two findings that fell out of counting the sites
+
+**The probe itself was the one place that EXECUTES an AVX-512 instruction, and
+it was guarded by the reading that does not answer the question.**
+`measure_avx512_throughput` runs a `vpaddd zmm` chain under `if !has_avx512 {
+return 0.0 }`, with `has_avx512` the raw CPUID bit. On a machine where CPUID
+says yes and XCR0 says no, the hardware prober **faults** rather than reporting -
+a SIGILL inside the compiler, on exactly the machines it exists to characterise.
+
+**`has_avx` had the identical defect and one extra.** It is CPUID leaf 1 ECX bit
+28, the **AVX** bit, and `host_cpu_attrs` turns it into `target-cpu=haswell` with
+`+avx2`. A Sandy Bridge has AVX and not AVX2. Fixing `has_avx512` alone would
+have been `feedback-guards-consulted-at-one-site`, so both move together and the
+new predicate requires `avx2 && avx` - what the emitter actually claims.
+
+`--emit-cpu` was checked before ranking its site: it emits **no** SIMD intrinsic
+at all today (`_mm512` and `_mm256` both appear zero times), and every regime
+`CpuShapeDispatcher` can select emits scalar Rust. So that site is a
+**performance** fallback, not a correctness one - and it is corrected anyway,
+because that is a property of the emitter rather than of the decision, and
+`CpuHardwareProfile::default()` guessing AVX-512 is precisely how `--emit-cpu`
+came to emit AVX-512 dispatch on every machine the first time.
+
+#### The fix: one authority, and the cache may not raise the answer
+
+`sentinel::host_has_avx512` is promoted from unused to **the** authority and
+`host_has_avx` is added beside it; all four sites take their answer from them.
+On the cached path the CPU features are **re-probed rather than loaded**, and a
+disagreement is *reported* rather than silently corrected - the same principle as
+naming the assumed card, so a stale profile is visible:
+
+```
+-> NOTE: .ysu_hw_profile says AVX=true AVX512=false, this machine reports
+   AVX=true AVX512=true. Using the machine. Delete the file to re-probe.
+```
+
+The live machine is the authority in **both** directions. An AND against the
+cached value would still let a stale `false` suppress a legitimate `true`, which
+is a performance regression nothing can see. `--portable` and
+`Y_NO_AVX512_VNNI` remain the down-only overrides and are untouched; there is
+deliberately no override that can CLAIM hardware.
+
+**All 55 emitted LLVM modules are byte-for-byte unchanged**, which on a machine
+where the four readings agree is exactly the expected result and is the evidence
+the change is behaviour-preserving here.
+
+#### AGREEMENT IS NECESSARY AND NOT SUFFICIENT, AND THAT IS THE GENERALISABLE PART
+
+The written precedent is *assert the producers AGREE rather than re-deriving a
+table*. Followed alone here it would have produced a **silent** gate: on this
+machine all four readings agree, so `the_producers_agree` passes with the bug
+fully restored. The mutation table proves it - A1 and A3 revert a site to raw
+CPUID and are caught only by the SOURCE-level test.
+
+What distinguishes the readings is not their output but **which input they
+consume**, and on a machine where the inputs happen to coincide that is only
+checkable at the source. So `the_authority_checks_the_register_state` requires
+`is_x86_feature_detected!` and forbids `__cpuid` in the authority, and forbids
+the two raw bit-tests from reappearing anywhere in `sentinel.rs`. Same device as
+pinning the absence of an env override, for the same reason: *the property
+cannot be observed by running the compiler on a machine where it holds.*
+
+#### Mutation table - 10 probes, each `--test` target run separately over nine suites
+
+| probe | defect the mutated program has | caught by |
+|---|---|---|
+| **A1** fresh probe back to raw CPUID | emitter claims AVX-512 where XCR0 masks it | **`avx512_probes_agree` ONLY** |
+| **A2** cached path back to the file deciding | a copied profile puts AVX-512 in every function | **`avx512_probes_agree` ONLY** |
+| **A3** `probe_cpu_hardware_profile` back to raw CPUID | `--emit-cpu` regime from the wrong reading | **`avx512_probes_agree` ONLY** |
+| **A4** the AUTHORITY stops checking XCR0 | all four sites wrong together | `avx512_probes_agree` + `build_is_warning_free`\* |
+| **A5** authority always `false` (over-refusal) | every module drops to the `haswell` fallback | `avx512_probes_agree` (2 assertions) |
+| **A6** SIMD width decoupled from the flag | width and masking flag can disagree | *survivor -> closed, see below* |
+| **A8** the gate stops doctoring the profile | Route B test compares two identical runs | **`avx512_probes_agree` ONLY** |
+| **A9** the control's skip guard computed by the authority | the control goes tautological | *no-op alone, see below* |
+| **A5+A9** over-refusal WITH the guard neutered | the over-refusal is invisible to the control | **`avx512_probes_agree` ONLY** |
+| **A7 CONTROL** no-op statement reorder | none | green everywhere |
+
+Read the control row first: **A7 is green in all nine suites**, so the table is
+reporting the mutations and not the state of the tree.
+
+**A1, A2 and A3 are the result that matters: the original defect was invisible
+to all eight other suites**, which is why it survived. `emitted_attribute_groups`
+- the gate written one increment ago about that very attribute group - passes
+under every one of them, correctly: it checks that the group is coherent and
+unique, not that the machine can execute what it names.
+
+\* **A4's second failure is my own mutation's side effect, not coverage.** The
+`__cpuid_count` call I substituted carries an unnecessary `unsafe` block, and
+that is what `build_is_warning_free` reports. *A mutation's side effects are not
+the mutation.*
+
+##### Sorting the two survivors
+
+**A6 was a real hole in my own gate.** `simd_w` is used at exactly one place, and
+that place is `&& supports_avx512_masking` - so on a machine WITHOUT AVX-512 the
+width is dead, and on a machine WITH it the correct and the hardcoded value are
+both 16. The mutation is a **no-op here**, and the behavioural assertion pairing
+the width with the flag is therefore **vacuous on this machine**. Closed by
+pinning the coupling at the source as well, the same move the reading needed and
+for the same reason. Re-run as A6r: caught, `avx512_probes_agree` only.
+
+**A9 alone is mis-aimed and the compound is the real probe.** Neutering the skip
+guard changes nothing while the authority is correct. Composed with A5 it is the
+`feedback-conditional-gates-skip-silently` failure exactly: measured,
+`the_fast_path_is_still_taken_on_hardware_that_has_it` reports **ok** - it has
+become a tautology. The compound is still caught, by
+`the_producers_agree`'s VNNI implication, which reads `host_has_avx512_vnni`'s
+own independent macro and so survives the guard being subverted. **A control
+wants a second leg on a different mechanism**, not only a guard on one.
+
+The suite reports `finished in 0.00s`, which this file records as looking exactly
+like a silent skip. Settled by mutation rather than by reading: A2 and A8 both
+fail on the emitted-artifact comparison, which runs the real compiler four times.
+
+#### What this does NOT establish
+
+Nothing here has been run on a machine where the readings disagree. Route A is
+argued from the mechanism - confirmed at the instruction level, not merely read
+off a manual - and from the fact that the two readings consume different inputs;
+it is not demonstrated end to end, because doing so needs a hypervisor masking
+`XSAVE` state or a kernel booted with `clearcpuid`. Route B **is** demonstrated
+end to end. The source-level gate is what covers Route A, and it covers the
+reading rather than the consequence.
+
 ## 5. End goal
 
 > **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one
