@@ -4850,6 +4850,165 @@ unfalsifiable"*. The fix is to name the deleted module **without a resolvable
 path**, and to say in the docstring why it is named that way, so the next reader
 does not "helpfully" restore the citation.
 
+### 2026-09-03 — `chisel {}` documented a register naming convention that did not exist
+
+The previous increment closed with `@ptx_emit`/`@hdl_emit` recorded as
+parse-and-ignore. Chasing `@ptx_emit`'s consumers found a bigger surface
+underneath: **§16 of the language reference is a full user manual for
+`chisel {}` blocks, and §16.2's central claim was false.**
+
+#### Measurement
+
+§16.2 said: *"Y variables declared before the `chisel` block are accessible
+using their PTX register names"*, with a table giving `let x: F32` -> `%x`.
+Compiling §16.2's own worked example:
+
+```
+    // --- CHISEL INLINE PTX ---
+    mul.f32 %result, %val, %val;
+```
+
+`Compilation Successful!`, exit 0 — and
+
+```
+ptxas probe.ptx, line 22; error   : Unknown symbol '%result'
+ptxas probe.ptx, line 22; error   : Unknown symbol '%val'
+```
+
+The line went to the module **verbatim**. This backend's allocator names
+registers `%f0`/`%r0`/`%rd0`, never after the source variable, so `val` and
+`result` were `%f0` and `%f1` and the documented names referred to nothing.
+Every worked example in §16.4 has the same defect; §16.4's clock example
+(`mov.u64 %t, %globaltimer;`) fails on `%t` while `%globaltimer` is accepted,
+which is what isolated the rule: **PTX special registers resolve, Y variables
+do not.** A `chisel` block naming no register at all (`bar.sync 0;`) assembles
+cleanly, so the surface was half-working, which is why nothing looked wrong.
+
+**No `.ysu` in this repository uses `chisel`.** The `SmemLayout` profile
+exactly: a documented API that no test exercises. It is also the `Expr::Ident`
+hole one layer over — an unbound name spliced into instruction text — reached
+through a *string* rather than through the AST, which is why the fix there did
+not cover it. **Enumerate the SITES, not the variants**, for the sixth time in
+this file; here the site is a different data type, not a different match arm.
+
+#### The fix, and why it is a resolver rather than a refusal
+
+Refusing every `chisel` block would have been sound and would have deleted a
+working path — `bar.sync 0;` is legitimate and §16.4 documents it. So
+`resolve_chisel_registers` gives three outcomes:
+
+* a Y variable in scope -> **substituted**, making §16.2 a true statement about
+  the compiler;
+* a PTX special register (`%tid.x`, `%globaltimer`) or one of this backend's
+  own allocator names -> passed through;
+* anything else -> **refused** with a line and column.
+
+The allowlist of special registers is deliberately generous and fail-closed if
+short: a missing entry refuses a legitimate program (five minutes), where
+passing an unrecognised `%name` through is the bug being closed. A `U32x4` is
+refused rather than substituted — it names FOUR registers in `vec_vars` and
+picking one would be a silent choice, the design rule's shape.
+
+The emitter now also writes a closing `// --- END CHISEL PTX ---` marker. It
+had an opening marker and no closing one, so nothing reading the artifact could
+say where the block ended; the LLVM backend's `chisel` arm has written both
+since it was added.
+
+#### The LLVM backend put PTX into an x86 module, and that was `@ptx_emit`'s only consumer
+
+`@ptx_emit` is not quite parse-and-ignore: `llvm_emitter` reads it in exactly
+one place, `Stmt::Chisel`, where it emits the lines as inline asm with an
+**empty constraint string** on the reading that an NVPTX-retargeted module
+wants different constraints from x86. `emit_prelude` writes
+`Self::host_triple()` and no path in that backend emits an `nvptx` triple, so
+the reading never applies. Measured: exit 0, and the `clang` line the compiler
+itself prints answers
+
+```
+<inline asm>:1:10: error: invalid register name
+```
+
+**Both branches fail identically**, so the directive's one live consumer could
+not change an outcome. Refused by name now, which is what makes its status
+honest: `--emit-ptx` is where PTX `chisel` is lowered. The ordinary host
+`chisel` arm (x86 clobbers) is untouched and still emits inline asm — the
+control that stops "refuse all `chisel` in this backend" passing.
+
+#### Two documentation defects found on the way
+
+§16.5 claimed invalid PTX surfaces as `CUDA_ERROR_INVALID_PTX` at JIT load
+time. An unresolvable `%name` is now a compile-time error; the rest of the
+claim stands and is scoped.
+
+§17's FAQ listed five backend flags. **Three of them (`--llvm`, `--cpu`,
+`--ptx`) are not options at all** — unrecognised options are a hard error, so
+each exited 1 — and it named a C backend that was removed. My first correction
+overstated this ("all five were wrong"): `--emit-r1cs` is valid, and `--emit-c`
+is recognised and reports the removal. **Corrected on measurement rather than
+on the first reading.** The gate asks the compiler for its own
+`Known options:` line rather than carrying a second copy of the list.
+
+#### Mutation table — 11 probes, nine suites, each `--test` target run separately
+
+| probe | caught by |
+|---|---|
+| **D1** chisel line emitted verbatim (the original bug) | **`chisel_register_scope` ONLY** (4 of 8 fail) |
+| **D2** resolver substitutes but never refuses | **`chisel_register_scope` ONLY** |
+| **D3** special-register allowlist emptied (over-refusal) | **`chisel_register_scope` ONLY** |
+| **D4** `is_emitter_register_name` accepts everything | **`chisel_register_scope` ONLY** |
+| **D5** vector-name refusal removed | **`chisel_register_scope` ONLY** |
+| **D6** LLVM `@ptx_emit` chisel arm restored | **`chisel_register_scope` ONLY** |
+| **D7** FAQ reverted to the unrecognised spellings | **`chisel_register_scope` ONLY** |
+| **D8** §16.2 drops the refusal paragraph | **`chisel_register_scope` ONLY** |
+| **D10b** distinct variables collapsed onto one register | **`chisel_register_scope` ONLY**, via the strengthened assertion |
+| **D11** FAQ flag scan finds nothing | **its non-vacuity floor** |
+| **D9 CONTROL** two allowlist entries reordered | **green everywhere** |
+
+**D1 is the row that matters: the original defect was invisible to all eight
+other suites**, including `ptx_portability` (which runs real `ptxas` at five
+architectures) and `committed_ptx_artifacts`. Neither can see it, correctly —
+no committed artifact contains a `chisel` block, so an assemble gate has
+nothing to assemble. *An assemble gate cannot see a construct no fixture uses*,
+which is the standing limit read one step further out than usual.
+
+##### D10 was caught for the wrong reason, and that is the finding about my own gate
+
+D10 made every `%name` resolve to the first variable's register. It failed —
+but only because `variables` also holds the kernel PARAMETER `Out` -> `%rd0`,
+which sorts first, so the line came out `mul.f32 %rd0, %rd0, %rd0` and tripped
+a `starts_with("mul.f32 %f")` prefix check. Restricted to f32 variables
+(**D10b**) the same collapse produced `mul.f32 %f1, %f1, %f1` — which satisfies
+"no `%val` survives" and "the operands are f32 registers" perfectly.
+
+The assertion now pins the property instead of a prefix: the two sources must
+be **one** register (both are `val`) and the destination must **differ** from
+them (`result` is a different variable). That is what says the map
+distinguishes its inputs. **A substitution gate that only checks the old names
+are gone cannot tell a map from a constant function.**
+
+Note also that D10b's second failing test was my mutation's own
+index-out-of-bounds panic on a fixture with no f32 variables — a side effect of
+the mutation, not coverage.
+
+#### Verification
+
+**584 / 835 / 8** tests, zero failures across 132 per-target binaries in both
+feature sets (132/132 result lines each) plus both aggregates (138 lines each)
+and `cargo test -p y-gpu`. Both builds warning-free. Corpus unchanged in both
+directions — `--emit-ptx` **60 accept / 25 refuse**, `--emit-cpu` **46 / 39** — and **no committed `.ptx`, `.ll` or `.v` changed**, which is the
+evidence the refusals are purely additive: no corpus program uses `chisel`.
+Totals are +8 on the previous increment, exactly the new suite's 8 tests.
+
+#### Recorded, not fixed
+
+`@hdl_emit` is read by **nothing** — `is_hdl_emit` is written by the parser
+into `FuncDecl` and has zero consumers anywhere. It names an HDL backend that
+does not exist, and §9.15 documents `@clock_domain` as applying to "function
+blocks compiled with `@hdl_emit`". That is the `scheme = "plonkish"` shape and
+wants its own increment with its own measurement: the honest end state is
+probably a refusal by name, and deciding that is not a drive-by.
+
+
 ## 5. End goal
 
 > **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one
