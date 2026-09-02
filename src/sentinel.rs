@@ -48,6 +48,62 @@ fn probe_cpu_features(out_buffer: &mut [u32; 4]) {
     }
 }
 
+/// Can THIS machine execute `vpdpwssd`?
+///
+/// Gates the exact `vpdpwssd` GEMM substitution. It is a question about the
+/// running machine and deliberately NOT part of `VnniExact::license`: that
+/// licence is a statement about operand magnitudes and int32 overflow, it is
+/// exhausted over the whole int16 domain by
+/// `tests/exact_gemm_licence_obligations.rs`, and the emitted certificate
+/// instantiates it. Making it depend on the host would make the certificate
+/// depend on the host, which is the one thing it must not do.
+///
+/// **`is_x86_feature_detected!` rather than raw CPUID, and that is not a
+/// convenience.** A CPU can report an AVX-512 feature in CPUID while the OS has
+/// not enabled the register state in `XCR0` - under a hypervisor that masks it,
+/// or a kernel booted with the state off - and then the instruction faults
+/// exactly as if the silicon lacked it. The std macro does the `XGETBV` check;
+/// `probe_cpu_features` reads leaf 7 directly and does not. See
+/// `host_has_avx512` for the same gap left standing.
+///
+/// `Y_NO_AVX512_VNNI=1` forces this to `false`. There is deliberately no
+/// override in the other direction: an escape hatch that let a caller CLAIM
+/// hardware would let it produce a binary that faults, so this one can only
+/// make the compiler more conservative.
+pub fn host_has_avx512_vnni() -> bool {
+    if std::env::var("Y_NO_AVX512_VNNI").is_ok_and(|v| v != "0") {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx512vnni")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether the host can execute AVX-512, checked the way
+/// [`host_has_avx512_vnni`] is.
+///
+/// **This is not yet what `HardwareProfile::has_avx512` reports.** That field
+/// comes from `probe_cpu_features`, which reads CPUID leaf 7 EBX bit 16 and
+/// performs no `XCR0` check, so it can answer `true` on a machine where
+/// executing AVX-512 faults. Correcting it moves a value that is cached in
+/// `.ysu_hw_profile` and feeds the analytic cost model, so it is a separate
+/// change with its own measurement rather than a side effect of this one.
+pub fn host_has_avx512() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx512f")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
 /// LLVM `target-cpu` name for the host microarchitecture, or `None` when it is
 /// not one we can name confidently.
 ///
