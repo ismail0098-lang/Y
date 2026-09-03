@@ -17,6 +17,7 @@ pub mod coprocessor_scheduler;
 pub mod autotuner;
 pub mod cuda_runtime;
 pub mod empirical_autotune;
+pub mod require;
 pub mod zero_drift;
 pub mod fixed_exp;
 pub mod exact_attention;

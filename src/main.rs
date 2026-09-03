@@ -18,7 +18,7 @@
 // The two module lists had already drifted apart.
 use y::{
     ast, autotuner, coprocessor_scheduler, cpu_emitter, exact_gemm_certificate, ir_grapher, lexer,
-    llvm_emitter, native_emitter, parser, ptx_emitter, sentinel, type_checker, zero_drift,
+    llvm_emitter, native_emitter, parser, ptx_emitter, require, sentinel, type_checker, zero_drift,
 };
 
 #[cfg(feature = "zk")]
@@ -1044,23 +1044,44 @@ fn main() {
     // ────────────────────────────────────────────────────────
     // Phase 4: Backend Emission
     // ────────────────────────────────────────────────────────
-    let mut target_is_cpu = false;
+    // `@require(condition)` is EVALUATED here, against real capabilities.
+    //
+    // What stood here computed a local `target_is_cpu` by scanning the
+    // condition for an identifier containing `avx512` - and that local was
+    // **written and never read**, so the directive's sole consumer produced a
+    // dead value. rustc's dead-code lint cannot see it: the write goes through
+    // an `&mut` parameter. Meanwhile §9.1 documented `@require` as terminating
+    // compilation with `error[R0001]`, a string that appeared nowhere in the
+    // compiler, and `@require(1 == 0)` compiled and emitted PTX with exit 0.
+    //
+    // This is the pre-dispatch position on purpose: every backend is reached
+    // through the dispatch below, so checking here refuses uniformly rather
+    // than once per emitter - the same reason the `@hdl_emit` refusal lives at
+    // `check_func` instead of in five backends.
+    let mut require_errors: Vec<String> = Vec::new();
+    let mut require_checked = 0usize;
     for item in &ast.items {
         if let Item::Kernel(k) = item {
             for req in &k.requires {
-                fn check_expr(e: &ast::Expr, is_cpu: &mut bool) {
-                    match e {
-                        ast::Expr::Ident(name, _) if name.contains("avx512") => *is_cpu = true,
-                        ast::Expr::BinaryOp { left, right, .. } => {
-                            check_expr(left, is_cpu);
-                            check_expr(right, is_cpu);
-                        }
-                        _ => {}
-                    }
+                require_checked += 1;
+                if let Err(e) = require::check(&req.condition, &hw_profile, req.span.line) {
+                    require_errors.push(e);
                 }
-                check_expr(&req.condition, &mut target_is_cpu);
             }
         }
+    }
+
+    if !require_errors.is_empty() {
+        log_error!(
+            "{} of {} `@require` condition(s) are not satisfied:",
+            require_errors.len(),
+            require_checked
+        );
+        for e in &require_errors {
+            eprintln!("    \x1b[1;31m[Error]\x1b[0m {}", e);
+        }
+        eprintln!("\nCompilation aborted to prevent undefined hardware behavior.");
+        exit(1);
     }
 
     // Check for target flags

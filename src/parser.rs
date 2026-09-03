@@ -228,6 +228,25 @@ impl Parser {
         if self.match_token(TokenKind::Kernel) {
             let kernel = self.parse_kernel(requires, kernel_tile)?;
             Ok(Item::Kernel(kernel))
+        } else if !requires.is_empty() {
+            // `requires` is threaded into `parse_kernel` and NOWHERE ELSE:
+            // `KernelDecl` is the only AST node with a field for it. So on any
+            // other item the attribute parsed and was **dropped on the floor**
+            // - measured on a `fn` (which is the form §9.1's own example uses)
+            // and on an `impl` (the form `self_hosted/lib.ysu` used three
+            // times): clean compile, exit 0, requirement never recorded, let
+            // alone checked.
+            //
+            // Refused rather than silently discarded. Storing and enforcing it
+            // on functions is a real feature - `FuncDecl` needs the field and
+            // `parse_func_decl` already takes seven attribute parameters - and
+            // is recorded as the next slice rather than half-done here. A
+            // named gap costs a user five minutes; a dropped hardware
+            // requirement costs them a machine that cannot run the binary.
+            let line = requires[0].span.line;
+            Err(format!(
+                "Line {line}: `@require(...)` is only supported on a `kernel`. Here it precedes an item that has nowhere to store it, so it would be discarded silently.\n  hint: move the requirement onto the `kernel` it constrains, or delete it.\n  note: this previously parsed and was dropped - the condition was never checked on any item, and on a `kernel` it is checked now."
+            ))
         } else if self.match_token(TokenKind::Struct) {
             let s = self.parse_struct_decl()?;
             Ok(Item::Struct(s))
