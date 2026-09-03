@@ -288,17 +288,29 @@ fn every_zeroed_buffer_is_zeroed_for_its_whole_allocation() {
         zeroed.insert(ptr);
     }
 
-    // The two that are deliberately NOT zeroed, with the reason. Every slot of
+    // The four that are deliberately NOT zeroed, with the reason. Every slot of
     // `%jobs` is written before anything reads it. A slot of `%tids` may NOT
     // be - `pthread_create` is only required to store the id when it succeeds
     // - and that is safe exactly because the join loop reads slot `t` only
     // when `%live[t]` says it succeeded. `%live` itself is therefore zeroed,
     // and it is the one buffer here whose zeroing is load-bearing rather than
     // defensive.
+    //
+    // `%mjobs` and `%mtids` are the M-split's copies of exactly those two, and
+    // are on this list for exactly those two reasons - `%mlive` is zeroed. The
+    // M-split has no private C to zero at all, which is the point of it: its
+    // bands PARTITION the rows of C rather than reducing over K, so there is
+    // nothing to sum out of and nothing to seed. The caller's C is still zeroed
+    // by `zero.head`, because the kernel accumulates into its destination.
     let unzeroed: Vec<&String> = alloc.keys().filter(|k| !zeroed.contains(*k)).collect();
     assert_eq!(
         unzeroed,
-        vec![&"%jobs".to_string(), &"%tids".to_string()],
+        vec![
+            &"%jobs".to_string(),
+            &"%mjobs".to_string(),
+            &"%mtids".to_string(),
+            &"%tids".to_string(),
+        ],
         "an allocation is neither zeroed nor fully written before it is read"
     );
 }

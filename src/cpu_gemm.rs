@@ -1162,10 +1162,109 @@ pub fn emit_vnni_threaded_module(need_libc_decls: bool) -> String {
     );
     let band_len = band_len.join("\n");
 
+    // ── The M-split's schedule, from the SAME `Ix` descriptions ────────────
+    //
+    // The row bands are `band_base_ix` / `band_rem_ix` / `band_len_ix` bound to
+    // `M` and `mthr` instead of `K` and `nthr` - the identical decomposition,
+    // read as a partition of the OUTPUT rather than a reduction over the
+    // contraction. Re-rendering rather than re-deriving is what lets
+    // `ExactGemmMSplit.v` state its theorem over the same `blen`/`boff` that
+    // `ExactGemmKsplit.v` does; a second transcription here would be the drift
+    // `ExactGemmSchedule.v` exists to remove.
+    let msplit_bind = |n: &'static str| -> String {
+        match n {
+            "K" => "%M".into(),
+            "nthr" => "%mthr".into(),
+            "base" => "%mbase".into(),
+            "rem" => "%mrem".into(),
+            "t" => "%mt".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        }
+    };
+    let (mut mband_pre, _) = render_named(
+        &band_base_ix(),
+        &mut ["%mbase"].into_iter().map(String::from),
+        &msplit_bind,
+    );
+    let (mrem_lines, _) = render_named(
+        &band_rem_ix(),
+        &mut ["%mrem"].into_iter().map(String::from),
+        &msplit_bind,
+    );
+    mband_pre.extend(mrem_lines);
+    let mband_pre = mband_pre.join("\n");
+    let (mband_len, _) = render_named(
+        &band_len_ix(),
+        &mut ["%mextra", "%minc", "%mlen"].into_iter().map(String::from),
+        &msplit_bind,
+    );
+    let mband_len = mband_len.join("\n");
+    // A band owns `mlen` rows, so its A panel is sized for THAT row count and
+    // for the FULL K - the mirror of the K-split, whose panel is sized for the
+    // full M and one k-band.
+    let (mtile_count_ir, _) = render_named(
+        &tile_count_ix(),
+        &mut ["%mtiles0m", "%mtilesm"].into_iter().map(String::from),
+        &|n| match n {
+            "ext" => "%mlen".into(),
+            "Tm1" => (mr - 1).to_string(),
+            "T" => mr.to_string(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let mtile_count_ir = mtile_count_ir.join("\n");
+    let (mpanel_a_ir, _) = render_named(
+        &panel_a_bytes_ix(),
+        &mut ["%apnm", "%apn2m", "%apbm"].into_iter().map(String::from),
+        &|n| match n {
+            "mtiles" => "%mtilesm".into(),
+            "kpairs" => "%kpsm".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let mpanel_a_ir = mpanel_a_ir.join("\n");
+    let (mpanel_b_ir, _) = render_named(
+        &panel_b_bytes_ix(),
+        &mut ["%bpnm", "%bpbm"].into_iter().map(String::from),
+        &|n| match n {
+            "kpairs" => "%kpsm".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let mpanel_b_ir = mpanel_b_ir.join("\n");
+    let (mkpairs_ir, _) = render_named(
+        &kpairs_ix(),
+        &mut ["%kp1m", "%kpsm"].into_iter().map(String::from),
+        &|n| match n {
+            "kc" => "%K".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let mkpairs_ir = mkpairs_ir.join("\n");
+    let (mjobs_bytes_ir, _) = render_named(
+        &jobs_bytes_ix(),
+        &mut ["%mjobsb"].into_iter().map(String::from),
+        &|n| match n {
+            "nthr" => "%mthr".into(),
+            "slots" => JOB_SLOTS.to_string(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let mjobs_bytes_ir = mjobs_bytes_ir.join("\n");
+    let (mtids_bytes_ir, _) = render_named(
+        &tids_bytes_ix(),
+        &mut ["%mtidsb"].into_iter().map(String::from),
+        &|n| match n {
+            "nthr" => "%mthr".into(),
+            other => unreachable!("unbound schedule name {other}"),
+        },
+    );
+    let mtids_bytes_ir = mtids_bytes_ir.join("\n");
+
     let _ = write!(
         &mut s,
         r#"
-define internal i64 @__y_gemm_exact_threads(i64 %K) {{
+define internal i64 @__y_gemm_exact_request() {{
 entry:
   ; RELAXED ATOMIC, not a plain load/store. Two application threads calling the
   ; exact GEMM at once both find the memo unset and both write it - measured at
@@ -1196,11 +1295,33 @@ clamp:
   br label %have
 have:
   %ceil = phi i64 [ %c, %entry ], [ %r2, %clamp ]
-  ; Never hand out a K-band shorter than {minband}: the per-thread zero-fill and
-  ; the reduction are independent of K, so a sliver costs more than it saves.
+  ret i64 %ceil
+}}
+
+; The K-split count: the request, clamped by how many non-trivial K-bands exist.
+;
+; Never hand out a K-band shorter than {minband}: the per-thread zero-fill and
+; the reduction are independent of K, so a sliver costs more than it saves.
+define internal i64 @__y_gemm_exact_threads(i64 %K) {{
+entry:
+  %ceil = call i64 @__y_gemm_exact_request()
   %byk = sdiv i64 %K, {minband}
   %small = icmp slt i64 %byk, %ceil
   %n = select i1 %small, i64 %byk, i64 %ceil
+  %z = icmp slt i64 %n, 1
+  %out = select i1 %z, i64 1, i64 %n
+  ret i64 %out
+}}
+
+; The M-split count: the request, clamped by how many row bands of at least
+; {minrows} rows exist. {minrows} is 2 * MR - below two register tiles a band
+; stops filling the micro-kernel and the per-thread B packing stops amortising.
+define internal i64 @__y_gemm_exact_mthreads(i64 %M) {{
+entry:
+  %ceil = call i64 @__y_gemm_exact_request()
+  %bym = sdiv i64 %M, {minrows}
+  %small = icmp slt i64 %bym, %ceil
+  %n = select i1 %small, i64 %bym, i64 %ceil
   %z = icmp slt i64 %n, 1
   %out = select i1 %z, i64 1, i64 %n
   ret i64 %out
@@ -1264,8 +1385,35 @@ zero.body:
   br label %zero.head
 
 zero.done:
-  %nthr = call i64 @__y_gemm_exact_threads(i64 %K)
 {tile_count_ir}
+  ; WHICH AXIS TO CUT. Both are proved, and they are not the same kind of thing:
+  ;
+  ;   K-split - a REDUCTION. The bands are summed, so `ExactGemmKsplit.
+  ;             ksplit_exact` needs associativity, and every thread needs a
+  ;             private M x N C to sum out of.
+  ;   M-split - a PARTITION. Each thread writes a disjoint row band, so
+  ;             `ExactGemmMSplit.msplit_exact` holds for an ARBITRARY
+  ;             accumulate. No private C, no zero-fill, no reduction.
+  ;
+  ; The K-split's bookkeeping is `O(T * M * N)` against `O(M * N * K)` of work,
+  ; i.e. a share of T/K that does not shrink with the problem. Measured at
+  ; 1024x1024x1024 on 8 threads: 9.311 ms of buffers and reduction against
+  ; 7.344 ms of compute - it cost more than the GEMM, and 8 threads ran SLOWER
+  ; than one.
+  ;
+  ; M is taken only when it SATURATES the request. The M axis runs out of rows
+  ; before the K axis runs out of contraction, and a half-populated M-split
+  ; loses to a full K-split - measured at T=16: M=96 gives 8 M-threads and
+  ; loses 0.61x, M=192 gives 16 and wins 1.10x.
+  %req = call i64 @__y_gemm_exact_request()
+  %mthr = call i64 @__y_gemm_exact_mthreads(i64 %M)
+  %msat = icmp sge i64 %mthr, %req
+  %mmany = icmp sgt i64 %req, 1
+  %usem = and i1 %msat, %mmany
+  br i1 %usem, label %mspawn.pre, label %kpath
+
+kpath:
+  %nthr = call i64 @__y_gemm_exact_threads(i64 %K)
   %one = icmp sle i64 %nthr, 1
   br i1 %one, label %single, label %many
 
@@ -1477,10 +1625,166 @@ cleanup:
   call void @free(ptr %tids)
   call void @free(ptr %live)
   ret void
+
+; ── The M-split: a PARTITION of C, not a reduction over K ──────────────────
+;
+; Thread `mt` owns rows [moff, moff + mlen) of C and computes them over the
+; FULL K. The bands tile [0, M) - the same `blen`/`boff` decomposition the
+; K-split uses, re-read on the output axis - so no two threads touch a row and
+; nothing has to be summed afterwards.
+;
+; What that removes, against the K-split: the per-thread `M x N x 8` private C,
+; its zero-fill, and the reduction that reads every one of them back. Those are
+; `O(T * M * N)` against `O(M * N * K)` of work; measured at 1024x1024x1024 on
+; 8 threads they cost 9.311 ms against 7.344 ms of compute.
+;
+; `C` is already zeroed by `zero.head` above, which this path still needs -
+; the kernel ACCUMULATES into its destination.
+mspawn.pre:
+{mkpairs_ir}
+{mjobs_bytes_ir}
+  %mjobs = call ptr @__y_gemm_exact_alloc(i64 %mjobsb)
+{mtids_bytes_ir}
+  %mtids = call ptr @__y_gemm_exact_alloc(i64 %mtidsb)
+  %mlive = call ptr @__y_gemm_exact_alloc(i64 %mthr)
+  call void @llvm.memset.p0.i64(ptr %mlive, i8 0, i64 %mthr, i1 false)
+{mband_pre}
+  br label %mspawn.head
+
+mspawn.head:
+  %mt = phi i64 [ 0, %mspawn.pre ], [ %mtnext, %mspawn.next ]
+  %moff = phi i64 [ 0, %mspawn.pre ], [ %moffnext, %mspawn.next ]
+  %mmore = icmp slt i64 %mt, %mthr
+  br i1 %mmore, label %mspawn.body, label %mjoin.head
+
+mspawn.body:
+{mband_len}
+{mtile_count_ir}
+{mpanel_a_ir}
+{mpanel_b_ir}
+  %maptr = call ptr @__y_gemm_exact_alloc(i64 %apbm)
+  %mbptr = call ptr @__y_gemm_exact_alloc(i64 %bpbm)
+  %mctptr = call ptr @__y_gemm_exact_alloc(i64 {ctb})
+  call void @llvm.memset.p0.i64(ptr %maptr, i8 0, i64 %apbm, i1 false)
+  call void @llvm.memset.p0.i64(ptr %mbptr, i8 0, i64 %bpbm, i1 false)
+  call void @llvm.memset.p0.i64(ptr %mctptr, i8 0, i64 {ctb}, i1 false)
+
+  ; A is [M, K] with row stride lda, so a row band starts at A + moff*lda.
+  ; B is shared unchanged - every thread reads all of it and packs its own
+  ; copy, which is O(K*N) against this band's O(mlen*N*K) of work.
+  ; C is the caller's, offset to this band's first row: NO private buffer.
+  %maoffi = mul i64 %moff, %lda
+  %maoff = getelementptr i16, ptr %A, i64 %maoffi
+  %mcoffi = mul i64 %moff, %ldc
+  %mcoff = getelementptr i64, ptr %C, i64 %mcoffi
+
+  %mjb = mul i64 %mt, {jobb}
+  %mj = getelementptr i8, ptr %mjobs, i64 %mjb
+  %m0 = getelementptr i8, ptr %mj, i64 0
+  store ptr %maoff, ptr %m0, align 8
+  %m1 = getelementptr i8, ptr %mj, i64 8
+  store ptr %B, ptr %m1, align 8
+  %m2 = getelementptr i8, ptr %mj, i64 16
+  store ptr %mcoff, ptr %m2, align 8
+  %m3 = getelementptr i8, ptr %mj, i64 24
+  store i64 %mlen, ptr %m3, align 8
+  %m4 = getelementptr i8, ptr %mj, i64 32
+  store i64 %N, ptr %m4, align 8
+  %m5 = getelementptr i8, ptr %mj, i64 40
+  store i64 %K, ptr %m5, align 8
+  %m6 = getelementptr i8, ptr %mj, i64 48
+  store i64 %lda, ptr %m6, align 8
+  %m7 = getelementptr i8, ptr %mj, i64 56
+  store i64 %ldb, ptr %m7, align 8
+  ; The caller's OWN row stride: this band writes into C directly, so its
+  ; destination stride is `ldc` and not `N`. The K-split stores `%N` here
+  ; because its destination is a compact private buffer - storing `ldc` there
+  ; was a heap overflow, and storing `N` here would be a wrong answer on a
+  ; padded C.
+  %m8 = getelementptr i8, ptr %mj, i64 64
+  store i64 %ldc, ptr %m8, align 8
+  %m9 = getelementptr i8, ptr %mj, i64 72
+  store ptr %maptr, ptr %m9, align 8
+  %m10 = getelementptr i8, ptr %mj, i64 80
+  store ptr %mbptr, ptr %m10, align 8
+  %m11 = getelementptr i8, ptr %mj, i64 88
+  store ptr %mctptr, ptr %m11, align 8
+
+  %mtb = mul i64 %mt, 8
+  %mtp = getelementptr i8, ptr %mtids, i64 %mtb
+  %mrc = call i32 @pthread_create(ptr %mtp, ptr null, ptr @__y_gemm_exact_worker, ptr %mj)
+  %mok = icmp eq i32 %mrc, 0
+  br i1 %mok, label %mspawn.started, label %mspawn.inline
+
+mspawn.started:
+  %mlp = getelementptr i8, ptr %mlive, i64 %mt
+  store i8 1, ptr %mlp, align 1
+  br label %mspawn.next
+
+; `pthread_create` failed. Run the band on this thread rather than dropping it.
+mspawn.inline:
+  %mign = call ptr @__y_gemm_exact_worker(ptr %mj)
+  br label %mspawn.next
+
+mspawn.next:
+  %mtnext = add i64 %mt, 1
+  %moffnext = add i64 %moff, %mlen
+  br label %mspawn.head
+
+mjoin.head:
+  %mjt = phi i64 [ 0, %mspawn.head ], [ %mjtnext, %mjoin.skip ]
+  %mjmore = icmp slt i64 %mjt, %mthr
+  br i1 %mjmore, label %mjoin.body, label %mfree.head
+
+mjoin.body:
+  %mjlp = getelementptr i8, ptr %mlive, i64 %mjt
+  %mlv = load i8, ptr %mjlp, align 1
+  %mstarted = icmp ne i8 %mlv, 0
+  br i1 %mstarted, label %mjoin.do, label %mjoin.skip
+
+mjoin.do:
+  %mjtb = mul i64 %mjt, 8
+  %mjtp = getelementptr i8, ptr %mtids, i64 %mjtb
+  %mtid = load i64, ptr %mjtp, align 8
+  %mjrc = call i32 @pthread_join(i64 %mtid, ptr null)
+  br label %mjoin.skip
+
+mjoin.skip:
+  %mjtnext = add i64 %mjt, 1
+  br label %mjoin.head
+
+; No reduction: every element of C was written by exactly one band. Only the
+; three per-thread scratch buffers are freed.
+mfree.head:
+  %mft = phi i64 [ 0, %mjoin.head ], [ %mftnext, %mfree.body ]
+  %mfmore = icmp slt i64 %mft, %mthr
+  br i1 %mfmore, label %mfree.body, label %mcleanup
+
+mfree.body:
+  %mfjb = mul i64 %mft, {jobb}
+  %mfj = getelementptr i8, ptr %mjobs, i64 %mfjb
+  %mf9 = getelementptr i8, ptr %mfj, i64 72
+  %mfap = load ptr, ptr %mf9, align 8
+  call void @free(ptr %mfap)
+  %mf10 = getelementptr i8, ptr %mfj, i64 80
+  %mfbp = load ptr, ptr %mf10, align 8
+  call void @free(ptr %mfbp)
+  %mf11 = getelementptr i8, ptr %mfj, i64 88
+  %mfct = load ptr, ptr %mf11, align 8
+  call void @free(ptr %mfct)
+  %mftnext = add i64 %mft, 1
+  br label %mfree.head
+
+mcleanup:
+  call void @free(ptr %mjobs)
+  call void @free(ptr %mtids)
+  call void @free(ptr %mlive)
+  ret void
 }}
 "#,
         maxthr = 64,
         minband = KSPLIT_MIN_BAND,
+        minrows = MSPLIT_MIN_ROWS,
         ctb = mr * nr * 8,
         panel_a_ir = panel_a_ir,
         panel_b_ir = panel_b_ir,
@@ -1497,6 +1801,14 @@ cleanup:
         tile_count_ir = tile_count_ir,
         kpairs_ir = kpairs_ir,
         kpairs_b_ir = kpairs_b_ir,
+        mkpairs_ir = mkpairs_ir,
+        mjobs_bytes_ir = mjobs_bytes_ir,
+        mtids_bytes_ir = mtids_bytes_ir,
+        mband_pre = mband_pre,
+        mband_len = mband_len,
+        mtile_count_ir = mtile_count_ir,
+        mpanel_a_ir = mpanel_a_ir,
+        mpanel_b_ir = mpanel_b_ir,
     );
     s
 }
@@ -3071,6 +3383,73 @@ pub fn ksplit_threads(requested: usize, k: usize) -> usize {
     let by_k = k / KSPLIT_MIN_BAND;
     let n = by_k.min(ceil);
     if n < 1 { 1 } else { n }
+}
+
+/// Fewest rows an M-split band may own, in units of the register tile.
+///
+/// The M-split gives each thread a disjoint ROW BAND of C. Below two register
+/// tiles per thread the band stops filling the `MR x NR` micro-kernel and the
+/// B panel - which every thread packs for itself - stops amortising. **The
+/// crossover was measured, not assumed**: at `T = 16` and `K = 16384`, where
+/// the K-split's own overhead share is smallest, M = 96 and M = 128 lose
+/// (0.61x, 0.88x) and M = 192 wins (1.10x). 192/16 is exactly `2 * VNNI_MR`.
+pub const MSPLIT_MIN_ROWS: usize = 2 * VNNI_MR;
+
+/// The M-split thread count, as `__y_gemm_exact_mthreads` computes it.
+pub fn msplit_threads(requested: usize, m: usize) -> usize {
+    let ceil = requested.clamp(1, KSPLIT_MAX_THREADS);
+    let by_m = m / MSPLIT_MIN_ROWS;
+    let n = by_m.min(ceil);
+    if n < 1 { 1 } else { n }
+}
+
+/// Which axis the emitted wrapper splits, and how many threads it uses.
+///
+/// **Both axes are already proved.** The K-split is a REDUCTION - the bands are
+/// summed, which is why `ExactGemmKsplit.ksplit_exact` needs associativity and
+/// why every thread needs a private `M x N` C to sum out of. The M-split is a
+/// PARTITION - each thread writes a disjoint row band - so it needs no private
+/// C, no zero-fill and no reduction, and `ExactGemmMSplit.msplit_exact` holds
+/// for an ARBITRARY accumulate rather than an associative one.
+///
+/// That asymmetry is the whole reason to prefer M. Measured on this box, the
+/// K-split's bookkeeping at 1024x1024x1024 on 8 threads is **9.311 ms against
+/// 7.344 ms of actual compute** - the buffers cost more than the GEMM - because
+/// the overhead is `O(T * M * N)` against `O(M * N * K)` of work, i.e. a share
+/// of `T / K` that is independent of M and N.
+///
+/// **The rule is that M is taken only when it SATURATES the request.** The M
+/// axis runs out of rows before the K axis runs out of contraction, and a
+/// half-populated M-split loses to a full K-split: at `T = 16`, M = 96 gives
+/// 8 M-threads and loses 0.61x, M = 192 gives 16 and wins. So the test is
+/// `msplit_threads == request`, not `msplit_threads > 1`.
+///
+/// Verified bit-identical between the two axes at every shape and thread count
+/// in `tests/exact_gemm_msplit.rs`, which is the only acceptable evidence for
+/// changing a schedule under a certificate that claims exactness.
+pub fn split_axis(requested: usize, m: usize, k: usize) -> (SplitAxis, usize) {
+    let request = requested.clamp(1, KSPLIT_MAX_THREADS);
+    let mthr = msplit_threads(request, m);
+    if request > 1 && mthr >= request {
+        return (SplitAxis::Rows, mthr);
+    }
+    let kthr = ksplit_threads(request, k);
+    if kthr <= 1 {
+        (SplitAxis::None, 1)
+    } else {
+        (SplitAxis::Contraction, kthr)
+    }
+}
+
+/// Which axis of the exact GEMM the threaded wrapper cuts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitAxis {
+    /// One thread; the wrapper calls the kernel directly.
+    None,
+    /// Disjoint row bands of C. A partition: no private C, no reduction.
+    Rows,
+    /// Bands of K, summed afterwards. A reduction: private C per thread.
+    Contraction,
 }
 
 /// Where `pack_a` puts row `i`, half `h` of a k-pair, inside its 2*MR slot group.

@@ -1364,6 +1364,76 @@ An exit code is not a diagnosis. Read the message before attributing the
 failure, especially when the attribution is about to be written into a
 document as a measured fact.
 
+### Ask which axis a schedule cuts before asking how fast it is
+
+The exact GEMM's threading anti-scaled - eight threads slower than one - and
+the cause was not a constant to tune. It was cutting the CONTRACTION, which is
+a reduction, so every thread needed a private copy of the whole output to sum
+out of. Cutting the OUTPUT instead needs no private buffer, no zero-fill and no
+reduction at all.
+
+The generalisable question is: **does this parallelisation need an arithmetic
+property, or not?** A reduction does - associativity at minimum - and it pays
+for it in buffers as well as in proof obligations. A partition needs nothing,
+and its correctness argument is disjointness rather than algebra.
+
+When a schedule is slow in a way that does not respond to tuning, ask which of
+the two it is before reaching for a threshold.
+
+### Exactness buys the axes you could not otherwise cut
+
+The programme's founding argument is that exact accumulation makes a tiled
+kernel's equivalence provable, because float addition is not associative. True,
+and it is a claim about REDUCTIONS specifically. A partition-shaped
+parallelisation is provably exact for an arbitrary accumulate - `f32`
+included - because no accumulator is ever re-bracketed.
+
+State the claim at that precision. "Exactness is what makes this provable" is
+right for a K-split and wrong for an M-split, and the difference is what tells
+you which axis to prefer.
+
+### A model tie needs a shape whose answer MOVES when the constant does
+
+A gate asserting that a compiler's decision function predicts an observable is
+only as strong as the inputs it uses. Mine compared `split_axis`'s prediction
+against a real spawn count at two shapes - and halving the emitted floor while
+leaving the Rust constant alone **passed**, because at both shapes the two
+floors happen to agree.
+
+The repair is not more shapes; it is the RIGHT shape. The boundary is one unit
+wide: `M = FLOOR * threads` takes one axis and `M = FLOOR * threads - 1` takes
+the other. Both sides asserted, so a floor that moves in either direction
+fails.
+
+Same shape as the exhaustive licence check finding its boundary at 4095/4096.
+**When a gate ties a constant to behaviour, find the input where the behaviour
+changes and put that input in the gate.**
+
+### The control row is also a nondeterminism detector
+
+A mutation table's control exists to show the table reports the mutation rather
+than the state of the tree. It has a second use that is easy to miss: a control
+that comes back RED, on a mutation you know is semantically a no-op, is
+evidence of a race or a stale artifact rather than of coverage.
+
+Mine did. The mutation reordered two independent stores at unchanged offsets;
+the suite failed, and the cause was a helper in the file I had just written
+with a pid-only temp directory and two callers. Six occurrences of that race in
+this repository now, and the control found this one for free.
+
+Read a red control as a bug report about the harness, not as a result.
+
+### Verify a re-baseline is actually the state you meant
+
+Mid-table I fixed a harness bug while a mutation was still applied, then
+re-archived - so my "clean" baseline silently contained the mutation. The next
+attempt to apply it failed its own assertion, which is what surfaced it.
+
+Two habits make this cheap: assert that a mutation is not already present
+before applying it, and re-run the baseline's own suite after any re-archive.
+The assertion cost one line and caught a polluted baseline that would otherwise
+have made every later row ambiguous.
+
 ### But check the queue is still TRUE before working from it
 
 The lists rot, and they rot in one direction. Audited across seventeen proofs:
