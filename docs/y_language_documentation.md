@@ -323,7 +323,7 @@ graph TD
 1. **Lexical Analysis (`lexer.rs`)**: Tokenizes the raw source input into a flat token stream. Identifies keywords, datatypes, operators, and metadata decorators.
 2. **Syntax Parsing (`parser.rs`)**: Consumes tokens and constructs an Abstract Syntax Tree (AST). Resolves module dependencies (`import`) recursively.
 3. **Semantic Type Checking (`type_checker.rs`)**: Validates type safety, verifies structural alignments, ensures bank-conflict-free access patterns, and tracks linear memory obligations.
-4. **Hardware Sentinel Resolver (`sentinel.rs`)**: Matches hardware constraints specified by `@require` decorators against physical microarchitectural capabilities.
+4. **Hardware Sentinel Resolver (`sentinel.rs`)**: Probes the host (CPU cache latencies and vector support, GPU warp/tensor timings) and caches the result in `.ysu_hw_profile`. It does **not** know about `@require`; that condition is evaluated in `src/require.rs`, which consults `sentinel`'s live feature predicates for CPU features and the profile for GPU facts. (This line used to claim `sentinel.rs` matched `@require` decorators against microarchitectural capabilities. It contained the string `require` zero times.)
 5. **Backend Emission**: Translates verified code to native backends:
    * `llvm_emitter.rs`: Outputs target-specific LLVM IR with cache hints and atomic constraints.
    * `ptx_emitter.rs`: Emits highly optimized GPU PTX assembly.
@@ -654,17 +654,63 @@ Y provides a built-in runtime library for environment interaction, system alloca
 Decorators instruct the parser, type-checker, and backend emitters on how to handle specific variables, functions, and memory structures.
 
 ### 9.1 `@require`
-* **Syntax**: `@require(hardware_feature_condition)`
-* **Usage**: Placed above `kernel` or `fn` definitions.
-* **Function**: Checks the user's `.ysu_hw_profile` at compile time. If the system does not support the requested features, compilation terminates with an error:
+* **Syntax**: `@require(feature <op> integer)` — operators `>=`, `>`, `<=`, `<`, `==`, `!=`
+* **Usage**: Placed above a **`kernel`**. Any other item is a compile error (see below).
+* **Function**: Evaluated at compile time. If the condition is not satisfied, compilation
+  terminates:
 ```
-error[R0001]: hardware requirement unsatisfied: `avx512 >= 1` required, but not supported by host hardware profile
+error[R0001]: hardware requirement unsatisfied: `avx512 >= 999` required, but this host reports `avx512 = 1`
 ```
+
+**The features it can answer for, and where each answer comes from:**
+
+| feature | source | note |
+|---|---|---|
+| `avx`, `avx2` | the **running machine** | `is_x86_feature_detected!`, i.e. CPUID **plus** the `XGETBV` check |
+| `avx512`, `avx512f` | the running machine | same |
+| `avx512_vnni` | the running machine | same |
+| `sm` | `.ysu_hw_profile` | two-digit form: `SM_VERSION=8.9` answers `89` |
+| `sm_count` | `.ysu_hw_profile` | |
+
+CPU features are read from the machine rather than the cached profile because a
+profile can be stale or copied from a better box, and a wrong-high answer there
+is an illegal instruction rather than a slow kernel. GPU facts come from the
+profile because the profile is what selects the PTX target, so a GPU `@require`
+is a claim about the compilation *target* while a CPU one is a claim about
+*this machine*.
+
+**Everything it cannot answer is refused, never assumed satisfied.** A
+requirement the compiler quietly ignores is worse than no requirement.
+
+| code | meaning |
+|---|---|
+| `R0001` | the condition is false on this host |
+| `R0002` | unknown feature name — lists the supported set |
+| `R0003` | the condition is not `feature <op> integer` |
+| `R0004` | the feature is supported but has no probed value here (e.g. `sm` with no `.ysu_hw_profile`) |
+
+`R0002` and `R0004` are deliberately distinct: "check your spelling" and "run
+the probe" are different repairs, and a single "cannot evaluate" would send a
+user with a perfectly valid `@require(sm >= 89)` to look for a typo.
+
+**This used to do nothing at all.** `error[R0001]` appeared nowhere in the
+compiler; `sentinel.rs` — which §2 of this document still described as matching
+`@require` against microarchitectural capabilities — contained the string
+`require` zero times; `@require(1 == 0)` compiled and emitted PTX with exit 0;
+and the attribute's sole reader scanned the condition for an identifier
+containing `avx512` to set a local that was **written and never read**.
+
+**On a `fn` or an `impl` it was silently discarded** — `KernelDecl` is the only
+node with a field for it — so the example this section used to give, a
+`@require` above a `fn`, recorded nothing. That is refused now rather than
+dropped. Storing and enforcing it on functions is a real feature and is not yet
+implemented.
+
 * **Example**:
 ```ysu
-@require(avx512 >= 1)
-fn vector_add_avx512(A: &mut [F32; 16], B: &[F32; 16]) {
-    // LLVM backend lowers this to AVX-512 register instructions
+@require(sm >= 89)
+kernel drift_demo() {
+    // refused on a card below sm_89 instead of failing at load time
 }
 ```
 
