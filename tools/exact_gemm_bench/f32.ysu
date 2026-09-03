@@ -1,0 +1,19 @@
+// The same nest in f32, so "what does exactness cost" is answered against the
+// SAME emitter rather than against a different library.
+kernel f32_matmul(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, M: I32, N: I32, K: I32) {
+    @invariant(i >= 0)
+    for i in 0..M step 1 {
+        @invariant(j >= 0)
+        for j in 0..N step 1 {
+            let mut sum: F32 = 0.0;
+            @invariant(k >= 0)
+            for k in 0..K step 1 {
+                let a_val: F32 = block_ptr2d_load(A, i, k, K, M, K);
+                let b_val: F32 = block_ptr2d_load(B, k, j, N, K, N);
+                sum = sum + a_val * b_val;
+            }
+            block_ptr2d_store(C, i, j, N, M, N, sum);
+        }
+    }
+}
+fn main() {}

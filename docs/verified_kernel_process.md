@@ -79,8 +79,16 @@ error irrelevant, and the refutation (without it, every weight rounds to zero
 and there is no denominator at all) is a failure this repository had already
 observed empirically at a narrower fixed-point width.
 
-The cost of exactness was measured before anything was built: exact VNNI is
-**1.88× faster** than the f32 path. Exactness here trades *range*, not speed.
+The cost of exactness was measured before anything was built — and the first
+figure was wrong twice over, which is worth carrying rather than quietly
+replacing. It read **1.88x faster** than the f32 path; the micro-kernel
+re-measured at **1.10-1.15x** (`docs/proof_carrying_kernels.md`, correction of
+2026-08-17), and the *shipped* GEMM does not cross over against Y's own f32
+kernel until about 2048^3, reaching 1.47x at 4096^3
+(`tools/exact_gemm_bench/run.py`). Exactness trades range, and below a few
+thousand it trades speed as well. The programme's argument rests on
+**order-independence**, which is measured and holds; it has never rested on
+speed.
 
 ---
 

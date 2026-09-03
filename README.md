@@ -59,12 +59,14 @@ repository's own investigation documents contradict.
   +0.12% perplexity.
 - A C-callable shared library: the crate builds as `cdylib` as well as `rlib`
   (`src/c_api.rs`), so the compiler can be embedded rather than shelled out to.
-- **Machine-checked proofs**: fourteen Rocq files, ~215 theorems, no axioms and
-  nothing admitted, all run by `cargo test`. They cover the ZK backend's
-  control-flow lowering and — the bulk of them — the exact AVX-512 GEMM's
-  schedule end to end, from the source dot product to the threaded, tiled,
-  K-split kernel. A compilation that substitutes that kernel now **emits its own
-  certificate** beside the `.ll`.
+- **Machine-checked proofs**: twenty Rocq files, 416 theorems and lemmas under
+  260 `Print Assumptions`, no axioms and nothing admitted, all run by
+  `cargo test`. They cover the ZK backend's control-flow lowering and — the bulk
+  of them — the exact AVX-512 GEMM's schedule end to end, from the source dot
+  product to the threaded, tiled, row- or K-split kernel. A compilation that
+  substitutes that kernel now **emits its own certificate** beside the `.ll`.
+  What the verified kernel *costs* is measured separately and is
+  [in its own section](#what-the-verified-kernel-costs) — it is not free.
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
   arkworks crates are `[dev-dependencies]` and are used as an *independent
@@ -1199,13 +1201,104 @@ is not associative, so a tiled f32 reduction provably does *not* equal the naive
 one — `GemmBandSplit.v` refutes it at `K = 201`, `nthr = 2`, where the rounded
 version answers 1100 against its own reference's 1000. Integer addition *is*
 associative, so the relationship is an equality, which is what a proof assistant
-is good at. Measured cost: exact VNNI is **1.88× faster** than the f32 path, so
-exactness here trades range rather than speed.
+is good at. What exactness costs is measured below, and it is not free.
 
-Fourteen files, ~215 theorems, **no axioms, nothing admitted** — and
+Twenty files, 416 theorems and lemmas, **no axioms, nothing admitted** — and
 `tests/proofs_are_checked.rs` runs `coqc` over all of them in `cargo test`,
 with a content control per file so that "it compiles" and "no axioms" (both
 properties an *empty* file has) are not the whole check.
+
+#### What the verified kernel costs
+
+The proofs say the kernel is bit-identical to the naive nest. They say nothing
+about whether it is *fast*, so that is a separate measurement — three arms, one
+shape per process per arm, interleaved, minimum over rounds:
+
+```bash
+python3 tools/exact_gemm_bench/run.py            # the table below
+python3 tools/exact_gemm_bench/run.py --scaling  # thread scaling
+python3 tools/exact_gemm_bench/run.py --isa      # what each datapath can issue
+```
+
+**The two datapaths do not have the same ceiling, and that has to be measured
+before any ratio means anything.** `vpdpwssd` retires 32 int16 multiply-accumulates
+where `vfmadd132ps` retires 16 f32 ones. On one core they issue at the *same*
+rate — **11.18 against 11.21 G instructions/s, ratio 1.00** — so the exact
+datapath's MAC ceiling is exactly **double** the f32 one: 357.9 against 179.3
+G MAC/s per core, and 5212 against 2606 across sixteen at the 5.09 GHz all-core
+clock. The probe is verified non-foldable two ways: the disassembly must contain
+the instruction, and doubling the iteration count must double the time.
+
+| 16 threads | Y exact | Y f32 | OpenBLAS f32 | exact / Y f32 | exact / OpenBLAS |
+|---|---|---|---|---|---|
+| 512³ | 370 | 763 | 780 | 0.48x | 0.47x |
+| 1024³ | 708 | 1105 | 1319 | 0.64x | 0.54x |
+| 2048³ | 1057 | 982 | 1618 | 1.08x | 0.65x |
+| 4096³ | **1570** | 1072 | 1648 | **1.47x** | **0.95x** |
+
+G MAC/s, the unit the two datapaths share. OpenBLAS is the `scipy-openblas`
+0.3.33 numpy ships — `DYNAMIC_ARCH`, dispatching to its `SkylakeX` AVX-512
+kernel here, which the harness prints, because this repository has previously
+used a distro OpenBLAS with **zero `zmm` instructions** as a baseline. Both
+arms are seeded identically and the f32 checksum equals the exact integer one
+at these magnitudes, so the two are demonstrably computing the same GEMM.
+
+**Read the spread before reading a row.** Over three runs the exact column holds
+to ±5% and OpenBLAS to ±10%, but **Y's own f32 arm swings by up to 1.7x at 512³
+and 1024³** — that kernel takes its thread count from the caller's call
+*frequency*, so it is regime-sensitive in exactly the way documented under
+[CPU: AVX-512 GEMM](#cpu-avx-512-gemm). Read the `exact / Y f32` column at those
+two shapes as "well below 1", not as a number.
+
+**Two things are true at once, and the second says where the work is.** In wall
+clock the exact kernel reaches **0.95x OpenBLAS f32 at 4096³** and 0.47–0.65x
+below that. In ISA efficiency it is at **30% of its own ceiling** where OpenBLAS
+is at **63%** of its — so the near-parity at 4096³ is bought with an instruction
+that is twice as strong, and roughly 2x of headroom is still on the table.
+
+**Exactness is not free the way an earlier version of this README said.** That
+claim — "exact VNNI is 1.88× faster than the f32 path" — came from a *single-core
+micro-kernel* probe, and `docs/proof_carrying_kernels.md` had already corrected
+it to 1.10–1.15x for the micro-kernel without the correction reaching here.
+Against Y's own f32 GEMM through the same emitter the exact kernel does not
+cross over until about 2048³. Exactness trades range *and*, below a few
+thousand, speed.
+
+#### Cutting the right axis was worth more than any of it
+
+The wrapper used to split **K**. That is a reduction, so every thread needs a
+private `M × N` copy of C to sum out of, and the bookkeeping is `O(T·M·N)`
+against `O(M·N·K)` of work — measured at 1024³ on 8 threads, **9.311 ms of
+buffer-and-reduce against 7.344 ms of compute**, so eight threads ran *slower
+than one*. Splitting **M** is a partition instead: disjoint row bands, no private
+buffer, no zero-fill, nothing to reduce. `ExactGemmTiling.c_written_exactly_once`
+had already proved the output tiling is one, so the fix needed no new proof —
+**the kernel had been cutting the one axis that needs an arithmetic property,
+while the axis that needs none was already covered.**
+
+| threads | 1024³ | 4096³ |
+|---|---|---|
+| 1 | 152 G MAC/s | 158 G MAC/s |
+| 2 | 269 (1.77x) | 355 (2.25x) |
+| 4 | 458 (3.02x) | 649 (4.12x) |
+| 8 | 650 (4.28x) | 1069 (6.79x) |
+| 16 | **711 (4.68x)** | **1570 (9.97x)** |
+| 32 | 649 (4.28x) | 1296 (8.23x) |
+
+Bit-identical at every row and every thread count, which is the only acceptable
+evidence for changing a schedule under a certificate that claims exactness
+(`tests/exact_gemm_msplit.rs` compares whole output buffers *and* checks each
+against an independent integer reference, so two schedules cannot be wrong
+together). Thirty-two threads is never best: this is a 16-core part and the
+kernel gets nothing from SMT.
+
+**`ExactGemmMSplit.msplit_needs_no_algebra` is the part that generalises.** The
+row split is exact for an *arbitrary* accumulate — not associative, not
+commutative, not exact — because a row's accumulator is never split, so there is
+no re-bracketing to justify. Exact accumulation is what makes a *reduction*-shaped
+parallelisation provable; a *partition*-shaped one is provable without it.
+**Exactness buys the axes you could not otherwise cut; it is not the price of
+cutting anything.**
 
 #### The proof is tied to the emitted code by removing the second description
 
@@ -1374,8 +1467,11 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # ~635 tests
-cargo test --release --features zk      # ~900 tests, ZK included
+cargo test --release                    # ~605 tests
+cargo test --release --features zk      # ~855 tests, ZK included
+cargo test --release -p y-gpu           # the sibling crate; a bare `cargo test`
+                                        # builds the root package ONLY and does
+                                        # not run these 8
 ```
 
 **Four gates are conditional on an external tool, and a missing tool makes them
