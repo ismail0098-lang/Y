@@ -5009,6 +5009,175 @@ wants its own increment with its own measurement: the honest end state is
 probably a refusal by name, and deciding that is not a drive-by.
 
 
+### 2026-09-03 — the exact GEMM cut the one axis that needs a reduction, while the axis that needs none was already proved
+
+Asking what the verified kernels cost against industry baselines produced a
+measurement rather than a number: the exact GEMM's threading **anti-scaled**.
+At 1024x1024x1024, eight threads ran SLOWER than one.
+
+#### The decomposition
+
+`__y_gemm_exact_vnni` is externally visible, so the shipped path can be taken
+apart by calling the unthreaded kernel directly with the same bands, the same
+private buffers and the same reduction, minus the threads:
+
+| 1024x1024x1024, 8 threads | ms |
+|---|---|
+| pure compute, one core, whole K | **7.344** |
+| K-split buffer + reduce overhead (serial) | **9.311** |
+| — buffer memset | 4.804 |
+| — the reduction | 2.393 |
+| — malloc/free | ~2.1 |
+| shipped threaded path | 10.774 |
+| ideal if it parallelised | 0.918 |
+
+**The bookkeeping cost more than the entire GEMM.** Each thread was given a
+private C of the full `M x N`, zeroed before and summed after, so the overhead
+is `O(T * M * N)` against `O(M * N * K)` of work - a share of `T / K` that is
+independent of M and N.
+
+**A predicted-then-measured check separated the two candidate explanations.**
+Holding `M * N` fixed and growing K, the 8-thread speedup rises monotonically
+(0.49x at K=2048 -> 1.44x -> 2.11x -> 3.00x at K=131072). I also predicted it
+would worsen as `M * N` grew; the sweep says it does not, and the algebra
+agrees - the ratio is `T / K` and `M * N` cancels. **The wrong half of the
+prediction is recorded because the sweep is what corrected it.**
+
+#### The fix is the split AXIS, and the proof for it already existed
+
+An M-split gives each thread a disjoint ROW BAND of C. No private buffer, no
+zero-fill, nothing to reduce. And `ExactGemmTiling.c_written_exactly_once`
+already proves the output tiling is a partition - it was the K-split that
+needed `ksplit_exact`, because a reduction is what requires associativity.
+
+So the kernel was cutting the one axis that needs an arithmetic property, while
+the axis that needs none was already covered.
+
+Measured, **bit-identical output at every row**, 32 threads:
+
+| shape | K-split | M-split | |
+|---|---|---|---|
+| 512^3 | 2.418 ms | 0.587 ms | **4.12x** |
+| 1024^3 | 10.619 ms | 1.823 ms | **5.83x** |
+| 2048^3 | 83.970 ms | 8.864 ms | **9.47x** |
+
+Against OpenBLAS f32 measured in the **same session** (its own column moves
+~35% between sessions, so cross-session numbers do not compose): at 1024^3 the
+exact kernel goes from 101 to 589 G MAC/s against OpenBLAS's 621 - **0.95x** -
+and at 2048^3 from 102 to 969 against 932, **1.04x**. The verified,
+certificate-carrying exact integer GEMM is at parity with OpenBLAS f32. The gap
+was never exactness; it was one scheduling choice.
+
+#### `ExactGemmMSplit.v`, and the theorem that is about the programme
+
+`owner_unique` / `owner_exists` say the row bands are a PARTITION: every row in
+exactly one band. That is the obligation a partition carries and a reduction
+does not - two overlapping K-bands double-count and the coverage theorem alone
+would not notice, where two overlapping row bands are two threads writing one
+element of C.
+
+The headline is **`msplit_needs_no_algebra`**: the M-split is exact for an
+arbitrary accumulate. Not associative, not commutative, not exact. A row's
+accumulator is never split, so there is no re-bracketing to justify.
+
+That qualifies section 2 of this document. Exact accumulation is what makes a
+**reduction-shaped** parallelisation provable; a partition-shaped one is
+provable without it. **Exactness buys the axes you could not otherwise cut - it
+is not the price of cutting anything.**
+
+The refutation that stops it being vacuous needed care. The obvious
+non-associativity witness for the rounding accumulate is FALSE - `rnd` is the
+identity on multiples of 100, so `fadd (fadd 1000 1) 1` and `fadd 1000 2` are
+both 1000. A real witness needs two terms that cross a rounding boundary
+together but not separately: 50 and 60. **Checked by computation rather than
+assumed, and the file records that the first attempt was wrong.**
+
+11 `Print Assumptions`, no axioms, nothing admitted. The capstone `Require`s it
+and re-exports both partition results, which is what makes the `Require` real -
+mutation E7 confirms it.
+
+#### The schedule is rendered, not re-derived
+
+The row bands come from the SAME `band_base_ix` / `band_rem_ix` /
+`band_len_ix` the K-split uses, bound to `M` and `mthr` instead of `K` and
+`nthr`; the panel sizes from the same `panel_a_bytes_ix` / `panel_b_bytes_ix`
+at this band's row count and the full K. A second transcription would be the
+drift `ExactGemmSchedule.v` exists to remove.
+
+The one place the two axes deliberately disagree is job slot 8, the worker's
+output stride. The K path stores `%N` because its destination is a compact
+private buffer - storing `ldc` there was a heap overflow this repository has
+already had - and the M path stores `%ldc` because its destination is the
+caller's own C, where storing `N` is a wrong answer on a padded C. **Opposite
+values, for opposite reasons, asserted separately.**
+
+#### The rule is saturation, not availability
+
+M is taken only when the row bands can fill the requested thread count
+(`msplit_threads == request`), because the M axis runs out of rows before the K
+axis runs out of contraction. Measured at T=16, K=16384 where the K-split's own
+overhead share is smallest: M=96 gives 8 M-threads and **loses** 0.61x, M=128
+gives 10 and loses 0.88x, M=192 gives 16 and wins 1.10x. 192/16 is exactly
+`2 * VNNI_MR` - two register tiles - so `MSPLIT_MIN_ROWS` is derived from the
+micro-kernel rather than chosen.
+
+#### Mutation table — 9 probes, nine suites, each `--test` target run separately
+
+| probe | caught by |
+|---|---|
+| **E1** dispatch always takes K (the state before this change) | **`exact_gemm_msplit` ONLY** |
+| **E2** M band stores `%N` as its output stride | `exact_gemm_msplit` + `exact_gemm_tiling_model` |
+| **E3** M band's A offset drops `lda` | msplit + thread_invariance + tiling_model |
+| **E4** M taken whenever it gives >1 thread (over-eager), both sides moved | msplit (its control) + thread_invariance |
+| **E5** emitted floor 6 against the model's 12 | **MISSED by my gate** — see below |
+| **E5b** the same, after the boundary shapes were added | msplit + thread_invariance |
+| **E6** M path skips every join | msplit + thread_invariance + tiling_model |
+| **E7** `owner_unique` weakened to a tautology, name kept | **`proofs_are_checked` + `exact_gemm_certificate`** |
+| **E8** `msplit_needs_no_algebra` deleted with its `Print Assumptions` | **`proofs_are_checked` ONLY** |
+| **E9 CONTROL** two job-record stores reordered at unchanged offsets | **green everywhere** |
+
+**E1 is the row that matters: the original schedule was invisible to all eight
+other suites.** They compare answers, and the K-split's answer is correct - it
+is merely 6.4x slower.
+
+##### E5 was a real hole in my own gate
+
+The model tie asserted `split_axis`'s prediction against the observed
+`pthread_create` count at two shapes - and at both of them a floor of 6 and a
+floor of 12 give the same answer, so halving the emitted floor while leaving
+`MSPLIT_MIN_ROWS` alone **passed**. `exact_gemm_thread_invariance` caught it
+instead. The gate now carries the boundary: `M = MSPLIT_MIN_ROWS * 16` takes
+the row axis on 16 threads and `M = MSPLIT_MIN_ROWS * 16 - 1` falls back to the
+contraction axis on 8 - one row wide, both sides asserted. **A model tie needs
+a shape whose answer MOVES when the constant does.**
+
+##### The control caught a race in the file I had just written
+
+E9 came back RED the first time, on `exact_gemm_msplit` alone. The mutation was
+a no-op; what failed was my own `emitted_ir()` helper, which had a pid-only
+temp directory and **two callers**. That is the race this repository has now
+hit six times, in the increment whose standing rule names it. The tag is in the
+signature now. **A control row is not only there to prove the table means
+something - it is the cheapest detector of nondeterminism in the harness.**
+
+#### Verification
+
+**589 / 840 / 8** tests, zero failures across 133 per-target binaries in both
+feature sets (133/133 result lines each) plus both aggregates (139 lines each)
+and `cargo test -p y-gpu`. Both builds warning-free. `coqc` clean over all
+twenty proofs, no axioms, nothing admitted. Corpus unchanged at `--emit-llvm`
+55/30 and `--emit-ptx` 60/25, and no committed `.ptx` or `.ll` changed. Totals
+are +5 on the previous increment, exactly the new suite.
+
+#### Recorded, not fixed
+
+The K-split remains the right axis for a short M and a long K, and that arm
+still pays its full `O(T * M * N)` bookkeeping. A hybrid - split M first, then
+K within each row band - would cover the shapes where neither axis alone
+saturates (M=96 at 16 threads uses 8 M-threads or 8 K-threads, never 16). Both
+component theorems exist; composing them is an increment, not a branch.
+
+
 ## 5. End goal
 
 > **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one

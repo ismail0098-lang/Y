@@ -378,6 +378,23 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             ][..],
         ),
         (
+            "ExactGemmMSplit.v",
+            &[
+                // The row bands PARTITION [0, M): every row in exactly one band.
+                "owner_unique",
+                "Print Assumptions owner_unique",
+                "owner_exists",
+                // ...and the schedule is exact for an ARBITRARY accumulate,
+                // which is the claim that separates this axis from the K one.
+                "msplit_needs_no_algebra",
+                "Print Assumptions msplit_needs_no_algebra",
+                // The refutation that stops that being vacuous: the same
+                // rounding accumulate that breaks a K-split leaves this alone.
+                "an_msplit_survives_the_accumulate_that_breaks_a_ksplit",
+                "the_rounding_accumulate_is_not_associative",
+            ][..],
+        ),
+        (
             "ExactGemmKsplit.v",
             &[
                 // The K-split reduction equals the naive nest, every K, every nthr.

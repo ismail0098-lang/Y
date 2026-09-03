@@ -42,6 +42,29 @@
     actually remained was the fold-back into C, which is what
     [gemm_position] models here. Read the emitter before recording a gap.
 
+    *** The shipped wrapper cuts TWO axes, and both are covered. ***
+
+    [cpu_gemm::split_axis] cuts the rows of C when the row bands can saturate
+    the requested thread count, and the contraction otherwise. The two are not
+    the same kind of schedule:
+
+    - the K-split is a REDUCTION - [ExactGemmKsplit.ksplit_exact] consumes
+      associativity, and [rounding_breaks_the_split] exhibits an accumulate for
+      which it fails;
+    - the M-split is a PARTITION - [ExactGemmMSplit.owner_unique] and
+      [owner_exists] say every row belongs to exactly one band, and
+      [msplit_needs_no_algebra] holds for an ARBITRARY accumulate.
+
+    That asymmetry qualifies section 2 of the roadmap. Exact accumulation is
+    what makes a REDUCTION-shaped parallelisation provable; a partition-shaped
+    one is provable without it. Exactness buys the axes you could not otherwise
+    cut - it is not the price of cutting anything.
+
+    **Which axis is chosen is a PERFORMANCE decision and is deliberately not on
+    the trust boundary below.** Getting it wrong is slow, not wrong: both arms
+    are proved, and [tests/exact_gemm_msplit.rs] asserts they give the same
+    bits. The crossover itself is measured, not derived.
+
     *** What is STILL not proved, stated rather than implied. ***
 
     - **`vpdpwssd`'s semantics and the little-endian order of an i32's two
@@ -97,6 +120,7 @@ Require ExactGemmPacking.
 Require ExactGemmRegisterTile.
 Require ExactGemmTiling.
 Require ExactGemmKsplit.
+Require ExactGemmMSplit.
 Require ExactGemmMicro.
 Require ExactGemmAllocation.
 Require ExactGemmThreading.
@@ -382,6 +406,28 @@ Corollary the_workers_records_cannot_overlap : forall t1 k1 t2 k2,
   TH.job_slot t1 k1 = TH.job_slot t2 k2 -> t1 = t2 /\ k1 = k2.
 Proof. exact TH.job_slot_injective. Qed.
 
+(** The row axis, re-exported so this capstone covers the dispatch the compiler
+    actually emits rather than one of its two arms. It is a real use of the
+    [Require] above: if [owner_unique]'s statement moves, this stops checking.
+
+    It is also the whole reason the M path needs no reduction. The K path's
+    workers all write the same rectangle and are summed; these write disjoint
+    rows, so what would be a reduction is nothing at all. *)
+Corollary every_row_of_c_is_written_by_exactly_one_band :
+  forall M mthr t u r,
+    ExactGemmMSplit.owns M mthr t r ->
+    ExactGemmMSplit.owns M mthr u r -> t = u.
+Proof. intros M mthr t u r H1 H2. eapply ExactGemmMSplit.owner_unique; eassumption. Qed.
+
+(** ...and the bands really do cover the rows, so "exactly one" is not
+    vacuously satisfied by a schedule that writes none of them. *)
+Corollary the_row_bands_leave_no_row_unwritten :
+  forall M mthr r, (0 < mthr)%nat -> (r < M)%nat ->
+    exists t, (t < mthr)%nat /\ ExactGemmMSplit.owns M mthr t r.
+Proof. intros. apply ExactGemmMSplit.owner_exists; assumption. Qed.
+
+Print Assumptions every_row_of_c_is_written_by_exactly_one_band.
+Print Assumptions the_row_bands_leave_no_row_unwritten.
 Print Assumptions the_threaded_gemm_holds_the_source_dot_products.
 Print Assumptions the_packing_buffers_hold_every_slot_written.
 Print Assumptions thread_sum_is_the_emitted_reduction.
