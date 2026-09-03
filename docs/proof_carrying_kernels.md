@@ -5061,12 +5061,26 @@ Measured, **bit-identical output at every row**, 32 threads:
 | 1024^3 | 10.619 ms | 1.823 ms | **5.83x** |
 | 2048^3 | 83.970 ms | 8.864 ms | **9.47x** |
 
-Against OpenBLAS f32 measured in the **same session** (its own column moves
-~35% between sessions, so cross-session numbers do not compose): at 1024^3 the
-exact kernel goes from 101 to 589 G MAC/s against OpenBLAS's 621 - **0.95x** -
-and at 2048^3 from 102 to 969 against 932, **1.04x**. The verified,
-certificate-carrying exact integer GEMM is at parity with OpenBLAS f32. The gap
-was never exactness; it was one scheduling choice.
+The exact kernel's own column is what this table is about, and it goes from 101
+to 589 G MAC/s at 1024^3 and from 102 to 969 at 2048^3.
+
+> **CORRECTION, 2026-09-03 - the OpenBLAS comparison taken in the same session
+> did NOT reproduce, and "at parity with OpenBLAS f32" was wrong.** It read
+> OpenBLAS at 621 and 932 G MAC/s, i.e. 0.95x and 1.04x. Re-measured through a
+> dedicated harness (`tools/exact_gemm_bench/run.py`, one shape per process per
+> arm, arms interleaved), **Y's column reproduces** - 619 and 1083 at 32 threads
+> against the 589 and 969 recorded - while **OpenBLAS reads 1376 and 1478**,
+> about twice what was recorded. Two candidate explanations were tested and
+> rejected: numpy's per-call output allocation costs 26% at 1024^3 and nothing
+> at 2048^3, and the library dispatches to its `SkylakeX` AVX-512 kernel in both
+> harnesses. What remains is that the original figure was taken while test
+> sweeps were running on the same machine, which is the hazard this project has
+> already recorded once. **The measured standing is 0.54x at 1024^3, 0.65x at
+> 2048^3 and 0.95x at 4096^3**, against an f32 datapath whose MAC ceiling is
+> *half* the exact one - so the exact kernel is at ~30% of its own ISA ceiling
+> where OpenBLAS is at ~63% of its. See README, "What the verified kernel
+> costs". The scheduling claim below is untouched: the M-split column is Y
+> against Y and reproduces.
 
 #### `ExactGemmMSplit.v`, and the theorem that is about the programme
 
