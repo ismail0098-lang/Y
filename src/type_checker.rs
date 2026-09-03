@@ -1173,7 +1173,70 @@ impl TypeChecker {
         }
     }
 
+    /// Refuses the two function attributes that reach `FuncDecl` and are read
+    /// by nothing.
+    ///
+    /// **Both were measured byte-identically inert before this was written**:
+    /// the same function with and without the attribute emits the same LLVM IR
+    /// and the same `--emit-cpu` blob, and `grep` finds zero readers of
+    /// `f.is_hdl_emit` / `f.is_ghost` outside `parser.rs` and `ast.rs`. That
+    /// consumer count is the sharp predicate, and the obvious one is a NULL
+    /// METRIC: diffing the emitted artifact reports `@safe`, `@unsafe`,
+    /// `@zk_safe` and `@zk_allow_unconstrained` as inert too, because those are
+    /// CHECKERS - they change what is refused, not what is emitted, so on a
+    /// program with nothing to check they legitimately change nothing.
+    ///
+    /// This is the `@zk_target(scheme = "plonkish")` shape: a directive a user
+    /// can select that changes nothing, with a clean compile and no sign the
+    /// annotation was discarded. Refusing is the fix, not a stopgap.
+    ///
+    /// The two are refused for DIFFERENT reasons and the distinction is why
+    /// `@ptx_emit` is deliberately left alone (see the census gate):
+    ///
+    /// * `@hdl_emit` names a backend that **does not exist**. There is no HDL
+    ///   emitter in this compiler and nothing for it to lower to, ever.
+    /// * `@ghost` is real at a different SYNTACTIC SITE. `@ghost { .. }` and
+    ///   `@ghost let ..` are the documented forms and are lowered by six
+    ///   backends; the function attribute parses and is dropped. That is
+    ///   "a guard consulted at one site" read across syntax rather than across
+    ///   call sites, and it is the worse direction, because a user who has used
+    ///   the block form successfully will reasonably expect the function form
+    ///   to work.
+    ///
+    /// Note what is NOT claimed: a `@ghost` BLOCK is emitted in full, not
+    /// stripped. `tests/directives_are_consumed_or_refused.rs` runs one and
+    /// measures 7 where a stripped block gives 0. Stripping it is a feature -
+    /// it would have to refuse a ghost block that writes non-ghost state, which
+    /// is exactly what that probe does - not a typo, so it is recorded rather
+    /// than done.
+    fn refuse_inert_attributes(&mut self, f: &FuncDecl) {
+        if f.is_hdl_emit {
+            self.errors.push(format!(
+                "Line {}: `@hdl_emit` on `{}` is not implemented. Y has no HDL backend, so \
+                 there is nothing for it to lower to.\n  \
+                 hint: remove the attribute. Select a backend with a CLI flag - `--emit-ptx`, \
+                 `--emit-llvm`, `--emit-cpu`, `--emit-native` or `--target=r1cs`.\n  \
+                 note: this previously parsed, was stored on the function, was read by nothing, \
+                 and exited 0 - the emitted artifact was byte-identical to the undecorated one.",
+                f.span.line, f.name
+            ));
+        }
+        if f.is_ghost {
+            self.errors.push(format!(
+                "Line {}: `@ghost` on a function (`{}`) is not implemented and was silently \
+                 ignored.\n  \
+                 hint: `@ghost` applies to a BLOCK (`@ghost {{ .. }}`) or a variable \
+                 (`@ghost let ..`); both of those work. Delete the function instead, or move \
+                 its body into a `@ghost` block at the call site.\n  \
+                 note: a `@ghost` block is EMITTED, not stripped - it costs the cycles its \
+                 statements cost.",
+                f.span.line, f.name
+            ));
+        }
+    }
+
     fn check_func(&mut self, f: &FuncDecl) {
+        self.refuse_inert_attributes(f);
         self.zk_safe_stack.push(f.is_safe || f.is_zk_safe);
         self.zk_allow_unconstrained_stack.push(f.is_zk_allow_unconstrained);
         self.push_scope();

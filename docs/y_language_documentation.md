@@ -753,12 +753,22 @@ Measured against the shipping binary:
 |---|---|
 | `@avx_emit` | **hard syntax error** — `Line 1: Error: Unexpected top-level item` |
 | `@ptx_emit` | parses, is ignored, exits 0 |
-| `@hdl_emit` | parses, is ignored, exits 0 |
+| `@hdl_emit` | **refused by name** — see below |
 
 `@avx_emit` is lexed (it has its own `TokenKind`) and matched by no parser arm,
-so it is fail-closed with an unhelpful message. The other two are accepted and
-read by nothing, which is the worse direction: a user selecting a backend gets
-a clean compile and no indication the annotation was discarded.
+so it is fail-closed with an unhelpful message.
+
+**`@hdl_emit` is refused by name now.** It reached `FuncDecl` and was read by
+nothing anywhere in the compiler, and there is no HDL backend for it to lower
+to, so the artifact was byte-identical to the undecorated program. That is the
+`@zk_target(scheme = "plonkish")` shape and it gets the same treatment.
+
+**`@ptx_emit` is deliberately still accepted**, and the distinction is the
+point rather than an oversight: it names a backend that EXISTS (`--emit-ptx`)
+and it has one consumer — the LLVM backend refuses a `chisel` block inside it,
+because that would put PTX text into an x86 module. It is inert for an
+ordinary program (measured byte-identical), which is recorded rather than
+fixed.
 
 **There is no "CPU AVX" backend for anything to lower to.** `--emit-cpu` emits
 scalar Rust and contains no vector intrinsic at all. Select a backend with the
@@ -823,17 +833,67 @@ for i in 0..1024 {
 }
 ```
 
-### 9.13 `@ghost`
-* **Syntax**: `@ghost`
-* **Usage**: Variable declarations or code scopes.
-* **Function**: Declares variables that only exist for static compile-time constraint validation and assertions. These are completely stripped out by codegen and cost zero execution cycles.
-* **Example**:
+### 9.13 `@ghost` — **emitted, NOT stripped; block form only**
+
+`@ghost` has three spellings in circulation and **only one of them works.**
+Measured against the shipping binary:
+
+| spelling | what actually happens |
+|---|---|
+| `@ghost { .. }` (a block) | parses, and is **lowered like any other block** |
+| `@ghost let ..` (a variable) | **syntax error** — `Expected '{' to begin block but found Let` |
+| `@ghost fn ..` (a function) | **refused by name** (it parsed and was read by nothing) |
+
+* **Syntax**: `@ghost { .. }`
+* **Usage**: Code scopes only.
+* **Function**: Marks a block as existing for verification rather than for its
+  value. It is an annotation on intent; **the compiler does not act on it.**
+
+**A `@ghost` block is not stripped.** This section previously claimed such code
+was removed by codegen at zero execution cost. That is false and measurably so
+— compiled, linked and run:
+
 ```ysu
-@ghost let mut verification_step: I32 = 0;
-for i in 0..10 {
-    @ghost {
-        verification_step = verification_step + 1;
+fn main() -> I32 {
+    let mut acc: I32 = 0;
+    @ghost { acc = acc + 7; }      // returns 7; a stripped block would give 0
+    return acc;
+}
+```
+
+The emitted LLVM carries the load, the add and the store under a
+`; --- @ghost speculative block ---` comment, and `tests/ghost_test.ysu` calls
+`print_int` inside a `@ghost` block — so ghost code performs I/O. Six backends
+lower the block form and none of them removes it.
+
+Removing it is a **feature, not a correction**: a ghost block that writes
+non-ghost state cannot be deleted without changing the answer, which is exactly
+what the program above does, so an implementation would first have to refuse
+that program. Until then, put nothing in a `@ghost` block whose cost or effect
+you are not willing to pay for.
+
+**The variable form does not parse.** The example this section used to give was
+`@ghost let mut verification_step: I32 = 0;`, and it is a syntax error: the
+parser's `@ghost` arm expects a block. Declare the variable normally and mark
+the code that maintains it.
+
+**The function form is refused.** `@ghost fn` parsed, was stored on the
+`FuncDecl`, and was read by nothing — so the function was emitted in full,
+which is the opposite of what the annotation says. It was never documented
+here either.
+
+* **Example** (verified to compile — a loop outside `@unsafe` also needs an
+  `@invariant`, so the old example failed on that too once the `let` was fixed):
+```ysu
+@unsafe
+fn main() -> I32 {
+    let mut verification_step: I32 = 0;
+    for i in 0..10 {
+        @ghost {
+            verification_step = verification_step + 1;
+        }
     }
+    return verification_step;    // 10 — the block is emitted, not stripped
 }
 ```
 
@@ -851,7 +911,7 @@ for i in 0..512 {
 
 ### 9.15 `@clock_domain`
 * **Syntax**: `@clock_domain(name_string)`
-* **Usage**: Fields, variables, or function blocks compiled with `@hdl_emit`.
+* **Usage**: Fields, variables, or function blocks. (This line used to say "compiled with `@hdl_emit`"; `@hdl_emit` is refused — see §9.7 — and `@clock_domain` does not depend on it. Every backend that lowers a `@clock_domain` block lowers it as an ordinary block; `--emit-cpu` and `--target=r1cs` refuse it by name.)
 * **Function**: Assigns signal registers to specific hardware clock domains, forcing the synthesis engine to insert synchronizers at crosses.
 * **Example**:
 ```ysu
