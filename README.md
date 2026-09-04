@@ -1420,6 +1420,31 @@ driver ABI fact, so `cbank_abi.py` referees them against `ptxas` *and* against a
 launch with six distinct extents — deriving them from `ptxas` alone would use the
 translator under test to license a fact used to validate it.
 
+**The queue was ordered by cost, and nobody had computed reach.** Every ranking
+answered "what would it take to validate *this* kernel"; none answered "how many
+kernels would *this opcode* unblock". `gap.py --rank` prints both, and they
+disagree. `ptx_subword_ops` was recorded as the cheapest kernel left at 8 unknown
+PTX ops; the dynamic gap is **three** opcodes with zero contaminated errors — and
+each of the three blocks **exactly one kernel**, it is the only corpus kernel
+using a sub-word store at all, and its SASS branch is already exercised by a
+passing kernel. Cheapest *and* worth nothing. Not built, and the reason is
+recorded: stores carry no width, so modelling one forces a soundness decision the
+tool has never had to make, and refusing them today leaves it sound.
+
+**The loop kernels are gated twice and only one gate had been counted.**
+`loopval` refuses on loop *structure*, independently of opcodes, so closing every
+opcode gap would leave a kernel refused for a reason nobody had measured.
+`loopgap.py` is that census — possible only because `loopval` refuses by name —
+and it takes **none of the 48** kernels with control flow. **32 of the 48 refuse
+for one reason: more than one back edge**, including all 23 tensor-core GEMMs,
+which have three. So "21–27 opcodes each" understates them, and supporting more
+than one back edge is the largest single lever in the corpus, needing no new
+opcode semantics. The census also puts a number on how the opcode census
+under-reports: `bra` reads as 37 kernels where a textual scan finds 48, split
+**6 hidden by predication** (an unrecognised predicate name is attributed to the
+predicate, not the opcode behind it) and **5 by setup failure** (no instruction
+executes, so the gap is empty and sorts to the top of a cost ranking).
+
 The kernel that looked closest to passing was not a GEMM and turned out to be
 **empty**. `hello.coprocessor` had a zero opcode gap on both sides because it
 *stores nothing* — a `ret;`-only artifact the coprocessor backend now refuses to

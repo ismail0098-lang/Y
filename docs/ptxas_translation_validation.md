@@ -193,7 +193,9 @@ kernel uses, and it overturned the obvious read:
   kernels in the corpus — 16–18 unknown PTX ops each, three MUFU identifications
   (none device-validated), f16 pack/unpack, and FFMA contraction on top.
 - `ptx_subword_ops` is the cheapest kernel left: 8 unknown PTX ops, all integer,
-  no float, no branch, no loop, no shared memory.
+  no float, no branch, no loop, no shared memory. **Both halves of that are
+  wrong, and it is measured below** — the dynamic gap is *three* opcodes, not
+  eight, and the SASS side does branch. It is also the wrong kernel to build.
 - `ptx_integer_ops` yields a **finding** rather than a kernel: `ptxas` implements
   32-bit `div.u32`/`rem.u32` through the *float* unit — `I2F.U32.RP`, `MUFU.RCP`,
   `F2I.TRUNC`. An integer PTX operation lowered as a floating-point macro-op.
@@ -531,12 +533,110 @@ change which SASS is under test. All 66 kernels rebuilt **byte-identically** to
 the ones the table above was measured on, `-O1` included, so the corpus is
 reproducible rather than shipped.
 
+### The queue was ordered by cost, and nobody had computed reach
+
+Every ranking here so far answers "what would it take to validate *this*
+kernel". None answers "how many kernels would *this opcode* unblock". `gap.py
+--rank` prints both, and the two disagree about what to do next.
+
+`ptx_subword_ops` was recorded as the cheapest kernel left, and re-measuring
+made it cheaper still: the real dynamic gap is **2 PTX opcodes and 1 SASS
+opcode** — `cvt.u8.u32`, `st.global.s8`, `STG.E.S8` — with **zero** contaminated
+errors, the only kernel in the corpus in that state. The eight was a `depth.py`
+figure quoted where the dynamic one belonged.
+
+Then reach:
+
+```
+cvt.u8.u32      blocks 1 kernel
+st.global.s8    blocks 1 kernel
+STG.E.S8        blocks 1 kernel
+```
+
+One kernel of 66, and no leverage: `ptx_subword_ops` is the **only** corpus
+kernel that uses a sub-word store at all. Nor does it exercise machinery
+nothing else reaches — its SASS branch (`BSSY`/`BRA`/`BSYNC`) is already covered
+by `bn254_permute`, which passes. So it is the cheapest kernel *and* worth
+almost nothing, and cheap-to-build was never the ranking a roadmap wanted.
+
+It is also not free. Stores are recorded as `(addr, value, guard)` with **no
+width**, so modelling a sub-word store forces a decision the tool has never had
+to make: compare the truncated value (faithful to the `Array(BV64 -> BV32)`
+memory model, which cannot distinguish an 8-bit from a 32-bit store at the same
+address) or the full register (conservative, but a false `UNPROVED` on any
+kernel where one side masks in a register and the other in the store). Doing it
+properly means a width field through six unpack sites in `loopval.py`,
+`batch.py` and `muls.py`. **Not built** — the measurement said not to, and
+refusing sub-word stores today leaves the tool sound rather than leaving a hole.
+
+### The loop kernels are gated twice, and only one gate had been counted
+
+`gap.py` measures opcodes. `loopval` refuses on loop **structure**, and the two
+are independent — closing every opcode gap would leave a kernel refused for a
+reason nobody had counted. `loopgap.py` is that census. It runs `loopval` over
+every kernel with PTX control flow and aggregates the refusal, which is possible
+only because `loopval` refuses by name and never guesses.
+
+**It takes none of them:**
+
+```
+48 kernels with PTX control flow; 0 validated
+
+ 30  PTX: more than one back edge (this validator handles exactly one)
+  9  PTX: loop finder found NO back edge
+  2  SASS prologue branches to .L_x_0 rather than the loop exit
+  2  the SASS zero-trip guard is not the last prologue instruction
+  2  SASS: more than one back edge
+  1  SASS back edge is unconditional
+  1  PTX loop body has more than one branch
+  1  SASS: loop finder found NO back edge
+```
+
+**32 of 48 refuse for one reason: more than one back edge.** That includes all
+23 FP16 tensor-core GEMMs, which have three. So the recorded "21–27 opcodes
+each" understates them — they are behind an opcode gap *and* behind a structural
+one, and only the first had been measured. Supporting more than one back edge is
+the single largest lever in the corpus, and it needs no new opcode semantics.
+
+(`exact_pv` is refused here because the corpus is built at `-O3`. Its standing
+result is at `-O1`, where it still validates — 14 obligations — and the refusal
+at `-O3` is the unroll-matching gap already recorded.)
+
+Two normalisations, and the second one is the point: back-edge counts are folded
+because the count is a property of the kernel, but **zero** back edges is kept
+apart from more-than-one although `loopval` phrases both as "has N back edges".
+They are opposite problems — the loop finder coming up empty on a kernel that
+demonstrably branches, versus capacity — and the first aggregation written here
+merged them and hid nine kernels behind thirty.
+
+### Two ways the opcode census under-reports, both measured
+
+`bra` appears in `gap.py`'s gap for 37 kernels where a textual scan finds 48.
+The eleven are two distinct causes, and the split was measured rather than
+assumed:
+
+- **6 hidden by predication.** A predicated instruction whose predicate name the
+  executor does not recognise is attributed to the *predicate*, not the opcode
+  behind it, so `@%rt_p0 bra $L;` counts as `@%rt_p0`. That is the six
+  coprocessor kernels, and it is why the earlier note "`coprocessor_test` still
+  needs `bra`" is right while the census appears to disagree.
+- **5 hidden by setup failure.** When the census cannot build the initial state
+  it executes no instruction and reports an *empty* opcode gap — which reads as
+  "nothing unmodelled" and sorts to the top of a cost ranking. Four `gemm_fp8_*`
+  and `rmsnorm_residual_4096` are in that state (`2 .shared arrays`). `--rank`
+  flags them.
+
+Removing predication alone from the textual scan gives **42, not 37**, which is
+how the 6/5 split was separated.
+
 Measurement scripts, which is most of what the numbers above came from:
 
 ```sh
 python3 scope2.py      # what blocks each kernel, cross-tabbed with control flow
 python3 depth.py       # each kernel's whole opcode alphabet, not its first refusal
 python3 gap.py         # what the executor GENUINELY refuses -- the dynamic gap
+python3 gap.py --rank  # the same census, ranked by COST and by REACH
+python3 loopgap.py     # why loopval refuses each kernel that has a loop
 python3 tractable.py   # if every opcode were modelled, what could the solver close?
 python3 smemdepth.py   # what ELSE each shared-memory kernel needs
 python3 barregion.py   # multiplies per barrier region, against the wall
@@ -553,6 +653,7 @@ rather than the mutations:
 ./gmut.sh    # the float macro-op guard
 ./lmut.sh    # the loop validator
 ./smut.sh    # shared memory and barriers, 12 probes
+./rmut.sh    # the two rankings: reach, and the loop-structure census
 ```
 
 These rewrite the `.py` files in place and restore from a tarball made by
