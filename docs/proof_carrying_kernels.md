@@ -2165,6 +2165,24 @@ async tokens are consumed exactly once — a property this backend was
   per-translation. **This must be stated in the certificate, never papered
   over.**
 
+**The per-translation option now exists, and it started before Phase 3 · 2026-09-04.**
+`tools/ptxas_tval/` symbolically executes a kernel's PTX and the SASS `ptxas`
+emitted from that exact file, and discharges the difference in z3. Six kernels
+are validated — 282 obligations, one across a loop, one using shared memory and
+a barrier — against a negative control that is *refuted*, because `ptxas`
+contracts `mul.f32`+`add.f32` into an `FFMA` unless the program says `.rn`.
+
+Two things it establishes that change this phase's plan rather than confirming
+it. **The binding constraint is the solver, not opcode coverage**: a kernel with
+29 multiplies validates in 24 s and one with 65 is unproved after 9,705 s, and
+asking what could be closed *if every opcode were modelled* puts 52 of 67 under
+that wall using barriers as cut points. And the ranking **inverts** — the 23
+tensor-core GEMMs this phase is about look like the deepest bucket and are the
+tractable one (39–61 multiplies per barrier region), while the field kernels
+look shallow and run 244–717. The bullet above is right that the boundary must
+be stated; what it did not anticipate is that stating it would be the cheap part.
+Write-up: [Translation validation for `ptxas`](ptxas_translation_validation.md).
+
 **Inventory correction, measured 2026-08-31.** "XOR bank swizzling" reads as a
 transformation that exists and needs a proof. It does not exist in any path a
 kernel can take. `src/bank_conflict.rs` is real — the type checker searches for
