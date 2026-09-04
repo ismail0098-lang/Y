@@ -1400,7 +1400,7 @@ cancelled the feature the measurement was taken to justify. `ptx_carry_chain`
 validates with 29 multiplies in 24 s; `bn254_fr_mul_fast` has 65 and is UNPROVED
 after 9,705 s — with 261 of 276 cut points closed and **no `sat`**. Asking the
 counterfactual (*if every opcode were modelled, what could the solver close?*)
-puts **52 of 67 kernels under that wall** using barriers as cut points — and
+puts **51 of 66 kernels under that wall** using barriers as cut points — and
 inverts the ranking: the 23 tensor-core GEMMs look deepest and are tractable at
 39–61 multiplies per barrier region, while the field kernels look shallow and run
 244–717. "33 kernels are behind shared memory" was false; shared memory alone
@@ -1418,9 +1418,18 @@ omitted. Fixing that unblocks nothing and was still worth landing: the census no
 reports the real gap instead of a spurious operand refusal. Those offsets are a
 driver ABI fact, so `cbank_abi.py` referees them against `ptxas` *and* against a
 launch with six distinct extents — deriving them from `ptxas` alone would use the
-translator under test to license a fact used to validate it. The kernel closest
-to passing is not a GEMM at all: `hello.coprocessor` has a **zero** opcode gap
-and is blocked by two naming assumptions in the executor's register model.
+translator under test to license a fact used to validate it.
+
+The kernel that looked closest to passing was not a GEMM and turned out to be
+**empty**. `hello.coprocessor` had a zero opcode gap on both sides because it
+*stores nothing* — a `ret;`-only artifact the coprocessor backend now refuses to
+emit, checked in and skipped by the gate written for exactly that class, whose
+`with_extension("ysu")` pairing could never match `<stem>.coprocessor.ptx`. Gate
+extended, artifact deleted, corpus 67 → 66 with the 66 survivors byte-identical.
+The register-model refactor that would reach the rest of that family was built as
+a probe, measured, and **cancelled**: it reaches one kernel with no stores, and
+paying for it means threading register declarations through the loop validator's
+live-in recovery.
 
 Also measured, and reported separately because they are different claims:
 `rcp.approx` differs from `rcp.rn` on **13.23%** of inputs on the device and

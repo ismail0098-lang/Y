@@ -20,6 +20,12 @@ set -u
 cd "$(dirname "$0")"
 REPO=../..
 OUT=corpus
+# CLEAN, do not merely overwrite.  A source deleted from tests/ otherwise leaves
+# its artifact behind in the corpus, so the validator keeps measuring a kernel
+# the repository no longer ships -- the stale-artifact class this whole corpus
+# exists downstream of, one layer down.  Found exactly that way, when
+# hello.coprocessor.ptx was deleted and the corpus still reported 67.
+rm -rf "$OUT" o1
 mkdir -p "$OUT"
 command -v ptxas    >/dev/null || { echo "ptxas not on PATH (CUDA toolkit)";    exit 1; }
 command -v nvdisasm >/dev/null || { echo "nvdisasm not on PATH (CUDA toolkit)"; exit 1; }

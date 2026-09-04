@@ -63,3 +63,6 @@ proofs/.nia.cache
 tools/ptxas_tval/corpus/
 tools/ptxas_tval/o1/
 tools/ptxas_tval/*.tgz
+# a hand-built fixture's .ptx and .sass are tracked (see fma/); the .cubin it
+# passes through is machine-specific and derived, like every other one here.
+tools/ptxas_tval/**/*.cubin
