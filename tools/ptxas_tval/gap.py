@@ -18,6 +18,27 @@ TWO COLUMNS, and they answer different things.
                the feature list and the non-opcode errors it drags behind it
                are contaminated by the skipping.  Reported separately and
                never mixed into the opcode census.
+
+TWO WAYS THIS CENSUS UNDER-REPORTS, both measured rather than supposed.
+
+  A PREDICATED instruction whose predicate name the executor does not
+  recognise is attributed to the PREDICATE, not to the opcode behind it.  So
+  `@%rt_p0 bra $L;` is counted as `@%rt_p0` and the `bra` is invisible.  That
+  hides control flow in the six coprocessor kernels (`%rt_p0`/`%qp0`).
+
+  A SETUP failure yields an EMPTY opcode gap, because no instruction ever
+  executes.  That reads as "nothing unmodelled" and sorts to the top of a cost
+  ranking.  Five kernels are in that state (`2 .shared arrays`): four
+  `gemm_fp8_*` and `rmsnorm_residual_4096`.  `--rank` flags them; the
+  per-kernel output shows it only in the `first=` column, easy to skim past.
+
+  The two together are why `bra` reads as 37 kernels where a textual scan says
+  48: 6 hidden by predication, 5 by setup failure.  Dropping predication alone
+  from the textual scan gives 42, not 37 -- which is how the split was
+  measured rather than assumed.  `loopgap.has_control_flow` scans the text.
+
+`--rank` adds the aggregation the per-kernel output cannot give: cost per
+kernel AND reach per opcode.  See `rank()`.
 """
 import sys, re, glob, os
 from z3 import *
@@ -87,12 +108,62 @@ def census(kernel):
         r[side] = (first, opgap, other)
     return r
 
+def rank(rows):
+    """Two rankings of one census, because they answer different questions.
+
+    COST  is what it takes to validate a given kernel.  It is the number the
+          roadmap has always quoted, and on its own it picks the CHEAPEST
+          kernel, which is not the same as a useful one.
+    REACH is how many kernels an opcode blocks.  Nothing had computed it, and
+          it re-orders the queue: `ptx_subword_ops` is the cheapest kernel in
+          the corpus (2 PTX + 1 SASS opcodes, no contaminated errors) and every
+          one of those three blocks exactly ONE kernel, so closing it buys
+          1/66 and no leverage.
+
+    A SETUP FAILURE IS FLAGGED, NEVER SHOWN AS A GAP OF ZERO.  When the census
+    cannot build the initial state it executes no instruction, so it reports an
+    empty opcode set -- which reads as "nothing unmodelled" and sorts to the
+    top of a cost ranking.  Five corpus kernels are in exactly that state
+    (`2 .shared arrays`), and an unflagged ranking calls them the cheapest work
+    available."""
+    import collections
+    reach = collections.Counter()
+    cost = []
+    for k, r in rows:
+        gp, gs = r['ptx'][1], r['sass'][1]
+        setup = [side for side in ('ptx', 'sass') if str(r[side][0]).startswith('setup:')]
+        for o in gp + gs:
+            reach[o] += 1
+        cost.append((len(gp) + len(gs), k, gp, gs, setup))
+    cost.sort()
+    print('=== COST: kernels by total opcode gap ===')
+    for tot, k, gp, gs, setup in cost:
+        tag = f'  [SETUP FAILURE on {"+".join(setup)} -- this gap is not a measurement]' if setup else ''
+        print(f'{tot:3d}  {k}{tag}')
+        if gp: print(f'       ptx : {", ".join(gp)}')
+        if gs: print(f'       sass: {", ".join(gs)}')
+    print('\n=== REACH: opcodes by number of kernels blocked ===')
+    for o, n in reach.most_common():
+        print(f'{n:3d}  {o}')
+    return cost, reach
+
+
 if __name__ == '__main__':
-    ks = sys.argv[1:] or sorted(os.path.basename(x)[:-4] for x in glob.glob('corpus/*.ptx'))
+    args = [a for a in sys.argv[1:] if a != '--rank']
+    want_rank = '--rank' in sys.argv[1:]
+    ks = args or sorted(os.path.basename(x)[:-4] for x in glob.glob('corpus/*.ptx'))
+    rows = []
     for k in ks:
         r = census(k)
-        for side in ('ptx','sass'):
-            first, opgap, other = r[side]
-            print(f'{k:34s} {side:4s} first={first}')
-            print(f'{"":34s}      opcode gap ({len(opgap)}): {", ".join(opgap) if opgap else "-"}')
-            if other: print(f'{"":34s}      other ({len(other)}, contaminated): {"; ".join(other[:3])}')
+        rows.append((k, r))
+        if not want_rank:
+            for side in ('ptx','sass'):
+                first, opgap, other = r[side]
+                print(f'{k:34s} {side:4s} first={first}')
+                print(f'{"":34s}      opcode gap ({len(opgap)}): {", ".join(opgap) if opgap else "-"}')
+                if other: print(f'{"":34s}      other ({len(other)}, contaminated): {"; ".join(other[:3])}')
+    if want_rank:
+        # FLOOR.  A census that examined nothing ranks nothing, perfectly.
+        if not rows:
+            print('FAIL: examined no kernels -- there is nothing to rank'); sys.exit(1)
+        rank(rows)
