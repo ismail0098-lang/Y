@@ -67,6 +67,14 @@ repository's own investigation documents contradict.
   substitutes that kernel now **emits its own certificate** beside the `.ll`.
   What the verified kernel *costs* is measured separately and is
   [in its own section](#what-the-verified-kernel-costs) — it is not free.
+- **Translation validation against `ptxas`**: six GPU kernels — including one
+  across a loop and one using shared memory and a barrier — proved to store
+  exactly what their PTX stores, by symbolically executing the PTX and the SASS
+  `ptxas` emitted from it and discharging 282 obligations in z3. It is a
+  by-hand research tool (`tools/ptxas_tval/`), not a CI gate, and it covers one
+  compilation of one kernel at a time. The negative control is in the table:
+  the same kernel *without* `.rn` is refuted, because `ptxas` contracts to
+  `FFMA`. [Details](docs/ptxas_translation_validation.md).
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
   arkworks crates are `[dev-dependencies]` and are used as an *independent
@@ -1358,6 +1366,61 @@ from that precondition found it.
 The method is written up in
 **[The process: taking a kernel from *fast* to *verified*](docs/verified_kernel_process.md)**.
 
+### Translation validation: removing `ptxas` from the trusted base
+
+Those proofs stop at the IR. The trust boundary printed into every emitted
+certificate says so, and names the remedy in the same breath — *"translation
+validation — checking THIS object against THIS IR per compilation, which is not
+performed."*
+
+`tools/ptxas_tval/` performs it, on the GPU side. It symbolically executes a
+kernel's PTX and the SASS `ptxas` produced from that exact file, and asks z3
+whether the two can ever store different values. **An opcode neither executor
+models is a hard error, never a guess.**
+
+| kernel | verdict | obligations | time | |
+|---|---|---|---|---|
+| `fma/rn` | **VALIDATED** | 9 | 0.0 s | float, contraction forbidden by `.rn` |
+| `fma/plain` | UNPROVED | 10 | 0.0 s | **the control** — `store 0: sat` |
+| `bn254_permute` | **VALIDATED** | 30 | 0.2 s | branching `ptxas` invented |
+| `bn254_sub_vec` | **VALIDATED** | 88 | 9.4 s | |
+| `ptx_carry_chain` | **VALIDATED** | 123 | 24.6 s | 24 predicated instructions |
+| `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.0 s | across a **loop** |
+| `smem_roundtrip` | **VALIDATED** | 18 | 0.2 s | **shared memory**, 1 barrier |
+
+Six kernels, 282 obligations. The `plain` row is what the rest are worth: it is
+the same kernel as `rn` without the `.rn` suffixes, `ptxas` contracts
+`mul.f32`+`add.f32` into one `FFMA` that rounds once where PTX rounds twice, and
+the validator answers `sat` with a counterexample. That is a freedom the ISA
+grants, not a `ptxas` bug — and a validator that always said VALIDATED would
+report every other row identically.
+
+**The binding constraint is the solver, not opcode coverage**, and measuring that
+cancelled the feature the measurement was taken to justify. `ptx_carry_chain`
+validates with 29 multiplies in 24 s; `bn254_fr_mul_fast` has 65 and is UNPROVED
+after 9,705 s — with 261 of 276 cut points closed and **no `sat`**. Asking the
+counterfactual (*if every opcode were modelled, what could the solver close?*)
+puts **52 of 67 kernels under that wall** using barriers as cut points — and
+inverts the ranking: the 23 tensor-core GEMMs look deepest and are tractable at
+39–61 multiplies per barrier region, while the field kernels look shallow and run
+244–717. "33 kernels are behind shared memory" was false; shared memory alone
+unlocks exactly one, a test fixture. It was still right to build, because it is
+what *creates* the cut points the GEMMs need.
+
+Also measured, and reported separately because they are different claims:
+`rcp.approx` differs from `rcp.rn` on **13.23%** of inputs on the device and
+`div.approx` from `div.rn` on **27.30%** — so identifying a PTX macro-op with the
+MUFU that seeds it, the cheap way to "support floats", would validate 17 kernels
+for the wrong reason. And `ptxas` implements 32-bit `div.u32`/`rem.u32` through
+the *float* unit (`I2F.U32.RP`, `MUFU.RCP`, `F2I.TRUNC`).
+
+Nothing here is CI-gated: it needs the CUDA toolkit, z3 and minutes to hours per
+kernel. It covers one compilation of one kernel at one architecture and
+optimisation level — which is the point of the technique and also its limit. The
+CPU-side trust item (`clang`, its optimiser, the assembler and the linker) stays
+open. Full write-up, including what is *not* claimed:
+**[Translation validation for `ptxas`](docs/ptxas_translation_validation.md)**.
+
 ### A machine-checked proof of the ZK control-flow lowering
 
 `proofs/ZkControlFlow.v` formalises the `return` / `if` / sequencing fragment of
@@ -1599,6 +1662,9 @@ src/                       Rust bootstrap compiler
 self_hosted/    compiler phases rewritten in Y (.ysu); not the default build path
 proofs/         Rocq proofs — ExactGemmSchedule.v is GENERATED
 tests/          test programs, benchmarks, PTX assembly gates
+tools/          measurement and analysis harnesses (Python), run by hand
+  ptxas_tval/     PTX-vs-SASS translation validator — see docs/
+  exact_gemm_bench/  the three-arm GEMM benchmark this README quotes
 circomlib/      vendored circomlib (upstream 2.0.5)
 docs/           language spec and design notes
 ```

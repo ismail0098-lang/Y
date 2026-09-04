@@ -1,0 +1,101 @@
+	.target	sm_89
+
+	.elftype	@"ET_EXEC"
+
+
+//--------------------- .text.k                   --------------------------
+	.section	.text.k,"ax",@progbits
+	.sectioninfo	@"SHI_REGISTERS=12"
+	.align	128
+        .global         k
+        .type           k,@function
+        .size           k,(.L_x_5 - k)
+        .other          k,@"STO_CUDA_ENTRY STV_DEFAULT"
+k:
+.text.k:
+        /*0000*/                   IMAD.MOV.U32 R1, RZ, RZ, c[0x0][0x28] ;
+        /*0010*/                   S2R R3, SR_TID.X ;
+        /*0020*/                   ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x170], PT ;
+        /*0030*/                   ULDC.64 UR6, c[0x0][0x118] ;
+        /*0040*/                   MOV R0, RZ ;
+        /*0050*/                   IMAD.MOV.U32 R7, RZ, RZ, RZ ;
+        /*0060*/                   LEA R2, P1, R3, c[0x0][0x168], 0x3 ;
+        /*0070*/                   LEA.HI.X R3, R3, c[0x0][0x16c], RZ, 0x3, P1 ;
+        /*0080*/              @!P0 BRA `(.L_x_0) ;
+        /*0090*/                   MOV R6, RZ ;
+        /*00a0*/                   ISETP.GE.U32.AND P1, PT, R6, c[0x0][0x170], PT ;
+        /*00b0*/               @P1 IMAD.MOV.U32 R6, RZ, RZ, 0x1 ;
+        /*00c0*/               @P1 MOV R5, 0x3 ;
+        /*00d0*/               @P1 IMAD R9, R7, 0x3, RZ ;
+        /*00e0*/                   ISETP.GE.U32.AND P0, PT, R6.reuse, c[0x0][0x170], PT ;
+        /*00f0*/                   IADD3 R4, -R6, c[0x0][0x170], RZ ;
+        /*0100*/                   ISETP.LE.U32.OR P0, PT, R4, 0x3, P0 ;
+        /*0110*/               @P1 IMAD.WIDE.U32 R4, R0, R5, c[0x2][0x0] ;
+        /*0120*/               @P1 IMAD.IADD R7, R5, 0x1, R9 ;
+        /*0130*/               @P1 MOV R0, R4 ;
+        /*0140*/                   PLOP3.LUT P1, PT, P1, PT, PT, 0x8, 0x0 ;
+        /*0150*/               @P0 BRA `(.L_x_1) ;
+        /*0160*/                   PLOP3.LUT P1, PT, PT, PT, PT, 0x8, 0x0 ;
+        /*0170*/                   IMAD.MOV.U32 R9, RZ, RZ, 0x3 ;
+        /*0180*/                   UMOV UR4, 0x3 ;
+        /*0190*/                   ULDC UR5, c[0x0][0x170] ;
+        /*01a0*/                   UIADD3 UR4, -UR4, UR5, URZ ;
+.L_x_2:
+        /*01b0*/                   IMAD R7, R7, 0x3, RZ ;
+        /*01c0*/                   IADD3 R6, R6, 0x4, RZ ;
+        /*01d0*/                   IMAD.WIDE.U32 R4, R0, R9, c[0x2][0x0] ;
+        /*01e0*/                   ISETP.GE.U32.AND P0, PT, R6, UR4, PT ;
+        /*01f0*/                   IADD3 R0, R5, R7, RZ ;
+        /*0200*/                   IMAD.WIDE.U32 R4, R4, R9, c[0x2][0x0] ;
+        /*0210*/                   IMAD R7, R0, 0x3, RZ ;
+        /*0220*/                   IMAD.IADD R0, R5, 0x1, R7 ;
+        /*0230*/                   IMAD.WIDE.U32 R4, R4, R9, c[0x2][0x0] ;
+        /*0240*/                   IMAD R7, R0, 0x3, RZ ;
+        /*0250*/                   IADD3 R0, R5, R7, RZ ;
+        /*0260*/                   IMAD.WIDE.U32 R4, R4, R9, c[0x2][0x0] ;
+        /*0270*/                   IMAD R7, R0, 0x3, RZ ;
+        /*0280*/                   IMAD.MOV.U32 R0, RZ, RZ, R4 ;
+        /*0290*/                   IADD3 R7, R5, R7, RZ ;
+        /*02a0*/              @!P0 BRA `(.L_x_2) ;
+.L_x_1:
+        /*02b0*/                   ISETP.GE.U32.AND P0, PT, R6.reuse, c[0x0][0x170], PT ;
+        /*02c0*/                   IADD3 R4, -R6, c[0x0][0x170], RZ ;
+        /*02d0*/                   ISETP.LE.U32.OR P0, PT, R4, 0x1, P0 ;
+        /*02e0*/               @P0 BRA `(.L_x_3) ;
+        /*02f0*/                   IMAD.MOV.U32 R9, RZ, RZ, 0x3 ;
+        /*0300*/                   PLOP3.LUT P1, PT, PT, PT, PT, 0x8, 0x0 ;
+        /*0310*/                   IMAD R7, R7, 0x3, RZ ;
+        /*0320*/                   IADD3 R6, R6, 0x2, RZ ;
+        /*0330*/                   IMAD.WIDE.U32 R4, R0, R9, c[0x2][0x0] ;
+        /*0340*/                   IADD3 R7, R5, R7, RZ ;
+        /*0350*/                   IMAD.WIDE.U32 R4, R4, R9, c[0x2][0x0] ;
+        /*0360*/                   IMAD R7, R7, 0x3, RZ ;
+        /*0370*/                   IMAD.MOV.U32 R0, RZ, RZ, R4 ;
+        /*0380*/                   IADD3 R7, R5, R7, RZ ;
+.L_x_3:
+        /*0390*/                   ISETP.GE.U32.AND P1, PT, R6, c[0x0][0x170], !P1 ;
+        /*03a0*/              @!P1 IMAD.MOV.U32 R5, RZ, RZ, 0x3 ;
+        /*03b0*/              @!P1 IMAD R9, R7, 0x3, RZ ;
+        /*03c0*/              @!P1 IMAD.WIDE.U32 R4, R0, R5, c[0x2][0x0] ;
+        /*03d0*/              @!P1 IMAD.MOV.U32 R0, RZ, RZ, R4 ;
+        /*03e0*/              @!P1 IADD3 R7, R5, R9, RZ ;
+.L_x_0:
+        /*03f0*/                   MOV R4, R0 ;
+        /*0400*/                   IMAD.MOV.U32 R5, RZ, RZ, R7 ;
+        /*0410*/                   STG.E.64 [R2.64], R4 ;
+        /*0420*/                   EXIT ;
+.L_x_4:
+        /*0430*/                   BRA `(.L_x_4);
+        /*0440*/                   NOP;
+        /*0450*/                   NOP;
+        /*0460*/                   NOP;
+        /*0470*/                   NOP;
+        /*0480*/                   NOP;
+        /*0490*/                   NOP;
+        /*04a0*/                   NOP;
+        /*04b0*/                   NOP;
+        /*04c0*/                   NOP;
+        /*04d0*/                   NOP;
+        /*04e0*/                   NOP;
+        /*04f0*/                   NOP;
+.L_x_5:

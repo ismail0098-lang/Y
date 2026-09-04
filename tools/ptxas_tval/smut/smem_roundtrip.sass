@@ -1,0 +1,57 @@
+	.target	sm_89
+
+	.elftype	@"ET_EXEC"
+
+
+//--------------------- .text.smem_roundtrip      --------------------------
+	.section	.text.smem_roundtrip,"ax",@progbits
+	.sectioninfo	@"SHI_REGISTERS=14"
+	.align	128
+        .global         smem_roundtrip
+        .type           smem_roundtrip,@function
+        .size           smem_roundtrip,(.L_x_1 - smem_roundtrip)
+        .other          smem_roundtrip,@"STO_CUDA_ENTRY STV_DEFAULT"
+smem_roundtrip:
+.text.smem_roundtrip:
+        /*0000*/                   IMAD.MOV.U32 R1, RZ, RZ, c[0x0][0x28] ;
+        /*0010*/                   S2R R2, SR_TID.X ;
+        /*0020*/                   ULDC UR4, c[0x0][0x168] ;
+        /*0030*/                   USHF.L.U32 UR4, UR4, 0x2, URZ ;
+        /*0040*/                   S2R R3, SR_CTAID.X ;
+        /*0050*/                   IMAD R0, R3, 0x100, R2 ;
+        /*0060*/                   IMAD.SHL.U32 R4, R0, 0x4, RZ ;
+        /*0070*/                   IADD3 R5, R4.reuse, 0x1, RZ ;
+        /*0080*/                   IADD3 R6, R4.reuse, 0x2, RZ ;
+        /*0090*/                   IADD3 R7, R4.reuse, 0x3, RZ ;
+        /*00a0*/                   ISETP.GE.U32.AND P0, PT, R4, UR4, PT ;
+        /*00b0*/                   STS.128 [R2.X16], R4 ;
+        /*00c0*/                   BAR.SYNC.DEFER_BLOCKING 0x0 ;
+        /*00d0*/               @P0 EXIT ;
+        /*00e0*/                   IADD3 R0, -R2, 0xff, RZ ;
+        /*00f0*/                   ULDC.64 UR4, c[0x0][0x118] ;
+        /*0100*/                   LEA R2, P0, R4, c[0x0][0x160], 0x2 ;
+        /*0110*/                   LDS.128 R8, [R0.X16] ;
+        /*0120*/                   IMAD.MOV.U32 R3, RZ, RZ, R8 ;
+        /*0130*/                   IADD3 R5, R3, 0x7, RZ ;
+        /*0140*/                   LEA.HI.X R3, R4, c[0x0][0x164], RZ, 0x2, P0 ;
+        /*0150*/                   IMAD.MOV.U32 R8, RZ, RZ, R5 ;
+        /*0160*/                   STG.E.128 [R2.64], R8 ;
+        /*0170*/                   EXIT ;
+.L_x_0:
+        /*0180*/                   BRA `(.L_x_0);
+        /*0190*/                   NOP;
+        /*01a0*/                   NOP;
+        /*01b0*/                   NOP;
+        /*01c0*/                   NOP;
+        /*01d0*/                   NOP;
+        /*01e0*/                   NOP;
+        /*01f0*/                   NOP;
+        /*0200*/                   NOP;
+        /*0210*/                   NOP;
+        /*0220*/                   NOP;
+        /*0230*/                   NOP;
+        /*0240*/                   NOP;
+        /*0250*/                   NOP;
+        /*0260*/                   NOP;
+        /*0270*/                   NOP;
+.L_x_1:
