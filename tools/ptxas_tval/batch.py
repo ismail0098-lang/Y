@@ -19,6 +19,16 @@ def mk(mul, layout, ab=None):
         sym[nm+'_lo'] = BitVec(nm+'_lo',32); sym[nm+'_hi'] = BitVec(nm+'_hi',32)
     cb = params.cbank(layout)
     cb[0x28]  = 'stackptr'; cb[0x118] = 'gridc_lo'; cb[0x11c] = 'gridc_hi'
+    # Launch geometry.  These offsets are a DRIVER ABI fact, not a `ptxas` fact,
+    # and establishing them by reading `ptxas` output would use the translator
+    # under test to license a fact used to validate it.  `cbank_abi.c` launches
+    # a kernel with six distinct extents and reads them back from the DEVICE:
+    #   0x00/04/08 = ntid.{x,y,z}   0x0c/10/14 = nctaid.{x,y,z}   (sm_89)
+    # `batch.mk` already carried these symbols; only the map was missing, so a
+    # kernel reading gridDim refused on an operand the vocabulary could name.
+    for i, ax in enumerate('xyz'):
+        cb[0x00 + 4*i] = f'ntid_{ax}'
+        cb[0x0c + 4*i] = f'nctaid_{ax}'
     sym['cbank'] = cb
     sym['mem']=Array('mem',BitVecSort(64),BitVecSort(32)); sym['mul']=mul
     import fpmode; sym['fp']=fpmode.factory()

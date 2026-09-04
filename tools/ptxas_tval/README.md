@@ -41,6 +41,8 @@ ones the published results were measured on.
 | `tval.py` `loopval.py` `smemval.py` | drivers: straight-line, loop, shared memory |
 | `cfg.py` `loopcfg.py` `params.py` | control-flow and signature parsing |
 | `scope2.py` `depth.py` `tractable.py` `smemdepth.py` `barregion.py` | measurement |
+| `gap.py` | the dynamic gap — what the executor genuinely refuses, not its first refusal |
+| `cbank_abi.py` `cbank_abi.c` | referee the const-bank ABI against `ptxas` **and** the device |
 | `fpclass.py` `expand.py` `contract.py` `unroll.py` `olevel.py` `muls.py` | measurement |
 | `gmut.sh` `lmut.sh` `smut.sh` + `muts/` | mutation tables; **the control row is first** |
 | `mkbase.sh` `restore.sh` | baseline snapshot/restore for the mutation harnesses |
