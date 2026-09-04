@@ -63,6 +63,16 @@ def run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     # something the compiler never promised, and the counterexamples are all
     # of that shape.
     pre=[ULT(symW['tid_x'],BitVecVal(1024,32)), ULT(symW['ctaid_x'],BitVecVal(1<<24,32))]
+    # A kernel that stores NOTHING is not a validation success, it is a kernel
+    # with no obligations -- and the whole point of the `fma/plain` control is
+    # that a validator which always says VALIDATED reports every row alike.
+    # This used to be an IndexError one line below, and a crash in a validator
+    # reads exactly like a missing feature (twice already in this repo).
+    if not Sw.stores or not Pw.stores:
+        return ('REFUSED',
+                f'this kernel stores nothing (ptx {len(Pw.stores)}, sass '
+                f'{len(Sw.stores)}) -- there is nothing to prove equal, '
+                f'{time.time()-t_start:.1f}s', 0)
     pre.append(Sw.stores[0][2])
 
     # Propose the pairing by simulation (proposes; proves nothing).  Match on

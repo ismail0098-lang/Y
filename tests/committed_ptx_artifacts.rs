@@ -28,34 +28,33 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Every `.ptx` tracked in the repo, found on disk rather than through git so
-/// the test needs no subprocess.
+/// Every `.ptx` **tracked in the repo**, from `git ls-files`.
+///
+/// This used to walk the filesystem from the repo root, excluding only
+/// `target/`, `.git/` and `node_modules/`, with a comment saying it avoided a
+/// subprocess. Two things were wrong with that. The file **already** runs `git
+/// ls-files` in `committed_with_extension` for the `.ll` path, so there were
+/// two notions of "committed" in one file and no subprocess was being saved;
+/// and the walk picked up `tools/ptxas_tval/corpus/`, which is **generated and
+/// gitignored** — 66 byte-copies of `tests/*.ptx` that the validator's
+/// `build_corpus.sh` writes. They passed every assertion here precisely
+/// because they are copies, so nothing failed and the docstring's claim was
+/// quietly false from the moment that tool landed.
+///
+/// One notion of committed, asked of git, used by both.
 fn committed_ptx() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![repo_root()];
-    while let Some(dir) = stack.pop() {
-        let rd = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd,
-            Err(_) => continue,
-        };
-        for entry in rd.flatten() {
-            let p = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if p.is_dir() {
-                // `target/` holds build output and `.git/` holds objects;
-                // neither is a committed source artifact.
-                if name == "target" || name == ".git" || name == "node_modules" {
-                    continue;
-                }
-                stack.push(p);
-            } else if name.ends_with(".ptx") {
-                out.push(p);
-            }
-        }
-    }
-    out.sort();
-    out
+    let out = Command::new("git")
+        .args(["ls-files", "*.ptx"])
+        .current_dir(repo_root())
+        .output()
+        .expect("git ls-files");
+    let mut v: Vec<PathBuf> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| repo_root().join(l.trim()))
+        .filter(|p| p.exists())
+        .collect();
+    v.sort();
+    v
 }
 
 /// A line that is not a directive, a comment, a brace or a parameter - i.e.
@@ -228,11 +227,29 @@ fn committed_with_extension(ext: &str) -> Vec<PathBuf> {
 fn every_committed_artifact_still_has_a_source_that_compiles() {
     let mut refused = Vec::new();
     let mut compiled = 0usize;
+    let mut coprocessor_checked = 0usize;
     let dir = std::env::temp_dir().join(format!("y_ptx_sources_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let mut artifacts: Vec<(PathBuf, &str)> =
-        committed_ptx().into_iter().map(|p| (p, "--emit-ptx")).collect();
+    let mut artifacts: Vec<(PathBuf, &str)> = committed_ptx()
+        .into_iter()
+        // `<stem>.coprocessor.ptx` is emitted by a DIFFERENT backend and names
+        // its source `<stem>.ysu`, not `<stem>.coprocessor.ysu`. The pairing
+        // below is `with_extension("ysu")`, which asks for the latter, so all
+        // seven coprocessor artifacts were SKIPPED - and one of them,
+        // `hello.coprocessor.ptx`, was a `ret;`-only kernel the backend now
+        // refuses to emit at all ("no RT Core work and no Tensor Core work, so
+        // there is nothing to fuse"). A gate written for exactly the stale-
+        // artifact class, with a blind spot created by a filename convention.
+        .map(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            if name.ends_with(".coprocessor.ptx") {
+                (p, "--emit-coprocessor")
+            } else {
+                (p, "--emit-ptx")
+            }
+        })
+        .collect();
     // `.ll` is covered by the same argument and had its own instance:
     // `tests/naive_gemm_f32.ll` was committed declaring `block_idx_y` and
     // friends as EXTERNS - it assembles and dies at link with `undefined
@@ -241,7 +258,17 @@ fn every_committed_artifact_still_has_a_source_that_compiles() {
     // committed `.ptx`.
     artifacts.extend(committed_with_extension("ll").into_iter().map(|p| (p, "--emit-llvm")));
     for (art, flag) in artifacts {
-        let ysu = art.with_extension("ysu");
+        // Strip EVERY artifact suffix, not just the last one: `.coprocessor` is
+        // part of the artifact's name, not part of the source's.
+        let stem = art
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .trim_end_matches(".ptx")
+            .trim_end_matches(".ll")
+            .trim_end_matches(".coprocessor")
+            .to_string();
+        let ysu = art.with_file_name(format!("{stem}.ysu"));
         if !ysu.exists() {
             continue; // generated fixtures without a checked-in source
         }
@@ -251,6 +278,9 @@ fn every_committed_artifact_still_has_a_source_that_compiles() {
         // repo has already been bitten by exactly that ("a test harness that
         // compiles the same .ysu from several threads races on the .ptx path",
         // which passed for several runs before failing).
+        if flag == "--emit-coprocessor" {
+            coprocessor_checked += 1;
+        }
         let tmp = dir.join(ysu.file_name().unwrap());
         std::fs::copy(&ysu, &tmp).expect("copy fixture");
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
@@ -279,6 +309,27 @@ fn every_committed_artifact_still_has_a_source_that_compiles() {
             refused.push(format!("{} ({flag}) -> {why}", rel(&ysu)));
         }
     }
+    // NON-VACUITY, and it is load-bearing rather than decorative: the artifact
+    // that exposed the blind spot has been DELETED, so reverting the pairing
+    // above would otherwise be invisible - there would be nothing left for the
+    // gate to fail on. This asserts the coprocessor family is actually reached.
+    let committed_coprocessor = committed_ptx()
+        .iter()
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".coprocessor.ptx")
+        })
+        .count();
+    assert!(
+        committed_coprocessor > 0 && coprocessor_checked == committed_coprocessor,
+        "{coprocessor_checked} of {committed_coprocessor} committed \
+         `*.coprocessor.ptx` were paired with a source - the rest were SKIPPED, \
+         which is exactly the blind spot this pairing was widened to close \
+         (`with_extension(\"ysu\")` asks for `<stem>.coprocessor.ysu`, which \
+         never exists)"
+    );
     assert!(
         compiled > 40,
         "only {compiled} sources were actually compiled - either the .ysu/.ptx \

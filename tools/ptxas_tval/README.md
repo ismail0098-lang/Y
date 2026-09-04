@@ -26,7 +26,7 @@ python3 smemval.py smut/smem_roundtrip.ptx smut/smem_roundtrip.sass 60 wide
 ```
 
 `corpus/` and `o1/` are generated and not committed: a `.cubin` is a machine-specific ELF
-and a `.sass` is a disassembly of one. All 67 rebuild byte-identically to the
+and a `.sass` is a disassembly of one. All 66 rebuild byte-identically to the
 ones the published results were measured on.
 
 ## Layout
@@ -46,7 +46,7 @@ ones the published results were measured on.
 | `fpclass.py` `expand.py` `contract.py` `unroll.py` `olevel.py` `muls.py` | measurement |
 | `gmut.sh` `lmut.sh` `smut.sh` + `muts/` | mutation tables; **the control row is first** |
 | `mkbase.sh` `restore.sh` | baseline snapshot/restore for the mutation harnesses |
-| `fma/ div/ loop/ smut/ synth/` | small hand-built fixtures, including the negative controls |
+| `fma/ div/ loop/ smut/ synth/` | small hand-built fixtures, including the negative controls and `synth/nostore` (a kernel that stores nothing) |
 
 ## The row that makes the table mean something
 

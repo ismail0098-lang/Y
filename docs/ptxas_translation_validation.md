@@ -128,7 +128,7 @@ is a solver wall between 29 and 65 multiplies per query.
 `tractable.py` asks the counterfactual — *if every opcode were modelled, how many
 kernels could the solver close?* — using barriers as cut points:
 
-**52 of 67 fall under the wall. 15 are over it.**
+**51 of 66 fall under the wall. 15 are over it.**
 
 And the ranking inverts. The 23 FP16 tensor-core GEMM kernels look like the
 deepest bucket — five unmodelled features each — and are the **tractable** one:
@@ -160,15 +160,15 @@ kernel.
 
 ## Where the corpus stands
 
-`scope2.py`, re-run 2026-09-04 over all 67 kernels the repository ships PTX for:
+`scope2.py`, re-run 2026-09-04 over all 66 kernels the repository ships PTX for:
 
 ```
-PAST BOTH EXECUTORS: 8 / 67
+PAST BOTH EXECUTORS: 8 / 66
 
    23  cp.async.cg.shared.global      the FP16 tensor-core GEMMs
    12  bra                            multi-block control flow
     8  (past both executors)
-    7  crash: invalid literal for int()   a residual PARSER defect, not a gap
+    6  crash: invalid literal for int()   a residual PARSER defect, not a gap
     5  more than one .shared array
     4  I2F.U32.RP                     32-bit integer division, via the float unit
     3  cvt.rn.f32.s32
@@ -176,7 +176,7 @@ PAST BOTH EXECUTORS: 8 / 67
     3  cvt.u8.u32 / cvt.f64.f32 / ld.global.ca.f32
 ```
 
-The seven-kernel `invalid literal for int()` bucket is a **crash**, not a
+The six-kernel `invalid literal for int()` bucket is a **crash**, not a
 refusal, and it is listed as a defect rather than as a blocker. A crash in a
 census reads exactly like a missing feature, which is how two earlier crash
 classes hid: `'NoneType' object has no attribute 'group'` was five unguarded
@@ -241,25 +241,93 @@ feature in front of the tractable bucket, where all 23 now refuse". That is true
 of the PTX side and of first-refusal reporting, and it reads as *one feature
 away*, which is wrong by an order of magnitude.
 
-### The front of the queue is a naming assumption, not a feature
+### The front of the queue is a naming assumption — and it was measured, then cancelled
 
-The kernel closest to passing is not a GEMM. `hello.coprocessor` has a **zero**
-opcode gap on both sides and still does not run, and the coprocessor family
-behind it is blocked by two lexical assumptions in the PTX executor:
+The PTX executor makes two lexical assumptions that have nothing to do with
+semantics:
 
-- predicates must be named `%p<digits>` — `re.match(r'^@(!?%p\d+)')`. These
-  kernels use `%qp0` and `%rt_p0`, so the whole predicated instruction is read
-  as an unknown opcode.
+- predicates must be named `%p<digits>` — `re.match(r'^@(!?%p\d+)')`. The
+  coprocessor kernels use `%qp0` and `%rt_p0`, so the whole predicated
+  instruction is read as an unknown opcode.
 - registers must be named `%r<n>` / `%rd<n>` / `%f<n>` — the register file is
   keyed by `int(name[2:])`. A named virtual register like `rt_A_ptr` gives
   `int('A_ptr')`, which is the `invalid literal for int()` crash class above.
 
-Both fail closed, and neither is a missing semantics. Broadening the predicate
-regex alone takes their PTX opcode gap 2 → 0 and lands them on the second one, so
-they are one repair, not two: the register file has to become name-keyed. That
-ripples into `run_lines`' `(kind, i)` region seeding, which the loop validator
-depends on — a refactor with its own mutation table, not a drive-by. It is
-recorded here rather than done.
+Both fail closed, and neither is a missing semantics. They are one repair, not
+two: the register file has to become **name-keyed**, with the file taken from
+the `.reg` declarations rather than from the spelling — a kernel may write
+`.reg .b32 %rt_r<100>;` or `.reg .b64 rt_A_ptr;`, the second with no `%` at
+all, and `ptxas` accepts it.
+
+**It was built as a probe and the measurement cancelled it.** Keying by name and
+resolving the file from the declarations keeps every existing proof term
+byte-identical (the undef symbol is the name minus `%`, so `%r5` is still
+`ptx_undef_r5`) and all seven standing results reproduce unchanged. What it buys
+is the question:
+
+```
+hello.coprocessor      clean on both sides -- and it stores NOTHING
+coprocessor_test       still needs `bra` (a loop); SASS has its own int() crash
+coprocessor_attention  needs a loop, F2FP.F16.F32.PACK_AB, shared address forms
+```
+
+`hello.coprocessor` was the kernel with a zero opcode gap on both sides, and it
+turned out to be the **empty-artifact** kernel this repository already documents:
+`--emit-coprocessor` with 0 RT and 0 Tensor nodes emitting a `ret;` body under a
+fixed parameter list. It was closest to passing **because it does nothing** —
+`tractable.py` counted it under the solver wall for the same reason, at zero
+multiplies. Validating it would have been the `fma/plain` lesson in reverse: a
+result a validator that always says VALIDATED reports identically.
+
+So the refactor was reverted rather than landed. It also does not come free —
+`loopval.py` recovers a region's live-ins by parsing the undef symbol *name*, and
+with arbitrary names that encoding is ambiguous (`ptx_undef_rt_rd6` reads as
+kind `r`), so doing it properly means threading the declaration map through
+`run_lines` and the selector machinery. Paying that to reach a kernel with no
+stores is the wrong trade. **Recorded, with what it costs and what it buys, so
+the next reader does not re-derive it.**
+
+### The probe condemned a committed artifact, and the gate for that had a blind spot
+
+`tests/hello.coprocessor.ptx` was checked in, and the compiler **refuses to emit
+it**: *"this source has no RT Core work and no Tensor Core work, so there is
+nothing to fuse."* That is the third staleness class this repository names — an
+artifact no run of the compiler can reproduce — and there is a gate for exactly
+it, `every_committed_artifact_still_has_a_source_that_compiles`.
+
+The gate pairs an artifact with its source by `with_extension("ysu")`. For
+`hello.coprocessor.ptx` that asks for `hello.coprocessor.ysu`, which does not
+exist, so it was skipped — **and so were all seven `*.coprocessor.ptx`**, because
+they are emitted by a different backend and name their source `<stem>.ysu`. A
+gate written for the stale-artifact class, with a blind spot created by a
+filename convention. Extended to strip `.coprocessor` and to pass
+`--emit-coprocessor`; it then failed on exactly one of the seven, naming the
+source, the flag and the backend's own reason. The other six compile.
+
+`build_corpus.sh` had the same shape one layer down: it wrote without cleaning,
+so a source deleted from `tests/` left its artifact behind and the corpus still
+reported 67. It removes `corpus/` and `o1/` first now — found by deleting the
+file and watching the count not move.
+
+**What moved, and what did not.** The corpus is 66; the 66 survivors rebuild
+**byte-identically**. `8 / 66` past both executors (the numerator does not move —
+`hello.coprocessor` was never in it, it crashed on the naming). `51 of 66` under
+the wall, from 52 of 67. The `invalid literal for int()` bucket is 6, from 7.
+
+Two published figures were also re-derived rather than transcribed. The corpus
+instruction total is **89,400**, from 89,416 — and the recomputation reproduces
+89,416 on the old corpus *exactly*, which is what says the counting is right. The
+form count does **not** reproduce: 129 forms / 66 base opcodes was published and
+every convention tried gives **127 / 64**, on both corpora. The offset is exactly
+two either way, and `nvdisasm` emits header lines (`ET_EXEC`, `STO_CUDA_ENTRY`)
+that a pattern not anchored on the `/*addr*/` prefix reads as opcodes. The
+instruction total is far more sensitive to a regex difference than a set size is,
+so the total agreeing and the set not is evidence the anchored pattern is the
+right one.
+
+`tval.py` crashed with an `IndexError` on a kernel that stores nothing. It
+reports `REFUSED ... this kernel stores nothing` now — a crash in a validator
+reads exactly like a missing feature, which has happened twice here already.
 
 ### A const-bank operand was masking the gap, and the ABI fact needed a device run
 
@@ -459,7 +527,7 @@ python3 smemval.py smut/smem_roundtrip.ptx smut/smem_roundtrip.sass 60 wide
 `build_corpus.sh` takes each kernel's architecture from its own `.target` line,
 never from the local card — compiling at the build machine's architecture is the
 bug `tests/ptx_portability.rs` exists to prevent, and here it would silently
-change which SASS is under test. All 67 kernels rebuilt **byte-identically** to
+change which SASS is under test. All 66 kernels rebuilt **byte-identically** to
 the ones the table above was measured on, `-O1` included, so the corpus is
 reproducible rather than shipped.
 
