@@ -1407,6 +1407,21 @@ inverts the ranking: the 23 tensor-core GEMMs look deepest and are tractable at
 unlocks exactly one, a test fixture. It was still right to build, because it is
 what *creates* the cut points the GEMMs need.
 
+Tractable is not the same as close. Running the executor to enumerate what it
+*genuinely* refuses — rather than reporting its first refusal — puts each of the
+23 GEMMs at **21–27 unmodelled opcodes**: the async-copy family, `ldmatrix`,
+`mma`/`HMMA`, a loop, and the integer-divide-through-the-float-unit macro-op, all
+of them. `cp.async` is three of those nine on the PTX side, and on the SASS side
+none of the 23 ever reached it — they refused earlier on a const-bank operand for
+`gridDim`, which the vocabulary could already name and the map had simply
+omitted. Fixing that unblocks nothing and was still worth landing: the census now
+reports the real gap instead of a spurious operand refusal. Those offsets are a
+driver ABI fact, so `cbank_abi.py` referees them against `ptxas` *and* against a
+launch with six distinct extents — deriving them from `ptxas` alone would use the
+translator under test to license a fact used to validate it. The kernel closest
+to passing is not a GEMM at all: `hello.coprocessor` has a **zero** opcode gap
+and is blocked by two naming assumptions in the executor's register model.
+
 Also measured, and reported separately because they are different claims:
 `rcp.approx` differs from `rcp.rn` on **13.23%** of inputs on the device and
 `div.approx` from `div.rn` on **27.30%** — so identifying a PTX macro-op with the

@@ -198,6 +198,119 @@ kernel uses, and it overturned the obvious read:
   32-bit `div.u32`/`rem.u32` through the *float* unit — `I2F.U32.RP`, `MUFU.RCP`,
   `F2I.TRUNC`. An integer PTX operation lowered as a floating-point macro-op.
 
+### The real gap, measured by running the executor
+
+`depth.py` over-states **by construction** — its own docstring says so. It marks
+an opcode unknown if no *passing* kernel uses it, so `add.u32`, `mad.lo.u32` and
+`IMAD.WIDE.U32` all appear in its list although they are modelled. `gap.py` gives
+the other number: it runs the executor and, on an unmodelled opcode, records it
+and **skips**, so what it reports is what the validator genuinely refuses.
+Skipping is unsound for validation — the state afterwards is not the kernel's —
+so the set is a *lower bound*, and the operand errors it drags behind it are
+contaminated by the skipping and reported in a separate column, never mixed in.
+
+Three measures of the same kernel, `gemm_f16_256`:
+
+```
+depth.py   static, over-states        27 PTX ops   29 SASS ops
+gap.py     dynamic, the real set       9 PTX ops   13 SASS ops
+"five unmodelled features"             5 PTX families
+```
+
+They are different measures, not disagreements — and the smallest is the one
+easiest to quote. Across all 23 FP16 tensor-core GEMMs the gap is **21–27
+opcodes each**, and every one of the 23 needs all of:
+
+```
+PTX    cp.async.cg.shared.global / .commit_group / .wait_group     23 kernels
+       ldmatrix .m8n8.x2.trans / .m8n8.x4                          23
+       mma.sync.m16n8k16 + wmma.store.d                            23
+       bra          -- every one of these kernels has a loop       23
+       st.global.v4.f32                                            19
+SASS   LDGSTS.E.BYPASS.128 / LDGDEPBAR / DEPBAR.LE                 23
+       HMMA.16816.F32                                              23
+       I2F.U32.RP / MUFU.RCP / F2I.FTZ.U32.TRUNC.NTZ               23
+       S2UR / UIMAD          -- the uniform datapath               23
+       IMAD.MOV / IMNMX.U32 / WARPSYNC / CS2R                   20-23
+```
+
+So **`cp.async` is a prerequisite, not the gate.** It is three opcodes of nine on
+the PTX side; and on the SASS side none of the 23 kernels ever reached it — they
+refused earlier, on a const-bank operand. Earlier notes recorded it as "the next
+feature in front of the tractable bucket, where all 23 now refuse". That is true
+of the PTX side and of first-refusal reporting, and it reads as *one feature
+away*, which is wrong by an order of magnitude.
+
+### The front of the queue is a naming assumption, not a feature
+
+The kernel closest to passing is not a GEMM. `hello.coprocessor` has a **zero**
+opcode gap on both sides and still does not run, and the coprocessor family
+behind it is blocked by two lexical assumptions in the PTX executor:
+
+- predicates must be named `%p<digits>` — `re.match(r'^@(!?%p\d+)')`. These
+  kernels use `%qp0` and `%rt_p0`, so the whole predicated instruction is read
+  as an unknown opcode.
+- registers must be named `%r<n>` / `%rd<n>` / `%f<n>` — the register file is
+  keyed by `int(name[2:])`. A named virtual register like `rt_A_ptr` gives
+  `int('A_ptr')`, which is the `invalid literal for int()` crash class above.
+
+Both fail closed, and neither is a missing semantics. Broadening the predicate
+regex alone takes their PTX opcode gap 2 → 0 and lands them on the second one, so
+they are one repair, not two: the register file has to become name-keyed. That
+ripples into `run_lines`' `(kind, i)` region seeding, which the loop validator
+depends on — a refactor with its own mutation table, not a drive-by. It is
+recorded here rather than done.
+
+### A const-bank operand was masking the gap, and the ABI fact needed a device run
+
+All 23 GEMMs refused on the SASS side at `unmodelled const bank slot 0xc` before
+reaching any opcode. `batch.mk` already defined `nctaid_x`; only the map from
+constant-bank offset to symbol was missing the launch-geometry block, so the
+validator refused an operand its own vocabulary could name. Two lines — and the
+offsets are a **driver ABI fact**, which is exactly the kind of thing that must
+not be guessed.
+
+Reading them out of `ptxas` output alone would use the translator under test to
+license a fact used to validate that translator. `cbank_abi.py` does it in two
+independent steps, and the launch is what breaks the circle:
+
+```
+(a) ptxas reads offset X for %<reg>          -- from the disassembly
+(b) %<reg> returns <extent> on the device    -- from a real launch
+```
+
+The six extents are **distinct** (11, 13, 2, 3, 5, 7), so if (a) were wrong the
+launch in (b) would return another axis's value. The script asserts that
+distinctness before anything else — with two extents equal, a swap between them
+is invisible and every check below it passes while asserting nothing. It reads
+the map back out of `batch.py` rather than restating it, so a wrong entry there
+is what fails. Measured: `0x00/04/08 = ntid.{x,y,z}`, `0x0c/10/14 =
+nctaid.{x,y,z}` on sm_89, agreeing with `ptxas` and with the device.
+
+This unblocks no kernel — the 23 GEMMs now refuse one instruction later, on
+`S2UR` — and that is the point of landing it: the census stops reporting a
+spurious operand refusal in place of the real gap.
+
+**Mutation table**, six probes; the control is the row to read first.
+
+| probe | `cbank_abi.py` | `gap.py` census | `regress.sh` |
+|---|---|---|---|
+| C5 CONTROL: reorder the two map assignments | ok | ok | ok |
+| C1: the block removed (the original state) | FAIL, by name | reverts to the masking operand | ok |
+| **C2: `ntid` and `nctaid` swapped** | **FAIL** | ok | ok |
+| C3: `nctaid` off by one axis | FAIL | reverts | ok |
+| C4: the census stops at the first refusal | ok | **gap 9/13 → 0/0** | ok |
+| C6: the launch extents not distinct | FAIL, non-vacuity | ok | ok |
+
+**C2 is the row that justifies committing the device probe**: a swapped mapping
+is a *wrong semantics*, and it is invisible to the census and to every standing
+result — no currently-passing kernel reads those slots, which is why the omission
+survived. C4 was mis-aimed on its first run (the mutation's anchor did not match,
+so it never applied, and then the column I measured could not have seen it
+anyway). Both halves of that are the standing rule: confirm the mutation is in
+the artifact that ran, and say what defect the mutated program has before
+recording a survivor.
+
 ---
 
 ## Floats: two questions, different answers
@@ -355,10 +468,12 @@ Measurement scripts, which is most of what the numbers above came from:
 ```sh
 python3 scope2.py      # what blocks each kernel, cross-tabbed with control flow
 python3 depth.py       # each kernel's whole opcode alphabet, not its first refusal
+python3 gap.py         # what the executor GENUINELY refuses -- the dynamic gap
 python3 tractable.py   # if every opcode were modelled, what could the solver close?
 python3 smemdepth.py   # what ELSE each shared-memory kernel needs
 python3 barregion.py   # multiplies per barrier region, against the wall
 python3 fpclass.py     # contraction vs macro-op, per kernel
+python3 cbank_abi.py   # referee the const-bank ABI against ptxas AND the device
 python3 unroll.py      # did ptxas unroll?  (it did, x4, at -O2 and above)
 ```
 
