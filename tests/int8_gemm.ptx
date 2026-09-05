@@ -15,7 +15,7 @@
     .reg .b32 %r<29>;
     .reg .f32 %f<1>;
     .reg .b64 %rd<14>;
-    .reg .pred %p<1>;
+    .reg .pred %p<2>;
 
     ld.param.u64 %rd0, [A_0];
     ld.param.u64 %rd1, [B_1];
@@ -29,6 +29,8 @@
     mov.u32 %r0, %tid.x;
     mov.u32 %r1, %ctaid.x;
     mov.u32 %r2, %ctaid.y;
+    setp.gt.u32 %p0, %r0, 31;
+    @%p0 bra $int8_gemm_idle_0;
     shr.u32 %r3, %r0, 2;
     and.b32 %r4, %r0, 3;
     mul.lo.u32 %r5, %r4, 4;
@@ -57,9 +59,9 @@
     mul.lo.u32 %r17, %r15, 32;
     cvt.u64.u32 %rd11, %r17;
     mov.u32 %r18, %r16;
-$int8_gemm_k_0:
-    setp.ge.u32 %p0, %r18, 128;
-    @%p0 bra $int8_gemm_end_1;
+$int8_gemm_k_1:
+    setp.ge.u32 %p1, %r18, 128;
+    @%p1 bra $int8_gemm_end_2;
     ld.global.u32 %r19, [%rd7];
     ld.global.u32 %r20, [%rd7+1024];
     ld.global.u32 %r21, [%rd7+16];
@@ -70,8 +72,8 @@ $int8_gemm_k_0:
     add.u64 %rd7, %rd7, %rd11;
     add.u64 %rd9, %rd9, %rd11;
     add.u32 %r18, %r18, %r17;
-    bra $int8_gemm_k_0;
-$int8_gemm_end_1:
+    bra $int8_gemm_k_1;
+$int8_gemm_end_2:
     mul.lo.u32 %r25, %r2, 16;
     add.u32 %r25, %r25, %r3;
     mul.lo.u32 %r26, %r25, 32;
@@ -86,4 +88,6 @@ $int8_gemm_end_1:
     red.global.add.s32 [%rd13+4], %r11;
     red.global.add.s32 [%rd13+1024], %r12;
     red.global.add.s32 [%rd13+1028], %r13;
+$int8_gemm_idle_0:
+    ret;
 }

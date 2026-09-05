@@ -5157,6 +5157,30 @@ declare it as a Q format.\n{}",
         writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.x;", cx).unwrap();
         writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.y;", cy).unwrap();
 
+        // THE LAUNCH CONTRACT, ENFORCED RATHER THAN DOCUMENTED. This schedule
+        // gives one 16x8 output tile to one warp, so a CTA has exactly 32
+        // threads of work however many it is launched with. Measured on the
+        // device before this guard existed, M=64 N=32 K=128, correct answer
+        // 1920: a 64-thread block returned 3840 at C[256] - EXACTLY DOUBLE,
+        // because warp 1 recomputed a shifted product and `red.global.add.s32`
+        // summed it in - 1344 of 2048 elements wrong. A 128-thread block also
+        // read row 79 of a 64-row A, i.e. out of bounds, without faulting.
+        //
+        // Nothing checked, and this is the one GPU GEMM in this repo whose
+        // whole claim is a bit-identical answer at every launch geometry
+        // (`tests/gpu_batch_invariance.rs`) - a claim a wrong block size
+        // silently falsifies. Guarding is what makes the kernel invariant in
+        // the property it advertises, rather than merely correct at the one
+        // geometry the tests happen to use.
+        //
+        // The branch is WARP-UNIFORM by construction (the predicate is
+        // `tid >= 32`, constant across any warp), so `mma.sync.aligned` still
+        // sees all 32 lanes of warp 0 converged.
+        let idle = self.alloc_label("int8_gemm_idle");
+        let idle_p = self.alloc_pred();
+        writeln!(&mut self.ptx_buffer, "    setp.gt.u32 {}, {}, 31;", idle_p, tid).unwrap();
+        writeln!(&mut self.ptx_buffer, "    @{} bra {};", idle_p, idle).unwrap();
+
         // g = laneid >> 2, t = laneid & 3 — the decomposition validated in
         // tests/ptx_int8_mma_layout.rs.
         let g = self.alloc_reg32();
@@ -5356,6 +5380,8 @@ declare it as a Q format.\n{}",
                     .unwrap();
                 }
             }
+            writeln!(&mut self.ptx_buffer, "{}:", idle).unwrap();
+            writeln!(&mut self.ptx_buffer, "    ret;").unwrap();
             return 32;
         }
 
@@ -5372,6 +5398,9 @@ declare it as a Q format.\n{}",
                 .unwrap();
             }
         }
+
+        writeln!(&mut self.ptx_buffer, "{}:", idle).unwrap();
+        writeln!(&mut self.ptx_buffer, "    ret;").unwrap();
 
         32
     }

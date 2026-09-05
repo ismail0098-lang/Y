@@ -1407,6 +1407,54 @@ truthfully state a global negative. The bijection gate that keeps a certificate'
 list in step with its capstone's now runs over both.
 
 
+### The int8 GEMM is 0.41x cuBLASLt, and its launch contract was unstated
+
+Of the 952 `mma.sync` instructions this compiler emits, **950 are floating
+point**. So the one place on the GPU where exact accumulation makes the
+kernel-vs-spec relationship an *equality* is the int8 tensor-core GEMM — and an
+earlier note here called it a stub, on the strength of a grep for `cp.async` /
+`ldmatrix` / `bar.sync`. Running it says otherwise. Measured at 4096³ on an
+RTX 4070 Ti SUPER, clock-ramped, with every timed configuration
+correctness-checked:
+
+| | G MAC/s | of cuBLASLt | of ISA ceiling |
+|---|---|---|---|
+| Y int8 | 15,439 | **0.41x** | 4.1% |
+| cuBLASLt (`torch._int_mm`) | 38,090 | 1.00x | 10.2% |
+
+Neither is compute bound. Y's kernel has no shared-memory staging, so a warp
+reads its 16 A rows and 8 B columns straight from global — **0.1875 bytes per
+MAC** — and it is L2-bandwidth bound: flat at ~2,890 GB/s at 2048³/4096³/6144³,
+then a **3.7x collapse** at 8192³ once the working set leaves the 48 MB L2. A
+128×128 staged tile would move 12x less. That is the size of the remaining
+performance gap, with a mechanism rather than a guess.
+
+**The finding was a launch contract nobody had stated.** The schedule gives one
+16×8 tile to one *warp*, so a CTA has 32 threads of work however many it is
+launched with, and the emitted kernel contained one predicate — the K-loop
+bound. With every element of A = 3 and B = 5 at K=128, so every output must be
+1920:
+
+| block | result |
+|---|---|
+| (32,1,1) | correct |
+| (64,1,1) | 1344 of 2048 wrong, `C[256] = 3840` |
+| (128,1,1) | same, and it reads row 79 of a 64-row A |
+
+3840 is **exactly double**: warp 1's lane index puts its second A-row read in
+the next tile, and `red.global.add.s32` sums it in. This is the one kernel
+whose advertised claim is a bit-identical answer at every launch geometry, so a
+wrong block size falsified that claim silently. Fixed with a warp-uniform guard
+at no measurable cost, and `proofs/Int8GemmSchedule.v` (20 `Print Assumptions`,
+no axioms) now states the guard, the striped split-K — instantiated from
+`GridStrideSplit`, so `red.global.add.s32` landing in any order is a theorem
+rather than a comment — and the output tiling.
+
+**A framing correction that came out of the same measurement:** cuBLASLt's int8
+GEMM is batch-invariant too, while the f16 control differs at 5 of 6 batch
+sizes. Integer accumulation is associative, so *any* int8 GEMM has the property
+for free. What Y adds is that it is proved and stated, not that it is present.
+
 ### The GPU warp tiling is proved, and the guard for it was compiled out
 
 Asked when the tensor-core GEMMs get proofs, the measurement moved the plan

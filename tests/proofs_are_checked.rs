@@ -264,6 +264,21 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
             // `the_measured_gap` states the instance that was actually
             // compiled, holes and all, so the file is pinned to a defect
             // rather than to a symmetry.
+            // The int8 tensor-core GEMM's schedule. It is the only GPU GEMM
+            // whose EXACTNESS is available to prove (950 of the 952 emitted
+            // `mma.sync` are floating point), and the three entries are the
+            // three claims: the launch guard confines a warp to its own tile,
+            // the atomic reduction is order-independent, and a rounding
+            // accumulate would break it - without that last one the file is
+            // satisfied by a property nothing violates.
+            "Int8GemmSchedule.v",
+            &[
+                "Print Assumptions the_guard_is_what_confines_a_warp_to_its_own_tile",
+                "Print Assumptions the_atomic_reduction_is_order_independent",
+                "Print Assumptions a_rounding_accumulate_would_break_the_landing_order",
+            ],
+        ),
+        (
             "GpuWarpTiling.v",
             &[
                 "Print Assumptions cta_rows_written_exactly_once",
