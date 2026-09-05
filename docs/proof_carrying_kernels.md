@@ -2367,6 +2367,170 @@ in. And the tie is the emitter's arithmetic transcribed and gated by
 there and **0** times in the PTX GEMM emitter). Routing the GEMM through `Ix`
 is what would upgrade this to the strong tie.
 
+#### Phase 3 progress, 2026-09-05 — the int8 GEMM was called a stub from a grep, and its launch contract was unstated
+
+The tensor-core GEMMs are Phase 3's real subject, and the previous increment
+recorded a blocker: **950 of the 952 `mma.sync` instructions this compiler
+emits are floating point** (854 `f32.f16.f16.f32`, 96 `f32.e4m3.e4m3.f32`, 2
+`s32.s8.s8.s32`), so §2's premise — exact accumulation restores associativity,
+which is what makes the kernel-vs-spec relationship an *equality* — applies to
+exactly one of them. That note went on to call the int8 kernel "a stub" on the
+strength of counting `cp.async` / `ldmatrix` / `bar.sync` occurrences, and to
+rank bringing it up as "the long pole, kernel engineering not proof work".
+
+**Running it says otherwise, and the grep was the wrong instrument.** Measured
+on an RTX 4070 Ti SUPER, clock-ramped, correctness-checked on every timed
+configuration:
+
+| 4096³ | G MAC/s | of cuBLASLt | of ISA ceiling |
+|---|---|---|---|
+| Y int8 | 15,439 | **0.41x** | 4.1% |
+| cuBLASLt (`torch._int_mm`) | 38,090 | 1.00x | 10.2% |
+
+A 0.41x kernel is not a stub. **The first timing run was 4x slow across the
+board and reported nothing wrong** — this card idles far below its boost clock
+and the repository's own recorded window effect ("absolute timings moved 4-5x
+between windows") applies; a ramp phase is what makes the numbers reproduce.
+
+##### The ISA ceiling, and the arm that validates it
+
+`374,027 G MAC/s` for `mma.sync.m16n8k32.s8`, doubling-verified (ratio 2.000)
+with 32 live `IMMA.16832.S8.S8` in the disassembly. That is **4x** the f16
+rate, where a spec-sheet reading predicts 2x, so the number is only worth
+quoting because of the control: **the identical probe in f16 reads 92,482
+G MAC/s = 185 TFLOPS against this card's ~176 spec.** The accounting method is
+validated by the arm whose answer is independently known; the int8 arm uses it
+unchanged. The 4x is recorded as measured and unreconciled with the marketing
+figure, rather than adjusted to match it.
+
+##### Where the 0.41x actually goes, established by a prediction that came true
+
+Neither kernel is compute bound — both are under 11% of the ceiling. Y's is
+**L2-bandwidth bound**, because it has no shared-memory staging: one warp owns
+a 16×8 output tile and reads its 16 A rows and 8 B columns straight from
+global, i.e. **0.1875 bytes per MAC**.
+
+| shape | A+B | warp-level read traffic | G MAC/s |
+|---|---|---|---|
+| 2048³ | 8 MB | 2,821 GB/s | 15,048 |
+| 4096³ | 32 MB | 2,887 GB/s | 15,399 |
+| 6144³ | 72 MB | 2,905 GB/s | 15,496 |
+| 8192³ | 128 MB | **789 GB/s** | **4,209** |
+
+Flat at ~2,890 GB/s while the working set is L2-resident, then a **3.7x
+collapse** at 8192 with traffic falling to DRAM levels. A 128×128 staged tile
+moves 2/128 bytes per MAC — **12x less** — which is what the bring-up is worth,
+and it removes the cliff entirely. That is a performance project with a number
+on it now, rather than an open-ended one.
+
+##### The finding: an unstated launch contract, and a wrong answer
+
+The schedule gives one output tile to one **warp**, so a CTA has exactly 32
+threads of work however many it is launched with. The emitted kernel contained
+**one predicate** — the K-loop bound — and never mentioned `%ntid.x`.
+
+At M=64 N=32 K=128 with every element of A = 3 and of B = 5, so every element
+of C must be exactly K·15 = 1920:
+
+| block | result |
+|---|---|
+| (32,1,1) | correct |
+| (64,1,1) | 1344 of 2048 wrong, `C[256] = 3840` |
+| (128,1,1) | same, and it reads row 79 of a 64-row A |
+
+**3840 is exactly double**, which is the mechanism: warp 1's lane index gives
+`g = tid/4` in 8..15 instead of 0..7, so its two A-row reads land at `cy·16+g`
+and `cy·16+g+8` — the second of which is the *next* tile's rows — and
+`red.global.add.s32` sums that second product into the same output.
+
+That matters more here than in an ordinary kernel. **This kernel's entire
+advertised claim is a bit-identical answer at every launch geometry**
+(`tests/gpu_batch_invariance.rs`), and a wrong block size falsified it
+silently. Fixed with a warp-uniform guard — the predicate is `tid >= 32`,
+constant across any warp, so `mma.sync.aligned` still sees all 32 lanes of
+warp 0 converged. Every block size is correct now, and the fix costs nothing
+measurable (15,061 vs 15,072 G MAC/s at 2048³, inside the ~4% band).
+
+##### `proofs/Int8GemmSchedule.v` — 20 `Print Assumptions`, no axioms
+
+No proof covered this kernel at all; every prior mention of "int8" in `proofs/`
+is the attention kernel's int8 `V` load. Three claims, and two of the three
+schemas are instantiated rather than re-derived:
+
+- **The launch guard**, `the_guard_is_what_confines_a_warp_to_its_own_tile`:
+  both A rows a lane reads lie inside its own 16-row tile exactly when `g < 8`,
+  which `tid < 32` gives. Its dual, `without_the_guard_a_second_warp_lands_in_
+  the_next_tile`, states the measured failure as arithmetic at `g = 8`.
+- **The split-K**, striped over `%ctaid.z`. That is residue classes, so
+  `GridStrideSplit`'s `grid_stride_exact` and `atomics_may_land_in_any_order`
+  apply verbatim — **the second is the whole demonstration**, since the
+  partials combine through `red.global.add.s32` in whatever order the scheduler
+  produces. The emitter states exactly this in a prose comment
+  ("order-independent by construction — the same result for every grid, every
+  launch, every scheduling accident") and nothing had checked it;
+  `gpu_batch_invariance` sweeps seven split factors, which is seven points
+  rather than a property.
+- **The output tiling and the lane decomposition** are positional indices, so
+  `MixedRadix` discharges them with no new reasoning — the fifth and sixth
+  consumers of that schema.
+
+##### A framing correction: batch invariance does not favour Y here
+
+Measured against `torch._int_mm`: at every shape it accepts, cuBLASLt's int8
+GEMM is **also** batch-invariant, while the f16 control **DIFFERS at 5 of 6
+batch sizes**. That is not a coincidence and it is not a gap in cuBLASLt —
+**integer accumulation is associative, so *any* int8 GEMM has the property for
+free.** The differentiator is not having it; it is having it *proved and
+stated*, which is what this file adds. (What cuBLASLt does not do is accept the
+shapes: `_int_mm` refuses M<16 outright.)
+
+##### Mutation table, 9 probes, nine suites, each `--test` target run separately
+
+**M0 CONTROL, two independent `mov`s reordered, un-applied AND applied rows:
+green everywhere** — read first. **RESTORED BASELINE green** — read second.
+
+- **M1 the guard removed (the original bug) / M3 the guard's label emitted
+  before the reduction, so it skips nothing / M5 the confinement theorem
+  weakened / M7 the proof's `MMA_N` set to 16 / M8 the emitter's shape refusal
+  drops the N axis: `int8_gemm_launch_contract` ONLY**, all five.
+- M2 the guard reads `%ntid.x` (not warp-uniform) and M4 the predicate inverted
+  (over-refusal): four suites each — the control that stops "guard everything"
+  and "guard nothing" from passing.
+- M6 the landing-order refutation deleted with its `Print Assumptions`:
+  **`proofs_are_checked` ONLY**.
+
+**M1 is the row that matters: the original defect was invisible to all eight
+other suites — `gpu_batch_invariance` included**, which is the suite whose
+entire claim it falsifies. It sweeps `gridDim.z` at one fixed, correct block
+size, and a test that sweeps one axis is not testing the other.
+
+**M5 SURVIVED THE FIRST SWEEP AND IT WAS A REAL HOLE IN THE NEW GATE.**
+Weakening `the_guard_is_what_confines_a_warp_to_its_own_tile` to its lower
+bound alone — `cy·16 <= row`, true for every `g` whatsoever — left everything
+green: the theorem still compiles, still reports "Closed under the global
+context", and still satisfies `proofs_are_checked`'s content control, which
+asks that the theorem *name* appear under a `Print Assumptions` and not that it
+say anything. That is the `Theorem the_certificate_is_not_vacuous : True.`
+shape this repository already records, and the fix is the one already written
+down: **the guard belongs on the statement's text.** The gate now requires the
+confinement theorem to carry its upper bound and the refutation to negate the
+same bound, so the pair cannot drift apart. Re-run, M5 is caught by that gate
+alone — 9/9.
+
+##### What this does not close
+
+- **One kernel, and the smallest one.** The 23 f16 GEMMs still cannot carry an
+  exactness argument at all, and nothing here changes that.
+- **The staging.** Y's int8 GEMM is still at 0.41x cuBLASLt for the traffic
+  reason above, and still falls 3.7x off the L2 cliff.
+- **The tie is transcription-plus-gate**, as in `GpuWarpTiling`: `ptx_emitter`
+  does not go through the `Ix` extraction layer, so the proof is checked
+  against emitted text rather than rendered with it. Routing the GEMM path
+  through `Ix` remains the named upgrade to a byte-identity tie.
+- **`mma.sync`'s own semantics and the per-lane fragment layout** are ISA facts
+  in the trusted base, pinned empirically by `tests/ptx_int8_mma_layout.rs`,
+  which runs the instruction on the device against a plain integer matmul.
+
 ### Phase 4 — Bounded error where exactness is impossible · 3–4 years
 
 Exact accumulation covers reductions and fixed-point pipelines. It does not
