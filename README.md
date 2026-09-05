@@ -1406,6 +1406,54 @@ rather than guessed — `AttentionSchedule` ← `GridStrideSplit` ←
 truthfully state a global negative. The bijection gate that keeps a certificate's
 list in step with its capstone's now runs over both.
 
+
+### The GPU warp tiling is proved, and the guard for it was compiled out
+
+Asked when the tensor-core GEMMs get proofs, the measurement moved the plan
+twice.
+
+**950 of the 952 `mma.sync` instructions this repository emits are floating
+point** — 854 `f16`, 96 `e4m3`, and **2** `s8`. So the premise that makes the
+CPU work an *equality* (exact accumulation restores associativity) does not
+apply to them. And the one kernel that could carry it is a stub: `int8_gemm.ptx`
+is 89 lines with 2 `mma` and **zero** `cp.async`, `ldmatrix` or `bar.sync`,
+against the f16 kernel's 964 / 65 / 22 / 24 / 7.
+
+What *is* available is the SCHEDULE half, because `proofs/ExactGemmTiling.v`
+mentions `f16`, `f32`, `float`, `int16` and `i32` **zero times** — it is `nat`
+index reasoning and does not depend on precision. Starting there found a live
+defect.
+
+Every tensor-core GEMM derives its warp geometry by truncating division, so a
+warp's base advances by `cta / warps` while a warp *writes* `(cta / warps /
+frag) * frag`. Those agree exactly when `frag * warps` divides `cta`, and the
+precondition was three `debug_assert_eq!`s — which `[profile.release]`, absent
+from `Cargo.toml`, compiles out of every shipping binary.
+
+```
+Y_CTA_OVERRIDE=96,128,32,4,2,3   →  exit 0, "Compilation Successful!", ptxas exit 0
+    each CTA advances 96 rows and writes 64
+    NEVER WRITTEN: rows 16-23, 40-47, 64-71, 88-95
+```
+
+That is `c_written_exactly_once` failing — the theorem the CPU chain has had
+since the tiling increment — on the GPU, where there was no equivalent. Two
+producers reach it: `Y_CTA_OVERRIDE`, and a persisted `AUTOTUNE_*` line in
+`.ysu_hw_profile`, which needs no environment variable at all. All 23 built-in
+candidates satisfy the constraint, which is why the default path was never
+wrong.
+
+`Y_SWIGLU_TILE` **already validated this exact constraint**. The same rule was
+written correctly at one override site and not the other.
+
+`proofs/GpuWarpTiling.v` now states the partition and refutes the compiled
+instance — nine `Print Assumptions`, no axioms. Injectivity is
+`MixedRadix.two_digit_unique` and nothing else: a warp row is a two-digit
+positional index, the fourth consumer of that schema.
+
+It is a claim about the schedule, not the value: these GEMMs are f16, so no
+equality to a naive nest is available for them at all.
+
 ### Translation validation: removing `ptxas` from the trusted base
 
 Those proofs stop at the IR. The trust boundary printed into every emitted

@@ -51,6 +51,83 @@ pub enum Precision {
     Fp8,
 }
 
+/// The warp tiling's own precondition, checked rather than assumed.
+///
+/// Every tensor-core GEMM in this backend cuts a CTA tile into
+/// `warps_m x warps_n` warp tiles and each warp tile into `frag_m x frag_n`
+/// MMA fragments, deriving the counts by TRUNCATING integer division:
+///
+/// ```text
+/// per_warp_m = cta_m / warps_m;   num_i = per_warp_m / frag_m
+/// ```
+///
+/// A warp then writes `num_i * frag_m` rows, the next warp's base is
+/// `per_warp_m` further on, and the next CTA's is `cta_m` further on. Unless
+/// `frag_m * warps_m` divides `cta_m` EXACTLY, those three strides disagree
+/// and the output tile has HOLES - the emitter still produces a well-formed
+/// kernel, `ptxas` still accepts it, and the rows in the gaps keep whatever
+/// was in the output buffer.
+///
+/// This is `ExactGemmTiling.c_written_exactly_once` failing, the theorem the
+/// CPU chain has had since the tiling increment, on the GPU where there was
+/// no equivalent.
+///
+/// Measured on `tests/gemm_f16_1024.ysu` with
+/// `Y_CTA_OVERRIDE=96,128,32,4,2,3`: each CTA advances 96 rows and writes
+/// 64, in four striped gaps (rows 16-23, 40-47, 64-71, 88-95), under
+/// "Compilation Successful!" and exit 0.
+///
+/// It was three `debug_assert_eq!`s at each of three emitters. `Cargo.toml`
+/// has no `[profile.release]`, so rustc's default `debug-assertions = false`
+/// applies and **none of them is in the shipping binary** - the same
+/// gates-nothing shape as `@require`. All 23 built-in candidates satisfy the
+/// constraint; the paths that bypass the list are `Y_CTA_OVERRIDE`,
+/// `Y_SWIGLU_TILE` and a persisted `.ysu_hw_profile` autotune line, none of
+/// which validated anything beyond the field count.
+///
+/// The fragment shape is a PARAMETER because the three consumers disagree:
+/// the F16 and SwiGLU GEMMs are m16n16k16 and the FP8 one is m16n8k32.
+/// Hardcoding 16 here would pass an FP8 tile that does not tile.
+pub fn validate_warp_tiling(
+    cta_m: u32,
+    cta_n: u32,
+    cta_k: u32,
+    warps_m: u32,
+    warps_n: u32,
+    frag_m: u32,
+    frag_n: u32,
+    frag_k: u32,
+) -> Result<(), String> {
+    if warps_m == 0 || warps_n == 0 {
+        return Err(format!(
+            "warp split {}x{} has a zero dimension; a CTA needs at least one warp on each axis",
+            warps_m, warps_n
+        ));
+    }
+    for (name, ext, warps, frag, axis) in [
+        ("cta_m", cta_m, warps_m, frag_m, "rows"),
+        ("cta_n", cta_n, warps_n, frag_n, "columns"),
+        ("cta_k", cta_k, 1, frag_k, "k-elements"),
+    ] {
+        let granule = frag * warps;
+        if ext == 0 || ext % granule != 0 {
+            let covered = (ext / warps / frag) * frag * warps;
+            return Err(format!(
+                "CTA tile {}={} does not tile: each warp covers {} {} of the {} it \
+                 strides, so {} {} per CTA are NEVER WRITTEN and keep whatever was in \
+                 the output buffer. {} must be a non-zero multiple of {} \
+                 (frag {} x warps {}). Nearest legal values: {} or {}.",
+                name, ext, covered, axis, ext,
+                ext - covered, axis,
+                name, granule, frag, warps,
+                (ext / granule) * granule,
+                ((ext / granule) + 1) * granule,
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Represents a candidate configuration parameter set for autotuning.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AutotuneCandidate {

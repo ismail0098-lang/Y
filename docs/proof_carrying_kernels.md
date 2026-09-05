@@ -2276,6 +2276,97 @@ have no proofs to carry yet, and `loopgap.py` says 32 of the 48 loop kernels in
 the validator's corpus are behind one structural gate before any of that
 becomes reachable.
 
+#### Phase 3 progress, 2026-09-05 — the first GPU GEMM theorem, and the guard it found was compiled out
+
+Asked when the tensor-core GEMMs get done, the answer came from a measurement
+rather than a plan, and the measurement moved the plan twice.
+
+**The blocker nobody had named: 950 of the 952 `mma.sync` instructions this
+repository emits are FLOATING POINT.** Counted across every committed `.ptx`:
+854 `f32.f16.f16.f32`, 96 `f32.e4m3.e4m3.f32`, and **2** `s32.s8.s8.s32`. So
+§2's premise — exact accumulation restores associativity, which is what makes
+the kernel-vs-spec relationship an *equality* — **does not apply to them at
+all.** An f16 tensor-core GEMM is not equal to the naive nest, and proving it
+so is not available; the honest options are an error bound (weak over large K)
+or the schedule alone.
+
+**And the one kernel that CAN carry the argument is a stub.** `int8_gemm.ptx`
+is 89 lines with 2 `mma` and **zero** `cp.async`, `ldmatrix` or `bar.sync`,
+against `gemm_f16_4096.ptx`'s 964 lines / 65 / 22 / 24 / 7. It has no
+shared-memory staging, no pipeline and no barriers — a single-tile
+demonstration, not a GEMM. **The same missing kernel blocks the product**:
+`tools/batch_invariance_demo.py` falls back to torch f32/f64 for exactly one
+stated reason, "torch has no batched CUDA integer matmul."
+
+So "do the tensor-core GEMMs" is not one task. The half that is available now
+is the SCHEDULE, and it is available because
+`proofs/ExactGemmTiling.v` mentions `f16`, `f32`, `float`, `vpdpwssd`, `int16`
+and `i32` **zero times** — it is `nat` index reasoning and is
+precision-agnostic. That half is what this increment does.
+
+**Starting there found a live defect, which is why the schedule half was worth
+doing first.** Every tensor-core GEMM derives its warp geometry by TRUNCATING
+integer division:
+
+```text
+per_warp = cta / warps ;   num = per_warp / frag
+```
+
+so a warp's base advances by `per_warp` while a warp *writes* `num * frag`.
+Those agree exactly when `frag * warps` divides `cta`. The precondition was
+three `debug_assert_eq!`s at each of three emitters — and **`Cargo.toml`
+declares no `[profile.release]`, so rustc's default `debug-assertions = false`
+applies and none of them is in the shipping binary.** The same gates-nothing
+shape as `@require`.
+
+Measured on `tests/gemm_f16_1024.ysu` with `Y_CTA_OVERRIDE=96,128,32,4,2,3`:
+stride 24, `num = 1`, so each CTA advances 96 rows and **writes 64** — gaps at
+rows 16-23, 40-47, 64-71, 88-95 — under "Compilation Successful!", exit 0, and
+`ptxas` exit 0. That is `ExactGemmTiling.c_written_exactly_once` failing, the
+theorem the CPU chain has had since the tiling increment, on the GPU where
+there was no equivalent.
+
+- **Two producers reach it, both demonstrated.** `Y_CTA_OVERRIDE`, and a
+  persisted `AUTOTUNE_*` line in `.ysu_hw_profile` — state on disk, written by
+  `--autotune`, keyed by GPU, needing no environment variable at all. Both
+  parse sites validate nothing beyond the field count. All 23 built-in
+  candidates satisfy the constraint, which is why the default path was never
+  wrong.
+- **The first cache probe was MIS-AIMED**, and saying so is part of the
+  result: it injected a line for a shape with no cached entry, so the analytic
+  model answered and the tile never reached the emitter. Re-aimed at a shape
+  the cache holds, it reproduces — `exit=1`, no artifact.
+- **`Y_SWIGLU_TILE` ALREADY VALIDATED THIS EXACT CONSTRAINT** and rejected with
+  a notice. So the same rule was written correctly at one override site and not
+  the other: `feedback-guards-consulted-at-one-site`, sixth occurrence in this
+  file, and the most legible instance yet because the correct code is nine
+  hundred lines from the missing code and does the same thing.
+- **The FP8 site's guard is DEFENSIVE AND UNREACHABLE** — its tile comes from
+  compile-time constants only, no autotuner and no override. Recorded rather
+  than claimed as coverage. Its fragment shape is m16n8k32, not m16n16k16,
+  which is why `validate_warp_tiling` takes the fragment extents as parameters:
+  hardcoding 16 would pass an FP8 tile that does not tile.
+
+**`proofs/GpuWarpTiling.v`** states the partition — `rows_in_range`,
+`rows_injective`, `rows_onto`, `cta_rows_written_exactly_once` — and refutes
+the compiled instance (`the_measured_gap`, `the_measured_hole_count`). Nine
+`Print Assumptions`, no axioms, nothing admitted. Injectivity is
+`MixedRadix.two_digit_unique` and nothing else: a warp row is a two-digit
+positional index, so this is the **fourth consumer** of that schema and the
+first reached from a GPU warp geometry — no new reasoning.
+
+**What is deliberately NOT claimed.** One axis at a time (M and N are
+independent instances; K is a reduction and is `ExactGemmKsplit`'s shape).
+Nothing about the VALUE written — these GEMMs are f16 or fp8 and their
+accumulation is not associative, so this is a claim about the SCHEDULE, which
+is the half that does not depend on precision and is the half the defect was
+in. And the tie is the emitter's arithmetic transcribed and gated by
+`tests/gemm_tile_partition.rs`, **not** the exact GEMM's byte-identity:
+`src/ptx_emitter.rs` does not go through the `Ix` extraction layer, where
+`src/exact_attention.rs` does (`Ix::`/`render_ptx`/`PtxEnv` appear 18 times
+there and **0** times in the PTX GEMM emitter). Routing the GEMM through `Ix`
+is what would upgrade this to the strong tie.
+
 ### Phase 4 — Bounded error where exactness is impossible · 3–4 years
 
 Exact accumulation covers reductions and fixed-point pipelines. It does not

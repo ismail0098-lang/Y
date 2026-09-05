@@ -256,6 +256,25 @@ fn nothing_in_any_proof_is_admitted() {
 fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
     vec![
         (
+            // The GPU warp tiling. The partition theorem is the load-bearing
+            // one - it is the GPU twin of `c_written_exactly_once`, which the
+            // CPU chain has had since the tiling increment and the GPU had no
+            // equivalent for. The REFUTATION is listed beside it because the
+            // partition alone would be satisfied by a tiling nothing violates:
+            // `the_measured_gap` states the instance that was actually
+            // compiled, holes and all, so the file is pinned to a defect
+            // rather than to a symmetry.
+            "GpuWarpTiling.v",
+            &[
+                "Print Assumptions cta_rows_written_exactly_once",
+                "Print Assumptions the_measured_gap",
+                // The tie: divisibility is exactly what the compiler tests
+                // before it derives anything. Without this the theorems are
+                // about an arithmetic nobody performs.
+                "Print Assumptions the_emitted_count_is_the_model",
+            ],
+        ),
+        (
             // The allocation bound. Its two halves are graded differently on
             // purpose: the IN-BOUNDS direction is what a heap corruption would
             // eventually reveal, while the EXACTNESS direction - the buffer is

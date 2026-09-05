@@ -11,7 +11,7 @@
 
 
 use crate::ast::*;
-use crate::autotuner::{Autotuner, Precision};
+use crate::autotuner::{validate_warp_tiling, Autotuner, Precision};
 use crate::sentinel::HardwareProfile;
 use std::fmt::Write;
 
@@ -6440,9 +6440,17 @@ declare it as a Q format.\n{}",
         let num_i = per_warp_m / 16;
         let num_j = per_warp_n / 8;
         let k_substeps = cta_k / 32;
-        debug_assert_eq!(num_i * 16 * warps_m, cta_m);
-        debug_assert_eq!(num_j * 8 * warps_n, cta_n);
-        debug_assert_eq!(k_substeps * 32, cta_k);
+        // The warp tiling's precondition. This was three `debug_assert_eq!`s,
+        // which the release profile compiles out - see
+        // `autotuner::validate_warp_tiling` for the measured consequence.
+        // Refuse rather than emit: a tile that does not tile produces a
+        // well-formed kernel `ptxas` accepts, with holes in the output.
+        if let Err(why) = validate_warp_tiling(
+            cta_m, cta_n, cta_k, warps_m, warps_n, 16, 8, 32,
+        ) {
+            self.emit_errors.push(format!("FP8 tensor-core GEMM: {}", why));
+            return 0;
+        }
 
         writeln!(&mut self.ptx_buffer, "    // ========================================================").unwrap();
         writeln!(
@@ -7338,9 +7346,17 @@ declare it as a Q format.\n{}",
         let num_i = per_warp_m / 16;
         let num_j = per_warp_n / 16;
         let k_substeps = cta_k / 16;
-        debug_assert_eq!(num_i * 16 * warps_m, cta_m, "autotuned cta_m must split evenly into 16-row warp fragments");
-        debug_assert_eq!(num_j * 16 * warps_n, cta_n, "autotuned cta_n must split evenly into 16-col warp fragments");
-        debug_assert_eq!(k_substeps * 16, cta_k, "autotuned cta_k must be a multiple of wmma's m16n16k16 K dimension");
+        // The warp tiling's precondition. This was three `debug_assert_eq!`s,
+        // which the release profile compiles out - see
+        // `autotuner::validate_warp_tiling` for the measured consequence.
+        // Refuse rather than emit: a tile that does not tile produces a
+        // well-formed kernel `ptxas` accepts, with holes in the output.
+        if let Err(why) = validate_warp_tiling(
+            cta_m, cta_n, cta_k, warps_m, warps_n, 16, 16, 16,
+        ) {
+            self.emit_errors.push(format!("F16 tensor-core GEMM: {}", why));
+            return 0;
+        }
 
         // ---- K tail ----
         // `k_tiles` rounds UP, so the final K-tile may be partial. Both
@@ -8215,9 +8231,17 @@ declare it as a Q format.\n{}",
         let num_i = per_warp_m / 16;
         let num_j = per_warp_n / 16;
         let k_substeps = cta_k / 16;
-        debug_assert_eq!(num_i * 16 * warps_m, cta_m, "cta_m must split evenly into 16-row warp fragments");
-        debug_assert_eq!(num_j * 16 * warps_n, cta_n, "cta_n must split evenly into 16-col warp fragments");
-        debug_assert_eq!(k_substeps * 16, cta_k, "cta_k must be a multiple of mma.sync's k16 dimension");
+        // The warp tiling's precondition. This was three `debug_assert_eq!`s,
+        // which the release profile compiles out - see
+        // `autotuner::validate_warp_tiling` for the measured consequence.
+        // Refuse rather than emit: a tile that does not tile produces a
+        // well-formed kernel `ptxas` accepts, with holes in the output.
+        if let Err(why) = validate_warp_tiling(
+            cta_m, cta_n, cta_k, warps_m, warps_n, 16, 16, 16,
+        ) {
+            self.emit_errors.push(format!("fused GEMM+SwiGLU: {}", why));
+            return 0;
+        }
         // Hard asserts, not `debug_assert!`s: unlike the plain F16 GEMM (which
         // masks M/N tails and, since the K-tail fix, K tails too), this fused
         // kernel has no tail path at all - a non-multiple shape here silently
