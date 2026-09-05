@@ -665,6 +665,56 @@ fn write_exact_gemm_certificates(
     }
 }
 
+/// Write the `.v` certificate for one emitted attention kernel.
+///
+/// `docs/proof_carrying_kernels.md` Phase 3 requires the `ptxas` trust boundary
+/// to be stated in the certificate and "never papered over". Before this there
+/// was no certificate to state it in: `--emit-attention-ptx` wrote a `.ptx` and
+/// nothing else, while three machine-checked proofs described that kernel.
+///
+/// TWO THINGS ARE DELIBERATE ABOUT WHERE THIS GOES.
+///
+/// The notice is on **stderr**. `tools/ptx_bridge.py` pipes stdout straight
+/// into `cuModuleLoadData`, so a line of diagnostic on that stream is a driver
+/// parse error rather than a message - the same reason the PTX itself is
+/// printed with no banner.
+///
+/// The file goes to the working directory, because unlike the exact-GEMM path
+/// there is no input file to sit beside. `Y_NO_CERTIFICATE=1` suppresses it,
+/// the same switch and the same loudness as the GEMM certificate: a compiler
+/// that quietly stops emitting its proof is the failure this whole programme is
+/// about.
+fn write_attention_certificate(head_dim: usize, seq_len: usize) {
+    let cert = y::exact_attention_certificate::Certificate { head_dim, seq_len };
+    let stem = y::exact_attention_certificate::file_stem(&cert);
+    if env::var("Y_NO_CERTIFICATE").is_ok() {
+        eprintln!(
+            "      -> attention certificate ({stem}.v) suppressed by Y_NO_CERTIFICATE"
+        );
+        return;
+    }
+    let source = format!("--emit-attention-ptx {head_dim} {seq_len}");
+    let text = y::exact_attention_certificate::render(&cert, &source, &stem);
+    let path = std::path::PathBuf::from(format!("{stem}.v"));
+    match fs::write(&path, text) {
+        Ok(()) => eprintln!(
+            "      -> attention certificate written to {} (check: coqc -Q <proofs> \"\" {stem}.v)",
+            path.display()
+        ),
+        // A failure here must be loud. The kernel on stdout is still the kernel
+        // the proofs describe; what is missing is the artifact SAYING so, and a
+        // silent omission is indistinguishable from a compiler that never had
+        // one.
+        Err(e) => eprintln!(
+            "      -> could not write the attention certificate to {}: {}. The emitted \
+             kernel is unchanged; what is missing is the certificate that states its \
+             trust boundary.",
+            path.display(),
+            e
+        ),
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -700,7 +750,10 @@ fn main() {
             // Straight to stdout with no banner: the bridge pipes this into
             // `cuModuleLoadData`, so anything else on the stream is a parse
             // error in the driver rather than a diagnostic.
-            Ok(ptx) => print!("{}", ptx),
+            Ok(ptx) => {
+                print!("{}", ptx);
+                write_attention_certificate(head_dim, seq_len);
+            }
             Err(why) => {
                 log_error!("{}", why);
                 exit(1);

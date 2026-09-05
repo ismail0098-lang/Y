@@ -1366,6 +1366,46 @@ from that precondition found it.
 The method is written up in
 **[The process: taking a kernel from *fast* to *verified*](docs/verified_kernel_process.md)**.
 
+#### The GPU kernel carries one too, and it states what `ptxas` is
+
+`docs/proof_carrying_kernels.md` Phase 3 says of the GPU pipeline that `ptxas`
+"is trusted or validated per-translation" and that **this must be stated in the
+certificate, never papered over**. Measured: there was no certificate.
+`--emit-attention-ptx` wrote a `.ptx` to stdout and nothing else, while three
+machine-checked proofs — 96 theorems — described that exact kernel. The same
+shape as the finding above: proof-carrying described the repository, not the
+output.
+
+It emits one now, to a file, with the notice on **stderr** because stdout is
+piped straight into `cuModuleLoadData`. What it instantiates is the launch
+partition (every key visited exactly once, at any geometry) and the
+order-independence of the atomics; what it *states* is the boundary:
+
+```
+- `ptxas`, which turns this PTX into the SASS the GPU runs. It is closed
+  source and is NOT covered by anything above.
+  NOT CHECKED. Closing it means validating THIS kernel per-translation
+  with `tools/ptxas_tval/`, which exists and currently covers six
+  kernels; this is not one of them, so for this kernel `ptxas` is
+  TRUSTED and not validated.
+```
+
+Both halves of that are measured rather than asserted — no committed `.ptx`
+contains `attn_accum`, so the kernel really is outside the validator's corpus.
+
+**The obligation bites, which is what separates a certificate from paperwork.**
+The kernel reduces into a 64-bit accumulator, so exactness needs
+`S * (2^28 - 1) * 127 < 2^63`. Y decides that in `usize`; the certificate states
+it over `Z` and `coqc` decides it — two tools, no shared code, no shared
+representation, and a boundary **one unit wide**: emitted and accepted at
+`seq_len = 270,549,122`, refused by both at `270,549,123`.
+
+The capstone the trust boundary mirrors is the dependency **root**, measured
+rather than guessed — `AttentionSchedule` ← `GridStrideSplit` ←
+`SoftmaxErrorBound`, nothing requires the last — because only a root can
+truthfully state a global negative. The bijection gate that keeps a certificate's
+list in step with its capstone's now runs over both.
+
 ### Translation validation: removing `ptxas` from the trusted base
 
 Those proofs stop at the IR. The trust boundary printed into every emitted
@@ -1693,6 +1733,7 @@ src/                       Rust bootstrap compiler
   native_emitter.rs                standalone ELF
   zero_drift.rs                    @ZeroDrift representation selection
   exact_gemm_certificate.rs        the .v a compilation emits with its kernel
+  exact_attention_certificate.rs   the same, for the GPU attention kernel
   exact_attention.rs fixed_exp.rs  exact int8 attention PTX + integer exp2
   zk_field.rs                      BN254 Fr, Montgomery form
   zk_emitter.rs zk_witness.rs      R1CS emission and witness solving

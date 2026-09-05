@@ -52,7 +52,18 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use y::exact_gemm_certificate::{Check, CAPSTONE, TRUST_BOUNDARY};
+use y::exact_attention_certificate::{
+    CAPSTONE as GPU_CAPSTONE, TRUST_BOUNDARY as GPU_TRUST_BOUNDARY,
+};
+use y::exact_gemm_certificate::{Check, TrustItem, CAPSTONE, TRUST_BOUNDARY};
+
+/// The marker locating each capstone's exclusion list.
+///
+/// They differ because the two files were written years apart in this
+/// programme's terms, and normalising them would be an edit to a proof made
+/// for a test's convenience. The gate takes the marker as a parameter instead.
+const CPU_MARKER: &str = "What is STILL not proved";
+const GPU_MARKER: &str = "What this does NOT claim";
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -210,13 +221,12 @@ fn every_named_check_is_a_file_that_exists() {
 /// Located by a marker phrase rather than by line number. If the marker moves
 /// this returns nothing and the caller's floor fails loudly, which is the
 /// behaviour wanted: a gate that silently finds zero bullets passes.
-fn capstone_bullets() -> Vec<String> {
-    let src = std::fs::read_to_string(repo().join(CAPSTONE))
-        .unwrap_or_else(|e| panic!("read {CAPSTONE}: {e}"));
-    const MARKER: &str = "What is STILL not proved";
-    let start = src.find(MARKER).unwrap_or_else(|| {
+fn capstone_bullets(capstone: &str, marker: &str) -> Vec<String> {
+    let src = std::fs::read_to_string(repo().join(capstone))
+        .unwrap_or_else(|e| panic!("read {capstone}: {e}"));
+    let start = src.find(marker).unwrap_or_else(|| {
         panic!(
-            "{CAPSTONE} no longer contains the marker {MARKER:?} that locates its \
+            "{capstone} no longer contains the marker {marker:?} that locates its \
              exclusion list. Update the marker here deliberately - a gate that cannot \
              find the list it is comparing against would otherwise pass silently."
         )
@@ -254,26 +264,31 @@ fn capstone_bullets() -> Vec<String> {
 /// A BIJECTION, not a count. The two lists were both three bullets long while
 /// disagreeing on one of them, so a count is exactly the check that would have
 /// passed.
-#[test]
-fn the_capstone_and_the_certificate_claim_the_same_exclusions() {
-    let bullets = capstone_bullets();
+/// The bijection, over any capstone and any trust boundary.
+///
+/// Generalised when the GPU certificate arrived. A second copy of this
+/// reasoning is precisely the drift both lists exist to prevent - the recorded
+/// instance is a hand-copied subset that dropped a bullet while adding one of
+/// its own, both lists three long so a count called them equal.
+fn assert_bijection(capstone: &str, marker: &str, items: &[TrustItem], what: &str) {
+    let bullets = capstone_bullets(capstone, marker);
     assert!(
         bullets.len() >= 3,
-        "found only {} bullets in {CAPSTONE}'s exclusion list; the parse has drifted \
+        "found only {} bullets in {capstone}'s exclusion list; the parse has drifted \
          and every comparison below would be vacuous",
         bullets.len()
     );
 
-    let attributed: Vec<_> = TRUST_BOUNDARY
+    let attributed: Vec<_> = items
         .iter()
         .filter_map(|i| match i.stated_in {
-            Some((file, phrase)) if file == CAPSTONE => Some((i.claim, phrase)),
+            Some((file, phrase)) if file == capstone => Some((i.claim, phrase)),
             _ => None,
         })
         .collect();
     assert!(
         attributed.len() >= 3,
-        "only {} trust items are attributed to {CAPSTONE}",
+        "only {} trust items are attributed to {capstone}",
         attributed.len()
     );
 
@@ -282,7 +297,7 @@ fn the_capstone_and_the_certificate_claim_the_same_exclusions() {
         let hits = bullets.iter().filter(|b| b.contains(phrase)).count();
         assert_eq!(
             hits, 1,
-            "the trust item `{claim}` locates its bullet in {CAPSTONE} by the phrase \
+            "the trust item `{claim}` locates its bullet in {capstone} by the phrase \
              {phrase:?}, which matches {hits} bullets rather than one. Either the \
              capstone reworded the bullet or the phrase is not distinctive."
         );
@@ -294,12 +309,86 @@ fn the_capstone_and_the_certificate_claim_the_same_exclusions() {
         let hits = attributed.iter().filter(|(_, p)| bullet.contains(p)).count();
         assert_eq!(
             hits, 1,
-            "this bullet of {CAPSTONE}'s exclusion list is claimed by {hits} trust \
+            "this bullet of {capstone}'s exclusion list is claimed by {hits} trust \
              items rather than one, so the emitted certificate does not carry it:\n  \
-             {bullet}\nAdd it to `exact_gemm_certificate::TRUST_BOUNDARY` - with the \
+             {bullet}\nAdd it to `exact_gemm_certificate::items` - with the \
              check that would fail if it were false, or `Check::Unchecked` saying what \
-             closing it would take."
+             closing it would take.\n(boundary: {what})"
         );
+    }
+}
+
+/// The CPU chain: `ExactGemmWhole.v` against the exact-GEMM certificate.
+#[test]
+fn the_capstone_and_the_certificate_claim_the_same_exclusions() {
+    assert_bijection(CAPSTONE, CPU_MARKER, TRUST_BOUNDARY, "exact_gemm_certificate");
+}
+
+/// The GPU chain: `SoftmaxErrorBound.v` against the attention certificate.
+///
+/// The capstone is the dependency ROOT, measured rather than guessed:
+/// `AttentionSchedule` <- `GridStrideSplit` <- `SoftmaxErrorBound`, and
+/// nothing requires the last. Only a root can truthfully state a global
+/// negative, which is the rule that picks it - and it is NOT
+/// `GridStrideSplit.v`, which is what it looks like from the kernel's side.
+#[test]
+fn the_gpu_capstone_and_its_certificate_claim_the_same_exclusions() {
+    assert_bijection(
+        GPU_CAPSTONE,
+        GPU_MARKER,
+        GPU_TRUST_BOUNDARY,
+        "exact_attention_certificate",
+    );
+}
+
+/// The GPU certificate's own below-the-model items, and the one Phase 3 names.
+///
+/// A proof over `Z` and `Q` has no opinion about a closed-source assembler, so
+/// the capstone correctly does not mention `ptxas` - which means the bijection
+/// above can never require it. Without this, deleting every `stated_in: None`
+/// item leaves the file green while the certificate stops saying the thing
+/// `docs/proof_carrying_kernels.md` Phase 3 says must never be papered over.
+#[test]
+fn the_gpu_certificate_states_the_ptxas_boundary_below_the_model() {
+    let own: Vec<_> = GPU_TRUST_BOUNDARY
+        .iter()
+        .filter(|i| i.stated_in.is_none())
+        .collect();
+    assert!(
+        own.len() >= 2,
+        "only {} GPU trust items sit below the model; at minimum `ptxas` and the \
+         hardware are trusted, and a certificate silent about them understates its \
+         boundary",
+        own.len()
+    );
+    let flat: String = own
+        .iter()
+        .flat_map(|i| [i.claim, i.because])
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    for want in ["ptxas", "closed source", "gpu"] {
+        assert!(
+            flat.contains(want),
+            "no GPU trust item below the model mentions {want:?}"
+        );
+    }
+    // And it must say which of the two Phase 3 allows: trusted, or validated.
+    let ptxas = own
+        .iter()
+        .find(|i| i.claim.contains("ptxas"))
+        .expect("a trust item for ptxas");
+    match ptxas.check {
+        Check::Unchecked(route) => assert!(
+            route.contains("ptxas_tval"),
+            "the ptxas item does not name the route that would close it, so it reads \
+             as an excuse rather than a work item: {route}"
+        ),
+        Check::Pinned(f) => panic!(
+            "the ptxas item claims to be checked by {f}. Phase 3 allows exactly two \
+             readings - trusted, or validated per-translation - and if this kernel is \
+             now covered by the validator, say so in the claim as well."
+        ),
     }
 }
 

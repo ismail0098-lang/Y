@@ -66,3 +66,11 @@ tools/ptxas_tval/*.tgz
 # a hand-built fixture's .ptx and .sass are tracked (see fma/); the .cubin it
 # passes through is machine-specific and derived, like every other one here.
 tools/ptxas_tval/**/*.cubin
+
+# Emitted certificates. One `.v` per compilation that substitutes an exact
+# kernel, written beside the artifact it certifies. They are GENERATED and must
+# never be committed: a checked-in certificate is the third staleness class this
+# repository already names -- an artifact no run of the compiler need reproduce,
+# which then reads as a claim about code that has moved underneath it.
+*_certificate.v
+*_certificate_[0-9]*.v

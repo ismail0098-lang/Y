@@ -2204,6 +2204,78 @@ So Phase 3's swizzle obligation is not "prove the existing pass correct". It is
 a compiler pass that computes swizzles nothing applies". Naming which of those
 to build on is the first decision, and it was not visible before this.
 
+#### Phase 3 progress, 2026-09-05 — the GPU kernel carries a certificate now, and it states the `ptxas` boundary
+
+This phase's trust-boundary bullet says the `ptxas` step "is trusted or
+validated per-translation" and that **this must be stated in the certificate,
+never papered over**. Measured: there was no certificate.
+`--emit-attention-ptx` wrote a `.ptx` to stdout and nothing else, while
+`AttentionSchedule.v` → `GridStrideSplit.v` → `SoftmaxErrorBound.v` — 96
+theorems — described that exact kernel. Same shape as the finding recorded for
+the exact GEMM before its certificate landed: **proof-carrying described the
+repository, not the output.**
+
+`src/exact_attention_certificate.rs` emits one `.v` per emitted kernel.
+`Y_NO_CERTIFICATE=1` suppresses it, loudly, the same switch as the CPU path.
+
+**The capstone is the dependency ROOT and it was measured rather than guessed.**
+The rule already established here is that only a root can truthfully state a
+global negative, so the capstone is the file whose exclusion list is the
+aggregate one. `AttentionSchedule` ← `GridStrideSplit` ← `SoftmaxErrorBound`,
+and nothing requires the last — so the GPU capstone is **`SoftmaxErrorBound.v`**,
+not `GridStrideSplit.v`, which is what it looks like from the kernel's side.
+
+**The obligation bites, which is what stops it being paperwork.** The kernel
+reduces into a 64-bit accumulator, so exactness needs
+`S * (2^28 - 1) * 127 < 2^63`. Y decides that in `usize`
+(`exact_attention::MAX_EXACT_SEQ_LEN`); the certificate states it over `Z` and
+hands it to `coqc`, which has no `usize`. Two tools, no shared code, no shared
+representation, and a boundary **one unit wide** — verified before anything was
+wired in:
+
+```
+seq_len = 270,549,122   emitter: emits    coqc: accepted
+seq_len = 270,549,123   emitter: refuses  coqc: "Cannot find witness"
+```
+
+That is the same structure as the exact-GEMM certificate's licence check, which
+is where the design came from.
+
+**What the certificate says about `ptxas` is the point of the exercise.** It is
+a `Check::Unchecked` item naming its own route: *"validating THIS kernel
+per-translation with `tools/ptxas_tval/`, which exists and currently covers six
+kernels; this is not one of them, so for this kernel `ptxas` is TRUSTED and not
+validated."* Measured, not assumed — no committed `.ptx` contains `attn_accum`,
+so the attention kernel is not in that corpus. The item also carries *why* it
+cannot be assumed away: the same validator **refutes** a float kernel because
+`ptxas` contracts `mul.f32`+`add.f32` into an `FFMA` that rounds once where the
+PTX rounds twice.
+
+**A `nat` literal is unary, and at a production length that is a landmine.**
+`Definition seq_len : nat := 270549122` is 270 million constructors, and every
+normalising tactic would try to evaluate it. The certificate emits
+`Z.to_nat seq_len_Z` and proves `Z.of_nat seq_len = seq_len_Z` by `Z2Nat.id` —
+the pattern this repository already recorded from `SoftmaxErrorBound.v`'s own
+`ring` blow-up, applied at generation time.
+
+**The bijection gate was generalised rather than copied.** `TrustItem`, `Check`
+and the renderer are now shared between the two certificates, and
+`tests/certificate_states_its_trust_boundary.rs` runs the same bijection over
+both capstones: every bullet of the capstone's exclusion list claimed by exactly
+one trust item, and every attributed item finding exactly one bullet. A second
+copy of that reasoning is precisely the drift the gate exists to prevent — the
+recorded instance is a hand-copied subset that dropped a bullet while adding one
+of its own, both lists three long so a count called them equal.
+
+**What this does NOT do.** It does not extend the proofs; every theorem it
+instantiates already existed. It does not put the attention kernel in the
+translation validator, so `ptxas` is trusted for it — which the certificate now
+says out loud instead of leaving to a reader to work out. And it covers the
+exact-attention kernel only: the tensor-core GEMMs this phase is really about
+have no proofs to carry yet, and `loopgap.py` says 32 of the 48 loop kernels in
+the validator's corpus are behind one structural gate before any of that
+becomes reachable.
+
 ### Phase 4 — Bounded error where exactness is impossible · 3–4 years
 
 Exact accumulation covers reductions and fixed-point pipelines. It does not
