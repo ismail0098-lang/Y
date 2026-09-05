@@ -257,8 +257,18 @@ pub const TRUST_BOUNDARY: &[TrustItem] = &[
 /// point, since a renderer that skipped them would turn the honest half of the
 /// list into silence.
 pub fn render_trust_boundary() -> String {
+    render_trust_boundary_of(TRUST_BOUNDARY)
+}
+
+/// The same renderer over any trust boundary.
+///
+/// Generalised when the GPU certificate arrived: a second copy of "how a trust
+/// item is written down" is exactly the drift this list exists to prevent, and
+/// the hand-copied subset that dropped a bullet is the recorded instance of it.
+/// One renderer, two boundaries.
+pub fn render_trust_boundary_of(items: &[TrustItem]) -> String {
     let mut out = String::new();
-    for item in TRUST_BOUNDARY {
+    for item in items {
         out.push_str(&wrap(item.claim, "    - ", "      "));
         out.push_str(&wrap(item.because, "      ", "      "));
         let line = match item.check {
@@ -273,7 +283,7 @@ pub fn render_trust_boundary() -> String {
 }
 
 /// Greedy wrap to the width the rest of this file is written at.
-fn wrap(text: &str, first: &str, rest: &str) -> String {
+pub(crate) fn wrap(text: &str, first: &str, rest: &str) -> String {
     const WIDTH: usize = 76;
     let mut out = String::new();
     let mut line = String::from(first);

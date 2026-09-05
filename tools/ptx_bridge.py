@@ -76,8 +76,15 @@ def dptr(t):
 
 # ------------------------------------------------------------------ the kernel
 def emit_ptx(head_dim, seq_len):
+    # `Y_NO_CERTIFICATE`: this is a differential HARNESS, called once per probe
+    # configuration, and it does not distribute the kernel it compiles. Without
+    # this it drops an identical `.v` into the caller's working directory on
+    # every call -- the repository root, for anyone running the documented
+    # command. Suppressing a side artifact is not the same as re-wrapping the
+    # compiler's output: the PTX this reads is byte-for-byte what Y emits.
+    env = dict(os.environ, Y_NO_CERTIFICATE="1")
     out = subprocess.run([YBIN, "--emit-attention-ptx", str(head_dim), str(seq_len)],
-                         capture_output=True, check=True)
+                         capture_output=True, check=True, env=env)
     return out.stdout.decode()
 
 
