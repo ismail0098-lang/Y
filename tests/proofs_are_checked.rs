@@ -256,6 +256,36 @@ fn nothing_in_any_proof_is_admitted() {
 fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
     vec![
         (
+            // `exact_pv`: the first kernel in the repository with BOTH a Rocq
+            // proof of what its PTX computes and a per-translation validation
+            // of that PTX against its SASS. The capstone is the value claim;
+            // the two REFUTATIONS beside it are what stop the file being
+            // satisfied by licences nothing can violate, and both are the
+            // device's own numbers reproduced from the wrap functions alone -
+            // `the_measured_index_wrap_reads_v0_twice` is the ceiling nobody
+            // had written down (the source states only the accumulator one,
+            // which at head_dim 64 is 8x looser), and
+            // `the_accumulator_licence_is_load_bearing` is the ceiling it does
+            // state, at its own boundary. `the_loop_lengths_exist` is what
+            // stops that second one reading as vacuous, since its lengths are
+            // abstract - a `nat` literal of sixteen million is unary and does
+            // not survive `Qed`.
+            "ExactPvExact.v",
+            &[
+                "Print Assumptions the_emitted_exact_pv_holds_the_source_dot_product",
+                "Print Assumptions the_index_ceiling_binds_first",
+                "Print Assumptions the_measured_index_wrap_reads_v0_twice",
+                "Print Assumptions without_the_index_licence_the_answer_is_wrong",
+                "Print Assumptions the_measured_overflow_is_two_s_complement",
+                "Print Assumptions the_accumulator_licence_is_load_bearing",
+                "Print Assumptions the_loop_lengths_exist",
+                // The tie comes first: without it the partition below is a
+                // fact about an index SHAPE that nothing says this kernel has.
+                "Print Assumptions the_output_index_is_the_mathematical_one",
+                "Print Assumptions every_output_element_is_written_by_one_thread",
+            ],
+        ),
+        (
             // The int8 GEMM's VALUE, as against `Int8GemmSchedule.v`'s
             // schedule. The four entries are the four claims, and the last two
             // are what stop the file being satisfied by something nothing
