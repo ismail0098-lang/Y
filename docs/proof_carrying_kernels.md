@@ -2382,6 +2382,34 @@ rank bringing it up as "the long pole, kernel engineering not proof work".
 on an RTX 4070 Ti SUPER, clock-ramped, correctness-checked on every timed
 configuration:
 
+> **CORRECTED 2026-09-05 — both figures in the original table were wrong, by
+> different mechanisms, and they partly cancelled.** The row is kept because the
+> conclusion it drew survives and the errors are worth reading. Re-measured
+> same-session, interleaved, ramped, every arm correctness-checked:
+>
+> | 4096³ | G MAC/s | of cuBLASLt | of ISA ceiling | published |
+> |---|---|---|---|---|
+> | Y int8 (16×8) | 14,571 | **0.09x** | 8.0% | 15,439 / 0.41x / 4.1% |
+> | cuBLASLt (`torch._int_mm`) | 144,196 | 1.00x | 80.2% | 38,090 |
+>
+> **The baseline was 3.8x too low because `.contiguous()` sat inside the timed
+> loop**, materialising a 16 MB copy per call. Measured directly:
+> `_int_mm(A, B.t())` is 144,803 G MAC/s and `_int_mm(A, B.t().contiguous())`
+> is **31,452** — which is essentially the 38,090 that was published. The
+> baseline kernel is `cutlass_80_tensorop_i16832gemm_s8_256x128_64x3_tn_align16`,
+> read out of the profiler rather than assumed.
+>
+> **The ISA ceiling was 2.1x too high** — see the correction in the next
+> subsection. The two errors moved the "% of ISA ceiling" column in opposite
+> directions, which is why 4.1% looked plausible where the truth is 8.0%.
+>
+> **The Y arm reproduces** (15,439 → 14,571, within 6%), and the corrected
+> baseline itself reads 144–154k across runs — so every ratio quoted here is
+> taken *within* one interleaved run, never across two. *A ratio whose two
+> arms move by different factors between sessions has a contaminated arm, not a
+> noisy one* — this repository's own OpenBLAS lesson, and it applied here to a
+> figure I had published two days earlier.
+
 | 4096³ | G MAC/s | of cuBLASLt | of ISA ceiling |
 |---|---|---|---|
 | Y int8 | 15,439 | **0.41x** | 4.1% |
@@ -2393,6 +2421,27 @@ and the repository's own recorded window effect ("absolute timings moved 4-5x
 between windows") applies; a ramp phase is what makes the numbers reproduce.
 
 ##### The ISA ceiling, and the arm that validates it
+
+> **CORRECTED 2026-09-05: this number was 2.08x too high, and the paragraph
+> below contains its own bug report.** The real ceiling is **179,761 G MAC/s**.
+>
+> The probe kept eight accumulator sets and **stored only one**, so `ptxas`
+> deleted the mma chains feeding the other seven. **The doubling control did not
+> catch it, and could not: a constant dead fraction divides out of the ratio.**
+> Storing every accumulator gives 179,761 with the control still at 1.989 —
+> and that figure is **102% of `66 SM × 2.61 GHz × 1024 MAC/SM/cycle`**, where
+> 374,027 was 2.1x above anything the hardware can do.
+>
+> **The tell was written down and filed as a curiosity.** The paragraph below
+> records int8 at 4.04x the f16 rate where a spec sheet predicts 2x, and calls
+> that "measured and unreconciled rather than adjusted". The corrected ceiling
+> is **1.94x f16** — exactly the 2x — so everything reconciles. *A measurement
+> that disagrees with a spec sheet by 2x is a bug report, not a curiosity;
+> "unreconciled" is a note to come back, and I did not.*
+>
+> The control paragraph's reasoning was sound and the control was run on the
+> arm where the bug did not bite. **An accounting method validated on one arm
+> does not validate a different arm's dead-code elimination.**
 
 `374,027 G MAC/s` for `mma.sync.m16n8k32.s8`, doubling-verified (ratio 2.000)
 with 32 live `IMMA.16832.S8.S8` in the disassembly. That is **4x** the f16
@@ -2521,8 +2570,9 @@ alone — 9/9.
 
 - **One kernel, and the smallest one.** The 23 f16 GEMMs still cannot carry an
   exactness argument at all, and nothing here changes that.
-- **The staging.** Y's int8 GEMM is still at 0.41x cuBLASLt for the traffic
-  reason above, and still falls 3.7x off the L2 cliff.
+- **The staging.** Y's int8 GEMM is still at 0.09x cuBLASLt for the traffic
+  reason above, and still falls 3.7x off the L2 cliff. *(Half of that is closed
+  by the warp tiling in the next section, which needs no staging at all.)*
 - **The tie is transcription-plus-gate**, as in `GpuWarpTiling`: `ptx_emitter`
   does not go through the `Ix` extraction layer, so the proof is checked
   against emitted text rather than rendered with it. Routing the GEMM path
@@ -2530,6 +2580,149 @@ alone — 9/9.
 - **`mma.sync`'s own semantics and the per-lane fragment layout** are ISA facts
   in the trusted base, pinned empirically by `tests/ptx_int8_mma_layout.rs`,
   which runs the instruction on the device against a plain integer matmul.
+
+#### The warp tile: 4.29x with no shared memory, and two published numbers that were wrong
+
+Taken from the previous increment's own residue, which named the shared-memory
+staging as the next item and — per the standing discipline — said to measure
+what the bring-up costs before writing any of it. **The measurement moved the
+plan twice and corrected two figures this document had published two days
+earlier.**
+
+##### Measure first: there is a cheaper lever pointing the same way
+
+The staging argument is a traffic argument: one warp owns a 16×8 output tile
+and reads its 16 A rows and 8 B columns straight from global, so it moves
+`16*32 + 8*32 = 768` bytes per 32-wide K step to retire 4096 MACs — **0.1875
+bytes per MAC**, against a 128×128 staged CTA tile's `2/128`, a 12x gap.
+
+That framing hides a cheaper lever. Issuing `mt*nt` mma per K step **from the
+same A and B fragments** amortises both halves with no shared memory, no
+barrier and no instruction this backend does not already emit:
+
+| warp tile | mma | B/MAC | vs 16×8 | accumulator + fragment regs |
+|---|---|---|---|---|
+| 16×8 | 1 | 0.1875 | 1.00x | 10 |
+| 32×16 | 4 | 0.0938 | 2.00x | 28 |
+| 64×32 | 16 | 0.0469 | 4.00x | 88 |
+| **64×64** | **32** | **0.0312** | **6.00x** | **160** |
+| *128×128 staged (for reference)* | | *0.0156* | *12.0x* | |
+
+**Register tiling is half the staged pipeline's lever for none of its
+machinery**, which is why it comes first. Measured, same session, interleaved,
+ramped, every configuration correctness-checked against `torch._int_mm`:
+
+| | 16×8 | 64×64 | speedup | vs cuBLASLt |
+|---|---|---|---|---|
+| 4096³ | 14,571 | **61,374** | **4.21x** | 0.09x → 0.40x |
+| 8192³ | 4,912 | **38,897** | **7.92x** | 0.03x → 0.24x |
+
+and through the real compiler end to end at 4096³, old emitter against new in
+one process: **14,322 → 61,441 G MAC/s, 4.29x**. 199 registers with
+`STACK:0 LOCAL:0` — **zero spill** — which is what makes the 4×8 cap right
+rather than chosen.
+
+##### Both baselines were wrong, by different mechanisms, and they cancelled
+
+Re-measuring the two numbers this section already published is what the
+"cross-session numbers do not compose" rule asks for, and both moved:
+
+| | published | measured | mechanism |
+|---|---|---|---|
+| cuBLASLt @ 4096³ | 38,090 | **144,196** | `.contiguous()` inside the timed loop |
+| int8 mma ISA ceiling | 374,027 | **179,761** | unstored accumulators deleted by `ptxas` |
+
+The first is a harness bias this repository has recorded before, identified
+rather than guessed: `_int_mm(A, B.t().contiguous())` measures **31,452**,
+essentially the published figure, because the transpose materialises a 16 MB
+copy per call. The real baseline kernel is
+`cutlass_80_tensorop_i16832gemm_s8_256x128_64x3_tn_align16`, read out of the
+profiler.
+
+**The second is the more interesting failure, because its control passed.** The
+ceiling probe kept eight accumulator sets and stored one, so seven mma chains
+were dead code — and the doubling control reported a clean 2.000 anyway,
+because *a constant dead fraction divides out of a ratio*. What caught it was
+arithmetic: 374,027 is 2.1x above `66 SM × 2.61 GHz × 1024 MAC/SM/cycle`. With
+every accumulator stored the probe reads 179,761 — **102% of that bound**, and
+**1.94x the f16 ceiling, exactly the 2x a spec sheet predicts.**
+
+That reconciliation is the point. The original note recorded int8 at **4.04x**
+f16 and called it "measured and unreconciled with the marketing figure, rather
+than adjusted to match it". Refusing to fudge a number was right; **filing the
+discrepancy as a curiosity instead of a bug report was not.** A doubling control
+proves work scales with the loop body, not that the loop body is live; the
+liveness control is that every result is stored.
+
+##### The largest tile is a 7x LOSS at a small shape, and only sweeping found it
+
+Taking the biggest tile the shape admits is the obvious rule and it is wrong. **A
+tile is one WARP**, so a 64×64 tile on a 64×64 matrix is one warp for the whole
+GEMM. Measured against the 16×8 schedule that shipped, three runs agreeing to
+within 1%:
+
+| shape | max tile | vs shipped |
+|---|---|---|
+| 64×64 | 64×64 | **0.14x** |
+| 128×128 | 64×64 | 0.18x |
+| 256×256 | 64×64 | 0.42x |
+| 512×256 | 64×64 | 0.74x |
+| 512×512 | 64×64 | 1.62x |
+| 1024×1024 | 64×64 | 3.13x |
+
+So the tile is taken only when it leaves at least 64 output tiles — roughly one
+warp per SM — and otherwise the schedule stays at one mma per warp. **The
+fallback is to 16×8 outright rather than to the next size down**, because the
+intermediate tiles do not win either: at 256×256 the largest tile leaving 64
+tiles is 32×32, and it measures 0.89x.
+
+Validated on 14 shapes, 8 of them not used to derive the rule and including
+rectangular and decode-shaped ones: **worst case 1.00x — it never regresses** —
+while keeping 1.57x–3.62x wherever the win exists. The 16×8 path itself is
+unchanged in cost by the tile loop (0.99x, within noise), which matters because
+the floor sends every small shape there.
+
+The floor is a **performance fallback, not a correctness one** — every tile the
+selector can return computes the same matrix — which is why it is a fixed
+constant rather than something probed from the local device. It leaves ~1.3x on
+the table at 512×512, where 64×32 measures 2.10x against 64×64's 1.62x.
+
+##### The conclusion the corrected numbers changed
+
+Under the published baseline, a 4.21x speedup on 0.41x reads as **1.56x
+cuBLASLt — "we beat the vendor library with no shared memory"**. That is false.
+Under the real baseline it is 0.09x → 0.40x: a large, cheap, real win that
+**does not close the gap**, and the staged pipeline is still needed. Re-measuring
+the baseline is what kept a wrong headline out of this document.
+
+##### The schedule change forced a stronger property than it needed
+
+The warp tile is a compile-time function of M and N, so it is **invisible at the
+call site** — and a host that kept launching the pre-tiling `(N/8, M/16, z)`
+grid would start `mt*nt` times too many CTAs, each computing a base row
+`ty*(mt*16)` at or past the end of the matrix, with `red.global.add.s32`
+writing it. That is the previous increment's defect exactly, one axis over.
+
+So the output tiles are **grid-strided in x and y**, the way K already was in z.
+Every grid of at least (1,1,1) is now correct, an over-large grid idles its
+extra CTAs, and **the pre-tiling host launch still computes the right matrix** —
+verified on the real compiler's 4096³ output, where it is not merely correct but
+marginally faster (67,568 vs 61,441 G MAC/s). The kernel is now invariant to
+block size, to grid, and to split factor.
+
+##### The proof cost nothing new
+
+An output row became a three-digit index — tile, mma within the tile, row within
+the mma — which is `MixedRadix.two_digit_unique` verbatim. `warp_row` is the
+**seventh consumer** of that schema and the composition needed no new reasoning:
+`warp_row_is_a_tile_row` shows the warp tile *factors through* the single-mma
+tiling, so everything already proved about `tile_row` still describes the
+emitted kernel. The tile loop is `owner` again, so it inherits
+`GridStrideSplit`'s coverage — the third axis of this one kernel to do so.
+
+`without_the_tile_guard_a_cta_addresses_past_the_matrix` is what makes the
+stride guard load-bearing rather than an optimisation: the overrun is *past the
+matrix*, not a duplicate write.
 
 ### Phase 4 — Bounded error where exactness is impossible · 3–4 years
 
