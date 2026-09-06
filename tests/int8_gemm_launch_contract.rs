@@ -276,6 +276,45 @@ fn the_proof_states_the_shape_the_emitter_enforces() {
         refute
     );
 
+    // **The warp tile's decomposition must stay THREE-digit**, for the same
+    // reason the confinement theorem must stay two-sided. `warp_row` is
+    // `ty*(mt*16) + mi*16 + i`: drop the middle digit and it degenerates to the
+    // single-mma tiling, which is still true, still compiles, and says nothing
+    // about a warp that issues mt*nt of them. The middle term is what makes two
+    // mma of ONE warp provably write different rows.
+    let wr = v
+        .split("Definition warp_row")
+        .nth(1)
+        .expect("the proof must define the warp tile's row map")
+        .split('\n')
+        .next()
+        .expect("malformed definition");
+    for term in ["mt * MMA_M", "mi * MMA_M"] {
+        assert!(
+            wr.contains(term),
+            "warp_row must carry `{}` - without the per-mma digit it is the \
+             single-tile map again and proves nothing about a warp tile:\n{}",
+            term, wr
+        );
+    }
+    // The tile guard's refutation must say the overrun is PAST THE MATRIX, not
+    // merely a duplicate: that is what makes the guard load-bearing rather than
+    // an optimisation, and it is the claim the grid sweep exercises.
+    let overrun = v
+        .split("Theorem without_the_tile_guard_a_cta_addresses_past_the_matrix")
+        .nth(1)
+        .expect("the tile-guard refutation must exist")
+        .split("Proof.")
+        .next()
+        .expect("malformed theorem");
+    assert!(
+        overrun.contains("m <= ty * (mt * MMA_M)"),
+        "the tile-guard refutation must conclude that the base row reaches or \
+         passes M. A weaker statement would leave the guard looking like a \
+         performance choice:\n{}",
+        overrun
+    );
+
     // The emitter refuses anything the tiling does not cover, and the proof
     // says so. Check both directions on the real compiler: one legal shape and
     // one shape short of a tile on each axis.
@@ -287,6 +326,225 @@ fn the_proof_states_the_shape_the_emitter_enforces() {
             e.contains("M % 16 == 0") || e.contains("m16n8k32"),
             "the refusal for a ragged {} must name the shape it needs, not fail obscurely:\n{}",
             axis, e
+        );
+    }
+}
+
+/// The WARP TILE, and why changing it needed the grid to stop mattering.
+///
+/// `int8_warp_tile` issues `mt*nt` mma per K step from the same A and B
+/// fragments, which cuts global traffic by up to 6x and measured **4.21x** at
+/// 4096^3 on an RTX 4070 Ti SUPER. The tile is a compile-time function of M and
+/// N, so it is invisible at the call site — and a host that kept launching the
+/// pre-tiling `(N/8, M/16, z)` grid would then start `mt*nt` times too many
+/// CTAs, each writing a wider tile, with `red.global.add.s32` summing the
+/// overlaps into a silently wrong answer.
+///
+/// That is the same class of defect as the block-size bug at the top of this
+/// file, so it gets the same answer: the output tiles are grid-strided in x and
+/// y, exactly as K already was in z. Every grid of at least (1,1,1) is now
+/// correct, and the old launch is correct with idle CTAs.
+fn cpu_reference(m: usize, n: usize, k: usize, a: &[i8], b: &[i8]) -> Vec<i32> {
+    let mut c = vec![0i32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut s = 0i32;
+            for x in 0..k {
+                s += a[i * k + x] as i32 * b[j * k + x] as i32;
+            }
+            c[i * n + j] = s;
+        }
+    }
+    c
+}
+
+/// Shapes that select DIFFERENT warp tiles must all compute the same matrix.
+///
+/// The reference is a plain CPU triple loop, not another GPU kernel: the tile
+/// decides which lane reads which element, so checking one tiling against
+/// another would compare two readings of the same possibly-wrong layout.
+#[test]
+fn every_warp_tile_the_shape_selects_computes_the_same_matrix() {
+    use y::cuda_runtime::CudaContext;
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — warp tiling was not exercised on a device.");
+        return;
+    };
+    let k = 128usize;
+    // (M, N) chosen so the selector lands on a different (mt, nt) in each row,
+    // and so several of them need MORE THAN ONE output tile — without that the
+    // grid-stride loop below runs exactly once and is not tested at all.
+    // The shapes must actually select DIFFERENT tiles under the floor rule, or
+    // this compares one schedule against itself. A big tile is only taken when
+    // it leaves >= 64 output tiles, so reaching 64x64 needs M*N >= 512*512, and
+    // reaching an intermediate tile needs a shape long in one axis and short in
+    // the other. Both directions are here on purpose.
+    let shapes = [
+        (16usize, 8usize),   // 1 tile at any size -> 16x8
+        (48, 24),            // 9 tiles -> 16x8
+        (512, 512),          // 64 tiles at 64x64 -> 64x64, exactly at the floor
+        (1024, 1024),        // 256 tiles -> 64x64
+        (4096, 16),          // N admits only nt=2 -> 64x16
+        (32, 4096),          // M admits only mt=2 -> 32x64
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for (m, n) in shapes {
+        let ptx = emit(&format!("tile{}x{}", m, n), m, n, k).expect("fixture must compile");
+        let tile = ptx
+            .lines()
+            .find(|l| l.contains("warp tile "))
+            .and_then(|l| l.split("warp tile ").nth(1))
+            .and_then(|s| s.split_whitespace().next())
+            .expect("the emitted kernel must declare its warp tile")
+            .to_string();
+        seen.insert(tile.clone());
+        let module = ctx.load_ptx(&ptx, "int8_gemm").expect("PTX failed to load");
+
+        let a: Vec<i8> = (0..m * k).map(|i| (((i * 37 + 11) % 251) as i32 - 125) as i8).collect();
+        let b: Vec<i8> = (0..n * k).map(|i| (((i * 53 + 7) % 251) as i32 - 125) as i8).collect();
+        let want = cpu_reference(m, n, k, &a, &b);
+
+        let d_a = ctx.alloc(m * k).unwrap();
+        let d_b = ctx.alloc(n * k).unwrap();
+        let d_c = ctx.alloc(m * n * 4).unwrap();
+        ctx.memcpy_htod_at(&d_a, 0, &a.iter().map(|&v| v as u8).collect::<Vec<u8>>()).unwrap();
+        ctx.memcpy_htod_at(&d_b, 0, &b.iter().map(|&v| v as u8).collect::<Vec<u8>>()).unwrap();
+        ctx.memset_u8(&d_c, 0).unwrap();
+        let args = vec![d_a.device_ptr(), d_b.device_ptr(), d_c.device_ptr()];
+        ctx.launch(&module, ((n / 8) as u32, (m / 16) as u32, 1), (32, 1, 1), 0, &args)
+            .unwrap_or_else(|e| panic!("launch failed at {}x{}: {:?}", m, n, e));
+        ctx.synchronize().unwrap_or_else(|e| panic!("faulted at {}x{}: {:?}", m, n, e));
+        let mut raw = vec![0u8; m * n * 4];
+        ctx.memcpy_dtoh_at(&mut raw, &d_c, 0).unwrap();
+        for i in 0..m * n {
+            let got = i32::from_le_bytes([raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3]]);
+            assert_eq!(
+                got, want[i],
+                "M={} N={} K={} warp tile {}: C[{}] = {}, want {}",
+                m, n, k, tile, i, got, want[i]
+            );
+        }
+    }
+    // Non-vacuity: if the selector collapsed to one tile these shapes would all
+    // exercise the same schedule and agreeing would mean nothing.
+    assert!(
+        seen.len() >= 4,
+        "the shapes above must select at least three distinct warp tiles, else this \
+         test compares one schedule against itself; saw {:?}",
+        seen
+    );
+}
+
+/// The answer must not depend on the GRID either — including the grid a host
+/// written before warp tiling would still be launching.
+#[test]
+fn the_answer_does_not_depend_on_the_grid() {
+    use y::cuda_runtime::CudaContext;
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — grid invariance was not demonstrated.");
+        return;
+    };
+    // 512x512 is the smallest shape that takes the 64x64 warp tile (64 output
+    // tiles, exactly at the floor), so the grid sweep below exercises the tile
+    // loop against a tile that is NOT the mma shape.
+    let (m, n, k) = (512usize, 512usize, 128usize);
+    let ptx = emit("grid", m, n, k).expect("fixture must compile");
+    let module = ctx.load_ptx(&ptx, "int8_gemm").expect("PTX failed to load");
+    let a: Vec<i8> = (0..m * k).map(|i| (((i * 29 + 3) % 251) as i32 - 125) as i8).collect();
+    let b: Vec<i8> = (0..n * k).map(|i| (((i * 71 + 17) % 251) as i32 - 125) as i8).collect();
+    let want = cpu_reference(m, n, k, &a, &b);
+
+    let d_a = ctx.alloc(m * k).unwrap();
+    let d_b = ctx.alloc(n * k).unwrap();
+    let d_c = ctx.alloc(m * n * 4).unwrap();
+    ctx.memcpy_htod_at(&d_a, 0, &a.iter().map(|&v| v as u8).collect::<Vec<u8>>()).unwrap();
+    ctx.memcpy_htod_at(&d_b, 0, &b.iter().map(|&v| v as u8).collect::<Vec<u8>>()).unwrap();
+    let args = vec![d_a.device_ptr(), d_b.device_ptr(), d_c.device_ptr()];
+
+    // (n/8, m/16) is the grid a host written before warp tiling launches: with
+    // a 64x64 tile that is 8x more CTAs in x and 4x more in y than there are
+    // tiles. Without the stride guard every one of them would write a full
+    // tile and `red.global.add.s32` would sum 32 copies.
+    for (gx, gy, gz) in [
+        (2u32, 2u32, 1u32),                            // exactly the tiles
+        ((n / 8) as u32, (m / 16) as u32, 1),          // the pre-tiling host grid
+        (1, 1, 1),                                     // one CTA does everything
+        (1, 2, 1),
+        (2, 1, 1),
+        (3, 5, 1),                                     // coprime with the tile counts
+        (2, 2, 4),                                     // split K as well
+        ((n / 8) as u32, (m / 16) as u32, 3),
+    ] {
+        ctx.memset_u8(&d_c, 0).unwrap();
+        ctx.launch(&module, (gx, gy, gz), (32, 1, 1), 0, &args)
+            .unwrap_or_else(|e| panic!("launch failed at grid ({},{},{}): {:?}", gx, gy, gz, e));
+        ctx.synchronize()
+            .unwrap_or_else(|e| panic!("faulted at grid ({},{},{}): {:?}", gx, gy, gz, e));
+        let mut raw = vec![0u8; m * n * 4];
+        ctx.memcpy_dtoh_at(&mut raw, &d_c, 0).unwrap();
+        let mut bad = 0usize;
+        let mut first = (0usize, 0i32);
+        for i in 0..m * n {
+            let got = i32::from_le_bytes([raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3]]);
+            if got != want[i] {
+                if bad == 0 {
+                    first = (i, got);
+                }
+                bad += 1;
+            }
+        }
+        assert_eq!(
+            bad, 0,
+            "grid ({},{},{}): {} of {} wrong; C[{}] = {}, want {}. An over-large grid \
+             without the tile-stride guard writes each tile several times and \
+             `red.global.add.s32` sums the copies.",
+            gx, gy, gz, bad, m * n, first.0, first.1, want[first.0]
+        );
+    }
+}
+
+/// The tile is chosen from the shape ALONE, so the set of programs that compile
+/// is exactly what it was before warp tiling.
+///
+/// This runs with no GPU. Without it, a selector that started refusing shapes
+/// it used to accept would be caught only by whichever fixture happened to use
+/// one.
+#[test]
+fn the_warp_tile_is_chosen_from_the_shape_and_narrows_nothing() {
+    // Every M % 16 == 0 and N % 8 == 0 still compiles, tile or no tile.
+    for (m, n) in [(16usize, 8usize), (48, 24), (80, 40), (16, 64), (64, 8), (128, 128)] {
+        let ptx = emit(&format!("sel{}_{}", m, n), m, n, 128)
+            .unwrap_or_else(|e| panic!("M={} N={} used to compile and must still:\n{}", m, n, e));
+        let hdr = ptx
+            .lines()
+            .find(|l| l.contains("warp tile "))
+            .expect("the kernel must declare its warp tile in the header");
+        let tile = hdr.split("warp tile ").nth(1).unwrap().split_whitespace().next().unwrap();
+        let (tm, tn) = tile.split_once('x').expect("tile must read <rows>x<cols>");
+        let (tm, tn): (usize, usize) = (tm.parse().unwrap(), tn.parse().unwrap());
+        assert_eq!(m % tm, 0, "M={} does not divide by its own warp tile {}", m, tile);
+        assert_eq!(n % tn, 0, "N={} does not divide by its own warp tile {}", n, tile);
+        assert!(tm % 16 == 0 && tn % 8 == 0, "warp tile {} is not a multiple of the mma shape", tile);
+        // **The tile must be the largest the shape admits, UNLESS that would
+        // leave too few tiles to fill the machine** — a tile is one warp, so a
+        // 64x64 tile on a 64x64 matrix is one warp for the whole GEMM, and it
+        // measures **0.14x** the schedule that shipped. Below the floor the
+        // schedule falls back to one mma per warp outright; the intermediate
+        // tiles do not win either (32x32 at 256x256 is 0.89x).
+        let max_mt = [4usize, 2, 1].into_iter().find(|c| m % (16 * c) == 0).unwrap();
+        let max_nt = [8usize, 4, 2, 1].into_iter().find(|c| n % (8 * c) == 0).unwrap();
+        let want = if (m / (16 * max_mt)) * (n / (8 * max_nt)) >= 64 {
+            (16 * max_mt, 8 * max_nt)
+        } else {
+            (16, 8)
+        };
+        assert_eq!(
+            (tm, tn),
+            want,
+            "M={} N={} selected warp tile {} where the rule says {}x{} \
+             ({} tiles at the maximal {}x{}, floor is 64)",
+            m, n, tile, want.0, want.1,
+            (m / (16 * max_mt)) * (n / (8 * max_nt)), 16 * max_mt, 8 * max_nt
         );
     }
 }

@@ -276,6 +276,14 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "Print Assumptions the_guard_is_what_confines_a_warp_to_its_own_tile",
                 "Print Assumptions the_atomic_reduction_is_order_independent",
                 "Print Assumptions a_rounding_accumulate_would_break_the_landing_order",
+                // The warp tile, added when the schedule gained one. The
+                // injectivity is what says two mma of one warp never write the
+                // same element of C, and the refutation is what says the tile
+                // guard is load-bearing rather than defensive: a CTA index at
+                // or past the tile count addresses PAST the matrix, so an
+                // ungurded pre-tiling grid does not merely idle.
+                "Print Assumptions warp_row_injective",
+                "Print Assumptions without_the_tile_guard_a_cta_addresses_past_the_matrix",
             ],
         ),
         (

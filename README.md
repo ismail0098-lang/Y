@@ -1407,27 +1407,82 @@ truthfully state a global negative. The bijection gate that keeps a certificate'
 list in step with its capstone's now runs over both.
 
 
-### The int8 GEMM is 0.41x cuBLASLt, and its launch contract was unstated
+### The int8 GEMM is 4.29x faster, and two numbers I published were wrong
 
 Of the 952 `mma.sync` instructions this compiler emits, **950 are floating
 point**. So the one place on the GPU where exact accumulation makes the
-kernel-vs-spec relationship an *equality* is the int8 tensor-core GEMM — and an
-earlier note here called it a stub, on the strength of a grep for `cp.async` /
-`ldmatrix` / `bar.sync`. Running it says otherwise. Measured at 4096³ on an
-RTX 4070 Ti SUPER, clock-ramped, with every timed configuration
-correctness-checked:
+kernel-vs-spec relationship an *equality* is the int8 tensor-core GEMM. It had
+no shared-memory staging: one warp owned a 16×8 output tile and read its 16 A
+rows and 8 B columns straight from global — **0.1875 bytes per MAC**.
 
-| | G MAC/s | of cuBLASLt | of ISA ceiling |
+**Measuring what staging would cost found a cheaper lever pointing the same
+way.** Issuing `mt*nt` mma per K step *from the same fragments* amortises both
+halves with no shared memory, no barrier, and no instruction this backend does
+not already emit. A 64×64 warp tile moves **6x** less — half of what a 128×128
+staged tile would — for none of the machinery. Measured through the real
+compiler, old emitter against new in one process:
+
+| 4096³ | G MAC/s | speedup | of cuBLASLt |
 |---|---|---|---|
-| Y int8 | 15,439 | **0.41x** | 4.1% |
-| cuBLASLt (`torch._int_mm`) | 38,090 | 1.00x | 10.2% |
+| Y int8, 16×8 (was) | 14,322 | 1.00x | 0.09x |
+| Y int8, 64×64 | **61,441** | **4.29x** | 0.40x |
+| cuBLASLt (`torch._int_mm`) | 154,380 | 10.78x | 1.00x |
 
-Neither is compute bound. Y's kernel has no shared-memory staging, so a warp
-reads its 16 A rows and 8 B columns straight from global — **0.1875 bytes per
-MAC** — and it is L2-bandwidth bound: flat at ~2,890 GB/s at 2048³/4096³/6144³,
-then a **3.7x collapse** at 8192³ once the working set leaves the 48 MB L2. A
-128×128 staged tile would move 12x less. That is the size of the remaining
-performance gap, with a mechanism rather than a guess.
+At 8192³, past the L2 cliff, it is **7.92x**. 199 registers, zero spill. (The
+cuBLASLt column reads 144–154k across runs; every ratio here is taken *within*
+one interleaved run, never across two.)
+
+**The largest tile is a 7x LOSS at a small shape, and only sweeping found it.** A
+tile is one *warp*, so a 64×64 tile on a 64×64 matrix is one warp for the whole
+GEMM — it measures **0.14x**. So the big tile is taken only when it leaves at
+least 64 output tiles, and otherwise the schedule stays at one mma per warp.
+Validated on 14 shapes, 8 of them not used to derive the rule: **worst case
+1.00x, it never regresses**, while keeping 1.57–3.62x wherever the win exists.
+
+#### Two numbers I published two days ago were wrong, and they cancelled
+
+Re-measuring the baselines is what the "cross-session numbers do not compose"
+rule asks for. Both moved:
+
+| | published | measured | mechanism |
+|---|---|---|---|
+| cuBLASLt @ 4096³ | 38,090 | **144,196** | `.contiguous()` inside the timed loop |
+| int8 `mma` ISA ceiling | 374,027 | **179,761** | unstored accumulators deleted by `ptxas` |
+
+The first is identified rather than guessed: `_int_mm(A, B.t().contiguous())`
+measures **31,452**, essentially the published figure, because the transpose
+materialises a 16 MB copy per call.
+
+**The second is the more interesting failure, because its control passed.** The
+ceiling probe kept eight accumulator sets and stored one, so seven mma chains
+were dead code — and the doubling control read a clean 2.000 anyway, because *a
+constant dead fraction divides out of a ratio*. What caught it was arithmetic:
+374,027 is 2.1x above `66 SM × 2.61 GHz × 1024 MAC/SM/cycle`. Storing every
+accumulator gives **179,761 — 102% of that bound, and 1.94x the f16 ceiling,
+exactly the 2x a spec sheet predicts.**
+
+The tell had been written down and filed as a curiosity: the original note
+recorded int8 at **4.04x** f16 where a spec sheet says 2x, and called that
+"measured and unreconciled rather than adjusted". Refusing to fudge the number
+was right; not chasing it was not. **A measurement that disagrees with a spec
+sheet by 2x is a bug report.**
+
+This changed the conclusion. Under the published baseline a 4.29x speedup reads
+as *1.56x cuBLASLt — beating the vendor library with no shared memory*. That is
+false. Under the real baseline it is 0.09x → 0.40x: a large, cheap, real win
+that **does not close the gap**, and the staged pipeline is still needed.
+
+#### The schedule change forced a stronger property than it needed
+
+The warp tile is a compile-time function of M and N, so it is invisible at the
+call site — and a host still launching the old `(N/8, M/16, z)` grid would start
+`mt*nt` times too many CTAs, each addressing *past the end of the matrix*, with
+`red.global.add.s32` writing it. That is the defect below, one axis over. So the
+output tiles are now **grid-strided in x and y**, the way K already was in z:
+every grid is correct, and the pre-tiling host launch still computes the right
+matrix. An output row became a three-digit index, which is
+`MixedRadix.two_digit_unique` verbatim — the **seventh consumer** of that
+schema, and the composition needed no new reasoning.
 
 **The finding was a launch contract nobody had stated.** The schedule gives one
 16×8 tile to one *warp*, so a CTA has 32 threads of work however many it is

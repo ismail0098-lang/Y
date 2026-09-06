@@ -12,17 +12,33 @@
     what is proved here is a property of a kernel that ships rather than of a
     demonstration:
 
-      - 15,439 G MAC/s at 4096^3, which is **0.41x** cuBLASLt's [_int_mm]
-        (38,090) - a real kernel, not a stub.  An earlier note in this repo
+      - 14,571 G MAC/s at 4096^3, which is **0.09x** cuBLASLt's [_int_mm]
+        (144,196) - a real kernel, not a stub.  An earlier note in this repo
         called it a stub on the strength of a GREP for [cp.async] / [ldmatrix]
         / [bar.sync]; running it says otherwise.
-      - 4% of the measured int8 [mma] ISA ceiling (374,027 G MAC/s, doubling-
-        verified, 32 live [IMMA.16832.S8.S8] in the SASS; the same probe in
-        f16 reads 92,482 G MAC/s = 185 TFLOPS against this card's ~176 spec,
-        which is what validates the accounting).
+      - 8% of the measured int8 [mma] ISA ceiling (179,761 G MAC/s), against
+        cuBLASLt's 80%.
       - It is L2-BANDWIDTH bound, at 0.1875 bytes per MAC, because it has no
         shared-memory staging: ~2,890 GB/s flat at 2048/4096/6144, then a
         3.7x collapse at 8192 when the working set leaves the 48 MB L2.
+
+    ** BOTH of those figures were published WRONG first, by different
+    ** mechanisms, and they partly cancelled.
+
+    The first version of this header said 0.41x and a 374,027 ceiling.  The
+    baseline was low because [.contiguous()] sat inside the timed loop,
+    materialising a 16 MB copy per call - measured at 31,452 G MAC/s, which is
+    where the published 38,090 came from.  The ceiling was HIGH because the
+    probe stored only one of its eight accumulator sets, so [ptxas] deleted the
+    mma chains feeding the other seven - and **the doubling control did not
+    catch it, because a constant dead fraction divides out of the ratio.**
+
+    The tell was there and was filed as a curiosity: the published ceiling made
+    int8 **4.04x** the f16 rate where a spec sheet predicts 2x, and the note
+    recorded that as "measured and unreconciled rather than adjusted".  The
+    corrected ceiling is 1.94x f16 and 102% of [66 SM x 2.61 GHz x 1024
+    MAC/SM/cycle].  A measurement that disagrees with a spec sheet by 2x is a
+    bug report, not a curiosity.
 
     ** The defect this file is about, measured before it was written
 
@@ -66,6 +82,27 @@
     The output tiling and the lane decomposition are positional indices, so
     [MixedRadix] discharges them with no new reasoning - the fifth and sixth
     consumers of that schema.
+
+    ** The WARP TILE, added when the kernel gained one
+
+    A warp now issues [mt*nt] mma per K step from ONE set of A and B fragments -
+    a pure traffic decision worth **4.21x** at 4096^3 with no shared memory and
+    no new instruction.  Its schedule consequence is that an output row becomes
+    a THREE-digit index (tile, mma within the tile, row within the mma), which
+    is [MixedRadix.two_digit_unique] verbatim: [warp_row] is its **seventh**
+    consumer.  [warp_row_is_a_tile_row] shows the warp tile FACTORS THROUGH the
+    single-mma tiling, so every theorem above about [tile_row] still describes
+    the emitted kernel and none of it had to be redone.
+
+    The output tiles are also GRID-STRIDED in x and y now, so [owner] serves a
+    third axis of this one kernel.  That is not a gratuitous generalisation: the
+    tile is a compile-time function of M and N and therefore invisible at the
+    call site, so a host still launching the pre-tiling [(N/8, M/16, z)] grid
+    would compute a base row past the end of the matrix and
+    [red.global.add.s32] would write it.
+    [without_the_tile_guard_a_cta_addresses_past_the_matrix] is what makes the
+    guard load-bearing rather than an optimisation - the overrun is PAST THE
+    MATRIX, not a duplicate write.
 
     ** What this does NOT claim
 
@@ -262,6 +299,158 @@ Proof.
 Qed.
 
 (* ------------------------------------------------------------------ *)
+(** ** The WARP TILE, and the grid stride that made it safe to change  *)
+(* ------------------------------------------------------------------ *)
+
+(** A warp now issues [mt*nt] mma per K step from ONE set of A and B fragments.
+    That is a pure traffic decision - a 16x8 tile moves 768 bytes per 32-wide K
+    step to retire 4096 MACs, a 64x64 tile moves 4096 bytes for 131,072, a 6x
+    reduction - and it measured **4.21x** at 4096^3 on an RTX 4070 Ti SUPER.
+
+    The SCHEDULE consequence is that an output row is now a THREE-digit index:
+    the tile, the mma within the tile, and the row within the mma.  That is
+    exactly [MixedRadix.two_digit_unique], so the composition costs no new
+    reasoning at all - which is the claim [Decomposition.v] exists to test. *)
+
+Definition warp_row (mt ty mi i : nat) : nat := ty * (mt * MMA_M) + mi * MMA_M + i.
+Definition warp_col (nt tx ni j : nat) : nat := tx * (nt * MMA_N) + ni * MMA_N + j.
+
+(** The warp tile does not replace the mma tiling, it factors through it: the
+    16-row block a lane addresses is still [tile_row], at the flattened index
+    [ty*mt + mi].  Everything already proved about [tile_row] therefore still
+    describes the emitted kernel. *)
+Theorem warp_row_is_a_tile_row :
+  forall mt ty mi i, warp_row mt ty mi i = tile_row (ty * mt + mi) i.
+Proof. intros. unfold warp_row, tile_row. ring. Qed.
+
+Theorem warp_col_is_a_tile_col :
+  forall nt tx ni j, warp_col nt tx ni j = tile_col (tx * nt + ni) j.
+Proof. intros. unfold warp_col, tile_col. ring. Qed.
+
+Theorem warp_row_injective :
+  forall mt ty1 mi1 i1 ty2 mi2 i2,
+    0 < mt -> mi1 < mt -> mi2 < mt -> i1 < MMA_M -> i2 < MMA_M ->
+    warp_row mt ty1 mi1 i1 = warp_row mt ty2 mi2 i2 ->
+    ty1 = ty2 /\ mi1 = mi2 /\ i1 = i2.
+Proof.
+  intros mt ty1 mi1 i1 ty2 mi2 i2 Hmt Hm1 Hm2 Hi1 Hi2 H.
+  unfold warp_row in H.
+  apply (MR.two_digit_unique MMA_M mt); try assumption; unfold MMA_M; lia.
+Qed.
+
+Theorem warp_col_injective :
+  forall nt tx1 ni1 j1 tx2 ni2 j2,
+    0 < nt -> ni1 < nt -> ni2 < nt -> j1 < MMA_N -> j2 < MMA_N ->
+    warp_col nt tx1 ni1 j1 = warp_col nt tx2 ni2 j2 ->
+    tx1 = tx2 /\ ni1 = ni2 /\ j1 = j2.
+Proof.
+  intros nt tx1 ni1 j1 tx2 ni2 j2 Hnt Hn1 Hn2 Hj1 Hj2 H.
+  unfold warp_col in H.
+  apply (MR.two_digit_unique MMA_N nt); try assumption; unfold MMA_N; lia.
+Qed.
+
+Theorem warp_row_onto :
+  forall mt r, 0 < mt ->
+    exists ty mi i, mi < mt /\ i < MMA_M /\ warp_row mt ty mi i = r.
+Proof.
+  intros mt r Hmt.
+  exists ((r / MMA_M) / mt), ((r / MMA_M) mod mt), (r mod MMA_M).
+  split; [ apply Nat.mod_upper_bound; lia | ].
+  split; [ apply Nat.mod_upper_bound; unfold MMA_M; lia | ].
+  unfold warp_row.
+  pose proof (Nat.div_mod_eq r MMA_M) as H1.
+  pose proof (Nat.div_mod_eq (r / MMA_M) mt) as H2.
+  nia.
+Qed.
+
+Theorem warp_col_onto :
+  forall nt c, 0 < nt ->
+    exists tx ni j, ni < nt /\ j < MMA_N /\ warp_col nt tx ni j = c.
+Proof.
+  intros nt c Hnt.
+  exists ((c / MMA_N) / nt), ((c / MMA_N) mod nt), (c mod MMA_N).
+  split; [ apply Nat.mod_upper_bound; lia | ].
+  split; [ apply Nat.mod_upper_bound; unfold MMA_N; lia | ].
+  unfold warp_col.
+  pose proof (Nat.div_mod_eq c MMA_N) as H1.
+  pose proof (Nat.div_mod_eq (c / MMA_N) nt) as H2.
+  nia.
+Qed.
+
+(** Every element of C is still written by exactly one (tile, mma, lane), now
+    with the warp tile in between. *)
+Theorem c_element_has_exactly_one_owner_under_warp_tiling :
+  forall mt nt r c, 0 < mt -> 0 < nt ->
+    (exists ty mi i tx ni j,
+       mi < mt /\ i < MMA_M /\ ni < nt /\ j < MMA_N
+       /\ warp_row mt ty mi i = r /\ warp_col nt tx ni j = c)
+    /\ (forall ty1 mi1 i1 ty2 mi2 i2,
+          mi1 < mt -> mi2 < mt -> i1 < MMA_M -> i2 < MMA_M ->
+          warp_row mt ty1 mi1 i1 = r -> warp_row mt ty2 mi2 i2 = r ->
+          ty1 = ty2 /\ mi1 = mi2 /\ i1 = i2).
+Proof.
+  intros mt nt r c Hmt Hnt. split.
+  - destruct (warp_row_onto mt r Hmt) as [ty [mi [i [Hmi [Hi Hr]]]]].
+    destruct (warp_col_onto nt c Hnt) as [tx [ni [j [Hni [Hj Hc]]]]].
+    exists ty, mi, i, tx, ni, j. repeat split; assumption.
+  - intros ty1 mi1 i1 ty2 mi2 i2 Hm1 Hm2 Hi1 Hi2 H1 H2.
+    apply (warp_row_injective mt ty1 mi1 i1 ty2 mi2 i2); try assumption.
+    rewrite H1, H2. reflexivity.
+Qed.
+
+(* ------------------------------------------------------------------ *)
+(** ** The output tiles are grid-strided, in x and y                   *)
+(* ------------------------------------------------------------------ *)
+
+(** **Why the stride exists at all.**  The warp tile is a compile-time function
+    of M and N, so it is invisible at the call site.  A host that kept launching
+    the pre-tiling [(N/8, M/16, z)] grid would start [mt*nt] times too many
+    CTAs, and each would compute a base row [ty * (mt*16)] - which for
+    [ty >= m/(mt*16)] is at or past the end of the matrix.
+
+    So changing the tile without this would be exactly the defect at the top of
+    this file, one axis over: a wrong answer from a host nobody recompiled.  The
+    kernel guards the tile index the same way it guards the lane index, and then
+    strides, so every grid of at least (1,1,1) is correct. *)
+
+Definition tile_owner (ng ty : nat) : nat := ty mod ng.
+
+(** The tile loop IS the grid-stride rule, so it inherits coverage with no new
+    reasoning - the third axis of this kernel to do so, after the K split and
+    (in [AttentionSchedule]) the sequence reduction. *)
+Theorem the_tile_loop_is_the_grid_stride_rule :
+  forall ng ty, tile_owner ng ty = owner ng ty.
+Proof. reflexivity. Qed.
+
+Theorem every_output_tile_has_exactly_one_owner :
+  forall ng ty, 0 < ng -> tile_owner ng ty < ng.
+Proof. intros ng ty H. unfold tile_owner. apply Nat.mod_upper_bound. lia. Qed.
+
+(** **The refutation the guard exists for.**  Any CTA index at or past the tile
+    count has its base row at or past the end of the matrix - so without the
+    guard those CTAs do not merely idle, they address memory the matrix does not
+    own, and [red.global.add.s32] writes it. *)
+Theorem without_the_tile_guard_a_cta_addresses_past_the_matrix :
+  forall m mt ty,
+    0 < mt -> m / (mt * MMA_M) <= ty -> m mod (mt * MMA_M) = 0 ->
+    m <= ty * (mt * MMA_M).
+Proof.
+  intros m mt ty Hmt Hty Hmod.
+  assert (Hb : 0 < mt * MMA_M) by (unfold MMA_M; nia).
+  pose proof (Nat.div_mod_eq m (mt * MMA_M)) as He.
+  rewrite Hmod in He. rewrite Nat.add_0_r in He.
+  nia.
+Qed.
+
+(** The measured instance, at the shape [tests/int8_gemm_launch_contract.rs]
+    sweeps: M=128 with a 64-row warp tile is 2 tiles, while the pre-tiling grid
+    launches M/16 = 8 CTAs in y - and CTA 2 starts at row 128, i.e. exactly one
+    past the last row of a 128-row matrix. *)
+Theorem the_pre_tiling_grid_overruns_the_tile_count :
+  128 / MMA_M = 8 /\ 128 / (4 * MMA_M) = 2 /\ 2 * (4 * MMA_M) = 128.
+Proof. unfold MMA_M. repeat split; reflexivity. Qed.
+
+(* ------------------------------------------------------------------ *)
 (** ** The split-K, instantiated from GridStrideSplit                  *)
 (* ------------------------------------------------------------------ *)
 
@@ -362,3 +551,14 @@ Print Assumptions a_rounding_accumulate_would_break_the_split.
 Print Assumptions a_rounding_accumulate_would_break_the_landing_order.
 Print Assumptions the_shape_refusal_is_the_covering_condition.
 Print Assumptions an_uncovered_shape_is_refused.
+Print Assumptions warp_row_is_a_tile_row.
+Print Assumptions warp_col_is_a_tile_col.
+Print Assumptions warp_row_injective.
+Print Assumptions warp_col_injective.
+Print Assumptions warp_row_onto.
+Print Assumptions warp_col_onto.
+Print Assumptions c_element_has_exactly_one_owner_under_warp_tiling.
+Print Assumptions the_tile_loop_is_the_grid_stride_rule.
+Print Assumptions every_output_tile_has_exactly_one_owner.
+Print Assumptions without_the_tile_guard_a_cta_addresses_past_the_matrix.
+Print Assumptions the_pre_tiling_grid_overruns_the_tile_count.
