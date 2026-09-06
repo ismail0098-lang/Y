@@ -1407,6 +1407,60 @@ truthfully state a global negative. The bijection gate that keeps a certificate'
 list in step with its capstone's now runs over both.
 
 
+### The int8 GEMM computes the source dot products — and the theorem was false until the compiler learned its licence
+
+`Int8GemmSchedule.v` proved this kernel's **schedule**: which lane owns which
+element of C, that the split-K classes tile the contraction, that the atomic
+reduction is order-independent. It said nothing about the **value** landing at
+`C[r][c]`. `proofs/Int8GemmExact.v` closes that — the GPU twin of the CPU
+chain's `the_threaded_gemm_holds_the_source_dot_products`, and available for
+this kernel and no other, because 950 of the 952 `mma.sync` this compiler emits
+are floating point.
+
+**Writing the capstone forces its hypotheses to be stated, and one of them did
+not exist anywhere in the compiler.** `mma...s32.s8.s8.s32` accumulates into
+int32, this kernel has no flush, and there is nowhere to widen to because the
+*output* is int32 too — so the whole contraction must satisfy `K · 127² ≤
+i32::MAX`, i.e. `K ≤ 133 120`. Nothing checked it: not the emitter, whose only
+refusal was on `M % 16` / `N % 8` / `K % 32`, not `proofs/`, not any test.
+
+Measured on the device before the guard existed, every operand 127:
+
+| K | exact | device | |
+|---|---|---|---|
+| **133 120** | 2 147 092 480 | 2 147 092 480 | **ok** |
+| **133 152** | 2 147 608 608 | **−2 147 358 688** | **wrapped** |
+
+One K step wide. The one GPU GEMM here whose entire claim is an exact answer
+returned a *negative number* under a green banner, with `red.global.add.s32`
+summing it. Latent rather than live — the largest K in the corpus is 16 384 —
+which is the argument for fixing it now, not against.
+
+`the_measured_overflow_is_two_s_complement` reproduces that second row from
+`wrap32` alone. The model was not fitted to the device: `wrap32` is the CPU
+chain's, written months earlier, and it lands on the exact value the card
+returned. **A model that merely said "it overflows" would agree with any wrong
+answer.**
+
+The proof establishes that the 32 lanes' register bytes are a *bijection* onto
+the 16×32 and 32×8 fragments (`MixedRadix`'s eighth and ninth consumers), that
+the emitted byte offsets address exactly the source elements that bijection
+names, that 32 products per step over `K/32` steps re-index to the flat
+contraction, and — under the licence — that the int32 accumulator does not wrap.
+22 `Print Assumptions`, no axioms.
+
+**A `nat` literal is unary, and that cost the afternoon.** Proved at the literal
+32, every tactic succeeded, the goal closed to something *syntactically
+identical* on both sides, and `Qed` did not return: 32 nested `S` inside a fold
+32 deep, carried through every conversion check. Stated for an abstract block
+size and instantiated by one `apply`, the same proof takes **0.27 s**.
+
+Mutation table, 11 rows, all resolved. **X1 — the licence removed, i.e. the
+original defect — is caught by the new gate and by nothing else**, including
+`gpu_batch_invariance` and `ptx_int8_mma_layout`; both use K ≤ 4096, and a suite
+that sweeps one axis is not testing another.
+
+
 ### The int8 GEMM is 4.29x faster, and two numbers I published were wrong
 
 Of the 952 `mma.sync` instructions this compiler emits, **950 are floating

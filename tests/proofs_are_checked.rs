@@ -256,6 +256,26 @@ fn nothing_in_any_proof_is_admitted() {
 fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
     vec![
         (
+            // The int8 GEMM's VALUE, as against `Int8GemmSchedule.v`'s
+            // schedule. The four entries are the four claims, and the last two
+            // are what stop the file being satisfied by something nothing
+            // violates: `bounded_products_accumulate_exactly` is where the
+            // licence is load-bearing (without it the capstone is false, and
+            // the compiler was not checking it), and
+            // `the_measured_overflow_is_two_s_complement` reproduces the value
+            // the DEVICE returned past the bound from `wrap32` alone - a model
+            // that merely said "it overflows" would agree with any wrong
+            // answer.
+            "Int8GemmExact.v",
+            &[
+                "Print Assumptions the_lanes_cover_the_a_fragment",
+                "Print Assumptions the_emitted_a_address_is_its_fragment_element",
+                "Print Assumptions bounded_products_accumulate_exactly",
+                "Print Assumptions the_measured_overflow_is_two_s_complement",
+                "Print Assumptions the_emitted_int8_gemm_holds_the_source_dot_products",
+            ],
+        ),
+        (
             // The GPU warp tiling. The partition theorem is the load-bearing
             // one - it is the GPU twin of `c_written_exactly_once`, which the
             // CPU chain has had since the tiling increment and the GPU had no

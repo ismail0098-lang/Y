@@ -106,6 +106,12 @@
 
     ** What this does NOT claim
 
+    - Nothing HERE about the VALUE that lands at [C[r][c]] - this file is about
+      the SCHEDULE, i.e. which lane owns which element and that the split-K
+      classes tile the contraction.  [Int8GemmExact.v] proves the value, under
+      a licence bounding the int32 accumulator, and reuses [warp_row] and
+      [warp_col] from here so the two describe the same element.
+
     - Nothing about [mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32]'s own
       semantics, nor about the per-lane fragment layout.  Those are ISA facts,
       pinned empirically by [tests/ptx_int8_mma_layout.rs], which runs the
