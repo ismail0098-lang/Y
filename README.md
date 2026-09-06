@@ -59,12 +59,14 @@ repository's own investigation documents contradict.
   +0.12% perplexity.
 - A C-callable shared library: the crate builds as `cdylib` as well as `rlib`
   (`src/c_api.rs`), so the compiler can be embedded rather than shelled out to.
-- **Machine-checked proofs**: twenty Rocq files, 416 theorems and lemmas under
-  260 `Print Assumptions`, no axioms and nothing admitted, all run by
-  `cargo test`. They cover the ZK backend's control-flow lowering and — the bulk
-  of them — the exact AVX-512 GEMM's schedule end to end, from the source dot
-  product to the threaded, tiled, row- or K-split kernel. A compilation that
-  substitutes that kernel now **emits its own certificate** beside the `.ll`.
+- **Machine-checked proofs**: 23 Rocq files, 498 theorems and lemmas under
+  332 `Print Assumptions`, no axioms and nothing admitted, all run by
+  `cargo test`. They cover the ZK backend's control-flow lowering; the exact
+  AVX-512 GEMM's schedule end to end, from the source dot product to the
+  threaded, tiled, row- or K-split kernel; and six GPU files, which now include
+  the int8 tensor-core GEMM's schedule *and* the value it computes. A
+  compilation that substitutes the CPU kernel **emits its own certificate**
+  beside the `.ll`, and so does `--emit-attention-ptx`.
   What the verified kernel *costs* is measured separately and is
   [in its own section](#what-the-verified-kernel-costs) — it is not free.
 - **Translation validation against `ptxas`**: six GPU kernels — including one
@@ -1211,7 +1213,7 @@ version answers 1100 against its own reference's 1000. Integer addition *is*
 associative, so the relationship is an equality, which is what a proof assistant
 is good at. What exactness costs is measured below, and it is not free.
 
-Twenty files, 416 theorems and lemmas, **no axioms, nothing admitted** — and
+23 files, 498 theorems and lemmas, **no axioms, nothing admitted** — and
 `tests/proofs_are_checked.rs` runs `coqc` over all of them in `cargo test`,
 with a content control per file so that "it compiles" and "no axioms" (both
 properties an *empty* file has) are not the whole check.
@@ -1510,7 +1512,7 @@ element of C, that the split-K classes tile the contraction, that the atomic
 reduction is order-independent. It said nothing about the **value** landing at
 `C[r][c]`. `proofs/Int8GemmExact.v` closes that — the GPU twin of the CPU
 chain's `the_threaded_gemm_holds_the_source_dot_products`, and available for
-this kernel and no other, because 950 of the 952 `mma.sync` this compiler emits
+this kernel and no other, because 923 of the 925 `mma.sync` this compiler emits
 are floating point.
 
 **Writing the capstone forces its hypotheses to be stated, and one of them did
@@ -1543,7 +1545,7 @@ the 16×32 and 32×8 fragments (`MixedRadix`'s eighth and ninth consumers), that
 the emitted byte offsets address exactly the source elements that bijection
 names, that 32 products per step over `K/32` steps re-index to the flat
 contraction, and — under the licence — that the int32 accumulator does not wrap.
-22 `Print Assumptions`, no axioms.
+28 `Print Assumptions`, no axioms.
 
 **A `nat` literal is unary, and that cost the afternoon.** Proved at the literal
 32, every tactic succeeded, the goal closed to something *syntactically
@@ -1559,7 +1561,7 @@ that sweeps one axis is not testing another.
 
 ### The int8 GEMM is 4.29x faster, and two numbers I published were wrong
 
-Of the 952 `mma.sync` instructions this compiler emits, **950 are floating
+Of the 925 `mma.sync` instructions this compiler emits, **923 are floating
 point**. So the one place on the GPU where exact accumulation makes the
 kernel-vs-spec relationship an *equality* is the int8 tensor-core GEMM. It had
 no shared-memory staging: one warp owned a 16×8 output tile and read its 16 A
@@ -1650,7 +1652,7 @@ bound. With every element of A = 3 and B = 5 at K=128, so every output must be
 the next tile, and `red.global.add.s32` sums it in. This is the one kernel
 whose advertised claim is a bit-identical answer at every launch geometry, so a
 wrong block size falsified that claim silently. Fixed with a warp-uniform guard
-at no measurable cost, and `proofs/Int8GemmSchedule.v` (20 `Print Assumptions`,
+at no measurable cost, and `proofs/Int8GemmSchedule.v` (36 `Print Assumptions`,
 no axioms) now states the guard, the striped split-K — instantiated from
 `GridStrideSplit`, so `red.global.add.s32` landing in any order is a theorem
 rather than a comment — and the output tiling.
@@ -1665,12 +1667,22 @@ for free. What Y adds is that it is proved and stated, not that it is present.
 Asked when the tensor-core GEMMs get proofs, the measurement moved the plan
 twice.
 
-**950 of the 952 `mma.sync` instructions this repository emits are floating
-point** — 854 `f16`, 96 `e4m3`, and **2** `s8`. So the premise that makes the
+**923 of the 925 `mma.sync` instructions this repository emits are floating
+point** — 827 `f16`, 96 `e4m3`, and **2** `s8`. So the premise that makes the
 CPU work an *equality* (exact accumulation restores associativity) does not
-apply to them. And the one kernel that could carry it is a stub: `int8_gemm.ptx`
-is 89 lines with 2 `mma` and **zero** `cp.async`, `ldmatrix` or `bar.sync`,
-against the f16 kernel's 964 / 65 / 22 / 24 / 7.
+apply to them.
+
+> This figure read **950 of 952** until 2026-09-06, and it was wrong when it was
+> written rather than having gone stale — the counts have not moved since. Its
+> `f16` term came from a grep that counts comment lines and its other two terms
+> from one that does not: 854 + 96 + 2. **A sum whose terms use different
+> conventions is wrong even when every term is individually defensible.** The
+> substance is untouched — two integer instructions either way — which is
+> exactly why it survived being transcribed forward three times.
+
+And the one kernel that could carry it is a stub: `int8_gemm.ptx` is 89 lines
+with 2 `mma` and **zero** `cp.async`, `ldmatrix` or `bar.sync`, against the f16
+kernel's 964 / 65 / 22 / 24 / 7.
 
 What *is* available is the SCHEDULE half, because `proofs/ExactGemmTiling.v`
 mentions `f16`, `f32`, `float`, `int16` and `i32` **zero times** — it is `nat`
@@ -1920,8 +1932,8 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # ~605 tests
-cargo test --release --features zk      # ~855 tests, ZK included
+cargo test --release                    # ~635 tests
+cargo test --release --features zk      # ~885 tests, ZK included
 cargo test --release -p y-gpu           # the sibling crate; a bare `cargo test`
                                         # builds the root package ONLY and does
                                         # not run these 8
