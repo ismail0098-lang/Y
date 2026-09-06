@@ -5187,6 +5187,29 @@ declare it as a Q format.\n{}",
     /// feature this backend does not have, and the refusal says so rather than
     /// pretending otherwise.
     ///
+    /// **THE BOUND IS ABOUT A ZEROED `C`, AND THAT IS A PRECONDITION THE
+    /// COMPILER CANNOT CHECK.** This kernel accumulates into `C` with
+    /// `red.global.add.s32` - which is what lets `gridDim.z` split the
+    /// contraction at all - so the quantity that must fit int32 is
+    /// `C_initial + sum`, not `sum`. Splitting K across LAUNCHES into the same
+    /// int32 `C` is therefore the one obvious use of that accumulate which the
+    /// licence does NOT cover: every launch is individually accepted and the
+    /// accumulation is not. Measured, M=16 N=8, every operand 127,
+    /// K = 66,560 per launch (half the maximum, so each launch compiles),
+    /// `C` zeroed once before the first:
+    ///
+    /// | launch | `C[0]` | |
+    /// |---|---|---|
+    /// | 1 | 1,073,546,240 | exact |
+    /// | 2 | 2,147,092,480 | exact |
+    /// | 3 | **-1,074,328,576** | **wrapped** (exact: 3,220,638,720) |
+    ///
+    /// `proofs/Int8GemmExact.v` states it as a hypothesis rather than leaving
+    /// it implicit - the combine there is `wcombine 0`, and
+    /// `the_combine_needs_a_zeroed_destination` refutes the version without
+    /// it. The refusal message below names it, because a runtime precondition
+    /// that only appears in a proof is one the user never reads.
+    ///
     /// Tied to `proofs/Int8GemmExact.v` by `tests/int8_gemm_exactness.rs`.
     const INT8_MAX_EXACT_K: u32 = 133_120;
 
@@ -5254,9 +5277,11 @@ declare it as a Q format.\n{}",
                  K * 127^2 <= i32::MAX, i.e. K <= {}. At K = {} a full-range int8 \
                  product is {} against an i32::MAX of 2147483647, and the kernel \
                  returns the wrapped value with no error. Reduce K, or split the \
-                 GEMM and accumulate the partials in a wider type on the host; \
-                 declaring a narrower operand range is not expressible for this \
-                 kernel.",
+                 GEMM and accumulate the partials in a WIDER TYPE ON THE HOST - \
+                 calling this kernel repeatedly into the same int32 C does NOT \
+                 work, because it accumulates into C and the bound is on \
+                 C_initial + sum. Declaring a narrower operand range is not \
+                 expressible for this kernel.",
                 kernel_name,
                 k,
                 Self::INT8_MAX_EXACT_K,

@@ -77,16 +77,24 @@
       ABSOLUTE values, which dominates every partial sum in every order.
     - Nothing about int8 QUANTIZATION.  The claim is that the kernel computes
       the integer matrix product its source names.
-    - The int32 conjunct of the capstone is stated for the FLAT accumulation
-      ([MC.wsum] over the K products in visit order), which is the emitted
-      order at [nz = 1] - the default grid, and the case the device
-      measurement above was taken in.  At [nz > 1] each class accumulates in
-      int32 and the atomics combine in int32; that is covered here in [Z]
-      (the first conjunct) plus the fact that the licence bounds the sum of
-      ABSOLUTE values, which dominates every partial sum of every class in
-      every bracketing - but it is not stated as one theorem over a wrapping
-      class fold.  Doing so needs a wrapping twin of [GridStrideSplit.combine]
-      and is recorded rather than done.
+    - CLOSED 2026-09-06.  This used to say the int32 conjunct was stated for
+      the FLAT accumulation only, and that the [nz > 1] case needed a wrapping
+      twin of [GridStrideSplit.combine].  It has one:
+      [the_split_k_accumulation_is_exact_in_int32] covers BOTH wrapping folds
+      the kernel performs - a CTA's own int32 register accumulator ([wclass])
+      and [red.global.add.s32] combining the CTAs' partials in memory
+      ([wcombine]) - at every split factor and every landing order.  One
+      licence hypothesis serves both, because it bounds the sum of ABSOLUTE
+      values and every partial of either fold is a sum over a SUBSET of the
+      products.  Measured at the licensed maximum K on the device at
+      nz = 1, 2, 3, 8, 17 and 64: exact at every one.
+    - **What writing that theorem forced into the open is that the licence is
+      about a ZEROED destination**, which is stated nowhere in the compiler.
+      See [each_launch_is_licensed_and_three_of_them_wrap] and
+      [the_combine_needs_a_zeroed_destination] below: a caller who splits K
+      across LAUNCHES into the same int32 [C] - the obvious thing to do, since
+      this kernel accumulates into [C] - has every launch licensed and the
+      accumulation not.
     - The tie is transcription-plus-gate, as in [Int8GemmSchedule]:
       [ptx_emitter] does not go through the [Ix] extraction layer, so this is a
       model checked against emitted text and against the device by
@@ -105,12 +113,15 @@
 Require Import Coq.Arith.Arith.
 Require Import Coq.micromega.Lia.
 Require Import Coq.ZArith.ZArith.
+From Stdlib Require Import List Permutation.
 
 Require MixedRadix.
 Require Decomposition.
 Require GridStrideSplit.
 Require Int8GemmSchedule.
 Require ExactGemmMicro.
+
+Import ListNotations.
 
 Module MR  := MixedRadix.
 Module D   := Decomposition.
@@ -499,6 +510,260 @@ Qed.
 
 (* ------------------------------------------------------------------ *)
 (** ** The capstone                                                    *)
+
+(* ------------------------------------------------------------------ *)
+(** ** The SPLIT-K accumulation, in int32 rather than in [Z]           *)
+(* ------------------------------------------------------------------ *)
+
+(** [bounded_products_accumulate_exactly] above is the int32 statement for the
+    FLAT accumulation - one class, the products visited in index order, which
+    is what the kernel does at [gridDim.z = 1] and is the case the device
+    measurement was taken in.  At [gridDim.z > 1] there are two wrapping folds
+    and not one:
+
+      - each CTA accumulates ITS OWN residue class in an int32 register, one
+        [mma] per K step, in ascending visit order;
+      - [red.global.add.s32] then combines the CTAs' partials in int32 IN
+        MEMORY, in whatever order they land.
+
+    Everything below is that pair.  Nothing new is needed about the
+    PARTITION - [GridStrideSplit] already has it, and this file already
+    instantiates it in [every_split_factor_gives_the_contraction] - what is
+    new is that neither fold wraps.
+
+    **The licence is what makes both true, and it is stronger than it looks.**
+    It bounds the sum of ABSOLUTE values of all K products, and every partial
+    of either fold is a sum over a SUBSET of those products.  So one hypothesis
+    covers both, at every split factor and every landing order. *)
+
+Definition afun (f : nat -> Z) : nat -> Z := fun i => Z.abs (f i).
+
+(** A class's own int32 accumulator: [GS.class_sum] with a wrap at every
+    step it takes. *)
+Fixpoint wclass (f : nat -> Z) (w n S : nat) : Z :=
+  match S with
+  | O => 0
+  | Datatypes.S k =>
+      if Nat.eqb (k mod n) w then MC.wrap32 (wclass f w n k + f k)
+      else wclass f w n k
+  end.
+
+(** The atomic combine: a wrapping fold of the partials, in list order, from
+    the destination's initial value.  That initial value is [C] before the
+    launch, and it is not decoration - see the refutation at the foot of this
+    section. *)
+Fixpoint wcombine (c0 : Z) (l : list Z) : Z :=
+  match l with
+  | [] => c0
+  | x :: r => wcombine (MC.wrap32 (c0 + x)) r
+  end.
+
+(** A single class's budget is at most the whole - summing a NON-NEGATIVE
+    function over a subset of the range cannot exceed summing it over all of
+    it.  This is what lets one licence hypothesis serve both folds. *)
+Lemma class_abs_le_total : forall f w n S,
+  GS.class_sum Z.add (afun f) w n S <= sum_k (afun f) S.
+Proof.
+  intros f w n S. induction S as [| S IH].
+  - cbn. lia.
+  - cbn [GS.class_sum]. unfold sum_k in *. rewrite acc_range_succ.
+    assert (H0 : 0 <= afun f (0 + S)%nat) by (unfold afun; apply Z.abs_nonneg).
+    replace (0 + S)%nat with S in * by lia.
+    destruct (Nat.eqb (S mod n) w); lia.
+Qed.
+
+Lemma class_abs_bounds : forall f w n S,
+  Z.abs (GS.class_sum Z.add f w n S) <= GS.class_sum Z.add (afun f) w n S.
+Proof.
+  intros f w n S. induction S as [| S IH]; cbn [GS.class_sum]; [ simpl; lia | ].
+  destruct (Nat.eqb (S mod n) w); [ | exact IH ].
+  pose proof (Z.abs_triangle (GS.class_sum Z.add f w n S) (f S)).
+  unfold afun in *. lia.
+Qed.
+
+(** **A CTA's own int32 accumulator does not wrap.** *)
+Lemma wclass_exact : forall f w n S,
+  GS.class_sum Z.add (afun f) w n S <= MC.I32MAX ->
+  wclass f w n S = GS.class_sum Z.add f w n S.
+Proof.
+  intros f w n S. induction S as [| S IH]; intros Hb.
+  - reflexivity.
+  - pose proof (class_abs_bounds f w n (Datatypes.S S)) as Hab.
+    cbn [wclass GS.class_sum] in Hab, Hb |- *.
+    (* [unfold] leaves a beta-redex that [lia] cannot see through; this is the
+       one place [afun] has to be normalised by hand. *)
+    assert (Ha : afun f S = Z.abs (f S)) by reflexivity.
+    rewrite Ha in Hab, Hb.
+    (* [remember] rather than [destruct ... eqn:], because the scrutinee occurs
+       in the hypotheses as well as the goal and only [remember] abstracts all
+       three at once. *)
+    remember (Nat.eqb (S mod n) w) as bb eqn:E; destruct bb.
+    + assert (Hs : GS.class_sum Z.add (afun f) w n S <= MC.I32MAX).
+      { pose proof (Z.abs_nonneg (f S)). lia. }
+      rewrite (IH Hs).
+      apply MC.wrap32_id.
+      assert (HX : Z.abs (GS.class_sum Z.add f w n S + f S) <= MC.I32MAX) by lia.
+      apply Z.abs_le in HX.
+      unfold MC.in_i32, MC.I32MIN, MC.I32MAX in *. lia.
+    + exact (IH Hb).
+Qed.
+
+Lemma abs_fold_nonneg : forall l, 0 <= fold_right Z.add 0 (map Z.abs l).
+Proof.
+  induction l as [| x r IH]; cbn [map fold_right]; [ lia | ].
+  pose proof (Z.abs_nonneg x). lia.
+Qed.
+
+(** **The atomic combine does not wrap either**, given the same budget - and
+    the statement carries [c0], so what the budget has to cover is the
+    destination's initial value as well as the partials. *)
+Lemma wcombine_exact : forall l c0,
+  Z.abs c0 + fold_right Z.add 0 (map Z.abs l) <= MC.I32MAX ->
+  wcombine c0 l = c0 + fold_right Z.add 0 l.
+Proof.
+  induction l as [| x r IH]; intros c0 H; cbn [wcombine map fold_right] in *.
+  - lia.
+  - pose proof (Z.abs_triangle c0 x) as Ht.
+    pose proof (abs_fold_nonneg r) as Hr.
+    pose proof (Z.abs_nonneg x) as Hx.
+    rewrite MC.wrap32_id by (unfold MC.in_i32, MC.I32MIN, MC.I32MAX in *; lia).
+    rewrite IH by lia. lia.
+Qed.
+
+Lemma fold_map_le : forall (l : list nat) (g h : nat -> Z),
+  (forall w, g w <= h w) ->
+  fold_right Z.add 0 (map g l) <= fold_right Z.add 0 (map h l).
+Proof.
+  induction l as [| a r IH]; intros g h H; cbn [map fold_right]; [ lia | ].
+  pose proof (H a). pose proof (IH g h H). lia.
+Qed.
+
+(** **THE THEOREM.**  Both folds, at every split factor and every landing
+    order, from a zeroed destination: the int32 result is the [Z] result. *)
+Theorem the_split_k_accumulation_is_exact_in_int32 :
+  forall f n S order,
+    (0 < n)%nat ->
+    Permutation order (seq 0 n) ->
+    GS.sum_upto Z.add (afun f) S <= MC.I32MAX ->
+    wcombine 0 (map (fun w => wclass f w n S) order) = GS.sum_upto Z.add f S.
+Proof.
+  intros f n S order Hn Hperm Hb.
+  (* Each class's own budget is at most the whole. *)
+  assert (Hc : forall w, GS.class_sum Z.add (afun f) w n S <= MC.I32MAX).
+  { intros w. pose proof (class_abs_le_total f w n S) as Hw.
+    rewrite sum_upto_is_sum_k in Hb. lia. }
+  (* Rewrite every wrapping class partial to its Z value. *)
+  assert (Hmap : map (fun w => wclass f w n S) order
+                 = map (fun w => GS.class_sum Z.add f w n S) order).
+  { apply map_ext. intros w. apply wclass_exact, Hc. }
+  rewrite Hmap.
+  (* The combine's own budget: sum of |partials| <= sum of class abs sums. *)
+  assert (Hbud : fold_right Z.add 0 (map Z.abs (map (fun w => GS.class_sum Z.add f w n S) order))
+                 <= MC.I32MAX).
+  { rewrite map_map.
+    eapply Z.le_trans.
+    - apply (fold_map_le order (fun w => Z.abs (GS.class_sum Z.add f w n S))
+                               (fun w => GS.class_sum Z.add (afun f) w n S)).
+      intros w. apply class_abs_bounds.
+    - rewrite (GS.fold_right_add_permutation _ (map (fun w => GS.class_sum Z.add (afun f) w n S) (seq 0 n)))
+        by (apply Permutation_map; exact Hperm).
+      rewrite <- GS.combine_is_fold.
+      rewrite (GS.grid_stride_exact (afun f) n S Hn). exact Hb. }
+  rewrite wcombine_exact by (simpl Z.abs; lia).
+  rewrite Z.add_0_l.
+  apply GS.atomics_may_land_in_any_order; assumption.
+Qed.
+
+(** The capstone's int32 conjunct, at every split factor and every landing
+    order, from a zeroed destination.  Together with
+    [every_split_factor_gives_the_contraction] - which is the same statement in
+    [Z] - this is the whole of the split-K claim. *)
+Corollary the_split_k_combine_is_exact_in_int32 :
+  forall A B m K row col nz order,
+    0 <= m ->
+    (forall r k, Z.abs (A r k) <= m) ->
+    (forall c k, Z.abs (B c k) <= m) ->
+    Z.of_nat K * (m * m) <= MC.I32MAX ->
+    (0 < nz)%nat ->
+    Permutation order (seq 0 nz) ->
+    wcombine 0 (map (fun w => wclass (prod A B row col) w nz K) order)
+    = sum_k (prod A B row col) K.
+Proof.
+  intros A B m K row col nz order Hm HA HB Hlic Hnz Hperm.
+  rewrite <- sum_upto_is_sum_k.
+  apply the_split_k_accumulation_is_exact_in_int32; try assumption.
+  rewrite sum_upto_is_sum_k. unfold sum_k.
+  (* the sum of |products| is bounded by its own absolute value, so the
+     absolute bound below serves.  Proved inline: the stdlib name for this has
+     moved between releases and a proof should not depend on which one. *)
+  assert (Hself : forall z : Z, z <= Z.abs z)
+    by (intros z; destruct (Z.abs_spec z) as [[? E] | [? E]]; lia).
+  eapply Z.le_trans; [ apply Hself | ].
+  eapply Z.le_trans; [ | exact Hlic ].
+  apply acc_range_abs_bound; [ nia | ].
+  intros i. unfold afun, prod. rewrite Z.abs_idemp, Z.abs_mul.
+  apply Z.mul_le_mono_nonneg;
+    auto using Z.abs_nonneg.
+Qed.
+
+(* ------------------------------------------------------------------ *)
+(** ** The licence is about a ZEROED destination                       *)
+(* ------------------------------------------------------------------ *)
+
+(** Writing [wcombine 0] above forced a hypothesis to be stated that exists
+    nowhere in the compiler: the licence [K * 127^2 <= i32::MAX] is sufficient
+    only when [C] starts at zero.  The emitter's own comment says a caller must
+    zero it, every test does, and NOTHING says the licence depends on it.
+
+    That is not academic, because this kernel ACCUMULATES into [C] - which is
+    exactly what lets [gridDim.z] split the contraction - so a caller who
+    splits K across LAUNCHES instead, into the same int32 [C], is doing the
+    obvious thing.  Every launch is individually licensed and the accumulation
+    is not.
+
+    Measured on the device, M=16 N=8, every operand 127, K = 66,560 per launch
+    (half the licensed maximum, so each launch is accepted by the compiler),
+    C zeroed once before the first:
+
+      launch 1:  C[0] =  1,073,546,240   exact
+      launch 2:  C[0] =  2,147,092,480   exact
+      launch 3:  C[0] = -1,074,328,576   WRAPPED   (exact: 3,220,638,720)
+
+    The three theorems below reproduce that from [MC.wrap32] alone - the CPU
+    chain's int32 model, written months earlier for a different instruction on
+    a different architecture - which is what makes them a refutation rather
+    than a transcription of what the card said. *)
+
+Definition LICENSED_HALF : Z := (MAX_EXACT_K_STEPS / 2) * (127 * 127).
+
+Theorem each_launch_is_licensed_and_three_of_them_wrap :
+  LICENSED_HALF = 1073546240
+  /\ LICENSED_HALF <= MC.I32MAX
+  /\ 2 * LICENSED_HALF <= MC.I32MAX
+  /\ MC.I32MAX < 3 * LICENSED_HALF.
+Proof.
+  unfold LICENSED_HALF, MAX_EXACT_K_STEPS, MAX_EXACT_K, MC.I32MAX.
+  repeat split; vm_compute; try reflexivity; discriminate.
+Qed.
+
+(** The wrapped value the device returned, from the model. *)
+Theorem the_third_launch_wraps_to_the_measured_value :
+  MC.wrap32 (3 * LICENSED_HALF) = -1074328576.
+Proof. vm_compute. reflexivity. Qed.
+
+(** And the statement of the hypothesis: with a destination that is not zero,
+    the combine is not the sum, at magnitudes the licence admits. *)
+Theorem the_combine_needs_a_zeroed_destination :
+  wcombine (2 * LICENSED_HALF) [LICENSED_HALF]
+  <> 2 * LICENSED_HALF + LICENSED_HALF.
+Proof. vm_compute. discriminate. Qed.
+
+(** The control that stops the previous theorem being read as "the combine is
+    broken": from zero, the same partial is exact. *)
+Theorem from_zero_the_same_partial_is_exact :
+  wcombine 0 [LICENSED_HALF; LICENSED_HALF] = 2 * LICENSED_HALF.
+Proof. vm_compute. reflexivity. Qed.
+
 (* ------------------------------------------------------------------ *)
 
 (** The row the emitted base register addresses IS the row the schedule proof
@@ -581,4 +846,10 @@ Print Assumptions acc_range_abs_bound.
 Print Assumptions bounded_products_accumulate_exactly.
 Print Assumptions the_addressed_row_is_the_schedules_row.
 Print Assumptions the_addressed_col_is_the_schedules_col.
+Print Assumptions the_split_k_accumulation_is_exact_in_int32.
+Print Assumptions the_split_k_combine_is_exact_in_int32.
+Print Assumptions each_launch_is_licensed_and_three_of_them_wrap.
+Print Assumptions the_third_launch_wraps_to_the_measured_value.
+Print Assumptions the_combine_needs_a_zeroed_destination.
+Print Assumptions from_zero_the_same_partial_is_exact.
 Print Assumptions the_emitted_int8_gemm_holds_the_source_dot_products.
