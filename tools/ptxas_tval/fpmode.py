@@ -155,6 +155,28 @@ def factory():
           for n in (tuple(sorted(HARDWARE_PRIMITIVES)) +
                     ('I2F_S32', 'I2F_U32', 'F2F_F16_F32', 'F2F_F32_F16'))}
     def f(name, *args, side, _via_table=False):
+        # COMMUTATIVITY, for FADD only, and licensed by a measurement.
+        #
+        # ptxas does not preserve the operand order of an add: it SORTS the
+        # addends by register number, so `add.rn.f32 d, acc, prod` comes back as
+        # `FADD d, prod, acc` whenever prod is in the lower register.  That was
+        # the last thing between `naive_gemm_f32` and a result, and it is the
+        # question this file used to record as deliberately open.
+        #
+        # "IEEE addition is commutative" is not enough on its own, because the
+        # claim being made is about stored BITS and IEEE leaves a NaN result's
+        # payload implementation defined -- a hardware that returned the FIRST
+        # operand's payload would break this on exactly the inputs no ordinary
+        # test uses.  `fpsem_abi.py` runs both operand orders on the device (two
+        # cubins, because ptxas CSEs the two orders inside one kernel) over two
+        # quiet NaNs with different payloads, a signalling NaN, inf+(-inf), both
+        # zeros and denormals, and they agree bit for bit.  Measured on sm_89.
+        #
+        # FMUL is NOT canonicalised: nothing has needed it, so nothing has
+        # measured it, and an unmeasured identification is the guess this file
+        # exists to refuse.  `_self_check` pins both halves of that.
+        if name == 'FADD' and len(args) == 2 and args[0].get_id() > args[1].get_id():
+            args = (args[1], args[0])
         if side not in ('ptx', 'sass'):
             raise Exception(f'float op {name!r} asked for without a side'
                             f' -- the caller must say which program it is executing')
@@ -200,6 +222,18 @@ def _self_check(f):
     if is_true(simplify(f('FFMA', a, b, c, side='sass') == f('FADD', f('FMUL', a, b, side='sass'), c, side='sass'))):
         raise Exception('float abstraction identifies FFMA with FADD(FMUL(..)) '
                         '-- that is exactly the contraction under test')
+    # The commutativity above is exactly one identification, and both halves of
+    # that have to be pinned or it drifts: FADD must commute (or the operand
+    # order ptxas rewrites is not covered and no float loop kernel validates),
+    # and FMUL must NOT (or an identification nothing measured has crept in).
+    if not is_true(simplify(f('FADD', a, b, side='sass') == f('FADD', b, a, side='sass'))):
+        raise Exception('FADD no longer commutes -- ptxas SORTS the addends, so '
+                        'without this no float kernel whose add it reorders can '
+                        'be validated')
+    if is_true(simplify(f('FMUL', a, b, side='sass') == f('FMUL', b, a, side='sass'))):
+        raise Exception('FMUL now commutes -- nothing has needed that, so nothing '
+                        'has measured it; see fpsem_abi.py for what licensing one '
+                        'of these costs')
 
 
 def _side_check(f):

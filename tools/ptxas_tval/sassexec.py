@@ -420,6 +420,21 @@ class Sass:
             else: raise Exception(f'unmodelled IADD3.X arity {len(ops)}')
         elif opc == 'SEL':
             self.wr(ops[0], If(self.pr(ops[3]), rd(ops[1]), rd(ops[2])), g)
+        elif opc == 'FSEL':
+            # A SELECT, not a float operation -- so it moves a 32-bit pattern
+            # and is modelled exactly, with no appeal to `sym['fp']`.
+            #
+            # That is a MEASUREMENT, not a reading of the mnemonic.  An
+            # arithmetic instruction is entitled to flush a denormal,
+            # canonicalise a NaN payload or normalise a signed zero; a select
+            # is not, and modelling a flushing instruction as a pure select
+            # would be exactly the guess this executor refuses to make -- and
+            # would be invisible on ordinary data.  `fpsem_abi.py` runs FSEL on
+            # the device over denormals at both ends of the range, +0.0 against
+            # -0.0, a quiet NaN carrying a payload, a signalling NaN and both
+            # infinities, with a control asserting the load/store path is
+            # itself bit-preserving, and gets `p ? s0 : s1` bit for bit.
+            self.wr(ops[0], If(self.pr(ops[3]), rd(ops[1]), rd(ops[2])), g)
         elif opc == 'LOP3.LUT':
             lut = int(ops[4], 16)
             self.wr(ops[0], self.lop3(rd(ops[1]), rd(ops[2]), rd(ops[3]), lut), g)

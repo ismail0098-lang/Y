@@ -40,9 +40,32 @@ last section.
 | `ptx_carry_chain` | **VALIDATED** | 123 | 24.6 s | 24 predicated instructions |
 | `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.0 s | across a **loop**; 1 multiplier identity assumed |
 | `smem_roundtrip` | **VALIDATED** | 18 | 0.2 s | **shared memory**, 1 barrier |
+| `naive_gemm_f32` @ `-O1` | UNPROVED | 7 | 0.2 s | **a shipped kernel refuted** — `store 0 value: sat` |
+| `naive_gemm_f32_rn` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden* — **a GEMM** |
+| `naive_gemm_f32_fma` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *stated* — byte-identical SASS |
 
-Six kernels, **282 obligations**. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
+Eight kernels validated, **300 obligations**, and two UNPROVED rows that are
+results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
 UNPROVED and are discussed under *The wall* below — neither produced a `sat`.
+
+The last three rows are one experiment: one kernel, three PTX spellings.
+`naive_gemm_f32`'s PTX says `mul.f32` then `add.f32` — two roundings — and
+`ptxas` contracts them into a single `FFMA`, which rounds once. The validator
+refutes it, and *where* it refutes is the informative part: `BASE`, `STEP`,
+`LOOPCOND` and `ENTRY` all prove, so the loop schedule corresponds exactly and
+it is the accumulated **value** that cannot be shown equal.
+
+Both repairs then validate, and they are not equally good:
+
+* `mul.rn.f32` + `add.rn.f32` **forbids** the fusion. Costs 0 to +7.1%
+  instructions, and leaves the kernel with two roundings where the hardware
+  does one. It is also the arm that needs `FADD` commutativity, because
+  `ptxas` sorts the addends.
+* `fma.rn.f32` **states** it. Emits a **byte-identical instruction stream** to
+  the shipped kernel, is more accurate, and validates.
+
+So the shipped artifact is not the validated one, the difference is one PTX
+modifier, and the better repair costs nothing.
 
 ### The control is the row that makes the table mean something
 
@@ -387,11 +410,24 @@ recording a survivor.
 
 Measured rather than assumed, and neither is the gate.
 
-**Contraction** — 9 kernels. `mul.f32` + `add.f32` becoming `FFMA` is a permitted
-freedom. The repair is to emit `.rn`, costing between 0 and +7.1% instructions.
-It unlocks nothing today: all 9 are behind loop invariants and 6 also behind
-shared memory. So it is *scheduled*, not deferred — make the change on the kernel
-that needs it, when the loop work reaches it.
+**Contraction** — **16 kernels**, derived by `contract.py` from the artifacts
+rather than listed. `mul.f32` + `add.f32` becoming `FFMA` is a permitted
+freedom, and it unlocks **one kernel today**: `naive_gemm_f32`, above.
+
+Three things this paragraph used to say were wrong, and each is the same shape.
+
+* **The count was a hardcoded 9** in `fpgate.py`, and it disagreed with
+  `contract.py`'s own measurement *in both directions* — six
+  `gemm_f16_bias_relu_*` kernels where `ptxas` contracts nothing, and ten
+  contracting kernels omitted. Two lists of one thing drift.
+* **"Behind loop invariants"** was true when written. `loopval.py` has since
+  provided them. `fpgate.py` asks the validator now instead of consulting a
+  table that models its answer.
+* **The repair named was the expensive one.** Forbidding the contraction with
+  `mul.rn.f32`/`add.rn.f32` costs 0 to +7.1% instructions *and* gives the
+  kernel two roundings where the hardware does one. Saying `fma.rn.f32` emits
+  the same instructions, is more accurate, and validates. **The repair is to
+  say what the machine does, not to forbid it.**
 
 **Macro-op expansion** — 17 kernels. One PTX instruction that `ptxas` implements
 as a multi-instruction refinement. No source-level token fixes it. Measured per
@@ -418,6 +454,50 @@ It is also false, measured on the device: `rcp.approx` differs from `rcp.rn` on
 agrees with a correctly-rounded double quotient on 100.00%. `fpmode.py` routes
 every such identification through a table carrying a `validated` flag, refuses an
 *expanded* op by name, and self-checks at import.
+
+### Two float facts refereed against silicon
+
+Both were needed to reach the GEMM above, and neither can be read off a
+mnemonic. `fpsem_abi.py` runs each on the device.
+
+**`FSEL` is a bit-exact select, not an arithmetic operation.** That is the
+guess that mattered — the operand order is visible in the disassembly, but an
+arithmetic instruction is entitled to flush a denormal, canonicalise a NaN
+payload or normalise a signed zero, and modelling a flushing instruction as a
+pure select would be invisible on ordinary data. Run over denormals at both
+ends of the range, `+0.0` against `-0.0`, a quiet NaN carrying a payload, a
+signalling NaN and both infinities: `p ? s0 : s1`, bit for bit, 32/32. The
+probe also stores each operand unchanged, because if the load/store path were
+itself lossy on those patterns a difference at the output would be blamed on
+`FSEL`.
+
+**An f32 add is bit-exactly commutative.** `fpmode.py` used to record this as
+deliberately open: *"IEEE addition is commutative, so canonicalising by operand
+id would be sound and would hide a real question — whether `ptxas` preserves
+operand order — so it is left out until something needs it."* Something needed
+it, and the answer to the question it was protecting is **no**: `ptxas` sorts
+the addends by register number, so `add.rn.f32 d, acc, prod` comes back as
+`FADD d, prod, acc`. "Sound in IEEE" is still not enough on its own, because
+the claim is about stored **bits** and IEEE leaves a NaN result's payload
+implementation-defined — a hardware returning the *first* operand's payload
+would break this on exactly the inputs no ordinary test uses. Measured on
+sm_89: 32/32 agree, including two quiet NaNs with different payloads.
+
+Two things `ptxas` does had to be designed around, and each would have produced
+a confident wrong answer:
+
+* It **CSEs** `a+b` with `b+a` inside one kernel, so the obvious probe is
+  answered by the translator under test rather than by the device. `B` is
+  passed through two pointers carrying the same values instead.
+* It then **sorts** the addends anyway, so both orders cannot be had from one
+  kernel. The load order is varied between two otherwise identical kernels, and
+  the checker traces each `FADD` source back through its load to the
+  **parameter** — comparing register *names* would pass vacuously when two
+  cubins differ in numbering while putting the same value in the same slot.
+
+`FMUL` is deliberately **not** canonicalised: nothing has needed it, so nothing
+has measured it, and `fpmode._self_check` now pins both halves — `FADD` must
+commute, `FMUL` must not — so neither can drift.
 
 ---
 
@@ -556,10 +636,15 @@ Needs `python3` with `z3-solver`, and `ptxas` + `nvdisasm` from the CUDA toolkit
 ```sh
 cd tools/ptxas_tval
 ./build_corpus.sh          # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
-./regress.sh               # the standing straight-line results, ~35 s
-python3 loopval.py o1/exact_pv.ptx o1/exact_pv.sass 60 wide
-python3 smemval.py smut/smem_roundtrip.ptx smut/smem_roundtrip.sass 60 wide
+./regress.sh               # ALL nine standing results, ~50 s
 ```
+
+`regress.sh` used to cover the straight-line cases only, and the loop and
+shared-memory results were three commands the README asked a reader to type. A
+documented command nothing runs is how a result goes stale, so it runs all of
+them — including the `naive_gemm_f32` **UNPROVED** row, because a run in which
+that turns green is a regression just as much as one where a VALIDATED row
+turns red.
 
 `build_corpus.sh` takes each kernel's architecture from its own `.target` line,
 never from the local card — compiling at the build machine's architecture is the
@@ -630,8 +715,30 @@ only because `loopval` refuses by name and never guesses.
 **32 of 48 refuse for one reason: more than one back edge.** That includes all
 23 FP16 tensor-core GEMMs, which have three. So the recorded "21–27 opcodes
 each" understates them — they are behind an opcode gap *and* behind a structural
-one, and only the first had been measured. Supporting more than one back edge is
-the single largest lever in the corpus, and it needs no new opcode semantics.
+one, and only the first had been measured.
+
+#### …and it is not the largest lever, because it unblocks nothing alone
+
+This section used to end "supporting more than one back edge is the single
+largest lever in the corpus, and it needs no new opcode semantics". The second
+clause is true and the first does not follow from it, so it was crossed against
+the opcode census: **of the 30 kernels in that bucket, 0 would validate after
+the lift.** Every one also has an opcode gap. The smallest are `bn254_fr_mul`
+at 2 (`CALL.REL.NOINC`, `IMAD.MOV`) and `y_cpu_matmul` at 3; the 23 GEMMs are
+at 20–26.
+
+Two corrections came out of running that cross:
+
+* **`bra` inflates every loop kernel's gap by one.** `gap.py` drives the
+  *straight-line* executor and `ptxexec` models no `bra` at all — control flow
+  is `loopval`'s layer. `sassexec` does model `BRA` (it refuses a backward one
+  by name, which is what hands the loop over), so only the PTX column needs the
+  correction.
+* **A structural refusal moves with the optimisation level and an opcode gap
+  does not.** `naive_gemm_f32` refuses on the back-edge shape at `-O0`, on the
+  prologue shape at `-O2`, and at `-O1` is past every structural gate with one
+  unmodelled opcode. Asking the question at one level answers it for that
+  level. That is how the GEMM above was reached.
 
 (`exact_pv` is refused here because the corpus is built at `-O3`. Its standing
 result is at `-O1`, where it still validates — 14 obligations — and the refusal
@@ -677,6 +784,8 @@ python3 smemdepth.py   # what ELSE each shared-memory kernel needs
 python3 barregion.py   # multiplies per barrier region, against the wall
 python3 fpclass.py     # contraction vs macro-op, per kernel
 python3 cbank_abi.py   # referee the const-bank ABI against ptxas AND the device
+python3 fpsem_abi.py   # referee FSEL and f32-add commutativity against the device
+python3 fpgate.py      # which contraction kernels a repair unlocks, by asking
 python3 unroll.py      # did ptxas unroll?  (it did, x4, at -O2 and above)
 ```
 

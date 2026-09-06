@@ -191,6 +191,29 @@ fn validated_kernels(doc: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every kernel the tval results table names, whatever its verdict.
+///
+/// The two doc gates below iterate THIS and not `validated_kernels`, because a
+/// false proof attribution is not confined to a row that passed: the table
+/// carries UNPROVED rows that are results in their own right, and a claim
+/// about one of those was invisible while the gates were scoped to the
+/// validated set. Found by mutating a new claim into the doc and watching the
+/// gate -- written one increment earlier -- stay green.
+fn table_kernels(doc: &str) -> Vec<String> {
+    doc.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with('|') && (t.contains("VALIDATED") || t.contains("UNPROVED"))
+        })
+        .filter_map(|l| {
+            let cell = l.split('|').nth(1)?.trim();
+            let name = cell.trim_matches('`').split(" @ ").next()?.trim();
+            Some(name.trim_matches('`').to_string())
+        })
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
 /// Which files in `proofs/` name a given kernel entry point.
 fn proofs_naming(entry: &str) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(repo().join("proofs"))
@@ -293,13 +316,13 @@ fn the_attention_kernel_is_proved_and_not_validated() {
 #[test]
 fn the_tval_doc_credits_no_kernel_with_a_proof_it_does_not_have() {
     let doc = tval_doc();
-    let validated = validated_kernels(&doc);
+    let named = table_kernels(&doc);
     let mut checked = 0usize;
-    for sentence in doc.split('.') {
+    for sentence in doc.split(['.', '\n']) {
         if !sentence.contains("Rocq") {
             continue;
         }
-        for k in &validated {
+        for k in &named {
             if sentence.contains(k.as_str()) {
                 checked += 1;
                 assert!(
@@ -316,7 +339,7 @@ fn the_tval_doc_credits_no_kernel_with_a_proof_it_does_not_have() {
     // FLOOR: a doc that stopped mentioning Rocq at all would pass silently.
     assert!(
         checked >= 1,
-        "no sentence in the tval doc names a validated kernel alongside \
+        "no sentence in the tval doc names a table kernel alongside \
          \"Rocq\", so this gate examined nothing"
     );
 }
@@ -334,9 +357,9 @@ fn the_tval_doc_states_the_right_number_of_proofs_for_a_kernel() {
         ("no", 0usize), ("one", 1), ("two", 2), ("three", 3),
         ("four", 4), ("five", 5), ("six", 6),
     ];
-    let validated = validated_kernels(&doc);
+    let named = table_kernels(&doc);
     let mut checked = 0usize;
-    for sentence in doc.split('.') {
+    for sentence in doc.split(['.', '\n']) {
         // A correcting sentence has to QUOTE the claim it corrects, so the
         // paragraph recording the old "three Rocq files" wording would trip
         // this gate on its own history. Scoped past it by an explicit
@@ -352,7 +375,7 @@ fn the_tval_doc_states_the_right_number_of_proofs_for_a_kernel() {
         let Some(&(_, want)) = words.iter().find(|(w, _)| *w == last.to_lowercase()) else {
             continue;
         };
-        for k in &validated {
+        for k in &named {
             if !sentence.contains(k.as_str()) {
                 continue;
             }
