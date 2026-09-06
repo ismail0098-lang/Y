@@ -70,8 +70,10 @@ $int8_gemm_ty_2:
     mov.u32 %r15, 0;
     mov.u32 %r16, 0;
     mov.u32 %r17, 0;
-    mov.u32 %r18, %ctaid.z;
-    mov.u32 %r19, %nctaid.z;
+    // [Y INT8 GEMM] the fused epilogue STORES, so this kernel walks the whole
+    // contraction and ignores %ctaid.z: a store combines no partials.
+    mov.u32 %r18, 0;
+    mov.u32 %r19, 1;
     mul.lo.u32 %r20, %r18, 32;
     cvt.u64.u32 %rd16, %r20;
     add.u64 %rd13, %rd13, %rd16;

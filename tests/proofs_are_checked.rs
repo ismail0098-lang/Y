@@ -304,6 +304,16 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 // ungurded pre-tiling grid does not merely idle.
                 "Print Assumptions warp_row_injective",
                 "Print Assumptions without_the_tile_guard_a_cta_addresses_past_the_matrix",
+                // The FUSED epilogue, added when a device measurement showed
+                // it stores where its sibling reduces. The refutation is the
+                // load-bearing half: it is the defect that was measured (a
+                // split CTA holds only part of the contraction), and the
+                // second one is why the observed answer moved BETWEEN
+                // launches rather than being merely wrong.
+                "Print Assumptions a_storing_cta_computes_the_whole_contraction",
+                "Print Assumptions a_split_cta_holds_only_part_of_the_contraction",
+                "Print Assumptions two_split_ctas_would_store_different_values",
+                "Print Assumptions the_reducing_epilogue_still_splits",
             ],
         ),
         (

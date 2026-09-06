@@ -5423,10 +5423,56 @@ declare it as a Q format.\n{}",
         // addition is associative and commutative, so this atomic is
         // order-independent by construction - the same result for every grid,
         // every launch, every scheduling accident.
+        //
+        // **THAT ARGUMENT IS ABOUT THE REDUCING EPILOGUE AND THE FUSED ONE
+        // STORES.** `epi.is_some()` dequantises the int32 accumulator to f32
+        // and writes it with `st.global.f32` - a plain store, which combines
+        // nothing. Split K under a store and every z-CTA writes its OWN
+        // residue class's partial to the same address; the last writer wins,
+        // and which one that is varies between launches. Measured before this
+        // guard existed, M=64 N=32 K=128, three launches each:
+        //
+        // ```text
+        //   z = 1     0 of 2048 elements wrong
+        //   z = 2  2048 of 2048 wrong,  C[0] = -3016 | -60724 | -3016
+        //   z = 8  2048 of 2048 wrong,  C[0] = -15591 | -7777 | -15591
+        //                                       (the answer is -63740)
+        // ```
+        //
+        // Not a rounding difference: a different, non-deterministic matrix,
+        // from the kernel whose source header says "the answer does not depend
+        // on how K was walked". The repair is NOT to make the store atomic - a
+        // float atomic add is exactly the non-reproducibility this family
+        // exists to avoid, and the bias would land once per z. It is to make
+        // the launch contract not matter, the same move the attention kernel's
+        // `attn_scores` needed: a storing epilogue walks the WHOLE
+        // contraction, so every z-CTA computes the identical value and writes
+        // identical bytes. The race becomes benign, the answer is right at
+        // every grid, and a caller who passes z > 1 buys redundant work rather
+        // than a wrong matrix - which is the right side of that trade, and the
+        // only side that keeps the module's advertised claim true.
+        //
+        // Tied to `proofs/Int8GemmSchedule.v` by `tests/int8_gemm_launch_contract.rs`.
+        let splits_k = epi.is_none();
         let cz = self.alloc_reg32();
         let nz = self.alloc_reg32();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.z;", cz).unwrap();
-        writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.z;", nz).unwrap();
+        if splits_k {
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %ctaid.z;", cz).unwrap();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %nctaid.z;", nz).unwrap();
+        } else {
+            writeln!(
+                &mut self.ptx_buffer,
+                "    // [Y INT8 GEMM] the fused epilogue STORES, so this kernel walks the whole"
+            )
+            .unwrap();
+            writeln!(
+                &mut self.ptx_buffer,
+                "    // contraction and ignores %ctaid.z: a store combines no partials."
+            )
+            .unwrap();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 0;", cz).unwrap();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, 1;", nz).unwrap();
+        }
 
         let zoff = self.alloc_reg32();
         let zoff64 = self.alloc_reg64();
@@ -5550,6 +5596,10 @@ declare it as a Q format.\n{}",
                     bi.push(v2);
                 }
             }
+            // Store, not reduce: this writes a FINAL value, so it may only run
+            // over a complete contraction. That is why the K loop above drops
+            // the `%ctaid.z` stripe when `epi.is_some()` - a store cannot
+            // combine what a split would produce.
             for mi in 0..mt as usize {
                 for ni in 0..nt as usize {
                     let base = (mi * nt as usize + ni) * 4;
