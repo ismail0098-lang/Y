@@ -2898,6 +2898,190 @@ no emitted code — the taxonomy working.
 - The 23 f16 GEMMs still cannot carry an exactness argument at all, and the
   staging is still unbuilt.
 
+#### Phase 3 progress, 2026-09-06 — the fused epilogue had the opposite launch contract, and a suite that sweeps one kernel is not testing its sibling
+
+Taken from the previous increment's own residue, which named a wrapping twin of
+`GridStrideSplit.combine` as the next item. **Measuring what it would cost
+found a live, non-deterministic wrong answer one function over**, so the plan
+moved before anything was written.
+
+##### The measurement
+
+`emit_int8_gemm_kernel` has two epilogues. The plain one accumulates with
+`red.global.add.s32`; the fused one (`epi.is_some()`) dequantises the int32
+accumulator to f32 — per-row activation scale, per-column weight scale, bias —
+and writes it with `st.global.f32`. **Both walked the same striped split over
+`%ctaid.z`.** A store combines nothing, so under a split every z-CTA wrote its
+own residue class's *partial* to the same address and the last writer won.
+
+Measured on the device before the guard existed, M=64 N=32 K=128, `Sa = Sb = 1`
+and `Bias = 0` so the f32 output is the integer accumulation exactly
+(`|product| <= 125·125·128 = 2 000 000`, well inside f32's exactly-representable
+integers, so a mismatch cannot be a rounding difference), three launches per
+geometry:
+
+| `gridDim.z` | wrong of 2048 | `C[0]` across three launches |
+|---|---|---|
+| 1 | **0** | −63740, −63740, −63740 |
+| 2 | 2048 | **−3016, −60724, −3016** |
+| 3 | 2048 | −23368, −23368, −23368 |
+| 4 | 2048 | 12575, 12575, 12575 |
+| 8 | 2048 | **−15591, −7777, −15591** |
+
+The answer is −63740. Not a rounding difference and not even a stable wrong
+answer: **a different matrix between launches of the same kernel on the same
+inputs**, from the kernel whose own source header reads *"the reduction is
+associative and the answer does not depend on how K was walked"*. That sentence
+is true of the accumulation and was read as a launch contract.
+
+This is the shape the w8a8 inference path is meant to use — the fixture's own
+header calls it "the census's largest single item: `_w8a8_gemm` is 145 launches
+and 38.7% of a decode step".
+
+##### What could not see it
+
+`tests/gpu_batch_invariance.rs` sweeps `gridDim.z ∈ {1,2,3,5,8,16,32}` and
+compares bit-identically against a CPU reference — **on `int8_gemm` only**. It
+never loads `int8_gemm_scaled`. So the suite whose entire subject is this
+kernel family's launch invariance was structurally incapable of seeing it.
+
+That is the third instance of one shape in this kernel's short history, and the
+sentence generalises one step further each time:
+
+- *a suite that sweeps one axis is not testing another* — `gpu_batch_invariance`
+  swept `gridDim.z` at one fixed block size, and the block size was wrong;
+- *a suite that sweeps one kernel's launch geometry is not testing the other
+  kernel* — `gpu_attention_invariance` swept `attn_accum` while launching
+  `attn_scores` at a fixed correct geometry;
+- **a suite that sweeps one kernel is not testing its sibling** — here.
+
+The comment in the emitter said it plainly and nobody read it that way:
+*"`red.global.add.s32` ... being an INTEGER add it is associative, so this
+atomic is order-independent by construction"*. **That is an argument about an
+ADD**, sitting in a function whose other branch stores. The storing branch had
+no comment about split-K at all.
+
+##### The repair is to make the contract not matter
+
+Not an atomic float add: that is exactly the non-reproducibility this family
+exists to avoid, and the bias would land once per z. Not a runtime refusal
+either — `gridDim.z` is a launch parameter and a kernel cannot fail.
+
+A storing epilogue **walks the whole contraction and ignores `%ctaid.z`**. Then
+every z-CTA computes the identical value and writes identical bytes; the race
+becomes benign, the answer is right at every grid, and a caller who passes
+`z > 1` buys redundant work rather than a wrong matrix. That is the same move
+`attn_scores` needed, in the other direction: there the fix was to make a kernel
+grid-stride so the theorem covered it, here it is to make one stop.
+
+The emitted diff is two `mov`s and a comment:
+
+```text
+-    mov.u32 %r18, %ctaid.z;
+-    mov.u32 %r19, %nctaid.z;
++    // [Y INT8 GEMM] the fused epilogue STORES, so this kernel walks the whole
++    // contraction and ignores %ctaid.z: a store combines no partials.
++    mov.u32 %r18, 0;
++    mov.u32 %r19, 1;
+```
+
+`tests/int8_gemm.ptx` is byte-identical, which is the confirmation that the
+reducing path is untouched. After the fix: 0 of 2048 wrong at every
+`z ∈ {1,2,3,4,8,16}`, three launches each.
+
+##### The proof
+
+`proofs/Int8GemmSchedule.v` gains the storing schedule as five theorems, 30
+`Print Assumptions`, no axioms. `emitted_class` / `emitted_workers` record the
+emitter's choice as a function of the epilogue rather than describing it in
+prose; `a_storing_cta_computes_the_whole_contraction` is
+`GS.class_sum Z.add f 0 1 S = GS.sum_upto Z.add f S`, i.e. the degenerate
+instance of the same `GridStrideSplit` decomposition every other theorem in the
+file uses — **no new reasoning**, which is the point of having the schema.
+
+`every_storing_cta_writes_the_same_value` is the launch-invariance statement:
+`cz` and `nz` are not free in the answer.
+
+The two refutations are what make those worth stating, and they are the measured
+defect rather than a symmetry:
+
+- `a_split_cta_holds_only_part_of_the_contraction` — under the stripe a CTA's
+  partial is not the contraction, so a store writes part of the answer;
+- `two_split_ctas_would_store_different_values` — **the partials disagree with
+  each other**, which is why the observed answer moved between launches rather
+  than being merely wrong. Which store lands last is a scheduling accident with
+  a visible value.
+
+And `the_reducing_epilogue_still_splits`, without which "walk the whole
+contraction everywhere" satisfies every theorem in the file and deletes the
+split the batch-invariance harness exists to sweep.
+
+##### The gate
+
+Three tests in `tests/int8_gemm_launch_contract.rs`, the file that already owns
+this kernel's launch-contract claims.
+
+The device test sweeps `gridDim.z` for the fused shape against a host
+reference — **three launches per geometry, because the failure was
+non-deterministic**: a single launch can miss it, and a single launch that
+catches it cannot say it is a race. It asserts every geometry is *correct*, not
+that the geometries agree; a kernel that writes nothing agrees with itself
+perfectly.
+
+It SKIPs with no CUDA driver, so it cannot be the only cover. The source-level
+test is a **biconditional** and has to be: "never read `%ctaid.z`" satisfies
+every assertion about the storing kernel while deleting the reducing kernel's
+split. So it asserts the reducing one *does* stripe and the storing one does
+not, having first checked which epilogue each fixture actually has — without
+that, both halves could hold of two kernels that are the same kernel.
+**Verified: with the fix reverted and `CUDA_VISIBLE_DEVICES=""`, the device test
+reports `ok` and the two source-level tests fail.**
+
+**The gate found a bug in itself on its first run.** A raw substring search for
+`%ctaid.z` matched the storing kernel's own comment — the line explaining *why
+it does not read it* — and reported the opposite of the truth. Comments are
+stripped before anything is looked for. That is the self-reference trap this
+document already records for `src.find("fn reference_bins")`, in a new place.
+
+##### Mutation table
+
+Seven probes over seven suites, each `--test` target run separately. **M0
+CONTROL, two independent `mov`s emitted in the other order: green everywhere** —
+read first. **BASE restored, before and after: green** — read second.
+
+| probe | suites that failed |
+|---|---|
+| **M0 CONTROL** — two independent `mov`s reordered | *(none)* |
+| **BASE_PRE / BASE_POST** | *(none)* |
+| **M1 — the storing epilogue splits K again (the original bug)** | **`int8_gemm_launch_contract` ONLY** |
+| M2 — over-refusal: nothing splits K | launch_contract + `gpu_batch_invariance` |
+| M3 — the proof says a storing CTA is one of `nz` workers | launch_contract + `proofs_are_checked` |
+| M4 — the refutation deleted with its `Print Assumptions` | launch_contract + `proofs_are_checked` |
+| M5 — the gate stops stripping comments | launch_contract ONLY |
+| M6 — the split decided by `K` instead of the epilogue | launch_contract + `gpu_batch_invariance` |
+
+**M1 is the row that matters: the original defect was invisible to all six
+other suites** — `gpu_batch_invariance`, `int8_gemm_exactness`,
+`ptx_int8_mma_layout`, `committed_ptx_artifacts`, `ptx_portability` and
+`proofs_are_checked`. That is how it survived being committed, measured,
+proved about and written up three times.
+
+**M2 is the control that stops the obvious over-fix**, and the mechanism is
+worth stating: with `red.global.add.s32` and every z-CTA computing the whole
+contraction, `C = z × answer`. So "walk the whole contraction everywhere" is
+not merely wasteful, it is wrong for the reducing kernel.
+
+##### What this does not close
+
+- The wrapping twin of `GridStrideSplit.combine` is **still not written**. The
+  int32 conjunct of `Int8GemmExact`'s capstone is stated for the flat
+  accumulation; multi-class int32 accumulation is covered in `Z` plus the fact
+  that the licence bounds a sum of absolute values, and not as one theorem over
+  a wrapping class fold. This increment made that item *smaller* rather than
+  closing it — the storing epilogue no longer has a multi-class case at all.
+- Nothing here is about the f32 GEMMs, which cannot carry an exactness argument.
+- The tie is transcription-plus-gate, as in the rest of this kernel's proofs.
+
 ### Phase 4 — Bounded error where exactness is impossible · 3–4 years
 
 Exact accumulation covers reductions and fixed-point pipelines. It does not

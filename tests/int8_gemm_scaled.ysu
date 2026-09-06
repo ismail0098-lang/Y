@@ -7,6 +7,16 @@
 // walked. The epilogue then applies per-ROW activation scales and per-COLUMN
 // weight scales, which is what per-token and per-channel quantisation give you.
 //
+// THAT SENTENCE IS ABOUT THE ACCUMULATION AND WAS READ AS A LAUNCH CONTRACT.
+// This shape STORES its dequantised result (`st.global.f32`) where the plain
+// `int8_gemm` accumulates it (`red.global.add.s32`), and a store combines
+// nothing - so with `gridDim.z > 1` every z-CTA wrote its own residue class's
+// partial to the same address and the last writer won. Measured at 2048 of
+// 2048 elements wrong, with a DIFFERENT wrong answer between launches. The
+// kernel therefore walks the whole contraction and ignores `%ctaid.z`; a
+// caller who passes `gridDim.z > 1` buys redundant work, not a wrong matrix.
+// See `proofs/Int8GemmSchedule.v` and `tests/int8_gemm_launch_contract.rs`.
+//
 // Per-row is the only activation scaling that keeps this exact: a row scale
 // factors out of the dot product and leaves the accumulation integer. A
 // per-K-channel scale would sit inside the sum and turn it back into an

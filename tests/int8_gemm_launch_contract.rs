@@ -548,3 +548,267 @@ fn the_warp_tile_is_chosen_from_the_shape_and_narrows_nothing() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The FUSED epilogue: the second entry point of the same emitter, and the one
+// whose launch contract was the opposite of what the module advertised.
+// ---------------------------------------------------------------------------
+
+/// The fused shape: `C = acc * Sa[m] * Sb[n] + Bias[n]`, f32 out. Same tag
+/// discipline as `emit` above and for the same reason.
+fn emit_scaled(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut bin = std::env::current_exe().unwrap();
+    bin.pop();
+    if bin.ends_with("deps") {
+        bin.pop();
+    }
+    let dir = std::env::temp_dir().join(format!("i8sc_{}_{}", std::process::id(), tag));
+    std::fs::create_dir_all(&dir).unwrap();
+    if let Ok(p) = std::fs::read(repo.join(".ysu_hw_profile")) {
+        let _ = std::fs::write(dir.join(".ysu_hw_profile"), p);
+    }
+    let src = dir.join("sc.ysu");
+    std::fs::write(
+        &src,
+        format!(
+            "@tile({}, {}, {})\n\
+             kernel int8_gemm_scaled(A: GlobalMemory<I8>, B: GlobalMemory<I8>, \
+             Sa: GlobalMemory<F32>, Sb: GlobalMemory<F32>, Bias: GlobalMemory<F32>, \
+             C: GlobalMemory<F32>) {{\n}}\n\
+             fn main() {{}}\n",
+            m, n, k
+        ),
+    )
+    .unwrap();
+    let out = Command::new(bin.join("Y"))
+        .arg(&src)
+        .arg("--emit-ptx")
+        .current_dir(&dir)
+        .output()
+        .expect("run Y");
+    let r = if out.status.success() {
+        Ok(std::fs::read_to_string(dir.join("sc.ptx")).expect("no .ptx"))
+    } else {
+        Err(format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+/// The behavioural half for the fused shape, and the measurement that found
+/// the defect.
+///
+/// `tests/gpu_batch_invariance.rs` sweeps `gridDim.z` over `int8_gemm` and
+/// never touches `int8_gemm_scaled`, so a suite that sweeps one KERNEL was not
+/// testing its sibling — the same shape as `attn_scores`, where a suite that
+/// swept one kernel's launch geometry launched the other at a fixed correct
+/// one.
+///
+/// Three launches per geometry, because the pre-fix failure was
+/// NON-DETERMINISTIC: which z-CTA's store landed last is a scheduling
+/// accident, so a single launch per geometry can miss it and a single launch
+/// that catches it cannot say it is a race.
+#[test]
+fn the_fused_epilogue_answers_the_same_at_every_split_k_geometry() {
+    use y::cuda_runtime::CudaContext;
+
+    const M: usize = 64;
+    const N: usize = 32;
+    const K: usize = 128;
+
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — the fused epilogue's launch contract was not demonstrated.");
+        return;
+    };
+    let ptx = emit_scaled("splitk", M, N, K).expect("scaled fixture did not compile");
+    let module = ctx
+        .load_ptx(&ptx, "int8_gemm_scaled")
+        .expect("PTX failed to load");
+
+    let a: Vec<i8> = (0..M * K)
+        .map(|i| (((i * 31 + 5) % 251) as i32 - 125) as i8)
+        .collect();
+    let b: Vec<i8> = (0..N * K)
+        .map(|i| (((i * 67 + 13) % 251) as i32 - 125) as i8)
+        .collect();
+
+    let d_a = ctx.alloc(M * K).unwrap();
+    let d_b = ctx.alloc(N * K).unwrap();
+    let d_sa = ctx.alloc(M * 4).unwrap();
+    let d_sb = ctx.alloc(N * 4).unwrap();
+    let d_bias = ctx.alloc(N * 4).unwrap();
+    let d_c = ctx.alloc(M * N * 4).unwrap();
+    ctx.memcpy_htod_at(&d_a, 0, &a.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+        .unwrap();
+    ctx.memcpy_htod_at(&d_b, 0, &b.iter().map(|&v| v as u8).collect::<Vec<u8>>())
+        .unwrap();
+    // Unit scales and zero bias, so the f32 output IS the integer
+    // accumulation: |product| <= 125*125*128 = 2_000_000, well inside f32's
+    // exactly-representable integers, so a mismatch is the schedule and never
+    // a rounding difference.
+    ctx.memcpy_htod_at(
+        &d_sa,
+        0,
+        &(0..M).flat_map(|_| 1.0f32.to_le_bytes()).collect::<Vec<u8>>(),
+    )
+    .unwrap();
+    ctx.memcpy_htod_at(
+        &d_sb,
+        0,
+        &(0..N).flat_map(|_| 1.0f32.to_le_bytes()).collect::<Vec<u8>>(),
+    )
+    .unwrap();
+    ctx.memset_u8(&d_bias, 0).unwrap();
+
+    let run = |splits: u32| -> Vec<f32> {
+        ctx.memset_u8(&d_c, 0).unwrap();
+        let args = vec![
+            d_a.device_ptr(),
+            d_b.device_ptr(),
+            d_sa.device_ptr(),
+            d_sb.device_ptr(),
+            d_bias.device_ptr(),
+            d_c.device_ptr(),
+        ];
+        ctx.launch(
+            &module,
+            ((N / 8) as u32, (M / 16) as u32, splits),
+            (32, 1, 1),
+            0,
+            &args,
+        )
+        .expect("launch failed");
+        ctx.synchronize().expect("kernel did not complete");
+        let mut raw = vec![0u8; M * N * 4];
+        ctx.memcpy_dtoh_at(&mut raw, &d_c, 0).unwrap();
+        (0..M * N)
+            .map(|i| {
+                f32::from_le_bytes([raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3]])
+            })
+            .collect()
+    };
+
+    // Ground truth on the host, so "every geometry agrees" cannot pass by all
+    // of them being wrong in the same way.
+    let mut want = vec![0f32; M * N];
+    for m in 0..M {
+        for n in 0..N {
+            want[m * N + n] = (0..K)
+                .map(|k| a[m * K + k] as i32 * b[n * K + k] as i32)
+                .sum::<i32>() as f32;
+        }
+    }
+    assert!(
+        want.iter().any(|&v| v != 0.0),
+        "the reference is all zeros; nothing below would mean anything"
+    );
+
+    for splits in [1u32, 2, 3, 4, 8, 16] {
+        for rep in 0..3 {
+            let got = run(splits);
+            let diffs = got.iter().zip(&want).filter(|(g, w)| g != w).count();
+            assert_eq!(
+                diffs,
+                0,
+                "split-K = {splits} (repeat {rep}) disagrees with the reference on {diffs} of {} \
+                 elements — got C[0] = {}, want {}. The fused epilogue STORES, so a striped \
+                 split makes every z-CTA write its own partial to the same address.",
+                M * N,
+                got[0],
+                want[0]
+            );
+        }
+        eprintln!("scaled split-K {splits:2}: correct across 3 launches");
+    }
+}
+
+/// The source-level half, which runs on a machine with no GPU.
+///
+/// It is a BICONDITIONAL and has to be: "never read `%ctaid.z`" would satisfy
+/// every assertion about the storing kernel while deleting the split that
+/// `gpu_batch_invariance` exists to sweep, and "always read it" is the defect.
+/// So the reducing kernel must still stripe and the storing one must not.
+#[test]
+fn only_the_reducing_epilogue_reads_the_split_k_index() {
+    // Comments are stripped before anything is looked for. The storing kernel
+    // carries a `// ... ignores %ctaid.z` line saying why it does not read it,
+    // and a raw substring search finds that and reports the opposite of the
+    // truth — which it did, on this test's first run.
+    let code = |ptx: &str| -> String {
+        ptx.lines()
+            .map(|l| l.split("//").next().unwrap_or("").trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let reducing = code(&emit("reduce_epi", 64, 32, 128).expect("plain fixture did not compile"));
+    let storing = code(&emit_scaled("store_epi", 64, 32, 128).expect("scaled fixture did not compile"));
+
+    // Which epilogue each one actually has — without this the two halves below
+    // could both hold of two kernels that are the same kernel.
+    assert!(
+        reducing.contains("red.global.add.s32") && !reducing.contains("st.global.f32"),
+        "the plain fixture is supposed to REDUCE; it does not"
+    );
+    assert!(
+        storing.contains("st.global.f32") && !storing.contains("red.global.add.s32"),
+        "the scaled fixture is supposed to STORE; it does not"
+    );
+
+    // The reducing one splits K, which is the property the batch-invariance
+    // harness sweeps.
+    assert!(
+        reducing.contains("%ctaid.z") && reducing.contains("%nctaid.z"),
+        "the reducing kernel stopped splitting K; `gpu_batch_invariance` would then be \
+         sweeping a geometry the kernel ignores"
+    );
+
+    // The storing one must not, because a store combines nothing.
+    assert!(
+        !storing.contains("%ctaid.z") && !storing.contains("%nctaid.z"),
+        "the fused epilogue reads the split-K index and then STORES. Every z-CTA writes its \
+         own residue class's partial to the same address and the last writer wins; measured \
+         at 2048 of 2048 elements wrong, with a different answer between launches.\n{}",
+        storing
+    );
+}
+
+/// The tie to `proofs/Int8GemmSchedule.v`: the proof's account of the
+/// emitter's choice must be the emitter's choice, in both directions.
+#[test]
+fn the_proof_states_the_epilogue_split_the_emitter_makes() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let v = std::fs::read_to_string(repo.join("proofs/Int8GemmSchedule.v"))
+        .expect("proofs/Int8GemmSchedule.v");
+
+    // The constants the storing branch substitutes, stated as the proof's own
+    // definitions rather than described in prose.
+    assert!(
+        v.contains("Definition emitted_class (stores : bool) (cz : nat) : nat :=")
+            && v.contains("if stores then 0 else cz"),
+        "the proof no longer says a storing CTA starts at class 0"
+    );
+    assert!(
+        v.contains("Definition emitted_workers (stores : bool) (nz : nat) : nat :=")
+            && v.contains("if stores then 1 else nz"),
+        "the proof no longer says a storing CTA is the only worker"
+    );
+
+    // And the emitter really does substitute them, on `epi` and nothing else.
+    let src = std::fs::read_to_string(repo.join("src/ptx_emitter.rs")).expect("src/ptx_emitter.rs");
+    assert!(
+        src.contains("let splits_k = epi.is_none();"),
+        "the emitter's split-K decision is no longer taken from the epilogue"
+    );
+
+    // The refutation has to survive too: without it the partition theorems are
+    // satisfied by a schedule nothing violates.
+    assert!(
+        v.contains("Theorem a_split_cta_holds_only_part_of_the_contraction"),
+        "the refutation the device measurement exhibits was deleted"
+    );
+}

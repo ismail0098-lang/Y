@@ -513,6 +513,94 @@ Theorem a_rounding_accumulate_would_break_the_landing_order :
 Proof. exact GS.rounding_is_order_dependent. Qed.
 
 (* ------------------------------------------------------------------ *)
+(** ** The FUSED epilogue STORES, so it may not be split               *)
+(* ------------------------------------------------------------------ *)
+
+(** Every theorem above is about the epilogue that REDUCES.  The same emitter
+    function has a second one: with [epi.is_some()] it dequantises the int32
+    accumulator to f32 (per-row activation scale, per-column weight scale,
+    bias) and writes it with [st.global.f32].  A store combines nothing, so
+    the striped split above is not merely unproved for it - it is WRONG, and
+    the argument one row up says exactly why without ever having been read
+    that way: "[red.global.add.s32] ... being an INTEGER add it is
+    associative" is a statement about an ADD.
+
+    Measured on the device before this section existed, M=64 N=32 K=128,
+    Sa = Sb = 1, Bias = 0 so the f32 output is the integer accumulation
+    exactly, three launches per geometry:
+
+      z = 1     0 of 2048 elements wrong
+      z = 2  2048 of 2048 wrong,  C[0] = -3016 | -60724 | -3016
+      z = 3  2048 of 2048 wrong,  C[0] = -23368
+      z = 8  2048 of 2048 wrong,  C[0] = -15591 | -7777 | -15591
+                                         (the answer is -63740)
+
+    A different matrix, and a different one BETWEEN LAUNCHES - from the kernel
+    whose own source header says "the answer does not depend on how K was
+    walked", in the shape the w8a8 inference path is meant to use.
+
+    The repair is not an atomic float add: that is precisely the
+    non-reproducibility this family exists to avoid, and the bias would land
+    once per z.  It is to make the launch contract not matter, which is what
+    [emitted_class] / [emitted_workers] below record. *)
+
+(** The K loop's seed and stride as the emitter chooses them.  Reducing reads
+    [%ctaid.z] / [%nctaid.z]; storing emits the constants [0] and [1]. *)
+Definition emitted_class (stores : bool) (cz : nat) : nat :=
+  if stores then 0 else cz.
+Definition emitted_workers (stores : bool) (nz : nat) : nat :=
+  if stores then 1 else nz.
+
+(** A storing CTA walks the WHOLE contraction, so what it writes is a final
+    value rather than a partial. *)
+Theorem a_storing_cta_computes_the_whole_contraction :
+  forall f S cz nz,
+    GS.class_sum Z.add f (emitted_class true cz) (emitted_workers true nz) S
+    = GS.sum_upto Z.add f S.
+Proof.
+  intros f S cz nz. cbn [emitted_class emitted_workers].
+  replace (GS.class_sum Z.add f 0 1 S) with (GS.combine Z.add f 1 S 1)
+    by (cbn [GS.combine]; lia).
+  apply GS.grid_stride_exact. lia.
+Qed.
+
+(** And [cz] and [nz] are not free in that answer: every z-CTA computes the
+    same value and writes identical bytes, so the race between their stores is
+    benign and the result is bit-identical at every grid.  This is the
+    counterpart of [any_split_factor_gives_the_same_answer] for the epilogue
+    that cannot combine. *)
+Theorem every_storing_cta_writes_the_same_value :
+  forall f S cz1 nz1 cz2 nz2,
+    GS.class_sum Z.add f (emitted_class true cz1) (emitted_workers true nz1) S
+    = GS.class_sum Z.add f (emitted_class true cz2) (emitted_workers true nz2) S.
+Proof.
+  intros. rewrite !a_storing_cta_computes_the_whole_contraction. reflexivity.
+Qed.
+
+(** The refutation that makes those two worth stating, and the one the device
+    measurement above exhibits: under the stripe a CTA holds only part of the
+    contraction, so a store writes part of the answer. *)
+Theorem a_split_cta_holds_only_part_of_the_contraction :
+  GS.class_sum Z.add (fun _ => 1%Z) 0 2 4 <> GS.sum_upto Z.add (fun _ => 1%Z) 4.
+Proof. vm_compute. lia. Qed.
+
+(** The sharper half, and the reason the measurement changed between launches
+    rather than being merely wrong: the partials DISAGREE, so "last writer
+    wins" is a scheduling accident with a visible value. *)
+Theorem two_split_ctas_would_store_different_values :
+  GS.class_sum Z.add (fun j => Z.of_nat j) 0 2 4
+  <> GS.class_sum Z.add (fun j => Z.of_nat j) 1 2 4.
+Proof. vm_compute. lia. Qed.
+
+(** The reducing epilogue keeps the stripe - the constants are substituted for
+    the storing one ALONE.  Without this, "walk the whole contraction
+    everywhere" would satisfy every theorem in this file and delete the split
+    the batch-invariance harness exists to sweep. *)
+Theorem the_reducing_epilogue_still_splits :
+  forall cz nz, emitted_class false cz = cz /\ emitted_workers false nz = nz.
+Proof. intros. split; reflexivity. Qed.
+
+(* ------------------------------------------------------------------ *)
 (** ** The emitter's shape refusal is what the partition needs         *)
 (* ------------------------------------------------------------------ *)
 
@@ -568,3 +656,8 @@ Print Assumptions the_tile_loop_is_the_grid_stride_rule.
 Print Assumptions every_output_tile_has_exactly_one_owner.
 Print Assumptions without_the_tile_guard_a_cta_addresses_past_the_matrix.
 Print Assumptions the_pre_tiling_grid_overruns_the_tile_count.
+Print Assumptions a_storing_cta_computes_the_whole_contraction.
+Print Assumptions every_storing_cta_writes_the_same_value.
+Print Assumptions a_split_cta_holds_only_part_of_the_contraction.
+Print Assumptions two_split_ctas_would_store_different_values.
+Print Assumptions the_reducing_epilogue_still_splits.

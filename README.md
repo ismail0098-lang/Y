@@ -1407,6 +1407,63 @@ truthfully state a global negative. The bijection gate that keeps a certificate'
 list in step with its capstone's now runs over both.
 
 
+### A suite that sweeps one kernel is not testing its sibling
+
+`emit_int8_gemm_kernel` emits two kernels. The plain one accumulates its
+partial sums with `red.global.add.s32`; the fused one dequantises to f32 —
+per-row activation scale, per-column weight scale, bias — and writes the result
+with `st.global.f32`. **Both walked the same striped split over `%ctaid.z`.**
+
+A store combines nothing. Measured on the device, M=64 N=32 K=128, unit scales
+and zero bias so the f32 output *is* the integer accumulation, three launches
+per geometry:
+
+| `gridDim.z` | wrong of 2048 | `C[0]` across three launches |
+|---|---|---|
+| 1 | **0** | −63740, −63740, −63740 |
+| 2 | 2048 | **−3016, −60724, −3016** |
+| 8 | 2048 | **−15591, −7777, −15591** |
+
+The answer is −63740. Not a rounding difference and not a stable wrong answer:
+**a different matrix between launches of the same kernel on the same inputs**,
+from the kernel whose own header reads *"the answer does not depend on how K was
+walked"* — in the shape the w8a8 inference path is meant to use.
+
+`tests/gpu_batch_invariance.rs` sweeps `gridDim.z ∈ {1,2,3,5,8,16,32}` against a
+CPU reference — **on the plain kernel only**. The suite whose entire subject is
+this family's launch invariance never loaded the other kernel. Third instance of
+one shape here, each time a step wider: a suite that sweeps one *axis* is not
+testing another; one that sweeps one kernel's *geometry* is not testing the
+other kernel; one that sweeps one *kernel* is not testing its sibling.
+
+The emitter's own comment said it and nobody read it that way —
+*"`red.global.add.s32` … being an INTEGER add it is associative"* is an argument
+about an **add**, in a function whose other branch stores.
+
+**The repair is to make the launch contract not matter.** Not an atomic float
+add (that is the non-reproducibility this family exists to avoid, and the bias
+would land once per z) and not a runtime refusal (a kernel cannot fail). A
+storing epilogue walks the whole contraction, so every z-CTA computes the
+identical value and writes identical bytes: the race is benign, the answer is
+right at every grid, and `z > 1` buys redundant work rather than a wrong matrix.
+The emitted diff is two `mov`s; `tests/int8_gemm.ptx` is byte-identical.
+
+`proofs/Int8GemmSchedule.v` gains the storing schedule as the *degenerate*
+instance of the same `GridStrideSplit` decomposition — no new reasoning — plus
+the two refutations that are the measured defect: a split CTA holds only part of
+the contraction, and **the partials disagree with each other**, which is why the
+answer moved between launches.
+
+The device test SKIPs without a driver, so the source-level half is a
+biconditional: the reducing kernel must still stripe and the storing one must
+not. With the fix reverted under `CUDA_VISIBLE_DEVICES=""`, the device test
+reports `ok` and the two source-level tests fail. The gate also found a bug in
+itself on its first run — a raw substring search for `%ctaid.z` matched the
+storing kernel's own comment explaining why it does not read it.
+
+Seven mutations, control and baseline green first. **The original defect is
+caught by the new gate and by none of the other six suites.**
+
 ### The int8 GEMM computes the source dot products — and the theorem was false until the compiler learned its licence
 
 `Int8GemmSchedule.v` proved this kernel's **schedule**: which lane owns which
