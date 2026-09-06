@@ -483,12 +483,47 @@ relation is preserved — a fixpoint, since the candidate pairs are discovered
 rather than declared), `LOOPCOND` (same trip count), `STORES` (same effects,
 under a permutation).
 
-`exact_pv` — the kernel that carries three Rocq files — validates at `-O1` with
+`exact_pv` — the one kernel here that also carries a Rocq proof — validates at `-O1` with
 14 obligations, 3 relation pairs and **1 multiplier identity assumed**. It does
 *not* validate at `-O2`/`-O3`, where `ptxas` unrolls the loop ×4. The
 optimisation-level differential is what relates the two, and it is sampled
 evidence rather than a proof; reaching `-O2` needs peel-and-remainder unroll
 matching, which is not built.
+
+**A correction, and what closed it.** This line used to read *"the kernel that
+carries three Rocq files"*. That was false: `exact_pv` carried **none**. Today `exact_pv` carries one Rocq file and the
+prose above credited it with three. The
+three files meant — `AttentionSchedule.v`, `GridStrideSplit.v`,
+`SoftmaxErrorBound.v` — are about a *different* kernel, the one
+`--emit-attention-ptx` emits, whose entry points are `attn_scores`,
+`attn_accum` and `attn_accum_naive`; that kernel is not in this corpus, and
+`src/exact_attention_certificate.rs` is correct to record `ptxas` as **trusted
+and not validated** for it. The claim was fixed in both directions: the prose
+above no longer overstates, and `proofs/ExactPvExact.v` now proves what
+`exact_pv`'s PTX computes, so the sentence is true of one file rather than
+three. `tests/exact_pv_proof.rs` gates it — the overlap between the proved set
+and the validated set is asserted rather than described.
+
+## The one unbroken chain
+
+For `exact_pv`, and for no other kernel in the repository, both steps are
+covered:
+
+```
+Y source (tests/exact_pv.ysu)
+  |  proofs/ExactPvExact.v :: the_emitted_exact_pv_holds_the_source_dot_product
+emitted PTX (tests/exact_pv.ptx)
+  |  tools/ptxas_tval/loopval.py @ -O1 :: VALIDATED, 14 obligations
+SASS the GPU runs
+```
+
+Both seams are named rather than glossed. The first is a **transcription plus a
+gate** — `ptx_emitter.rs` does not go through the `Ix` extraction layer, so the
+proof is tied to the emitted text by assertions in `tests/exact_pv_proof.rs`
+rather than rendered with it from one description the way `exact_attention.rs`
+is. The second carries this document's own assumptions: one multiplier identity
+ASSUMED, a single thread's view, one optimisation level, one architecture. The
+chain is not a proof about `ptxas`.
 
 ---
 
