@@ -1407,6 +1407,45 @@ truthfully state a global negative. The bijection gate that keeps a certificate'
 list in step with its capstone's now runs over both.
 
 
+### The licence was about a zeroed destination, and nothing said so
+
+The int8 GEMM's exactness proof stated its int32 claim for the **flat**
+accumulation only — the default grid. At `gridDim.z > 1` the kernel runs *two*
+wrapping folds: each block accumulates its own share of the contraction in an
+int32 register, and the atomic reduction then combines those partials in int32
+in memory, in whatever order they land. Both are covered now, at every split
+factor and every landing order, by **one** licence hypothesis — it bounds the
+sum of *absolute* values, and every partial of either fold is a sum over a
+subset. Measured at the licensed maximum K, where every partial is at its worst:
+exact at split factors 1, 2, 3, 8, 17 and 64.
+
+**Writing the theorem is what forced its missing hypothesis into the open.** The
+combine starts from whatever `C` already holds, so choosing that value is part
+of stating the theorem — and the licence `K · 127² ≤ i32::MAX` is sufficient
+only when `C` starts at **zero**. The emitter's comment says a caller must zero
+it; nothing connected that to the licence.
+
+That is not academic. This kernel *accumulates* into `C` — which is exactly what
+lets the grid split the contraction — so a caller who instead splits K across
+**launches** into the same int32 buffer is doing the obvious thing with that
+property. Measured, each launch at half the licensed maximum so **the compiler
+accepts every one of them**:
+
+| launch | `C[0]` | exact | |
+|---|---|---|---|
+| 1 | 1,073,546,240 | 1,073,546,240 | ok |
+| 2 | 2,147,092,480 | 2,147,092,480 | ok |
+| 3 | **−1,074,328,576** | 3,220,638,720 | **wrapped** |
+
+Every launch individually licensed; the accumulation not. The refusal message
+now names the repair it was silent about, and the proof carries the hypothesis
+with a refutation and a control rather than assuming a zeroed buffer quietly.
+
+Two mutations were expected to survive and are the reason the gate reads the
+definitions' text: **remove the wrap from either fold and every theorem still
+holds** — they become ordinary integer folds, and the file still reports "closed
+under the global context". A proof about int32 that says nothing about int32.
+
 ### A suite that sweeps one kernel is not testing its sibling
 
 `emit_int8_gemm_kernel` emits two kernels. The plain one accumulates its

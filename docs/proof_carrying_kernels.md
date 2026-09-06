@@ -3082,6 +3082,154 @@ not merely wasteful, it is wrong for the reducing kernel.
 - Nothing here is about the f32 GEMMs, which cannot carry an exactness argument.
 - The tie is transcription-plus-gate, as in the rest of this kernel's proofs.
 
+#### Phase 3 progress, 2026-09-06 — the split-K accumulation is exact in int32, and the licence turned out to be about a zeroed destination
+
+The item this file's previous entry named as still open. `Int8GemmExact`'s
+int32 conjunct was stated for the FLAT accumulation only — the emitted order at
+`gridDim.z = 1`, which is the default grid and the case the device measurement
+was taken in. The caveat said the multi-class case needed "a wrapping twin of
+`GridStrideSplit.combine`" and was recorded rather than done.
+
+##### It is done, and measuring it first is what made it worth more than bookkeeping
+
+The kernel performs **two** wrapping folds at `gridDim.z > 1`, not one:
+
+- each CTA accumulates its own residue class in an int32 register, one `mma`
+  per K step, in ascending visit order — `wclass`;
+- `red.global.add.s32` then combines the CTAs' partials **in int32 in memory**,
+  in whatever order they land — `wcombine`.
+
+`the_split_k_accumulation_is_exact_in_int32` covers both, at every split factor
+and every landing order. Nothing new was needed about the *partition* —
+`GridStrideSplit` has had that since the attention kernel, and this file already
+instantiates it — and **one licence hypothesis serves both folds**, because it
+bounds the sum of *absolute* values and every partial of either fold is a sum
+over a subset of the products.
+
+Measured at the licensed maximum K, where every partial of both folds is at its
+worst, M=16 N=8, every operand 127:
+
+| `gridDim.z` | 1 | 2 | 3 | 8 | 17 | 64 |
+|---|---|---|---|---|---|---|
+| wrong of 128 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+17 is in that sweep deliberately: the theorem has no divisibility precondition
+and a sweep of powers of two would not say so.
+
+##### What writing the theorem forced into the open
+
+`wcombine 0` — the combine starts from the destination's initial value, and
+writing the theorem means choosing what that is. **The licence
+`K · 127² ≤ i32::MAX` is sufficient only when `C` starts at zero, and that is
+stated nowhere in the compiler.**
+
+The emitter's own comment says a caller must zero `C`; every test does; nothing
+connects it to the licence. And it is not academic, because **this kernel
+accumulates into `C`** — which is exactly what lets `gridDim.z` split the
+contraction — so a caller who splits K across *launches* into the same int32
+buffer is doing the obvious thing with that property.
+
+Measured, K = 66,560 per launch (half the licensed maximum, so **the compiler
+accepts every one of these launches**), `C` zeroed once before the first:
+
+| launch | `C[0]` | exact | |
+|---|---|---|---|
+| 1 | 1,073,546,240 | 1,073,546,240 | ok |
+| 2 | 2,147,092,480 | 2,147,092,480 | ok |
+| 3 | **−1,074,328,576** | 3,220,638,720 | **wrapped** |
+
+Every launch individually licensed; the accumulation not. Same severity class
+as the accumulator bound itself — latent rather than live, because nothing in
+the corpus does it, which is the argument for stating it now.
+
+The proof states it as a hypothesis rather than assuming it silently:
+`each_launch_is_licensed_and_three_of_them_wrap` and
+`the_combine_needs_a_zeroed_destination`, with
+`from_zero_the_same_partial_is_exact` as the control that stops the refutation
+reading as "the combine is broken". `LICENSED_HALF` is **derived** from
+`MAX_EXACT_K_STEPS` rather than written as a numeral, so a change to the bound
+cannot leave a stale fixture behind.
+
+The refusal message named the wrong repair by omission — "accumulate the
+partials in a wider type on the host" is right and does not warn against the
+reading that fails. It now says so explicitly.
+
+##### Two proof lessons, both about literals and normalisation
+
+**`unfold` leaves a beta-redex that `lia` cannot see through.** `afun f S`
+unfolds to `(fun i => Z.abs (f i)) S`, and `lia` treats that as an opaque atom
+distinct from `Z.abs (f S)`. One `assert ... by reflexivity` and a rewrite fixes
+it; without that the arithmetic goal is unprovable for a reason that looks like
+a missing hypothesis.
+
+**`remember`, not `destruct ... eqn:`, when the scrutinee occurs in hypotheses
+as well as the goal.** `destruct` abstracts the goal only, so the subsequent
+`rewrite E in H` fails with *"Found no subterm matching"* — which reads as a
+malformed hypothesis rather than as the wrong tactic.
+
+A third, smaller: `Z.le_abs_self` has moved between releases. Proving
+`z <= Z.abs z` inline from `Z.abs_spec` costs two lines and does not depend on
+which release the reader has.
+
+##### Mutation table
+
+Seven probes over six suites, each `--test` target run separately. **N0
+CONTROL, two independent `Print Assumptions` lines swapped: green everywhere** —
+read first. **BASE restored, before and after: green** — read second.
+
+| probe | suites that failed |
+|---|---|
+| **N0 CONTROL** — two `Print Assumptions` swapped | *(none)* |
+| **BASE_PRE / BASE_POST** | *(none)* |
+| N1 — the licence hypothesis dropped from the split-K theorem | **`proofs_are_checked` ONLY** |
+| N2 — the combine starts from a non-zero destination | exactness + proofs |
+| N3 — the refutation deleted with its `Print Assumptions` | exactness + proofs |
+| **N4 — the refusal message stops naming the precondition** | **`int8_gemm_exactness` ONLY** |
+| **N5 — the proof's magnitude hardcoded instead of derived** | **`int8_gemm_exactness` ONLY** |
+| N6 — a CTA's own accumulator stops wrapping | exactness + proofs |
+| N7 — the atomic combine stops wrapping | exactness + proofs |
+
+**N6 and N7 are the interesting rows and they were expected to survive.**
+Removing the wrap turns both definitions into ordinary integer folds; every
+theorem above still holds, and the file would still report *"Closed under the
+global context"* — a proof about int32 that says nothing about int32. They are
+caught by `coqc` as it happens, because `wclass_exact`'s script applies
+`wrap32_id` and that step no longer typechecks — but that is a **proof-script
+detail**, exactly the incidental pinning this document already records as too
+weak to rely on. The deliberate guard is an assertion on the definitions' text,
+added before the sweep for that reason.
+
+Two probes printed a spurious "NOT APPLIED" from my own `grep`: the theorem
+name and the phrase `C_initial + sum` both occur in prose as well as in code,
+so a whole-file search finds them after the code is gone. *Guard a mutation
+check on the code, not on a word that also appears in the paragraph explaining
+it* — recorded here before, hit again.
+
+##### The temp-dir race, seventh occurrence, caused by me
+
+`emit(tag, ..)` puts a per-test tag in its **signature** precisely so the next
+author cannot forget it. Two tests in one file then both passed `"over"`, and
+the run failed with `Failed to write profile: NotFound` — one test's
+`remove_dir_all` landing while the other was writing.
+
+**A per-test tag in the signature makes the requirement visible; it does not
+make tags unique.** The helper now appends an atomic counter, so the tag is for
+legibility when a run leaves a directory behind and the counter is what
+guarantees the path.
+
+##### What this closes and what it does not
+
+The flat-accumulation caveat is **closed**, and the file's header says so with
+a pointer to what replaced it rather than silently dropping the paragraph.
+
+Still open: the licence remains **conservative** — a worst case over the
+declared operand type, exactly as `VnniExact::license` is, and narrowing it
+needs an operand-range declaration this backend does not have. `mma.sync`'s own
+semantics and the per-lane fragment layout stay definitions in the trusted base,
+pinned by `tests/ptx_int8_mma_layout.rs` running the instruction. The tie is
+transcription-plus-gate; routing `ptx_emitter` through `Ix` is still the upgrade
+to byte-identity. And the 23 f16 GEMMs still cannot carry the argument at all.
+
 ### Phase 4 — Bounded error where exactness is impossible · 3–4 years
 
 Exact accumulation covers reductions and fixed-point pipelines. It does not

@@ -273,6 +273,15 @@ fn content_controls() -> Vec<(&'static str, &'static [&'static str])> {
                 "Print Assumptions bounded_products_accumulate_exactly",
                 "Print Assumptions the_measured_overflow_is_two_s_complement",
                 "Print Assumptions the_emitted_int8_gemm_holds_the_source_dot_products",
+                // The split-K accumulation in int32 rather than in Z, added
+                // when the flat-accumulation caveat was closed. The refutation
+                // beside it is the hypothesis writing that theorem forced out:
+                // the licence is sufficient only for a ZEROED destination, and
+                // a caller who splits K across LAUNCHES into the same int32 C
+                // has every launch licensed and the accumulation not.
+                "Print Assumptions the_split_k_accumulation_is_exact_in_int32",
+                "Print Assumptions the_combine_needs_a_zeroed_destination",
+                "Print Assumptions from_zero_the_same_partial_is_exact",
             ],
         ),
         (

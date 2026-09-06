@@ -84,7 +84,19 @@ fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
     if bin.ends_with("deps") {
         bin.pop();
     }
-    let dir = std::env::temp_dir().join(format!("i8ex_{}_{}", std::process::id(), tag));
+    // The tag is for legibility when a run leaves a directory behind; the
+    // COUNTER is what makes the path unique. A per-test tag in the signature
+    // makes the requirement visible and does not enforce it - two tests in
+    // this file both passed "over", which is the same temp-dir race this
+    // repository has now hit seven times, caused here by reusing a string.
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "i8ex_{}_{}_{}",
+        std::process::id(),
+        tag,
+        uniq
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     // `--emit-ptx` writes next to its input, so compile a COPY: a gate that
     // emits must never rewrite the committed artifacts it is checking.
@@ -268,4 +280,191 @@ fn the_largest_admitted_k_is_exact_on_the_device() {
              still exact."
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The SPLIT-K accumulation, and the hypothesis writing its theorem forced out.
+// ---------------------------------------------------------------------------
+
+/// The positive case for `Int8GemmExact.the_split_k_accumulation_is_exact_in_int32`.
+///
+/// The capstone's int32 conjunct used to be stated for the flat accumulation
+/// only. At `gridDim.z > 1` the kernel performs TWO wrapping folds — each CTA
+/// accumulates its own residue class in an int32 register, and
+/// `red.global.add.s32` then combines the partials in int32 in memory, in
+/// whatever order they land. This runs both at the licensed maximum K, which
+/// is the case where every partial of both folds is at its worst.
+#[test]
+fn the_split_k_accumulation_is_exact_at_the_licensed_maximum() {
+    use y::cuda_runtime::CudaContext;
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — the split-K accumulation was not demonstrated.");
+        return;
+    };
+    let k = emitter_bound() as usize;
+    let (m, n) = (16usize, 8usize);
+    let ptx = emit("splitk", m, n, k).expect("the fixture must compile");
+    let module = ctx.load_ptx(&ptx, "int8_gemm").expect("PTX failed to load");
+
+    let d_a = ctx.alloc(m * k).unwrap();
+    let d_b = ctx.alloc(n * k).unwrap();
+    let d_c = ctx.alloc(m * n * 4).unwrap();
+    ctx.memset_u8(&d_a, 127).unwrap();
+    ctx.memset_u8(&d_b, 127).unwrap();
+    let args = vec![d_a.device_ptr(), d_b.device_ptr(), d_c.device_ptr()];
+    let want = (k as i64) * 127 * 127;
+
+    // 17 is deliberately not a divisor of the K step count: the theorem has no
+    // divisibility precondition and a sweep of powers of two would not say so.
+    for nz in [1u32, 2, 3, 8, 17, 64] {
+        ctx.memset_u8(&d_c, 0).unwrap();
+        ctx.launch(&module, (1, 1, nz), (32, 1, 1), 0, &args).unwrap();
+        ctx.synchronize().expect("kernel faulted");
+        let mut raw = vec![0u8; m * n * 4];
+        ctx.memcpy_dtoh_at(&mut raw, &d_c, 0).unwrap();
+        for i in 0..m * n {
+            let v = i32::from_le_bytes([raw[i * 4], raw[i * 4 + 1], raw[i * 4 + 2], raw[i * 4 + 3]])
+                as i64;
+            assert_eq!(
+                v, want,
+                "C[{i}] = {v} at K = {k}, split {nz}, want {want}. Both wrapping folds are \
+                 covered by one licence hypothesis because it bounds the sum of ABSOLUTE \
+                 values and every partial of either fold is a sum over a subset."
+            );
+        }
+    }
+}
+
+/// The refutation, and the reason it is a test rather than a remark: **the
+/// licence is sufficient only for a ZEROED `C`, and nothing in the compiler
+/// can check that.**
+///
+/// This kernel accumulates into `C` — which is what lets `gridDim.z` split the
+/// contraction — so a caller who instead splits K across LAUNCHES into the
+/// same int32 buffer is doing the obvious thing with that property. Every
+/// launch is individually licensed; the accumulation is not.
+///
+/// Asserting the wrap makes the precondition load-bearing rather than
+/// defensive, the same way `the_add_formula_really_is_incomplete` pins that
+/// `add(P, P)` degenerates. The two exact launches before it are the control:
+/// without them this would pass for a kernel that was simply broken.
+#[test]
+fn accumulating_across_launches_wraps_although_each_launch_is_licensed() {
+    use y::cuda_runtime::CudaContext;
+    let Some(ctx) = CudaContext::new() else {
+        eprintln!("SKIP: no CUDA driver — the zeroed-C precondition was not demonstrated.");
+        return;
+    };
+    let k = (emitter_bound() / 2) as usize;
+    assert_eq!(k % 32, 0, "half the bound must still be a legal K");
+    let (m, n) = (16usize, 8usize);
+    let per = (k as i64) * 127 * 127;
+    assert!(
+        per <= i32::MAX as i64,
+        "each launch must be inside the licence, or this tests nothing"
+    );
+
+    // It compiles: the compiler accepts every one of these launches.
+    let ptx = emit("half", m, n, k).expect("half the bound must compile");
+    let module = ctx.load_ptx(&ptx, "int8_gemm").expect("PTX failed to load");
+
+    let d_a = ctx.alloc(m * k).unwrap();
+    let d_b = ctx.alloc(n * k).unwrap();
+    let d_c = ctx.alloc(m * n * 4).unwrap();
+    ctx.memset_u8(&d_a, 127).unwrap();
+    ctx.memset_u8(&d_b, 127).unwrap();
+    ctx.memset_u8(&d_c, 0).unwrap();
+    let args = vec![d_a.device_ptr(), d_b.device_ptr(), d_c.device_ptr()];
+    let read = |ctx: &CudaContext| -> i64 {
+        let mut raw = vec![0u8; 4];
+        ctx.memcpy_dtoh_at(&mut raw, &d_c, 0).unwrap();
+        i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as i64
+    };
+
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        ctx.launch(&module, (1, 1, 1), (32, 1, 1), 0, &args).unwrap();
+        ctx.synchronize().expect("kernel faulted");
+        seen.push(read(&ctx));
+    }
+    assert_eq!(seen[0], per, "launch 1 into a zeroed C must be exact");
+    assert_eq!(seen[1], 2 * per, "launch 2 is still inside int32 and must be exact");
+
+    // Two's complement, computed here rather than pasted, so the expectation
+    // moves with the bound instead of pinning one card's answer.
+    let exact3 = 3 * per;
+    let wrapped = ((exact3 - i32::MIN as i64).rem_euclid(1i64 << 32)) + i32::MIN as i64;
+    assert!(
+        exact3 > i32::MAX as i64,
+        "three launches must exceed int32, or there is nothing to refute"
+    );
+    assert_eq!(
+        seen[2], wrapped,
+        "launch 3 gave {}, and the model says {wrapped} (exact {exact3}). Each launch was \
+         licensed; the ACCUMULATION is not, because the bound is on C_initial + sum.",
+        seen[2]
+    );
+}
+
+/// The source-level half, which runs with no GPU: the compiler must warn about
+/// the precondition, and the proof must state it as a hypothesis with its
+/// refutation rather than assuming a zeroed destination silently.
+#[test]
+fn the_zeroed_destination_precondition_is_stated_in_both_places() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // The message a user sees. It used to say only "accumulate the partials in
+    // a wider type on the host", which is right and does not warn against the
+    // reading that fails.
+    let over = emit("overmsg", 16, 8, (emitter_bound() + 32) as usize)
+        .expect_err("a K past the bound must be refused");
+    for needle in ["accumulates into C", "C_initial + sum", "WIDER TYPE ON THE HOST"] {
+        assert!(
+            over.contains(needle),
+            "the refusal no longer names the zeroed-C precondition (missing {needle:?}):\n{over}"
+        );
+    }
+
+    let v = std::fs::read_to_string(repo.join("proofs/Int8GemmExact.v"))
+        .expect("proofs/Int8GemmExact.v");
+
+    // The combine is stated from zero, and the theorem that says that matters.
+    assert!(
+        v.contains("wcombine 0 (map (fun w => wclass f w n S) order) = GS.sum_upto Z.add f S"),
+        "the split-K int32 theorem no longer combines from a zeroed destination"
+    );
+    assert!(
+        v.contains("Theorem the_combine_needs_a_zeroed_destination"),
+        "the refutation that makes the hypothesis load-bearing was deleted"
+    );
+    assert!(
+        v.contains("Theorem from_zero_the_same_partial_is_exact"),
+        "the control that stops the refutation reading as `the combine is broken` was deleted"
+    );
+
+    // Both folds must actually WRAP. Neither theorem's name nor `coqc` can see
+    // this: with the wrap removed the definitions become ordinary integer
+    // folds, every theorem above still holds, and the file still reports
+    // "Closed under the global context" — a proof about int32 that says
+    // nothing about int32. The guard belongs on the definition's text.
+    assert!(
+        v.contains("if Nat.eqb (k mod n) w then MC.wrap32 (wclass f w n k + f k)"),
+        "a CTA's own accumulator no longer wraps, so the class fold is not int32"
+    );
+    assert!(
+        v.contains("| x :: r => wcombine (MC.wrap32 (c0 + x)) r"),
+        "the atomic combine no longer wraps, so the memory fold is not int32"
+    );
+
+    // The fixture magnitude is DERIVED from the emitter's bound in the proof
+    // too, so a change to the bound cannot leave a stale numeral behind.
+    assert!(
+        v.contains("Definition LICENSED_HALF : Z := (MAX_EXACT_K_STEPS / 2) * (127 * 127)."),
+        "the proof's launch magnitude is no longer derived from the licensed maximum"
+    );
+    assert_eq!(
+        (emitter_bound() as i64 / 2) * 127 * 127,
+        1_073_546_240,
+        "the proof pins LICENSED_HALF = 1073546240; the emitter's bound no longer gives it"
+    );
 }
