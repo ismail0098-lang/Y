@@ -5149,6 +5149,47 @@ declare it as a Q format.\n{}",
     /// worth a second tuning axis for one shape.
     const INT8_MIN_WARP_TILES: u32 = 64;
 
+    /// The largest K whose exact product an int32 accumulator can hold.
+    ///
+    /// **THIS IS A CORRECTNESS GATE, NOT A PERFORMANCE ONE**, and it is the
+    /// distinction the constant above turns on. `mma...s32.s8.s8.s32`
+    /// accumulates into int32, this kernel has NO FLUSH, and the OUTPUT is
+    /// int32 too - so unlike the CPU's exact GEMM, which widens to int64 every
+    /// `Fl` k-pairs, there is nowhere to widen to. The bound is therefore on
+    /// the whole contraction:
+    ///
+    /// ```text
+    ///   | sum over k < K of A[r][k] * B[c][k] |  <=  K * 127^2  <=  i32::MAX
+    /// ```
+    ///
+    /// `floor(i32::MAX / 127^2)` is 133_144; the kernel already requires
+    /// `K % 32 == 0`, so the largest K it can be handed is 133_120.
+    ///
+    /// **Measured on the device before this guard existed**, M=16 N=8, every
+    /// element of A and B set to 127, one warp, grid (1,1,1):
+    ///
+    /// | K       | exact          | device         |         |
+    /// |---------|----------------|----------------|---------|
+    /// | 133_120 | 2_147_092_480  | 2_147_092_480  | ok      |
+    /// | 133_152 | 2_147_608_608  | -2_147_358_688 | WRAPPED |
+    ///
+    /// One K step wide. Nothing anywhere - not the emitter, not `proofs/`, not
+    /// any test - had bounded K, so the one GPU GEMM in this repository whose
+    /// whole claim is an exact answer would return a NEGATIVE number under a
+    /// green banner and `red.global.add.s32` would sum it.
+    ///
+    /// Latent rather than live: the largest K in the corpus is 16_384. That is
+    /// the reason to fix it now - *find these while the path is still dead*.
+    ///
+    /// This is a worst case over the DECLARED operand type, so it is
+    /// conservative exactly as `VnniExact::license` is on the CPU: real data
+    /// rarely reaches it. Narrowing it with a declared operand range is a
+    /// feature this backend does not have, and the refusal says so rather than
+    /// pretending otherwise.
+    ///
+    /// Tied to `proofs/Int8GemmExact.v` by `tests/int8_gemm_exactness.rs`.
+    const INT8_MAX_EXACT_K: u32 = 133_120;
+
     /// **A BIG TILE IS A LOSS AT A SMALL SHAPE, AND THE LOSS IS LARGER THAN THE
     /// WIN.** A tile is one WARP, so taking the largest tile the shape admits
     /// hands a 64x64 GEMM to a single warp. Measured, three runs agreeing to
@@ -5199,6 +5240,32 @@ declare it as a Q format.\n{}",
         // Refused rather than padded: a partial tile would need predication on
         // every fragment load, and silently rounding the shape up would compute
         // a different matrix than the source asked for.
+        // THE LICENCE. Refusing is the only honest answer: the exact product
+        // does not fit the int32 output, so no int32 kernel can be correct
+        // here, and the alternative to a named refusal is a plausible-looking
+        // negative number. Checked BEFORE the shape refusal below reports a
+        // different problem, because a K past this bound is not fixed by
+        // rounding K to a multiple of 32.
+        if k > Self::INT8_MAX_EXACT_K {
+            self.emit_errors.push(format!(
+                "[PTX] `{}`: K = {} exceeds this kernel's exact range. \
+                 `mma.sync...s32.s8.s8.s32` accumulates into int32 and there is no \
+                 flush - the output is int32 too - so the contraction must satisfy \
+                 K * 127^2 <= i32::MAX, i.e. K <= {}. At K = {} a full-range int8 \
+                 product is {} against an i32::MAX of 2147483647, and the kernel \
+                 returns the wrapped value with no error. Reduce K, or split the \
+                 GEMM and accumulate the partials in a wider type on the host; \
+                 declaring a narrower operand range is not expressible for this \
+                 kernel.",
+                kernel_name,
+                k,
+                Self::INT8_MAX_EXACT_K,
+                k,
+                (k as u64) * 127 * 127
+            ));
+            return 32;
+        }
+
         if m % 16 != 0 || n % 8 != 0 || k % 32 != 0 {
             self.emit_errors.push(format!(
                 "[PTX] `{}`: an int8 tensor-core GEMM needs M % 16 == 0, N % 8 == 0 and \

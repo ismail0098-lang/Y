@@ -2724,6 +2724,180 @@ emitted kernel. The tile loop is `owner` again, so it inherits
 stride guard load-bearing rather than an optimisation: the overrun is *past the
 matrix*, not a duplicate write.
 
+#### Phase 3 progress, 2026-09-06 — the int8 GEMM computes the source dot products, and the theorem was false until the compiler learned its licence
+
+`Int8GemmSchedule.v` proves this kernel's **schedule**: which lane owns which
+element of C, that the split-K classes tile the contraction, that the atomic
+reduction is order-independent. It says nothing whatever about the **value**
+that lands at `C[r][c]`. `proofs/Int8GemmExact.v` closes that — the GPU twin of
+`ExactGemmWhole.the_threaded_gemm_holds_the_source_dot_products`, which the CPU
+side has had since the whole-kernel increment.
+
+It is available for this kernel and no other GEMM here: **950 of the 952
+`mma.sync` instructions Y emits are floating point**, and an f16 tensor-core
+GEMM is simply not equal to the naive nest.
+
+##### Measure first, and the measurement found the theorem was false
+
+Writing the capstone forces its hypotheses to be stated. One of them did not
+exist anywhere in the compiler.
+
+`mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32` accumulates into **int32**,
+this kernel has **no flush**, and there is nowhere to widen to because the
+*output* is int32 as well — where the CPU's exact GEMM widens to int64 every
+`Fl` k-pairs. So the bound is on the whole contraction:
+
+```text
+  | sum over k < K of A[r][k] * B[c][k] |  <=  K * 127^2  <=  i32::MAX
+```
+
+`floor(i32::MAX / 127²)` is 133 144, and `K % 32 == 0` is already the kernel's
+shape precondition, so the largest admissible K is **133 120**.
+
+**Nothing checked it.** Not `emit_int8_gemm_kernel`, whose only refusal was on
+`M % 16` / `N % 8` / `K % 32`; not `proofs/`; not any test. Measured on the
+device before the guard was written — M=16, N=8, every element of A and B set to
+127, one warp, grid (1,1,1):
+
+| K | exact | device | |
+|---|---|---|---|
+| 133 088 | 2 146 576 352 | 2 146 576 352 | ok |
+| **133 120** | 2 147 092 480 | 2 147 092 480 | **ok** |
+| **133 152** | 2 147 608 608 | **−2 147 358 688** | **wrapped** |
+| 133 184 | 2 148 124 736 | −2 146 842 560 | wrapped |
+
+One K step wide. The one GPU GEMM in this repository whose entire claim is an
+exact answer returned a **negative number** under a green banner, with
+`red.global.add.s32` summing it.
+
+**Latent rather than live** — the largest K in the corpus is 16 384, four orders
+below the bound. That is the argument for doing it now, not against: this
+repository's own rule is to *find these while the path is still dead*.
+
+Note the asymmetry with the attention kernel, which is the tell that should have
+been read earlier: `GridStrideSplit.MAX_EXACT_SEQ_LEN` states that kernel's
+accumulator bound in a proof, and the GEMM's — four orders *tighter*, on an
+output type half as wide — was stated nowhere.
+
+##### The refutation is refereed against the silicon
+
+`the_measured_overflow_is_two_s_complement` reproduces the third row of that
+table from `wrap32` alone:
+
+```coq
+Theorem the_measured_overflow_is_two_s_complement :
+  133152 * (127 * 127) = 2147608608
+  /\ MC.wrap32 2147608608 = -2147358688.
+```
+
+The model was not fitted to the device: `wrap32` is `ExactGemmMicro`'s, written
+for the CPU chain months earlier, and it lands on the exact value the card
+returned. **A model that merely said "it overflows" would agree with any wrong
+answer.**
+
+##### What the proof establishes
+
+- **`the_lanes_cover_the_a_fragment` / `_b_fragment`** — the 32 lanes' register
+  bytes are a *bijection* onto the 16×32 and 32×8 fragments, so every element is
+  loaded, once, and no fragment position keeps a value from the previous K step.
+  Both are `MixedRadix` — its **eighth and ninth** consumers.
+- **`the_emitted_a_address_is_its_fragment_element` / `_b_`** — the emitted byte
+  offsets (base `(brow + 16·mi + g)·K + 4t`, register steps `8K` and `16`, byte
+  `b`) address exactly the source element that bijection names. This is where a
+  stride/extent confusion would live; A is packed, so its row stride *is* K and
+  there is no `lda` to disagree with the extent.
+- **`the_k_loop_is_the_contraction`** — 32 products per step over `K/32` steps
+  re-index to the flat `sum over k < K`.
+- **`bounded_products_accumulate_exactly`** — under the licence the int32
+  accumulator (`wsum`, wrapping at *every* step) equals the `Z` sum. This is
+  where the licence is load-bearing rather than paperwork.
+- **`the_emitted_int8_gemm_holds_the_source_dot_products`** — the capstone, at
+  every split factor, with no hypothesis that `nz` divides `K/32`.
+
+22 `Print Assumptions`, no axioms, nothing admitted.
+
+##### Two tools deriving one obligation
+
+The compiler decides the licence in `u32`; the proof states it over `Z` and
+hands it to `coqc`, which has no `u32`. `the_emitter_and_the_proof_agree_on_the_bound`
+asserts the proof *derives* `MAX_EXACT_K` from `I32MAX / 127²` rather than
+stating a numeral, and that the emitter's constant is the proof's
+`MAX_EXACT_K_STEPS`. Same structure as the exact-GEMM certificate's floating-point
+licence checked against a `Z` obligation.
+
+**The prover caught a transcription error of mine on the first run**: I had
+written 133 143 where `⌊2147483647/16129⌋` is 133 144. The step-granular bound
+is unaffected, which is precisely why the theorem states both numbers.
+
+##### A `nat` literal is unary, and it cost the whole afternoon
+
+`sum_k_blocks` — 32 products per step re-indexing to a flat range — was proved
+at the literal 32 first. **Every tactic succeeded, the goal closed to something
+syntactically identical on both sides, and `Qed` did not return.** A `nat`
+literal is thirty-two nested `S`, inside a fold that is itself 32 deep, and the
+proof term carries it through every conversion check.
+
+Stated for an **abstract block size `B`** and instantiated by a single `apply`,
+the same proof takes **0.27 s**. Nothing can unfold, because there is nothing to
+unfold.
+
+This is `SoftmaxErrorBound`'s `ring`-on-a-large-power landmine wearing a
+different hat, and the diagnosis differs from the obvious one: it is not the
+tactics and not `reflexivity`, it is `Qed` type-checking a term that carries the
+literal. **Keep every literal out of anything that normalises.** (Also worth
+recording: `f_equal` on two folds of a 32-deep literal does not terminate
+either; every step of that proof is a *directed* rewrite for that reason.)
+
+##### Mutation table — 11 rows, all resolved
+
+Each `--test` target run separately over seven suites.
+
+| row | mutation | caught by |
+|---|---|---|
+| **X0 CONTROL** | two independent `mov`s reordered | **green everywhere** |
+| **BASE** | restored baseline | **green everywhere** |
+| **X1** | licence check removed (the original bug) | **`int8_gemm_exactness` ONLY** |
+| **X2** | bound one K step too large (admits a K that wraps) | **`int8_gemm_exactness` ONLY** |
+| **X3** | bound one K step too small (refuses an exact K) | **`int8_gemm_exactness` ONLY** |
+| **X4** | refusal message drops its derivation | **`int8_gemm_exactness` ONLY** |
+| **X5** | over-refusal: every K refused | exactness + 4 suites |
+| **X6** | proof derives the bound from 127, not 127² | exactness + `proofs_are_checked` |
+| **X7** | proof states a wrong wrapped value | exactness + `proofs_are_checked` |
+| **X8** | capstone drops the licence hypothesis | **`proofs_are_checked` ONLY** |
+| **X9** | proof's A fragment row map is wrong | **`proofs_are_checked` ONLY** |
+
+**X1 is the row that matters.** The original defect — a GEMM returning a
+negative number for an exact integer product — was invisible to all six other
+suites, `gpu_batch_invariance` and `ptx_int8_mma_layout` included. The first
+sweeps launch geometries and the second runs the real instruction on the device;
+both use K ≤ 4096, and **a suite that sweeps one axis is not testing another**.
+
+X5 is the control that stops "refuse every int8 GEMM" from passing: it correctly
+takes out five suites. X8 and X9 isolate to the proof gate because they change
+no emitted code — the taxonomy working.
+
+##### What this does not close
+
+- **The int32 conjunct is stated for the flat accumulation** (`nz = 1`, the
+  default grid and the case the device measurement was taken in). At `nz > 1`
+  each class accumulates in int32 and the atomics combine in int32; that is
+  covered in `Z` plus the fact that the licence bounds the sum of *absolute*
+  values, which dominates every partial sum of every class in every bracketing —
+  but it is not one theorem over a wrapping class fold. A wrapping twin of
+  `GridStrideSplit.combine` is the named next step.
+- **The licence is conservative**, exactly as `VnniExact::license` is: it is a
+  worst case over the declared operand type, and real data rarely reaches it.
+  Narrowing it with a declared operand range is a feature this backend does not
+  have, and the refusal says so rather than pretending otherwise.
+- **`mma.sync`'s semantics and the per-lane fragment layout** remain a
+  `Definition` — the trusted base, exactly where `vpdpwssd`'s semantics sit for
+  the CPU chain, pinned empirically by `tests/ptx_int8_mma_layout.rs`.
+- **The tie is transcription-plus-gate.** `ptx_emitter` still does not go
+  through `Ix`, so the proof is checked against emitted text rather than
+  rendered with it.
+- The 23 f16 GEMMs still cannot carry an exactness argument at all, and the
+  staging is still unbuilt.
+
 ### Phase 4 — Bounded error where exactness is impossible · 3–4 years
 
 Exact accumulation covers reductions and fixed-point pipelines. It does not
