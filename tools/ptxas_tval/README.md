@@ -20,10 +20,15 @@ minutes to hours per kernel.
 
 ```sh
 ./build_corpus.sh    # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
-./regress.sh         # the standing straight-line results, ~35 s
-python3 loopval.py o1/exact_pv.ptx o1/exact_pv.sass 60 wide
-python3 smemval.py smut/smem_roundtrip.ptx smut/smem_roundtrip.sass 60 wide
+./regress.sh         # ALL nine standing results, ~50 s
+python3 fpsem_abi.py # referee FSEL and f32-add commutativity against the device
 ```
+
+`regress.sh` includes an **UNPROVED** row on purpose: `o1/naive_gemm_f32` is a
+shipped kernel whose PTX asks for two roundings while `ptxas` contracts them
+into one `FFMA`, and `o1/naive_gemm_f32_fma` is the same kernel saying
+`fma.rn.f32`, which emits a byte-identical instruction stream and validates.
+A run in which the UNPROVED row turns green is a regression.
 
 `corpus/` and `o1/` are generated and not committed: a `.cubin` is a machine-specific ELF
 and a `.sass` is a disassembly of one. All 66 rebuild byte-identically to the
@@ -36,6 +41,7 @@ ones the published results were measured on.
 | `ptxexec.py` `sassexec.py` | the two symbolic executors |
 | `smem.py` | shared memory as a z3 array; barriers as an uninterpreted `H_k` |
 | `fpmode.py` | float macro-op table, with a `validated` flag per identification |
+| `fpsem_abi.py` `fpsem_abi.c` | referee `FSEL` and f32-add commutativity against the device |
 | `mulmode.py` `conc.py` | the multiplier ladder (`uf` / `wide` / `direct`) and concretisation |
 | `batch.py` | the obligations, and `same_if` — guard-relative address matching |
 | `tval.py` `loopval.py` `smemval.py` | drivers: straight-line, loop, shared memory |

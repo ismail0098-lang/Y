@@ -9,8 +9,35 @@ An unhandled node kind raises.  A concrete evaluator that guesses would
 produce a correspondence that is silently wrong, which is worse than none.
 """
 from z3 import *
+import math, struct
 K = Z3_OP_TRUE
 M32 = (1<<32)-1
+
+
+# --- f32, for the float UFs -------------------------------------------------
+#
+# PROPOSAL ONLY, and that is what makes this arm legitimate where the module
+# docstring says a guessing evaluator is worse than none.  `conc` is reached
+# from exactly two places (`tval.run` and `loopval.validate`) and both use it
+# to PROPOSE a correspondence that the solver then proves; a wrong proposal
+# fails its own obligation and is dropped.  So an inexact float here costs a
+# proposal, never a result.  It is still computed exactly wherever exactness is
+# cheap, because a lost proposal looks exactly like a kernel that is too hard.
+#
+# FMUL/FADD/FSUB are numpy-free: a Python float is f64, an f32 product of two
+# f32 values is exact in f64 (24+24 <= 53 bits), and `struct` rounds to nearest
+# on the way back to f32.  FFMA is the one corner: `math.fma` rounds the exact
+# a*b+c once to f64 and the pack rounds again to f32, so a value landing on an
+# f32 tie boundary can differ from a single rounding.  Left as a documented
+# double rounding rather than an exact rational implementation, because it is
+# proposal-only -- and NOT silently, because that is the difference between a
+# stated boundary and a guess.
+def _f32(b):  return struct.unpack('<f', struct.pack('<I', b & M32))[0]
+def _bits(x):
+    try:    return struct.unpack('<I', struct.pack('<f', x))[0]
+    except (OverflowError, ValueError):
+        return 0x7F800000 if x > 0 else 0xFF800000
+def _r32(x):  return _f32(_bits(x))          # round a f64 result to f32
 class Conc:
     def __init__(self, env, mulmask=M32):
         self.env = env; self.memo = {}; self._keep = []
@@ -101,5 +128,9 @@ class Conc:
             if n == 'MULLO': return (a[0]*a[1]) & M32
             if n == 'MULHI': return ((a[0]*a[1]) >> 32) & M32
             if n == 'MUL64': return (a[0]*a[1]) & ((1<<64)-1)
+            if n == 'FMUL': return _bits(_r32(_f32(a[0]) * _f32(a[1])))
+            if n == 'FADD': return _bits(_r32(_f32(a[0]) + _f32(a[1])))
+            if n == 'FSUB': return _bits(_r32(_f32(a[0]) - _f32(a[1])))
+            if n == 'FFMA': return _bits(_r32(math.fma(_f32(a[0]), _f32(a[1]), _f32(a[2]))))
             raise Exception(f'unmodelled uninterpreted function {n}')
         raise Exception(f'unmodelled AST node kind {k} ({d.name()})')
