@@ -7,13 +7,13 @@
     .param .u64 Positions_1,
     .param .u64 Out_2
 )
-    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 53
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 52
     // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 64 (to maximize SM occupancy)
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 66.67% (32 active blocks per SM)
 .maxnreg 64
 {
     .reg .b32 %r<16>;
-    .reg .f32 %f<15>;
+    .reg .f32 %f<14>;
     .reg .b64 %rd<11>;
     .reg .pred %p<1>;
 
@@ -53,12 +53,11 @@
     mul.f32 %f9, %f1, %f8;
     mul.f32 %f10, %f2, %f7;
     sub.f32 %f11, %f9, %f10;
-    mul.f32 %f12, %f1, %f7;
-    mul.f32 %f13, %f2, %f8;
-    add.f32 %f14, %f12, %f13;
+    mul.f32 %f12, %f2, %f8;
+    fma.rn.f32 %f13, %f1, %f7, %f12;
     cvt.rn.f16.f32 %r11, %f11;
     and.b32 %r12, %r11, 0xFFFF;
-    cvt.rn.f16.f32 %r13, %f14;
+    cvt.rn.f16.f32 %r13, %f13;
     shl.b32 %r14, %r13, 16;
     or.b32 %r15, %r12, %r14;
     add.s64 %rd10, %rd5, %rd8;

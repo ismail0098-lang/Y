@@ -135,8 +135,7 @@ $int8_gemm_end_5:
     add.u64 %rd29, %rd8, %rd28;
     cvt.rn.f32.s32 %f6, %r14;
     mul.f32 %f6, %f6, %f0;
-    mul.f32 %f6, %f6, %f2;
-    add.f32 %f6, %f6, %f3;
+    fma.rn.f32 %f6, %f6, %f2, %f3;
     st.global.f32 [%rd29], %f6;
     add.u32 %r36, %r8, 0;
     add.u32 %r36, %r36, %r3;
@@ -149,8 +148,7 @@ $int8_gemm_end_5:
     add.u64 %rd31, %rd8, %rd30;
     cvt.rn.f32.s32 %f7, %r15;
     mul.f32 %f7, %f7, %f0;
-    mul.f32 %f7, %f7, %f4;
-    add.f32 %f7, %f7, %f5;
+    fma.rn.f32 %f7, %f7, %f4, %f5;
     st.global.f32 [%rd31], %f7;
     add.u32 %r38, %r8, 8;
     add.u32 %r38, %r38, %r3;
@@ -162,8 +160,7 @@ $int8_gemm_end_5:
     add.u64 %rd33, %rd8, %rd32;
     cvt.rn.f32.s32 %f8, %r16;
     mul.f32 %f8, %f8, %f1;
-    mul.f32 %f8, %f8, %f2;
-    add.f32 %f8, %f8, %f3;
+    fma.rn.f32 %f8, %f8, %f2, %f3;
     st.global.f32 [%rd33], %f8;
     add.u32 %r40, %r8, 8;
     add.u32 %r40, %r40, %r3;
@@ -176,8 +173,7 @@ $int8_gemm_end_5:
     add.u64 %rd35, %rd8, %rd34;
     cvt.rn.f32.s32 %f9, %r17;
     mul.f32 %f9, %f9, %f1;
-    mul.f32 %f9, %f9, %f4;
-    add.f32 %f9, %f9, %f5;
+    fma.rn.f32 %f9, %f9, %f4, %f5;
     st.global.f32 [%rd35], %f9;
     add.u32 %r2, %r2, %r7;
     bra $int8_gemm_ty_2;

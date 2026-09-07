@@ -416,12 +416,22 @@ recording a survivor.
 
 Measured rather than assumed, and neither is the gate.
 
-**Contraction** — **9 kernels**, MEASURED by `contract.py` rather than listed
-or inferred. `mul.f32` + `add.f32` becoming `FFMA` is a permitted freedom, and
-it unlocked **one kernel**: `naive_gemm_f32`, above — which the emitter now
-spells `fma.rn.f32`, so the shipped kernel is the validated one.
+**Contraction** — **3 kernels**, MEASURED by `contract.py` as
+`FMA(plain) − FMA(.rn)`: forbidding the fusion cannot remove a fused
+instruction the PTX asked for, so the difference *is* the number of fusions.
+`mul.f32` + `add.f32` becoming `FFMA` is a permitted freedom, and the emitter
+states it wherever it can — `naive_gemm_f32` and `y_cpu_matmul` through
+expression lowering, and the hand-written `rmsnorm_residual_4096`,
+`int8_gemm_scaled` and `rope_*` bodies directly. For the first four the `.rn`
+rewrite is now a **complete no-op**: forbidding the fusion changes not one byte
+of their SASS, because there is no longer a fusion to forbid.
 
-Four things this paragraph used to say were wrong, and each is the same shape.
+What is left is the **`mul` + `sub` half of the rope rotation**, 1 / 2 / 4
+fusions. `a*b − c` is `fma.rn.f32 d, a, b, −c` and PTX has no operand modifier
+for that negation, so stating it costs a `neg.f32` the hardware does not pay.
+Recorded, not done.
+
+**Five** things this paragraph used to say were wrong, and each is the same shape.
 
 * **The count was a hardcoded 9** in `fpgate.py`, and it disagreed with
   `contract.py`'s own measurement *in both directions* — six
@@ -436,6 +446,16 @@ Four things this paragraph used to say were wrong, and each is the same shape.
   precision. `contract.py` forbids the fusion with `.rn` and re-assembles now:
   if the SASS moves, `ptxas` was fusing. **Wrong in both directions again, one
   layer down, and it was found only because this change moved the numerator.**
+* **And "the SASS moves" is not "ptxas fused" either — that reading gave 9 and
+  the answer is 5.** The `.rn` modifier restricts `ptxas` in ways beyond
+  contraction, so any effect of it registers as one. The four
+  `gemm_f16_swiglu_*` move by **`FSEL` 4 → 8 and `IMAD` 202 → 206 with `FFMA`
+  0 → 0** — a scheduling difference and no fusion at all. Worse, the
+  half-precision explanation published for them here was a **hypothesis
+  asserted as fact**: `HFMA2` appears in neither build. The predicate is
+  `FMA(plain) − FMA(.rn) > 0` now, which is the quantity itself rather than a
+  proxy for it. **Four readings of one number, and every wrong one was
+  indirect.**
 * **"Behind loop invariants"** was true when written. `loopval.py` has since
   provided them. `fpgate.py` asks the validator now instead of consulting a
   table that models its answer.
