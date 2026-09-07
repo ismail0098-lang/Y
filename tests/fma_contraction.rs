@@ -133,6 +133,34 @@ kernel probe(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, N
 fn main() {}
 "#;
 
+/// The two subtraction directions, one expression each.
+///
+/// Each is ASYMMETRIC in the operand that carries the sign - `a`, `b` and `c`
+/// are three distinct loads - so negating the wrong one is observable. A
+/// fixture reusing a register for two of the three could not tell `fma(a,b,-c)`
+/// from `fma(-a,b,c)`.
+const SUB_SRC: &str = r#"
+kernel probe(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, N: I32) {
+    let i: I32 = block_idx_x() * 128 + thread_idx_x();
+    let a: F32 = block_ptr2d_load(A, 0, i, N, 1, N);
+    let b: F32 = block_ptr2d_load(B, 0, i, N, 1, N);
+    let c: F32 = block_ptr2d_load(C, 0, i, N, 1, N);
+    block_ptr2d_store(C, 0, i, N, 1, N, a * b - c);
+}
+fn main() {}
+"#;
+
+const RSUB_SRC: &str = r#"
+kernel probe(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, N: I32) {
+    let i: I32 = block_idx_x() * 128 + thread_idx_x();
+    let a: F32 = block_ptr2d_load(A, 0, i, N, 1, N);
+    let b: F32 = block_ptr2d_load(B, 0, i, N, 1, N);
+    let c: F32 = block_ptr2d_load(C, 0, i, N, 1, N);
+    block_ptr2d_store(C, 0, i, N, 1, N, c - a * b);
+}
+fn main() {}
+"#;
+
 #[test]
 fn a_float_multiply_feeding_an_add_is_emitted_as_one_fma() {
     let b = body(&emit_ptx("float", FLOAT_SRC));
@@ -150,38 +178,242 @@ fn a_float_multiply_feeding_an_add_is_emitted_as_one_fma() {
     );
 }
 
-/// Only `+`. A subtraction is NOT this shape, and folding it into the same
-/// instruction computes a different function.
+/// A subtraction is the SAME instruction with one operand negated, and which
+/// operand carries the sign depends on which side the multiply is on:
 ///
-/// `a*b - c` is `fma.rn.f32 d, a, b, -c` and `c - a*b` is
-/// `fma.rn.f32 d, -a, b, c`: each needs a `neg.f32` the two-instruction form
-/// does not, so there is no instruction to save and there IS a sign to get
-/// wrong. Recognising `Sub` alongside `Add` without negating anything emits
-/// `a*b + c` for `a*b - c` -- a wrong answer under a green banner, which is
-/// the failure class this repository's design rule is about. It survived
-/// every other suite in the mutation sweep, including this file before this
-/// test existed.
+///   `a*b - c`  ->  fma( a, b, -c)   negate the ADDEND
+///   `c - a*b`  ->  fma(-a, b,  c)   negate a MULTIPLICAND
+///
+/// Recognising `Sub` without negating anything emits `a*b + c` for `a*b - c`,
+/// a wrong answer under a green banner - which is why this was left unfused
+/// when the `Add` case landed, and why both directions are pinned here rather
+/// than one. A fixture that is symmetric in the negated operand cannot see a
+/// sign error at all.
+///
+/// The reason to fuse it after all is that `ptxas` CONTRACTS the subtraction
+/// too - `FFMA R9, R9, R8, -R10` for the first shape and
+/// `FFMA R9, R9, -R8, R10` for the second - so leaving it split shipped an
+/// artifact claiming a rounding the hardware does not perform, which is the
+/// whole defect this file exists downstream of. The recorded price was "a
+/// `neg.f32` PTX cannot fold"; the `neg` REPLACES the `mul.f32` the `fma`
+/// absorbs, so the instruction count is unchanged and the SASS is
+/// byte-identical (measured below, and on the three `rope_*` artifacts).
 #[test]
-fn a_float_multiply_feeding_a_subtract_is_not_fused() {
-    let src = r#"
-kernel probe(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, N: I32) {
+fn a_float_multiply_feeding_a_subtract_is_fused_with_the_sign_on_the_right_operand() {
+    // `a*b - c`: the ADDEND is negated, and the multiplicands are untouched.
+    let b = body(&emit_ptx("sub", SUB_SRC));
+    assert!(
+        !b.contains("sub.f32"),
+        "`a*b - c` still emits a sub.f32, so it claims a rounding ptxas does \
+         not perform:\n{b}"
+    );
+    let fma = b
+        .lines()
+        .find(|l| l.trim_start().starts_with("fma.rn.f32"))
+        .unwrap_or_else(|| panic!("`a*b - c` was not fused:\n{b}"))
+        .to_string();
+    let neg = b
+        .lines()
+        .find(|l| l.trim_start().starts_with("neg.f32"))
+        .unwrap_or_else(|| panic!("`a*b - c` was fused with NO negation, which \
+             computes `a*b + c` - a different function:\n{b}"))
+        .to_string();
+    // The negated register must be the fma's ADDEND (operand 4), not either
+    // multiplicand. Asserting only that a `neg` exists is satisfied by
+    // negating the wrong operand, which is the wrong function.
+    let negged = neg
+        .trim()
+        .trim_start_matches("neg.f32")
+        .trim_end_matches(';')
+        .split(',')
+        .nth(0)
+        .map(|s| s.trim().to_string())
+        .expect("neg destination");
+    let ops: Vec<String> = fma
+        .trim()
+        .trim_start_matches("fma.rn.f32")
+        .trim_end_matches(';')
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    assert_eq!(ops.len(), 4, "unexpected fma operand count in `{fma}`");
+    assert_eq!(
+        ops[3], negged,
+        "`a*b - c` must negate the ADDEND. `{negged}` is not the fma's addend \
+         in `{fma}`, so this computes something other than `a*b - c`"
+    );
+    assert!(
+        ops[1] != negged && ops[2] != negged,
+        "a multiplicand was negated for `a*b - c` in `{fma}`"
+    );
+}
+
+#[test]
+fn a_subtract_from_a_float_multiply_negates_a_multiplicand_instead() {
+    // `c - a*b` is the OTHER direction and needs the sign somewhere else.
+    // Without this case, negating the addend unconditionally passes the test
+    // above and emits `a*b - c` for `c - a*b` - the sign inverted.
+    let b = body(&emit_ptx("rsub", RSUB_SRC));
+    assert!(
+        !b.contains("sub.f32"),
+        "`c - a*b` still emits a sub.f32:\n{b}"
+    );
+    let fma = b
+        .lines()
+        .find(|l| l.trim_start().starts_with("fma.rn.f32"))
+        .unwrap_or_else(|| panic!("`c - a*b` was not fused:\n{b}"))
+        .to_string();
+    let neg = b
+        .lines()
+        .find(|l| l.trim_start().starts_with("neg.f32"))
+        .unwrap_or_else(|| panic!("`c - a*b` was fused with no negation:\n{b}"))
+        .to_string();
+    let negged = neg
+        .trim()
+        .trim_start_matches("neg.f32")
+        .trim_end_matches(';')
+        .split(',')
+        .nth(0)
+        .map(|s| s.trim().to_string())
+        .expect("neg destination");
+    let ops: Vec<String> = fma
+        .trim()
+        .trim_start_matches("fma.rn.f32")
+        .trim_end_matches(';')
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    assert_eq!(ops.len(), 4, "unexpected fma operand count in `{fma}`");
+    assert_eq!(
+        ops[1], negged,
+        "`c - a*b` must negate a MULTIPLICAND. `{negged}` is not the fma's \
+         first multiplicand in `{fma}`, so the sign is on the wrong operand"
+    );
+    assert!(
+        ops[3] != negged,
+        "the addend was negated for `c - a*b` in `{fma}`, which emits \
+         `a*b - c` - the sign inverted"
+    );
+}
+
+/// The operator gate is a WHITELIST, and nothing else may reach the fusion.
+///
+/// The shape this recognises is "a `Mul` on one side of a binary operator",
+/// and that is true of `a*b / c` and `a*b * c` as well. Widening the gate to
+/// every operator emits `fma.rn.f32 d, a, b, c` for a DIVISION - `a*b + c`
+/// where the source says `a*b / c`, with no division left in the artifact at
+/// all. It compiles clean, `ptxas` accepts it, and it survived every other
+/// test in this file: the `Add` and `Sub` cases pin what those two operators
+/// do and say nothing about a third.
+///
+/// This is the over-refusal control read the other way round. Without it,
+/// "fuse everything" passes.
+#[test]
+fn no_operator_other_than_add_and_subtract_reaches_the_fusion() {
+    for (name, expr, want) in [
+        ("div", "a * b / c", "div."),
+        ("mulmul", "a * b * c", "mul.f32"),
+    ] {
+        let src = format!(
+            r#"
+kernel probe(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, N: I32) {{
     let i: I32 = block_idx_x() * 128 + thread_idx_x();
     let a: F32 = block_ptr2d_load(A, 0, i, N, 1, N);
     let b: F32 = block_ptr2d_load(B, 0, i, N, 1, N);
     let c: F32 = block_ptr2d_load(C, 0, i, N, 1, N);
-    block_ptr2d_store(C, 0, i, N, 1, N, a * b - c);
+    block_ptr2d_store(C, 0, i, N, 1, N, {expr});
+}}
+fn main() {{}}
+"#
+        );
+        let bd = body(&emit_ptx(name, &src));
+        assert!(
+            !bd.contains("fma."),
+            "`{expr}` was folded into an fma. The fusion is only correct for \
+             `+` and `-`; for anything else it computes a different function \
+             entirely:\n{bd}"
+        );
+        assert!(
+            bd.contains(want),
+            "`{expr}` lost its `{want}`, so it is not being lowered as itself:\n{bd}"
+        );
+    }
+}
+
+/// The subtraction must not disturb the INTEGER path, exactly as the addition
+/// does not. An integer `a*b - c` has no fma to fold into and the multiply
+/// must stay where it was.
+#[test]
+fn an_integer_multiply_feeding_a_subtract_stays_exactly_where_it_was() {
+    let src = r#"
+kernel probe(O: GlobalMemory<U32>, N: I32) {
+    let k: I32 = block_idx_x() * block_idx_y() - thread_idx_x();
+    block_ptr2d_store(O, 0, 0, N, 1, N, k);
 }
 fn main() {}
 "#;
-    let b = body(&emit_ptx("sub", src));
-    assert!(
-        b.contains("mul.f32") && b.contains("sub.f32"),
-        "`a*b - c` must stay a multiply and a subtract:\n{b}"
-    );
+    let b = body(&emit_ptx("isub", src));
     assert!(
         !b.contains("fma."),
-        "`a*b - c` was folded into an fma. Unless the addend is negated that \
-         computes `a*b + c`, which is a different function:\n{b}"
+        "an integer `a*b - c` must not be fused:\n{b}"
+    );
+    assert!(
+        b.contains("sub.s32") || b.contains("sub.u32"),
+        "the integer subtract disappeared:\n{b}"
+    );
+    let mul = b.find("mul.lo.s32").expect("no integer multiply emitted");
+    let tid = b.find("%tid.x").expect("no thread index emitted");
+    assert!(
+        mul < tid,
+        "the integer multiply moved PAST the instruction computing its \
+         subtrahend. That is a reordering, not a fusion:\n{b}"
+    );
+}
+
+/// `c - a*b` in the INTEGER case must keep its operand ORDER. Subtraction does
+/// not commute, so finishing it through the ordinary path with the operands
+/// the wrong way round emits `a*b - c` - a wrong answer with no float in it.
+#[test]
+fn an_integer_subtract_from_a_multiply_keeps_its_operand_order() {
+    let src = r#"
+kernel probe(O: GlobalMemory<U32>, N: I32) {
+    let k: I32 = thread_idx_x() - block_idx_x() * block_idx_y();
+    block_ptr2d_store(O, 0, 0, N, 1, N, k);
+}
+fn main() {}
+"#;
+    let b = body(&emit_ptx("irsub", src));
+    let sub = b
+        .lines()
+        .find(|l| l.trim_start().starts_with("sub.s32") || l.trim_start().starts_with("sub.u32"))
+        .unwrap_or_else(|| panic!("no integer subtract emitted:\n{b}"))
+        .to_string();
+    let mul = b
+        .lines()
+        .find(|l| l.trim_start().starts_with("mul.lo.s32"))
+        .unwrap_or_else(|| panic!("no integer multiply emitted:\n{b}"))
+        .to_string();
+    let prod = mul
+        .trim()
+        .trim_start_matches("mul.lo.s32")
+        .trim_end_matches(';')
+        .split(',')
+        .nth(0)
+        .map(|s| s.trim().to_string())
+        .expect("mul destination");
+    let ops: Vec<String> = sub
+        .trim()
+        .trim_start_matches("sub.s32")
+        .trim_start_matches("sub.u32")
+        .trim_end_matches(';')
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+    assert_eq!(ops.len(), 3, "unexpected sub operand count in `{sub}`");
+    assert_eq!(
+        ops[2], prod,
+        "`c - a*b` emitted `{sub}` with the product as the MINUEND. \
+         Subtraction does not commute; that computes `a*b - c`"
     );
 }
 
@@ -349,18 +581,22 @@ fn stating_the_fusion_is_free_and_forbidding_it_is_not() {
 /// `emit_rmsnorm_residual_kernel`, `emit_rope_kernel` and the int8 GEMM's
 /// dequantise epilogue. They were the whole of the remaining contraction set.
 ///
-/// The two that go to ZERO are the strong statement: forbidding the fusion
-/// with `.rn` changes not one byte of their SASS, because there is no longer a
-/// fusion to forbid. `rope` keeps its `mul` + `sub` half, which is why the
-/// count here is a floor per kernel rather than "no float multiply anywhere".
+/// ALL FIVE now go to zero: forbidding the fusion with `.rn` changes not one
+/// byte of any of their SASS, because there is no longer a fusion to forbid.
+/// That empties the corpus-wide contraction set, so every artifact this
+/// repository ships states every rounding the hardware performs.
+///
+/// The rope counts are TWO per rotated pair - `out0 = x0*cos - x1*sin` and
+/// `out1 = x0*sin + x1*cos` - where they used to be one, because the subtract
+/// half now states its fusion as well.
 #[test]
 fn the_hand_written_kernels_state_their_fusions() {
     let want: &[(&str, usize)] = &[
         ("rmsnorm_residual_4096", 9),
         ("int8_gemm_scaled", 4),
-        ("rope_64", 1),
-        ("rope_128", 2),
-        ("rope_256", 4),
+        ("rope_64", 2),
+        ("rope_128", 4),
+        ("rope_256", 8),
     ];
     for (k, n) in want {
         let shipped = std::fs::read_to_string(repo().join(format!("tests/{k}.ptx"))).expect(k);
@@ -395,28 +631,87 @@ fn the_hand_written_kernels_state_their_fusions() {
     }
 }
 
-/// The rope rotation's subtract half is deliberately left alone.
+/// The rope rotation states its subtract, with the sign on the ADDEND.
 ///
-/// `a*b - c` is `fma.rn.f32 d, a, b, -c` and PTX has no operand modifier for
-/// that negation, so stating it costs a `neg.f32` the hardware does not pay.
-/// Without this the previous test is satisfied by "fuse everything", which is
-/// exactly the over-recognition that computes `a*b + c` for `a*b - c`.
+/// `x0*cos - x1*sin` is `fma.rn.f32 d, x0, cos, -(x1*sin)`, and `ptxas`
+/// contracts it either way - into `FFMA R7, R4, R5, -R7`, with the negation as
+/// an operand modifier the SASS encoding carries for free. So leaving it split
+/// shipped an artifact claiming a rounding the machine does not perform.
+///
+/// The negation must be on the ADDEND and not on a multiplicand. Both compute
+/// the same value, but `fma(-x1, sin, x0*cos)` is NOT byte-identical here - it
+/// reorders the schedule - so which side carries the sign was measured rather
+/// than chosen, and this pins the measured one.
+///
+/// Without this the count test above is satisfied by "fuse everything", which
+/// is the over-recognition that computes `a*b + c` for `a*b - c`.
 #[test]
-fn the_rope_rotation_still_subtracts() {
+fn the_rope_rotation_states_its_subtract_on_the_addend() {
+    let mut checked = 0;
     for k in ["rope_64", "rope_128", "rope_256"] {
         let b = body(&std::fs::read_to_string(repo().join(format!("tests/{k}.ptx"))).expect(k));
         assert!(
-            b.contains("sub.f32"),
-            "tests/{k}.ptx has no sub.f32 left, so the rotation's `x*cos - y*sin` \
-             half was folded into an fma without negating its addend"
+            !b.contains("sub.f32"),
+            "tests/{k}.ptx still splits the rotation's `x0*cos - x1*sin` half, \
+             so it claims a rounding `ptxas` does not perform"
         );
+        // Every `neg.f32` destination must be the addend of some `fma.rn.f32`,
+        // and never one of its multiplicands. Asserting only that a `neg`
+        // exists is satisfied by negating the wrong operand.
+        let negs: Vec<String> = b
+            .lines()
+            .filter(|l| l.trim_start().starts_with("neg.f32"))
+            .map(|l| {
+                l.trim()
+                    .trim_start_matches("neg.f32")
+                    .split(',')
+                    .next()
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        assert!(!negs.is_empty(), "tests/{k}.ptx has no neg.f32, so the \
+             subtract was fused without its sign - a different function");
+        let fmas: Vec<Vec<String>> = b
+            .lines()
+            .filter(|l| l.trim_start().starts_with("fma.rn.f32"))
+            .map(|l| {
+                l.trim()
+                    .trim_start_matches("fma.rn.f32")
+                    .trim_end_matches(';')
+                    .split(',')
+                    .map(|o| o.trim().to_string())
+                    .collect()
+            })
+            .collect();
+        for n in &negs {
+            assert!(
+                fmas.iter().any(|o| o.len() == 4 && &o[3] == n),
+                "tests/{k}.ptx negates {n}, which is not the addend of any \
+                 fma.rn.f32 - the sign is on the wrong operand"
+            );
+            assert!(
+                !fmas.iter().any(|o| o.len() == 4 && (&o[1] == n || &o[2] == n)),
+                "tests/{k}.ptx negates {n} and uses it as a MULTIPLICAND. \
+                 That computes the same value and is not byte-identical here"
+            );
+            checked += 1;
+        }
     }
+    assert_eq!(checked, 7, "expected 1 + 2 + 4 rotated pairs across the three \
+         rope kernels; the fixture list or the schedule moved");
 }
 
-/// Forbidding the fusion is a NO-OP for the two kernels that state all of it.
+/// Forbidding the fusion is a NO-OP for every kernel that states all of it.
 ///
 /// This is the claim the count above is a proxy for, measured: if `.rn` cannot
 /// change the SASS, the artifact and the machine agree about every rounding.
+///
+/// All FIVE hand-written kernels are here now. The three `rope_*` joined when
+/// the rotation's subtract half started stating its own fusion, which empties
+/// the corpus-wide contraction set that `tools/ptxas_tval/contract.py`
+/// measures - so this is the whole of it rather than a subset.
 #[test]
 fn forbidding_the_fusion_changes_nothing_where_it_is_all_stated() {
     if Command::new("ptxas").arg("--version").output().is_err() {
@@ -426,7 +721,13 @@ fn forbidding_the_fusion_changes_nothing_where_it_is_all_stated() {
     let dir = std::env::temp_dir().join(format!("y_fma_noop_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("dir");
     let mut checked = 0;
-    for k in ["rmsnorm_residual_4096", "int8_gemm_scaled"] {
+    for k in [
+        "rmsnorm_residual_4096",
+        "int8_gemm_scaled",
+        "rope_64",
+        "rope_128",
+        "rope_256",
+    ] {
         let src = std::fs::read_to_string(repo().join(format!("tests/{k}.ptx"))).expect(k);
         let arch = src
             .lines()
@@ -483,5 +784,5 @@ fn forbidding_the_fusion_changes_nothing_where_it_is_all_stated() {
         checked += 1;
     }
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(checked, 2, "the kernel list emptied itself");
+    assert_eq!(checked, 5, "the kernel list emptied itself");
 }

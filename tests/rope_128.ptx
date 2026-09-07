@@ -53,9 +53,9 @@
     mul.f32 %f8, %f0, %f7;
     sin.approx.f32 %f9, %f8;
     cos.approx.f32 %f10, %f8;
-    mul.f32 %f11, %f1, %f10;
-    mul.f32 %f12, %f2, %f9;
-    sub.f32 %f13, %f11, %f12;
+    mul.f32 %f11, %f2, %f9;
+    neg.f32 %f12, %f11;
+    fma.rn.f32 %f13, %f1, %f10, %f12;
     mul.f32 %f14, %f2, %f10;
     fma.rn.f32 %f15, %f1, %f9, %f14;
     add.u32 %r13, %r5, 1;
@@ -65,9 +65,9 @@
     mul.f32 %f19, %f0, %f18;
     sin.approx.f32 %f20, %f19;
     cos.approx.f32 %f21, %f19;
-    mul.f32 %f22, %f3, %f21;
-    mul.f32 %f23, %f4, %f20;
-    sub.f32 %f24, %f22, %f23;
+    mul.f32 %f22, %f4, %f20;
+    neg.f32 %f23, %f22;
+    fma.rn.f32 %f24, %f3, %f21, %f23;
     mul.f32 %f25, %f4, %f21;
     fma.rn.f32 %f26, %f3, %f20, %f25;
     cvt.rn.f16.f32 %r14, %f13;

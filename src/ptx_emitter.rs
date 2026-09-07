@@ -1257,7 +1257,25 @@ impl PtxEmitter {
         dst
     }
 
-    /// Lowers a source-level `a*b + c` over F32 as one `fma.rn.f32`.
+    /// Lowers a source-level `a*b + c` or `a*b - c` over F32 as one
+    /// `fma.rn.f32`, negating the operand the sign requires.
+    ///
+    ///   `a*b + c`  ->  fma( a, b,  c)
+    ///   `a*b - c`  ->  fma( a, b, -c)    negate the ADDEND
+    ///   `c - a*b`  ->  fma(-a, b,  c)    negate a MULTIPLICAND
+    ///
+    /// Which operand carries the sign is decided by which side the multiply is
+    /// on. Getting it backwards computes `a*b + c` for `a*b - c` -- a wrong
+    /// function that compiles clean, which is why the subtraction was left
+    /// unfused when the `Add` case landed.
+    ///
+    /// The reason to fuse it anyway is that `ptxas` contracts the subtraction
+    /// too, with the negation as an SASS OPERAND MODIFIER the encoding carries
+    /// for free (`FFMA R9, R9, R8, -R10` and `FFMA R9, R9, -R8, R10`,
+    /// measured). PTX has no such modifier, so saying it costs an explicit
+    /// `neg.f32` -- and that `neg` REPLACES the `mul.f32` the `fma` absorbs.
+    /// Two instructions before, two after, and the SASS is byte-identical.
+    /// The cost recorded for this repair was an instruction PTX does not gain.
     ///
     /// This is not a peephole and needs no dataflow: a *sub-expression* has
     /// exactly one use by construction, so the multiply this recognises cannot
@@ -1291,9 +1309,14 @@ impl PtxEmitter {
         cache_policy: Option<&CachePolicyAttr>,
         hw_profile: &HardwareProfile,
     ) -> Option<String> {
-        if !matches!(op, BinaryOp::Add) {
+        if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
             return None;
         }
+        // `op` is carried through every fallback below rather than hardcoded:
+        // an integer or refused `c - a*b` must finish as a SUBTRACT in the
+        // original operand order, and folding it as an add would be a wrong
+        // function under a green banner.
+        let fold = op.clone();
         // Which side is the multiply. `mul_first` is kept because the operands
         // must be emitted in the order the two-instruction path would emit
         // them: any program that does NOT take the float branch below has to
@@ -1338,7 +1361,7 @@ impl PtxEmitter {
                 // finish through the ordinary path: byte-identical output.
                 let prod = self.emit_binary(BinaryOp::Mul, &ar, &br, &mspan);
                 let cr = self.emit_expr(c, cache_policy, hw_profile);
-                return Some(self.emit_binary(BinaryOp::Add, &prod, &cr, &mspan));
+                return Some(self.emit_binary(fold, &prod, &cr, &mspan));
             }
             let cr = self.emit_expr(c, cache_policy, hw_profile);
             (ar, br, cr)
@@ -1358,6 +1381,31 @@ impl PtxEmitter {
             let a32 = self.emit_convert(&ar, ScalarTy::F32);
             let b32 = self.emit_convert(&br, ScalarTy::F32);
             let c32 = self.emit_convert(&cr, ScalarTy::F32);
+            // A subtraction is the same instruction with one operand
+            // negated, and WHICH operand is decided by which side the multiply
+            // is on -- getting that backwards computes `a*b + c` for
+            // `a*b - c`, a wrong function that compiles clean.
+            //
+            //   a*b - c  ==  fma( a, b, -c)   negate the ADDEND
+            //   c - a*b  ==  fma(-a, b,  c)   negate a MULTIPLICAND
+            //
+            // Both were measured byte-identical against the two-instruction
+            // form, and `ptxas` contracts both today (`FFMA R9, R9, R8, -R10`
+            // and `FFMA R9, R9, -R8, R10`), so the emitted PTX was claiming a
+            // rounding the hardware does not perform. `neg.f32` replaces the
+            // `mul.f32` the `fma` absorbs: two instructions before, two after.
+            let (a32, c32) = if matches!(fold, BinaryOp::Sub) {
+                let n = self.alloc_ty(ScalarTy::F32);
+                if mul_first {
+                    writeln!(&mut self.ptx_buffer, "    neg.f32 {}, {};", n, c32).unwrap();
+                    (a32, n)
+                } else {
+                    writeln!(&mut self.ptx_buffer, "    neg.f32 {}, {};", n, a32).unwrap();
+                    (n, c32)
+                }
+            } else {
+                (a32, c32)
+            };
             let dst = self.alloc_ty(ScalarTy::F32);
             writeln!(
                 &mut self.ptx_buffer,
@@ -1373,9 +1421,9 @@ impl PtxEmitter {
         // recursive `emit_expr` would have.
         let prod = self.emit_binary(BinaryOp::Mul, &ar, &br, &mspan);
         Some(if mul_first {
-            self.emit_binary(BinaryOp::Add, &prod, &cr, &mspan)
+            self.emit_binary(fold, &prod, &cr, &mspan)
         } else {
-            self.emit_binary(BinaryOp::Add, &cr, &prod, &mspan)
+            self.emit_binary(fold, &cr, &prod, &mspan)
         })
     }
 
@@ -9811,12 +9859,24 @@ declare it as a Q format.\n{}",
                 writeln!(&mut self.ptx_buffer, "    cos.approx.f32 {}, {};", cos_t, theta).unwrap();
 
                 // out0 = x0*cos - x1*sin ; out1 = x0*sin + x1*cos
-                let x0_cos = self.alloc_regf32();
-                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x0_cos, x0_f, cos_t).unwrap();
                 let x1_sin = self.alloc_regf32();
                 writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x1_sin, x1_f, sin_t).unwrap();
+                // `ptxas` contracts this subtract too, into `FFMA d, x0, cos,
+                // -R` with the negation as an OPERAND MODIFIER the encoding
+                // carries for free. PTX has no such modifier, so saying it
+                // costs an explicit `neg.f32` -- and that `neg` replaces the
+                // `mul.f32` the `fma` absorbs, so the PTX instruction count is
+                // unchanged and the SASS is byte-identical. The recorded price
+                // for this repair was an instruction PTX does not gain.
+                //
+                // Negate the ADDEND, not a multiplicand. `fma(-x1, sin, x0*cos)`
+                // computes the same value and is NOT byte-identical here -- it
+                // reorders the schedule -- so which side carries the sign was
+                // measured rather than chosen.
+                let neg_x1_sin = self.alloc_regf32();
+                writeln!(&mut self.ptx_buffer, "    neg.f32 {}, {};", neg_x1_sin, x1_sin).unwrap();
                 let out0 = self.alloc_regf32();
-                writeln!(&mut self.ptx_buffer, "    sub.f32 {}, {}, {};", out0, x0_cos, x1_sin).unwrap();
+                writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", out0, x0_f, cos_t, neg_x1_sin).unwrap();
 
                 let x1_cos = self.alloc_regf32();
                 writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x1_cos, x1_f, cos_t).unwrap();

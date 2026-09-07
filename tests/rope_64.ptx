@@ -50,9 +50,9 @@
     mul.f32 %f6, %f0, %f5;
     sin.approx.f32 %f7, %f6;
     cos.approx.f32 %f8, %f6;
-    mul.f32 %f9, %f1, %f8;
-    mul.f32 %f10, %f2, %f7;
-    sub.f32 %f11, %f9, %f10;
+    mul.f32 %f9, %f2, %f7;
+    neg.f32 %f10, %f9;
+    fma.rn.f32 %f11, %f1, %f8, %f10;
     mul.f32 %f12, %f2, %f8;
     fma.rn.f32 %f13, %f1, %f7, %f12;
     cvt.rn.f16.f32 %r11, %f11;

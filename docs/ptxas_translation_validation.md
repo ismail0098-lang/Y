@@ -68,7 +68,10 @@ Both repairs validate, and they are not equally good:
 **The compiler emits the second one now** (`try_emit_fma` in
 `src/ptx_emitter.rs`, gated by `tests/fma_contraction.rs`): a source-level
 `a*b + c` over F32 becomes one `fma.rn.f32`, so the shipped artifact and the
-validated one are the same file. The refutation is kept as `_muladd`, derived
+validated one are the same file. `a*b − c` and `c − a*b` do too, with the sign
+on the operand each shape requires — `fma(a, b, −c)` and `fma(−a, b, c)` — and
+that `neg.f32` replaces the `mul.f32` the `fma` absorbs, so it is free in
+instructions as well as in SASS. The refutation is kept as `_muladd`, derived
 from the shipped kernel by splitting the instruction back into two — a corpus
 containing nothing the validator refutes cannot be told apart from a validator
 that always says VALIDATED.
@@ -220,7 +223,9 @@ kernel uses, and it overturned the obvious read:
 
 - `rope_64/128/256` look one transliteration away and are the **deepest** float
   kernels in the corpus — 16–18 unknown PTX ops each, three MUFU identifications
-  (none device-validated), f16 pack/unpack, and FFMA contraction on top.
+  (none device-validated) and f16 pack/unpack. FFMA contraction used to be on
+  that list and no longer is: the rotation states both halves of its own
+  fusion, so those kernels are now exactly as deep as their opcodes.
 - `ptx_subword_ops` is the cheapest kernel left: 8 unknown PTX ops, all integer,
   no float, no branch, no loop, no shared memory. **Both halves of that are
   wrong, and it is measured below** — the dynamic gap is *three* opcodes, not
@@ -416,22 +421,35 @@ recording a survivor.
 
 Measured rather than assumed, and neither is the gate.
 
-**Contraction** — **3 kernels**, MEASURED by `contract.py` as
+**Contraction** — **0 kernels**, MEASURED by `contract.py` as
 `FMA(plain) − FMA(.rn)`: forbidding the fusion cannot remove a fused
 instruction the PTX asked for, so the difference *is* the number of fusions.
 `mul.f32` + `add.f32` becoming `FFMA` is a permitted freedom, and the emitter
-states it wherever it can — `naive_gemm_f32` and `y_cpu_matmul` through
+states it everywhere it occurs — `naive_gemm_f32` and `y_cpu_matmul` through
 expression lowering, and the hand-written `rmsnorm_residual_4096`,
-`int8_gemm_scaled` and `rope_*` bodies directly. For the first four the `.rn`
-rewrite is now a **complete no-op**: forbidding the fusion changes not one byte
-of their SASS, because there is no longer a fusion to forbid.
+`int8_gemm_scaled` and `rope_*` bodies directly. For **all five** the `.rn`
+rewrite is a **complete no-op**: forbidding the fusion changes not one byte of
+their SASS, because there is no longer a fusion to forbid. Every artifact this
+repository ships states every rounding the hardware performs.
 
-What is left is the **`mul` + `sub` half of the rope rotation**, 1 / 2 / 4
-fusions. `a*b − c` is `fma.rn.f32 d, a, b, −c` and PTX has no operand modifier
-for that negation, so stating it costs a `neg.f32` the hardware does not pay.
-Recorded, not done.
+**An empty set is also what a measurement computing nothing returns**, so the
+positive control is no longer a shipped kernel. `contract.measurement_is_live`
+perturbs one — splitting a shipped `fma.rn.f32` back into the `mul.f32` +
+`add.f32` it replaced — and requires the metric to flag it; `fpgate.py` fails
+if it does not. Same device as keeping `naive_gemm_f32_muladd` in the corpus.
 
-**Five** things this paragraph used to say were wrong, and each is the same shape.
+**Six** things this paragraph used to say were wrong, and each is the same shape.
+
+* **The last of them was the price of finishing it.** The `mul` + `sub` half of
+  the rope rotation was recorded here as costing "a `neg.f32` the hardware does
+  not pay", and that is a claim about an instruction PTX **does not gain**: the
+  `neg` REPLACES the `mul.f32` the `fma` absorbs. Measured — `mul,mul,sub` (3)
+  becomes `mul,neg,fma` (3) in the rope body and `mul,sub` (2) becomes
+  `neg,fma` (2) at the source level, with the register pool unchanged and the
+  **SASS byte-identical** in every case, because `ptxas` folds the negation
+  into the FFMA's own operand modifier (`FFMA R7, R4, R5, -R7`). Counting the
+  PTX instruction the repair adds without counting the one it removes is the
+  same indirect reading as the four below.
 
 * **The count was a hardcoded 9** in `fpgate.py`, and it disagreed with
   `contract.py`'s own measurement *in both directions* — six
