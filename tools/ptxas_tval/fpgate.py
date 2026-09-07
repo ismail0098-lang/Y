@@ -58,18 +58,26 @@ def main():
         return 1
     # ...and the guard above compares one function against ITSELF, so it catches
     # a hardcoded LIST and is SILENT about a wrong MEASUREMENT.  Both sides move
-    # together, which is the same silence a generated description has.  These
-    # two are the control, and each pins a direction a previous reading of this
-    # number got wrong:
-    #   rope    still fuses -- its `mul` + `sub` half cannot be stated, because
-    #           `fma.rn.f32 d, a, b, -c` has no operand modifier in PTX.  A
-    #           metric that stopped detecting a real fusion would drop it.
-    #   swiglu  does NOT fuse: FFMA is 0 in both builds and what moves under
-    #           `.rn` is FSEL 4 -> 8 and IMAD 202 -> 206, a scheduling
-    #           difference.  The published claim that it fused at HALF
-    #           precision was a hypothesis asserted as fact; `HFMA2` appears in
-    #           neither build.  "The SASS moves" is not "ptxas fused".
-    for k, want in (('rope_64', True), ('gemm_f16_swiglu_512', False)):
+    # together, which is the same silence a generated description has.
+    #
+    # THE SET IS NOW EMPTY, which makes that silence total: a measurement
+    # computing nothing returns exactly what a corpus contracting nowhere
+    # returns.  So the POSITIVE control can no longer be a shipped kernel and
+    # is a PERTURBED one -- split a shipped `fma.rn.f32` back into the
+    # `mul.f32` + `add.f32` it replaced and require the metric to flag it.
+    # Same device as keeping `naive_gemm_f32_muladd` in the corpus.
+    live, why = contract.measurement_is_live()
+    if not live:
+        print(f'FAIL: the contraction measurement is not live -- {why}')
+        return 1
+    print(f'  positive control: {why}')
+    # The NEGATIVE control keeps the metric from over-reporting, and pins a
+    # direction a previous reading got wrong: swiglu does NOT fuse.  FFMA is 0
+    # in both builds and what moves under `.rn` is FSEL 4 -> 8 and IMAD
+    # 202 -> 206, a scheduling difference.  The published claim that it fused
+    # at HALF precision was a hypothesis asserted as fact; `HFMA2` appears in
+    # neither build.  "The SASS moves" is not "ptxas fused".
+    for k, want in (('gemm_f16_swiglu_512', False),):
         if not os.path.exists(f'corpus/{k}.ptx'): continue
         if (k in measured) != want:
             print(f'FAIL: {k} is {"absent from" if want else "in"} the contraction '
