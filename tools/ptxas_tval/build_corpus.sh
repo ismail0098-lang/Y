@@ -60,38 +60,50 @@ if [ -f "$REPO/tests/exact_pv.ptx" ]; then
 fi
 
 # naive_gemm_f32 is the other -O1 subject, and it is a TRIPLE rather than a
-# kernel: the shipped PTX says `mul.f32` then `add.f32` -- two roundings -- and
-# ptxas contracts them into one FFMA, so the artifact does not mean what the
-# machine does and the validator refutes it.  There are two repairs and the
-# difference between them is the result, so both are built:
-#   _rn   FORBID the contraction (mul.rn + add.rn).  Validates.  It is the arm
-#         that needs FADD commutativity, because ptxas SORTS the addends -- so
-#         it is also what keeps that identification exercised rather than dead.
-#   _fma  SAY the contraction (fma.rn.f32).  Validates, and emits a
-#         BYTE-IDENTICAL instruction stream to the shipped kernel.
+# kernel.  The shipped PTX now says `fma.rn.f32` -- one rounding, which is what
+# the hardware performs -- and it VALIDATES.  Both other readings of the same
+# arithmetic are derived from it, because the difference between the three is
+# the result:
+#   _muladd  the form Y shipped until the emitter learned to say `fma`:
+#            `mul.f32` then `add.f32`, two roundings, which ptxas contracts
+#            into one FFMA.  It is REFUTED, and it is kept for that reason --
+#            a validator whose corpus contains nothing it refutes reports
+#            VALIDATED for a living and cannot be distinguished from one that
+#            always does.
+#   _rn      FORBID the contraction (mul.rn + add.rn).  Validates.  It is the
+#            arm that needs FADD commutativity, because ptxas SORTS the addends
+#            -- so it is also what keeps that identification exercised.
 if [ -f "$REPO/tests/naive_gemm_f32.ptx" ]; then
   arch=$(grep -m1 -oE '^\.target[[:space:]]+sm_[0-9]+[a-z]*' "$REPO/tests/naive_gemm_f32.ptx" | awk '{print $2}')
   cp "$REPO/tests/naive_gemm_f32.ptx" o1/naive_gemm_f32.ptx
   # The rewrite FAILS LOUDLY if the emitter stops producing this shape, rather
-  # than silently copying an unchanged file and reporting two identical halves.
-  python3 - o1/naive_gemm_f32.ptx o1/naive_gemm_f32_rn.ptx o1/naive_gemm_f32_fma.ptx <<'PY' || exit 1
+  # than silently copying an unchanged file and reporting three identical arms.
+  python3 - o1/naive_gemm_f32.ptx o1/naive_gemm_f32_muladd.ptx o1/naive_gemm_f32_rn.ptx <<'PY' || exit 1
 import sys, re
 src = open(sys.argv[1]).read()
-m = re.search(r'^(\s*)mul\.f32 (%f\d+), (%f\d+), (%f\d+);\n\s*add\.f32 (%f\d+), (%f\d+), \2;\n',
-              src, re.M)
+m = re.search(r'^(\s*)fma\.rn\.f32 (%f\d+), (%f\d+), (%f\d+), (%f\d+);\n', src, re.M)
 if not m:
-    sys.stderr.write('  FAIL: naive_gemm_f32.ptx no longer has the mul.f32+add.f32 '
+    sys.stderr.write('  FAIL: naive_gemm_f32.ptx no longer has the fma.rn.f32 '
                      'shape this triple is about\n'); sys.exit(1)
-ind, prod, a, b, dst, acc = m.groups()
-# (1) FORBID the contraction: two roundings, as the shipped PTX literally says.
-open(sys.argv[2], 'w').write(src[:m.start()] +
-    f'{ind}mul.rn.f32 {prod}, {a}, {b};\n{ind}add.rn.f32 {dst}, {acc}, {prod};\n' +
-    src[m.end():])
-# (2) SAY the contraction: one rounding, which is what the machine does anyway.
-open(sys.argv[3], 'w').write(src[:m.start()] +
-    f'{ind}fma.rn.f32 {dst}, {a}, {b}, {acc};\n' + src[m.end():])
+ind, dst, a, b, acc = m.groups()
+# Splitting one instruction into two needs one more register than the shipped
+# kernel declares, and a body that names a register outside the declared pool
+# is exactly the bug this directory's own history records.
+rm = re.search(r'^(\s*)\.reg \.f32 %f<(\d+)>;', src, re.M)
+if not rm:
+    sys.stderr.write('  FAIL: naive_gemm_f32.ptx declares no .f32 register pool\n'); sys.exit(1)
+n = int(rm.group(2)); prod = f'%f{n}'
+grown = src[:rm.start()] + f'{rm.group(1)}.reg .f32 %f<{n+1}>;' + src[rm.end():]
+d = len(grown) - len(src)                      # the splice shifted everything after it
+def sub(rep): return grown[:m.start()+d] + rep + grown[m.end()+d:]
+# (1) The form Y used to ship: two roundings, which ptxas fuses into one.
+open(sys.argv[2], 'w').write(sub(
+    f'{ind}mul.f32 {prod}, {a}, {b};\n{ind}add.f32 {dst}, {acc}, {prod};\n'))
+# (2) FORBID the fusion: two roundings, and ptxas may not remove either.
+open(sys.argv[3], 'w').write(sub(
+    f'{ind}mul.rn.f32 {prod}, {a}, {b};\n{ind}add.rn.f32 {dst}, {acc}, {prod};\n'))
 PY
-  for v in naive_gemm_f32 naive_gemm_f32_rn naive_gemm_f32_fma; do
+  for v in naive_gemm_f32 naive_gemm_f32_muladd naive_gemm_f32_rn; do
     ptxas -O1 -arch="$arch" -o o1/$v.cubin o1/$v.ptx 2>/dev/null \
       && nvdisasm -c o1/$v.cubin > o1/$v.sass \
       && echo "  o1/$v rebuilt at -O1"

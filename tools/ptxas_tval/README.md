@@ -24,11 +24,17 @@ minutes to hours per kernel.
 python3 fpsem_abi.py # referee FSEL and f32-add commutativity against the device
 ```
 
-`regress.sh` includes an **UNPROVED** row on purpose: `o1/naive_gemm_f32` is a
-shipped kernel whose PTX asks for two roundings while `ptxas` contracts them
-into one `FFMA`, and `o1/naive_gemm_f32_fma` is the same kernel saying
-`fma.rn.f32`, which emits a byte-identical instruction stream and validates.
-A run in which the UNPROVED row turns green is a regression.
+`regress.sh` includes an **UNPROVED** row on purpose. `o1/naive_gemm_f32` is a
+shipped GEMM and it VALIDATES, because the emitter says `fma.rn.f32`;
+`o1/naive_gemm_f32_muladd` is the same kernel in the form Y used to emit -
+`mul.f32` then `add.f32`, two roundings, which `ptxas` contracts into one
+`FFMA` on a byte-identical instruction stream - and it is refuted. A run in
+which that row turns green is a regression, because a corpus containing
+nothing the validator refutes cannot be told apart from a validator that
+always says VALIDATED. `regress.sh` ASSERTS all ten standing results in the
+direction each reads and exits non-zero if any of them moves; `fpgate.py`
+asserts the same pair independently, and checks the doc's contraction count
+against the measurement.
 
 `corpus/` and `o1/` are generated and not committed: a `.cubin` is a machine-specific ELF
 and a `.sass` is a disassembly of one. All 66 rebuild byte-identically to the

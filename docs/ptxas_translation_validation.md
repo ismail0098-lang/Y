@@ -27,45 +27,51 @@ transfers, the result does not.
 
 ## What is validated today
 
-Measured on 2026-09-04, on this machine (RTX 4070 Ti SUPER, sm_89, CUDA 13.3,
-z3 5.0.0), reproduced from a clean `tools/ptxas_tval/` by the commands in the
-last section.
+Measured on 2026-09-07, on this machine (RTX 4070 Ti SUPER, sm_89, CUDA 13.3,
+z3 5.0.0), reproduced from a clean `tools/ptxas_tval/` by `./regress.sh`, which
+ASSERTS every row below in the direction it reads and exits non-zero if any of
+them moves — the two UNPROVED rows included.
 
 | kernel | verdict | obligations | time | what makes it interesting |
 |---|---|---|---|---|
 | `fma/rn` | **VALIDATED** | 9 | 0.0 s | float, with contraction forbidden by `.rn` |
 | `fma/plain` | UNPROVED | 10 | 0.0 s | **the negative control** — `store 0: sat` |
 | `bn254_permute` | **VALIDATED** | 30 | 0.2 s | branching `ptxas` invented |
-| `bn254_sub_vec` | **VALIDATED** | 88 | 9.4 s | |
-| `ptx_carry_chain` | **VALIDATED** | 123 | 24.6 s | 24 predicated instructions |
-| `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.0 s | across a **loop**; 1 multiplier identity assumed |
+| `bn254_sub_vec` | **VALIDATED** | 88 | 12.6 s | |
+| `ptx_carry_chain` | **VALIDATED** | 123 | 33.4 s | 24 predicated instructions |
+| `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.1 s | across a **loop**; 1 multiplier identity assumed |
 | `smem_roundtrip` | **VALIDATED** | 18 | 0.2 s | **shared memory**, 1 barrier |
-| `naive_gemm_f32` @ `-O1` | UNPROVED | 7 | 0.2 s | **a shipped kernel refuted** — `store 0 value: sat` |
-| `naive_gemm_f32_rn` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden* — **a GEMM** |
-| `naive_gemm_f32_fma` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *stated* — byte-identical SASS |
+| `naive_gemm_f32` @ `-O1` | **VALIDATED** | 9 | 0.2 s | **a shipped GEMM** — the emitter says `fma.rn.f32` |
+| `naive_gemm_f32_muladd` @ `-O1` | UNPROVED | 7 | 0.2 s | the form Y used to ship — `store 0 value: sat` |
+| `naive_gemm_f32_rn` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden*, at a different SASS |
 
-Eight kernels validated, **300 obligations**, and two UNPROVED rows that are
+Eight kernels validated, **317 obligations**, and two UNPROVED rows that are
 results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
 UNPROVED and are discussed under *The wall* below — neither produced a `sat`.
 
 The last three rows are one experiment: one kernel, three PTX spellings.
-`naive_gemm_f32`'s PTX says `mul.f32` then `add.f32` — two roundings — and
-`ptxas` contracts them into a single `FFMA`, which rounds once. The validator
-refutes it, and *where* it refutes is the informative part: `BASE`, `STEP`,
-`LOOPCOND` and `ENTRY` all prove, so the loop schedule corresponds exactly and
-it is the accumulated **value** that cannot be shown equal.
+Y **used to** emit `mul.f32` then `add.f32` — two roundings — and `ptxas`
+contracts them into a single `FFMA`, which rounds once. The validator refuted
+that, and *where* it refuted is the informative part: `BASE`, `STEP`,
+`LOOPCOND` and `ENTRY` all proved, so the loop schedule corresponded exactly
+and it was the accumulated **value** that could not be shown equal.
 
-Both repairs then validate, and they are not equally good:
+Both repairs validate, and they are not equally good:
 
 * `mul.rn.f32` + `add.rn.f32` **forbids** the fusion. Costs 0 to +7.1%
   instructions, and leaves the kernel with two roundings where the hardware
   does one. It is also the arm that needs `FADD` commutativity, because
   `ptxas` sorts the addends.
 * `fma.rn.f32` **states** it. Emits a **byte-identical instruction stream** to
-  the shipped kernel, is more accurate, and validates.
+  the form it replaces, is more accurate, and validates.
 
-So the shipped artifact is not the validated one, the difference is one PTX
-modifier, and the better repair costs nothing.
+**The compiler emits the second one now** (`try_emit_fma` in
+`src/ptx_emitter.rs`, gated by `tests/fma_contraction.rs`): a source-level
+`a*b + c` over F32 becomes one `fma.rn.f32`, so the shipped artifact and the
+validated one are the same file. The refutation is kept as `_muladd`, derived
+from the shipped kernel by splitting the instruction back into two — a corpus
+containing nothing the validator refutes cannot be told apart from a validator
+that always says VALIDATED.
 
 ### The control is the row that makes the table mean something
 
@@ -410,16 +416,26 @@ recording a survivor.
 
 Measured rather than assumed, and neither is the gate.
 
-**Contraction** — **16 kernels**, derived by `contract.py` from the artifacts
-rather than listed. `mul.f32` + `add.f32` becoming `FFMA` is a permitted
-freedom, and it unlocks **one kernel today**: `naive_gemm_f32`, above.
+**Contraction** — **9 kernels**, MEASURED by `contract.py` rather than listed
+or inferred. `mul.f32` + `add.f32` becoming `FFMA` is a permitted freedom, and
+it unlocked **one kernel**: `naive_gemm_f32`, above — which the emitter now
+spells `fma.rn.f32`, so the shipped kernel is the validated one.
 
-Three things this paragraph used to say were wrong, and each is the same shape.
+Four things this paragraph used to say were wrong, and each is the same shape.
 
 * **The count was a hardcoded 9** in `fpgate.py`, and it disagreed with
   `contract.py`'s own measurement *in both directions* — six
   `gemm_f16_bias_relu_*` kernels where `ptxas` contracts nothing, and ten
   contracting kernels omitted. Two lists of one thing drift.
+* **Then the count was a DERIVED 16, and derived is not measured.**
+  `FFMA(sass) − fma(ptx) > 0` cannot tell a contraction from an **unrolling**:
+  one `fma.rn.f32` in a loop body becomes N `FFMA`, which is where
+  `paged_decode_attention_*`'s +32 to +56 came from, and `gemm_fp8_*`'s +11 is
+  `FFMA` `ptxas` synthesised for something else. It under-reported too, by
+  counting `FFMA` only — the four `gemm_f16_swiglu_*` fuse at *half*
+  precision. `contract.py` forbids the fusion with `.rn` and re-assembles now:
+  if the SASS moves, `ptxas` was fusing. **Wrong in both directions again, one
+  layer down, and it was found only because this change moved the numerator.**
 * **"Behind loop invariants"** was true when written. `loopval.py` has since
   provided them. `fpgate.py` asks the validator now instead of consulting a
   table that models its answer.
@@ -642,8 +658,8 @@ cd tools/ptxas_tval
 `regress.sh` used to cover the straight-line cases only, and the loop and
 shared-memory results were three commands the README asked a reader to type. A
 documented command nothing runs is how a result goes stale, so it runs all of
-them — including the `naive_gemm_f32` **UNPROVED** row, because a run in which
-that turns green is a regression just as much as one where a VALIDATED row
+them — including the `naive_gemm_f32_muladd` **UNPROVED** row, because a run in
+which that turns green is a regression just as much as one where a VALIDATED row
 turns red.
 
 `build_corpus.sh` takes each kernel's architecture from its own `.target` line,
