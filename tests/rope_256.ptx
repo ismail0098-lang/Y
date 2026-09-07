@@ -7,13 +7,13 @@
     .param .u64 Positions_1,
     .param .u64 Out_2
 )
-    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 119
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 115
     // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 128 (to maximize SM occupancy)
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 33.33% (16 active blocks per SM)
 .maxnreg 128
 {
     .reg .b32 %r<40>;
-    .reg .f32 %f<57>;
+    .reg .f32 %f<53>;
     .reg .b64 %rd<11>;
     .reg .pred %p<1>;
 
@@ -62,66 +62,62 @@
     mul.f32 %f15, %f1, %f14;
     mul.f32 %f16, %f2, %f13;
     sub.f32 %f17, %f15, %f16;
-    mul.f32 %f18, %f1, %f13;
-    mul.f32 %f19, %f2, %f14;
-    add.f32 %f20, %f18, %f19;
+    mul.f32 %f18, %f2, %f14;
+    fma.rn.f32 %f19, %f1, %f13, %f18;
     add.u32 %r17, %r5, 1;
-    cvt.rn.f32.u32 %f21, %r17;
-    mul.f32 %f22, %f21, 0fBDD49A78;
-    ex2.approx.f32 %f23, %f22;
-    mul.f32 %f24, %f0, %f23;
-    sin.approx.f32 %f25, %f24;
-    cos.approx.f32 %f26, %f24;
-    mul.f32 %f27, %f3, %f26;
-    mul.f32 %f28, %f4, %f25;
-    sub.f32 %f29, %f27, %f28;
-    mul.f32 %f30, %f3, %f25;
-    mul.f32 %f31, %f4, %f26;
-    add.f32 %f32, %f30, %f31;
+    cvt.rn.f32.u32 %f20, %r17;
+    mul.f32 %f21, %f20, 0fBDD49A78;
+    ex2.approx.f32 %f22, %f21;
+    mul.f32 %f23, %f0, %f22;
+    sin.approx.f32 %f24, %f23;
+    cos.approx.f32 %f25, %f23;
+    mul.f32 %f26, %f3, %f25;
+    mul.f32 %f27, %f4, %f24;
+    sub.f32 %f28, %f26, %f27;
+    mul.f32 %f29, %f4, %f25;
+    fma.rn.f32 %f30, %f3, %f24, %f29;
     add.u32 %r18, %r5, 2;
-    cvt.rn.f32.u32 %f33, %r18;
-    mul.f32 %f34, %f33, 0fBDD49A78;
-    ex2.approx.f32 %f35, %f34;
-    mul.f32 %f36, %f0, %f35;
-    sin.approx.f32 %f37, %f36;
-    cos.approx.f32 %f38, %f36;
-    mul.f32 %f39, %f5, %f38;
-    mul.f32 %f40, %f6, %f37;
-    sub.f32 %f41, %f39, %f40;
-    mul.f32 %f42, %f5, %f37;
-    mul.f32 %f43, %f6, %f38;
-    add.f32 %f44, %f42, %f43;
+    cvt.rn.f32.u32 %f31, %r18;
+    mul.f32 %f32, %f31, 0fBDD49A78;
+    ex2.approx.f32 %f33, %f32;
+    mul.f32 %f34, %f0, %f33;
+    sin.approx.f32 %f35, %f34;
+    cos.approx.f32 %f36, %f34;
+    mul.f32 %f37, %f5, %f36;
+    mul.f32 %f38, %f6, %f35;
+    sub.f32 %f39, %f37, %f38;
+    mul.f32 %f40, %f6, %f36;
+    fma.rn.f32 %f41, %f5, %f35, %f40;
     add.u32 %r19, %r5, 3;
-    cvt.rn.f32.u32 %f45, %r19;
-    mul.f32 %f46, %f45, 0fBDD49A78;
-    ex2.approx.f32 %f47, %f46;
-    mul.f32 %f48, %f0, %f47;
-    sin.approx.f32 %f49, %f48;
-    cos.approx.f32 %f50, %f48;
-    mul.f32 %f51, %f7, %f50;
-    mul.f32 %f52, %f8, %f49;
-    sub.f32 %f53, %f51, %f52;
-    mul.f32 %f54, %f7, %f49;
-    mul.f32 %f55, %f8, %f50;
-    add.f32 %f56, %f54, %f55;
+    cvt.rn.f32.u32 %f42, %r19;
+    mul.f32 %f43, %f42, 0fBDD49A78;
+    ex2.approx.f32 %f44, %f43;
+    mul.f32 %f45, %f0, %f44;
+    sin.approx.f32 %f46, %f45;
+    cos.approx.f32 %f47, %f45;
+    mul.f32 %f48, %f7, %f47;
+    mul.f32 %f49, %f8, %f46;
+    sub.f32 %f50, %f48, %f49;
+    mul.f32 %f51, %f8, %f47;
+    fma.rn.f32 %f52, %f7, %f46, %f51;
     cvt.rn.f16.f32 %r20, %f17;
     and.b32 %r21, %r20, 0xFFFF;
-    cvt.rn.f16.f32 %r22, %f20;
+    cvt.rn.f16.f32 %r22, %f19;
     shl.b32 %r23, %r22, 16;
     or.b32 %r24, %r21, %r23;
-    cvt.rn.f16.f32 %r25, %f29;
+    cvt.rn.f16.f32 %r25, %f28;
     and.b32 %r26, %r25, 0xFFFF;
-    cvt.rn.f16.f32 %r27, %f32;
+    cvt.rn.f16.f32 %r27, %f30;
     shl.b32 %r28, %r27, 16;
     or.b32 %r29, %r26, %r28;
-    cvt.rn.f16.f32 %r30, %f41;
+    cvt.rn.f16.f32 %r30, %f39;
     and.b32 %r31, %r30, 0xFFFF;
-    cvt.rn.f16.f32 %r32, %f44;
+    cvt.rn.f16.f32 %r32, %f41;
     shl.b32 %r33, %r32, 16;
     or.b32 %r34, %r31, %r33;
-    cvt.rn.f16.f32 %r35, %f53;
+    cvt.rn.f16.f32 %r35, %f50;
     and.b32 %r36, %r35, 0xFFFF;
-    cvt.rn.f16.f32 %r37, %f56;
+    cvt.rn.f16.f32 %r37, %f52;
     shl.b32 %r38, %r37, 16;
     or.b32 %r39, %r36, %r38;
     add.s64 %rd10, %rd5, %rd8;

@@ -36,6 +36,12 @@ use std::process::Command;
 /// makes the tag sufficient rather than merely conventional - a tag is for
 /// legibility when a run leaves a directory behind.
 fn emit_ptx(tag: &str, src: &str) -> String {
+    emit_ptx_at(tag, src, "sm_89")
+}
+
+/// The same, at a named target: an artifact's own `.target` and never the
+/// build machine's card, which is the bug `ptx_portability.rs` exists to stop.
+fn emit_ptx_at(tag: &str, src: &str, target: &str) -> String {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static N: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join(format!(
@@ -49,7 +55,14 @@ fn emit_ptx(tag: &str, src: &str) -> String {
     // Pin the profile: the emitted target must not be the build machine's card.
     std::fs::write(
         dir.join(".ysu_hw_profile"),
-        "SM_VERSION=8.9\nGPU_NAME=FmaGate\nSM_COUNT=66\n",
+        {
+            let d = target.trim_start_matches("sm_");
+            format!(
+                "SM_VERSION={}.{}\nGPU_NAME=FmaGate\nSM_COUNT=66\n",
+                &d[..d.len() - 1],
+                &d[d.len() - 1..]
+            )
+        },
     )
     .expect("pin the profile");
     let f = dir.join("k.ysu");
@@ -328,4 +341,147 @@ fn stating_the_fusion_is_free_and_forbidding_it_is_not() {
         "forbidding the fusion produced the SAME instruction stream, so \
          `ptxas` is not contracting here and this fixture measures nothing"
     );
+}
+
+/// The hand-written kernel bodies state it too.
+///
+/// Expression lowering never reaches these: each is a literal PTX string in
+/// `emit_rmsnorm_residual_kernel`, `emit_rope_kernel` and the int8 GEMM's
+/// dequantise epilogue. They were the whole of the remaining contraction set.
+///
+/// The two that go to ZERO are the strong statement: forbidding the fusion
+/// with `.rn` changes not one byte of their SASS, because there is no longer a
+/// fusion to forbid. `rope` keeps its `mul` + `sub` half, which is why the
+/// count here is a floor per kernel rather than "no float multiply anywhere".
+#[test]
+fn the_hand_written_kernels_state_their_fusions() {
+    let want: &[(&str, usize)] = &[
+        ("rmsnorm_residual_4096", 9),
+        ("int8_gemm_scaled", 4),
+        ("rope_64", 1),
+        ("rope_128", 2),
+        ("rope_256", 4),
+    ];
+    for (k, n) in want {
+        let shipped = std::fs::read_to_string(repo().join(format!("tests/{k}.ptx"))).expect(k);
+        let got = body(&shipped).matches("fma.rn.f32").count();
+        assert_eq!(
+            got, *n,
+            "tests/{k}.ptx states {got} fusions where it should state {n}; a \
+             `mul.f32` feeding an `add.f32` claims a rounding `ptxas` does not \
+             perform"
+        );
+        // ...and the EMITTER must still produce that file. Reading the shipped
+        // artifact alone is satisfied by an emitter that has drifted away from
+        // it: reverting one of these four sites left every suite green, because
+        // the committed `.ptx` still said `fma` and nothing compared the two.
+        //
+        // Byte-identity is claimable for exactly these five: emitted PTX
+        // varies with the hardware profile and the autotune cache in general,
+        // and these were checked to reproduce at their own declared target.
+        let target = shipped
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(".target "))
+            .expect("no .target")
+            .trim()
+            .to_string();
+        let src = std::fs::read_to_string(repo().join(format!("tests/{k}.ysu"))).expect("source");
+        let fresh = emit_ptx_at(k, &src, &target);
+        assert_eq!(
+            fresh, shipped,
+            "tests/{k}.ptx is not what the emitter produces from its source, so \
+             the shipped kernel and the compiler have drifted apart"
+        );
+    }
+}
+
+/// The rope rotation's subtract half is deliberately left alone.
+///
+/// `a*b - c` is `fma.rn.f32 d, a, b, -c` and PTX has no operand modifier for
+/// that negation, so stating it costs a `neg.f32` the hardware does not pay.
+/// Without this the previous test is satisfied by "fuse everything", which is
+/// exactly the over-recognition that computes `a*b + c` for `a*b - c`.
+#[test]
+fn the_rope_rotation_still_subtracts() {
+    for k in ["rope_64", "rope_128", "rope_256"] {
+        let b = body(&std::fs::read_to_string(repo().join(format!("tests/{k}.ptx"))).expect(k));
+        assert!(
+            b.contains("sub.f32"),
+            "tests/{k}.ptx has no sub.f32 left, so the rotation's `x*cos - y*sin` \
+             half was folded into an fma without negating its addend"
+        );
+    }
+}
+
+/// Forbidding the fusion is a NO-OP for the two kernels that state all of it.
+///
+/// This is the claim the count above is a proxy for, measured: if `.rn` cannot
+/// change the SASS, the artifact and the machine agree about every rounding.
+#[test]
+fn forbidding_the_fusion_changes_nothing_where_it_is_all_stated() {
+    if Command::new("ptxas").arg("--version").output().is_err() {
+        eprintln!("SKIP: no ptxas");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("y_fma_noop_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let mut checked = 0;
+    for k in ["rmsnorm_residual_4096", "int8_gemm_scaled"] {
+        let src = std::fs::read_to_string(repo().join(format!("tests/{k}.ptx"))).expect(k);
+        let arch = src
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(".target "))
+            .expect("no .target")
+            .trim()
+            .to_string();
+        // Rewrite every plain f32 mul/add/sub to its .rn form, which forbids
+        // contraction and nothing else.
+        let rn: String = src
+            .lines()
+            .map(|l| {
+                let t = l.trim_start();
+                for op in ["mul.f32 ", "add.f32 ", "sub.f32 "] {
+                    if t.starts_with(op) {
+                        return l.replacen(op, &format!("{}rn.f32 ", &op[..4]), 1);
+                    }
+                }
+                l.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let sass = |name: &str, text: &str| -> String {
+            let p = dir.join(format!("{k}_{name}.ptx"));
+            std::fs::write(&p, text).expect("write");
+            let cu = dir.join(format!("{k}_{name}.cubin"));
+            let o = Command::new("ptxas")
+                .arg(format!("-arch={arch}"))
+                .arg("-o")
+                .arg(&cu)
+                .arg(&p)
+                .output()
+                .expect("ptxas");
+            assert!(
+                o.status.success(),
+                "ptxas rejected {k} ({name}):\n{}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            let d = Command::new("nvdisasm")
+                .arg("-c")
+                .arg(&cu)
+                .output()
+                .expect("nvdisasm");
+            String::from_utf8_lossy(&d.stdout).to_string()
+        };
+        let plain = sass("plain", &src);
+        assert!(!plain.is_empty(), "nvdisasm produced nothing for {k}");
+        assert_eq!(
+            plain,
+            sass("rn", &rn),
+            "forbidding the fusion changes {k}'s SASS, so it still contains a \
+             contraction its PTX does not state"
+        );
+        checked += 1;
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(checked, 2, "the kernel list emptied itself");
 }

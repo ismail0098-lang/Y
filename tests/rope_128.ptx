@@ -7,13 +7,13 @@
     .param .u64 Positions_1,
     .param .u64 Out_2
 )
-    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 75
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 73
     // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 128 (to maximize SM occupancy)
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 33.33% (16 active blocks per SM)
 .maxnreg 128
 {
     .reg .b32 %r<24>;
-    .reg .f32 %f<29>;
+    .reg .f32 %f<27>;
     .reg .b64 %rd<11>;
     .reg .pred %p<1>;
 
@@ -56,30 +56,28 @@
     mul.f32 %f11, %f1, %f10;
     mul.f32 %f12, %f2, %f9;
     sub.f32 %f13, %f11, %f12;
-    mul.f32 %f14, %f1, %f9;
-    mul.f32 %f15, %f2, %f10;
-    add.f32 %f16, %f14, %f15;
+    mul.f32 %f14, %f2, %f10;
+    fma.rn.f32 %f15, %f1, %f9, %f14;
     add.u32 %r13, %r5, 1;
-    cvt.rn.f32.u32 %f17, %r13;
-    mul.f32 %f18, %f17, 0fBE549A78;
-    ex2.approx.f32 %f19, %f18;
-    mul.f32 %f20, %f0, %f19;
-    sin.approx.f32 %f21, %f20;
-    cos.approx.f32 %f22, %f20;
-    mul.f32 %f23, %f3, %f22;
-    mul.f32 %f24, %f4, %f21;
-    sub.f32 %f25, %f23, %f24;
-    mul.f32 %f26, %f3, %f21;
-    mul.f32 %f27, %f4, %f22;
-    add.f32 %f28, %f26, %f27;
+    cvt.rn.f32.u32 %f16, %r13;
+    mul.f32 %f17, %f16, 0fBE549A78;
+    ex2.approx.f32 %f18, %f17;
+    mul.f32 %f19, %f0, %f18;
+    sin.approx.f32 %f20, %f19;
+    cos.approx.f32 %f21, %f19;
+    mul.f32 %f22, %f3, %f21;
+    mul.f32 %f23, %f4, %f20;
+    sub.f32 %f24, %f22, %f23;
+    mul.f32 %f25, %f4, %f21;
+    fma.rn.f32 %f26, %f3, %f20, %f25;
     cvt.rn.f16.f32 %r14, %f13;
     and.b32 %r15, %r14, 0xFFFF;
-    cvt.rn.f16.f32 %r16, %f16;
+    cvt.rn.f16.f32 %r16, %f15;
     shl.b32 %r17, %r16, 16;
     or.b32 %r18, %r15, %r17;
-    cvt.rn.f16.f32 %r19, %f25;
+    cvt.rn.f16.f32 %r19, %f24;
     and.b32 %r20, %r19, 0xFFFF;
-    cvt.rn.f16.f32 %r21, %f28;
+    cvt.rn.f16.f32 %r21, %f26;
     shl.b32 %r22, %r21, 16;
     or.b32 %r23, %r20, %r22;
     add.s64 %rd10, %rd5, %rd8;

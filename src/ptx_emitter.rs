@@ -5760,8 +5760,11 @@ declare it as a Q format.\n{}",
                         let f = self.alloc_regf32();
                         writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.s32 {}, {};", f, d[base + j]).unwrap();
                         writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", f, f, sa[mi * 2 + j / 2]).unwrap();
-                        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", f, f, sb[ni * 2 + j % 2]).unwrap();
-                        writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", f, f, bi[ni * 2 + j % 2]).unwrap();
+                        // One `fma.rn.f32` rather than a `mul.f32` and an `add.f32`.
+                        // `ptxas` fuses this pair anyway -- the SASS is byte-identical
+                        // either way -- so the two-instruction form was asking for a
+                        // rounding the hardware does not perform.
+                        writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", f, f, sb[ni * 2 + j % 2], bi[ni * 2 + j % 2]).unwrap();
                         writeln!(&mut self.ptx_buffer, "    st.global.f32 [{}], {};", addr, f).unwrap();
                     }
                 }
@@ -9479,9 +9482,11 @@ declare it as a Q format.\n{}",
             for k in 0..8 {
                 let h = self.alloc_regf32();
                 writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", h, x_f[k], r_f[k]).unwrap();
-                let h_sq = self.alloc_regf32();
-                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", h_sq, h, h).unwrap();
-                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", running_sum, running_sum, h_sq).unwrap();
+                // One `fma.rn.f32` rather than a `mul.f32` and an `add.f32`.
+                // `ptxas` fuses this pair anyway -- the SASS is byte-identical
+                // either way -- so the two-instruction form was asking for a
+                // rounding the hardware does not perform.
+                writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", running_sum, h, h, running_sum).unwrap();
                 h_vals.push(h);
             }
 
@@ -9532,10 +9537,12 @@ declare it as a Q format.\n{}",
             warp_total
         };
 
-        let mean_sq = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", mean_sq, total_sum_sq, Self::f32_to_ptx_hex(1.0 / hidden_dim as f32)).unwrap();
+        // One `fma.rn.f32` rather than a `mul.f32` and an `add.f32`.
+        // `ptxas` fuses this pair anyway -- the SASS is byte-identical
+        // either way -- so the two-instruction form was asking for a
+        // rounding the hardware does not perform.
         let mean_sq_eps = self.alloc_regf32();
-        writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", mean_sq_eps, mean_sq, Self::f32_to_ptx_hex(1e-5)).unwrap();
+        writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", mean_sq_eps, total_sum_sq, Self::f32_to_ptx_hex(1.0 / hidden_dim as f32), Self::f32_to_ptx_hex(1e-5)).unwrap();
         let inv_rms = self.alloc_regf32();
         writeln!(&mut self.ptx_buffer, "    rsqrt.approx.f32 {}, {};", inv_rms, mean_sq_eps).unwrap();
 
@@ -9811,12 +9818,16 @@ declare it as a Q format.\n{}",
                 let out0 = self.alloc_regf32();
                 writeln!(&mut self.ptx_buffer, "    sub.f32 {}, {}, {};", out0, x0_cos, x1_sin).unwrap();
 
-                let x0_sin = self.alloc_regf32();
-                writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x0_sin, x0_f, sin_t).unwrap();
                 let x1_cos = self.alloc_regf32();
                 writeln!(&mut self.ptx_buffer, "    mul.f32 {}, {}, {};", x1_cos, x1_f, cos_t).unwrap();
                 let out1 = self.alloc_regf32();
-                writeln!(&mut self.ptx_buffer, "    add.f32 {}, {}, {};", out1, x0_sin, x1_cos).unwrap();
+                // One `fma.rn.f32` rather than a `mul.f32` and an `add.f32`.
+                // `ptxas` fuses this pair anyway -- the SASS is byte-identical
+                // either way -- so the two-instruction form was asking for a
+                // rounding the hardware does not perform.
+                // `ptxas` fuses the FIRST operand's multiply when both are
+                // eligible, measured on this rotation, so this fuses x0*sin.
+                writeln!(&mut self.ptx_buffer, "    fma.rn.f32 {}, {}, {}, {};", out1, x0_f, sin_t, x1_cos).unwrap();
 
                 out_vals.push(out0);
                 out_vals.push(out1);

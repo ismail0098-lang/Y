@@ -59,13 +59,17 @@ def main():
     # ...and the guard above compares one function against ITSELF, so it catches
     # a hardcoded LIST and is SILENT about a wrong MEASUREMENT.  Both sides move
     # together, which is the same silence a generated description has.  These
-    # two are the control, and they are the two directions the obvious metric
-    # (`FFMA(sass) - fma(ptx) > 0`) gets wrong:
-    #   swiglu  fuses at HALF precision, so its FFMA count is 0 either way and
-    #           the metric misses it entirely;
-    #   fp8     has 11 FFMA the PTX did not ask for and forbidding the fusion
-    #           changes nothing, so the metric invents a contraction.
-    for k, want in (('gemm_f16_swiglu_512', True), ('gemm_fp8_512', False)):
+    # two are the control, and each pins a direction a previous reading of this
+    # number got wrong:
+    #   rope    still fuses -- its `mul` + `sub` half cannot be stated, because
+    #           `fma.rn.f32 d, a, b, -c` has no operand modifier in PTX.  A
+    #           metric that stopped detecting a real fusion would drop it.
+    #   swiglu  does NOT fuse: FFMA is 0 in both builds and what moves under
+    #           `.rn` is FSEL 4 -> 8 and IMAD 202 -> 206, a scheduling
+    #           difference.  The published claim that it fused at HALF
+    #           precision was a hypothesis asserted as fact; `HFMA2` appears in
+    #           neither build.  "The SASS moves" is not "ptxas fused".
+    for k, want in (('rope_64', True), ('gemm_f16_swiglu_512', False)):
         if not os.path.exists(f'corpus/{k}.ptx'): continue
         if (k in measured) != want:
             print(f'FAIL: {k} is {"absent from" if want else "in"} the contraction '
