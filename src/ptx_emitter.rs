@@ -1257,6 +1257,128 @@ impl PtxEmitter {
         dst
     }
 
+    /// Lowers a source-level `a*b + c` over F32 as one `fma.rn.f32`.
+    ///
+    /// This is not a peephole and needs no dataflow: a *sub-expression* has
+    /// exactly one use by construction, so the multiply this recognises cannot
+    /// be read anywhere else and contracting it cannot duplicate work.
+    ///
+    /// It says what the machine already does. `ptxas` is free to contract a
+    /// `mul.f32` feeding an `add.f32` into a single `FFMA`, and on this corpus
+    /// it takes that freedom: measured at `-O1`, the SASS for the `fma.rn.f32`
+    /// form is **byte-identical** to the SASS for the two-instruction form.
+    /// So the emitted PTX was claiming two roundings where one was performed,
+    /// and `tools/ptxas_tval` REFUTED the shipped kernel for exactly that -
+    /// `BASE`, `STEP`, `LOOPCOND` and `ENTRY` all proved and the accumulated
+    /// VALUE could not be shown equal.
+    ///
+    /// The other repair is to forbid the fusion with `mul.rn.f32` +
+    /// `add.rn.f32`. That also validates, and it is the worse one: it changes
+    /// the instruction stream, and it leaves the kernel rounding twice where
+    /// the hardware rounds once. Stating what happens is free; forbidding it
+    /// is not.
+    ///
+    /// Returns `None` when the shape does not apply, in which case the caller
+    /// emits exactly what it emitted before. When the shape applies but the
+    /// operands are not float, the operands have already been emitted, so this
+    /// finishes the job through `emit_binary` rather than handing back a
+    /// half-emitted expression.
+    fn try_emit_fma(
+        &mut self,
+        op: &BinaryOp,
+        left: &Expr,
+        right: &Expr,
+        cache_policy: Option<&CachePolicyAttr>,
+        hw_profile: &HardwareProfile,
+    ) -> Option<String> {
+        if !matches!(op, BinaryOp::Add) {
+            return None;
+        }
+        // Which side is the multiply. `mul_first` is kept because the operands
+        // must be emitted in the order the two-instruction path would emit
+        // them: any program that does NOT take the float branch below has to
+        // come out byte-identical, and operand emission has side effects.
+        let (a, b, c, mspan, mul_first) = match (left, right) {
+            (
+                Expr::BinaryOp {
+                    op: BinaryOp::Mul,
+                    left: a,
+                    right: b,
+                    span,
+                },
+                _,
+            ) => (&**a, &**b, right, span.clone(), true),
+            (
+                _,
+                Expr::BinaryOp {
+                    op: BinaryOp::Mul,
+                    left: a,
+                    right: b,
+                    span,
+                },
+            ) => (&**a, &**b, left, span.clone(), false),
+            _ => return None,
+        };
+
+        // The multiply's operands come first when the multiply is on the left,
+        // because that is the order `emit_expr(left)` would have produced them
+        // in. Whether the fused form applies is decided from their types
+        // BEFORE `c` is emitted -- deciding it afterwards would move the
+        // integer `mul.lo` past `c`'s own instructions, which is a reordering
+        // rather than a fusion. Measured: it moved the emitted PTX of
+        // FOURTEEN integer kernels that have no float in them at all.
+        let (ar, br, cr) = if mul_first {
+            let ar = self.emit_expr(a, cache_policy, hw_profile);
+            let br = self.emit_expr(b, cache_policy, hw_profile);
+            if !Self::promote(self.ty_of(&ar), self.ty_of(&br)).is_float()
+                || ar.is_empty()
+                || br.is_empty()
+            {
+                // Emit the multiply where it would have been emitted, then
+                // finish through the ordinary path: byte-identical output.
+                let prod = self.emit_binary(BinaryOp::Mul, &ar, &br, &mspan);
+                let cr = self.emit_expr(c, cache_policy, hw_profile);
+                return Some(self.emit_binary(BinaryOp::Add, &prod, &cr, &mspan));
+            }
+            let cr = self.emit_expr(c, cache_policy, hw_profile);
+            (ar, br, cr)
+        } else {
+            // `c + a*b` already emits `c` first, so no such care is needed.
+            let cr = self.emit_expr(c, cache_policy, hw_profile);
+            let ar = self.emit_expr(a, cache_policy, hw_profile);
+            let br = self.emit_expr(b, cache_policy, hw_profile);
+            (ar, br, cr)
+        };
+
+        // An empty register is an expression that refused; let the ordinary
+        // path report it rather than folding a refusal into an `fma`.
+        let product = Self::promote(self.ty_of(&ar), self.ty_of(&br));
+        let sum = Self::promote(product, self.ty_of(&cr));
+        if sum.is_float() && !ar.is_empty() && !br.is_empty() && !cr.is_empty() {
+            let a32 = self.emit_convert(&ar, ScalarTy::F32);
+            let b32 = self.emit_convert(&br, ScalarTy::F32);
+            let c32 = self.emit_convert(&cr, ScalarTy::F32);
+            let dst = self.alloc_ty(ScalarTy::F32);
+            writeln!(
+                &mut self.ptx_buffer,
+                "    fma.rn.f32 {}, {}, {}, {};",
+                dst, a32, b32, c32
+            )
+            .unwrap();
+            return Some(dst);
+        }
+
+        // Integer `a*b + c`, or a refusal. Finish through the ordinary path,
+        // with the multiply carrying the multiply's own span exactly as the
+        // recursive `emit_expr` would have.
+        let prod = self.emit_binary(BinaryOp::Mul, &ar, &br, &mspan);
+        Some(if mul_first {
+            self.emit_binary(BinaryOp::Add, &prod, &cr, &mspan)
+        } else {
+            self.emit_binary(BinaryOp::Add, &cr, &prod, &mspan)
+        })
+    }
+
     /// Records that `name` is a recognised intrinsic the backend cannot lower
     /// to correct PTX, and why. The build fails; no `.ptx` is written.
     ///
@@ -2935,6 +3057,11 @@ declare it as a Q format.\n{}",
             Expr::BinaryOp {
                 op, left, right, span,
             } => {
+                // `a*b + c` over F32 becomes one `fma.rn.f32`, which is what
+                // `ptxas` produces from the two-instruction form anyway.
+                if let Some(r) = self.try_emit_fma(op, left, right, cache_policy, hw_profile) {
+                    return r;
+                }
                 let l_reg = self.emit_expr(left, cache_policy, hw_profile);
                 let r_reg = self.emit_expr(right, cache_policy, hw_profile);
                 self.emit_binary(op.clone(), &l_reg, &r_reg, span)

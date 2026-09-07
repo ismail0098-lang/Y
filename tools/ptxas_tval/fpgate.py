@@ -56,7 +56,35 @@ def main():
         print(f'FAIL: fpgate is not measuring its own set -- it reports {len(ks)} '
               f'kernels where contract.py measures {len(measured)}')
         return 1
-    print(f'{len(ks)} kernels where ptxas emitted an FFMA the PTX did not ask for\n')
+    # ...and the guard above compares one function against ITSELF, so it catches
+    # a hardcoded LIST and is SILENT about a wrong MEASUREMENT.  Both sides move
+    # together, which is the same silence a generated description has.  These
+    # two are the control, and they are the two directions the obvious metric
+    # (`FFMA(sass) - fma(ptx) > 0`) gets wrong:
+    #   swiglu  fuses at HALF precision, so its FFMA count is 0 either way and
+    #           the metric misses it entirely;
+    #   fp8     has 11 FFMA the PTX did not ask for and forbidding the fusion
+    #           changes nothing, so the metric invents a contraction.
+    for k, want in (('gemm_f16_swiglu_512', True), ('gemm_fp8_512', False)):
+        if not os.path.exists(f'corpus/{k}.ptx'): continue
+        if (k in measured) != want:
+            print(f'FAIL: {k} is {"absent from" if want else "in"} the contraction '
+                  f'set. That is the metric answering by inference rather than by '
+                  f'forbidding the fusion and re-assembling.')
+            return 1
+    print(f'{len(ks)} kernels where ptxas actually fuses a mul.f32 into an add.f32\n')
+    # The doc quotes this number, and it has been wrong twice -- once as a
+    # hardcoded 9, once as a derived 16.  Check it here, where the measurement
+    # is, rather than leaving a third copy to go stale on its own.
+    doc = os.path.join('..', '..', 'docs', 'ptxas_translation_validation.md')
+    if os.path.exists(doc):
+        m = re.search(r'\*\*Contraction\*\* [^\n]*?\*\*(\d+) kernels\*\*', open(doc).read())
+        if not m:
+            print('FAIL: the doc no longer states a contraction count for this to check')
+            return 1
+        if int(m.group(1)) != len(ks):
+            print(f'FAIL: the doc says {m.group(1)} kernels contract; measured {len(ks)}')
+            return 1
     print(f'{"kernel":38s}{"gap":>4}   what still blocks it')
     unlocked = []
     for k in ks:
@@ -69,14 +97,26 @@ def main():
         print(f'{k:38s}{n:4d}   {why}')
         if n == 0 and v == 'VALIDATED': unlocked.append(k)
 
-    # The one kernel a repaired build exists for -- and the pair is the result,
-    # so BOTH halves are asserted rather than just the green one.
+    # The one kernel a repaired build exists for -- and the PAIR is the result,
+    # so both halves are asserted rather than just the green one.  The emitter
+    # says `fma.rn.f32` now, so the SHIPPED kernel is the validated one and the
+    # refutation lives on in `_muladd`, the form it used to emit.  Asserting
+    # only the green half would be satisfied by a validator that never refutes.
     print()
-    for v, want in (('naive_gemm_f32', 'UNPROVED'), ('naive_gemm_f32_fma', 'VALIDATED')):
+    bad = 0
+    for v, want in (('naive_gemm_f32', 'VALIDATED'), ('naive_gemm_f32_muladd', 'UNPROVED')):
         got, why = structural(v, o1=True)
         mark = 'ok' if got == want else f'CHANGED (wanted {want})'
         print(f'  o1/{v:24s} {got:10s} {mark:28s} {why if got != "VALIDATED" else ""}')
-        if got == 'VALIDATED' and v.endswith('_fma'): unlocked.append(v)
+        if got != want: bad += 1
+        if got == 'VALIDATED' and not v.endswith('_muladd'): unlocked.append(v)
+    # A printed CHANGED is not a gate.  This pair is a STANDING RESULT in both
+    # directions -- the shipped kernel must validate, and the form it replaced
+    # must still be refuted, because a corpus containing nothing the validator
+    # refutes cannot be told apart from a validator that always says VALIDATED.
+    if bad:
+        print(f'\nFAIL: {bad} of the two standing verdicts moved.')
+        return 1
 
     print(f'\nkernels the fma.rn repair unlocks today: {len(unlocked)}'
           f'{" -- " + ", ".join(unlocked) if unlocked else ""}')

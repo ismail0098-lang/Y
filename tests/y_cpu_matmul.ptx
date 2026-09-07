@@ -10,13 +10,13 @@
     .param .b32 N_4,
     .param .b32 K_5
 )
-    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 44
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 43
     // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 64 (to maximize SM occupancy)
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 66.67% (4 active blocks per SM)
 .maxnreg 64
 {
     .reg .b32 %r<15>;
-    .reg .f32 %f<5>;
+    .reg .f32 %f<4>;
     .reg .b64 %rd<12>;
     .reg .pred %p<12>;
 
@@ -67,9 +67,8 @@
     and.pred %p8, %p6, %p7;
     @%p8 ld.global.f32 %f2, [%rd8];
     @!%p8 mov.f32 %f2, 0.0;
-    mul.f32 %f3, %f1, %f2;
-    add.f32 %f4, %f0, %f3;
-    mov.f32 %f0, %f4;
+    fma.rn.f32 %f3, %f1, %f2, %f0;
+    mov.f32 %f0, %f3;
     add.u32 %r7, %r7, 1;
     bra $LOOP_START_4;
     $LOOP_END_5:
