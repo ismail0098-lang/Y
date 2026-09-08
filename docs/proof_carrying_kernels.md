@@ -2259,6 +2259,19 @@ cannot be assumed away: the same validator **refutes** a float kernel because
 `ptxas` contracts `mul.f32`+`add.f32` into an `FFMA` that rounds once where the
 PTX rounds twice.
 
+> **SUPERSEDED · 2026-09-08 — the count in that quotation was already wrong when
+> it was published, and it was ungated.** `regress.sh` asserts **sixteen**
+> standing rows over **thirteen** distinct subjects, and had for three
+> increments; the gate asserted the item's *route* and never its arithmetic, and
+> the error is in the safe direction, so nothing noticed. The same sentence was
+> quoted verbatim here and in `README.md`, so one ungated number was published
+> three times. The count is gone rather than refreshed — it is not what the
+> claim rests on, and *rows* versus *subjects* is exactly the ambiguity that had
+> already bitten the README. The item now states the ABSENCE and the gate
+> CHECKS it, reading the entry names out of the PTX the compiler just emitted
+> and the subjects out of `regress.sh`. The quotation above is kept as the text
+> that shipped on 2026-09-05.
+
 **A `nat` literal is unary, and at a production length that is a landmine.**
 `Definition seq_len : nat := 270549122` is 270 million constructors, and every
 normalising tactic would try to evaluate it. The certificate emits

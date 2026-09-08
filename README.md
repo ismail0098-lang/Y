@@ -1390,13 +1390,24 @@ order-independence of the atomics; what it *states* is the boundary:
 - `ptxas`, which turns this PTX into the SASS the GPU runs. It is closed
   source and is NOT covered by anything above.
   NOT CHECKED. Closing it means validating THIS kernel per-translation
-  with `tools/ptxas_tval/`, which exists and currently covers six
-  kernels; this is not one of them, so for this kernel `ptxas` is
-  TRUSTED and not validated.
+  with `tools/ptxas_tval/`, whose standing results are the subjects its
+  `regress.sh` asserts. NONE of this module's entry points is among
+  them, so for this kernel `ptxas` is TRUSTED and not validated.
 ```
 
-Both halves of that are measured rather than asserted — no committed `.ptx`
-contains `attn_accum`, so the kernel really is outside the validator's corpus.
+That absence is **checked, not remembered**: the gate reads the entry names out
+of the PTX the compiler just emitted and the subjects out of `regress.sh`, so
+neither a renamed kernel nor a widened corpus can leave the sentence standing.
+
+It used to say *"which exists and currently covers six kernels"*, and that
+number had been wrong for three increments — the validator asserts sixteen rows
+over thirteen subjects. Nothing caught it because the gate asserted the item's
+*route* and never its arithmetic, and because the error is in the safe direction:
+understating the corpus cannot make a trusted item look validated. The same
+sentence was quoted verbatim here and in `docs/proof_carrying_kernels.md`, so one
+ungated number was published three times. The fix is not a fresher number — a
+count is not what the claim rests on, and *rows* versus *subjects* is exactly the
+ambiguity that has already bitten this file once.
 
 **The obligation bites, which is what separates a certificate from paperwork.**
 The kernel reduces into a 64-bit accumulator, so exactness needs
@@ -1683,9 +1694,33 @@ apply to them.
 > substance is untouched — two integer instructions either way — which is
 > exactly why it survived being transcribed forward three times.
 
-And the one kernel that could carry it is a stub: `int8_gemm.ptx` is 89 lines
-with 2 `mma` and **zero** `cp.async`, `ldmatrix` or `bar.sync`, against the f16
-kernel's 964 / 65 / 22 / 24 / 7.
+And the one kernel that could carry it is a stub — no shared-memory staging at
+all. Counted as **instructions**, not as lines that mention one:
+
+```
+kernel                lines  mma.sync  cp.async  ldmatrix  bar.sync
+int8_gemm.ptx           134         1         0         0         0
+gemm_f16_4096.ptx       964        64        21        24         7
+```
+
+> **Those figures read `89 lines with 2 mma … against 964 / 65 / 22 / 24 / 7`
+> until 2026-09-08, and the correction above had already been written.** The
+> line count was three increments stale, and **two of the five f16 terms were a
+> raw `grep -c`, which counts the comment naming the instruction** — 65 against
+> 64 real `mma.sync`, 22 against 21 real `cp.async`. That is the identical
+> defect the note four lines above corrects, in the sentence below it: *a
+> counting convention fixed at one site is not fixed*.
+> `python3 tools/ptxas_tval/docgate.py` re-derives the table from the committed
+> artifacts, so neither term can drift again.
+
+**The staging bring-up would widen the validator's gap, not close it**, which
+is the answer to "build the staging, then validate it". Measured before writing
+any: the int8 kernel is 3 PTX / 4 SASS opcodes short, and staging is exactly the
+difference between that and the f16 kernel's 9 / 13 — it imports the whole
+`cp.async` / `ldmatrix` family and the `LDGSTS` / `DEPBAR` / `WARPSYNC` family,
+and adds back edges to a kernel already refused for having three. The perf
+increment and the validation increment point in **opposite directions** here;
+`docs/ptxas_translation_validation.md` carries the table.
 
 What *is* available is the SCHEDULE half, because `proofs/ExactGemmTiling.v`
 mentions `f16`, `f32`, `float`, `int16` and `i32` **zero times** — it is `nat`

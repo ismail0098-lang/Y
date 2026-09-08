@@ -2,9 +2,10 @@
 //!
 //! `proofs/ExactPvExact.v` proves what the emitted PTX computes;
 //! `tools/ptxas_tval/loopval.py` validates that PTX against the SASS `ptxas`
-//! produced from it. Until this file those two sets were DISJOINT -- the six
-//! validated kernels had no proofs and the three proved GPU kernels are not in
-//! the validator's corpus -- and `docs/ptxas_translation_validation.md` said
+//! produced from it. Until this file those two sets were DISJOINT -- every
+//! kernel the validator had a standing result for carried no proof, and the
+//! three proved GPU kernels were not in its corpus -- and
+//! `docs/ptxas_translation_validation.md` said
 //! otherwise, calling `exact_pv` "the kernel that carries three Rocq files"
 //! when it carried none. This gate asserts the overlap instead of describing
 //! it, in both directions.
@@ -300,10 +301,20 @@ fn the_attention_kernel_is_proved_and_not_validated() {
              trusted-and-not-validated in the same commit."
         );
     }
-    let cert = std::fs::read_to_string(repo().join("src/exact_attention_certificate.rs"))
-        .expect("src/exact_attention_certificate.rs");
+    // Read the RENDERED certificate, not the source file. The first version of
+    // this control matched a literal against `src/exact_attention_certificate.rs`
+    // and broke the moment that sentence was re-wrapped across two source lines
+    // -- the emitted string was byte-identical and the claim unchanged, so the
+    // gate was pinned to a text FORM rather than to what the certificate says.
+    // A certificate's claim is what it renders; that is the thing to assert on.
+    let rendered = y::exact_attention_certificate::render(
+        &y::exact_attention_certificate::Certificate { head_dim: 128, seq_len: 4096 },
+        "test",
+        "attention_probe_certificate",
+    );
+    let flat = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        cert.contains("TRUSTED and not validated"),
+        flat.contains("TRUSTED and not validated"),
         "the attention certificate no longer records `ptxas` as trusted; if \
          that changed, this control and the doc must change with it"
     );

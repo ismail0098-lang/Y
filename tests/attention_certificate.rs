@@ -331,3 +331,174 @@ fn suppression_is_available_and_says_so() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The subjects `tools/ptxas_tval/regress.sh` asserts a standing result for.
+///
+/// DERIVED, never listed. A second copy of that list in this file is the drift
+/// the whole trust-boundary machinery exists to prevent, and it is exactly how
+/// the count this test replaced went stale: a number remembered in `src/` while
+/// the thing it described moved three times.
+fn validator_subjects(repo: &PathBuf) -> Vec<String> {
+    let src = std::fs::read_to_string(repo.join("tools/ptxas_tval/regress.sh"))
+        .expect("read regress.sh");
+    // Comments first. `regress.sh` explains each fixture in prose directly
+    // above it, and those paragraphs name the very kernels the assertions are
+    // about - so a raw scan finds a subject in the sentence saying why it is
+    // there. Same trap as guarding a mutation on a word that also appears in
+    // the paragraph explaining it.
+    let code: String = src
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |path: &str| {
+        let stem = path.rsplit('/').next().unwrap_or(path);
+        let stem = stem.strip_suffix(".ptx").unwrap_or(stem).to_string();
+        if !stem.is_empty() && !out.contains(&stem) {
+            out.push(stem);
+        }
+    };
+    for tok in code.split(|c: char| c.is_whitespace() || c == '"') {
+        // The straight-line loop names `<dir>/<stem>.ptx <dir>/<stem>.sass`;
+        // the loop/shared-memory loop names `<tool> <dir>/<stem>` and appends
+        // the extensions itself.
+        if let Some(p) = tok.strip_suffix(".ptx") {
+            push(p);
+        } else if tok.contains('/') && !tok.contains('.') && !tok.starts_with('$') {
+            push(tok);
+        }
+    }
+    out
+}
+
+/// The `ptxas` trust item must state a CHECKED claim, not a remembered count.
+///
+/// It used to read "which exists and currently covers six kernels". The
+/// validator asserts sixteen standing rows over thirteen subjects, and had for
+/// three increments; `the_certificate_states_the_ptxas_boundary` asserts the
+/// item's ROUTE and never the number, so nothing noticed. The same sentence was
+/// quoted verbatim in `README.md` and `docs/proof_carrying_kernels.md`, so one
+/// ungated number was published three times.
+///
+/// What the item needs to say is not a count - it is that THIS kernel is
+/// outside that corpus. So this asserts three things:
+///
+/// 1. the covered set is DERIVED from `regress.sh`, with a floor, and with a
+///    positive control through the SAME parse (an all-clear is what a parse
+///    that recovered nothing also reports);
+/// 2. none of the entry points the compiler ACTUALLY EMITTED is in it - the
+///    names come out of the PTX rather than out of a literal, so a renamed
+///    kernel cannot leave a vacuous absence check passing;
+/// 3. the item states no count of kernels, in words or digits.
+#[test]
+fn the_ptxas_item_is_a_checked_claim_and_not_a_remembered_count() {
+    let repo = repo();
+    let subjects = validator_subjects(&repo);
+
+    // Floor, and the positive control through the same parse. Without these a
+    // parser that recovered NOTHING satisfies the absence check perfectly.
+    assert!(
+        subjects.len() >= 12,
+        "the regress.sh parse recovered only {} subject(s), so the absence \
+         check below is asserting nothing: {subjects:?}",
+        subjects.len()
+    );
+    for known in ["bn254_permute", "exact_pv", "naive_gemm_f32", "smem_roundtrip"] {
+        assert!(
+            subjects.iter().any(|s| s == known),
+            "the parse did not recover the known standing subject {known:?}, so \
+             it cannot be trusted to say a kernel is ABSENT: {subjects:?}"
+        );
+    }
+
+    // The entry names the compiler really wrote, this run.
+    let dir = std::env::temp_dir().join(format!(
+        "y_attn_route_{}_{}",
+        std::process::id(),
+        NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let (ptx, _, _) = emit(&dir, 128, 4096, true);
+    let entries: Vec<String> = ptx
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix(".visible .entry "))
+        .map(|r| r.split(['(', ' ']).next().unwrap_or("").to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        entries.len() >= 2,
+        "recovered {} entry point(s) from the emitted PTX, so the absence check \
+         is vacuous: {entries:?}",
+        entries.len()
+    );
+
+    for e in &entries {
+        assert!(
+            !subjects.contains(e),
+            "the certificate says `ptxas` is TRUSTED and not validated for this \
+             kernel, but `{e}` IS a standing subject of tools/ptxas_tval/. The \
+             trust item is now understating what is checked - move it to \
+             Check::Pinned rather than leaving a false NOT CHECKED."
+        );
+    }
+
+    // And the item must carry no count, because a count is not what the claim
+    // rests on and it is what went stale.
+    let text = render(
+        &Certificate { head_dim: 128, seq_len: 4096 },
+        "test",
+        "attention_probe_certificate",
+    );
+    let ptxas_line: String = text
+        .lines()
+        .skip_while(|l| !l.contains("tools/ptxas_tval/"))
+        .take(12)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        ptxas_line.contains("tools/ptxas_tval/"),
+        "the ptxas item is not in the rendered certificate at all"
+    );
+    // Every noun the corpus could be counted in, not just "kernel". The
+    // validator's size has THREE readings that all go stale together - sixteen
+    // rows over thirteen subjects over some number of kernels - and it is
+    // exactly that rows-versus-subjects ambiguity that has already bitten the
+    // README once. A gate that forbade only one of the three nouns would let
+    // the next author write the same claim in a different unit.
+    let words = [
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+    ];
+    let nouns = ["kernel", "row", "subject", "result"];
+    let mut counts: Vec<String> = Vec::new();
+    for w in words {
+        for n in nouns {
+            counts.push(format!("{w} {n}"));
+        }
+        counts.push(format!("covers {w}"));
+    }
+    for bad in &counts {
+        assert!(
+            !ptxas_line.to_lowercase().contains(bad.as_str()),
+            "the ptxas trust item states a COUNT of covered kernels ({bad:?}). \
+             That number is not what the claim rests on and nothing keeps it \
+             true: it was published as `six` while the validator asserted \
+             sixteen rows over thirteen subjects. State the absence, which is \
+             load-bearing and checked above.\n{ptxas_line}"
+        );
+    }
+    let digits: Vec<&str> = ptxas_line
+        .split_whitespace()
+        .filter(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .collect();
+    assert!(
+        digits.is_empty(),
+        "the ptxas trust item carries a bare number ({digits:?}); see above"
+    );
+}
+
+static NEXT_DIR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

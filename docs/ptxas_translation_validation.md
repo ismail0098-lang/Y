@@ -976,27 +976,37 @@ only because `loopval` refuses by name and never guesses.
 ```
 48 kernels with PTX control flow; 0 validated
 
- 30  PTX: more than one back edge (this validator handles exactly one)
+ 32  PTX: more than one back edge (this validator handles exactly one)
   9  PTX: loop finder found NO back edge
   2  SASS prologue branches to .L_x_0 rather than the loop exit
-  2  the SASS zero-trip guard is not the last prologue instruction
   2  SASS: more than one back edge
   1  SASS back edge is unconditional
   1  PTX loop body has more than one branch
   1  SASS: loop finder found NO back edge
 ```
 
-**32 of 48 refuse for one reason: more than one back edge.** That includes all
+**34 of 48 refuse for one reason: more than one back edge.** That includes all
 23 FP16 tensor-core GEMMs, which have three. So the recorded "21–27 opcodes
 each" understates them — they are behind an opcode gap *and* behind a structural
 one, and only the first had been measured.
+
+> **This block was stale, and `python3 docgate.py` is what stops it happening
+> again.** It read `30` and carried a `2 the SASS zero-trip guard is not the
+> last prologue instruction` bucket. Those two kernels are `int8_gemm` and
+> `int8_gemm_scaled`, and they moved because an EMITTER change moved them: the
+> increment that grid-strided the int8 output tiles in x and y gave that kernel
+> two more back edges, taking it from one bucket to another without re-running
+> this census. The arithmetic closes exactly — 30 + 2 = 32, and the zero-trip
+> bucket is now empty — so the old figures were right when they were written.
+> A doc census with no gate is a measurement that decays whenever the thing it
+> measures is edited by someone reading a different file.
 
 #### …and it is not the largest lever, because it unblocks nothing alone
 
 This section used to end "supporting more than one back edge is the single
 largest lever in the corpus, and it needs no new opcode semantics". The second
 clause is true and the first does not follow from it, so it was crossed against
-the opcode census: **of the 30 kernels in that bucket, 0 would validate after
+the opcode census: **of the kernels in that bucket, 0 would validate after
 the lift.** Every one also has an opcode gap. The smallest are `bn254_fr_mul`
 at 2 (`CALL.REL.NOINC`, `IMAD.MOV`) and `y_cpu_matmul` at 3; the 23 GEMMs are
 at 20–26.
@@ -1024,6 +1034,43 @@ apart from more-than-one although `loopval` phrases both as "has N back edges".
 They are opposite problems — the loop finder coming up empty on a kernel that
 demonstrably branches, versus capacity — and the first aggregation written here
 merged them and hid nine kernels behind thirty.
+
+### The staging bring-up would WIDEN this gap, and that is the pricing
+
+The programme's largest standing item is the tensor-core gap: 923 of the 925
+`mma.sync` this compiler emits are floating point and carry no proof of the
+value at all, and the one kernel that could carry the full argument is `int8`,
+which is a stub with no shared-memory staging and sits at 0.40x cuBLASLt. The
+obvious reading is that building the staging is simultaneously the performance
+increment and the route to a real tensor-core kernel under the validator. It is
+not. Measured before writing any of it:
+
+```
+kernel            PTX gap                        SASS gap
+int8_gemm         3   bra, mma.sync…s8,          4   S2UR, CS2R,
+                      red.global.add.s32             IMMA.16832.S8.S8,
+                                                     RED.E.ADD.S32.STRONG.GPU
+gemm_f16_1024     9   + cp.async.cg.shared…,    13   + LDGSTS.E.BYPASS.128,
+                      cp.async.commit_group,         LDGDEPBAR, DEPBAR.LE,
+                      cp.async.wait_group,           WARPSYNC, HMMA.16816.F32 …
+                      ldmatrix ×2 …
+```
+
+Staging is exactly the difference between those two rows. Adding it to the int8
+kernel imports the whole `cp.async` / `ldmatrix` family on the PTX side and the
+`LDGSTS` / `DEPBAR` / `WARPSYNC` family on the SASS side — roughly **3 → 8 and
+4 → 8** — and it adds back edges to a kernel that is already refused for having
+three. **So the perf increment and the validation increment point in opposite
+directions for this kernel**, and the staging should be ranked and justified as
+a throughput item on its own terms rather than as a step toward a validated
+tensor-core GEMM.
+
+What the pricing says to build instead, if the goal is validation: the int8
+kernel's opcode gap is small and *its tensor-core instruction is the only one in
+this corpus whose semantics fit the existing bitvector model* — an int8 `mma` is
+a wrapping sum of 32 int8 products into int32, where every f16 `mma` needs a
+float theory and an unspecified internal summation order. That, plus the
+multi-back-edge lift, is the route; neither is the staging.
 
 ### Two ways the opcode census under-reports, both measured
 
@@ -1061,6 +1108,7 @@ python3 cbank_abi.py   # referee the const-bank ABI against ptxas AND the device
 python3 fpsem_abi.py   # referee the seven float facts against the device
 python3 fpgate.py      # which contraction kernels a repair unlocks, by asking
 python3 unroll.py      # did ptxas unroll?  (it did, x4, at -O2 and above)
+python3 docgate.py     # the two doc figures that describe a MEASUREMENT
 ```
 
 Mutation tables — each carries a **control row, which is read first**, because a
