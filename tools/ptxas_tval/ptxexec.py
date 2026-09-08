@@ -279,6 +279,21 @@ class Ptx:
             self.wf(ops[0], self.sym['fp']('FSUB', self.F(ops[1]), self.F(ops[2]), side='ptx'), g)
         elif op in ('fma.rn.f32',):
             self.wf(ops[0], self.sym['fp']('FFMA', self.F(ops[1]), self.F(ops[2]), self.F(ops[3]), side='ptx'), g)
+        elif op in ('neg.f32',):
+            # A SIGN FLIP, modelled as the same uninterpreted FNEG the SASS side
+            # gives a `-R` operand modifier -- which is what ptxas emits for
+            # this whenever it can fold it, and it folds it in all 23 corpus
+            # occurrences.
+            #
+            # The UN-FOLDABLE lowering is a different function and the model
+            # says so.  Feed a `neg.f32` straight to a store and ptxas emits
+            # `FADD Rd, -Rx, -RZ`, which is ARITHMETIC: measured on sm_89 it
+            # returns the canonical quiet NaN 0x7fffffff for every NaN input,
+            # discarding the payload AND the sign, where a sign flip preserves
+            # both (8 of 32 vectors differ; `fpsem_abi.py`).  Here that is
+            # `FADD(FNEG(x), FNEG(0))` against the PTX side's `FNEG(x)` -- two
+            # terms that do not meet, so such a kernel is refused, correctly.
+            self.wf(ops[0], self.sym['fp']('FNEG', self.F(ops[1]), side='ptx'), g)
         elif op == 'mov.f32':
             self.wf(ops[0], self.F(ops[1]), g)
         elif op == 'ld.global.f32':

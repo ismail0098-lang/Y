@@ -20,7 +20,7 @@ minutes to hours per kernel.
 
 ```sh
 ./build_corpus.sh    # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
-./regress.sh         # ALL nine standing results, ~50 s
+./regress.sh         # ALL thirteen standing results, ~50 s
 python3 fpsem_abi.py # referee FSEL and f32-add commutativity against the device
 ```
 
@@ -31,10 +31,17 @@ shipped GEMM and it VALIDATES, because the emitter says `fma.rn.f32`;
 `FFMA` on a byte-identical instruction stream - and it is refuted. A run in
 which that row turns green is a regression, because a corpus containing
 nothing the validator refutes cannot be told apart from a validator that
-always says VALIDATED. `regress.sh` ASSERTS all ten standing results in the
+always says VALIDATED. `regress.sh` ASSERTS all thirteen standing results in the
 direction each reads and exits non-zero if any of them moves; `fpgate.py`
 asserts the same pair independently, and checks the doc's contraction count
 against the measurement.
+
+`neg/unfoldable` is the SECOND refutation and it is a different kind:
+`neg/folded` holds the SAME PTX opcode and VALIDATES, so the pair says the
+refusal is about the LOWERING rather than about the opcode. `ptxas` has no bare
+float-negate instruction -- where it can it folds the negation into an operand
+modifier (a bit-exact sign flip, measured), and where it cannot it emits
+`FADD Rd, -Rx, -RZ`, which is arithmetic and canonicalises every NaN.
 
 `corpus/` and `o1/` are generated and not committed: a `.cubin` is a machine-specific ELF
 and a `.sass` is a disassembly of one. All 66 rebuild byte-identically to the
@@ -47,7 +54,7 @@ ones the published results were measured on.
 | `ptxexec.py` `sassexec.py` | the two symbolic executors |
 | `smem.py` | shared memory as a z3 array; barriers as an uninterpreted `H_k` |
 | `fpmode.py` | float macro-op table, with a `validated` flag per identification |
-| `fpsem_abi.py` `fpsem_abi.c` | referee `FSEL` and f32-add commutativity against the device |
+| `fpsem_abi.py` `fpsem_abi.c` | referee five float facts against the device: `FSEL`, f32-add commutativity, the `-R` sign flip, the un-foldable `neg.f32` lowering, and `a-b == a+(-b)` |
 | `mulmode.py` `conc.py` | the multiplier ladder (`uf` / `wide` / `direct`) and concretisation |
 | `batch.py` | the obligations, and `same_if` — guard-relative address matching |
 | `tval.py` `loopval.py` `smemval.py` | drivers: straight-line, loop, shared memory |

@@ -71,6 +71,22 @@ FADD_PAIRS = [
     (0x3F800000, 0x33800000),   # 1.0 + 2^-24  (a rounding tie)
 ]
 
+# The negation vectors.  A sign flip is total and exact; an ARITHMETIC
+# implementation of one is entitled to canonicalise a NaN, flush a denormal or
+# normalise a signed zero, so these are the patterns that separate the two.
+NEG_VECS = [
+    0x00000001, 0x007FFFFF, 0x80000001, 0x807FFFFF,   # denormals, both signs
+    0x00000000, 0x80000000,                           # +0.0, -0.0
+    0x7FC0DEAD, 0x7FC0BEEF, 0xFF800001, 0x7F800001,   # NaNs: quiet w/ payload, sNaN
+    0x7F800000, 0xFF800000,                           # +inf, -inf
+    0x3F800000, 0xBF800000, 0xFFFFFFFF, 0x7FFFFFFF,   # normals and all-ones
+]
+
+
+def is_nan(b):
+    return (b & 0x7F800000) == 0x7F800000 and (b & 0x007FFFFF) != 0
+
+
 HEAD = """.version 7.8
 .target %s
 .address_size 64
@@ -129,6 +145,59 @@ def fadd_ptx(swap):
     add.rn.f32 %f3, %f4, %f0;
     st.global.f32 [%rd23], %f2;
     st.global.f32 [%rd24], %f3;
+}
+"""
+
+
+def negsel_ptx():
+    """A `neg.f32` folded into an FSEL SOURCE MODIFIER.
+
+    FSEL is the one float-shaped instruction already refereed as bit-exact, so
+    this observes the `-R` modifier with nothing arithmetic in the way.  Every
+    other consumer of a negated float source is an FADD/FFMA, which is entitled
+    to canonicalise the result and would hide what the modifier itself did."""
+    return HEAD + _addrs() + """    ld.global.f32 %f0, [%rd20];
+    ld.global.f32 %f1, [%rd21];
+    ld.global.u32 %r1, [%rd22];
+    neg.f32 %f2, %f0;
+    setp.ne.u32 %p0, %r1, 0;
+    selp.f32 %f3, %f2, %f1, %p0;
+    st.global.f32 [%rd23], %f3;
+    st.global.f32 [%rd24], %f0;
+}
+"""
+
+
+def negstore_ptx():
+    """A `neg.f32` that CANNOT be folded: its result goes straight to a store,
+    so ptxas has to materialise the negation as an instruction of its own."""
+    return HEAD + _addrs() + """    ld.global.f32 %f0, [%rd20];
+    neg.f32 %f1, %f0;
+    st.global.f32 [%rd23], %f1;
+    st.global.f32 [%rd24], %f0;
+}
+"""
+
+
+def subneg_ptx():
+    """`a - b` against `a + t`, where t is b with its sign bit flipped by an
+    integer XOR against a mask LOADED FROM MEMORY.
+
+    The mask must be opaque.  With a literal 0x80000000 ptxas recognises the xor
+    as a negation, folds it back into an operand modifier and CSEs the two arms
+    into ONE instruction -- so the probe would compare a kernel against itself
+    and answer perfectly.  That was measured, not supposed."""
+    return HEAD + _addrs() + """    ld.global.f32 %f0, [%rd20];
+    ld.global.f32 %f1, [%rd21];
+    ld.global.u32 %r2, [%rd21];
+    ld.global.u32 %r4, [%rd22];
+    sub.f32 %f2, %f0, %f1;
+    xor.b32 %r3, %r2, %r4;
+    mov.b32 %f3, %r3;
+    add.f32 %f4, %f0, %f3;
+    st.global.f32 [%rd23], %f2;
+    st.global.f32 [%rd24], %f4;
+    st.global.u32 [%rd25], %r3;
 }
 """
 
@@ -243,6 +312,130 @@ def check_fadd_commutes(d, exe):
     return 0
 
 
+def check_neg_modifier(d, exe):
+    """Is `-R` on a float source a BIT-EXACT sign flip?
+
+    This licenses modelling it as FNEG on the SASS side and `neg.f32` as the
+    same FNEG on the PTX side, which is what lets the 23 corpus occurrences --
+    every one of them folded into an operand modifier -- meet their PTX."""
+    cases = [(v, 0x5EEDBEEF, p) for p in (1, 0) for v in NEG_VECS]
+    cases = (cases * 2)[:32]
+    if len({p for _, _, p in cases}) != 2:
+        print('FAIL: the predicate does not take both values -- the false arm of '
+              'the select never runs and the probe observes one source'); return 1
+
+    cub, sass = build(d, 'negsel', negsel_ptx())
+    m = re.search(r'^\s*/\*[0-9a-f]+\*/\s+FSEL (R\d+), (-R\d+), (R\w+), (P\d+) ;',
+                  sass, re.M)
+    if not m:
+        print('FAIL: the probe does not emit `FSEL Rd, -Ra, Rb, P` -- ptxas has '
+              'stopped folding the negation into the select, so what this measures '
+              'is no longer the operand modifier'); return 1
+    print(f'  probe emits  FSEL {m.group(1)}, {m.group(2)}, {m.group(3)}, {m.group(4)}')
+
+    bad = 0
+    for (v, other, pr), (o, e, _) in zip(cases, run(exe, cub, cases)):
+        if e != v:
+            print(f'  CONTROL FAILED in={v:#010x}: the load/store path changed the '
+                  f'bits (echo={e:#010x})'); bad += 1; continue
+        want = (v ^ 0x80000000) if pr else other
+        if o != want:
+            print(f'  DIFFERS in={v:#010x} pred={pr} device={o:#010x} '
+                  f'want={want:#010x}'); bad += 1
+    print(f'  {len(cases)} vectors, {bad} disagreements'
+          f"{'' if bad else '  -- the modifier is a bit-exact sign flip'}")
+    return 1 if bad else 0
+
+
+def check_neg_unfoldable(d, exe):
+    """The un-foldable lowering is NOT a sign flip, and this is a REFUTATION.
+
+    ptxas has no bare float-negate instruction, so a `neg.f32` whose result is
+    stored comes back as `FADD Rd, -Rx, -RZ` -- arithmetic, which canonicalises.
+    That is why `neg/unfoldable` is a standing UNPROVED row rather than a gap
+    somebody should close, and a run in which these agree would mean the
+    validator is refusing something it could prove."""
+    cases = [(v, 0, 0) for v in NEG_VECS]
+    cases = (cases * 3)[:32]
+    cub, sass = build(d, 'negstore', negstore_ptx())
+    m = re.search(r'^\s*/\*[0-9a-f]+\*/\s+FADD (R\d+), (-R\d+), (-RZ) ;', sass, re.M)
+    if not m:
+        print('FAIL: the probe does not emit `FADD Rd, -Rx, -RZ` -- ptxas has '
+              'changed how it materialises an un-foldable negation, so the '
+              'standing UNPROVED row is about something else now'); return 1
+    print(f'  probe emits  FADD {m.group(1)}, {m.group(2)}, {m.group(3)}')
+
+    diff = agree = 0
+    for (v, _, _), (o, e, _) in zip(cases, run(exe, cub, cases)):
+        if e != v:
+            print(f'  CONTROL FAILED in={v:#010x} echo={e:#010x}'); return 1
+        flip = v ^ 0x80000000
+        if o == flip:
+            agree += 1
+            continue
+        diff += 1
+        if not is_nan(v):
+            print(f'  UNEXPECTED: a NON-NaN input differs.  in={v:#010x} '
+                  f'device={o:#010x} signflip={flip:#010x}'); return 1
+        if o != 0x7FFFFFFF:
+            print(f'  UNEXPECTED: a NaN came back as {o:#010x}, not the canonical '
+                  f'0x7fffffff  (in={v:#010x})'); return 1
+    # NON-VACUITY, and it is the whole point: a run in which nothing differs
+    # says the two ARE the same function, and then the UNPROVED row is a
+    # limitation of the model rather than a fact about the machine.
+    if diff == 0:
+        print('FAIL: no vector separates the lowering from a sign flip -- then '
+              'nothing licenses `neg/unfoldable` being UNPROVED'); return 1
+    if agree == 0:
+        print('FAIL: no vector AGREES -- the probe is measuring something else '
+              'entirely, not a negation'); return 1
+    print(f'  {len(cases)} vectors: {agree} agree with a sign flip, {diff} do not; '
+          f'every disagreement is a NaN and every one canonicalises to 0x7fffffff')
+    return 0
+
+
+def check_sub_is_add_of_neg(d, exe):
+    """`sub.f32 a b` against `add.f32 a (b with its sign bit flipped)`.
+
+    This licenses the FSUB(a,b) == FADD(a, FNEG(b)) identification in
+    `fpmode.py`, without which no kernel containing a float subtract can
+    validate -- eleven in the corpus, because that is what `sub.f32` lowers to."""
+    A = 0x3FC00000                                    # 1.5
+    OTHER = [A, A, A, A, 0x00000000, 0x80000000, A, A, 0x7F800000, 0x7F800000,
+             0x7F800000, 0x7F800000, A, A, A, A]      # inf-inf and 0-0 among them
+    cases = [(a, b, 0x80000000) for a, b in zip(OTHER, NEG_VECS)]
+    cases = (cases * 2)[:32]
+
+    cub, sass = build(d, 'subneg', subneg_ptx())
+    adds = re.findall(r'^\s*/\*[0-9a-f]+\*/\s+FADD (R\d+), (\S+), (\S+) ;', sass, re.M)
+    lop = re.search(r'LOP3\.LUT (R\d+),', sass)
+    if len(adds) != 2 or lop is None:
+        print(f'FAIL: the probe collapsed -- {len(adds)} FADD and '
+              f'{"a" if lop else "no"} LOP3.  ptxas folds an xor-by-a-LITERAL '
+              f'sign bit back into an operand modifier and then CSEs the two '
+              f'arms into one instruction, and the probe compares a kernel '
+              f'against itself'); return 1
+    if not any(x.startswith('-') for x in adds[0][1:]):
+        print('FAIL: the subtract arm has no negated source'); return 1
+    if any(x.startswith('-') for x in adds[1][1:]):
+        print('FAIL: the xor arm ALSO uses a modifier -- ptxas recognised the '
+              'negation, so both arms are the same instruction'); return 1
+    print(f'  probe emits  FADD {adds[0][0]}, {adds[0][1]}, {adds[0][2]}   and   '
+          f'LOP3.LUT {lop.group(1)} ; FADD {adds[1][0]}, {adds[1][1]}, {adds[1][2]}')
+
+    bad = 0
+    for (a, b, _), (sub, addn, xb) in zip(cases, run(exe, cub, cases)):
+        if xb != (b ^ 0x80000000):
+            print(f'  CONTROL FAILED b={b:#010x}: the xor arm produced '
+                  f'{xb:#010x}'); bad += 1; continue
+        if sub != addn:
+            print(f'  DIFFERS a={a:#010x} b={b:#010x}  a-b={sub:#010x}  '
+                  f'a+(-b)={addn:#010x}'); bad += 1
+    print(f'  {len(cases)} vectors, {bad} disagreements'
+          f"{'' if bad else '  -- subtraction is addition of a negation'}")
+    return 1 if bad else 0
+
+
 def main():
     os.chdir(HERE)
     inc = next((x for x in ('/opt/cuda/include', '/usr/local/cuda/include')
@@ -258,6 +451,12 @@ def main():
     rc = check_fsel(d, exe)
     print('\nFADD: is it bit-exactly commutative?')
     rc |= check_fadd_commutes(d, exe)
+    print('\nNEG: is the `-R` operand modifier a bit-exact sign flip?')
+    rc |= check_neg_modifier(d, exe)
+    print('\nNEG: and is the UN-FOLDABLE lowering one too?  (it is not)')
+    rc |= check_neg_unfoldable(d, exe)
+    print('\nFSUB: is `a - b` the same bits as `a + (-b)`?')
+    rc |= check_sub_is_add_of_neg(d, exe)
     return rc
 
 

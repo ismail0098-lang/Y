@@ -74,6 +74,41 @@ class Sass:
             return bv(-v if m.group(1) else v)
         raise Exception(f'unmodelled operand {o!r}')
 
+
+    def frd(self, o):
+        """A FLOAT source operand.  `rd` is the INTEGER reader and reading a
+        float source with it is a guess, not a refusal.
+
+        `-R3` on an FADD is a sign-bit flip; `rd` returns the TWO'S COMPLEMENT
+        of the bit pattern, which is a different 32-bit value for every input
+        that is not zero or the sign bit alone.  Nothing said so -- the negation
+        was handled once, generically, at the top of `rd`, and every float arm
+        inherited it.  `-RZ` was worse in the same place: it collapses to `+0.0`
+        where the operand is `-0.0`, and `FADD Rd, -Rx, -RZ` is exactly how
+        ptxas lowers an un-foldable `neg.f32`, so the one construct that needs
+        it is the one that got it wrong.
+
+        It was LATENT rather than live -- no standing result has a negated float
+        source in its SASS, checked rather than assumed -- and its observed
+        direction on the one case measured was a false UNPROVED.  That is the
+        safe direction and it is not a licence: nothing says the guess is safe
+        in general, and under the concretising rungs of the ladder two wrong
+        values can agree.  Reach is ELEVEN corpus kernels (3 rope, 4 gemm_fp8,
+        4 paged-decode attention), because a plain `sub.f32` lowers to a negated
+        source.
+
+        FNEG is an uninterpreted unary on both sides, and `fpsem_abi.py`
+        measures on the device that the modifier is a bit-exact sign flip.
+        """
+        o = o.strip().replace('.reuse','')
+        if o.startswith('-') and not o.startswith('-0x'):
+            return self.sym['fp']('FNEG', self.frd(o[1:]), side='sass')
+        if o.startswith('|') or o.endswith('|'):
+            raise Exception(f'unmodelled float operand modifier {o!r}  '
+                            f'(refusing, not guessing) -- |R| is an absolute '
+                            f'value, which is a second bit operation and has '
+                            f'not been refereed')
+        return self.rd(o)
     def gaddr(self, o):
         """A 64-bit GLOBAL address operand: `[Rn.64]` or `[Rn.64+0xNN]`.
 
@@ -286,7 +321,7 @@ class Sass:
                 self.alive = simplify(And(self.alive, Not(g)))
         elif opc in ('FMUL','FADD','FFMA','FSUB'):
             n = 3 if opc == 'FFMA' else 2
-            self.wr(ops[0], self.sym['fp'](opc, *[rd(o) for o in ops[1:1+n]], side='sass'), g)
+            self.wr(ops[0], self.sym['fp'](opc, *[self.frd(o) for o in ops[1:1+n]], side='sass'), g)
         elif opc.startswith('SHF.'):
             # funnel shift: {Rc:Ra} shifted, .HI takes the upper word.
             f = opc.split('.')
@@ -434,7 +469,11 @@ class Sass:
             # -0.0, a quiet NaN carrying a payload, a signalling NaN and both
             # infinities, with a control asserting the load/store path is
             # itself bit-preserving, and gets `p ? s0 : s1` bit for bit.
-            self.wr(ops[0], If(self.pr(ops[3]), rd(ops[1]), rd(ops[2])), g)
+            # ...and its SOURCES are float sources: `FSEL Rd, -Ra, Rb, P` is
+            # what ptxas emits for a `neg.f32` feeding a `selp.f32`, and it is
+            # the probe `fpsem_abi.py` uses to observe the `-R` modifier with
+            # nothing arithmetic in the way.
+            self.wr(ops[0], If(self.pr(ops[3]), self.frd(ops[1]), self.frd(ops[2])), g)
         elif opc == 'LOP3.LUT':
             lut = int(ops[4], 16)
             self.wr(ops[0], self.lop3(rd(ops[1]), rd(ops[2]), rd(ops[3]), lut), g)

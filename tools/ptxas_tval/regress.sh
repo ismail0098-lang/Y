@@ -9,6 +9,8 @@ rm -rf __pycache__
 
 bad=0
 for pair in "fma/rn.ptx fma/rn.sass" "fma/plain.ptx fma/plain.sass" \
+            "neg/folded.ptx neg/folded.sass" "neg/sub.ptx neg/sub.sass" \
+            "neg/unfoldable.ptx neg/unfoldable.sass" \
             "corpus/bn254_permute.ptx corpus/bn254_permute.sass" \
             "corpus/bn254_sub_vec.ptx corpus/bn254_sub_vec.sass" \
             "corpus/ptx_carry_chain.ptx corpus/ptx_carry_chain.sass"; do
@@ -18,9 +20,16 @@ for pair in "fma/rn.ptx fma/rn.sass" "fma/plain.ptx fma/plain.sass" \
   printf '%-22s %s\n' "$name" "$out"
   # `fma/plain` is the NEGATIVE CONTROL and is asserted in its own direction:
   # every result above is worth exactly what that row is worth.
+  #
+  # `neg/unfoldable` is the SECOND negative control and it is a different
+  # refutation from `plain`: not a contraction ptxas is free to make, but a
+  # `neg.f32` whose un-foldable lowering (`FADD Rd, -Rx, -RZ`) is arithmetic and
+  # canonicalises every NaN.  Its sibling `neg/folded` is the SAME PTX opcode in
+  # the shape the whole corpus uses, and it VALIDATES -- so the pair pins that
+  # the refusal is about the lowering rather than about the opcode.
   case "$name" in
-    plain) echo "$out" | grep -q '^UNPROVED'  || bad=$((bad+1)) ;;
-    *)     echo "$out" | grep -q '^VALIDATED' || bad=$((bad+1)) ;;
+    plain|unfoldable) echo "$out" | grep -q '^UNPROVED'  || bad=$((bad+1)) ;;
+    *)                echo "$out" | grep -q '^VALIDATED' || bad=$((bad+1)) ;;
   esac
 done
 
