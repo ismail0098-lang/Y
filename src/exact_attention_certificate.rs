@@ -40,6 +40,30 @@
 //! the GPU capstone is [`CAPSTONE`] - **not** `GridStrideSplit.v`, which is
 //! what it looks like from the kernel's side.
 
+//! # The `ptxas` item carried an UNGATED COUNT, and it went stale in three files
+//!
+//! It used to read *"which exists and currently covers six kernels"*. The
+//! validator's `regress.sh` asserts **sixteen** standing rows over thirteen
+//! distinct subjects, and had for three increments. Nothing caught it because
+//! `tests/attention_certificate.rs` asserted the item's ROUTE - the path
+//! `tools/ptxas_tval/` - and not the number, and because the number errs in the
+//! safe direction: understating the corpus cannot make a trusted item look
+//! validated.
+//!
+//! The count was also QUOTED verbatim in `README.md` and in
+//! `docs/proof_carrying_kernels.md`, so one ungated number was published three
+//! times - and the README additionally claimed *"both halves of that are
+//! measured rather than asserted"*, which was true of the absence and false of
+//! the count.
+//!
+//! **Replacing one ungated number with another is not the fix.** The count is
+//! not load-bearing: what the item needs to say is that THIS kernel is outside
+//! that corpus, and a count invites the rows-versus-subjects ambiguity that has
+//! already bitten the README once. So the count is gone and the load-bearing
+//! half is now CHECKED - the gate reads the entry names out of the PTX the
+//! compiler just emitted, and the subjects out of `regress.sh`, so it cannot be
+//! satisfied by a name nothing uses.
+
 use crate::exact_gemm_certificate::{render_trust_boundary_of, Check, TrustItem};
 
 /// The compile-time parameters of one emitted attention kernel.
@@ -139,9 +163,13 @@ pub const TRUST_BOUNDARY: &[TrustItem] = &[
                   twice. That is a freedom the ISA grants, not a bug - which is exactly why \
                   it cannot be assumed away.",
         check: Check::Unchecked(
-            "validating THIS kernel per-translation with `tools/ptxas_tval/`, which exists \
-             and currently covers six kernels; this is not one of them, so for this kernel \
-             `ptxas` is TRUSTED and not validated",
+            "validating THIS kernel per-translation with `tools/ptxas_tval/`, whose standing \
+             results are the subjects its `regress.sh` asserts. NONE of this module's \
+             entry points is among them, so for this kernel `ptxas` is TRUSTED and not \
+             validated. That absence is CHECKED rather than remembered - \
+             `tests/attention_certificate.rs` reads the entry names out of the PTX the \
+             compiler just emitted and the subjects out of `regress.sh`, so neither a \
+             renamed kernel nor a widened corpus can leave this sentence standing",
         ),
         stated_in: None,
     },
