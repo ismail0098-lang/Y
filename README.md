@@ -59,24 +59,27 @@ repository's own investigation documents contradict.
   +0.12% perplexity.
 - A C-callable shared library: the crate builds as `cdylib` as well as `rlib`
   (`src/c_api.rs`), so the compiler can be embedded rather than shelled out to.
-- **Machine-checked proofs**: 23 Rocq files, 498 theorems and lemmas under
-  332 `Print Assumptions`, no axioms and nothing admitted, all run by
+- **Machine-checked proofs**: 24 Rocq files, 520 theorems and lemmas under
+  349 `Print Assumptions`, no axioms and nothing admitted, all run by
   `cargo test`. They cover the ZK backend's control-flow lowering; the exact
   AVX-512 GEMM's schedule end to end, from the source dot product to the
-  threaded, tiled, row- or K-split kernel; and six GPU files, which now include
-  the int8 tensor-core GEMM's schedule *and* the value it computes. A
+  threaded, tiled, row- or K-split kernel; and seven GPU files, which now
+  include the int8 tensor-core GEMM's schedule *and* the value it computes, and
+  the one GPU kernel whose PTX-to-SASS translation is *also* validated. A
   compilation that substitutes the CPU kernel **emits its own certificate**
   beside the `.ll`, and so does `--emit-attention-ptx`.
   What the verified kernel *costs* is measured separately and is
   [in its own section](#what-the-verified-kernel-costs) — it is not free.
-- **Translation validation against `ptxas`**: six GPU kernels — including one
-  across a loop and one using shared memory and a barrier — proved to store
-  exactly what their PTX stores, by symbolically executing the PTX and the SASS
-  `ptxas` emitted from it and discharging 282 obligations in z3. It is a
-  by-hand research tool (`tools/ptxas_tval/`), not a CI gate, and it covers one
-  compilation of one kernel at a time. The negative control is in the table:
-  the same kernel *without* `.rn` is refuted, because `ptxas` contracts to
-  `FFMA`. [Details](docs/ptxas_translation_validation.md).
+- **Translation validation against `ptxas`**: **sixteen standing rows — thirteen
+  validated, three refuted** — including one across a loop, one using shared
+  memory and a barrier, and **a shipped GEMM**. Each is proved to store exactly
+  what its PTX stores, by symbolically executing the PTX and the SASS `ptxas`
+  emitted from it and discharging 361 obligations in z3. It is a by-hand
+  research tool (`tools/ptxas_tval/`), not a CI gate, and it covers one
+  compilation of one kernel at a time. **The three refutations are what the
+  other thirteen are worth** — a validator that always said VALIDATED would
+  report every row identically.
+  [Details](docs/ptxas_translation_validation.md).
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
   arkworks crates are `[dev-dependencies]` and are used as an *independent
@@ -1213,7 +1216,7 @@ version answers 1100 against its own reference's 1000. Integer addition *is*
 associative, so the relationship is an equality, which is what a proof assistant
 is good at. What exactness costs is measured below, and it is not free.
 
-23 files, 498 theorems and lemmas, **no axioms, nothing admitted** — and
+24 files, 520 theorems and lemmas, **no axioms, nothing admitted** — and
 `tests/proofs_are_checked.rs` runs `coqc` over all of them in `cargo test`,
 with a content control per file so that "it compiles" and "no axioms" (both
 properties an *empty* file has) are not the whole check.
@@ -1734,19 +1737,74 @@ models is a hard error, never a guess.**
 | kernel | verdict | obligations | time | |
 |---|---|---|---|---|
 | `fma/rn` | **VALIDATED** | 9 | 0.0 s | float, contraction forbidden by `.rn` |
-| `fma/plain` | UNPROVED | 10 | 0.0 s | **the control** — `store 0: sat` |
+| `fma/plain` | UNPROVED | 10 | 0.0 s | **a control** — `store 0: sat` |
+| `neg/folded` | **VALIDATED** | 9 | 0.0 s | a `neg.f32` folded into an `FFMA` modifier |
+| `neg/sub` | **VALIDATED** | 7 | 0.0 s | a plain float subtract |
+| `neg/unfoldable` | UNPROVED | 9 | 0.0 s | **a control** — the *other* lowering of one opcode |
+| `max/relu` | **VALIDATED** | 5 | 0.0 s | the **shipped ReLU** shape |
+| `max/general` | **VALIDATED** | 7 | 0.0 s | the same opcode, operand order preserved |
+| `max/min` | **VALIDATED** | 7 | 0.0 s | the other polarity of one SASS instruction |
 | `bn254_permute` | **VALIDATED** | 30 | 0.2 s | branching `ptxas` invented |
-| `bn254_sub_vec` | **VALIDATED** | 88 | 9.4 s | |
-| `ptx_carry_chain` | **VALIDATED** | 123 | 24.6 s | 24 predicated instructions |
-| `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.0 s | across a **loop** |
+| `bn254_sub_vec` | **VALIDATED** | 88 | 11.9 s | |
+| `ptx_carry_chain` | **VALIDATED** | 123 | 26.7 s | 24 predicated instructions |
+| `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.1 s | across a **loop** |
 | `smem_roundtrip` | **VALIDATED** | 18 | 0.2 s | **shared memory**, 1 barrier |
+| `naive_gemm_f32` @ `-O1` | **VALIDATED** | 9 | 0.2 s | **a shipped GEMM** |
+| `naive_gemm_f32_muladd` | UNPROVED | 7 | 0.2 s | the form Y *used to* ship |
+| `naive_gemm_f32_rn` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden* |
 
-Six kernels, 282 obligations. The `plain` row is what the rest are worth: it is
-the same kernel as `rn` without the `.rn` suffixes, `ptxas` contracts
-`mul.f32`+`add.f32` into one `FFMA` that rounds once where PTX rounds twice, and
-the validator answers `sat` with a counterexample. That is a freedom the ISA
-grants, not a `ptxas` bug — and a validator that always said VALIDATED would
-report every other row identically.
+Sixteen rows, 361 obligations, **thirteen VALIDATED and three refuted** —
+asserted by `regress.sh` in the direction each currently reads, because a run in
+which an UNPROVED row turns green is a regression too. `fma/plain` is the same
+kernel as `rn` without the `.rn` suffixes: `ptxas` contracts `mul.f32`+`add.f32`
+into one `FFMA` that rounds once where PTX rounds twice, and the validator
+answers `sat` with a counterexample. That is a freedom the ISA grants, not a
+`ptxas` bug. `neg/unfoldable` is a *different* refutation — one PTX opcode with
+two lowerings and two verdicts, so the refusal is about the lowering rather than
+about the opcode.
+
+#### A shipped kernel was refuted, and the repair was to say what the machine does
+
+`naive_gemm_f32` is Y's own emitted GEMM, and it was **refuted**: `BASE`, `STEP`,
+`LOOPCOND` and `ENTRY` all proved — the loop schedule corresponds exactly — and
+only the accumulated *value* could not be shown equal, because the PTX asked for
+two roundings and the hardware performed one. Two repairs exist and the obvious
+one is worse. `mul.rn.f32`+`add.rn.f32` **forbids** the fusion: it validates, and
+leaves the kernel rounding twice where the hardware rounds once. `fma.rn.f32`
+**states** it: a **byte-identical instruction stream**, more accurate, and it
+validates. Stating what the machine does is free; forbidding it is not.
+
+The emitter says it now — at the expression level, and in the hand-written
+rmsnorm, RoPE and int8-dequantise bodies — and **the corpus-wide contraction set
+is 0**: forbidding the fusion changes not one byte of SASS anywhere, because
+there is no unstated fusion left to forbid. Every artifact this repository ships
+now names every rounding the hardware performs. The RoPE `a·b − c` half was
+recorded as costing a `neg.f32` PTX cannot fold; that price was **counted in the
+wrong currency** — the `neg` *replaces* the `mul` the `fma` absorbs, so the
+instruction count is unchanged and the SASS is byte-identical.
+
+#### The float layer needed facts IEEE does not give
+
+Floats are uninterpreted functions, so every identification between the two sides
+is an assumption that must be measured. Three are load-bearing and none is
+readable off a mnemonic: `FADD` and `FMAX` commute **bit-exactly**, and the `-R`
+operand modifier is a bit-exact sign flip. "IEEE says so" is not enough — the
+claim is about stored *bits* and a NaN payload is implementation-defined — so
+seven float facts are refereed against silicon in `fpsem_abi.py`, each with a
+non-vacuity check that fails if the probe could not have observed a difference.
+`FMAX` commutativity is needed by exactly one shape in the corpus: the **shipped**
+ReLU epilogue, whose literal `ptxas` folds into `RZ` in the *first* operand slot.
+A general-max fixture alone would have validated and hidden that the fact was
+needed at all.
+
+**And the gate that was supposed to stop the emitter outgrowing the validator
+counted 5 of 30 float opcodes.** It matched `(mul|add|sub|neg|fma).f32`; the
+emitter writes thirty, and two uncounted ones cleared the bar the gate exists
+for. The rule is total now — every float-semantic opcode in a committed artifact
+is *modelled* (6) or in a **named family with a written reason** (11 conversions,
+9 macro-ops derived from the executor's own table, 4 f64) — and a thirty-first
+fails. An all-clear is also what a broken census reports, so the gate carries a
+positive control through the same classifier it uses.
 
 **The binding constraint is the solver, not opcode coverage**, and measuring that
 cancelled the feature the measurement was taken to justify. `ptx_carry_chain`
@@ -1932,8 +1990,8 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # ~635 tests
-cargo test --release --features zk      # ~885 tests, ZK included
+cargo test --release                    # ~655 tests
+cargo test --release --features zk      # ~905 tests, ZK included
 cargo test --release -p y-gpu           # the sibling crate; a bare `cargo test`
                                         # builds the root package ONLY and does
                                         # not run these 8
