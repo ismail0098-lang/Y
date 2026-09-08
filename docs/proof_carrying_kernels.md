@@ -2172,6 +2172,14 @@ are validated — 282 obligations, one across a loop, one using shared memory an
 a barrier — against a negative control that is *refuted*, because `ptxas`
 contracts `mul.f32`+`add.f32` into an `FFMA` unless the program says `.rn`.
 
+> Those two figures are what this entry measured on 2026-09-04 and are kept as
+> written. The standing results have since grown to **sixteen rows, 361
+> obligations, thirteen validated and three refuted**, and one of them is a
+> shipped GEMM: the emitter was taught to say `fma.rn.f32`, which is
+> byte-identical in SASS, so the artifact now names the rounding the machine
+> performs. See `docs/ptxas_translation_validation.md`, which `regress.sh`
+> asserts row by row.
+
 Two things it establishes that change this phase's plan rather than confirming
 it. **The binding constraint is the solver, not opcode coverage**: a kernel with
 29 multiplies validates in 24 s and one with 65 is unproved after 9,705 s, and
