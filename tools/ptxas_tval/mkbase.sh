@@ -40,8 +40,26 @@ fi
 # this archive while bash is executing it, so neither it nor `mkbase.sh` may be
 # a member; every other script can be, and archiving them all is what makes the
 # coverage check below mechanical instead of a list somebody maintains.
-tar czf "$A" $(ls *.py *.sh | grep -vE '^(mkbase|restore)\.sh$') \
-             muts smut fma div loop synth neg \
+# EVERY TRACKED FILE, derived from git rather than listed.  The fixture
+# directories used to be a hand-maintained list beside the glob, and the
+# coverage check below only ever covered .py/.sh -- so a NEW fixture directory
+# was invisible to both, which is the same hole one level over from the two it
+# already records.
+#
+# `-co --exclude-standard` is tracked AND new-but-not-ignored, deliberately: a
+# fixture added by the increment under test is not tracked yet, and archiving
+# only tracked files would leave a probe that rewrites it restored by nothing --
+# which is the exact failure this check exists to prevent, reintroduced by the
+# fix for it.  `corpus/`, `o1/` and `__pycache__` are gitignored, so they are
+# excluded for free (measured: 0 entries).
+if command -v git >/dev/null 2>&1 && git rev-parse --show-toplevel >/dev/null 2>&1; then
+  MEMBERS=$(git ls-files -co --exclude-standard . | grep -vE '^(mkbase|restore)\.sh$')
+else
+  # No git: fall back to the glob, and SAY the coverage check cannot run.
+  echo "mkbase: no git -- archiving by glob, coverage is UNCHECKED" >&2
+  MEMBERS=$(ls *.py *.sh *.c 2>/dev/null | grep -vE '^(mkbase|restore)\.sh$')
+fi
+tar czf "$A" $MEMBERS \
   || { echo "mkbase: tar failed"; rm -f "$A"; exit 1; }
 n=$(tar tzf "$A" | wc -l)
 [ "$n" -ge 40 ] || { echo "mkbase: $A has only $n entries -- refusing"; rm -f "$A"; exit 1; }
@@ -56,8 +74,11 @@ n=$(tar tzf "$A" | wc -l)
 # exceptions are NAMED: `restore.sh` extracts the archive while bash is
 # executing it, so neither it nor `mkbase.sh` may be overwritten mid-run.
 if command -v git >/dev/null 2>&1 && git rev-parse --show-toplevel >/dev/null 2>&1; then
+  # EVERY tracked file, not just .py/.sh: a probe that rewrites a FIXTURE is
+  # restored by nothing if the fixture is missing, and a new fixture DIRECTORY
+  # was invisible to both the old glob and the old .py/.sh check.
   miss=$(comm -23 \
-    <(git ls-files . | grep -E '\.(py|sh)$' | grep -vE '^(mkbase|restore)\.sh$' | sort) \
+    <(git ls-files -co --exclude-standard . | grep -vE '^(mkbase|restore)\.sh$' | sort) \
     <(tar tzf "$A" | sed 's|^\./||' | sort))
   if [ -n "$miss" ]; then
     echo "mkbase: NOT IN THE ARCHIVE -- a probe that writes one of these is"

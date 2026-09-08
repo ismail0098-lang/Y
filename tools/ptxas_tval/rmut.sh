@@ -74,4 +74,11 @@ rm -rf __pycache__; run 'R5 reach counts presence, not kernels blocked'
 
 ./restore.sh >/dev/null; rm -rf __pycache__
 printf '\n'; run 'RESTORED BASELINE'
-rm -f rank_base.tgz
+# ...AND `guard_base.tgz`, which is the one `restore.sh` actually extracts.
+# Each harness used to delete only the archive it created, so a run that
+# finished normally still left behind the archive that RESTORES -- and the
+# next run, after a source had been edited, silently put the old tree back.
+# That is not hypothetical: it reverted this file's own X10 fix mid-session.
+# mkbase's stderr notice is not a guard, because it prints on every restore
+# of a run, so a stale one looks like a fresh one apart from a timestamp.
+rm -f rank_base.tgz guard_base.tgz

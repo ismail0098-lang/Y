@@ -202,6 +202,52 @@ def subneg_ptx():
 """
 
 
+MAX_PAIRS = [
+    # sixteen DISTINCT pairs -- distinctness is the non-vacuity condition, since
+    # a swap of two identical operands is not observable.
+    (0x7FC0DEAD, 0x00000000), (0x7FC0DEAD, 0x3F800000),   # quiet NaN vs zero, vs a normal
+    (0x7FC0DEAD, 0x7FC0BEEF), (0x7F800001, 0x00000000),   # two payloads; signalling NaN
+    (0x80000000, 0x00000000), (0x00000001, 0x00000000),   # -0.0 vs +0.0; denormal
+    (0x80000001, 0x00000000), (0x807FFFFF, 0x00000001),   # negative denormals
+    (0x7F800000, 0x7FC0DEAD), (0xFF800000, 0x00000000),   # infinities against NaN and zero
+    (0x7F800000, 0xFF800000), (0x3F800000, 0xBF800000),   # +inf vs -inf; 1 vs -1
+    (0x007FFFFF, 0x00000001), (0xFF800001, 0x3F800000),   # denormal ends; negative sNaN
+    (0x7FC0DEAD, 0xFF800000), (0xBF800000, 0x00000000),
+]
+
+
+def ptx_max_rule(a, b):
+    """PTX ISA `max.f32`: with ONE NaN operand the result is the OTHER operand;
+    with two it is a canonical NaN.  That is not an ordering, which is why the
+    executor models max as an uninterpreted function rather than as If(a>b,..).
+    Signed zeros are compared as an ordering with +0.0 above -0.0, which is the
+    part of this that is a MEASUREMENT rather than a reading."""
+    if is_nan(a) and is_nan(b): return 0x7FFFFFFF
+    if is_nan(a): return b
+    if is_nan(b): return a
+    def val(x):
+        import struct
+        return struct.unpack('<f', struct.pack('<I', x))[0]
+    fa, fb = val(a), val(b)
+    if fa == fb:                       # only reachable for +0.0 vs -0.0
+        return a if (a >> 31) == 0 else b
+    return a if fa > fb else b
+
+
+def maxg_ptx():
+    """max(a, b) with a and b ALSO stored, so a load/store path that changed the
+    bits would be blamed on the instruction rather than on the plumbing."""
+    return HEAD + _addrs() + """    ld.global.f32 %f0, [%rd20];
+    ld.global.f32 %f1, [%rd21];
+    st.global.f32 [%rd24], %f0;
+    st.global.f32 [%rd25], %f1;
+    max.f32 %f2, %f0, %f1;
+    st.global.f32 [%rd23], %f2;
+    ret;
+}
+"""
+
+
 def build(d, tag, ptx):
     p, cub = f'{d}/{tag}.ptx', f'{d}/{tag}.cubin'
     open(p, 'w').write(ptx)
@@ -436,6 +482,79 @@ def check_sub_is_add_of_neg(d, exe):
     return 1 if bad else 0
 
 
+def check_max_is_the_ptx_rule(d, exe):
+    """Does `max.f32` compute the PTX rule bit for bit?
+
+    This licenses modelling it at all.  A float instruction is entitled to
+    flush a denormal or canonicalise a NaN payload, and the NaN rule is not an
+    ordering -- so what the executor may assume about FMAX has to be measured,
+    not read off the mnemonic.  The denormal vectors are what make the probe
+    DISCRIMINATE: a flushing implementation returns +0.0 where this returns the
+    denormal, so a clean run is evidence rather than an absence of evidence."""
+    cases = [(a, b, 0) for a, b in MAX_PAIRS] + [(b, a, 0) for a, b in MAX_PAIRS]
+    cub, sass = build(d, 'maxg', maxg_ptx())
+    m = re.search(r'^\s*/\*[0-9a-f]+\*/\s+FMNMX (R\d+), (R\w+), (R\w+), (!?PT) ;',
+                  sass, re.M)
+    if not m:
+        print('FAIL: the probe does not emit `FMNMX Rd, Ra, Rb, !PT` -- what this '
+              'measures is no longer the instruction the corpus contains'); return 1
+    if m.group(4) != '!PT':
+        print(f'FAIL: `max.f32` lowered with polarity {m.group(4)}, not !PT -- the '
+              f'executor selects FMIN/FMAX on that operand'); return 1
+    print(f'  probe emits  FMNMX {m.group(1)}, {m.group(2)}, {m.group(3)}, {m.group(4)}')
+    bad = flushed = 0
+    for (a, b, _), (o, ea, eb) in zip(cases, run(exe, cub, cases)):
+        if ea != a or eb != b:
+            print(f'  CONTROL FAILED a={a:#010x} b={b:#010x}: the load/store path '
+                  f'changed the bits'); bad += 1; continue
+        want = ptx_max_rule(a, b)
+        if o != want:
+            print(f'  DIFFERS a={a:#010x} b={b:#010x} device={o:#010x} '
+                  f'want={want:#010x}'); bad += 1
+        elif (a & 0x7F800000) == 0 and (a & 0x7FFFFF) and o == a:
+            flushed += 1      # a denormal survived, so the probe discriminates
+    if not flushed:
+        print('FAIL: no vector observed a denormal passing through -- this probe '
+              'cannot tell a flushing implementation from a bit-exact one'); return 1
+    print(f'  {len(cases)} vectors, {bad} disagreements with the PTX rule '
+          f'({flushed} of them a denormal surviving unflushed)')
+    return 1 if bad else 0
+
+
+def check_max_commutes(d, exe):
+    """Is `max.f32` bit-exactly COMMUTATIVE?
+
+    Needed, and needed for exactly one shape.  The shipped ReLU epilogue writes
+    `max.f32 r, r, 0f00000000` and ptxas folds the literal into RZ and puts it
+    in the FIRST operand slot -- `FMNMX d, RZ, x` -- so the two sides build
+    FMAX(x, +0.0) and FMAX(+0.0, x).  Measured: with the canonicalisation
+    removed `max/relu` goes UNPROVED while `max/general`, whose operand order
+    ptxas preserves, still validates.
+
+    "IEEE max is commutative" is not enough, for the same reason it was not
+    enough for FADD: the claim is about stored BITS, and a hardware returning
+    the FIRST operand's NaN payload would break it on precisely the inputs no
+    ordinary test uses.  Two of the pairs are quiet NaNs with DIFFERENT
+    payloads for that reason.
+    """
+    cases = [(a, b, 0) for a, b in MAX_PAIRS] + [(b, a, 0) for a, b in MAX_PAIRS]
+    if any(a == b for a, b in MAX_PAIRS):
+        print('FAIL: a pair has identical operands -- a swap of those is not '
+              'observable and the run would agree vacuously'); return 1
+    cub, _ = build(d, 'maxg', maxg_ptx())
+    res = run(exe, cub, cases)
+    n = len(MAX_PAIRS)
+    bad = 0
+    for i, (a, b) in enumerate(MAX_PAIRS):
+        fwd, rev = res[i][0], res[n + i][0]
+        if fwd != rev:
+            print(f'  ASYMMETRIC a={a:#010x} b={b:#010x} '
+                  f'max(a,b)={fwd:#010x} max(b,a)={rev:#010x}'); bad += 1
+    print(f'  {n} DISTINCT pairs in both orders, {bad} asymmetric'
+          f"{'' if bad else '  -- bit-exactly commutative'}")
+    return 1 if bad else 0
+
+
 def main():
     os.chdir(HERE)
     inc = next((x for x in ('/opt/cuda/include', '/usr/local/cuda/include')
@@ -457,6 +576,10 @@ def main():
     rc |= check_neg_unfoldable(d, exe)
     print('\nFSUB: is `a - b` the same bits as `a + (-b)`?')
     rc |= check_sub_is_add_of_neg(d, exe)
+    print('\nMAX: does `max.f32` compute the PTX rule bit for bit?')
+    rc |= check_max_is_the_ptx_rule(d, exe)
+    print('\nMAX: and is it bit-exactly commutative?  (the shipped ReLU needs it)')
+    rc |= check_max_commutes(d, exe)
     return rc
 
 

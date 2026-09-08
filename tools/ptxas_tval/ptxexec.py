@@ -279,6 +279,21 @@ class Ptx:
             self.wf(ops[0], self.sym['fp']('FSUB', self.F(ops[1]), self.F(ops[2]), side='ptx'), g)
         elif op in ('fma.rn.f32',):
             self.wf(ops[0], self.sym['fp']('FFMA', self.F(ops[1]), self.F(ops[2]), self.F(ops[3]), side='ptx'), g)
+        elif op in ('max.f32','min.f32'):
+            # ONE SASS INSTRUCTION, `FMNMX`, whose polarity is an operand -- so
+            # these are modelled as two distinct uninterpreted functions and the
+            # SASS side selects between them on that operand.  Collapsing them
+            # would make a polarity error validate.
+            #
+            # `max.f32` is NOT `If(a > b, a, b)` over the abstraction: the
+            # floats here are uninterpreted, and PTX's rule is not an ordering
+            # anyway -- with one NaN operand the result is the OTHER operand,
+            # and with two it is a canonical NaN.  Measured against that rule on
+            # sm_89 over 32 edge vectors with 0 disagreements, denormals passing
+            # through unflushed (so the probe discriminates a flushing
+            # implementation) and the load/store echo bit-preserving.
+            self.wf(ops[0], self.sym['fp']('FMAX' if op == 'max.f32' else 'FMIN',
+                                           self.F(ops[1]), self.F(ops[2]), side='ptx'), g)
         elif op in ('neg.f32',):
             # A SIGN FLIP, modelled as the same uninterpreted FNEG the SASS side
             # gives a `-R` operand modifier -- which is what ptxas emits for

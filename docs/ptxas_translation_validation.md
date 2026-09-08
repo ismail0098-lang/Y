@@ -39,6 +39,9 @@ them moves — the two UNPROVED rows included.
 | `neg/folded` | **VALIDATED** | 9 | 0.0 s | a `neg.f32` folded into an `FFMA` modifier |
 | `neg/sub` | **VALIDATED** | 7 | 0.0 s | a plain float subtract |
 | `neg/unfoldable` | UNPROVED | 9 | 0.0 s | **a second control** — the *other* lowering of one opcode |
+| `max/relu` | **VALIDATED** | 5 | 0.0 s | the **shipped ReLU** shape — needs FMAX commutativity |
+| `max/general` | **VALIDATED** | 7 | 0.0 s | the same opcode with the operand order *preserved* |
+| `max/min` | **VALIDATED** | 7 | 0.0 s | the other polarity of the same SASS instruction |
 | `bn254_permute` | **VALIDATED** | 30 | 0.2 s | branching `ptxas` invented |
 | `bn254_sub_vec` | **VALIDATED** | 88 | 12.6 s | |
 | `ptx_carry_chain` | **VALIDATED** | 123 | 33.4 s | 24 predicated instructions |
@@ -48,8 +51,8 @@ them moves — the two UNPROVED rows included.
 | `naive_gemm_f32_muladd` @ `-O1` | UNPROVED | 7 | 0.2 s | the form Y used to ship — `store 0 value: sat` |
 | `naive_gemm_f32_rn` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden*, at a different SASS |
 
-Ten kernels validated, **342 obligations**, and three UNPROVED rows that are
-results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
+Thirteen kernels validated, **361 obligations**, and three UNPROVED rows that
+are results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
 UNPROVED and are discussed under *The wall* below — neither produced a `sat`.
 
 The last three rows are one experiment: one kernel, three PTX spellings.
@@ -104,6 +107,30 @@ functions.
 
 `neg/sub` is the third of the set because a plain `sub.f32` lowers to `FADD Rd,
 Ra, -Rb` — the same modifier. It is the shape eleven corpus kernels contain.
+
+### The three `max` rows, and why two of them are not a spare
+
+`max/relu` is the shape the shipped bias+ReLU epilogue emits:
+`max.f32 r, r, 0f00000000`. `ptxas` folds the literal into `RZ` and puts it in
+the **first** operand slot — `FMNMX d, RZ, x, !PT` — so the two sides build
+`FMAX(x, +0.0)` and `FMAX(+0.0, x)`, and without a commutativity fact they are
+two terms that never meet.
+
+`max/general` is the same opcode on two runtime values, and it is **not** a
+redundant control. Measured: with the canonicalisation removed, `relu` goes
+UNPROVED and `general` stays **VALIDATED**, because `ptxas` preserved its
+operand order. So the commutativity measurement is load-bearing for exactly the
+shipped shape and for nothing else in the corpus — a general-max fixture alone
+would have validated and left the need invisible.
+
+`max/min` is the other polarity of the same SASS instruction. `FMNMX` carries
+min-vs-max in its fourth operand, so a polarity error is a whole-kernel wrong
+answer rather than a modelling gap; the pair is what pins that the executor
+reads that operand instead of assuming.
+
+These validate the shipped **lowering**, not the shipped kernel: the six
+`gemm_f16_bias_relu_*` around it are 11 PTX and 14 SASS opcodes away, and the
+four paged-decode kernels 5 and 24–26.
 
 ### The control is the row that makes the table mean something
 
@@ -538,7 +565,7 @@ agrees with a correctly-rounded double quotient on 100.00%. `fpmode.py` routes
 every such identification through a table carrying a `validated` flag, refuses an
 *expanded* op by name, and self-checks at import.
 
-### Five float facts refereed against silicon
+### Seven float facts refereed against silicon
 
 None can be read off a mnemonic. `fpsem_abi.py` runs each on the device.
 
@@ -607,6 +634,37 @@ instruction — so the probe compares a kernel against itself and answers
 perfectly. That was measured, not supposed, and the checker asserts two
 *distinct* `FADD`s and a materialised `LOP3` before believing the run.
 
+**`max.f32` computes the PTX rule bit for bit.** Not an ordering: with one
+NaN operand the result is the *other* operand, with two it is a canonical NaN,
+and `+0.0` ranks above `-0.0`. 32 vectors, **0 disagreements**, and the probe
+is live rather than empty — 3 of them are a denormal passing through
+**unflushed**, so it distinguishes a flushing implementation from a bit-exact
+one, and the run fails if none does. The load/store echo is checked in the same
+pass, so a lossy plumbing path cannot be blamed on the instruction.
+
+The model was written **before** the run and was not adjusted afterwards, which
+is the difference between evidence and curve-fitting: the NaN clause comes from
+the PTX ISA and the signed-zero clause was a guess, and it reported 0
+disagreements on the first execution. Had it disagreed, the honest report would
+have been the device's answer and a corrected model — not a clean run.
+
+**And `max.f32` is bit-exactly commutative.** This is needed, and needed for
+exactly one shape: the shipped ReLU epilogue writes `max.f32 r, r, 0f00000000`
+and `ptxas` folds the literal into `RZ` in the **first** operand slot. "IEEE
+max is commutative" is not enough for the same reason it was not enough for
+`FADD` — the claim is about stored **bits**, and a hardware returning the first
+operand's NaN payload would break it on precisely the inputs no ordinary test
+uses. 16 **distinct** pairs in both orders, 0 asymmetric; two of them are quiet
+NaNs with different payloads, and the run refuses if any pair has identical
+operands, because a swap of those is not observable.
+
+`FMIN` is deliberately **not** canonicalised. No committed artifact contains a
+`min.f32` and no corpus SASS contains an `FMNMX ..., PT` — measured, 0 of 66 —
+so nothing has needed it and nothing has measured it. Same treatment as `FMUL`
+commutativity, and `fpmode._self_check` pins both halves.
+
+---
+
 ### The third currency, and an integer reader on a float operand
 
 Two things were wrong here and they arrived together.
@@ -643,10 +701,49 @@ opcode in the corpus**.
 Nothing measured that. The commit carried a 13-row mutation table over nine
 checks and not one of them reads the validator. *A cost stated in one currency
 is not a cost until it is checked in the currency that ships* — and there was a
-third currency. `fpgate.py` counts it now: every arithmetic-core f32 opcode
-(`mul`/`add`/`sub`/`neg`/`fma`) appearing in a committed artifact must be
-modelled by `ptxexec`, with the opcodes read off the **artifacts** rather than
-listed, so a list of what the emitter emits cannot drift from the emitter.
+third currency. `fpgate.py` counts it now, with the opcodes read off the
+**artifacts** rather than listed, so a list of what the emitter emits cannot
+drift from the emitter.
+
+#### …and the first version of that gate counted 5 of 30
+
+It matched `(mul|add|sub|neg|fma)\.f32` — *"the family a change to the fusion
+path moves within"*. That scope is right about fusions and it is **not** the
+scope of the defect: an emitter change can hand the validator an opcode it
+refuses in any family. Measured, the emitter writes **30** float-semantic
+opcodes and the regex counted **five**. Two of the uncounted ones have census
+reach at or above the 7 of `neg.f32`, the opcode the gate exists for —
+`max.f32` at **10** and `cvt.rn.f16.f32` at 7.
+
+(A first pass said *four*, from an ad-hoc `grep` counting kernels that
+**contain** an opcode. `gap.py --rank` counts kernels it **blocks**, which is
+the comparable measure and is smaller: `cvt.f32.f16` is 5 there, not 8, and
+`ex2.approx.f32` does not appear at all, because a macro-op is classified by
+`fpmode` and surfaces as a contaminated error rather than an opcode gap. The
+same pass said 29 opcodes where the gate measures **30**, having truncated
+`cvt.rn.f32.s32` to `cvt.rn.f32`. Two counting conventions, and only the gate's
+is reproducible.)
+
+The rule is total now: every float-semantic opcode in a committed artifact is
+either **modelled** or in a **named family with a written reason**, and a
+thirty-first is in neither and fails. Today that is 6 modelled, 11 conversions,
+9 macro-ops (a family *derived* from `fpmode.MACRO_OPS`, not listed again), and
+4 f64. `ld.global.v4.f32` and friends are deliberately out: they move a bit
+pattern and are unmodelled for a vector-width reason, not a floating-point one.
+
+An all-clear is also what a broken classification reports, so the gate carries
+a **positive control** that runs two synthetic opcodes through the *same*
+`classify()` the census uses — `abs.f32`, which must be reported, and
+`setp.lt.f64`, which must not be called modelled.
+
+That second one is a defect the first version of the widened gate actually had,
+and it is the design rule inside the gate written to apply it. `setp.lt.f64`
+refuses on its **operand** — `%fd1`, a 64-bit float register the executor has
+no sort for — rather than on its opcode, and I had exempted a non-opcode
+refusal on the reading that the sample line's operands were at fault. It was
+reported as MODELLED. It was caught by reading the output, not by a test: an
+unmodelled opcode in the modelled column is obvious once printed. Any refusal
+means not modelled.
 
 ---
 
@@ -785,7 +882,7 @@ Needs `python3` with `z3-solver`, and `ptxas` + `nvdisasm` from the CUDA toolkit
 ```sh
 cd tools/ptxas_tval
 ./build_corpus.sh          # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
-./regress.sh               # ALL thirteen standing results, ~50 s
+./regress.sh               # ALL sixteen standing results, ~50 s
 ```
 
 `regress.sh` used to cover the straight-line cases only, and the loop and
@@ -801,6 +898,34 @@ bug `tests/ptx_portability.rs` exists to prevent, and here it would silently
 change which SASS is under test. All 66 kernels rebuilt **byte-identically** to
 the ones the table above was measured on, `-O1` included, so the corpus is
 reproducible rather than shipped.
+
+### Reach 10 bought nothing, and that is why `max.f32` was modelled anyway
+
+The reach ranking says `max.f32` blocks **10** kernels — six
+`gemm_f16_bias_relu_*` and four paged-decode attention — which is more than the
+7 of `neg.f32`. Reach is not why it was modelled, and the cross-check is the
+whole point of having both columns: in every one of those ten it is **1 of 11**
+PTX opcodes (the GEMMs) or **1 of 5** (attention), with SASS gaps of 14 to 26.
+**Necessary for ten, sufficient for none** — the same verdict the one-back-edge
+lift got.
+
+What it buys is that the shipped ReLU **lowering** becomes a standing result,
+and that required a fact IEEE does not give: `ptxas` swaps the operands, so the
+two sides only meet under bit-exact commutativity over NaN payloads. That fact
+is measured now. The GEMM around it is still eleven opcodes away.
+
+Two residue items were also settled by measurement rather than by building
+them. `selp.f32` was recorded as *"the obvious next unary"*; its corpus reach is
+**0** — it appears in no kernel, and served only the FSEL probe's own PTX.
+`selp.u32` (reach 25) was already modelled.
+
+And a confirmation worth recording because it looked like a finding: `ptxas`
+**rematerialises** three `FMNMX` in each paged-decode split kernel — 35 in the
+PTX against 38 in the SASS — at `-O1` and above, and 35 against 35 at `-O0`.
+An instruction-count delta between the two currencies cannot tell
+rematerialisation from a semantic difference, which is exactly the confound
+`contract.py` was fixed for one opcode over. Reach counts *kernels*, so it is
+unaffected.
 
 ### The queue was ordered by cost, and nobody had computed reach
 
@@ -933,7 +1058,7 @@ python3 smemdepth.py   # what ELSE each shared-memory kernel needs
 python3 barregion.py   # multiplies per barrier region, against the wall
 python3 fpclass.py     # contraction vs macro-op, per kernel
 python3 cbank_abi.py   # referee the const-bank ABI against ptxas AND the device
-python3 fpsem_abi.py   # referee the five float facts against the device
+python3 fpsem_abi.py   # referee the seven float facts against the device
 python3 fpgate.py      # which contraction kernels a repair unlocks, by asking
 python3 unroll.py      # did ptxas unroll?  (it did, x4, at -O2 and above)
 ```

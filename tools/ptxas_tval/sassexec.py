@@ -474,6 +474,23 @@ class Sass:
             # the probe `fpsem_abi.py` uses to observe the `-R` modifier with
             # nothing arithmetic in the way.
             self.wr(ops[0], If(self.pr(ops[3]), self.frd(ops[1]), self.frd(ops[2])), g)
+        elif opc == 'FMNMX':
+            # ONE instruction for both min and max, with the polarity in the
+            # fourth operand: TRUE selects the min.  Measured on sm_89 --
+            # `max.f32` lowers to `FMNMX d, a, b, !PT` and `min.f32` to
+            # `FMNMX d, a, b, PT`.
+            #
+            # Modelled as a select between the two functions rather than by
+            # branching on the operand's TEXT, so a real predicate register in
+            # that slot ( `P ? min : max` ) is handled rather than guessed at --
+            # `self.pr` already refuses nothing and yields a Bool, and where the
+            # operand is the constant PT/!PT Z3 folds the select away.
+            #
+            # The sources are FLOAT sources, so they go through `frd`: ptxas is
+            # free to put a `-R` modifier here exactly as it does on FADD.
+            self.wr(ops[0], If(self.pr(ops[3]),
+                               self.sym['fp']('FMIN', self.frd(ops[1]), self.frd(ops[2]), side='sass'),
+                               self.sym['fp']('FMAX', self.frd(ops[1]), self.frd(ops[2]), side='sass')), g)
         elif opc == 'LOP3.LUT':
             lut = int(ops[4], 16)
             self.wr(ops[0], self.lop3(rd(ops[1]), rd(ops[2]), rd(ops[3]), lut), g)
