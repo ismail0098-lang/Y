@@ -36,6 +36,9 @@ them moves — the two UNPROVED rows included.
 |---|---|---|---|---|
 | `fma/rn` | **VALIDATED** | 9 | 0.0 s | float, with contraction forbidden by `.rn` |
 | `fma/plain` | UNPROVED | 10 | 0.0 s | **the negative control** — `store 0: sat` |
+| `neg/folded` | **VALIDATED** | 9 | 0.0 s | a `neg.f32` folded into an `FFMA` modifier |
+| `neg/sub` | **VALIDATED** | 7 | 0.0 s | a plain float subtract |
+| `neg/unfoldable` | UNPROVED | 9 | 0.0 s | **a second control** — the *other* lowering of one opcode |
 | `bn254_permute` | **VALIDATED** | 30 | 0.2 s | branching `ptxas` invented |
 | `bn254_sub_vec` | **VALIDATED** | 88 | 12.6 s | |
 | `ptx_carry_chain` | **VALIDATED** | 123 | 33.4 s | 24 predicated instructions |
@@ -45,7 +48,7 @@ them moves — the two UNPROVED rows included.
 | `naive_gemm_f32_muladd` @ `-O1` | UNPROVED | 7 | 0.2 s | the form Y used to ship — `store 0 value: sat` |
 | `naive_gemm_f32_rn` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden*, at a different SASS |
 
-Eight kernels validated, **317 obligations**, and two UNPROVED rows that are
+Ten kernels validated, **342 obligations**, and three UNPROVED rows that are
 results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
 UNPROVED and are discussed under *The wall* below — neither produced a `sat`.
 
@@ -75,6 +78,32 @@ instructions as well as in SASS. The refutation is kept as `_muladd`, derived
 from the shipped kernel by splitting the instruction back into two — a corpus
 containing nothing the validator refutes cannot be told apart from a validator
 that always says VALIDATED.
+
+### The three `neg` rows are one opcode in two lowerings
+
+`neg/folded` and `neg/unfoldable` contain the same PTX instruction. One
+validates and one does not, and the difference is entirely what `ptxas` does
+with it.
+
+`ptxas` has no bare float-negate instruction. Where the negation feeds another
+float operation it disappears into an **operand modifier** — `FFMA Rd, Ra, Rb,
+-Rx` — and that is what happens in all 23 occurrences in the committed corpus.
+Where it cannot (`neg/unfoldable` sends the result straight to a store) `ptxas`
+materialises it as `FADD Rd, -Rx, -RZ`, which is **arithmetic**.
+
+The two are not the same function, and the device says so. Measured on sm_89
+over denormals of both signs, `±0.0`, quiet NaNs carrying payloads, a
+signalling NaN, both infinities and the all-ones pattern: the modifier is a
+bit-exact sign flip on **32/32**; the un-foldable lowering agrees on every
+finite input and returns the canonical quiet NaN `0x7fffffff` for **every** NaN
+— discarding the payload *and* the sign — on 10 of 32 vectors. So the UNPROVED
+row is a fact about the machine rather than a limitation of the model, and it is
+a genuinely different refutation from `fma/plain`: not a contraction `ptxas` is
+free to make, but one PTX opcode with two lowerings that compute different
+functions.
+
+`neg/sub` is the third of the set because a plain `sub.f32` lowers to `FADD Rd,
+Ra, -Rb` — the same modifier. It is the shape eleven corpus kernels contain.
 
 ### The control is the row that makes the table mean something
 
@@ -509,10 +538,9 @@ agrees with a correctly-rounded double quotient on 100.00%. `fpmode.py` routes
 every such identification through a table carrying a `validated` flag, refuses an
 *expanded* op by name, and self-checks at import.
 
-### Two float facts refereed against silicon
+### Five float facts refereed against silicon
 
-Both were needed to reach the GEMM above, and neither can be read off a
-mnemonic. `fpsem_abi.py` runs each on the device.
+None can be read off a mnemonic. `fpsem_abi.py` runs each on the device.
 
 **`FSEL` is a bit-exact select, not an arithmetic operation.** That is the
 guess that mattered — the operand order is visible in the disassembly, but an
@@ -552,6 +580,73 @@ a confident wrong answer:
 `FMUL` is deliberately **not** canonicalised: nothing has needed it, so nothing
 has measured it, and `fpmode._self_check` now pins both halves — `FADD` must
 commute, `FMUL` must not — so neither can drift.
+
+**A `-R` operand modifier on a float source is a bit-exact sign flip.** Every
+consumer of one is an `FADD` or an `FFMA`, which is entitled to canonicalise
+its *result*, so the modifier's own behaviour is invisible through them. It is
+observed through `FSEL` instead — the one float-shaped instruction already
+refereed as bit-exact — by folding a `neg.f32` into a `selp.f32` source, which
+`ptxas` obligingly does. 32/32, with the false arm of the select exercised so
+the probe cannot be answered by one source alone.
+
+**The un-foldable lowering of `neg.f32` is *not* one.** This is a refutation,
+and it is asserted as one: the probe fails if *nothing* separates the lowering
+from a sign flip (then the standing UNPROVED row would be a modelling gap), and
+it also fails if nothing *agrees* (then it is not measuring a negation at all).
+Every disagreement must be a NaN and must be the canonical `0x7fffffff`, which
+is a much stronger statement than "they differ".
+
+**`a - b` is bit-for-bit `a + (-b)`.** This licenses the `FSUB(a,b) ==
+FADD(a, FNEG(b))` identification, without which the two sides of every float
+subtract build terms that cannot meet. It cannot be asked of `ptxas`, because
+`sub.f32` has exactly one lowering; it is asked of the device as two PTX
+programs, the second negating `b` with an integer XOR. **The mask has to be
+loaded from memory**: given a literal `0x80000000`, `ptxas` recognises the xor
+as a negation, folds it back into a modifier and CSEs the two arms into one
+instruction — so the probe compares a kernel against itself and answers
+perfectly. That was measured, not supposed, and the checker asserts two
+*distinct* `FADD`s and a materialised `LOP3` before believing the run.
+
+### The third currency, and an integer reader on a float operand
+
+Two things were wrong here and they arrived together.
+
+**The reader was a guess.** `sassexec.rd` handled a `-R` prefix once,
+generically, at the top — `return -self.rd(o[1:])`, the **two's complement of
+the bit pattern** — and every float arm inherited it. That is a different
+32-bit value for every input but zero and the sign bit alone. `-RZ` was worse
+in the same place: it collapses to `+0.0` where the operand is `-0.0`, and
+`FADD Rd, -Rx, -RZ` is precisely how `ptxas` lowers an un-foldable `neg.f32`,
+so the one construct that needed it is the one that got it wrong.
+
+It was **latent rather than live** — no standing result has a negated float
+source in its SASS, checked rather than assumed — and the direction it failed
+in on the one case measured was a *false UNPROVED*. That is the safe direction
+and it is not a licence: nothing said the guess was safe in general, and under
+the concretising rungs of the ladder two wrong values can agree. This tool's
+rule is that an unmodelled operand **form** is a hard error, not a guess in a
+convenient direction. Reach: **eleven** corpus kernels (three RoPE, four
+`gemm_fp8`, four paged-decode attention), because a plain `sub.f32` produces
+one. `sassexec.frd` is the float reader now, and `|R|` — an absolute value,
+a second bit operation nobody has refereed — is refused by name rather than
+silently ignored.
+
+**And the emitter had just grown the gap.** Repairing the RoPE rotation to say
+`fma.rn.f32` was measured free in PTX instructions (42/62/102 before and after)
+and free in SASS bytes (byte-identical). It replaced a `sub.f32`, which
+`ptxexec` models, with a `neg.f32`, which it did not — so the PTX opcode gap of
+those three kernels each grew by exactly one while their SASS gap did not move,
+and `neg.f32`'s reach across the corpus went from 4 kernels to 7. By
+`gap.py --rank`'s own reach metric that makes it the **second-highest-reach PTX
+opcode in the corpus**.
+
+Nothing measured that. The commit carried a 13-row mutation table over nine
+checks and not one of them reads the validator. *A cost stated in one currency
+is not a cost until it is checked in the currency that ships* — and there was a
+third currency. `fpgate.py` counts it now: every arithmetic-core f32 opcode
+(`mul`/`add`/`sub`/`neg`/`fma`) appearing in a committed artifact must be
+modelled by `ptxexec`, with the opcodes read off the **artifacts** rather than
+listed, so a list of what the emitter emits cannot drift from the emitter.
 
 ---
 
@@ -690,7 +785,7 @@ Needs `python3` with `z3-solver`, and `ptxas` + `nvdisasm` from the CUDA toolkit
 ```sh
 cd tools/ptxas_tval
 ./build_corpus.sh          # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
-./regress.sh               # ALL nine standing results, ~50 s
+./regress.sh               # ALL thirteen standing results, ~50 s
 ```
 
 `regress.sh` used to cover the straight-line cases only, and the loop and
@@ -838,7 +933,7 @@ python3 smemdepth.py   # what ELSE each shared-memory kernel needs
 python3 barregion.py   # multiplies per barrier region, against the wall
 python3 fpclass.py     # contraction vs macro-op, per kernel
 python3 cbank_abi.py   # referee the const-bank ABI against ptxas AND the device
-python3 fpsem_abi.py   # referee FSEL and f32-add commutativity against the device
+python3 fpsem_abi.py   # referee the five float facts against the device
 python3 fpgate.py      # which contraction kernels a repair unlocks, by asking
 python3 unroll.py      # did ptxas unroll?  (it did, x4, at -O2 and above)
 ```

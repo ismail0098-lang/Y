@@ -19,9 +19,9 @@ fusion the machine already performs -- emits a BYTE-IDENTICAL instruction
 stream, is more accurate, and validates.  The repair is to SAY what the machine
 does, not to forbid it.
 """
-import contextlib, io, os, re, subprocess, sys
+import contextlib, glob, io, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or '.')
-import contract, gap, loopgap, loopval
+import contract, gap, loopgap, loopval, ptxexec
 
 
 def structural(k, o1=False):
@@ -41,6 +41,68 @@ def structural(k, o1=False):
     except Exception as e:
         v, msg = 'REFUSED', str(e)
     return (v, v if v == 'VALIDATED' else loopgap.reason_key(msg))
+
+
+# The arithmetic core: the family a change to the fusion path moves WITHIN.
+# `mul`/`add`/`sub` are what a fusion consumes, `fma` and `neg` are what it
+# produces.  Deliberately NOT the macro-ops (`div`, `sin`, `ex2`, ...), which
+# are refused by name and on purpose -- see fpmode.py.
+ARITH = re.compile(r'^\s*((?:mul|add|sub|neg|fma)\.[a-z0-9.]*f32)\s')
+
+
+def arith_ops_the_emitter_writes():
+    """Every arithmetic-core f32 opcode present in a committed artifact, with
+    one real instruction line for each.  Read off the ARTIFACTS rather than
+    listed: a list of what the emitter emits is a second copy of the emitter."""
+    out = {}
+    files = sorted(glob.glob(os.path.join('..', '..', 'tests', '*.ptx')))
+    for f in files:
+        for ln in open(f):
+            m = ARITH.match(ln)
+            if m: out.setdefault(m.group(1), ln.strip().rstrip(';'))
+    return files, out
+
+
+def check_the_emitter_cannot_grow_the_gap():
+    """An emitter change can hand the validator an opcode it refuses, and
+    nothing measured that.
+
+    It happened.  Repairing the RoPE rotation to say `fma.rn.f32` -- byte-
+    identical SASS, same PTX instruction count -- replaced a `sub.f32`, which
+    `ptxexec` models, with a `neg.f32`, which it did not.  The three rope
+    kernels' PTX opcode gap each grew by exactly one while their SASS gap did
+    not move at all, and `neg.f32`'s reach across the corpus went 4 kernels to
+    7 -- the second-highest-reach PTX opcode there is.  The commit that did it
+    carried a 13-row mutation table and nine checks, and not one of them reads
+    the validator.
+
+    "The negation is free in both currencies" was measured in PTX instructions
+    and in SASS bytes.  This is the third currency, and it was not counted.
+    """
+    files, ops = arith_ops_the_emitter_writes()
+    # FLOOR.  A scan that reads nothing reports no unmodelled opcodes, perfectly.
+    if len(files) < 20 or len(ops) < 4:
+        print(f'FAIL: scanned {len(files)} artifacts and found {len(ops)} '
+              f'arithmetic-core opcodes -- there is nothing to check')
+        return 1
+    bad = []
+    for op, line in sorted(ops.items()):
+        st = ptxexec.Ptx(gap.fresh(files[0]))
+        try:
+            st.step(line)
+        except Exception as e:
+            if gap.OPCODE_ERR.search(str(e)):
+                bad.append(op)
+    print(f'  {len(ops)} arithmetic-core f32 opcodes across {len(files)} committed '
+          f'artifacts: {", ".join(sorted(ops))}')
+    if bad:
+        print(f'FAIL: the emitter writes {", ".join(bad)} and ptxexec refuses it. '
+              f'An emitter change that is free in instructions and free in SASS '
+              f'bytes is not thereby free: it can hand the validator an opcode '
+              f'no executor models, and this is the currency nobody counts.')
+        return 1
+    print('  all modelled -- the emitter has not grown the validator\'s gap')
+    return 0
 
 
 def main():
@@ -128,6 +190,10 @@ def main():
     # refutes cannot be told apart from a validator that always says VALIDATED.
     if bad:
         print(f'\nFAIL: {bad} of the two standing verdicts moved.')
+        return 1
+
+    print()
+    if check_the_emitter_cannot_grow_the_gap():
         return 1
 
     print(f'\nkernels the fma.rn repair unlocks today: {len(unlocked)}'

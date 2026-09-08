@@ -28,10 +28,16 @@ sequence.  So the macro-op class is not a float-semantics gap, it is a
 different verification problem -- proving an IEEE division algorithm -- and it
 is REFUSED BY NAME here rather than approximated.
 
-Deliberately NOT assumed: commutativity.  `FADD(a,b)` and `FADD(b,a)` are
-different terms here.  IEEE addition is commutative, so canonicalising by
-operand id would be sound and would hide a real question -- whether ptxas
-preserves operand order -- so it is left out until something needs it.
+TWO IDENTIFICATIONS ARE IMPOSED, each licensed by a device probe and each
+recorded with the flag that says so -- `FADD` commutes, and `FSUB(a,b)` is
+`FADD(a, FNEG(b))`.  Both were once written here as deliberately open, and both
+were closed only when something needed them, which is the order to do it in: an
+identification nothing needs is an unmeasured assumption with no benefit.
+
+Deliberately NOT assumed: `FMUL` commutativity.  Nothing has needed it, so
+nothing has measured it, and `_self_check` pins BOTH halves of every
+identification -- the one that must hold and the one that must not -- so a
+third cannot arrive without a probe.
 """
 from z3 import *
 W = 32
@@ -105,6 +111,29 @@ TRANSLITERATED = {
 }
 MACRO_OPS = dict.fromkeys(list(EXPANDED) + list(TRANSLITERATED))
 
+# --- identifications licensed by a device probe --------------------------------
+#
+# An identification is an EQUATION imposed on the abstraction, so it is exactly
+# as load-bearing as an opcode model and it drifts the same way.  Each one is
+# recorded here with the flag that says a probe settled it, and the factory
+# REFUSES to impose an unvalidated one -- otherwise the flag is a comment.
+#
+#   FSUB(a,b) == FADD(a, FNEG(b))
+#     `sub.f32` has exactly one lowering -- `FADD Ra, -Rb` -- so "is FSUB the
+#     same function as FADD-of-a-negation" cannot be asked of ptxas without
+#     asking the translator under test.  It is asked of the DEVICE instead, as
+#     two PTX programs: `sub.f32 a b` against `add.f32 a t` where `t` is `b`
+#     with its sign bit flipped by an integer XOR against a mask LOADED FROM
+#     MEMORY.  The mask has to be opaque: with a literal 0x80000000 ptxas
+#     recognises the xor as a negation and folds it back into the modifier, so
+#     both arms become the same instruction and the probe compares a kernel
+#     against itself.  Measured 32/32 identical on sm_89 over denormals of both
+#     signs, +0.0/-0.0, quiet NaNs carrying payloads, a signalling NaN, both
+#     infinities and inf+(-inf).
+IDENTIFICATIONS = {
+    'FSUB_IS_FADD_OF_FNEG': True,
+}
+
 
 def refuse_macro_op(op):
     """Refuse a PTX macro-op BY NAME, with the class and the reason.
@@ -153,7 +182,10 @@ def factory():
     # whole file is about.
     F1 = {n: Function(n, BitVecSort(W), BitVecSort(W))
           for n in (tuple(sorted(HARDWARE_PRIMITIVES)) +
-                    ('I2F_S32', 'I2F_U32', 'F2F_F16_F32', 'F2F_F32_F16'))}
+                    ('I2F_S32', 'I2F_U32', 'F2F_F16_F32', 'F2F_F32_F16', 'FNEG'))}
+    # FSUB is deliberately NOT a symbol: `f` rewrites it below, so deleting that
+    # rewrite is a HARD ERROR at the first `sub.f32` rather than a silent revert
+    # to two terms that no longer meet.
     def f(name, *args, side, _via_table=False):
         # COMMUTATIVITY, for FADD only, and licensed by a measurement.
         #
@@ -175,6 +207,26 @@ def factory():
         # FMUL is NOT canonicalised: nothing has needed it, so nothing has
         # measured it, and an unmeasured identification is the guess this file
         # exists to refuse.  `_self_check` pins both halves of that.
+        # SUBTRACTION IS ADDITION OF A NEGATION, and licensed by a measurement.
+        #
+        # The PTX side writes `sub.f32`; ptxas writes `FADD Ra, -Rb`, with the
+        # negation as an OPERAND MODIFIER.  Without this the two sides build
+        # different terms and no kernel containing a float subtract can ever
+        # validate -- and the failure reads as a divergence in the arithmetic
+        # rather than as a modelling gap, which is the worst way to be told.
+        #
+        # `-R` itself is modelled as FNEG on both sides; `fpsem_abi.py` measures
+        # that the modifier is a BIT-EXACT sign flip, by folding a `neg.f32`
+        # into an FSEL source -- FSEL being the one float-shaped instruction
+        # already refereed as bit-exact, so the modifier is observed with
+        # nothing arithmetic in the way.
+        if name == 'FSUB':
+            if len(args) != 2:
+                raise Exception(f'FSUB/{len(args)} -- the identification is binary')
+            if not IDENTIFICATIONS['FSUB_IS_FADD_OF_FNEG']:
+                raise Exception('FSUB is identified with FADD(a, FNEG(b)) but the '
+                                'device probe that settles it is marked unvalidated')
+            return f('FADD', args[0], f('FNEG', args[1], side=side), side=side)
         if name == 'FADD' and len(args) == 2 and args[0].get_id() > args[1].get_id():
             args = (args[1], args[0])
         if side not in ('ptx', 'sass'):
@@ -234,6 +286,27 @@ def _self_check(f):
         raise Exception('FMUL now commutes -- nothing has needed that, so nothing '
                         'has measured it; see fpsem_abi.py for what licensing one '
                         'of these costs')
+    # FNEG, and both halves again.  It must be a real function -- an identity
+    # FNEG makes `FADD Ra, -Rb` and `FADD Ra, Rb` the same term, so a kernel
+    # whose SASS negates the wrong source validates -- and the FSUB rewrite must
+    # actually fire, or the PTX and SASS sides of every float subtract build
+    # terms that cannot meet and no such kernel can ever be validated.
+    if is_true(simplify(f('FNEG', a, side='sass') == a)):
+        raise Exception('FNEG is the identity -- a negated source is then the same '
+                        'term as the source, so a kernel that negates the wrong '
+                        'operand validates')
+    if is_true(simplify(f('FNEG', a, side='sass') == f('FNEG', b, side='sass'))):
+        raise Exception('FNEG ignores its argument -- both arms share it, so this '
+                        'validates everything')
+    if not is_true(simplify(f('FSUB', a, b, side='sass') ==
+                            f('FADD', a, f('FNEG', b, side='sass'), side='sass'))):
+        raise Exception('FSUB is no longer rewritten to FADD(a, FNEG(b)) -- ptxas '
+                        'lowers `sub.f32` to `FADD Ra, -Rb`, so without the rewrite '
+                        'the two sides of every float subtract build terms that '
+                        'cannot meet')
+    # ...and it must be a rewrite rather than a collapse: `a - b` is not `a + b`.
+    if is_true(simplify(f('FSUB', a, b, side='sass') == f('FADD', a, b, side='sass'))):
+        raise Exception('FSUB collapsed onto FADD -- FNEG has stopped doing anything')
 
 
 def _side_check(f):
@@ -266,6 +339,21 @@ def _side_check(f):
             raise Exception(f'{op} is no longer refused -- it emits an out-of-line '
                             f'CALL and cannot be a term match')
     # and an unvalidated identification must refuse too, or the table is a comment
+    # an identification whose probe has not been run must refuse, for the same
+    # reason: the flag is a comment unless something reads it.
+    # SAVE and RESTORE, never assign the flag back to True: a check that puts a
+    # constant back is a check that repairs the mutation it was written to find.
+    _was = IDENTIFICATIONS['FSUB_IS_FADD_OF_FNEG']
+    IDENTIFICATIONS['FSUB_IS_FADD_OF_FNEG'] = False
+    try:
+        f('FSUB', a, a, side='sass')
+    except Exception:
+        pass
+    else:
+        raise Exception('FSUB was identified with FADD(a, FNEG(b)) although the '
+                        'validated flag says no device probe has settled it')
+    finally:
+        IDENTIFICATIONS['FSUB_IS_FADD_OF_FNEG'] = _was
     unval = [o for o, (_, v) in TRANSLITERATED.items() if not v]
     if unval:
         try:

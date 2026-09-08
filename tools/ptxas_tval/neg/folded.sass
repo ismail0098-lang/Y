@@ -1,0 +1,22 @@
+probe:
+.text.probe:
+        /*0000*/                   IMAD.MOV.U32 R1, RZ, RZ, c[0x0][0x28] ;
+        /*0010*/                   S2R R0, SR_TID.X ;
+        /*0020*/                   ULDC.64 UR4, c[0x0][0x118] ;
+        /*0030*/                   IMAD.SHL.U32 R8, R0, 0x4, RZ ;
+        /*0040*/                   SHF.R.U32.HI R0, RZ, 0x1e, R0 ;
+        /*0050*/                   IADD3 R2, P0, R8, c[0x0][0x160], RZ ;
+        /*0060*/                   IADD3.X R3, R0, c[0x0][0x164], RZ, P0, !PT ;
+        /*0070*/                   IADD3 R4, P0, R8, c[0x0][0x168], RZ ;
+        /*0080*/                   LDG.E R2, [R2.64] ;
+        /*0090*/                   IADD3.X R5, R0, c[0x0][0x16c], RZ, P0, !PT ;
+        /*00a0*/                   IADD3 R6, P0, R8, c[0x0][0x170], RZ ;
+        /*00b0*/                   LDG.E R4, [R4.64] ;
+        /*00c0*/                   IADD3.X R7, R0, c[0x0][0x174], RZ, P0, !PT ;
+        /*00d0*/                   LDG.E R7, [R6.64] ;
+        /*00e0*/                   IADD3 R8, P0, R8, c[0x0][0x178], RZ ;
+        /*00f0*/                   FMUL R9, R4, R7 ;
+        /*0100*/                   FFMA R11, R2, R2, -R9 ;
+        /*0110*/                   IADD3.X R9, R0, c[0x0][0x17c], RZ, P0, !PT ;
+        /*0120*/                   STG.E [R8.64], R11 ;
+        /*0130*/                   EXIT ;
