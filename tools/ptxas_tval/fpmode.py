@@ -130,8 +130,28 @@ MACRO_OPS = dict.fromkeys(list(EXPANDED) + list(TRANSLITERATED))
 #     against itself.  Measured 32/32 identical on sm_89 over denormals of both
 #     signs, +0.0/-0.0, quiet NaNs carrying payloads, a signalling NaN, both
 #     infinities and inf+(-inf).
+#
+#   FMAX(a,b) == FMAX(b,a)
+#     The SHIPPED ReLU epilogue writes `max.f32 d, x, 0f00000000` and ptxas
+#     lowers it to `FMNMX d, RZ, x, !PT` -- an OPERAND SWAP.  So the two sides
+#     build FMAX(x, +0.0) and FMAX(+0.0, x), and without this they are two
+#     terms that never meet.  Exactly the FADD situation one opcode over, and
+#     it needs the same measurement for the same reason: the claim is about
+#     stored BITS, and IEEE leaves a NaN result's payload implementation
+#     defined, so a hardware returning the FIRST operand's payload would break
+#     it on precisely the inputs no ordinary test uses.  Measured 16/16
+#     bit-identical on sm_89 over both operand orders of sixteen DISTINCT pairs
+#     -- two quiet NaNs with different payloads, a signalling NaN of each sign,
+#     +0.0/-0.0, denormals of both signs, both infinities and inf-vs-(-inf).
+#
+#     FMIN is deliberately NOT canonicalised.  No committed artifact contains a
+#     `min.f32` and no corpus SASS contains an `FMNMX ..., PT` (measured, 0 of
+#     66), so nothing has needed it and nothing has measured it -- and an
+#     unmeasured identification is the guess this file exists to refuse.  Same
+#     treatment as FMUL commutativity.
 IDENTIFICATIONS = {
     'FSUB_IS_FADD_OF_FNEG': True,
+    'FMAX_IS_COMMUTATIVE': True,
 }
 
 
@@ -174,7 +194,7 @@ def primitive_for(op):
 
 def factory():
     F2 = {n: Function(n, BitVecSort(W), BitVecSort(W), BitVecSort(W))
-          for n in ('FMUL', 'FADD', 'FSUB')}
+          for n in ('FMUL', 'FADD', 'FSUB', 'FMAX', 'FMIN')}
     F3 = {n: Function(n, BitVecSort(W), BitVecSort(W), BitVecSort(W), BitVecSort(W))
           for n in ('FFMA',)}
     # the MUFU entries are DERIVED from HARDWARE_PRIMITIVES rather than listed
@@ -229,6 +249,16 @@ def factory():
             return f('FADD', args[0], f('FNEG', args[1], side=side), side=side)
         if name == 'FADD' and len(args) == 2 and args[0].get_id() > args[1].get_id():
             args = (args[1], args[0])
+        # MAX IS COMMUTATIVE, and licensed by a measurement -- see the note on
+        # IDENTIFICATIONS.  The shipped ReLU lowering swaps the operands, so
+        # this is not an optimisation of the term size: without it that kernel
+        # cannot validate at all.  FMIN is deliberately left alone.
+        if name == 'FMAX' and len(args) == 2:
+            if not IDENTIFICATIONS['FMAX_IS_COMMUTATIVE']:
+                raise Exception('FMAX is canonicalised by operand id but the '
+                                'device probe that settles it is marked unvalidated')
+            if args[0].get_id() > args[1].get_id():
+                args = (args[1], args[0])
         if side not in ('ptx', 'sass'):
             raise Exception(f'float op {name!r} asked for without a side'
                             f' -- the caller must say which program it is executing')
@@ -307,6 +337,24 @@ def _self_check(f):
     # ...and it must be a rewrite rather than a collapse: `a - b` is not `a + b`.
     if is_true(simplify(f('FSUB', a, b, side='sass') == f('FADD', a, b, side='sass'))):
         raise Exception('FSUB collapsed onto FADD -- FNEG has stopped doing anything')
+    # FMAX, and BOTH halves, exactly as for FADD/FMUL.  It must commute (or the
+    # shipped ReLU lowering, which swaps the operands, builds two terms that
+    # never meet) and FMIN must NOT (or an identification nothing measured has
+    # crept in on the back of the one that was).
+    if not is_true(simplify(f('FMAX', a, b, side='sass') == f('FMAX', b, a, side='sass'))):
+        raise Exception('FMAX no longer commutes -- ptxas lowers `max.f32 d, x, +0.0` '
+                        'to `FMNMX d, RZ, x`, so without this the shipped ReLU shape '
+                        'cannot be validated')
+    if is_true(simplify(f('FMIN', a, b, side='sass') == f('FMIN', b, a, side='sass'))):
+        raise Exception('FMIN now commutes -- nothing has needed that, so nothing '
+                        'has measured it; see fpsem_abi.py for what licensing one '
+                        'of these costs')
+    # ...and max is not min.  `FMNMX` is ONE instruction whose polarity is an
+    # operand, so a sign error there is a whole-kernel wrong answer rather than
+    # a modelling gap, and collapsing the two would hide it.
+    if is_true(simplify(f('FMAX', a, b, side='sass') == f('FMIN', a, b, side='sass'))):
+        raise Exception('FMAX and FMIN collapsed -- FMNMX carries its polarity in an '
+                        'operand, so the two must stay distinguishable')
 
 
 def _side_check(f):

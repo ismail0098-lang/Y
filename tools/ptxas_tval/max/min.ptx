@@ -1,0 +1,35 @@
+// `min.f32` -- the OTHER polarity of the same SASS instruction.  FMNMX carries
+// min-vs-max in its fourth operand, so a polarity error is a whole-kernel wrong
+// answer rather than a modelling gap; this is the half of the pair that fails
+// if the executor's select is inverted, and `general` is the other half.
+//   PTX   min.f32 %f5, %f0, %f1
+//   SASS  FMNMX R9, R2, R5, PT
+// VALIDATED.  Note NO committed artifact contains a `min.f32` and no corpus
+// SASS contains an `FMNMX ..., PT` (measured, 0 of 66) -- so FMIN is modelled
+// and deliberately NOT canonicalised, because nothing has needed a
+// commutativity measurement for it.
+.version 7.8
+.target sm_89
+.address_size 64
+.visible .entry probe(
+    .param .u64 P0, .param .u64 P1, .param .u64 P2,
+    .param .u64 P3, .param .u64 P4, .param .u64 P5
+)
+{
+    .reg .b32 %r<8>;
+    .reg .f32 %f<8>;
+    .reg .b64 %rd<32>;
+    ld.param.u64 %rd0, [P0];
+    ld.param.u64 %rd1, [P1];
+    ld.param.u64 %rd3, [P3];
+    mov.u32 %r0, %tid.x;
+    cvt.u64.u32 %rd10, %r0;
+    shl.b64 %rd11, %rd10, 2;
+    add.u64 %rd20, %rd0, %rd11;
+    add.u64 %rd21, %rd1, %rd11;
+    add.u64 %rd23, %rd3, %rd11;
+    ld.global.f32 %f0, [%rd20];
+    ld.global.f32 %f1, [%rd21];
+    min.f32 %f5, %f0, %f1;
+    st.global.f32 [%rd23], %f5;
+}

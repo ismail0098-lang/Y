@@ -21,7 +21,7 @@ does, not to forbid it.
 """
 import contextlib, glob, io, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)) or '.')
-import contract, gap, loopgap, loopval, ptxexec
+import contract, fpmode, gap, loopgap, loopval, ptxexec
 
 
 def structural(k, o1=False):
@@ -43,24 +43,136 @@ def structural(k, o1=False):
     return (v, v if v == 'VALIDATED' else loopgap.reason_key(msg))
 
 
-# The arithmetic core: the family a change to the fusion path moves WITHIN.
-# `mul`/`add`/`sub` are what a fusion consumes, `fma` and `neg` are what it
-# produces.  Deliberately NOT the macro-ops (`div`, `sin`, `ex2`, ...), which
-# are refused by name and on purpose -- see fpmode.py.
-ARITH = re.compile(r'^\s*((?:mul|add|sub|neg|fma)\.[a-z0-9.]*f32)\s')
+# EVERY FLOAT-SEMANTIC OPCODE, not the fusion family.
+#
+# This used to be `(mul|add|sub|neg|fma)\.f32` -- "the family a change to the
+# fusion path moves WITHIN".  That scope is right about fusions and it is not
+# the scope of the defect below: an emitter change can hand the validator an
+# opcode it refuses in ANY family, and the narrow regex counted 5 of the 29
+# float-valued opcodes the emitter actually writes.  Four of the uncounted ones
+# had reach at or above the 7 of `neg.f32`, the opcode the gate exists for.
+#
+# `ld.global.v4.f32` and friends are deliberately OUT: they move a bit pattern
+# and are unmodelled for a VECTOR-WIDTH reason, not a floating-point one.  The
+# boundary is "does the result depend on interpreting the bits as a float".
+FLOAT_TY = ('f16', 'f32', 'f64', 'f16x2', 'bf16',
+            'e4m3', 'e5m2', 'e4m3x2', 'e5m2x2')
+SEM_MNEM = frozenset(('mul', 'add', 'sub', 'neg', 'fma', 'mad', 'div', 'rcp',
+                      'sqrt', 'rsqrt', 'abs', 'max', 'min', 'ex2', 'lg2', 'sin',
+                      'cos', 'tanh', 'setp', 'selp', 'cvt', 'testp', 'copysign'))
+OPCODE = re.compile(r'^\s*([a-z][a-z0-9._]*)\s')
 
 
-def arith_ops_the_emitter_writes():
-    """Every arithmetic-core f32 opcode present in a committed artifact, with
-    one real instruction line for each.  Read off the ARTIFACTS rather than
-    listed: a list of what the emitter emits is a second copy of the emitter."""
+def is_float_semantic(op):
+    parts = op.split('.')
+    return parts[0] in SEM_MNEM and any(p in FLOAT_TY for p in parts[1:])
+
+
+# Why each unmodelled family is unmodelled.  A gate whose exclusion list has no
+# reasons is a TODO list; the point of writing them down is that the next
+# opcode the emitter starts writing matches NONE of them and fails.
+#
+# The macro-op family is DERIVED from fpmode.MACRO_OPS rather than listed here:
+# two lists of one thing drift, which is the shape of bug this whole directory
+# is about.
+def why_unmodelled(op):
+    if op in fpmode.MACRO_OPS:
+        return ('macro-op', 'approximate or multi-instruction; ptxas seeds it '
+                'with a MUFU or expands it into a Newton sequence with its own '
+                'control flow, and identifying the two is a semantic claim a '
+                'device probe would have to settle -- see fpmode.py')
+    parts = op.split('.')
+    if parts[0] == 'cvt':
+        return ('conversion', 'a rounding operation between two float formats '
+                '(or a float and an integer); each rounding mode needs its own '
+                'device referee, exactly as max.f32 did')
+    if 'f64' in parts:
+        return ('f64', 'a second float domain; fpmode has one 32-bit sort, so '
+                'this needs a parallel set of symbols and its own referees')
+    if any(p in ('e4m3', 'e5m2', 'e4m3x2', 'e5m2x2') for p in parts):
+        return ('fp8', 'saturating narrow-float conversion; the saturation is '
+                'part of the semantics and is not measured')
+    return (None, None)
+
+
+def float_ops_the_emitter_writes():
+    """Every float-semantic opcode present in a committed artifact, with one
+    real instruction line for each.  Read off the ARTIFACTS rather than listed:
+    a list of what the emitter emits is a second copy of the emitter."""
     out = {}
     files = sorted(glob.glob(os.path.join('..', '..', 'tests', '*.ptx')))
     for f in files:
         for ln in open(f):
-            m = ARITH.match(ln)
-            if m: out.setdefault(m.group(1), ln.strip().rstrip(';'))
+            m = OPCODE.match(ln)
+            if m and is_float_semantic(m.group(1)):
+                out.setdefault(m.group(1), ln.strip().rstrip(';'))
     return files, out
+
+
+def classify(files, ops):
+    """MODELLED / excluded-by-family / unclassifiable, as ONE code path.
+
+    Shared with the positive control below on purpose: a control that
+    re-implements the classification is a second measurement, and two copies
+    agree while both are wrong."""
+    modelled, excluded, bad = [], {}, []
+    for op, line in sorted(ops.items()):
+        st = ptxexec.Ptx(gap.fresh(files[0]))
+        try:
+            st.step(line)
+            modelled.append(op)
+            continue
+        except Exception:
+            # ANY refusal means not modelled.  The first version of this gate
+            # exempted a refusal that was not an OPCODE_ERR, on the reading that
+            # the sample line's operands were at fault -- and that classified
+            # `setp.lt.f64` as MODELLED, because it refuses on `%fd1`, a 64-bit
+            # float register the executor has no sort for.  An opcode that
+            # cannot be executed is not modelled whatever the message says; the
+            # exemption was a guess in the convenient direction, which is the
+            # one thing this directory refuses to do.
+            pass
+        fam, _ = why_unmodelled(op)
+        if fam is None: bad.append(op)
+        else: excluded.setdefault(fam, []).append(op)
+    return modelled, excluded, bad
+
+
+def check_the_gate_would_notice():
+    """Would this gate SEE a new float opcode?  An all-clear is what a broken
+    classification reports too, so the census below is worth exactly what this
+    control is worth.
+
+    Two synthetic cases, through the SAME classify() the census uses:
+
+      `abs.f32` -- a real PTX opcode the emitter does not write today.  Not
+      modelled, not a macro-op, not a conversion, not f64, not fp8, so it must
+      be REPORTED.  That is the whole claim of the widened gate.
+
+      `setp.lt.f64` -- refuses on its OPERAND rather than on its opcode.  The
+      first version of this gate exempted that and called it MODELLED.  It must
+      land in a family instead.
+    """
+    files = sorted(glob.glob(os.path.join('..', '..', 'tests', '*.ptx')))
+    if not files:
+        print('FAIL: no artifacts to build a control from'); return 1
+    probe = {'abs.f32': 'abs.f32 %f1, %f2',
+             'setp.lt.f64': 'setp.lt.f64 %p1, %fd1, %fd2'}
+    modelled, excluded, bad = classify(files, probe)
+    rc = 0
+    if 'abs.f32' not in bad:
+        print(f'FAIL: the control opcode abs.f32 was not reported '
+              f'(modelled={modelled}, excluded={excluded}) -- this gate cannot '
+              f'see a new float opcode, so its all-clear means nothing')
+        rc = 1
+    if 'setp.lt.f64' in modelled:
+        print('FAIL: setp.lt.f64 counted as MODELLED -- it refuses on its '
+              'operand, and treating an operand-shaped refusal as "the opcode '
+              'is fine" is the guess this directory refuses to make')
+        rc = 1
+    if not rc:
+        print('  control: abs.f32 is reported, setp.lt.f64 is not called modelled')
+    return rc
 
 
 def check_the_emitter_cannot_grow_the_gap():
@@ -69,39 +181,37 @@ def check_the_emitter_cannot_grow_the_gap():
 
     It happened.  Repairing the RoPE rotation to say `fma.rn.f32` -- byte-
     identical SASS, same PTX instruction count -- replaced a `sub.f32`, which
-    `ptxexec` models, with a `neg.f32`, which it did not.  The three rope
-    kernels' PTX opcode gap each grew by exactly one while their SASS gap did
-    not move at all, and `neg.f32`'s reach across the corpus went 4 kernels to
-    7 -- the second-highest-reach PTX opcode there is.  The commit that did it
-    carried a 13-row mutation table and nine checks, and not one of them reads
-    the validator.
+    `ptxexec` models, with a `neg.f32`, which it did not.  `neg.f32`'s reach
+    across the corpus went 4 kernels to 7, and the commit that did it carried a
+    13-row mutation table and nine checks, none of which read the validator.
 
-    "The negation is free in both currencies" was measured in PTX instructions
-    and in SASS bytes.  This is the third currency, and it was not counted.
+    THE FIRST VERSION OF THIS GATE HAD THE SAME SHAPE OF HOLE, and it was mine.
+    It counted the FUSION family -- `(mul|add|sub|neg|fma).f32`, five opcodes --
+    and the emitter writes THIRTY.  `max.f32` sat outside it at reach 10,
+    HIGHER than the `neg.f32` the gate was written for.
+
+    So the rule is total now: every float-semantic opcode in a committed
+    artifact is either MODELLED or in a named family with a written reason.  A
+    thirty-first is in neither and fails -- which is what the control above
+    measures rather than assumes.
     """
-    files, ops = arith_ops_the_emitter_writes()
+    files, ops = float_ops_the_emitter_writes()
     # FLOOR.  A scan that reads nothing reports no unmodelled opcodes, perfectly.
-    if len(files) < 20 or len(ops) < 4:
+    if len(files) < 20 or len(ops) < 20:
         print(f'FAIL: scanned {len(files)} artifacts and found {len(ops)} '
-              f'arithmetic-core opcodes -- there is nothing to check')
+              f'float-semantic opcodes -- there is nothing to check')
         return 1
-    bad = []
-    for op, line in sorted(ops.items()):
-        st = ptxexec.Ptx(gap.fresh(files[0]))
-        try:
-            st.step(line)
-        except Exception as e:
-            if gap.OPCODE_ERR.search(str(e)):
-                bad.append(op)
-    print(f'  {len(ops)} arithmetic-core f32 opcodes across {len(files)} committed '
-          f'artifacts: {", ".join(sorted(ops))}')
+    modelled, excluded, bad = classify(files, ops)
+    print(f'  {len(ops)} float-semantic opcodes across {len(files)} committed artifacts')
+    print(f'    modelled ({len(modelled)}): {", ".join(modelled)}')
+    for fam in sorted(excluded):
+        print(f'    {fam} ({len(excluded[fam])}): {", ".join(excluded[fam])}')
     if bad:
-        print(f'FAIL: the emitter writes {", ".join(bad)} and ptxexec refuses it. '
-              f'An emitter change that is free in instructions and free in SASS '
-              f'bytes is not thereby free: it can hand the validator an opcode '
-              f'no executor models, and this is the currency nobody counts.')
+        print(f'FAIL: the emitter writes {", ".join(bad)} and it is neither '
+              f'modelled nor in a named family. An emitter change that is free '
+              f'in instructions and free in SASS bytes is not free in the third '
+              f'currency: what the validator can read.')
         return 1
-    print('  all modelled -- the emitter has not grown the validator\'s gap')
     return 0
 
 
@@ -193,6 +303,9 @@ def main():
         return 1
 
     print()
+    # The control FIRST: the census below is worth exactly what it is worth.
+    if check_the_gate_would_notice():
+        return 1
     if check_the_emitter_cannot_grow_the_gap():
         return 1
 

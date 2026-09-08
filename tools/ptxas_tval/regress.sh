@@ -11,6 +11,8 @@ bad=0
 for pair in "fma/rn.ptx fma/rn.sass" "fma/plain.ptx fma/plain.sass" \
             "neg/folded.ptx neg/folded.sass" "neg/sub.ptx neg/sub.sass" \
             "neg/unfoldable.ptx neg/unfoldable.sass" \
+            "max/relu.ptx max/relu.sass" "max/general.ptx max/general.sass" \
+            "max/min.ptx max/min.sass" \
             "corpus/bn254_permute.ptx corpus/bn254_permute.sass" \
             "corpus/bn254_sub_vec.ptx corpus/bn254_sub_vec.sass" \
             "corpus/ptx_carry_chain.ptx corpus/ptx_carry_chain.sass"; do
@@ -20,6 +22,18 @@ for pair in "fma/rn.ptx fma/rn.sass" "fma/plain.ptx fma/plain.sass" \
   printf '%-22s %s\n' "$name" "$out"
   # `fma/plain` is the NEGATIVE CONTROL and is asserted in its own direction:
   # every result above is worth exactly what that row is worth.
+  #
+  # `max/relu` is the SHIPPED ReLU epilogue's shape and `max/general` is the
+  # same opcode on two runtime values.  They are NOT a fixture and a spare: the
+  # ReLU form carries a literal, which ptxas folds into RZ and puts in the FIRST
+  # operand slot, so `relu` needs FMAX commutativity and `general` -- whose
+  # operand order ptxas preserves -- validates without it.  Measured: with the
+  # canonicalisation removed, relu goes UNPROVED and general stays VALIDATED.
+  # A general-max fixture alone would have hidden that the fact is needed.
+  #
+  # `max/min` is the OTHER polarity of the same SASS instruction, so the two of
+  # them pin that the executor reads FMNMX's predicate operand rather than
+  # assuming a polarity.
   #
   # `neg/unfoldable` is the SECOND negative control and it is a different
   # refutation from `plain`: not a contraction ptxas is free to make, but a
