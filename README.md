@@ -1881,11 +1881,24 @@ tool has never had to make, and refusing them today leaves it sound.
 `loopval` refuses on loop *structure*, independently of opcodes, so closing every
 opcode gap would leave a kernel refused for a reason nobody had measured.
 `loopgap.py` is that census — possible only because `loopval` refuses by name —
-and it takes **none of the 48** kernels with control flow. **32 of the 48 refuse
-for one reason: more than one back edge**, including all 23 tensor-core GEMMs,
-which have three. So "21–27 opcodes each" understates them, and supporting more
-than one back edge is the largest single lever in the corpus, needing no new
-opcode semantics. The census also puts a number on how the opcode census
+and it takes **none of the 48** kernels with control flow. **34 of the 48 refuse
+for one reason: more than one back edge** (32 on the PTX side, 2 on the SASS),
+including all 23 tensor-core GEMMs, which have three. So "21–27 opcodes each"
+understates them.
+
+> **This paragraph used to end "supporting more than one back edge is the
+> largest single lever in the corpus".** That was retracted in the doc — it
+> blocks 34 kernels and, at the level the corpus is built at, unblocks *none*,
+> because every one of them also has an opcode gap. **The retraction landed in
+> one file of two**, which is the same defect as the certificate count that was
+> published in six places and gated in none. The current position, measured by
+> `frontier.py`: in the committed corpus **no single item is the sole blocker of
+> any kernel**, and at `-O1` exactly one is — `y_cpu_matmul` has an empty opcode
+> gap on both sides there and only the back-edge limit left. So the lift is the
+> one item with a sufficiency case, and paying for it buys a new standing result
+> rather than a smaller census.
+
+The census also puts a number on how the opcode census
 under-reports: `bra` reads as 37 kernels where a textual scan finds 48, split
 **6 hidden by predication** (an unrecognised predicate name is attributed to the
 predicate, not the opcode behind it) and **5 by setup failure** (no instruction

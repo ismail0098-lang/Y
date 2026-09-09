@@ -883,7 +883,18 @@ Needs `python3` with `z3-solver`, and `ptxas` + `nvdisasm` from the CUDA toolkit
 cd tools/ptxas_tval
 ./build_corpus.sh          # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
 ./regress.sh               # ALL sixteen standing results, ~50 s
+python3 fpgate.py          # every float opcode a committed artifact carries
+python3 docgate.py         # the doc figures that describe a measurement
+python3 gap.py --rank      # cost per kernel, reach per opcode      (~15 min)
+python3 frontier.py        # sufficiency: what is SOLE blocker of what  (~25 min)
+python3 frontier.py --o1   # the same question with every kernel at -O1
 ```
+
+The two `frontier.py` runs are minutes and cache to `.frontier_cache*.json`,
+keyed on a digest of every corpus artifact **and** every executor source — so a
+changed emitter or a changed model invalidates the cache by name rather than by
+somebody remembering to pass a flag. The cache is derived and is not committed,
+for the reason `.ysu_hw_profile` is not.
 
 `regress.sh` used to cover the straight-line cases only, and the loop and
 shared-memory results were three commands the README asked a reader to type. A
@@ -1018,11 +1029,29 @@ Two corrections came out of running that cross:
   is `loopval`'s layer. `sassexec` does model `BRA` (it refuses a backward one
   by name, which is what hands the loop over), so only the PTX column needs the
   correction.
-* **A structural refusal moves with the optimisation level and an opcode gap
-  does not.** `naive_gemm_f32` refuses on the back-edge shape at `-O0`, on the
-  prologue shape at `-O2`, and at `-O1` is past every structural gate with one
-  unmodelled opcode. Asking the question at one level answers it for that
-  level. That is how the GEMM above was reached.
+* **A structural refusal moves with the optimisation level** — `naive_gemm_f32`
+  refuses on the back-edge shape at `-O0`, on the prologue shape at `-O2`, and
+  at `-O1` is past every structural gate. Asking the question at one level
+  answers it for that level. That is how the GEMM above was reached.
+
+  > **The second half of this bullet used to read "and an opcode gap does
+  > not", and that is FALSE.** An opcode gap moves with `-O` as readily as a
+  > structural refusal does, because a lower level emits a smaller instruction
+  > vocabulary. Measured, committed corpus (`-O3`) against `-O1`, same `.ptx`,
+  > by running the real census at both levels: `y_cpu_matmul` **2 → 0**
+  > (`PLOP3.LUT`, `UIADD3`, both gone), `exact_pv` **2 → 0**,
+  > `naive_gemm_f32` **2 → 0**. Two more move without changing size, which is
+  > the sharper form of the same point: `bn254_fr_mul` **2 → 2**
+  > (`CALL.REL.NOINC` out, `CS2R` in) and `int8_gemm_scaled` **4 → 4**
+  > (`SHF.L.U32` out, `CS2R` in) — **the count is not the thing that moves**.
+  > The old claim was written from one kernel where it happens to hold, and
+  > generalised.
+  >
+  > The `int8_gemm_scaled` figure was published here as `4 → 3` and was wrong:
+  > it came from a cheap text scan asking only whether each `-O3` gap opcode
+  > still *occurs* at `-O1`, which cannot see a NEW opcode arriving. `CS2R`
+  > arrives in both of those kernels. `docgate.py` caught it on its first run,
+  > because that check re-censuses rather than re-greps.
 
 (`exact_pv` is refused here because the corpus is built at `-O3`. Its standing
 result is at `-O1`, where it still validates — 14 obligations — and the refusal
@@ -1034,6 +1063,117 @@ apart from more-than-one although `loopval` phrases both as "has N back edges".
 They are opposite problems — the loop finder coming up empty on a kernel that
 demonstrably branches, versus capacity — and the first aggregation written here
 merged them and hid nine kernels behind thirty.
+
+### The sufficiency census, and the frontier is empty at the level we ship
+
+The cross above was done by hand, in prose, for one bucket. `frontier.py` is it
+corpus-wide and re-derivable. It answers the question a roadmap asks and that
+neither existing column does:
+
+* **COST** (`gap.py --rank`) is how many opcodes *this kernel* is short.
+* **REACH** is how many kernels *this opcode* blocks. It reads like a ranking
+  and it has been wrong twice here in the same direction — `max.f32` blocks ten
+  and unblocks none; the tensor-core staging blocks twenty-three and unblocks
+  none.
+* **SUFFICIENCY** is how many kernels an item is the *sole* blocker of. Nothing
+  had computed it.
+
+A kernel has more than one kind of blocker, gated by different layers, so the
+census crosses three measurements — and imports all three rather than restating
+any, because a second implementation of an aggregation agrees with the thing it
+is checking while both are wrong:
+
+* the **opcode** gap from `gap.census`, with `bra` discounted on the PTX side
+  (it is not an unmodelled opcode; it is the straight-line executor being handed
+  a loop, and counting it dresses a structural blocker up as a feature gap);
+* the **structural** refusal from `loopgap`, for any kernel with control flow;
+* a **setup** failure, which executes nothing and so reports an *empty* opcode
+  gap — that is not a gap of zero and is its own blocker.
+
+**In the committed corpus every blocker has a sole-count of zero.** 66 kernels,
+**106** distinct blockers, and not one of them would validate a kernel on its own
+— including every item then on the queue. `cvt.rn.f16.f32` is sole blocker of
+nothing; so is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the
+back-edge lift. That is the honest state of a corpus where **8 kernels are clear,
+the median is 15 blockers and 31 of 66 are 21 or more**, and it is why "reach"
+kept naming work that buys nothing.
+
+#### …and at `-O1` it is not empty, which re-ranks the queue
+
+Crossing sufficiency with the optimisation level is what the corrected bullet
+above makes necessary, and it changes the answer. **`y_cpu_matmul` at `-O1` has
+an empty opcode gap on both sides** — measured by the real census, not by a text
+scan: its `-O3` `PLOP3.LUT`/`UIADD3` are gone, no new opcode replaces them, and
+its PTX gap is `bra` alone. Its **only** remaining blocker is the multi-back-edge
+limit, three on each side.
+
+Measured over the whole corpus at that level, **at `-O1` exactly one kernel is
+one blocker away: `y_cpu_matmul`** — everything else is either clear or two or
+more short.
+
+So the lift is not "sufficient for nothing". It is the one item in the corpus
+with a sufficiency case, and paying for it buys a **new standing result** rather
+than a smaller number in a census. Two honest limits go with that:
+
+* **A refusal census reports the FIRST structural refusal**, so lifting the
+  PTX back-edge check can expose another — exactly the first-refusal problem
+  `gap.py` exists to solve, one layer over. `loopcfg` refuses the two sides
+  independently, and both say three, so the lift has to cover both; what
+  `loopval` would say after that is not measurable without building it.
+* **`-O1` is a weaker subject than the shipped build.** That is already the
+  standing position for `exact_pv` and `naive_gemm_f32`, and the thing that
+  relates a lower level to the shipped one is a `-O0..-O3` output differential.
+  For those two it is measured; **for `y_cpu_matmul` it is not**, and claiming
+  the kernel rather than the `-O1` build of it would need that first.
+
+#### Two censuses in one interpreter changed a verdict
+
+The first version of `frontier.py` called `loopgap.census([k])` inline, right
+after `gap.census(k)`, in one process. Over a full corpus that reported
+**`exact_pv` at `-O1` as `store 0 value: sat`** — a *refutation* of a kernel
+that is a standing VALIDATED result, on a `.sass` byte-identical to the
+committed one, and which `loopgap` alone validates at budget 20 **and** 60.
+
+It is not a budget artifact and it is not the kernel. Bisected on the number of
+kernels censused before it in the same interpreter:
+
+```
+preamble  0 kernels  ->  exact_pv: []                        (validates)
+preamble  5 kernels  ->  exact_pv: loop:store 0 value: sat
+preamble 12 kernels  ->  exact_pv: loop:store 0 value: sat
+```
+
+The mechanism is one `sassexec.run_insns` already warns about in its seeding
+comment: **the multiply primitive canonicalises its operands by z3 node id at
+construction**, and node ids come from a global counter, so unrelated work
+earlier in the same interpreter can leave two terms with their operands in
+opposite orders and congruence closure will not relate them. A single preceding
+kernel is not enough to move it; a corpus of them is.
+
+Two things make this worth writing down rather than fixing quietly. The
+observable was a **false refutation** — the direction that reads as *the kernel
+is wrong*, not as *the tool gave up*. And the hazard was already documented, one
+file away, for regions **inside** one validator run; nobody had asked what it
+does **across tools sharing an interpreter**. `frontier.structural` runs that
+census in a separate process now, which also makes its column equal to the
+doc's by construction rather than by coincidence.
+
+**It is an ordering effect, not a monotone one, and the control for it went
+vacuous saying so.** `frontier.py` carries a positive control asserting *both*
+that the in-process census is still contaminated and that the isolated one is
+not. Run in a fresh interpreter it fires; run at the end of a full 66-kernel
+census — in the same process, after far *more* unrelated work — the in-process
+census validated `exact_pv` again and the control reported itself vacuous rather
+than passing quietly. So more volume is not more contamination, and **a control
+that sets up its own experiment cannot inherit whatever the process has already
+done**: it runs in a child now, every time.
+
+> And the cache hid the fix. `frontier.py`'s digest keyed on the corpus and on
+> the *executor* sources and not on `frontier.py` itself — where `PTX_DISCOUNT`
+> and the blocker taxonomy live — so the first run made after the repair served
+> the contaminated answer straight back out of the cache. It is in the key now.
+> A cache built to refuse a stale tree, one entry short of the file that
+> decides the answer.
 
 ### The staging bring-up would WIDEN this gap, and that is the pricing
 
