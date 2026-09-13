@@ -50,6 +50,7 @@ A control that re-implements the check is a second measurement.
 import collections, glob, os, re, sys, tempfile
 
 import frontier
+import liftgap
 import loopcfg
 import loopgap
 
@@ -87,7 +88,12 @@ def measure_loop_census(only=None):
         if v == 'VALIDATED':
             nval += 1
         else:
-            agg[loopgap.reason_key(msg)] += 1
+            # THE KERNEL IS PASSED, so the key names the SHAPE of a
+            # more-than-one-back-edge refusal.  Without it the key degrades to
+            # `shape unknown` and this gate would compare the doc's shape-named
+            # census against a shapeless measurement -- i.e. report every row as
+            # missing, which is a gate failing rather than a gate checking.
+            agg[loopgap.reason_key(msg, _k)] += 1
     return len(ks), nval, agg
 
 
@@ -334,6 +340,161 @@ def check_optimisation_level_gaps(perturb=None):
     return bad
 
 
+def measure_second_refusal(only=None):
+    """`liftgap`'s census, IMPORTED rather than restated.
+
+    The first version of this walked the corpus itself, which is a second
+    implementation of the aggregation -- and a second implementation agrees with
+    the thing it is checking while both are wrong.  It also left `liftgap`'s own
+    floor guarded by nothing, since `--selftest` returns before reaching it.
+
+    `only` restricts the corpus, and exists so the measurement's own INPUT can be
+    perturbed through this same call."""
+    rows, examined, levels_ = liftgap.census(only)
+    shapes, clear = collections.Counter(), 0
+    for _k, shape, _np, _ns, blockers in rows:
+        shapes[f'{shape[0]} depth {shape[2]}'] += 1
+        if not blockers:
+            clear += 1
+    return examined, levels_, shapes, clear
+
+
+def doc_second_refusal(text):
+    m = re.search(r'```\n(\d+) multi-back-edge kernels, (\d+) PTX loop levels\n(.*?)```',
+                  text, re.S)
+    if not m:
+        return None
+    rows, clear = {}, None
+    for line in m.group(3).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        n, rest = line.split(None, 1)
+        if 'no named structural refusal' in rest:
+            clear = int(n)
+        else:
+            rows[rest.strip()] = int(n)
+    return int(m.group(1)), int(m.group(2)), rows, clear
+
+
+def check_second_refusal(perturb=None):
+    """The doc's second-refusal census against a fresh `liftgap` run.
+
+    This is the figure that says what the multi-back-edge lift would BUY, and
+    it is the one a roadmap reads.  It went into the doc as `0 of 32`; a
+    published `0` is indistinguishable from a census that decomposed nothing,
+    so the floor and the positive control below are not decoration."""
+    doc = open(DOC).read()
+    published = doc_second_refusal(doc)
+    if published is None:
+        print('FAIL: the second-refusal census block is not in the doc at all')
+        return 1
+    d_examined, d_levels, d_rows, d_clear = published
+    examined, levels_, shapes, clear = measure_second_refusal()
+    if perturb:
+        shapes = collections.Counter(shapes); shapes[perturb] = shapes.get(perturb, 0) + 1
+    bad = 0
+    if not examined or not levels_:
+        print(f'FAIL: liftgap decomposed {examined} kernels / {levels_} levels')
+        return 1
+    if (d_examined, d_levels) != (examined, levels_):
+        print(f'FAIL: the doc says {d_examined} kernels / {d_levels} levels; '
+              f'liftgap measures {examined} / {levels_}')
+        bad += 1
+    if d_clear != clear:
+        print(f'FAIL: the doc says {d_clear} kernel(s) left with no named structural '
+              f'refusal; liftgap measures {clear}')
+        bad += 1
+    for r, n in sorted(shapes.items()):
+        if d_rows.get(r) != n:
+            print(f'FAIL: the doc says {d_rows.get(r)} for {r!r}; liftgap measures {n}')
+            bad += 1
+    for r in d_rows:
+        if r not in shapes:
+            print(f'FAIL: the doc publishes a shape {r!r} liftgap does not measure')
+            bad += 1
+    if not bad:
+        print(f'ok: second-refusal census, {examined} kernels / {levels_} levels / '
+              f'{clear} left clear')
+    return bad
+
+
+def the_shape_is_measured_from_the_artifact():
+    """The census key's SHAPE must come from the kernel, not from a table.
+
+    THE SPLIT THIS GUARDS.  `loopgap`'s more-than-one-back-edge bucket held
+    three shapes needing three different validators, and the sufficiency case
+    sits behind the dearest of them -- so the key now names the shape.  A shape
+    that were hardcoded, or a classifier that answered one constant, would
+    re-bucket the census into something that looks exactly as informative and
+    is not.
+
+    Three legs, and the second is the one that perturbs the INPUT.  A control
+    applied to the ANSWER cannot see a classifier subverted to read a table --
+    the hole found by mutation in this same file, recorded above.
+    """
+    bad = 0
+    # (a) the classifier answers each kind, so it is not one constant.
+    kinds = {
+        'NONE':        [],
+        'SINGLE':      [(0, 9)],
+        'SEQUENTIAL':  [(0, 4), (6, 9)],
+        'NESTED':      [(0, 9), (2, 7)],
+        'MIXED':       [(0, 9), (2, 7), (11, 14)],
+        'IRREDUCIBLE': [(0, 5), (3, 9)],
+    }
+    for want, iv in kinds.items():
+        got = loopcfg.nest_shape(iv)[0]
+        if got != want:
+            print(f'FAIL: nest_shape{iv} is {got}, wanted {want}')
+            bad += 1
+
+    # (b) PERTURB THE ARTIFACT.  Delete the innermost back edge of a real
+    #     depth-3 nest and the measured depth must fall.  A classifier reading
+    #     a table by kernel name cannot move.
+    src = 'corpus/y_cpu_matmul.ptx'
+    if not os.path.exists(src):
+        print('FAIL: the shape control has no corpus artifact to perturb')
+        return bad + 1
+    base = loopcfg.nest_shape(loopcfg.ptx_back_edges(src)[2])
+    if base != ('NESTED', 3, 3):
+        print(f'FAIL: y_cpu_matmul reads {base}; the shape control is stated over '
+              'a depth-3 nest and no longer has one')
+        bad += 1
+    else:
+        lines = open(src).read().splitlines(keepends=True)
+        # the innermost back edge is the FIRST `bra` to a label above it
+        cut = max(i for i, l in enumerate(lines)
+                  if re.match(r'\s*bra\s+\$LOOP_START_4;', l))
+        with tempfile.TemporaryDirectory() as d:
+            alt = os.path.join(d, 'y_cpu_matmul.ptx')
+            with open(alt, 'w') as f:
+                f.writelines(lines[:cut] + lines[cut + 1:])
+            moved = loopcfg.nest_shape(loopcfg.ptx_back_edges(alt)[2])
+        if moved[2] >= base[2]:
+            print(f'FAIL: a nest with its innermost back edge deleted reads {moved} '
+                  f'against {base}; the shape is not read from the file it was given')
+            bad += 1
+
+    # (c) NON-VACUITY: two real corpus kernels must land in different buckets,
+    #     or the split distinguishes nothing whatever the classifier says.
+    seen = set()
+    for k in sorted(os.path.basename(x)[:-4] for x in glob.glob('corpus/*.ptx')):
+        try:
+            sh = loopcfg.nest_shape(loopcfg.ptx_back_edges(f'corpus/{k}.ptx')[2])
+        except Exception:
+            continue
+        if sh[1] > 1:
+            seen.add((sh[0], sh[2]))
+    if len(seen) < 2:
+        print(f'FAIL: every multi-back-edge kernel has shape {seen}; the split is vacuous')
+        bad += 1
+    if not bad:
+        print(f'  control: the shape moves with the artifact, and the corpus really '
+              f'does hold {len(seen)} distinct multi-back-edge shapes')
+    return bad
+
+
 def the_measurements_read_their_inputs():
     """Each measurement must depend on the thing it measures, not on the doc.
 
@@ -375,6 +536,20 @@ def the_measurements_read_their_inputs():
               f'{moved["mma.sync"]} against {base["mma.sync"]}; '
               'the count is not reading the file it was given')
         bad += 1
+    # (c2) the second-refusal census, restricted to two kernels.  A doc-reading
+    #      implementation answers with the corpus figure whatever it is handed.
+    two = [k for k in sorted(os.path.basename(x)[:-4] for x in glob.glob('corpus/*.ptx'))
+           if os.path.exists(f'corpus/{k}.sass')
+           and loopcfg.nest_shape(loopcfg.ptx_back_edges(f'corpus/{k}.ptx')[2])[1] > 1][:2]
+    if len(two) < 2:
+        print('FAIL: fewer than two multi-back-edge kernels; the control is vacuous')
+        bad += 1
+    else:
+        ex2, _lv2, _sh2, _cl2 = measure_second_refusal(only=two)
+        if ex2 != 2:
+            print(f'FAIL: the second-refusal census was handed {two} and reported '
+                  f'{ex2} kernels; it is not reading the corpus it was given')
+            bad += 1
     # (c) the -O census, handed a -O3 build in the -O1 slot.  A doc-reading
     #     implementation answers `0` for y_cpu_matmul whatever it assembles.
     g = frontier.gap_at('y_cpu_matmul', 3)
@@ -389,13 +564,15 @@ def the_measurements_read_their_inputs():
 
 
 if __name__ == '__main__':
-    bad = check_loop_census() + check_staging_table() + check_optimisation_level_gaps()
+    bad = (check_loop_census() + check_staging_table()
+           + check_optimisation_level_gaps() + the_shape_is_measured_from_the_artifact()
+           + check_second_refusal())
     # POSITIVE CONTROLS, through the same code path.  Without these a parse that
     # recovered nothing, or a comparison that compared nothing, reports ok.
     # The FAIL lines they print below are the controls WORKING; they are the
     # gate's own diagnosis of a deliberately perturbed measurement.
     print('\n--- positive controls (the FAIL lines below are EXPECTED) ---')
-    if check_loop_census(perturb='PTX: more than one back edge (this validator handles exactly one)') == 0:
+    if check_loop_census(perturb='PTX: more than one back edge, NESTED depth 9') == 0:
         print('FAIL: a perturbed loop census was not reported -- the comparison is dead')
         bad += 1
     if check_staging_table(perturb='int8_gemm.ptx') == 0:
@@ -403,6 +580,10 @@ if __name__ == '__main__':
         bad += 1
     if check_optimisation_level_gaps(perturb='y_cpu_matmul') == 0:
         print('FAIL: a perturbed -O figure was not reported -- the comparison is dead')
+        bad += 1
+    if check_second_refusal(perturb='NESTED depth 9') == 0:
+        print('FAIL: a perturbed second-refusal census was not reported -- '
+              'the comparison is dead')
         bad += 1
     print('  control: a perturbed census, artifact and -O figure are all reported')
     bad += the_measurements_read_their_inputs()

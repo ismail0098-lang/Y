@@ -22,11 +22,76 @@ syntactically.
 """
 import re
 
+# ---------------- loop-nest SHAPE ----------------
+#
+# WHY THIS IS NOT A DETAIL OF THE REFUSAL MESSAGE.  `loopval` handles exactly
+# one back edge, and the census that reports why folds every other count into a
+# single bucket -- "more than one back edge".  That bucket holds THREE shapes
+# which need three different validators, and merging them ranks the cheapest
+# lift first while the only kernel a lift is SUFFICIENT for sits behind the
+# dearest one:
+#
+#   SEQUENTIAL  one loop after another.  The same relation, proved once per
+#               loop and composed at the join.  The cheap lift.
+#   NESTED      one loop inside another.  An inner loop cannot be executed
+#               straight-line, so it has to be SUMMARISED by its own proved
+#               relation and the induction runs over the nest.  The dear lift.
+#   MIXED       both, so it needs both.
+#
+# `loopgap.py`'s own docstring already records the general form of this -- "a
+# census key that merges two causes reports the larger one" -- for the split
+# between zero back edges and more than one.  This is the same observation one
+# level in, on the bucket that split left behind.
+#
+# IRREDUCIBLE is a refusal, not a fourth shape: two back edges that neither
+# nest nor sit apart share a header region no structured lift describes.
+
+def nest_shape(backs):
+    """(kind, count, depth) for a list of (header, edge, ...) back edges.
+
+    Positions are compared as intervals: `[h, e]` contains `[h2, e2]` iff
+    `h <= h2 and e2 <= e`.  Indices for PTX, addresses for SASS -- both are
+    monotone in program order, which is all this needs."""
+    iv = [(b[0], b[1]) for b in backs]
+    n = len(iv)
+    if n == 0: return 'NONE', 0, 0
+    if n == 1: return 'SINGLE', 1, 1
+    nest = seq = 0
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = iv[i], iv[j]
+            if (a[0] <= b[0] and b[1] <= a[1]) or (b[0] <= a[0] and a[1] <= b[1]):
+                nest += 1
+            elif a[1] < b[0] or b[1] < a[0]:
+                seq += 1
+            else:
+                return 'IRREDUCIBLE', n, 0
+    depth = max(1 + sum(1 for j in range(n)
+                        if j != i and iv[j][0] <= iv[i][0] and iv[i][1] <= iv[j][1])
+                for i in range(n))
+    if nest and seq: return 'MIXED', n, depth
+    if nest:         return 'NESTED', n, depth
+    return 'SEQUENTIAL', n, depth
+
+
+def shape_of(ptx_path, sass_path):
+    """The shape both sides present, as ((kind,n,d), (kind,n,d))."""
+    return (nest_shape(ptx_back_edges(ptx_path)[2]),
+            nest_shape(sass_back_edges(sass_path)[3]))
+
+
 # ---------------- PTX ----------------
 PTX_LABEL = re.compile(r'^\$?([A-Za-z_][\w$]*)\s*:$')
 PTX_BRA   = re.compile(r'^(?:@(!?)%p(\d+)\s+)?bra(?:\.uni)?\s+\$?([\w$]+)$')
 
-def ptx_regions(path):
+def ptx_back_edges(path):
+    """Every PTX back edge, as (header_index, edge_index, match).
+
+    Split out of `ptx_regions` so that the SHAPE census and this validator's own
+    arity check read ONE back-edge finder.  A second implementation of it would
+    agree with this one while both were wrong -- the recorded failure mode of an
+    agreement gate whose two sides move together -- and the shape of a nest is
+    exactly what decides which validator a kernel needs."""
     raw = []
     started = False
     for line in open(path):
@@ -45,6 +110,11 @@ def ptx_regions(path):
         m = PTX_BRA.fullmatch(t)
         if m and lab.get(m.group(3).lstrip('$'), 1 << 30) < i:
             backs.append((lab[m.group(3).lstrip('$')], i, m))
+    return raw, lab, backs
+
+
+def ptx_regions(path):
+    raw, lab, backs = ptx_back_edges(path)
     if len(backs) != 1:
         raise Exception(f'PTX has {len(backs)} back edges; this validator handles '
                         f'exactly one  (refusing, not guessing)')
@@ -85,7 +155,10 @@ SASS_INSN = re.compile(r'^\s*/\*([0-9a-f]+)\*/\s+(.*?);\s*$')
 SASS_LBL  = re.compile(r'^(\.L_\w+):')
 SASS_BRA  = re.compile(r'^(?:@(!?)P(\d+)\s+)?BRA\s+`\((\.L_\w+)\)$')
 
-def sass_regions(path):
+def sass_back_edges(path):
+    """Every SASS back edge, as (header_addr, edge_addr, match).
+
+    See `ptx_back_edges` for why this is factored out rather than duplicated."""
     text = open(path).read()
     lab = {m.group(1): int(m.group(2), 16)
            for m in re.finditer(r'(\.L_\w+):\s*\n\s*/\*([0-9a-f]+)\*/', text)}
@@ -102,6 +175,44 @@ def sass_regions(path):
         m = SASS_BRA.fullmatch(t)
         if m and m.group(3) in lab and lab[m.group(3)] <= a:
             backs.append((lab[m.group(3)], a, m))
+    return ins, lab, trap, backs
+
+
+# A branch-family mnemonic.  `SASS_BRA` recognises ONE form; anything else in
+# this family is a control transfer the CFG cannot place, and the fail-open
+# reading of that -- "it did not match, so it is not a branch" -- is what makes
+# it dangerous.  A backward one would be a loop invisible to `sass_regions`,
+# which would then hand `loopval` a "body" that actually loops.
+#
+# Deliberately NOT in this family: `BSSY`/`BSYNC` (reconvergence bookkeeping,
+# they transfer no control), `WARPSYNC`, `EXIT`, `RET`.  Including those would
+# refuse almost every kernel with control flow and destroy the census rather
+# than sharpen it.  `CALL` is a genuine transfer and is left to `sassexec`,
+# which refuses it by name.
+SASS_BRANCHY = re.compile(r'^(?:@!?P\d+\s+)?(BRA|BRX|JMP|JMX)\b')
+
+
+def sass_unclassified_branches(ins):
+    """Branch-family instructions `SASS_BRA` cannot parse, as (addr, text).
+
+    Returned rather than raised so the SHAPE census keeps its resolution: a
+    kernel that also has, say, an irreducible back-edge pair should be able to
+    report that.  `sass_regions` -- the validator path -- refuses on this."""
+    return [(a, t) for a, t in ins
+            if SASS_BRANCHY.match(t) and not SASS_BRA.fullmatch(t)]
+
+
+def sass_regions(path):
+    ins, lab, trap, backs = sass_back_edges(path)
+    # REFUSE a branch form the CFG cannot place, before anything is concluded
+    # from the back-edge count -- the count is only meaningful if every branch
+    # was seen.  Latent when this was written: all 13 in the corpus are forward
+    # and every kernel holding one is refused earlier for an opcode.
+    unk = sass_unclassified_branches(ins)
+    if unk:
+        a, t = unk[0]
+        raise Exception(f'SASS branch form this CFG cannot place at 0x{a:x}: {t!r} '
+                        f'({len(unk)} in this kernel)  (refusing, not guessing)')
     if len(backs) != 1:
         raise Exception(f'SASS has {len(backs)} back edges; this validator handles '
                         f'exactly one  (refusing, not guessing)')
