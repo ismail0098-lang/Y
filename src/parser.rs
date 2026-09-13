@@ -91,6 +91,7 @@ impl Parser {
         match kind {
             TokenKind::Ident(s) => format!("the identifier `{}`", s),
             TokenKind::IntLit(v) => format!("the number `{}`", v),
+            TokenKind::InvalidNumber(message) => message.clone(),
             TokenKind::StringLit(s) => format!("the string \"{}\"", s),
             other => format!("the reserved word `{}`", format!("{:?}", other).to_lowercase()),
         }
@@ -148,6 +149,21 @@ impl Parser {
     // ── Entry Point ─────────────────────────────────────────
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
+        // Report lexical failures even in attribute/type positions that do not
+        // pass through the expression parser. The one extra signed magnitude
+        // is deferred to unary-minus parsing, where I64::MIN is representable.
+        for (index, token) in self.tokens.iter().enumerate() {
+            if let TokenKind::InvalidNumber(message) = &token.kind {
+                let may_be_signed_min = Self::is_signed_min_magnitude(token)
+                    && index > 0
+                    && matches!(self.tokens[index - 1].kind, TokenKind::Minus);
+                if !may_be_signed_min {
+                    return Err(format!(
+                        "Line {}, column {}: {}", token.line, token.col, message
+                    ));
+                }
+            }
+        }
         let mut items = Vec::new();
 
         while !self.check(TokenKind::Eof) {
@@ -155,6 +171,11 @@ impl Parser {
         }
 
         Ok(Program { items })
+    }
+
+    fn is_signed_min_magnitude(token: &Token) -> bool {
+        matches!(token.kind, TokenKind::InvalidNumber(_))
+            && token.lexeme.trim_start_matches('0') == "9223372036854775808"
     }
 
     fn parse_item(&mut self) -> Result<Item, String> {
@@ -1919,6 +1940,10 @@ impl Parser {
 
         // Unary minus: -expr
         if self.match_token(TokenKind::Minus) {
+            if Self::is_signed_min_magnitude(self.peek()) {
+                self.advance();
+                return Ok(Expr::IntLit(i64::MIN, span));
+            }
             let operand = self.parse_expr_bp(19)?; // higher than any binary op
             return Ok(Expr::UnaryOp {
                 op: UnaryOp::Neg,
@@ -1982,6 +2007,9 @@ impl Parser {
 
         match &tok.kind {
             // Literals
+            TokenKind::InvalidNumber(message) => Err(format!(
+                "Line {}, column {}: {}", tok.line, tok.col, message
+            )),
             TokenKind::IntLit(v) => {
                 self.advance();
                 Ok(Expr::IntLit(*v, span))

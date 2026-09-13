@@ -190,6 +190,9 @@ pub enum TokenKind {
     IntLit(i64),
     /// A floating-point literal
     FloatLit(f64),
+    /// A numeric token that cannot be represented, with its diagnostic.
+    /// Keep the original spelling in `Token::lexeme`; never substitute zero.
+    InvalidNumber(String),
     /// A quoted string literal
     StringLit(String),
     /// A character literal like 'c'
@@ -324,13 +327,28 @@ impl Lexer {
             }
         }
 
-        if is_float {
-            let val: f64 = lexeme.parse().unwrap_or(0.0);
-            Token::new(TokenKind::FloatLit(val), line, start_col, &lexeme)
+        let kind = if is_float {
+            match lexeme.parse::<f64>() {
+                Ok(val) if val.is_finite() => TokenKind::FloatLit(val),
+                Ok(_) => TokenKind::InvalidNumber(format!(
+                    "Invalid floating-point literal `{}`: outside the finite F64 range.",
+                    lexeme
+                )),
+                Err(_) => TokenKind::InvalidNumber(format!(
+                    "Invalid floating-point literal `{}`: malformed decimal number.",
+                    lexeme
+                )),
+            }
         } else {
-            let val: i64 = lexeme.parse().unwrap_or(0);
-            Token::new(TokenKind::IntLit(val), line, start_col, &lexeme)
-        }
+            match lexeme.parse::<i64>() {
+                Ok(val) => TokenKind::IntLit(val),
+                Err(_) => TokenKind::InvalidNumber(format!(
+                    "Invalid integer literal `{}`: outside the supported signed 64-bit literal range (-9223372036854775808..9223372036854775807). Unsigned literals above I64::MAX are not supported yet, including in U64 expressions.",
+                    lexeme
+                )),
+            }
+        };
+        Token::new(kind, line, start_col, &lexeme)
     }
 
     // ── String literal scanning ───────────────────────────────

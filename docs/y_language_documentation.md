@@ -981,12 +981,15 @@ if global_thread_id < warp_limit {
 ```
 
 ### 9.17 `@static_assert`
-* **Syntax**: `@static_assert(Expr);`
-* **Usage**: Top-level item declaration or block statement.
-* **Function**: Evaluates a boolean constant expression at compile time. If the expression evaluates to `false`, compilation aborts immediately with a static assertion failure.
+* **Syntax**: `@static_assert(Expr, "message");` at item scope, or `compile_time::assert!(Expr, "message");` inside a function or kernel.
+* **Function**: Evaluates a boolean constant expression before code generation. False assertions, invalid arithmetic, and expressions the evaluator cannot establish all stop compilation. Only a proved true assertion is erased.
+* **Supported constants**: Boolean and signed 64-bit integer literals, parentheses, checked `+ - * / %`, integer `& | ^`, comparisons, boolean `&& || !`, and unary minus. Runtime variables, calls, floating-point expressions, and shifts are currently refused. Overflow and division by zero are errors.
 * **Example**:
 ```ysu
-@static_assert(1024 % 32 == 0);
+@static_assert(1024 % 32 == 0, "whole warps");
+fn main() {
+    compile_time::assert!(2 * (3 + 4) == 14, "constant arithmetic");
+}
 ```
 
 ---
@@ -4825,7 +4828,6 @@ two names overlapped. All of it is deleted.
 ---
 
 *Y Compiler Engine — Research by YSU-SSS*
-
 
 
 

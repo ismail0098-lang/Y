@@ -21,7 +21,7 @@
 //! assignment rather than asserting it, so callers can distinguish "this
 //! circuit is unsatisfiable" from "this solver could not finish it".
 
-use crate::zk_emitter::{Constraint, Fr, HintOp, LinearCombination, SignalId, WitnessIRGraph, WitnessOp};
+use crate::zk_emitter::{Constraint, FieldContext, Fr, HintOp, LinearCombination, SignalId, WitnessIRGraph, WitnessOp};
 
 /// Evaluates a linear combination against a witness vector.
 ///
@@ -30,14 +30,17 @@ use crate::zk_emitter::{Constraint, Fr, HintOp, LinearCombination, SignalId, Wit
 /// malformed circuits, and a panic there would be a fuzz crash rather than the
 /// soundness finding it is looking for.
 pub fn eval_lc(lc: &LinearCombination, w: &[Fr]) -> Fr {
-    let mut sum = Fr::zero();
+    let field = w.first().map(Fr::field)
+        .or_else(|| lc.terms.first().map(|(_, c)| c.field()))
+        .unwrap_or_else(FieldContext::active);
+    let mut sum = field.zero();
     for (wire_id, coeff) in &lc.terms {
         let val = if *wire_id == 0 {
-            Fr::one()
+            field.one()
         } else if *wire_id < w.len() {
             w[*wire_id].clone()
         } else {
-            Fr::zero()
+            field.zero()
         };
         sum = sum.add(&coeff.mul(&val));
     }
@@ -53,9 +56,13 @@ pub fn execute_host_witness_ir(
     public_inputs: &[Fr],
     private_inputs: &[Fr],
 ) -> Result<Vec<Fr>, String> {
-    let mut w = vec![Fr::zero(); ir.num_signals];
+    let field = ir.field_context;
+    if public_inputs.iter().chain(private_inputs).any(|v| v.field() != field) {
+        return Err("witness input scalar field does not match the circuit".to_string());
+    }
+    let mut w = vec![field.zero(); ir.num_signals];
     if ir.num_signals > 0 {
-        w[0] = Fr::one();
+        w[0] = field.one();
     }
 
     // Inputs are consumed POSITIONALLY, so they must be assigned in wire order
@@ -92,6 +99,9 @@ pub fn execute_host_witness_ir(
 
         match op {
             WitnessOp::Const(val) => {
+                if val.field() != field {
+                    return Err("witness constant scalar field does not match the circuit".to_string());
+                }
                 w[node_idx] = *val;
             }
             // handled in the positional pre-pass above
@@ -112,13 +122,13 @@ pub fn execute_host_witness_ir(
                 }
             }
             WitnessOp::Div(SignalId(a), SignalId(b)) => {
-                if *a < w.len() && *b < w.len() && w[*b] != Fr::zero() {
+                if *a < w.len() && *b < w.len() && w[*b] != field.zero() {
                     let inv_b = w[*b].inv();
                     w[node_idx] = w[*a].mul(&inv_b);
                 }
             }
             WitnessOp::Inv(SignalId(a)) => {
-                if *a < w.len() && w[*a] != Fr::zero() {
+                if *a < w.len() && w[*a] != field.zero() {
                     w[node_idx] = w[*a].inv();
                 }
             }
@@ -126,7 +136,7 @@ pub fn execute_host_witness_ir(
                 for hint in ops {
                     match hint {
                         HintOp::NonDeterministicInv { src: SignalId(s), dst: SignalId(d) } => {
-                            if *s < w.len() && *d < w.len() && w[*s] != Fr::zero() {
+                            if *s < w.len() && *d < w.len() && w[*s] != field.zero() {
                                 w[*d] = w[*s].inv();
                             }
                         }
@@ -140,7 +150,7 @@ pub fn execute_host_witness_ir(
                                 let val_is_zero = w[*s].is_zero();
                                 for dst in dst_bits {
                                     if dst.0 < w.len() {
-                                        w[dst.0] = if val_is_zero { Fr::zero() } else { Fr::one() };
+                                        w[dst.0] = if val_is_zero { field.zero() } else { field.one() };
                                     }
                                 }
                             }
@@ -189,16 +199,17 @@ pub fn execute_host_witness_ir(
 /// back-propagation, so both are unreachable here and say so rather than
 /// returning a plausible zero.
 fn eval_lc_recipe(op: &WitnessOp, w: &[Fr]) -> Fr {
+    let field = w.first().map(Fr::field).unwrap_or_else(FieldContext::active);
     match op {
         WitnessOp::IsZeroLc(lc) => {
-            if eval_lc(lc, w).is_zero() { Fr::one() } else { Fr::zero() }
+            if eval_lc(lc, w).is_zero() { field.one() } else { field.zero() }
         }
         WitnessOp::InvOrZeroLc(lc) => {
             let v = eval_lc(lc, w);
-            if v.is_zero() { Fr::zero() } else { v.inv() }
+            if v.is_zero() { field.zero() } else { v.inv() }
         }
         WitnessOp::BitOfLc { lc, bit } => {
-            if eval_lc(lc, w).get_bit(*bit as usize) { Fr::one() } else { Fr::zero() }
+            if eval_lc(lc, w).get_bit(*bit as usize) { field.one() } else { field.zero() }
         }
         WitnessOp::MulLc(a, b) => eval_lc(a, w).mul(&eval_lc(b, w)),
         WitnessOp::MulAddLc(a, b, c) => {
@@ -206,15 +217,15 @@ fn eval_lc_recipe(op: &WitnessOp, w: &[Fr]) -> Fr {
         }
         WitnessOp::DivLc(a, b) => {
             let bv = eval_lc(b, w);
-            if bv.is_zero() { Fr::zero() } else { eval_lc(a, w).mul(&bv.inv()) }
+            if bv.is_zero() { field.zero() } else { eval_lc(a, w).mul(&bv.inv()) }
         }
         WitnessOp::IntDivLc(a, b) => {
             let (bv, av) = (eval_lc(b, w), eval_lc(a, w));
-            if bv.is_zero() { Fr::zero() } else { av.int_div_rem(&bv).0 }
+            if bv.is_zero() { field.zero() } else { av.int_div_rem(&bv).0 }
         }
         WitnessOp::IntModLc(a, b) => {
             let (bv, av) = (eval_lc(b, w), eval_lc(a, w));
-            if bv.is_zero() { Fr::zero() } else { av.int_div_rem(&bv).1 }
+            if bv.is_zero() { field.zero() } else { av.int_div_rem(&bv).1 }
         }
         // Only the taken branch. The tempting story is that eager evaluation
         // would divide by zero - circomlib's `IsZero` is
@@ -266,11 +277,14 @@ pub fn solve_r1cs_witness(
     pub_in: &[Fr],
     priv_in: &[Fr],
 ) -> (Vec<Fr>, bool) {
-    let mut w = execute_host_witness_ir(witness_ir, pub_in, priv_in)
-        .unwrap_or_else(|_| vec![Fr::zero(); num_vars]);
-    w.resize(num_vars.max(w.len()), Fr::zero());
+    let field = witness_ir.field_context;
+    let mut w = match execute_host_witness_ir(witness_ir, pub_in, priv_in) {
+        Ok(w) => w,
+        Err(_) => return (vec![field.zero(); num_vars], false),
+    };
+    w.resize(num_vars.max(w.len()), field.zero());
     if num_vars > 0 {
-        w[0] = Fr::one();
+        w[0] = field.one();
     }
 
     let mut solved_mask = vec![false; num_vars.max(w.len())];
@@ -358,10 +372,10 @@ pub fn solve_r1cs_witness(
     };
     // Sum of every term except `skip`, i.e. the part of the LC already pinned.
     let known_sum = |lc: &LinearCombination, skip: usize, w: &[Fr]| {
-        let mut acc = Fr::zero();
+        let mut acc = field.zero();
         for (w_id, coeff) in &lc.terms {
             if *w_id != skip {
-                let val = if *w_id == 0 { Fr::one() } else { w[*w_id].clone() };
+                let val = if *w_id == 0 { field.one() } else { w[*w_id].clone() };
                 acc = acc.add(&coeff.mul(&val));
             }
         }
@@ -425,7 +439,7 @@ pub fn solve_r1cs_witness(
 /// this one call.
 #[inline]
 fn div_by(rem: &Fr, coeff: &Fr) -> Fr {
-    if *coeff == Fr::one() {
+    if coeff.is_one() {
         rem.clone()
     } else {
         rem.mul(&coeff.inv())
@@ -453,7 +467,18 @@ fn sole_unknown(lc: &LinearCombination, mask: &[bool]) -> Option<(usize, Fr)> {
 /// proof over a witness that fails this cannot verify, so it is the natural
 /// gate to run before ever invoking a prover.
 pub fn check_r1cs_satisfiability(constraints: &[Constraint], w: &[Fr]) -> Result<(), String> {
+    let field = w.first().map(Fr::field)
+        .or_else(|| constraints.iter().flat_map(|c| [&c.a, &c.b, &c.c])
+            .flat_map(|lc| &lc.terms).next().map(|(_, value)| value.field()))
+        .unwrap_or_else(FieldContext::active);
+    if w.iter().any(|value| value.field() != field) {
+        return Err("witness contains different scalar fields".to_string());
+    }
     for (i, c) in constraints.iter().enumerate() {
+        if [&c.a, &c.b, &c.c].iter().flat_map(|lc| &lc.terms)
+            .any(|(_, coeff)| coeff.field() != field) {
+            return Err(format!("scalar field mismatch on constraint #{}", i));
+        }
         let a = eval_lc(&c.a, w);
         let b = eval_lc(&c.b, w);
         let c_val = eval_lc(&c.c, w);

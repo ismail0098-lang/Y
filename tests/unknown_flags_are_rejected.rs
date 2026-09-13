@@ -22,6 +22,9 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 
 fn run(extra: &[&str]) -> (bool, String) {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -29,7 +32,9 @@ fn run(extra: &[&str]) -> (bool, String) {
         .arg(repo.join("tests/hello.ysu"))
         .args(extra)
         .arg("-o")
-        .arg(std::env::temp_dir().join(format!("y_flagtest_{}", std::process::id())))
+        // Parallel flag probes must not overwrite the LLVM input while the
+        // bare-invocation control is linking it with clang.
+        .arg(std::env::temp_dir().join(format!("y_flagtest_{}_{}", std::process::id(), NEXT_OUTPUT.fetch_add(1, Ordering::Relaxed))))
         .current_dir(&repo)
         .output()
         .expect("run Y");

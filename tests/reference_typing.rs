@@ -145,3 +145,61 @@ fn the_cpu_backend_keeps_both_borrow_spellings() {
         text
     );
 }
+
+// ── The `Unknown` exemption behind a reference ──────────────────────────
+//
+// `Unknown` means "this checker could not type it", and `check_type_match`
+// exempts it precisely so an untypeable value is not reported as a WRONG one.
+// That exemption lived at the TOP LEVEL only, and `types_are_compatible` had
+// no `Reference` arm at all - so `&Unknown` against a declared `&String` was
+// an ordinary mismatch.
+//
+// It became reachable when the intrinsic registry started refusing unknown
+// function names: `String_new` returns a non-scalar the scalar-only registry
+// cannot type, so `&s_str` is `&Unknown`, and `tests/test_struct.ysu` - a
+// committed fixture that compiled at HEAD - stopped compiling.
+//
+// The two tests below are a pair and neither is worth anything alone. The
+// first says the exemption survives the reference; the second says the arm
+// that carries it did not degenerate into "any two references match", which
+// is the `Reference` variant's whole reason for existing.
+
+/// The regression: a reference to a value this checker cannot type must
+/// satisfy a declared reference, rather than being reported as the wrong type.
+#[test]
+fn a_reference_to_an_untypeable_value_satisfies_a_declared_reference() {
+    let (ok, text) = compile(
+        "refunknown",
+        "struct MyStruct {\n    a: i64,\n    b: &String,\n}\n\nfn MyStruct_new(a: i64, b: &String) -> MyStruct {\n    return MyStruct { a: a, b: b };\n}\n\n@unsafe\nfn main() -> i32 {\n    let s_str = String_new(\"hello\");\n    let s = MyStruct_new(42, &s_str);\n    return 0;\n}\n",
+        "--emit-llvm",
+    );
+    assert!(
+        ok,
+        "`&<untypeable>` was refused against a declared `&String`:\n{}",
+        text
+    );
+}
+
+/// The control, and the one that stops the fix above from being "every pair of
+/// references is compatible". Both inner types are KNOWN and different, which
+/// is exactly the case `SemanticType::Reference` was introduced to catch -
+/// before it existed, `Type::Reference` resolved to a bare `Unknown` and
+/// `let r: &F32 = &x;` with `x: I32` compiled clean.
+#[test]
+fn a_reference_to_a_known_wrong_type_is_still_a_mismatch() {
+    let (ok, text) = compile(
+        "refwrong",
+        "@unsafe\nfn main() -> i32 {\n    let x: I32 = 1;\n    let r: &F32 = &x;\n    return 0;\n}\n",
+        "--emit-llvm",
+    );
+    assert!(
+        !ok,
+        "`let r: &F32 = &x;` with `x: I32` compiled and exited 0:\n{}",
+        text
+    );
+    assert!(
+        text.contains("Type mismatch"),
+        "refused, but not as a type mismatch:\n{}",
+        text
+    );
+}

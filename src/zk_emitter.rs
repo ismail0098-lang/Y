@@ -21,13 +21,13 @@ use std::rc::Rc;
 // 1. Field arithmetic
 // ────────────────────────────────────────────────────────
 //
-// `BigUint` and `Fr` live in `zk_field.rs`. `Fr` is a `Copy` `[u64; 4]` in
-// Montgomery form, not a heap `BigUint` - see that file's header for why, and
+// `BigUint` and `Fr` live in `zk_field.rs`. `Fr` is `Copy`, with four Montgomery
+// limbs and an immutable field-context pointer - see that file's header, and
 // `docs/zk_emit_profile.md` for the measurement that forced it. Re-exported
 // here because `y::zk_emitter::{BigUint, Fr}` is the path every caller and test
 // already uses.
 
-pub use crate::zk_field::{active_modulus, field_op_counts, set_active_modulus, BigUint, Fr};
+pub use crate::zk_field::{active_modulus, field_op_counts, set_active_modulus, BigUint, FieldContext, Fr};
 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,16 +94,14 @@ impl FieldConfig {
         };
         let p = BigUint::from_str(p_str);
 
-        // Temporarily set active modulus so elements are reduced properly
-        let prev_modulus = active_modulus();
-        set_active_modulus(&p);
+        let context = FieldContext::new(&p);
 
         // Generate deterministic MDS matrix (Cauchy matrix)
-        let mut mds = vec![vec![Fr::zero(); 3]; 3];
+        let mut mds = vec![vec![context.zero(); 3]; 3];
         for i in 0..3 {
             for j in 0..3 {
                 let val = (i + j + 5) as u64;
-                mds[i][j] = Fr::from_u64(val).inv();
+                mds[i][j] = context.from_u64(val).inv();
             }
         }
 
@@ -117,11 +115,8 @@ impl FieldConfig {
         };
         for _ in 0..60 {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            rc.push(Fr::from_u64(seed));
+            rc.push(context.from_u64(seed));
         }
-
-        // Restore previous modulus
-        set_active_modulus(&prev_modulus);
 
         FieldConfig {
             name: name.to_string(),
@@ -144,6 +139,9 @@ pub struct SignalId(pub usize);
 #[derive(Clone, Debug)]
 pub enum FieldType {
     Bn254,
+    Bls12_381,
+    Pallas,
+    Vesta,
     Goldilocks,
     BabyBear,
 }
@@ -260,6 +258,7 @@ pub enum WitnessOp {
 #[derive(Clone, Debug)]
 pub struct WitnessIRGraph {
     pub field: FieldType,
+    pub field_context: FieldContext,
     pub num_public_inputs: usize,
     pub num_private_inputs: usize,
     pub num_signals: usize,
@@ -551,7 +550,7 @@ impl LinearCombination {
         }
 
         // It only contains constant terms (wire 0), sum them up
-        let mut sum = Fr::zero();
+        let mut sum = self.terms[0].1.field().zero();
         for (wire, coeff) in &self.terms {
             if *wire == 0 {
                 sum = sum.add(coeff);
@@ -576,7 +575,7 @@ impl LinearCombination {
             } else {
                 var_names.get(wire).cloned().unwrap_or_else(|| format!("w_{}", wire))
             };
-            if *coeff == Fr::one() {
+            if coeff.is_one() {
                 s.push_str(&name);
             } else {
                 s.push_str(&format!("{} * {}", coeff.to_string(), name));
@@ -616,6 +615,7 @@ pub enum WireBinding {
 
 #[derive(Clone, Debug)]
 pub struct Circuit {
+    pub field_context: FieldContext,
     pub num_variables: usize,
     pub variables: Vec<String>,
     pub public_inputs: Vec<usize>,
@@ -634,6 +634,7 @@ pub struct Circuit {
 /// reach. Owning `Circuit` stays for callers that genuinely need it.
 #[derive(Copy, Clone, Debug)]
 pub struct CircuitView<'a> {
+    pub field_context: FieldContext,
     pub num_variables: usize,
     pub variables: &'a [String],
     pub public_inputs: &'a [usize],
@@ -645,6 +646,7 @@ pub struct CircuitView<'a> {
 impl Circuit {
     pub fn view(&self) -> CircuitView<'_> {
         CircuitView {
+            field_context: self.field_context,
             num_variables: self.num_variables,
             variables: &self.variables,
             public_inputs: &self.public_inputs,
@@ -1261,6 +1263,7 @@ fn poseidon_t3_params() -> Result<Rc<PoseidonT3Params>, String> {
 }
 
 pub struct ZkEmitter {
+    field_context: FieldContext,
     pub variables: Vec<String>,
     pub public_inputs: Vec<usize>,
     pub private_inputs: Vec<usize>,
@@ -1324,7 +1327,11 @@ impl ZkEmitter {
     pub fn new() -> Self {
         init_cse_from_env();
         init_compaction_from_env();
+        // The program entry point may select another field. The low-level
+        // circuit builder (also used by Circom) starts in BN254.
+        set_active_modulus(&BigUint::from_str(crate::zk_field::BN254_FR_MODULUS));
         Self {
+            field_context: FieldContext::active(),
             variables: vec!["const_1".to_string()], // wire 0 is constant 1
             public_inputs: Vec::new(),
             private_inputs: Vec::new(),
@@ -1685,7 +1692,7 @@ impl ZkEmitter {
         let mut nodes = Vec::with_capacity(num_signals);
         let mut signal_names = HashMap::new();
 
-        nodes.push(WitnessOp::Const(Fr::one()));
+        nodes.push(WitnessOp::Const(self.field_context.one()));
         signal_names.insert(0, "const_1".to_string());
 
         // Index the `a*b = c` constraints by their single output wire, ONCE.
@@ -1707,7 +1714,7 @@ impl ZkEmitter {
         // sweep, which is the 0.4-seconds-for-one-wire path described below.
         // Wires that fail this test fall through to `lc_by_output`, which keeps
         // the coefficients.
-        let one = Fr::one();
+        let one = self.field_context.one();
         let mut mul_by_output: HashMap<usize, (usize, usize)> = HashMap::new();
         for c in &self.constraints {
             if c.c.terms.len() == 1
@@ -1782,7 +1789,13 @@ impl ZkEmitter {
         let topological_order = Self::topological_order(&nodes);
 
         WitnessIRGraph {
-            field: FieldType::Bn254,
+            field: match self.active_field {
+                ScalarField::Bn254 => FieldType::Bn254,
+                ScalarField::Bls12_381 => FieldType::Bls12_381,
+                ScalarField::Pallas => FieldType::Pallas,
+                ScalarField::Vesta => FieldType::Vesta,
+            },
+            field_context: self.field_context,
             num_public_inputs: self.public_inputs.len(),
             num_private_inputs: self.private_inputs.len(),
             num_signals,
@@ -2007,6 +2020,7 @@ impl ZkEmitter {
         self.active_scheme = active_scheme;
         let config = FieldConfig::get(self.active_field);
         set_active_modulus(&config.p);
+        self.field_context = FieldContext::active();
 
         // Collect all functions inside the flattened items list
         let mut target_func: Option<&FuncDecl> = None;
@@ -4550,6 +4564,7 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
     /// Run the constraint-reduction pass. Front ends call this once, after
     /// emitting everything.
     pub fn run_optimizer(&mut self) {
+        set_active_modulus(&self.field_context.modulus());
         self.optimize_circuit();
     }
 
@@ -4557,6 +4572,7 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
     /// `build_circuit()`, without duplicating the constraint list.
     pub fn view(&self) -> CircuitView<'_> {
         CircuitView {
+            field_context: self.field_context,
             num_variables: self.next_var_id,
             variables: &self.variables,
             public_inputs: &self.public_inputs,
@@ -4568,6 +4584,7 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
 
     pub fn build_circuit(&self) -> Circuit {
         Circuit {
+            field_context: self.field_context,
             num_variables: self.next_var_id,
             variables: self.variables.clone(),
             public_inputs: self.public_inputs.clone(),
@@ -4647,6 +4664,10 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
         output_path: &str,
     ) -> std::io::Result<()> {
         use std::io::Write as IoWrite;
+        if witness.iter().any(|value| value.field() != circuit.field_context) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+                "witness scalar field does not match the circuit"));
+        }
         let file = std::fs::File::create(output_path)?;
         let mut writer = std::io::BufWriter::new(file);
 
@@ -4657,7 +4678,7 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
         let n8: u32 = 32;
         let mut header = Vec::new();
         header.write_all(&n8.to_le_bytes())?;
-        header.write_all(&Fr::modulus().to_bytes_le(n8 as usize))?;
+        header.write_all(&circuit.field_context.modulus().to_bytes_le(n8 as usize))?;
         header.write_all(&(witness.len() as u32).to_le_bytes())?;
 
         writer.write_all(&1u32.to_le_bytes())?;
@@ -4666,7 +4687,7 @@ self.constraints.retain(|c| !constraint_is_vacuous(c));
 
         // Permuted into the same order the .r1cs constraints were written in.
         let (old_to_new, _, _, _) = Self::snarkjs_wire_map_view(circuit);
-        let mut permuted = vec![Fr::zero(); witness.len()];
+        let mut permuted = vec![circuit.field_context.zero(); witness.len()];
         for (old, new) in &old_to_new {
             if *old < witness.len() && *new < permuted.len() {
                 permuted[*new] = witness[*old].clone();
@@ -4819,7 +4840,7 @@ impl R1csEncoder {
         let fs = 32u32;
         header_buf.write_all(&fs.to_le_bytes())?;
 
-        let prime_bytes = Fr::modulus().to_bytes_le(32);
+        let prime_bytes = circuit.field_context.modulus().to_bytes_le(32);
         header_buf.write_all(&prime_bytes)?;
 
         let n_wires = circuit.num_variables;
@@ -4874,6 +4895,10 @@ impl R1csEncoder {
                 writer.write_all(&(remapped.len() as u32).to_le_bytes())?;
                 written += 4;
                 for (wire_id, coeff) in &remapped {
+                    if coeff.field() != circuit.field_context {
+                        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+                            "constraint coefficient scalar field does not match the circuit"));
+                    }
                     coeff.write_bytes_le(&mut coeff_bytes);
                     writer.write_all(&wire_id.to_le_bytes())?;
                     writer.write_all(&coeff_bytes)?;

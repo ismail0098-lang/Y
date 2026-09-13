@@ -15,7 +15,7 @@
 // floating-point buffer, because `red.global.add.f32` is the instruction that
 // makes GPU results irreproducible in the first place.
 //
-// Checked on the device by tests/ptx_deterministic_reduce.rs.
+// The committed PTX is covered by tests/committed_ptx_artifacts.rs.
 
 kernel deterministic_reduce(
     Src: GlobalMemory<I32>,
@@ -23,9 +23,17 @@ kernel deterministic_reduce(
     Mx: GlobalMemory<I32>,
     N: I32
 ) {
-    let ctaflat: I32 = block_idx_z() * grid_dim_x() + block_idx_x();
-    let worker: I32 = ctaflat * block_dim_x() + thread_idx_x();
-    let nworkers: I32 = grid_dim_z() * grid_dim_x() * block_dim_x();
+    // Widen each intrinsic before multiplication. The permitted X/Z grid
+    // dimensions can produce more workers than a signed 32-bit index holds.
+    let block_x: I64 = block_idx_x();
+    let block_z: I64 = block_idx_z();
+    let grid_x: I64 = grid_dim_x();
+    let grid_z: I64 = grid_dim_z();
+    let block_size: I64 = block_dim_x();
+    let thread_x: I64 = thread_idx_x();
+    let ctaflat: I64 = block_z * grid_x + block_x;
+    let worker: I64 = ctaflat * block_size + thread_x;
+    let nworkers: I64 = grid_z * grid_x * block_size;
 
     let acc: I64 = 0;
     let best: I32 = -2147483647;
@@ -34,14 +42,20 @@ kernel deterministic_reduce(
     // the partition is a launch parameter rather than part of the kernel's
     // meaning. That is the whole point -- the answer below must not depend on
     // it.
+    // Use a typed while induction variable: PTX for-loop counters are 32-bit.
+    let mut i: I64 = worker;
     @invariant(i >= 0)
-    for i in worker..N step nworkers {
-        let v: I32 = block_ptr2d_load(Src, 0, i, N, 1, N);
+    while i < N {
+        // The invariant and loop condition establish 0 <= i < N <= I32::MAX,
+        // so this narrowing for the block-pointer load preserves the index.
+        let index: I32 = i;
+        let v: I32 = block_ptr2d_load(Src, 0, index, N, 1, N);
         let w: I64 = v;
         acc = acc + w;
         if v > best {
             best = v;
         }
+        i = i + nworkers;
     }
 
     // The two order-independent folds. Integer addition and integer max are

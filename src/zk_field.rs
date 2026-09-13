@@ -4,8 +4,9 @@
 //
 //  `BigUint`  — arbitrary-precision, heap-backed. Parsing, one-off setup,
 //               and the handful of places that genuinely need unbounded width.
-//  `Fr`       — a scalar-field element: `[u64; 4]` in MONTGOMERY FORM, `Copy`,
-//               stack-resident, zero allocations for add / sub / mul.
+//  `Fr`       — a scalar-field element: `[u64; 4]` in MONTGOMERY FORM plus an
+//               immutable field-context pointer, `Copy`, stack-resident,
+//               zero allocations for add / sub / mul.
 // ============================================================
 //
 // Why `Fr` is not a `BigUint`:
@@ -35,7 +36,10 @@
 //     "updated" to accommodate a change here — if one moves, the field is wrong.
 
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 
 // ────────────────────────────────────────────────────────
 // 1. BigUint — arbitrary precision, base 2^32
@@ -625,7 +629,7 @@ impl FieldParams {
 
     /// Miller-Rabin over the first twelve prime bases.
     ///
-    /// Run once per field switch (~100 us), never per operation. Twelve bases
+    /// Run once per distinct field (~100 us), never per operation. Twelve bases
     /// is deterministic below 3.3e24 and leaves an error under 4^-12 for the
     /// 254-bit moduli here — and the failure it exists to catch is a mistyped
     /// constant, not an adversarially constructed pseudoprime.
@@ -705,36 +709,109 @@ fn shr1(a: &[u64; N]) -> [u64; N] {
 pub const BN254_FR_MODULUS: &str =
     "21888242871839275222246405745257275088548364400416034343698204186575808495617";
 
-thread_local! {
-    static FIELD: RefCell<FieldParams> =
-        RefCell::new(FieldParams::new(&BigUint::from_str(BN254_FR_MODULUS)));
+/// Immutable, shared scalar-field parameters. Interning retains one allocation
+/// per distinct modulus for the process lifetime, keeping `Fr` allocation-free
+/// and `Copy` while values remain valid across field switches and threads.
+#[derive(Clone, Copy)]
+pub struct FieldContext(&'static FieldParams);
+
+impl FieldContext {
+    pub fn new(p: &BigUint) -> Self {
+        static FIELDS: OnceLock<Mutex<HashMap<[u64; N], &'static FieldParams>>> = OnceLock::new();
+        let fields = FIELDS.get_or_init(|| Mutex::new(HashMap::new()));
+        // Validate before deriving the fixed-width cache key: oversized moduli
+        // must not alias a previously interned field after truncation.
+        assert!(p.bit_len() <= 255, "scalar field modulus must be < 2^255");
+        let key = p.to_limbs4();
+        if let Some(params) = fields.lock().unwrap().get(&key).copied() {
+            return Self(params);
+        }
+        // Validation can panic; do it outside the lock so a rejected modulus
+        // cannot poison the registry for every subsequent compilation.
+        let params = FieldParams::new(p);
+        let mut fields = fields.lock().unwrap();
+        Self(*fields.entry(key).or_insert_with(|| Box::leak(Box::new(params))))
+    }
+
+    pub fn active() -> Self {
+        FIELD.with(Cell::get)
+    }
+
+    pub fn modulus(self) -> BigUint {
+        self.0.p_big.clone()
+    }
+
+    pub fn zero(self) -> Fr {
+        Fr([0; N], self)
+    }
+
+    pub fn one(self) -> Fr {
+        Fr(self.0.r1, self)
+    }
+
+    pub fn from_u64(self, value: u64) -> Fr {
+        self.from_limbs_reduce([value, 0, 0, 0])
+    }
+
+    pub fn from_limbs_reduce(self, limbs: [u64; N]) -> Fr {
+        let f = self.0;
+        Fr(mont_mul(&reduce_once(limbs, &f.p), &f.r2, &f.p, f.inv), self)
+    }
+
+    pub fn from_biguint(self, value: &BigUint) -> Fr {
+        let limbs = if value.effective_len() > 8 {
+            value.div_mod(&self.0.p_big).1.to_limbs4()
+        } else {
+            value.to_limbs4()
+        };
+        self.from_limbs_reduce(limbs)
+    }
 }
 
-/// Switch the active scalar field. Recomputes the Montgomery constants.
-///
-/// Every `Fr` already in existence was built against the OLD field and is not
-/// reinterpreted; callers switch fields before constructing elements, which is
-/// what `FieldConfig::get` and `emit_program` do.
+impl PartialEq for FieldContext {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for FieldContext {}
+
+impl Hash for FieldContext {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.0, state);
+    }
+}
+
+impl std::fmt::Debug for FieldContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("FieldContext").field(&self.0.p_big.to_decimal_string()).finish()
+    }
+}
+
+thread_local! {
+    static FIELD: Cell<FieldContext> =
+        Cell::new(FieldContext::new(&BigUint::from_str(BN254_FR_MODULUS)));
+}
+
+/// Select the field for subsequent `Fr` constructors. Existing values retain
+/// their original immutable parameters, including their equality and hash.
 pub fn set_active_modulus(p: &BigUint) {
-    let params = FieldParams::new(p);
-    FIELD.with(|f| *f.borrow_mut() = params);
+    let context = FieldContext::new(p);
+    FIELD.with(|f| f.set(context));
 }
 
 pub fn active_modulus() -> BigUint {
-    FIELD.with(|f| f.borrow().p_big.clone())
+    FieldContext::active().modulus()
 }
 
 /// `active_modulus`, but `None` rather than a panic when the thread-local is
 /// unavailable or mid-initialisation. See `BigUint::sub`.
 fn try_active_modulus() -> Option<BigUint> {
-    FIELD
-        .try_with(|f| f.try_borrow().ok().map(|f| f.p_big.clone()))
-        .ok()
-        .flatten()
+    FIELD.try_with(|f| f.get().modulus()).ok()
 }
 
 pub fn with_field_params<R, F: FnOnce(&FieldParams) -> R>(f: F) -> R {
-    FIELD.with(|c| f(&c.borrow()))
+    f(FieldContext::active().0)
 }
 
 // ────────────────────────────────────────────────────────
@@ -774,24 +851,24 @@ pub fn field_op_counts() -> (u64, u64) {
 // 5. Fr — a scalar field element
 // ────────────────────────────────────────────────────────
 
-/// An element of the active scalar field, stored as `value * R mod p` with
-/// `R = 2^256`.
+/// A scalar-field element, stored as `value * R mod p` with `R = 2^256`,
+/// together with its immutable field identity. Arithmetic rejects mixed fields.
 ///
 /// The limbs are private, and that is load-bearing. In Montgomery form the
 /// stored limbs are NOT the number; a caller reaching past the API to read them
 /// would get `value * R mod p` and no type error.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct Fr([u64; N]);
+pub struct Fr([u64; N], FieldContext);
 
 impl Fr {
     // ---- construction ----
 
     pub fn zero() -> Self {
-        Fr([0u64; N])
+        FieldContext::active().zero()
     }
 
     pub fn one() -> Self {
-        Fr(with_field_params(|f| f.r1))
+        FieldContext::active().one()
     }
 
     pub fn from_u64(val: u64) -> Self {
@@ -803,29 +880,24 @@ impl Fr {
     }
 
     pub fn from_biguint_ref(bi: &BigUint) -> Self {
-        with_field_params(|f| {
-            // Reduce with long division only when the value cannot fit in 256
-            // bits; otherwise the conditional-subtraction loop below is enough
-            // and does not allocate.
-            let limbs = if bi.effective_len() > 8 {
-                bi.div_mod(&f.p_big).1.to_limbs4()
-            } else {
-                bi.to_limbs4()
-            };
-            Fr(mont_mul(&reduce_once(limbs, &f.p), &f.r2, &f.p, f.inv))
-        })
+        FieldContext::active().from_biguint(bi)
     }
 
     /// From a canonical (non-Montgomery) 256-bit value, reducing mod p.
     pub fn from_limbs_reduce(limbs: [u64; N]) -> Self {
-        with_field_params(|f| Fr(mont_mul(&reduce_once(limbs, &f.p), &f.r2, &f.p, f.inv)))
+        FieldContext::active().from_limbs_reduce(limbs)
     }
 
     // ---- accessors ----
 
+    pub fn field(&self) -> FieldContext {
+        self.1
+    }
+
     /// The canonical value, as four little-endian `u64` limbs.
     pub fn to_limbs(&self) -> [u64; N] {
-        with_field_params(|f| mont_mul(&self.0, &[1, 0, 0, 0], &f.p, f.inv))
+        let f = self.1.0;
+        mont_mul(&self.0, &[1, 0, 0, 0], &f.p, f.inv)
     }
 
     pub fn to_biguint(&self) -> BigUint {
@@ -843,7 +915,7 @@ impl Fr {
     }
 
     pub fn is_one(&self) -> bool {
-        *self == Fr::one()
+        self.0 == self.1.0.r1
     }
 
     /// Bit `i` of the canonical value, LSB-first.
@@ -878,35 +950,37 @@ impl Fr {
     // ---- arithmetic ----
 
     pub fn add(&self, other: &Self) -> Self {
+        assert_eq!(self.1, other.1, "cannot add elements from different scalar fields");
         count_add();
-        with_field_params(|f| {
-            let (sum, carry) = add_limbs(&self.0, &other.0);
-            if carry != 0 || cmp_limbs(&sum, &f.p) != std::cmp::Ordering::Less {
-                Fr(sub_limbs(&sum, &f.p).0)
-            } else {
-                Fr(sum)
-            }
-        })
+        let f = self.1.0;
+        let (sum, carry) = add_limbs(&self.0, &other.0);
+        if carry != 0 || cmp_limbs(&sum, &f.p) != std::cmp::Ordering::Less {
+            Fr(sub_limbs(&sum, &f.p).0, self.1)
+        } else {
+            Fr(sum, self.1)
+        }
     }
 
     pub fn sub(&self, other: &Self) -> Self {
-        with_field_params(|f| {
-            let (diff, borrow) = sub_limbs(&self.0, &other.0);
-            if borrow != 0 {
-                Fr(add_limbs(&diff, &f.p).0)
-            } else {
-                Fr(diff)
-            }
-        })
+        assert_eq!(self.1, other.1, "cannot subtract elements from different scalar fields");
+        let f = self.1.0;
+        let (diff, borrow) = sub_limbs(&self.0, &other.0);
+        if borrow != 0 {
+            Fr(add_limbs(&diff, &f.p).0, self.1)
+        } else {
+            Fr(diff, self.1)
+        }
     }
 
     pub fn neg(&self) -> Self {
-        Fr::zero().sub(self)
+        self.1.zero().sub(self)
     }
 
     pub fn mul(&self, other: &Self) -> Self {
+        assert_eq!(self.1, other.1, "cannot multiply elements from different scalar fields");
         count_mul();
-        with_field_params(|f| Fr(mont_mul(&self.0, &other.0, &f.p, f.inv)))
+        let f = self.1.0;
+        Fr(mont_mul(&self.0, &other.0, &f.p, f.inv), self.1)
     }
 
     pub fn square(&self) -> Self {
@@ -919,7 +993,7 @@ impl Fr {
 
     /// `self^exp`, exponent given as canonical little-endian limbs.
     pub fn pow_limbs(&self, exp: &[u64; N]) -> Self {
-        with_field_params(|f| Fr(f.mont_pow(&self.0, exp)))
+        Fr(self.1.0.mont_pow(&self.0, exp), self.1)
     }
 
     pub fn try_inv(&self) -> Result<Self, String> {
@@ -940,14 +1014,8 @@ impl Fr {
         if self.is_zero() {
             panic!("Zero has no modular inverse");
         }
-        let exp = with_field_params(|f| {
-            let (mut e, borrow) = sub_limbs(&f.p, &[2, 0, 0, 0]);
-            debug_assert_eq!(borrow, 0);
-            if borrow != 0 {
-                e = [0; N];
-            }
-            e
-        });
+        let (exp, borrow) = sub_limbs(&self.1.0.p, &[2, 0, 0, 0]);
+        debug_assert_eq!(borrow, 0);
         self.pow_limbs(&exp)
     }
 
@@ -958,13 +1026,14 @@ impl Fr {
     /// This is INTEGER division, not field division, and the distinction is the
     /// whole reason `IntDivLc` exists: `7 / 2` is 3, not `(p+7)/2`.
     pub fn int_div_rem(&self, other: &Self) -> (Self, Self) {
+        assert_eq!(self.1, other.1, "cannot divide integers from different scalar fields");
         let a = self.to_limbs();
         let b = other.to_limbs();
         if b == [0u64; N] {
             panic!("Fr::int_div_rem: division by zero");
         }
         let (q, r) = div_rem_u256(&a, &b);
-        (Fr::from_limbs_reduce(q), Fr::from_limbs_reduce(r))
+        (self.1.from_limbs_reduce(q), self.1.from_limbs_reduce(r))
     }
 
     // ---- serialisation ----
@@ -1016,8 +1085,8 @@ impl Fr {
         self.to_decimal_string()
     }
 
-    /// The active modulus. Kept as a `BigUint` because its consumers are the
-    /// `.r1cs`/`.wtns` header writers and the arkworks cross-check.
+    /// The modulus for subsequent constructors. Use `value.field().modulus()`
+    /// for an existing value, or the circuit's context for artifact headers.
     pub fn modulus() -> BigUint {
         active_modulus()
     }
@@ -1037,7 +1106,11 @@ impl PartialOrd for Fr {
 /// wrong answer and silently emit a circuit proving a false statement.
 impl Ord for Fr {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        cmp_limbs(&self.to_limbs(), &other.to_limbs())
+        // Distinct fields are distinct values, including zero. Order fields by
+        // modulus first so Ord remains consistent with Eq and independent of
+        // allocation order; within a field use the canonical value.
+        cmp_limbs(&self.1.0.p, &other.1.0.p)
+            .then_with(|| cmp_limbs(&self.to_limbs(), &other.to_limbs()))
     }
 }
 

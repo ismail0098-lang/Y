@@ -187,6 +187,16 @@ pub unsafe extern "C" fn y_interpret_kernel(source_ptr: *const c_char, error_out
     let mut type_checker = TypeChecker::new();
     type_checker.check_program(&ast);
 
+    let mut errors = type_checker.errors;
+    errors.extend(type_checker.linear_tracker.errors);
+    if !errors.is_empty() {
+        if !error_out.is_null() {
+            *error_out = CString::new(format!("TypeChecker Error: {}", errors.join("; ")))
+                .unwrap().into_raw();
+        }
+        return -1;
+    }
+
     let mut cpu_emitter = crate::cpu_emitter::CpuEmitter::new();
     let _code = cpu_emitter.emit_program(&ast);
 
@@ -245,5 +255,4 @@ pub unsafe extern "C" fn y_free_string(s: *mut c_char) {
         drop(CString::from_raw(s));
     }
 }
-
 
