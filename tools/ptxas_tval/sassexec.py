@@ -302,7 +302,14 @@ class Sass:
             # execution stops where the guard holds
             self.alive = And(self.alive, Not(g))
         elif opc == 'BRA':
-            m = re.search(r'`\(\.L_(\w+)\)', body)
+            # THE WHOLE OPERAND LIST, not just the label.  `re.search` for a
+            # label accepts `BRA P1, `(.L_x)` and silently DROPS the `P1`, so a
+            # branch governed by a second predicate was taken to be governed by
+            # its `@` guard alone -- a guess, in the one place this file is
+            # otherwise scrupulous about refusing.  Latent when found (13 in the
+            # corpus, all forward, all in kernels refused earlier for an opcode),
+            # which is the reason to close it now rather than after.
+            m = bra_target(ops)
             if not m: raise Exception(f'unmodelled BRA form {body!r}  (refusing, not guessing)')
             tgt = self.labels.get(m.group(1))
             if tgt is None: raise Exception(f'BRA to unknown label {m.group(1)!r}')
@@ -581,6 +588,40 @@ class Sass:
                 self.stores.append((addr + BitVecVal(4*k, 64), self.rd(f'R{vb+k}'), g))
         else:
             raise Exception(f'UNMODELLED SASS OPCODE {opc!r}  (refusing, not guessing)')
+
+def bra_target(ops):
+    """The label of a plain `BRA`, or None if this is not one.
+
+    ONE operand, and it is the label.  `re.search` for a label anywhere in the
+    instruction accepts `BRA P1, `(.L_x)` and silently DROPS the `P1`, taking a
+    branch governed by a second predicate to be governed by its `@` guard alone
+    -- a guess, in the file that is otherwise scrupulous about refusing.
+
+    Latent when found: 13 in the corpus, all forward, every one in a kernel
+    refused earlier for an opcode, so none has ever executed.  That is why it is
+    factored out and self-checked at import rather than left to a behavioural
+    gate: there is no kernel whose answer it changes, so nothing else can see it.
+    """
+    if len(ops) != 1:
+        return None
+    return re.fullmatch(r'`\(\.L_(\w+)\)', ops[0])
+
+
+def _self_check():
+    """Both halves, at import.  A parse that accepts everything, or nothing, is
+    what a missing refusal and an over-refusal look like respectively."""
+    if not bra_target(['`(.L_x_0)']):
+        raise Exception('sassexec: the plain BRA form is refused  (over-refusal)')
+    for bad in (['P1', '`(.L_x_0)'], ['!P2', '`(.L_x_0)'], ['~URZ', '`(.L_x_3)']):
+        if bra_target(bad):
+            raise Exception(f'sassexec: BRA operands {bad} accepted -- a second '
+                            'operand is being dropped  (guessing, not refusing)')
+    if bra_target(['R4']):
+        raise Exception('sassexec: a non-label BRA operand is accepted')
+
+
+_self_check()
+
 
 CROSS_THREAD = re.compile(r'\b(BAR\.|MEMBAR|SHFL|VOTE|LDS|STS|LDSM|ATOM|RED|MATCH)')
 

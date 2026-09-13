@@ -79,14 +79,53 @@ CACHE = '.frontier_cache{}.json'
 PTX_DISCOUNT = {'bra', 'bra.uni'}
 # The executor sources whose behaviour the census reports.  A change to any of
 # them changes the answer, so a cache taken before it is not an answer.
-MODELS = ['ptxexec.py', 'sassexec.py', 'gap.py', 'loopgap.py', 'loopval.py',
-          'batch.py', 'params.py', 'smem.py', 'mulmode.py', 'fpmode.py',
-          # THIS FILE TOO.  `PTX_DISCOUNT` and the blocker taxonomy are part of
-          # the answer, so a cache taken before they moved is not one -- and the
-          # first version of this list left it out and served exactly that: a
-          # run made after the structural census moved into its own process
-          # came back with the contaminated verdict still in it.
-          'frontier.py']
+# EVERY module whose content decides the answer, DERIVED from this file's own
+# import closure rather than listed.  A hand-maintained list is the defect this
+# directory keeps finding, and it was here twice over: the first version left out
+# THIS file, where the blocker taxonomy lives, and the second left out
+# `loopcfg.py`, which decides every structural blocker.  Deriving it then found
+# two more nobody had noticed -- `conc.py` and `mac64.py`, reached through
+# `loopval`'s own comma-separated import.
+#
+# A cache that silently answers for an older tree is this repository's own
+# `.ysu_hw_profile` trap, so the key must name the modules by construction.
+MODELS = None   # set below, once _local_closure is defined
+
+
+def _local_closure(root):
+    """Every local .py reachable from `root` by import, `root` included.
+
+    Textual rather than by importing: this runs inside a control, and importing
+    a module to find out whether it should be in a digest is a side effect in
+    the middle of a check."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    seen, todo = set(), [root]
+    while todo:
+        m = todo.pop()
+        if m in seen:
+            continue
+        path = os.path.join(here, m)
+        if not os.path.exists(path):
+            continue
+        seen.add(m)
+        for line in open(path):
+            line = line.strip()
+            # `import a, b, c` names THREE modules.  Capturing only the first
+            # under-reports the closure, which makes this control weaker than
+            # it looks -- it missed `sassexec.py`, reached through `loopval`'s
+            # own comma-separated import.
+            mm = re.match(r'^import\s+([\w.,\s]+)', line) or \
+                 re.match(r'^from\s+([\w.]+)\s+import', line)
+            if not mm:
+                continue
+            for part in mm.group(1).split(','):
+                cand = part.strip().split('.')[0].split(' ')[0] + '.py'
+                if os.path.exists(os.path.join(here, cand)):
+                    todo.append(cand)
+    return seen
+
+
+MODELS = sorted(_local_closure('frontier.py'))
 
 
 def digest():
@@ -165,7 +204,7 @@ def structural(ks):
            'for n,k in enumerate(sys.argv[1:],1):\n'
            '    print(f"[loop {n}/{len(sys.argv)-1}] {k}", file=sys.stderr, flush=True)\n'
            '    r = loopgap.census([k])[0]\n'
-           '    if r[1] != "VALIDATED": out[r[0]] = loopgap.reason_key(r[2])\n'
+           '    if r[1] != "VALIDATED": out[r[0]] = loopgap.reason_key(r[2], r[0])\n'
            'print(json.dumps(out))')
     env = dict(os.environ)
     env['PYTHONPATH'] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + env.get('PYTHONPATH', '')
@@ -441,11 +480,40 @@ def cache_key_control():
     `PTX_DISCOUNT` and the blocker taxonomy live -- and the first run made after
     the process-boundary repair handed the contaminated answer straight back."""
     mine = os.path.basename(__file__)
-    missing = [m for m in (mine, 'gap.py', 'loopgap.py', 'loopval.py') if m not in MODELS]
-    if missing:
-        print(f'FAIL: {", ".join(missing)} decide(s) the answer and is not in the cache key')
+    # `MODELS` IS the closure now, so asking whether it contains the closure is
+    # vacuous.  What has to be checked is that the closure is COMPUTED, and the
+    # control therefore perturbs its INPUT: a synthetic root importing a known
+    # module, through the same call.  A closure that returned a constant, or
+    # that stopped at the root, answers the real question perfectly.
+    if mine not in MODELS:
+        print(f'FAIL: {mine} decides the answer and is not in the cache key')
         return 1
-    print(f'  control: the cache key covers {len(MODELS)} sources including {mine} itself')
+    # the transitive case: `sassexec` is reached only through `loopval`, and
+    # only by reading a comma-separated import -- the exact shape the first
+    # version of this walk missed.
+    for deep in ('loopcfg.py', 'sassexec.py', 'conc.py'):
+        if deep not in MODELS:
+            print(f'FAIL: {deep} is reachable by import and is not in the cache key')
+            return 1
+    import tempfile, shutil
+    here = os.path.dirname(os.path.abspath(__file__))
+    with tempfile.TemporaryDirectory(dir=here) as d:
+        probe = os.path.join(os.path.basename(d), '_probe_root.py')
+        with open(os.path.join(here, probe), 'w') as f:
+            f.write('import gap, loopcfg\n')
+        # the walk resolves names against `here`, so run it on a copy placed there
+        tmpname = '_frontier_probe_root.py'
+        shutil.copy(os.path.join(here, probe), os.path.join(here, tmpname))
+        try:
+            got = _local_closure(tmpname)
+        finally:
+            os.remove(os.path.join(here, tmpname))
+    if not {'gap.py', 'loopcfg.py'} <= got:
+        print(f'FAIL: a root importing gap and loopcfg produced the closure {sorted(got)}; '
+              'the walk is not reading the file it was given')
+        return 1
+    print(f'  control: the cache key is the import closure, {len(MODELS)} sources '
+          f'including {mine} itself; a synthetic root resolves to {sorted(got)}')
     return 0
 
 

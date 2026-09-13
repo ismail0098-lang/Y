@@ -987,19 +987,27 @@ only because `loopval` refuses by name and never guesses.
 ```
 48 kernels with PTX control flow; 0 validated
 
- 32  PTX: more than one back edge (this validator handles exactly one)
+ 24  PTX: more than one back edge, SEQUENTIAL depth 1
   9  PTX: loop finder found NO back edge
-  2  SASS prologue branches to .L_x_0 rather than the loop exit
-  2  SASS: more than one back edge
+  5  PTX: more than one back edge, MIXED depth 2
+  3  PTX: more than one back edge, NESTED depth 3
+  2  SASS branch form this CFG cannot place: '@P BRA P1, `(.L)'
+  2  SASS branch form this CFG cannot place: 'BRA.DIV ~URZ, `(.L)'
   1  SASS back edge is unconditional
   1  PTX loop body has more than one branch
   1  SASS: loop finder found NO back edge
 ```
 
-**34 of 48 refuse for one reason: more than one back edge.** That includes all
+**32 of 48 refuse for one reason: more than one back edge.** That includes all
 23 FP16 tensor-core GEMMs, which have three. So the recorded "21–27 opcodes
 each" understates them — they are behind an opcode gap *and* behind a structural
 one, and only the first had been measured.
+
+> **This block used to fold that 32 into ONE bucket, and the bucket held three
+> shapes needing three different validators.** It also carried
+> `2 SASS prologue branches to .L_x_0` and `2 SASS: more than one back edge`
+> where it now names an unplaceable branch form; both moves are measured below.
+> The figures before the split were right for what they counted.
 
 > **This block was stale, and `python3 docgate.py` is what stops it happening
 > again.** It read `30` and carried a `2 the SASS zero-trip guard is not the
@@ -1064,6 +1072,143 @@ They are opposite problems — the loop finder coming up empty on a kernel that
 demonstrably branches, versus capacity — and the first aggregation written here
 merged them and hid nine kernels behind thirty.
 
+#### The bucket held three shapes, and the sufficiency case is behind the dearest
+
+The paragraph above ends "*two normalisations, and the second one is the point*"
+— back-edge counts folded, zero kept apart from more-than-one. There is a third,
+and leaving it out ranked the cheapest lift first.
+
+**"More than one back edge" is not one lift.** `loopcfg.nest_shape` classifies
+the back edges as intervals, and the corpus splits:
+
+| shape | n | what a lift has to do |
+|---|---|---|
+| `SEQUENTIAL` depth 1 | 24 | the same relation, proved once per loop, composed at the join |
+| `MIXED` depth 2 | 5 | both of the others |
+| `NESTED` depth 3 | 3 | an inner loop cannot be executed straight-line, so it must be **summarised** by its own proved relation and the induction runs over the nest |
+
+`loopgap.py`'s own docstring already records the general form of this — "*a
+census key that merges two causes reports the larger one*" — for the split
+between zero back edges and more than one. This is the same observation one
+level in, on the bucket that split left behind.
+
+**The ranking inverts.** Reach puts `SEQUENTIAL` first: 24 kernels, and the
+cheap lift. Sufficiency puts it last — those 24 are the **furthest kernels in
+the corpus**, 21–23 opcodes short each, so the cheap structural lift would buy
+nothing at all. The one kernel the lift was measured to be sufficient for,
+`y_cpu_matmul`, is `NESTED` depth 3 — behind the dearest of the three.
+
+**And it links the two roadmap items rather than leaving them independent.**
+`int8_gemm` — the tensor-core kernel item 1 is about — is `NESTED` depth 3 on
+both sides too. Its recorded pricing, "3 PTX / 4 SASS short", is its *opcode*
+gap; it also needs the nested lift, which nobody had said. Items 1 and 2 share
+a blocker.
+
+#### …and the lift is sufficient for nothing, which IS measurable without building it
+
+The section above says of the first-refusal problem: "*what `loopval` would say
+after that is not measurable without building it*". **That is wrong, and
+`liftgap.py` is the measurement.** `loopcfg` refuses on the back-edge count
+*before* it looks at anything else, so the checks behind that one have simply
+never been asked. Ask them: decompose the nest, and run the remaining
+structural predicates at every level a lift would produce.
+
+```
+32 multi-back-edge kernels, 113 PTX loop levels
+ 24  SEQUENTIAL depth 1
+  5  MIXED depth 2
+  3  NESTED depth 3
+  0  left with no named structural refusal
+```
+
+**Zero.** Every one of the 32 is still refused by a NAMED check `loopcfg` never
+reached. `y_cpu_matmul` — the sufficiency case — has a **store in the body** of
+one PTX level and one SASS level, plus two SASS levels that branch inside the
+body. `loopval` compares the stores *after* the loop, so a store in the body is
+refused; and a store in an outer level's body is the ordinary shape of a tiled
+kernel, not a corner case. So **the multi-back-edge lift is sufficient for
+nothing at either optimisation level**, and the `-O1` result recorded above is
+an artifact of the refusal ORDER.
+
+What it does *not* say is that any kernel would validate: past these predicates
+lie the opcode gap, the relation proposal and the obligations, none of which is
+decidable by reading. A level reported clear is a level with **no named
+structural refusal**, and nothing more.
+
+> **The first version of this census was OPTIMISTIC — the one direction its own
+> docstring claims it cannot be — and it reported `23 of 32` left with nothing.**
+> The store scan anchored on `^st\.global`, and every store that matters is
+> PREDICATED (`@%p11 st.global.f32 [%rd11], %f0`), so it matched none of them.
+> Caught by reading the report against a kernel whose store had already been
+> read by eye. `liftgap.py --selftest` now requires a predicated store to be
+> recognised, a non-store not to be, and the count to FALL when the artifact
+> loses its stores.
+
+#### The cache key was missing three modules, and the control was a hand list
+
+`frontier.py`'s cache refuses to serve an answer for an older tree, keyed on a
+digest of every corpus artifact and every module whose content decides the
+answer. That list named `loopval.py` and **not `loopcfg.py`** — the file that
+finds the back edges and raises the refusal the structural census folds into a
+key. Found by changing it: the first run after the shape split would have served
+the pre-split answer straight back.
+
+Its own docstring records that exact hole, one entry earlier, about this file
+itself. **The control that was supposed to stop it was a hardcoded list of four
+module names** — the defect this directory keeps finding, sitting inside the
+check written to prevent it, and it passed with `loopcfg.py` absent.
+
+The list is **derived from the import closure** now, and deriving it found two
+more nobody had noticed: `conc.py` and `mac64.py`, both reached through
+`loopval`'s own import. **12 modules → 14.**
+
+> **And the first closure walk under-reported, because `import a, b, c` names
+> three modules and the obvious regex captures one.** It missed `sassexec.py`,
+> reached through exactly that shape. So the control has a positive control of
+> its own: a synthetic root importing two known modules must resolve to a
+> closure containing them, through the same call.
+
+**The figures do not move**, which is the prediction worth stating: the key
+decides whether the cache is *used*, not what the census *computes*. Re-measured
+after the change, `-O3` is 66 kernels / 108 distinct blockers / 8 clear and `-O1`
+is 66 / 112 / 10 with `y_cpu_matmul` the only kernel one blocker away —
+identical to the run before it.
+
+#### A branch form the CFG could not place, found while checking that
+
+`loopcfg.SASS_BRA` recognises exactly one branch form and used `fullmatch`, so
+anything else in the branch family was silently **not a branch** — fail-open, in
+a CFG. Swept over the corpus, 13 instructions in 8 kernels:
+``@!P0 BRA P1, `(.L_x_1)`` and ``BRA.DIV ~URZ, `(.L_x_3)``.
+
+Two defects, and they fail in opposite directions:
+
+* **`loopcfg` could not see them at all.** A *backward* one would be a loop
+  invisible to `sass_regions`, which would then hand `loopval` a "body" that
+  actually loops.
+* **`sassexec` could see them and dropped an operand.** Its `BRA` arm did
+  `re.search` for a label anywhere in the instruction, so `BRA P1, target` was
+  taken to be governed by its `@` guard alone and the `P1` was discarded — a
+  guess, in the file that is otherwise scrupulous about refusing.
+
+**Latent, not live, and checked rather than assumed:** all 13 are FORWARD, and
+every kernel holding one is refused earlier for an opcode, so none has ever
+executed. That is the reason to close it now rather than after. Both are
+refusals by name now, and **all 16 standing results are unchanged** — which is
+what says the refusal is not an over-refusal.
+
+It also retracts a smaller claim: the two `paged_decode_attention` kernels were
+reported as `SASS: more than one back edge, IRREDUCIBLE`, and that shape was
+computed while **ignoring two branches the CFG could not place**. An
+irreducible classification taken from an incomplete branch set is not a
+classification.
+
+> The first attempt at the `sassexec` half checked the wrong string — `body`
+> carries the mnemonic, so ``BRA `(.L_x_0)`` was refused too and **nine standing
+> results moved**. The probe that was supposed to confirm the arm had been
+> stopped by an unrelated region check one layer up, and its message read as a
+> pass. `regress.sh` is what caught it.
+
 ### The sufficiency census, and the frontier is empty at the level we ship
 
 The cross above was done by hand, in prose, for one bucket. `frontier.py` is it
@@ -1091,7 +1236,7 @@ is checking while both are wrong:
   gap — that is not a gap of zero and is its own blocker.
 
 **In the committed corpus every blocker has a sole-count of zero.** 66 kernels,
-**106** distinct blockers, and not one of them would validate a kernel on its own
+**108** distinct blockers, and not one of them would validate a kernel on its own
 — including every item then on the queue. `cvt.rn.f16.f32` is sole blocker of
 nothing; so is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the
 back-edge lift. That is the honest state of a corpus where **8 kernels are clear,
@@ -1109,7 +1254,21 @@ limit, three on each side.
 
 Measured over the whole corpus at that level, **at `-O1` exactly one kernel is
 one blocker away: `y_cpu_matmul`** — everything else is either clear or two or
-more short.
+more short. At `-O1` the corpus is 66 kernels, **112** distinct blockers and
+**10** clear (`exact_pv` and `naive_gemm_f32` join the eight, which is the same
+`-O` effect the corrected bullet above measures).
+
+> **And that "one blocker away" is an artifact of the refusal ORDER — see the
+> second-refusal census above.** `loopcfg` refuses on the back-edge count before
+> it looks at anything else, so `y_cpu_matmul`'s store-in-body is a refusal the
+> frontier never reached. Lift the back edges and it is still refused. The
+> frontier is empty at distance 1 at **both** levels; this row was the last one
+> standing and it does not survive being asked what is behind it.
+
+> The distinct-blocker counts moved **106 → 108** at `-O3` when the
+> more-than-one-back-edge bucket split into its three shapes (+2 strings) —
+> `python3 frontier.py` is what reported the stale figure, by name, on the run
+> that made it stale.
 
 So the lift is not "sufficient for nothing". It is the one item in the corpus
 with a sufficiency case, and paying for it buys a **new standing result** rather
