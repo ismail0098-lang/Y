@@ -1881,16 +1881,29 @@ tool has never had to make, and refusing them today leaves it sound.
 `loopval` refuses on loop *structure*, independently of opcodes, so closing every
 opcode gap would leave a kernel refused for a reason nobody had measured.
 `loopgap.py` is that census — possible only because `loopval` refuses by name —
-and it takes **none of the 48** kernels with control flow. **32 of the 48 refuse
-for one reason: more than one back edge** (32 on the PTX side, 0 on the SASS),
+and it takes **none of the 48** kernels with control flow. **38 of the 48 refuse
+for one reason: more than one back edge** (38 on the PTX side, 0 on the SASS),
 including all 23 tensor-core GEMMs, which have three. So "21–27 opcodes each"
 understates them.
 
 **That one bucket held three shapes needing three different validators**, and
-splitting it inverts the ranking: 24 are `SEQUENTIAL` (one loop after another —
+splitting it inverts the ranking: 30 are `SEQUENTIAL` (one loop after another —
 the cheap lift, and the *furthest* kernels in the corpus at 21–23 opcodes each),
 5 are `MIXED`, and 3 are a depth-3 `NESTED` loop, which is where the one kernel
-with a sufficiency case sits. `int8_gemm` is one of those three, so the
+with a sufficiency case sits.
+
+**The two sides were reading different functions, and that is why this says 38
+where it used to say 32.** A module with more than one function has no defined
+subject: the PTX scanners stopped at the first `}` and read entry 1, while the
+SASS side read the whole disassembly — and the corpus's two split paged-decode
+kernels declare `..._reduce` first in the PTX and the main kernel first in the
+SASS. Each `.text.` section also restarts addressing at zero, so those two
+files carry 376 and 248 **duplicated addresses**. Separately, the PTX branch
+pattern hardcoded `%p(\d+)`, so `@%rt_p0 bra` was not a branch at all and six
+coprocessor kernels had two back edges each that the CFG could not see. Both
+are refusals by name now; both were **latent** (every affected kernel was
+refused first by an unrelated arity check) and **all 16 standing results are
+byte-identical**. `int8_gemm` is one of those three, so the
 tensor-core item and the back-edge item share a blocker.
 
 > **This paragraph used to end "supporting more than one back edge is the
@@ -1907,7 +1920,7 @@ tensor-core item and the back-edge item share a blocker.
 > FIRST refusal; `loopcfg` refuses on the back-edge count before it looks at
 > anything else. `liftgap.py` asks what is behind it — decompose the nest and run
 > the remaining structural predicates at every level a lift would produce — and
-> the answer is **0 of 32**: `y_cpu_matmul` has a **store in the body**, which
+> the answer is **0 of 38**: `y_cpu_matmul` has a **store in the body**, which
 > `loopval` refuses because it compares the stores *after* the loop. The lift is
 > sufficient for nothing at either level.
 

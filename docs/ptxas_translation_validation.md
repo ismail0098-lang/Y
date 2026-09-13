@@ -987,21 +987,33 @@ only because `loopval` refuses by name and never guesses.
 ```
 48 kernels with PTX control flow; 0 validated
 
- 24  PTX: more than one back edge, SEQUENTIAL depth 1
-  9  PTX: loop finder found NO back edge
+ 30  PTX: more than one back edge, SEQUENTIAL depth 1
   5  PTX: more than one back edge, MIXED depth 2
   3  PTX: more than one back edge, NESTED depth 3
   2  SASS branch form this CFG cannot place: '@P BRA P1, `(.L)'
   2  SASS branch form this CFG cannot place: 'BRA.DIV ~URZ, `(.L)'
+  2  PTX module holds more than one entry point
   1  SASS back edge is unconditional
   1  PTX loop body has more than one branch
+  1  PTX: loop finder found NO back edge
   1  SASS: loop finder found NO back edge
 ```
 
-**32 of 48 refuse for one reason: more than one back edge.** That includes all
+**38 of 48 refuse for one reason: more than one back edge.** That includes all
 23 FP16 tensor-core GEMMs, which have three. So the recorded "21–27 opcodes
 each" understates them — they are behind an opcode gap *and* behind a structural
 one, and only the first had been measured.
+
+> **This block read `24 / 9` and the 9 was a DETECTION failure, not a capacity
+> one.** `loopcfg`'s PTX branch pattern hardcoded `%p(\d+)`, which is a lexical
+> assumption about the emitter's register naming rather than a fact about PTX:
+> `ptx_emitter` writes `%rt_p0` and `%qp0` in the coprocessor kernels, so a
+> branch guarded by one of those **was not a branch to this CFG**. Six kernels
+> have two back edges each that were invisible for exactly that reason. Two
+> more — the split paged-decode kernels — were invisible because the scanner
+> stopped at the first `}` and read only entry 1; they now refuse by name.
+> **8 of the 9 were the defect and 1 (`test_drift`) was a correct answer**, so
+> the bucket is 1 and `SEQUENTIAL depth 1` is 30. See the subject section below.
 
 > **This block used to fold that 32 into ONE bucket, and the bucket held three
 > shapes needing three different validators.** It also carried
@@ -1114,15 +1126,31 @@ never been asked. Ask them: decompose the nest, and run the remaining
 structural predicates at every level a lift would produce.
 
 ```
-32 multi-back-edge kernels, 113 PTX loop levels
- 24  SEQUENTIAL depth 1
+38 multi-back-edge kernels, 125 PTX loop levels
+ 30  SEQUENTIAL depth 1
   5  MIXED depth 2
   3  NESTED depth 3
   0  left with no named structural refusal
 ```
 
-**Zero.** Every one of the 32 is still refused by a NAMED check `loopcfg` never
-reached. `y_cpu_matmul` — the sufficiency case — has a **store in the body** of
+**Zero.** Every one of the 38 is still refused by a NAMED check `loopcfg` never
+reached.
+
+> **This read `0 of 32` and then read `6 of 38`, and the 6 were an OPTIMISTIC
+> answer — the one direction this file's own docstring says it cannot give.**
+> When the branch pattern stopped hardcoding `%pN`, six coprocessor kernels'
+> loops became visible, and this census called all six *clear* because it
+> counted stores and branches and nothing else. They are **do-whiles guarded by
+> a named predicate register**: `ptx_regions` refuses a predicated back edge
+> (the recognised shape tests at the TOP) and refuses a guard `ptx_pred_index`
+> cannot resolve (the predicate file downstream is keyed by NUMBER, so a
+> `%rt_p0` branch is visible but not executable). Both are now counted, the
+> answer is 0 again over the larger bucket, and `--selftest` carries a control
+> that perturbs a real artifact — rename every `%rt_p` to `%p` and the
+> named-predicate blocker must go while the bottom-test one stays, so the two
+> checks are shown independent rather than assumed to be.
+
+`y_cpu_matmul` — the sufficiency case — has a **store in the body** of
 one PTX level and one SASS level, plus two SASS levels that branch inside the
 body. `loopval` compares the stores *after* the loop, so a store in the body is
 refused; and a store in an outer level's body is the ordinary shape of a tiled
@@ -1170,9 +1198,77 @@ more nobody had noticed: `conc.py` and `mac64.py`, both reached through
 
 **The figures do not move**, which is the prediction worth stating: the key
 decides whether the cache is *used*, not what the census *computes*. Re-measured
-after the change, `-O3` is 66 kernels / 108 distinct blockers / 8 clear and `-O1`
-is 66 / 112 / 10 with `y_cpu_matmul` the only kernel one blocker away —
+after the change, `-O3` is 66 kernels / 109 distinct blockers / 8 clear and `-O1`
+is 66 / 113 / 10 with `y_cpu_matmul` the only kernel one blocker away —
 identical to the run before it.
+
+#### The PTX scanner read a fraction of the kernel
+
+`if s == '}': break` stops at the first **inner** brace, not at the end of the
+entry — and the coprocessor kernels carry `{ … }` blocks that
+`quantization_pass` emits. So the scanner read a prefix and stopped, silently.
+Measured, instructions actually read against instructions present:
+
+| kernel | read | present | |
+|---|---|---|---|
+| `coprocessor_large.coprocessor` | 30 | 84 | 36% |
+| `coprocessor_collision.coprocessor` | 26 | 66 | 39% |
+| `coprocessor_combined.coprocessor` | 26 | 66 | 39% |
+| `coprocessor_attention.coprocessor` | 30 | 70 | 43% |
+| `coprocessor_db_index.coprocessor` | 30 | 70 | 43% |
+| `paged_decode_attention_split_…_16_8` | 223 | 1035 | 22% |
+| `paged_decode_attention_split_…_4_8` | 91 | 903 | **10%** |
+
+**`ptxexec.run_ptx` has the identical `break`**, so it was *executing* 91 of 903
+instructions and reporting a symbolic state for it — and `gap.py` drives that
+executor, so the opcode gap published for those kernels was measured over the
+fraction above. A truncated program is not a smaller program: the back edge
+inside a truncated block is a loop, and one of these blocks ends with
+``@%qp0 bra $QUANT_HALF2_PACK_0;``.
+
+Brace *depth* now, on both sides. There are no `.func` bodies in this corpus
+(measured: 0), so for a single-entry module with no inner block the two
+scanners agree instruction for instruction — verified over all 64 such kernels,
+0 differing.
+
+#### The two sides were reading different functions
+
+A module with more than one function has no defined SUBJECT, and this validator
+did not notice: **the PTX side and the SASS side picked different ones.**
+
+`ptxexec.run_ptx` and `loopcfg.ptx_back_edges` both scanned until the first `}`,
+so they read **entry 1**. `sassexec` and `loopcfg.sass_back_edges` read the whole
+disassembly. The corpus's two split paged-decode kernels declare
+`..._reduce` first in the PTX and the **main kernel** first in the SASS, so the
+PTX side was executing `_reduce` while the SASS side read the main kernel — plus
+two `ptxas`-synthesised helper functions concatenated after it.
+
+And the addressing makes it worse rather than merely inconsistent. Each `.text.`
+section **restarts at `/*0000*/`**, so two of them in one file put two functions
+in ONE address space. Measured: those two kernels carry **376 and 248 duplicated
+addresses**. `lab` maps a label to an address naming two instructions, and the
+`target <= addr` back-edge test compares addresses across functions — so every
+back edge reported for them was an artifact.
+
+Both sides refuse by name now. The reach is small and the shape is not:
+
+| | kernels |
+|---|---|
+| PTX modules with two `.entry` points | 2 |
+| SASS files with two `.text.` sections | 2 |
+| SASS files carrying a `ptxas` helper function (`$__internal_…`) | 7 |
+
+**Latent, not live, and checked rather than assumed.** In all 8 affected kernels
+`loopcfg` reported **0** back edges, so the arity check (`!= 1`) refused first —
+fail-closed *by accident of a different check*, not because the branch was
+refused. The sweep that matters is the other one: no corpus kernel is in the
+state where `loopcfg` sees exactly one back edge while another is hidden, which
+is the state that would hand `loopval` a wrong CFG and let it proceed. **All 16
+standing results are byte-identical**, verdicts and obligation counts alike.
+
+The helper functions are the same phenomenon one step down: `CALL.REL.NOINC`, a
+standing blocker for `bn254_fr_mul` and `bn254_msm_bucket`, is the call into one
+of them.
 
 #### A branch form the CFG could not place, found while checking that
 
@@ -1236,7 +1332,7 @@ is checking while both are wrong:
   gap — that is not a gap of zero and is its own blocker.
 
 **In the committed corpus every blocker has a sole-count of zero.** 66 kernels,
-**108** distinct blockers, and not one of them would validate a kernel on its own
+**109** distinct blockers, and not one of them would validate a kernel on its own
 — including every item then on the queue. `cvt.rn.f16.f32` is sole blocker of
 nothing; so is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the
 back-edge lift. That is the honest state of a corpus where **8 kernels are clear,
@@ -1254,9 +1350,18 @@ limit, three on each side.
 
 Measured over the whole corpus at that level, **at `-O1` exactly one kernel is
 one blocker away: `y_cpu_matmul`** — everything else is either clear or two or
-more short. At `-O1` the corpus is 66 kernels, **112** distinct blockers and
+more short. At `-O1` the corpus is 66 kernels, **113** distinct blockers and
 **10** clear (`exact_pv` and `naive_gemm_f32` join the eight, which is the same
 `-O` effect the corrected bullet above measures).
+
+> **Those two counts were published and gated by NOTHING until this
+> increment.** `check_doc`'s `-O1` branch asserted the sole-blocker SET and
+> nothing else, so `112` and `10` could decay freely — a gate that checks the
+> route and never the number, which is the certificate-count defect one
+> increment later, in the gate written to stop published figures going stale.
+> Both are asserted now. The `-O1` figures moved 112 → 113 for the same reason
+> the `-O3` ones moved 108 → 109: the census keys for the kernels whose loops
+> the scanner could not see.
 
 > **And that "one blocker away" is an artifact of the refusal ORDER — see the
 > second-refusal census above.** `loopcfg` refuses on the back-edge count before

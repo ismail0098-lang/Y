@@ -85,7 +85,7 @@ def levels(ptx_path, sass_path):
     raw, _lab, pbacks = loopcfg.ptx_back_edges(ptx_path)
     ins, _l2, _trap, sbacks = loopcfg.sass_back_edges(sass_path)
 
-    def side(backs, items, key, text, store_re, bra_re):
+    def side(backs, items, key, text, store_re, bra_re, ptx=False):
         iv = [(b[0], b[1]) for b in backs]
         out = []
         for i, (h, e) in enumerate(iv):
@@ -96,12 +96,32 @@ def levels(ptx_path, sass_path):
             # the level's own exit test is a branch and is expected; anything
             # beyond one is the shape `loopcfg` already refuses for a flat loop.
             bras = [t for t in txt if bra_re.fullmatch(t)]
-            out.append({'span': (h, e), 'n': len(txt),
-                        'stores': len(stores), 'bras': len(bras)})
+            rec = {'span': (h, e), 'n': len(txt),
+                   'stores': len(stores), 'bras': len(bras),
+                   'pred_back': 0, 'named_pred': 0}
+            if ptx:
+                # TWO refusals `ptx_regions` makes that counting stores and
+                # branches cannot see, and both bite the loops that became
+                # visible when the branch pattern stopped hardcoding `%pN`.
+                #
+                #  pred_back   the recognised shape is a test at the TOP with an
+                #              UNPREDICATED back edge.  `@%p bra HEADER` is a
+                #              do-while and `ptx_regions` refuses it by name.
+                #  named_pred  a guard `ptx_pred_index` cannot resolve.  The
+                #              predicate file downstream is keyed by NUMBER, so
+                #              a `%rt_p0` branch is visible but not executable.
+                pm = backs[i][2]
+                if pm.group(2) is not None: rec['pred_back'] = 1
+                preds = [mm.group(2) for t in txt
+                         if (mm := bra_re.fullmatch(t)) and mm.group(2) is not None]
+                if pm.group(2) is not None: preds.append(pm.group(2))
+                rec['named_pred'] = sum(
+                    1 for x in preds if loopcfg.ptx_pred_index(x) is None)
+            out.append(rec)
         return out
 
     p = side(pbacks, [(i, t) for i, (k, t) in enumerate(raw) if k == 'i'],
-             lambda x: x[0], lambda x: x[1], PTX_STORE, PTX_BRA)
+             lambda x: x[0], lambda x: x[1], PTX_STORE, PTX_BRA, ptx=True)
     s = side(sbacks, ins, lambda x: x[0], lambda x: x[1], SASS_STORE, SASS_BRA)
     return p, s
 
@@ -119,6 +139,10 @@ def report(kernel, d='corpus'):
     sb = sum(1 for L in s if L['bras'] > 0)
     if pb: blockers.append(f'{pb} PTX level(s) branch beyond their exit test')
     if sb: blockers.append(f'{sb} SASS level(s) branch inside the body')
+    pd = sum(1 for L in p if L['pred_back'])
+    np_ = sum(1 for L in p if L['named_pred'])
+    if pd: blockers.append(f'{pd} PTX level(s) test at the BOTTOM (predicated back edge)')
+    if np_: blockers.append(f'{np_} PTX level(s) guarded by a named predicate register')
     return pshape, p, s, blockers
 
 
@@ -174,6 +198,95 @@ def selftest():
                   'reading the file it was given')
             bad += 1
 
+    # (b2) THE TWO REFUSALS A STORE-AND-BRANCH COUNT CANNOT SEE.  Both were
+    #      missed until the branch pattern stopped hardcoding `%pN` made six
+    #      do-while loops visible, and this census then called all six CLEAR --
+    #      the optimistic direction its own docstring says it cannot be.  The
+    #      control PERTURBS AN ARTIFACT through the same call: rewrite a
+    #      do-while kernel's guards to `%p0` and the named-predicate blocker
+    #      must go while the bottom-test one stays.
+    kc = 'coprocessor_test.coprocessor'
+    if os.path.exists(f'corpus/{kc}.ptx'):
+        _sh, pl, _sl, bl = report(kc)
+        if not any(L['pred_back'] for L in pl) or not any(L['named_pred'] for L in pl):
+            print(f'FAIL: {kc} is a do-while guarded by a named predicate and the '
+                  f'census reports neither; blockers={bl}')
+            bad += 1
+        with tempfile.TemporaryDirectory() as d:
+            shutil.copy(f'corpus/{kc}.sass', f'{d}/{kc}.sass')
+            txt = open(f'corpus/{kc}.ptx').read().replace('%rt_p', '%p')
+            open(f'{d}/{kc}.ptx', 'w').write(txt)
+            _s2, pl2, _s3, bl2 = report(kc, d)
+        if any(L['named_pred'] for L in pl2):
+            print(f'FAIL: {kc} with every predicate renamed to %pN still reports a '
+                  f'named predicate register; the check is a constant')
+            bad += 1
+        if not any(L['pred_back'] for L in pl2):
+            print(f'FAIL: renaming the predicates also removed the bottom-test '
+                  f'blocker; the two checks are not independent')
+            bad += 1
+
+    # (b3) THE SUBJECT REFUSALS, and the SASS one needs a SYNTHETIC fixture
+    #      because the PTX one SHADOWS it: both corpus modules with two `.text`
+    #      sections also have two `.entry` points, so the PTX side refuses first
+    #      and no artifact in the corpus can reach the SASS guard.  An
+    #      unreachable guard is an untested one -- which is the whole subject of
+    #      the increment that added it -- so the fixture is built here rather
+    #      than the guard being left defensive with a comment.
+    with tempfile.TemporaryDirectory() as d:
+        two_ptx = ('.visible .entry a(\n)\n{\n\tret;\n}\n'
+                   '.visible .entry b(\n)\n{\n\tret;\n}\n')
+        open(f'{d}/t.ptx', 'w').write(two_ptx)
+        try:
+            loopcfg.ptx_back_edges(f'{d}/t.ptx')
+            print('FAIL: a PTX module with two entry points was accepted; which '
+                  'one is under test is undefined'); bad += 1
+        except Exception as e:
+            if 'entry points' not in str(e):
+                print(f'FAIL: two entry points refused for the wrong reason: {e}')
+                bad += 1
+        one_ptx = '.visible .entry a(\n)\n{\n\tret;\n}\n'
+        open(f'{d}/o.ptx', 'w').write(one_ptx)
+        try:
+            loopcfg.ptx_back_edges(f'{d}/o.ptx')
+        except Exception as e:
+            print(f'FAIL: a single-entry module is refused: {e}'); bad += 1
+        two_sass = ('\t\t.section\t.text.a,"ax",@progbits\n.text.a:\n'
+                    '        /*0000*/                   MOV R1, c[0x0][0x28] ;\n'
+                    '        /*0010*/                   EXIT ;\n'
+                    '\t\t.section\t.text.b,"ax",@progbits\n.text.b:\n'
+                    '        /*0000*/                   MOV R1, c[0x0][0x28] ;\n'
+                    '        /*0010*/                   EXIT ;\n')
+        open(f'{d}/t.sass', 'w').write(two_sass)
+        try:
+            loopcfg.sass_back_edges(f'{d}/t.sass')
+            print('FAIL: a disassembly with two .text sections was accepted; each '
+                  'restarts addressing at 0, so their addresses collide'); bad += 1
+        except Exception as e:
+            if '.text sections' not in str(e):
+                print(f'FAIL: two .text sections refused for the wrong reason: {e}')
+                bad += 1
+        one_sass = ('\t\t.section\t.text.a,"ax",@progbits\n.text.a:\n'
+                    '        /*0000*/                   MOV R1, c[0x0][0x28] ;\n'
+                    '        /*0010*/                   EXIT ;\n')
+        open(f'{d}/o.sass', 'w').write(one_sass)
+        try:
+            loopcfg.sass_back_edges(f'{d}/o.sass')
+        except Exception as e:
+            print(f'FAIL: a single-section disassembly is refused: {e}'); bad += 1
+        # AND THE EXECUTOR'S OWN GUARD, which `loopcfg`'s shadows for the same
+        # reason -- and this is the one that matters most, because `ptxexec` is
+        # what was EXECUTING the wrong function and reporting a symbolic state.
+        import ptxexec
+        try:
+            ptxexec.run_ptx(f'{d}/t.ptx', {})
+            print('FAIL: the PTX executor accepted a module with two entry points; '
+                  'it would execute whichever one comes first'); bad += 1
+        except Exception as e:
+            if 'entry points' not in str(e):
+                print(f'FAIL: the executor refused two entry points for the wrong '
+                      f'reason: {e}'); bad += 1
+
     # (c) NON-VACUITY: some level must have a store and some must not, or the
     #     per-level split distinguishes nothing whatever the scan says.
     with_, without = 0, 0
@@ -200,9 +313,15 @@ def selftest():
             print(f'FAIL: the census reports {ex} kernels / {lv} levels'); bad += 1
     except Exception as e:
         print(f'FAIL: the census raised on the real corpus: {e}'); bad += 1
+    def _nlevels(k):
+        # `ptx_back_edges` REFUSES a module with no defined subject, so a bare
+        # call in a comprehension turns a legitimate refusal into a crash --
+        # which is how this selftest first met the multi-entry refusal.
+        try: return loopcfg.nest_shape(loopcfg.ptx_back_edges(f'corpus/{k}.ptx')[2])[1]
+        except Exception: return None
     single = [k for k in sorted(os.path.basename(x)[:-4] for x in glob.glob('corpus/*.ptx'))
               if os.path.exists(f'corpus/{k}.sass')
-              and loopcfg.nest_shape(loopcfg.ptx_back_edges(f'corpus/{k}.ptx')[2])[1] <= 1][:1]
+              and (_n := _nlevels(k)) is not None and _n <= 1][:1]
     if not single:
         print('FAIL: no single-loop kernel to probe the floor with'); bad += 1
     else:

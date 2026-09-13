@@ -393,8 +393,18 @@ def doc_figures(o1):
     then the gate reports the claim as MISSING rather than as wrong."""
     d = open(DOC).read()
     if o1:
+        # THE COUNTS TOO, not just the sole-blocker set.  Asserting only the set
+        # left `112 distinct blockers and 10 clear` published and gated by
+        # NOTHING -- a gate that asserts the ROUTE and never the NUMBER, which
+        # is the certificate-count defect one increment later, in the gate
+        # written to stop published figures going stale.
         m = re.search(r'at `-O1` exactly one kernel is\s+one blocker away:\s+`(\w+)`', d)
-        return None if not m else {'one': {m.group(1)}}
+        n = re.search(r'At `-O1` the corpus is\s+(\d+)\s+kernels,\s+\*\*(\d+)\*\*\s+'
+                      r'distinct\s+blockers\s+and\s+\*\*(\d+)\*\*\s+clear', d)
+        if not m or not n:
+            return None
+        return {'one': {m.group(1)}, 'kernels': int(n.group(1)),
+                'distinct': int(n.group(2)), 'clear': int(n.group(3))}
     a = re.search(r'(\d+)\s+kernels,\s+\*\*(\d+)\*\*\s+distinct\s+blockers', d)
     b = re.search(r'\*\*(\d+)\s+kernels\s+are\s+clear,\s+the\s+median\s+is\s+(\d+)\s+blockers'
                   r'\s+and\s+(\d+)\s+of\s+(\d+)\s+are\s+(\d+)\s+or\s+more\*\*', d)
@@ -422,7 +432,17 @@ def check_doc(rows, o1):
             print(f'FAIL: doc says exactly {sorted(want["one"])} is one blocker away at -O1; '
                   f'measured {sorted(sole)}')
             return 1
-        print(f'  doc: at -O1 exactly {sorted(sole)} is one blocker away, as published')
+        got1 = {'kernels': len(rows),
+                'distinct': len({b for bs in rows.values() for b in bs}),
+                'clear': sum(1 for c in counts if c == 0)}
+        bad1 = {k: (want[k], got1[k]) for k in got1 if want[k] != got1[k]}
+        if bad1:
+            for k, (w, g) in sorted(bad1.items()):
+                print(f'FAIL: doc says -O1 {k}={w}; measured {g}')
+            return 1
+        print(f'  doc: at -O1 exactly {sorted(sole)} is one blocker away, and the corpus is '
+              f'{got1["kernels"]} kernels / {got1["distinct"]} distinct / {got1["clear"]} '
+              'clear -- as published')
         return 0
     got = {'kernels': len(rows), 'distinct': len({b for bs in rows.values() for b in bs}),
            'clear': sum(1 for c in counts if c == 0),

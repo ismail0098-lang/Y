@@ -446,15 +446,28 @@ def run_lines(lines, sym, seed=None):
 
 
 def run_ptx(path, sym):
+    # A module with two entry points has no defined SUBJECT, and the two sides
+    # of this validator did not even pick the same one: this scanner stopped at
+    # the first `}`, so it executed entry 1, while the SASS side reads the whole
+    # disassembly -- and the corpus's two split paged-decode kernels declare
+    # `..._reduce` FIRST in the PTX and the main kernel FIRST in the SASS.  So
+    # the PTX side was executing `_reduce` and the SASS side the main kernel.
+    # Refuse rather than pick; `loopcfg` owns the entry scan so there is one.
+    import loopcfg
+    ents = loopcfg.ptx_entry_points(path)
+    if len(ents) > 1:
+        raise Exception(
+            f'this PTX module holds {len(ents)} entry points ({", ".join(ents)}); '
+            f'which one is under test is undefined  (refusing, not guessing)')
     sym.setdefault('smem_layout', {}).update(smem.layout(path))
-    st = Ptx(sym); started = False
+    st = Ptx(sym); depth = 0
     for line in open(path):
         s = line.strip()
         if s.startswith('//') or not s: continue
         if s.startswith('.') or s.startswith('.reg') or s.endswith('(') or s.startswith('.param'): continue
-        if s == '{': started = True; continue
-        if s == '}': break
-        if not started: continue
+        if s == '{': depth += 1; continue
+        if s == '}': depth -= 1; continue
+        if not depth: continue
         if not s.endswith(';'): continue
         st.step(s[:-1].strip())
     return st
