@@ -28,8 +28,66 @@ pub struct Interval {
     pub max: i64,
 }
 
+#[derive(Clone, Copy)]
+enum CompileTimeValue {
+    Integer(i64),
+    Boolean(bool),
+}
+
+/// Evaluate the constant subset without consulting inferred runtime bounds.
+/// Unsupported expressions and overflowing arithmetic are proof failures.
+fn eval_compile_time(expr: &Expr) -> Result<CompileTimeValue, &'static str> {
+    use CompileTimeValue::{Boolean, Integer};
+    let invalid = "invalid or overflowing integer constant arithmetic";
+    match expr {
+        Expr::IntLit(n, _) => Ok(Integer(*n)),
+        Expr::BoolLit(b, _) => Ok(Boolean(*b)),
+        Expr::UnaryOp { op, operand, .. } => match (op, eval_compile_time(operand)?) {
+            (UnaryOp::Neg, Integer(n)) => n.checked_neg().map(Integer).ok_or(invalid),
+            (UnaryOp::Not, Boolean(b)) => Ok(Boolean(!b)),
+            _ => Err("unsupported constant unary expression"),
+        },
+        Expr::BinaryOp { left, op, right, .. } => {
+            let lhs = eval_compile_time(left)?;
+            let rhs = eval_compile_time(right)?;
+            match (lhs, rhs) {
+                (Boolean(a), Boolean(b)) => match op {
+                    BinaryOp::And => Ok(Boolean(a && b)),
+                    BinaryOp::Or => Ok(Boolean(a || b)),
+                    BinaryOp::Eq => Ok(Boolean(a == b)),
+                    BinaryOp::NotEq => Ok(Boolean(a != b)),
+                    _ => Err("unsupported constant boolean operator"),
+                },
+                (Integer(a), Integer(b)) => {
+                    let n = match op {
+                        BinaryOp::Eq => return Ok(Boolean(a == b)),
+                        BinaryOp::NotEq => return Ok(Boolean(a != b)),
+                        BinaryOp::Lt => return Ok(Boolean(a < b)),
+                        BinaryOp::Le => return Ok(Boolean(a <= b)),
+                        BinaryOp::Gt => return Ok(Boolean(a > b)),
+                        BinaryOp::Ge => return Ok(Boolean(a >= b)),
+                        BinaryOp::Add => a.checked_add(b),
+                        BinaryOp::Sub => a.checked_sub(b),
+                        BinaryOp::Mul => a.checked_mul(b),
+                        BinaryOp::Div => a.checked_div(b),
+                        BinaryOp::Mod => a.checked_rem(b),
+                        BinaryOp::BitAnd => Some(a & b),
+                        BinaryOp::BitOr => Some(a | b),
+                        BinaryOp::BitXor => Some(a ^ b),
+                        _ => return Err("unsupported constant integer operator"),
+                    };
+                    n.map(Integer).ok_or(invalid)
+                }
+                _ => Err("constant operands have incompatible types"),
+            }
+        }
+        _ => Err("expected a constant expression of integer or boolean literals"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SemanticType {
+    Void,
     Primitive(String),
     Fragment {
         op: String,
@@ -109,6 +167,12 @@ pub struct ScopeFrame {
     pub symbols: HashMap<String, SymbolEntry>,
 }
 
+#[derive(Clone)]
+struct FunctionSignature {
+    params: Vec<SemanticType>,
+    result: SemanticType,
+}
+
 impl ScopeFrame {
     fn new() -> Self {
         Self {
@@ -125,8 +189,9 @@ pub struct TypeChecker {
     pub in_unsafe: bool,
     allow_transfer_use: usize,
     current_return_type: Option<SemanticType>,
-    functions: HashMap<String, Vec<SemanticType>>,
+    functions: HashMap<String, FunctionSignature>,
     structs: HashMap<String, HashMap<String, SemanticType>>,
+    enums: HashMap<String, EnumDecl>,
 
     // Static Under-Constrained Analyzer (@zk_safe) fields
     pub zk_safe_stack: Vec<bool>,
@@ -153,6 +218,7 @@ impl TypeChecker {
             current_return_type: None,
             functions: HashMap::new(),
             structs: HashMap::new(),
+            enums: HashMap::new(),
             zk_safe_stack: vec![false],
             zk_allow_unconstrained_stack: vec![false],
             zk_target: false,
@@ -444,6 +510,73 @@ impl TypeChecker {
             .collect()
     }
 
+    fn interval_state(&self) -> Vec<HashMap<String, Option<Interval>>> {
+        self.scopes.iter().map(|frame| frame.symbols.iter()
+            .map(|(name, entry)| (name.clone(), entry.interval)).collect()).collect()
+    }
+
+    fn restore_interval_state(&mut self, state: &[HashMap<String, Option<Interval>>]) {
+        for (frame, saved) in self.scopes.iter_mut().zip(state) {
+            for (name, entry) in &mut frame.symbols {
+                entry.interval = saved.get(name).copied().flatten();
+            }
+        }
+    }
+
+    /// Retain a fact only if every incoming path establishes it. Scope indices
+    /// distinguish a shadowing local from the outer binding it must not alter.
+    fn join_interval_state(&mut self, other: &[HashMap<String, Option<Interval>>]) {
+        for (frame, saved) in self.scopes.iter_mut().zip(other) {
+            for (name, entry) in &mut frame.symbols {
+                entry.interval = match (entry.interval, saved.get(name).copied().flatten()) {
+                    (Some(a), Some(b)) => Some(Interval { min: a.min.min(b.min), max: a.max.max(b.max) }),
+                    _ => None,
+                };
+            }
+        }
+    }
+
+    fn update_assignment_facts(&mut self, name: &str, value: &Expr, span: &Span) {
+        let val_state = self.eval_expr_constraint_state(value);
+        self.update_signal_constraint_state(name, val_state);
+        if matches!(self.lookup_var(name), Some(SemanticType::Primitive(p))
+            if p.starts_with('F') || p.starts_with('f') || p.starts_with('Q'))
+        {
+            // This domain proves integer indices. A float/fixed-point data
+            // bound also guides the backend's accumulator selection, but it
+            // cannot be propagated as an integer interval through arithmetic.
+            self.update_interval(name, None);
+            return;
+        }
+        let val_interval = self.eval_interval(value);
+        if self.is_explicitly_bounded(name) {
+            if let Some(target_interval) = self.lookup_interval(name).copied() {
+                match val_interval {
+                    Some(v) if v.min < target_interval.min || v.max > target_interval.max => {
+                        self.errors.push(format!(
+                            "Line {}: [Strict Safety] Bounds Violation: assigned value range [{}, {}] exceeds declared bounds [{}, {}] of `{}`.",
+                            span.line, v.min, v.max, target_interval.min, target_interval.max, name
+                        ));
+                        self.update_interval(name, None);
+                    }
+                    None => {
+                        if !self.in_unsafe {
+                            self.errors.push(format!(
+                                "Line {}: [Strict Safety] Bounds Violation: assigning an unconstrained value to bounded variable `{}`.", span.line, name
+                            ));
+                        }
+                        // Even an unsafe assignment must not leave a proof
+                        // behind that a later safe block could trust.
+                        self.update_interval(name, None);
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            self.update_interval(name, val_interval);
+        }
+    }
+
     fn insert_interval(&mut self, name: String, interval: Interval) {
         if let Some(frame) = self.scopes.last_mut() {
             if let Some(entry) = frame.symbols.get_mut(&name) {
@@ -493,7 +626,7 @@ impl TypeChecker {
         });
         if let Some(frame) = self.scopes.get_mut(target_idx) {
             if let Some(entry) = frame.symbols.get_mut(name) {
-                entry.interval = interval;
+                entry.interval = Self::interval_for_type(interval, &entry.ty);
             } else if let Some(inv) = interval {
                 frame.symbols.insert(name.to_string(), SymbolEntry {
                     ty: SemanticType::Unknown,
@@ -503,6 +636,24 @@ impl TypeChecker {
                 });
             }
         }
+    }
+
+    fn interval_for_type(interval: Option<Interval>, ty: &SemanticType) -> Option<Interval> {
+        let value = interval?;
+        let SemanticType::Primitive(name) = ty else { return Some(value) };
+        let (min, max) = match name.to_ascii_lowercase().as_str() {
+            "i8" => (i8::MIN as i64, i8::MAX as i64),
+            "i16" => (i16::MIN as i64, i16::MAX as i64),
+            "i32" => (i32::MIN as i64, i32::MAX as i64),
+            "u8" => (0, u8::MAX as i64),
+            "u16" => (0, u16::MAX as i64),
+            "u32" => (0, u32::MAX as i64),
+            "u64" => (0, i64::MAX),
+            _ => return Some(value),
+        };
+        // Arithmetic beyond the variable's width may wrap. The mathematical
+        // interval then says nothing about the stored machine integer.
+        (value.min >= min && value.max <= max).then_some(value)
     }
 
     fn lookup_interval(&self, name: &str) -> Option<&Interval> {
@@ -519,13 +670,17 @@ impl TypeChecker {
     fn eval_interval(&self, expr: &Expr) -> Option<Interval> {
         match expr {
             Expr::IntLit(val, _) => Some(Interval { min: *val, max: *val }),
+            Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => {
+                let value = self.eval_interval(operand)?;
+                Some(Interval { min: value.max.checked_neg()?, max: value.min.checked_neg()? })
+            }
             Expr::Ident(name, _) => self.lookup_interval(name).cloned(),
             // The GPU index intrinsics have ranges the HARDWARE guarantees, so
             // they are the one call shape this domain can evaluate. Without
-            // them a grid-stride loop cannot be verified at all: `let i =
-            // block_idx_x() * block_dim_x() + thread_idx_x();` left `i` with
-            // no interval, so `@invariant(i >= 0)` - true of every GPU kernel
-            // ever written - got no precondition and Z3 correctly refuted it.
+            // them even `let i = thread_idx_x();` had no interval, so
+            // `@invariant(i >= 0)` got no precondition. Composed launch
+            // indices must also fit their stored integer width; otherwise
+            // `interval_for_type` discards their mathematical interval.
             //
             // Everything asserted here makes an obligation EASIER, which is
             // the direction `CLAUDE.md`'s design rule warns about, so these
@@ -536,24 +691,45 @@ impl TypeChecker {
                 Expr::Ident(name, _) => gpu_index_interval(name),
                 _ => None,
             },
+            Expr::BinaryOp { left, op, right, .. } if matches!(op, BinaryOp::BitAnd) => {
+                // `x & c` with a NON-NEGATIVE constant mask lies in [0, c]
+                // whatever `x` is: the result's set bits are a subset of `c`'s,
+                // and `c >= 0` leaves the sign bit clear, so the result cannot
+                // be negative and cannot exceed `c`.
+                //
+                // This is decided BEFORE both operands are required to be
+                // bounded, which is the whole point: the masked ring-buffer
+                // index (`tail & 1023` into a `[I64; 1024]`) has a completely
+                // unbounded left operand, and demanding an interval for it
+                // returns `None` before the operator is ever consulted. A
+                // negative or non-constant mask falls through to `None`.
+                let mask_of = |side: &Expr| -> Option<i64> {
+                    match self.eval_interval(side) {
+                        Some(i) if i.min == i.max && i.min >= 0 => Some(i.min),
+                        _ => None,
+                    }
+                };
+                let mask = mask_of(right).or_else(|| mask_of(left))?;
+                Some(Interval { min: 0, max: mask })
+            }
             Expr::BinaryOp { left, op, right, .. } => {
                 let lhs = self.eval_interval(left)?;
                 let rhs = self.eval_interval(right)?;
                 match op {
                     BinaryOp::Add => Some(Interval {
-                        min: lhs.min.saturating_add(rhs.min),
-                        max: lhs.max.saturating_add(rhs.max),
+                        min: lhs.min.checked_add(rhs.min)?,
+                        max: lhs.max.checked_add(rhs.max)?,
                     }),
                     BinaryOp::Sub => Some(Interval {
-                        min: lhs.min.saturating_sub(rhs.max),
-                        max: lhs.max.saturating_sub(rhs.min),
+                        min: lhs.min.checked_sub(rhs.max)?,
+                        max: lhs.max.checked_sub(rhs.min)?,
                     }),
                     BinaryOp::Mul => {
                         let candidates = [
-                            lhs.min.saturating_mul(rhs.min),
-                            lhs.min.saturating_mul(rhs.max),
-                            lhs.max.saturating_mul(rhs.min),
-                            lhs.max.saturating_mul(rhs.max),
+                            lhs.min.checked_mul(rhs.min)?,
+                            lhs.min.checked_mul(rhs.max)?,
+                            lhs.max.checked_mul(rhs.min)?,
+                            lhs.max.checked_mul(rhs.max)?,
                         ];
                         Some(Interval {
                             min: *candidates.iter().min().unwrap(),
@@ -565,10 +741,10 @@ impl TypeChecker {
                             None
                         } else {
                             let candidates = [
-                                lhs.min.saturating_div(rhs.min),
-                                lhs.min.saturating_div(rhs.max),
-                                lhs.max.saturating_div(rhs.min),
-                                lhs.max.saturating_div(rhs.max),
+                                lhs.min.checked_div(rhs.min)?,
+                                lhs.min.checked_div(rhs.max)?,
+                                lhs.max.checked_div(rhs.min)?,
+                                lhs.max.checked_div(rhs.max)?,
                             ];
                             Some(Interval {
                                 min: *candidates.iter().min().unwrap(),
@@ -586,6 +762,7 @@ impl TypeChecker {
     fn insert_var(&mut self, name: String, ty: SemanticType) {
         if let Some(frame) = self.scopes.last_mut() {
             if let Some(entry) = frame.symbols.get_mut(&name) {
+                entry.interval = Self::interval_for_type(entry.interval, &ty);
                 entry.ty = ty;
             } else {
                 frame.symbols.insert(name, SymbolEntry {
@@ -601,9 +778,7 @@ impl TypeChecker {
     fn lookup_var(&self, name: &str) -> Option<&SemanticType> {
         for frame in self.scopes.iter().rev() {
             if let Some(entry) = frame.symbols.get(name) {
-                if entry.ty != SemanticType::Unknown {
-                    return Some(&entry.ty);
-                }
+                return Some(&entry.ty);
             }
         }
         None
@@ -834,19 +1009,13 @@ impl TypeChecker {
     /// ("expected `bool`, found integer"). `tests/test_drift.ysu` is exactly
     /// this program.
     ///
-    /// Deliberately narrow: it fires only on a type this checker is CONFIDENT
-    /// about. `SemanticType::Unknown` is still produced in more places than it
-    /// should be (see the design-rule table), and treating it as a violation
-    /// here would refuse working programs for a reason unrelated to their
-    /// condition. Fail-open on Unknown, refuse on a definite numeric.
+    /// Unknown is not evidence of a boolean. Named functions and scalar
+    /// operators now carry result types, so a condition must resolve to bool.
     fn require_bool_condition(&mut self, ty: &SemanticType, kw: &str, span: Span) {
-        let SemanticType::Primitive(name) = ty else {
-            return;
-        };
-        if Self::is_numeric_primitive(name) {
+        if !matches!(ty, SemanticType::Primitive(name) if name.eq_ignore_ascii_case("bool")) {
             self.errors.push(format!(
                 "Line {}: `{}` condition has type {}, not a boolean. Y has no implicit truthiness; write a comparison such as `{} x != 0`.",
-                span.line, kw, name, kw
+                span.line, kw, Self::semantic_type_name(ty), kw
             ));
         }
     }
@@ -912,6 +1081,19 @@ impl TypeChecker {
         INDEX_SWIZZLES.with(|map| {
             map.borrow_mut().clear();
         });
+        // Predeclare named types before resolving signatures, including types
+        // whose declarations follow the functions that use them.
+        fn named_types(tc: &mut TypeChecker, items: &[Item]) {
+            for item in items {
+                match item {
+                    Item::Struct(s) => { tc.structs.insert(s.name.clone(), HashMap::new()); }
+                    Item::Enum(e) => { tc.enums.insert(e.name.clone(), e.clone()); }
+                    Item::Module(m) => named_types(tc, &m.items),
+                    _ => {}
+                }
+            }
+        }
+        named_types(self, &prog.items);
         // Collect function signatures first
         for item in &prog.items {
             self.collect_signatures_item(item);
@@ -929,7 +1111,22 @@ impl TypeChecker {
                 for p in &f.params {
                     params.push(self.resolve_type(&p.ty));
                 }
-                self.functions.insert(f.name.clone(), params);
+                let result = f.ret_ty.as_ref().map(|t| self.resolve_type(t)).unwrap_or(SemanticType::Void);
+                self.functions.insert(f.name.clone(), FunctionSignature { params, result });
+            }
+            Item::Kernel(k) => {
+                let params = k.params.iter().map(|p| self.resolve_type(&p.ty)).collect();
+                self.functions.insert(k.name.clone(), FunctionSignature { params, result: SemanticType::Void });
+            }
+            Item::Enum(e) => {
+                for variant in &e.variants {
+                    if let Some(fields) = &variant.fields {
+                        let params = fields.iter().map(|t| self.resolve_type(t)).collect();
+                        self.functions.insert(format!("{}_{}", e.name, variant.name), FunctionSignature {
+                            params, result: SemanticType::Primitive(e.name.clone()),
+                        });
+                    }
+                }
             }
             Item::Impl(imp) => {
                 for f in &imp.methods {
@@ -937,8 +1134,8 @@ impl TypeChecker {
                     for p in &f.params {
                         params.push(self.resolve_type(&p.ty));
                     }
-                    self.functions
-                        .insert(format!("{}_{}", imp.target_type, f.name), params);
+                    let result = f.ret_ty.as_ref().map(|t| self.resolve_type(t)).unwrap_or(SemanticType::Void);
+                    self.functions.insert(format!("{}_{}", imp.target_type, f.name), FunctionSignature { params, result });
                 }
             }
             Item::Const(c) => {
@@ -963,6 +1160,7 @@ impl TypeChecker {
 
     fn check_item(&mut self, item: &Item) {
         match item {
+            Item::StaticAssert(a) => self.check_compile_time_assert(&a.condition, &a.message, &a.span),
             Item::Kernel(k) => self.check_kernel(k),
             Item::Func(f) => self.check_func(f),
             Item::Impl(imp) => {
@@ -1345,16 +1543,21 @@ impl TypeChecker {
                 }
 
                 if let Some(resolved) = explicit_resolved {
-                    // Minimal type unification
-                    if inferred_type == SemanticType::Unknown {
-                        inferred_type = resolved.clone();
-                    } else if !self.types_are_compatible(&inferred_type, &resolved)
+                    if inferred_type != SemanticType::Unknown
+                        && !self.types_are_compatible(&inferred_type, &resolved)
                         && inferred_type != SemanticType::TransferObligation
                     {
                         self.errors.push(format!(
                             "Line {}: Type mismatch in let assignment.",
                             span.line
                         ));
+                    }
+                    // The backend stores the annotated type after conversion.
+                    // Keeping the initializer's type here can discard a valid
+                    // widening or retain range facts after a narrowing.
+                    // An annotation must never hide a linear obligation.
+                    if inferred_type != SemanticType::TransferObligation {
+                        inferred_type = resolved;
                     }
                 }
 
@@ -1459,6 +1662,14 @@ impl TypeChecker {
                 self.insert_var(name.clone(), resolved);
             }
             Stmt::For { loop_var, start, end, step, body, invariant, is_uniform_branch: _, span, .. } => {
+                for expr in std::iter::once(start).chain(std::iter::once(end)).chain(step.iter()) {
+                    let ty = self.check_expr(expr);
+                    if ty != SemanticType::Unknown && !matches!(&ty, SemanticType::Primitive(p)
+                        if matches!(p.to_ascii_lowercase().as_str(), "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"))
+                    {
+                        self.errors.push(format!("Line {}: for-loop bounds and step must be integer.", expr.span().line));
+                    }
+                }
                 self.push_scope();
 
                 if !self.in_unsafe && invariant.is_none() {
@@ -1469,10 +1680,10 @@ impl TypeChecker {
                 }
 
                 let start_val = self.eval_interval(start).map(|i| i.min);
-                let end_val = self.eval_interval(end).map(|i| i.max);
+                let end_val = self.eval_interval(end).and_then(|i| i.max.checked_sub(1));
                 let bounds_are_known = matches!((start_val, end_val), (Some(_), Some(_)));
                 if let (Some(s_min), Some(e_max)) = (start_val, end_val) {
-                    self.insert_interval(loop_var.clone(), Interval { min: s_min, max: e_max - 1 });
+                    self.insert_interval(loop_var.clone(), Interval { min: s_min, max: e_max });
                 } else {
                     // The loop bounds are not statically known, so the loop
                     // variable has NO provable range and must not be given one.
@@ -1557,28 +1768,7 @@ impl TypeChecker {
                     ));
                 }
                 if let Expr::Ident(name, _) = target {
-                    let val_state = self.eval_expr_constraint_state(value);
-                    self.update_signal_constraint_state(name, val_state);
-                    if self.is_explicitly_bounded(name) {
-                        if let Some(target_interval) = self.lookup_interval(name).cloned() {
-                            if let Some(val_interval) = self.eval_interval(value) {
-                                if val_interval.min < target_interval.min || val_interval.max > target_interval.max {
-                                    self.errors.push(format!(
-                                        "Line {}: [Strict Safety] Bounds Violation: assigned value range [{}, {}] exceeds declared bounds [{}, {}] of `{}`.",
-                                        span.line, val_interval.min, val_interval.max, target_interval.min, target_interval.max, name
-                                    ));
-                                }
-                            } else if !self.in_unsafe {
-                                self.errors.push(format!(
-                                    "Line {}: [Strict Safety] Bounds Violation: assigning an unconstrained value to bounded variable `{}`.",
-                                    span.line, name
-                                ));
-                            }
-                        }
-                    } else {
-                        let val_interval = self.eval_interval(value);
-                        self.update_interval(name, val_interval);
-                    }
+                    self.update_assignment_facts(name, value, span);
                 }
             }
             Stmt::Expr(expr) => {
@@ -1611,12 +1801,17 @@ impl TypeChecker {
                     }
 
                     let ret_ty = self.check_expr_with_expected(expr, expected_ret_ty.as_ref());
+                    if let Some(expected) = expected_ret_ty {
+                        self.check_type_match(&expected, &ret_ty, span, "return type");
+                    }
                     if ret_ty == SemanticType::TransferObligation {
                         self.errors.push(format!(
                             "Line {}: Returning a Transfer obligation would leak a linear sync proof. Consume it with `pipe.wait(...)` before returning.",
                             span.line
                         ));
                     }
+                } else if self.current_return_type.is_some() {
+                    self.errors.push(format!("Line {}: bare return does not supply the declared return type.", span.line));
                 }
             }
             Stmt::Chisel(block, _) => {
@@ -1638,10 +1833,14 @@ impl TypeChecker {
                 // Both arms are conditional: a transfer awaited in either one is
                 // not awaited on the paths that take the other.
                 self.linear_tracker.enter_conditional();
+                let entry = self.interval_state();
                 self.check_block(then_block);
+                let then_exit = self.interval_state();
+                self.restore_interval_state(&entry);
                 if let Some(eb) = else_block {
                     self.check_block(eb);
                 }
+                self.join_interval_state(&then_exit);
                 self.linear_tracker.exit_conditional();
             }
             Stmt::While {
@@ -1707,7 +1906,7 @@ impl TypeChecker {
             } => {
                 // The scrutinee runs whatever the arms do, so it is evaluated
                 // outside the conditional.
-                self.check_expr(scrutinee);
+                let scrutinee_ty = self.check_expr(scrutinee);
                 // A `match` IS a branch, and the linear tracker was never told.
                 // `if n { pipe.wait(t); }` was rejected as an await on one path
                 // out of two, and `match n { _ => pipe.wait(t) }` - the same
@@ -1720,17 +1919,51 @@ impl TypeChecker {
                 // over-approximates it. That is the safe direction and it is
                 // free here: nothing in the kernel corpus matches on anything.
                 self.linear_tracker.enter_conditional();
+                let entry = self.interval_state();
+                let mut exits = Vec::new();
                 for arm in arms {
+                    self.restore_interval_state(&entry);
+                    self.push_scope();
+                    match &arm.pattern {
+                        MatchPattern::Ident(name, _) => self.insert_var(name.clone(), scrutinee_ty.clone()),
+                        MatchPattern::EnumVariant { path, variant, bindings, .. } => {
+                            let namespace = if path.is_empty() {
+                                match &scrutinee_ty { SemanticType::Primitive(t) => t.as_str(), _ => "" }
+                            } else { path.as_str() };
+                            let signature = self.functions.get(&format!("{}_{}", namespace, variant)).cloned();
+                            for (i, binding) in bindings.iter().enumerate() {
+                                let ty = signature.as_ref().and_then(|s| s.params.get(i)).cloned().unwrap_or(SemanticType::Unknown);
+                                self.insert_var(binding.clone(), ty);
+                            }
+                        }
+                        _ => {}
+                    }
                     let arm_ty = self.check_expr(&arm.body);
                     self.reject_transfer_escape(&arm_ty, &arm.span, "as a match arm result");
+                    self.pop_scope();
+                    exits.push(self.interval_state());
+                }
+                // Exhaustiveness is not proved here, so include the path on
+                // which no arm matches as well as each arm's exit.
+                self.restore_interval_state(&entry);
+                for exit in exits {
+                    self.join_interval_state(&exit);
                 }
                 self.linear_tracker.exit_conditional();
             }
-            Stmt::CompoundAssign { target, value, .. } => {
+            Stmt::CompoundAssign { target, op, value, span } => {
                 let lhs = self.check_expr(target);
-                let rhs = self.check_expr(value);
+                let rhs = self.check_expr_with_expected(value, Some(&lhs));
                 self.reject_transfer_escape(&lhs, &target.span(), "in compound assignment");
                 self.reject_transfer_escape(&rhs, &value.span(), "in compound assignment");
+                self.binary_result_type(op, &lhs, &rhs, span);
+                if let Expr::Ident(name, _) = target {
+                    let result = Expr::BinaryOp {
+                        left: Box::new(target.clone()), op: op.clone(),
+                        right: Box::new(value.clone()), span: span.clone(),
+                    };
+                    self.update_assignment_facts(name, &result, span);
+                }
             }
             Stmt::SafeBlock(block, _) => {
                 let prev_unsafe = self.in_unsafe;
@@ -1766,15 +1999,120 @@ impl TypeChecker {
                 self.check_block(body);
             }
             Stmt::CompileTimeAssert { condition, message, span } => {
-                // Verify the assertion expression is well-typed
-                self.check_expr(condition);
                 let msg = message.as_deref().unwrap_or("compile-time assertion");
-                println!(
-                    "      \x1b[1;36m[Verified]\x1b[0m Line {}: compile_time::assert! \"{}\"",
-                    span.line, msg
-                );
+                self.check_compile_time_assert(condition, msg, span);
             }
         }
+    }
+
+    fn check_compile_time_assert(&mut self, condition: &Expr, message: &str, span: &Span) {
+        match eval_compile_time(condition) {
+            Ok(CompileTimeValue::Boolean(true)) => println!(
+                "      \x1b[1;36m[Verified]\x1b[0m Line {}: compile-time assertion \"{}\"",
+                span.line, message
+            ),
+            Ok(CompileTimeValue::Boolean(false)) => self.errors.push(format!(
+                "Line {}: compile-time assertion failed: {}", span.line, message
+            )),
+            result => {
+                let reason = match result {
+                    Err(reason) => reason,
+                    _ => "condition must evaluate to a boolean",
+                };
+                self.errors.push(format!(
+                    "Line {}: cannot verify compile-time assertion: {} ({})", span.line, message, reason
+                ));
+            }
+        }
+    }
+
+    fn check_type_match(&mut self, expected: &SemanticType, actual: &SemanticType, span: &Span, context: &str) {
+        if *expected != SemanticType::Unknown && *actual != SemanticType::Unknown
+            && !self.types_are_compatible(expected, actual)
+        {
+            self.errors.push(format!("Line {}: {} mismatch: expected {}, got {}.",
+                span.line, context, Self::semantic_type_name(expected), Self::semantic_type_name(actual)));
+        }
+    }
+
+    fn known_expr_type(&self, expr: &Expr) -> Option<SemanticType> {
+        match expr {
+            Expr::Ident(name, _) => self.lookup_var(name).cloned(),
+            Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => self.known_expr_type(operand),
+            Expr::Call { func, .. } => {
+                let name = match &**func {
+                    Expr::Ident(name, _) => name.clone(),
+                    Expr::Path { namespace, member, .. } => format!("{}_{}", namespace, member),
+                    _ => return None,
+                };
+                self.functions.get(&name).map(|s| s.result.clone())
+                    .or_else(|| crate::intrinsics::scalar_return_type(&name).map(|t| SemanticType::Primitive(t.into())))
+            }
+            _ => None,
+        }
+    }
+
+    fn binary_result_type(&mut self, op: &BinaryOp, lhs: &SemanticType, rhs: &SemanticType, span: &Span) -> SemanticType {
+        if matches!(op, BinaryOp::And | BinaryOp::Or) {
+            self.require_bool_condition(lhs, "boolean operator", span.clone());
+            self.require_bool_condition(rhs, "boolean operator", span.clone());
+            return SemanticType::Primitive("bool".into());
+        }
+        self.check_type_match(lhs, rhs, span, "binary operands");
+        if !matches!(op, BinaryOp::Eq | BinaryOp::NotEq) {
+            for ty in [lhs, rhs] {
+                if *ty != SemanticType::Unknown && !matches!(ty, SemanticType::Primitive(p) if Self::is_numeric_primitive(p)) {
+                    self.errors.push(format!("Line {}: arithmetic/comparison operands must be numeric.", span.line));
+                }
+                if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Mod)
+                    && matches!(ty, SemanticType::Primitive(p) if p.starts_with('F') || p.starts_with('f') || p.starts_with('Q'))
+                {
+                    self.errors.push(format!("Line {}: bitwise, shift and remainder operands must be integer.", span.line));
+                }
+            }
+        }
+        if matches!(op, BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge) {
+            SemanticType::Primitive("bool".into())
+        } else if *lhs == SemanticType::Unknown { rhs.clone() } else { lhs.clone() }
+    }
+
+    fn check_named_call(&mut self, name: &str, args: &[Expr], span: &Span) -> SemanticType {
+        if self.lookup_var(name).is_some() {
+            self.errors.push(format!("Line {}: `{}` is a variable, not callable.", span.line, name));
+        }
+        let signature = self.functions.get(name).cloned();
+        if let Some(sig) = &signature {
+            if args.len() != sig.params.len() {
+                self.errors.push(format!("Line {}: function `{}` expects {} argument(s), got {}.",
+                    span.line, name, sig.params.len(), args.len()));
+            }
+        }
+        let typed_vec_get = name.strip_prefix("Vec_get_").filter(|t|
+            Self::is_numeric_primitive(t) || self.structs.contains_key(*t) || self.enums.contains_key(*t));
+        if signature.is_none() && !crate::intrinsics::is_known_function(name) && typed_vec_get.is_none() {
+            self.errors.push(format!("Line {}: Unknown function `{}`.", span.line, name));
+        }
+        let mut arg_types = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let expected = signature.as_ref().and_then(|s| s.params.get(i));
+            let actual = self.check_expr_with_expected(arg, expected);
+            self.reject_transfer_escape(&actual, &arg.span(), "as a function argument");
+            if let Some(expected) = expected {
+                self.check_type_match(expected, &actual, &arg.span(), &format!("function `{}` argument {}", name, i + 1));
+            }
+            arg_types.push(actual);
+        }
+        if let Some(sig) = signature { return sig.result; }
+        if let Some(t) = typed_vec_get { return SemanticType::Primitive(t.to_string()); }
+        if let Some(t) = crate::intrinsics::scalar_return_type(name) {
+            return if t == "void" { SemanticType::Void } else { SemanticType::Primitive(t.to_string()) };
+        }
+        if matches!(name, "load" | "block_ptr2d_load" | "block_ptr3d_load" | "GlobalMemory_load") {
+            if let Some(SemanticType::GlobalMemory(t)) = arg_types.first() {
+                return SemanticType::Primitive(t.clone());
+            }
+        }
+        SemanticType::Unknown
     }
 
     fn check_expr(&mut self, expr: &Expr) -> SemanticType {
@@ -1810,7 +2148,7 @@ impl TypeChecker {
                     }
                     ty
                 } else {
-                    // Could be a Type Alias reference (e.g., `smem_A: ATile`)
+                    self.errors.push(format!("Line {}: Undefined variable `{}`.", span.line, name));
                     SemanticType::Unknown
                 }
             }
@@ -1854,7 +2192,7 @@ impl TypeChecker {
                 {
                     if namespace == "barrier" && member == "sync" {
                         self.linear_tracker.synchronize_barrier();
-                        return SemanticType::Unknown;
+                        return SemanticType::Void;
                     }
                     if namespace == "File" && member == "read" {
                         for arg in args {
@@ -1880,30 +2218,19 @@ impl TypeChecker {
                         if !self.in_unsafe {
                             self.errors.push(format!("Line {}: Dynamic memory operations like {}::{} are mapped to raw void* and require an @unsafe function context.", span.line, namespace, member));
                         }
-                        return SemanticType::Unknown;
+                        return self.check_named_call(&format!("{}_{}", namespace, member), args, &span);
                     }
+                }
+                match &**func {
+                    Expr::Ident(name, _) => return self.check_named_call(name, args, &span),
+                    Expr::Path { namespace, member, .. } => {
+                        return self.check_named_call(&format!("{}_{}", namespace, member), args, &span);
+                    }
+                    _ => {}
                 }
                 let func_ty = self.check_expr(func);
                 self.reject_transfer_escape(&func_ty, &func.span(), "as a callable value");
-
-                let mut expected_params = None;
-                if let Expr::Ident(fname, _) = &**func {
-                    expected_params = self.functions.get(fname).cloned();
-                } else if let Expr::Path {
-                    namespace, member, ..
-                } = &**func
-                {
-                    expected_params = self
-                        .functions
-                        .get(&format!("{}_{}", namespace, member))
-                        .cloned();
-                }
-
-                for (i, arg) in args.iter().enumerate() {
-                    let expected_ty = expected_params.as_ref().and_then(|p| p.get(i));
-                    let arg_ty = self.check_expr_with_expected(arg, expected_ty);
-                    self.reject_transfer_escape(&arg_ty, &arg.span(), "as a function argument");
-                }
+                for arg in args { self.check_expr(arg); }
                 SemanticType::Unknown
             }
             Expr::MemberAccess { base, member, .. } => {
@@ -1916,6 +2243,15 @@ impl TypeChecker {
                         &base.span(),
                         "as the base of member access",
                     );
+                    let owner = match &base_ty {
+                        SemanticType::Reference { inner, .. } => &**inner,
+                        other => other,
+                    };
+                    if let SemanticType::Primitive(name) = owner {
+                        if let Some(fields) = self.structs.get(name) {
+                            if let Some(ty) = fields.get(member) { return ty.clone(); }
+                        }
+                    }
                     SemanticType::Unknown
                 }
             }
@@ -1956,13 +2292,16 @@ impl TypeChecker {
                     }
                 }
 
-                let func_ty = self.check_expr(func);
-                self.reject_transfer_escape(&func_ty, &func.span(), "as a generic callable value");
-                for arg in args {
-                    let arg_ty = self.check_expr(arg);
-                    self.reject_transfer_escape(&arg_ty, &arg.span(), "as a generic call argument");
+                match &**func {
+                    Expr::Ident(name, _) => self.check_named_call(name, args, &span),
+                    Expr::Path { namespace, member, .. } => self.check_named_call(&format!("{}_{}", namespace, member), args, &span),
+                    _ => {
+                        let func_ty = self.check_expr(func);
+                        self.reject_transfer_escape(&func_ty, &func.span(), "as a generic callable value");
+                        for arg in args { self.check_expr(arg); }
+                        SemanticType::Unknown
+                    }
                 }
-                SemanticType::Unknown
             }
             Expr::StructLit { name, fields, .. } => {
                 let struct_fields = self.structs.get(name).cloned();
@@ -2073,8 +2412,12 @@ impl TypeChecker {
                 SemanticType::Unknown
             }
             Expr::BinaryOp { left, op, right, span } => {
-                let lhs = self.check_expr(left);
-                let rhs = self.check_expr(right);
+                let compares = matches!(op, BinaryOp::Eq | BinaryOp::NotEq | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge);
+                let rhs_hint = self.known_expr_type(right);
+                let numeric_context = expected_type.filter(|t| matches!(t, SemanticType::Primitive(p) if Self::is_numeric_primitive(p)));
+                let operand_expected = if compares { rhs_hint.as_ref().or(numeric_context) } else { expected_type.or(rhs_hint.as_ref()) };
+                let lhs = self.check_expr_with_expected(left, operand_expected);
+                let rhs = self.check_expr_with_expected(right, if lhs == SemanticType::Unknown { operand_expected } else { Some(&lhs) });
                 self.reject_transfer_escape(&lhs, &left.span(), "in a binary expression");
                 self.reject_transfer_escape(&rhs, &right.span(), "in a binary expression");
 
@@ -2082,7 +2425,18 @@ impl TypeChecker {
                     self.check_verification_transition(left, right, span);
                 }
 
-                SemanticType::Unknown
+                let result = self.binary_result_type(op, &lhs, &rhs, span);
+                // Y's backends also expose comparisons as integer 0/1 in an
+                // explicitly numeric result context (including nested integer
+                // expressions). In a condition/inferred binding they are bool.
+                if compares {
+                    if let Some(SemanticType::Primitive(p)) = expected_type {
+                        if Self::is_numeric_primitive(p) {
+                            return SemanticType::Primitive(p.clone());
+                        }
+                    }
+                }
+                result
             }
             Expr::UnaryOp { op, operand, .. } => {
                 let span = expr.span();
@@ -2092,7 +2446,7 @@ impl TypeChecker {
                         span.line
                     ));
                 }
-                let operand_ty = self.check_expr(operand);
+                let operand_ty = self.check_expr_with_expected(operand, expected_type);
                 self.reject_transfer_escape(&operand_ty, &operand.span(), "in a unary expression");
                 // Every unary expression used to be `Unknown`, which is the
                 // same hole as `Type::Reference` above and had to be closed
@@ -2164,6 +2518,17 @@ impl TypeChecker {
             // the same case as a clause that is logically IMPLIED, which
             // should be deleted rather than kept.
             Expr::BoolLit(..) => SemanticType::Primitive("bool".into()),
+            Expr::StringLit(..) => SemanticType::Primitive("String".into()),
+            Expr::CharLit(..) => SemanticType::Primitive("char".into()),
+            Expr::SelfLit(..) => self.lookup_var("self").cloned().unwrap_or(SemanticType::Unknown),
+            Expr::Path { namespace, member, .. } => {
+                if let Some(e) = self.enums.get(namespace) {
+                    if e.variants.iter().any(|v| v.name == *member) {
+                        return SemanticType::Primitive(namespace.clone());
+                    }
+                }
+                SemanticType::Unknown
+            }
             Expr::IntLit(..) => match expected_type {
                 Some(SemanticType::Primitive(p)) if Self::is_numeric_primitive(p) => {
                     SemanticType::Primitive(p.clone())
@@ -2171,12 +2536,11 @@ impl TypeChecker {
                 _ => SemanticType::Primitive("I32".into()),
             },
             Expr::FloatLit(..) => match expected_type {
-                Some(SemanticType::Primitive(p)) if Self::is_numeric_primitive(p) => {
+                Some(SemanticType::Primitive(p)) if p.starts_with('F') || p.starts_with('f') || p.starts_with('Q') => {
                     SemanticType::Primitive(p.clone())
                 }
                 _ => SemanticType::Primitive("F32".into()),
             },
-            _ => SemanticType::Unknown,
         }
     }
 
@@ -2222,7 +2586,7 @@ impl TypeChecker {
                     SemanticType::Primitive("ptr".into())
                 } else if let Some(t) = self.lookup_var(name) {
                     t.clone() // alias resolution
-                } else if self.structs.contains_key(name) {
+                } else if self.structs.contains_key(name) || self.enums.contains_key(name) {
                     // A declared struct, resolved the way `Expr::StructLit`
                     // reports itself. Without this arm the name fell through to
                     // `Unknown`, and since `types_are_compatible` treats
@@ -2459,11 +2823,10 @@ impl TypeChecker {
             // The GPU index intrinsics are the one class of call this encoder
             // models rather than refuses. They take no arguments, have no
             // side effects, and their ranges are guaranteed by the hardware -
-            // so mapping each to a canonical symbol lets an ordinary
-            // grid-stride loop be verified instead of rejected. Before this,
-            // `let i = block_idx_x() * block_dim_x() + thread_idx_x();` made
-            // `i` a havoc, and `@invariant(i >= 0)` - which is true of every
-            // GPU kernel ever written - could not be discharged.
+            // so mapping each to a canonical symbol supplies the launch
+            // bounds needed by GPU loop invariants. These bounds describe
+            // the intrinsic results, not the absence of overflow in an
+            // arbitrary expression that combines them.
             //
             // This is the one place in this file that makes an obligation
             // EASIER, so the facts asserted alongside it (in
@@ -3230,7 +3593,7 @@ tracked variable in a way this verifier cannot see",
         for frame in &self.scopes {
             for (name, entry) in &frame.symbols {
                 if let SemanticType::Primitive(prim_name) = &entry.ty {
-                    if prim_name == "I32" || prim_name == "u32" || prim_name == "usize" || prim_name == "i64" {
+                    if matches!(prim_name.to_ascii_lowercase().as_str(), "i32" | "u32" | "usize" | "i64") {
                         vars.insert(name.clone());
                     }
                 }
@@ -3374,7 +3737,7 @@ tracked variable in a way this verifier cannot see",
         for frame in &self.scopes {
             for (name, entry) in &frame.symbols {
                 if let SemanticType::Primitive(prim_name) = &entry.ty {
-                    if prim_name == "I32" || prim_name == "u32" || prim_name == "usize" || prim_name == "i64" {
+                    if matches!(prim_name.to_ascii_lowercase().as_str(), "i32" | "u32" | "usize" | "i64") {
                         vars.insert(name.clone());
                     }
                 }
@@ -3976,6 +4339,30 @@ impl TypeChecker {
         if t1 == t2 {
             return true;
         }
+        // `Unknown` means "this checker could not type it", and the mismatch
+        // check exempts it precisely so an untypeable value is not reported as
+        // a WRONG one. That exemption has to survive being placed behind a
+        // reference. `String_new` returns a non-scalar the intrinsic registry
+        // cannot type, so `&s_str` is `&Unknown`; comparing it against a
+        // declared `&String` refused `tests/test_struct.ysu`, a correct
+        // program. A reference whose inner types are both KNOWN and different
+        // is still a mismatch - that is the `let r: &F32 = &x` case with
+        // `x: I32` that `Reference` was introduced to catch, and it is what
+        // stops this from reverting `Reference` to the old blanket `Unknown`.
+        // The MUTABILITY must still match exactly. Relaxing only the inner
+        // type is what keeps `let r: &mut I32 = &x;` refused - a shared borrow
+        // does not satisfy a `&mut` annotation, and that is the half of this
+        // check the parser's dropped `mut` token used to lose entirely.
+        if let (
+            SemanticType::Reference { inner: a, mutable: am },
+            SemanticType::Reference { inner: b, mutable: bm },
+        ) = (t1, t2)
+        {
+            return am == bm
+                && (**a == SemanticType::Unknown
+                    || **b == SemanticType::Unknown
+                    || self.types_are_compatible(a, b));
+        }
         let is_int_or_ptr = |t: &SemanticType| {
             if let SemanticType::Primitive(p) = t {
                 let p_lower = p.to_lowercase();
@@ -4143,4 +4530,3 @@ mod tests {
         );
     }
 }
-

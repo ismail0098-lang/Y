@@ -214,10 +214,10 @@ pub struct LlvmEmitter {
     block_terminated: bool,
     /// Store current cache policy during let bindings
     current_cache_policy: Option<String>,
-    /// Accumulators declared `@ZeroDrift`, with the exact representation chosen
-    /// for each. These are stored as integers; conversion happens on write and
-    /// on read, and the accumulation between is exact.
-    zero_drift: BTreeMap<String, crate::zero_drift::DriftRepr>,
+    /// Accumulators declared `@ZeroDrift`: representation and whether the
+    /// declared value is an integer. Integer values stay in their integer
+    /// domain on reads and writes; fixed-point floats require conversion.
+    zero_drift: BTreeMap<String, (crate::zero_drift::DriftRepr, bool)>,
     /// Measured accumulate costs from the device, driving the choice.
     drift_costs: crate::zero_drift::CostTable,
     /// Constructs this backend refuses to emit: `@ZeroDrift` bindings it
@@ -662,8 +662,30 @@ impl LlvmEmitter {
         out
     }
 
-    /// Emits an expression and coerces the result to `double`, which is the
-    /// domain every `@ZeroDrift` conversion works in.
+    /// Converts one term to the accumulator's storage domain. Integer terms
+    /// must never pass through `double`: values above 2^53 would be rounded
+    /// before the supposedly exact addition even starts.
+    fn emit_drift_term(
+        &mut self,
+        expr: &Expr,
+        repr: crate::zero_drift::DriftRepr,
+        integer_domain: bool,
+    ) -> String {
+        if integer_domain {
+            let value = self.emit_expr(expr, None, None);
+            let ty = self.infer_type(expr);
+            return self.emit_coerce_from(
+                &value,
+                &ty,
+                repr.llvm_type(),
+                self.expr_is_unsigned(expr),
+            );
+        }
+        let value = self.emit_expr_as_double(expr);
+        self.emit_to_fixed(&value, repr)
+    }
+
+    /// Emits an expression in the conversion domain of a fixed-point float.
     fn emit_expr_as_double(&mut self, expr: &Expr) -> String {
         let v = self.emit_expr(expr, None, None);
         let t = self.infer_type(expr);
@@ -1503,10 +1525,25 @@ impl LlvmEmitter {
 
     // ── Functions ───────────────────────────────────────────
 
-    fn emit_func(&mut self, f: &FuncDecl) {
+    /// Local facts belong to one function (including a kernel). Leaving any
+    /// of these maps populated makes an unrelated binding with the same name
+    /// inherit its predecessor's directive, signedness or pointer element.
+    fn reset_function_state(&mut self) {
         self.tmp_counter = 0;
+        self.label_counter = 0;
         self.locals.clear();
+        self.locals_ast_type.clear();
+        self.pointee_types.clear();
+        self.mem_elem_types.clear();
+        self.zero_drift.clear();
+        self.loop_exit_stack.clear();
         self.block_terminated = false;
+        self.current_cache_policy = None;
+        self.current_load_hint = None;
+    }
+
+    fn emit_func(&mut self, f: &FuncDecl) {
+        self.reset_function_state();
         let prev_ptx = self.in_ptx_emit;
         self.in_ptx_emit = f.is_ptx_emit;
 
@@ -1620,7 +1657,17 @@ impl LlvmEmitter {
                             ));
                             self.locals.insert(name.clone(), decision.repr.llvm_type().to_string());
                             self.locals_ast_type.insert(name.clone(), ty_name.clone());
-                            self.zero_drift.insert(name.clone(), decision.repr);
+                            let integer_domain = decision.repr.frac_bits() == 0
+                                && matches!(
+                                    ty_name.as_str(),
+                                    "I8" | "I16" | "I32" | "I64"
+                                        | "U8" | "U16" | "U32" | "U64"
+                                        | "i8" | "i16" | "i32" | "i64"
+                                        | "u8" | "u16" | "u32" | "u64"
+                                        | "isize" | "usize"
+                                );
+                            self.zero_drift
+                                .insert(name.clone(), (decision.repr, integer_domain));
                             writeln!(
                                 &mut self.output,
                                 "  %{} = alloca {}",
@@ -1734,9 +1781,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
     }
 
     fn emit_kernel(&mut self, k: &KernelDecl) {
-        self.tmp_counter = 0;
-        self.locals.clear();
-        self.block_terminated = false;
+        self.reset_function_state();
 
         writeln!(&mut self.output, "; @kernel").unwrap();
 
@@ -2167,12 +2212,11 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
     fn emit_stmt(&mut self, stmt: &Stmt, ret_type: &str) {
         match stmt {
             Stmt::Let { name, init, .. } if self.zero_drift.contains_key(name) => {
-                let repr = self.zero_drift[name];
-                let as_double = match init {
-                    Some(e) => self.emit_expr_as_double(e),
-                    None => "0.0".to_string(),
+                let (repr, integer_domain) = self.zero_drift[name];
+                let fixed = match init {
+                    Some(e) => self.emit_drift_term(e, repr, integer_domain),
+                    None => "0".to_string(),
                 };
-                let fixed = self.emit_to_fixed(&as_double, repr);
                 self.emit_store(&fixed, &format!("%{}", name), repr.llvm_type());
             }
             Stmt::Let {
@@ -2294,9 +2338,8 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                     _ => unreachable!(),
                 };
                 let (op, rhs) = Self::drift_running_sum(target, value).unwrap();
-                let repr = self.zero_drift[&name];
-                let rhs_double = self.emit_expr_as_double(rhs);
-                let rhs_fixed = self.emit_to_fixed(&rhs_double, repr);
+                let (repr, integer_domain) = self.zero_drift[&name];
+                let rhs_fixed = self.emit_drift_term(rhs, repr, integer_domain);
                 let ity = repr.llvm_type();
                 let addr = format!("%{}", name);
                 let loaded = self.emit_load(&addr, ity);
@@ -2581,7 +2624,7 @@ representation, and whether that is lossless depends on the expression.",
                     Expr::Ident(n, _) => n.clone(),
                     _ => unreachable!(),
                 };
-                let repr = self.zero_drift[&name];
+                let (repr, integer_domain) = self.zero_drift[&name];
                 // Only `+=` and `-=` are exact here. Scaling a product or a
                 // quotient would reintroduce rounding into the accumulation
                 // itself, which is the single thing @ZeroDrift exists to
@@ -2596,8 +2639,7 @@ representation, and whether that is lossless depends on the expression.",
                 // Each term is quantised once, deterministically; every
                 // addition after that is exact integer arithmetic, so the total
                 // does not depend on the order the terms arrived in.
-                let rhs_double = self.emit_expr_as_double(value);
-                let rhs_fixed = self.emit_to_fixed(&rhs_double, repr);
+                let rhs_fixed = self.emit_drift_term(value, repr, integer_domain);
                 let ity = repr.llvm_type();
                 let addr = format!("%{}", name);
                 let loaded = self.emit_load(&addr, ity);
@@ -2996,11 +3038,13 @@ representation, and whether that is lossless depends on the expression.",
                     return tag.to_string();
                 }
 
-                // Reading a @ZeroDrift accumulator converts back out of its
-                // integer domain. The stored value stays exact; only this
-                // observation is a float, which is the type the source declared.
-                if let Some(repr) = self.zero_drift.get(name).copied() {
+                // Integer observations stay exact too. Only a source-level
+                // float needs to be decoded from its fixed-point storage.
+                if let Some((repr, integer_domain)) = self.zero_drift.get(name).copied() {
                     let raw = self.emit_load(&format!("%{}", name), repr.llvm_type());
+                    if integer_domain {
+                        return raw;
+                    }
                     return self.emit_from_fixed(&raw, repr);
                 }
                 let ty = self
@@ -4174,12 +4218,14 @@ representation, and whether that is lossless depends on the expression.",
             Expr::CharLit(_, _) => "i8".into(),
             Expr::StringLit(_, _) => "ptr".into(),
             Expr::Ident(name, _) => {
-                // A @ZeroDrift accumulator is STORED as an integer but READS as
-                // a double. Reporting the storage type here would make every
-                // downstream operation emit integer arithmetic against a value
-                // that arrives as a float.
-                if self.zero_drift.contains_key(name) {
-                    return "double".into();
+                // Match the value returned by emit_expr, rather than assuming
+                // that every directive denotes a fixed-point float.
+                if let Some((repr, integer_domain)) = self.zero_drift.get(name) {
+                    return if *integer_domain {
+                        repr.llvm_type().into()
+                    } else {
+                        "double".into()
+                    };
                 }
                 if self.enum_variants.contains_key(name) {
                     return "i32".into();
@@ -4565,4 +4611,3 @@ representation, and whether that is lossless depends on the expression.",
         }
     }
 }
-

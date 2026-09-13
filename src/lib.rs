@@ -4,6 +4,7 @@ pub mod cpu_emitter;
 pub mod lexer;
 pub mod linear_tracker;
 pub mod llvm_emitter;
+pub mod intrinsics;
 pub mod parser;
 pub mod ptx_emitter;
 pub mod sentinel;

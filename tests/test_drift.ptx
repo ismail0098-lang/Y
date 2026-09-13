@@ -9,11 +9,11 @@
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 100.00% (6 active blocks per SM)
 .maxnreg 32
 {
-    .reg .b32 %r<16>;
-    .reg .f32 %f<5>;
+    .reg .b32 %r<19>;
+    .reg .f32 %f<2>;
     .reg .b64 %rd<4>;
     .reg .pred %p<3>;
-    .reg .f64 %fd<12>;
+    .reg .f64 %fd<8>;
 
     // [Y ZERO DRIFT] acc: Q32.32 accumulated exactly as Q32.32
     mov.f32 %f0, 0.0;
@@ -47,23 +47,19 @@
     mov.u32 %r5, 30;
     mov.u32 %r6, %r5;
     $IF_END_1:
-    cvt.rn.f64.s64 %fd8, %rd0;
-    div.rn.f64 %fd9, %fd8, 0d41F0000000000000;
-    cvt.rn.f32.f64 %f2, %fd9;
-    cvt.rn.f64.s64 %fd10, %rd2;
-    div.rn.f64 %fd11, %fd10, 0d41F0000000000000;
-    cvt.rn.f32.f64 %f3, %fd11;
-    mul.f32 %f4, %f2, %f3;
-    cvt.rzi.u32.f32 %r7, %f4;
+    mov.u32 %r7, 10;
+    mov.u32 %r8, 20;
+    mul.lo.s32 %r9, %r7, %r8;
+    mov.u32 %r10, %r9;
     // [BARRIER HOISTING] Found barrier stall of 205.25 cycles.
     // [BARRIER HOISTING] Hoisted 2 independent ALU instructions into the shadow.
-    mov.u32 %r8, 10;
-    mov.u32 %r9, 20;
-    add.s32 %r10, %r8, %r9;
-    mov.u32 %r11, %r10;
-    mov.u32 %r12, 30;
-    mov.u32 %r13, 40;
-    mul.lo.s32 %r14, %r12, %r13;
-    mov.u32 %r15, %r14;
+    mov.u32 %r11, 10;
+    mov.u32 %r12, 20;
+    add.s32 %r13, %r11, %r12;
+    mov.u32 %r14, %r13;
+    mov.u32 %r15, 30;
+    mov.u32 %r16, 40;
+    mul.lo.s32 %r17, %r15, %r16;
+    mov.u32 %r18, %r17;
     bar.sync 0;
 }

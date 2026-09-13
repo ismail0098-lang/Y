@@ -50,6 +50,7 @@ fn build_native(name: &str, src: &str) -> Result<i32, String> {
         String::from_utf8_lossy(&out.stderr)
     );
     if !out.status.success() {
+        assert!(!bin.exists(), "{name}: failed compilation still wrote a native binary");
         return Err(all);
     }
     assert!(bin.exists(), "{}: reported success but wrote no file", name);
@@ -151,11 +152,6 @@ fn constructs_this_backend_cannot_encode_are_refused() {
             "a float literal",
         ),
         (
-            "no_unknown_name",
-            "fn main() -> I32 {\n    return q;\n}\n",
-            "the name `q`",
-        ),
-        (
             "no_assign",
             "fn main() -> I32 {\n    let a: I32 = 1;\n    a = 2;\n    return a;\n}\n",
             "assignment",
@@ -178,6 +174,27 @@ fn constructs_this_backend_cannot_encode_are_refused() {
             ),
         }
     }
+}
+
+#[test]
+fn unknown_names_are_rejected_by_frontend_and_native_backend() {
+    let src = "fn main() -> I32 {\n    return q;\n}\n";
+    // Name resolution now stops this source before native lowering. Exercise
+    // the public emitter directly to retain its independent rejection check.
+    let ast = y::parser::Parser::new(y::lexer::Lexer::new(src).tokenize())
+        .parse_program()
+        .expect("parse unresolved identifier");
+    let mut emitter = y::native_emitter::NativeEmitter::new();
+    emitter.emit_program(&ast);
+    assert!(
+        emitter.emit_errors.iter().any(|e|
+            e.contains("[Native x86-64 Backend]") && e.contains("the name `q`")),
+        "native emitter lost its unresolved-name refusal: {:?}",
+        emitter.emit_errors
+    );
+    let diagnostic = build_native("no_unknown_name", src)
+        .expect_err("an unresolved identifier must not produce a runnable binary");
+    assert!(diagnostic.contains("Undefined variable `q`"), "{diagnostic}");
 }
 
 // ── The datapath is 32 bits, and it used to lie about that ──────────────

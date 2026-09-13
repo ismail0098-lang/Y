@@ -58,8 +58,8 @@ fn compile(name: &str, src: &str) -> (bool, String, String) {
 
 const GRID_STRIDE: &str = r#"
 kernel gs(Src: GlobalMemory<I32>, Out: GlobalMemory<I32>, N: I32) {
-    let worker: I32 = block_idx_x() * block_dim_x() + thread_idx_x();
-    let nworkers: I32 = grid_dim_x() * block_dim_x();
+    let worker: I32 = thread_idx_x();
+    let nworkers: I32 = block_dim_x();
     @invariant(i >= 0)
     for i in worker..N step nworkers {
         Out[i] = i;
@@ -68,6 +68,8 @@ kernel gs(Src: GlobalMemory<I32>, Out: GlobalMemory<I32>, N: I32) {
 "#;
 
 /// The increment after the loop body must be a REGISTER, not the literal 1.
+/// Use a single-block launch: unrestricted grid dimensions can overflow I32,
+/// so the former global-worker calculation did not establish `i >= 0`.
 #[test]
 fn a_runtime_step_is_emitted_rather_than_silently_becoming_one() {
     let (ok, ptx, log) = compile("dyn_step", GRID_STRIDE);

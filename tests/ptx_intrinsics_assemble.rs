@@ -31,11 +31,12 @@
 //!
 //! # Why it drives the real binary
 //!
-//! Calling `PtxEmitter` methods directly cannot catch a register-pool overflow
-//! or a wrong `.target`, because both are decided by the module envelope that
-//! only the full `emit_program` path writes. The whole class of bug here lived
-//! in the gap between "the instruction looks right" and "the module assembles",
-//! so the test has to assemble the module.
+//! Most cases drive the binary. Async-copy backend probes call the full
+//! `PtxEmitter::emit_program` path: the frontend now requires a declared `pipe`,
+//! while this backend cannot lower `Pipeline::init` yet. These probes therefore
+//! check copy/commit/wait lowering independently of that unsupported binding.
+//! They still assemble the complete module, including its register declarations
+//! and `.target`; testing a single instruction helper would miss those errors.
 //!
 //! Requires `ptxas`; skipped with a notice otherwise, matching the gate in
 //! `tests_paged_decode_attention` and `tests/coprocessor_ptx_assembles.rs`.
@@ -49,6 +50,30 @@ fn ptxas_present() -> bool {
     Command::new("ptxas").arg("--version").output().is_ok()
 }
 
+fn kernel_source(name: &str, body: &str) -> String {
+    format!(
+        "kernel {}(A: GlobalMemory<F32>, B: GlobalMemory<F32>, N: I32) {{\n{}\n}}\n\nfn main() {{\n}}\n",
+        name, body
+    )
+}
+
+/// Exercise the backend independently when frontend rejection would otherwise
+/// hide its own guards or make an async-copy lowering probe unreachable.
+fn emit_backend(name: &str, body: &str) -> (String, Option<String>) {
+    let source = kernel_source(name, body);
+    let program = y::parser::Parser::new(y::lexer::Lexer::new(&source).tokenize())
+        .parse_program()
+        .expect("parse backend fixture");
+    let hardware = y::sentinel::HardwareProfile {
+        sm_version: "8.9".into(),
+        ..Default::default()
+    };
+    let mut emitter = y::ptx_emitter::PtxEmitter::new_with_profile(&hardware);
+    let ptx = emitter.emit_program(&program, &hardware);
+    let log = emitter.emit_errors.join("\n");
+    (log, emitter.emit_errors.is_empty().then_some(ptx))
+}
+
 /// Compiles a kernel body through the real `Y` binary with `--emit-ptx`.
 ///
 /// Returns `(compiler_output, emitted_ptx_if_any)`.
@@ -57,14 +82,7 @@ fn compile(name: &str, body: &str) -> (String, Option<String>) {
     let dir = std::env::temp_dir().join(format!("y_intr_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let src = dir.join(format!("{}.ysu", name));
-    std::fs::write(
-        &src,
-        format!(
-            "kernel {}(A: GlobalMemory<F32>, B: GlobalMemory<F32>, N: I32) {{\n{}\n}}\n\nfn main() {{\n}}\n",
-            name, body
-        ),
-    )
-    .expect("write source");
+    std::fs::write(&src, kernel_source(name, body)).expect("write source");
 
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src)
@@ -85,6 +103,7 @@ fn compile(name: &str, body: &str) -> (String, Option<String>) {
 /// Runs `ptxas` over `ptx`, returning its stderr on failure.
 fn assemble(name: &str, ptx: &str) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("y_intr_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
     let f = dir.join(format!("{}.check.ptx", name));
     std::fs::write(&f, ptx).expect("write ptx");
     let res = Command::new("ptxas")
@@ -155,7 +174,11 @@ fn supported_intrinsics_emit_assemblable_ptx() {
     let mut passed = 0;
     let mut failures: Vec<String> = Vec::new();
     for (name, body) in cases {
-        let (log, ptx) = compile(name, body);
+        let (log, ptx) = if *name == "i_cp_async" {
+            emit_backend(name, body)
+        } else {
+            compile(name, body)
+        };
         let Some(ptx) = ptx else {
             failures.push(format!("{}: no PTX was written.\n{}", name, log));
             continue;
@@ -240,6 +263,11 @@ fn unlowerable_intrinsics_fail_the_build() {
             intrinsic,
             log
         );
+        let (backend_log, backend_ptx) = emit_backend(name, body);
+        assert!(
+            backend_ptx.is_none() && backend_log.contains(intrinsic),
+            "backend must independently refuse {intrinsic}:\n{backend_log}"
+        );
     }
 }
 
@@ -264,7 +292,7 @@ fn unlowerable_intrinsics_fail_the_build() {
 /// it is satisfied immediately and the await is a no-op even when present.
 #[test]
 fn async_copy_is_committed_and_awaited() {
-    let (log, ptx) = compile(
+    let (log, ptx) = emit_backend(
         "async_await",
         "let tok: AsyncToken = cp_async(A, B, 16);\n    pipe.wait(tok);",
     );
@@ -302,7 +330,7 @@ fn async_copy_is_committed_and_awaited() {
 #[test]
 fn cp_async_honours_its_byte_count_and_rejects_illegal_ones() {
     for (n, want) in [(4u32, "], 4;"), (8, "], 8;"), (16, "], 16;")] {
-        let (log, ptx) = compile(
+        let (log, ptx) = emit_backend(
             &format!("async_size_{}", n),
             &format!(
                 "let tok: AsyncToken = cp_async(A, B, {});\n    pipe.wait(tok);",
@@ -321,7 +349,7 @@ fn cp_async_honours_its_byte_count_and_rejects_illegal_ones() {
 
     // 12 is not an encodable cp.async width. Rounding it to 16 would silently
     // overrun; rounding it to 8 would silently truncate. Refuse.
-    let (log, ptx) = compile(
+    let (log, ptx) = emit_backend(
         "async_size_bad",
         "let tok: AsyncToken = cp_async(A, B, 12);\n    pipe.wait(tok);",
     );

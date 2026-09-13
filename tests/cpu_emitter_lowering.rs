@@ -197,15 +197,10 @@ fn unlowerable_constructs_are_refused_not_guessed() {
     // **The first version of this test used a `match`, and it was vacuous** -
     // the parser rejects `match` outright, so the assertion `!success` held for
     // a reason that has nothing to do with the backend, and deleting
-    // `unsupported_stmt` entirely would have left it green. Both fixtures below
-    // were checked to reach the emitter, and each asserts on ITS OWN message
-    // rather than on "something failed".
+    // `unsupported_stmt` entirely would have left it green. The chisel fixture
+    // reaches the emitter and asserts on its own message. Unknown paths now
+    // fail earlier; the separate test below exercises both layers explicitly.
     for (name, src, phrase) in [
-        (
-            "refuse_path",
-            "fn f() -> I32 {\n    let t: I32 = Widget::spin(1);\n    return t;\n}\n",
-            "`Widget::spin`",
-        ),
         (
             "refuse_chisel",
             "fn f() -> I32 {\n    chisel {\n        let r: I32 = 1;\n    }\n    return 0;\n}\n",
@@ -243,4 +238,36 @@ fn unlowerable_constructs_are_refused_not_guessed() {
             all
         );
     }
+}
+
+#[test]
+fn unknown_paths_are_rejected_by_frontend_and_cpu_backend() {
+    let src = "fn f() -> I32 {\n    let t: I32 = Widget::spin(1);\n    return t;\n}\n";
+    // Direct callers of the public emitter still need its own refusal. The
+    // frontend's stronger name checking must not make this coverage vacuous.
+    let ast = y::parser::Parser::new(y::lexer::Lexer::new(src).tokenize())
+        .parse_program()
+        .expect("parse unknown path");
+    let mut emitter = y::cpu_emitter::CpuEmitter::new();
+    emitter.emit_program(&ast);
+    assert!(
+        emitter.emit_errors.iter().any(|e|
+            e.contains("[CPU Backend]") && e.contains("`Widget::spin`")),
+        "CPU emitter lost its unknown-path refusal: {:?}",
+        emitter.emit_errors
+    );
+
+    let path = scratch("refuse_path").join("refuse_path.ysu");
+    std::fs::write(&path, src).expect("write source");
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+        .arg(&path)
+        .arg("--emit-cpu")
+        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        .output()
+        .expect("run Y");
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout),
+                      String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "unknown function compiled: {all}");
+    assert!(all.contains("Unknown function `Widget_spin`"), "{all}");
+    assert!(!all.contains("GENERATED RUST BLOB"), "invalid source emitted Rust: {all}");
 }

@@ -127,7 +127,7 @@ fn condition(r: &mut Rng, locals: u64) -> String {
 
 /// Builds the shared function body: masked `let`s, then a nest of `if`s with
 /// returns, then a fall-through return.
-fn body(r: &mut Rng, indent: usize, locals: u64, depth: u32) -> (String, u64) {
+fn body(r: &mut Rng, indent: usize, locals: u64, depth: u32) -> String {
     let pad = "    ".repeat(indent);
     let mut out = String::new();
     let mut n = locals;
@@ -160,10 +160,13 @@ fn body(r: &mut Rng, indent: usize, locals: u64, depth: u32) -> (String, u64) {
     }
     if depth > 0 && r.below(2) == 0 {
         out.push_str(&format!("{pad}if {} {{\n", condition(r, n)));
-        let (inner, n2) = body(r, indent + 1, n, depth - 1);
+        // Nested declarations are visible only within the recursive block.
+        // Keep this block's `n` for the following loop and fall-through return;
+        // carrying the child's count back used to reference branch locals
+        // after their scope had ended.
+        let inner = body(r, indent + 1, n, depth - 1);
         out.push_str(&inner);
         out.push_str(&format!("{pad}}}\n"));
-        n = n2;
     }
     // A `for` whose body can return is the third of the three control-flow
     // sites, and the one whose bug was that the lowering was never CALLED
@@ -193,12 +196,12 @@ fn body(r: &mut Rng, indent: usize, locals: u64, depth: u32) -> (String, u64) {
         out.push_str(&format!("{pad}    }}\n{pad}}}\n"));
     }
     out.push_str(&format!("{pad}return ({}) & 65535;\n", arith(r, n)));
-    (out, n)
+    out
 }
 
 fn programs(seed: u64) -> (String, String, [u64; NPARAMS]) {
     let mut r = Rng(seed);
-    let (shared, _) = body(&mut r, 1, 0, 3);
+    let shared = body(&mut r, 1, 0, 3);
     let params = (0..NPARAMS)
         .map(|i| format!("p{i}: I32"))
         .collect::<Vec<_>>()

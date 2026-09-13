@@ -160,7 +160,7 @@ fn the_host_backend_refuses_the_gpu_intrinsics_it_used_to_fake() {
     // `--emit-cpu` prints Rust for a human to paste, so a substitution that
     // computes something else reaches their source with no compiler in between.
     for (i, (call, needle)) in [
-        ("let tok = cp_async(a, b, 4); pipe.wait(tok);", "cp_async"),
+        ("let pipe = Pipeline::init(); let tok = cp_async(a, b, 4); pipe.wait(tok);", "cp_async"),
         ("let x = ldmatrix(a);", "ldmatrix"),
         ("let y = mma_sync(a, b, a);", "mma_sync"),
     ]
@@ -176,6 +176,19 @@ fn the_host_backend_refuses_the_gpu_intrinsics_it_used_to_fake() {
         assert!(
             text.contains(needle),
             "the refusal must name `{needle}`.\n{text}"
+        );
+
+        // The frontend can independently reject bad fragment operands. Keep
+        // the backend's own refusal covered even when that earlier check fires.
+        let program = y::parser::Parser::new(y::lexer::Lexer::new(&src).tokenize())
+            .parse_program()
+            .expect("parse backend refusal fixture");
+        let mut backend = y::cpu_emitter::CpuEmitter::new();
+        backend.emit_program(&program);
+        assert!(
+            backend.emit_errors.iter().any(|error| error.contains(needle)),
+            "CPU emitter accepted `{needle}` or failed to name it: {:?}",
+            backend.emit_errors
         );
     }
 }

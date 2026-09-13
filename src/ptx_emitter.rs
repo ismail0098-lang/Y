@@ -2086,14 +2086,17 @@ or `shared_alloc_u32` for a shared-memory array.",
         self.reg_ty.clear();
         self.vec_vars.clear();
         self.ptr_elem.clear();
+        self.zero_drift.clear();
         self.record_pointer_element_types(kernel);
 
         // Reset register counters
         self.reg_u32_count = 0;
         self.reg_f32_count = 0;
+        self.reg_f64_count = 0;
         self.reg_u64_count = 0;
         self.reg_pred_count = 0;
         self.reg_b16_count = 0;
+        self.label_count = 0;
 
         // Create a temporary buffer for parameter loading and kernel body
         let body_buffer = String::new();

@@ -1,0 +1,508 @@
+{
+  "baseline": "8b7122ab6cb78c5224e9d22c2d10aa41ca9dab50",
+  "tools": {
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "clang": "clang version 22.1.8\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/bin",
+    "ptxas": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Tue_Jun_09_02:43:40_PM_PDT_2026\nCuda compilation tools, release 13.3, V13.3.73\nBuild cuda_13.3.r13.3/compiler.38244171_0",
+    "/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y/venv/bin/z3": "Z3 version 5.0.0 - 64 bit"
+  },
+  "test_sha256": {
+    "compile_time_assertions": "99edc05e7a0174b05e003c1c12cd0c8ed8c2d3c9b98ff68a68d8e1577909892f",
+    "bounds_control_flow": "1a1f6aa1bdf4d9f67c289980430d185a88b74152392f6ade47464bb51300a78e",
+    "frontend_semantics": "c818e6f717b5f89f2319cb091a1578a967c10a772c1542e9b192987f63ae5e1d",
+    "integer_literal_diagnostics": "58a634981dc5b301ac83c560e378aaca7d862f4a9a1825d46c773cbe7ad3f99c",
+    "llvm_zero_drift_integer": "e598d31d6c7e50c6382116f78ad0b4c20bb87533c5627397287ba11c57cfc8b0",
+    "backend_function_state": "8d97cc6b8eedafa7380e184c93e85cdc7f953f46756969910054fd1a34da9b6f",
+    "zk_field_context": "57f9aa5f28a9e606a5aad35c6ba5a42e8029b6a1b8cf3e4ab464b93e0c653b5f"
+  },
+  "runner_sha256": "0739e9b5360db2eec861c4f9d098459c216a7b9c449913051db83ad6ea41d18f",
+  "source_sha256": {
+    "Cargo.lock": "b45dd806e2f07df29f3a9fa970546939f101a186583261eabc3b020a7765847e",
+    "Cargo.toml": "a0724334df849713ee682c74b53c1207f01a70f635916f89b3ed1ca26339e13b",
+    "crates/y-gpu/BENCHMARKS.md": "c3093794a7448ad9f9af9686f127461f7d79f4b31896c9f65c34332d0522bb50",
+    "crates/y-gpu/Cargo.toml": "12d76ae57f4a4a8a6daed2ea79f7889f8abb502cf2c4537b71a11375b34f889f",
+    "crates/y-gpu/README.md": "6936198224c84c914f909cb7d3fc32b8d8594b674a2c13694f4aa6d91fba7d3c",
+    "crates/y-gpu/ptx/bn254_fr_mul_fast.ptx": "5f04b787a25aa58b809ec08a38183f6bf75a966c62491cc0f371bf353f78daef",
+    "crates/y-gpu/ptx/bn254_msm_bucket.ptx": "ce20a940f4d369920af998ead0f7f1f11d6aa5381a28b5863700dfa0b95d041c",
+    "crates/y-gpu/ptx/bn254_ntt_stage.ptx": "55035be680aff78f5a599982f0acc5cbeb39e30b0c2413fc740f910fe2964379",
+    "crates/y-gpu/ptx/bn254_permute.ptx": "85650a6e842a2a518124fabb5991b1bc0eddf627f0c19470bec14261d3e5333b",
+    "crates/y-gpu/ptx/bn254_sub_vec.ptx": "6709805234e6462c0032a7767d5f875c2efba6c11d42e7d94ab94daecc831b74",
+    "crates/y-gpu/src/device.rs": "aa797896b80396cda6167193bbcbe25b6d02a2e40ffe7230972c0dc68d751abd",
+    "crates/y-gpu/src/error.rs": "4ec10aa53b207da39476d1b47991966c4d07109226f9ebcd156cb046a713d269",
+    "crates/y-gpu/src/groth16.rs": "8e126b7b0c96467dde56a64584e28fd90fed2375a969a8b127bde0d20cac0899",
+    "crates/y-gpu/src/kernels.rs": "79c97e594782f142ac09ed6f737b6fe60902b830dbed73f1ce3c86b8f5ff604f",
+    "crates/y-gpu/src/lib.rs": "1762ac2d1202ab6e65670e6321563c51692da57f5c26b58084f98b49c5d91f13",
+    "crates/y-gpu/src/msm.rs": "b7bb26fbc7856654038e4d39c80fe64c050d52cbc37c53a08315ffebc967a60c",
+    "crates/y-gpu/src/qap.rs": "e73a5289bfb7daa7100cfcef4ca04642a3e9e2ef5110a5eca037eeb0c2fbcd82",
+    "crates/y-gpu/tests/prove.rs": "08a1c30a2b09eb7f62a23b261663a246817aa4bd6d5510a965ef7378b0670795",
+    "crates/y-gpu/tests/ptx_is_not_stale.rs": "12503e7abe05fb8186a314bb4741b9e5b16d26a9b13e0e2a11df0cda8b302d65",
+    "src/ast.rs": "fbdd0ad7d6738f848fa3da89a269dedb89d6abba6f01f475f29493c3ca5cc741",
+    "src/autotuner.rs": "94daf4cdeae4f2aefcae4ad297b373d87c4d10110558646b61677bea78024e0b",
+    "src/bank_conflict.rs": "9c6c0d4adc313df42268fd5494e0371ef84900944fe83f06d82cc9610e269cf7",
+    "src/bin/autotune_verify.rs": "19916451d064a0a7106969d14fd937216e22d33310628264c6b6fc80e51214b6",
+    "src/c_api.rs": "772e7d0fd0a11f1fd872f3e0e588a1dc3b9630f6896051693216113a521727e1",
+    "src/circom_ast.rs": "d7fa5fdf7c95920a66c83843fc3a20e279c41dae5d0a97eed8abcd32576bbc1f",
+    "src/circom_lexer.rs": "bb17c255ea0e8fb441dee61632527e5cb0512256403a1cef52de3c413c898cb2",
+    "src/circom_lower.rs": "0369e165d73e366e7d437b7a85ea2683226f114f5685b26366beb8f10d044f58",
+    "src/circom_parser.rs": "757112e669d8ea62914029ca48f1c7b80f28487c5fe21e395f730aeb41bb1122",
+    "src/coprocessor_scheduler.rs": "96d0c653e6f4f814f4f5125af82b15c0f2f0e552ed399de4748af9b106e1c6d2",
+    "src/cpu_emitter.rs": "38163903fb86e8fde388d7ffa7579d10fe751c3faceabce5f85a64c2951d940c",
+    "src/cpu_gemm.rs": "8a9ec068b051c7cf668b1da9e088d7cc2360dc18fcc499bdef3993d83187bb0d",
+    "src/cpu_specializer.rs": "79b301be7d2ccec46b8383fc305c32e646cd39ee0ebb3ab65df2c9b9e5795e32",
+    "src/cuda_runtime.rs": "4a083683f8dd4038d9c31438543b7aab516517df00bb4217c1e3cf5780ba4753",
+    "src/empirical_autotune.rs": "76f42214c080adab5e55739081d6f06ff1e6e526bc19e6430736a83af82e994b",
+    "src/exact_attention.rs": "92941b980f7e026a7d1515e35a312223802ade08f3409583dbe08b2433e2a5cd",
+    "src/exact_attention_certificate.rs": "7d9073f856a9f65a232629cd14e216d86bba695c52f80e7b3feec2d591404168",
+    "src/exact_gemm_certificate.rs": "1fed6cfac00ff9f25013bbfad56057ed3e7630bd4860c9d2073539a950003a96",
+    "src/fixed_exp.rs": "0acaa8a8f076faf9dd12c85497b161a3a8d269c49efd95d046f4900368f3d0b8",
+    "src/intrinsics.rs": "959ed61a5f2d908adb0124029a6339853171a21f4afca660fb9ba9c92487c58f",
+    "src/ir_grapher.rs": "1bf6882b59aa0dbe8e61a34caa8472cd6df7bd358006a595afcde4cb64f4b6a1",
+    "src/lexer.rs": "16c84fa40f60a2f105531a5475fe919a26ae0632c14d39b2baf57c952dbfbf7d",
+    "src/lib.rs": "bf66d4741ad50a53cc36d1f8239750f4b6e3e1f942a2abc43434b7ce59f4f4d8",
+    "src/linear_tracker.rs": "68a7e2529ffea974aa2ae1e52a45de818d872bdd63372c2c8b513497d57edcd7",
+    "src/llvm_emitter.rs": "fba42924437c394fbfe314105fc5e46aab6808ed2753f1a4c1a3df5139060c1c",
+    "src/main.rs": "1646e118bea14d449ae508cae95079e9e3cceb83f9653407e5e8338fc9e3c100",
+    "src/mini_json.rs": "ab1623fd697780351bb282c821ec6cd2e83c40b1eec11037ea967d36a95e5149",
+    "src/native_emitter.rs": "5228ec99b0f0117e9cd7587cd56d4c0b0bfef0866540c44e27fe1be77a78e19b",
+    "src/parser.rs": "93ca2250ce18fc4c36711ac80c629159435c9163b8e0ae388f2d5517715b89f8",
+    "src/ptx_emitter.rs": "9c7d3d68cd37e36c8dd4a82421e145977ab52c867ed8686589c602489aa4cef3",
+    "src/quantization_pass.rs": "34832ffeb4aaaa4f42e0887116811503d562e76fdcec1f6dc4251ccb8dc1118e",
+    "src/require.rs": "8894f5a65810aa59bb208d6c16b00e258e99ab49fc75d09f14165c390669a943",
+    "src/rt_core_emitter.rs": "518d3c665197b53e285bd53a2fcb926c677f6d58a9f783ca69fe6cf953840114",
+    "src/sentinel.rs": "ced6b7e78de1680f5659e1779c6343b4e6e22cc812a979708570c62b9830e215",
+    "src/type_checker.rs": "75a7e4c840ba4b4fd632ab2381f4ac623f5f415ea8cacebbda2a822a52a77182",
+    "src/ypm.rs": "4d523c7a77cab67cb4d14bb2aa989172444f7a8c6624d37684904519db856107",
+    "src/ysu_gpu_probe.rs": "125b0fefef6266a880e6bcd1ea038c579f753f83d3dc18c2f89492fb95f51eed",
+    "src/zero_drift.rs": "9a7a6c241c3e2a599c0b49fdb4bf0fd7b06dfd99dd8bcfb824b43932e525c3d3",
+    "src/zk_emitter.rs": "daa78c37293869314fb237ae9cf55160249dedd354ca335fc5b35eb3b882ab61",
+    "src/zk_field.rs": "0e0dab2bebb91ddf8c3023e7edba7f34960d3ad37ebab2cd84276944fcf26b5b",
+    "src/zk_fuzz.rs": "6ce7b242588c38aa6b5eefdc5c17b85a13317a188b6f5ae97db26e07deb7a959",
+    "src/zk_poseidon_constants.rs": "5fef5c9121108b70cffb41ea31d0e5aa59f80267c948628d6a7c67a85b6ab318",
+    "src/zk_solidity.rs": "852f8dc50044d44f858538cfdcd5bc66e47f46169960bc3640094c9d819c33e4",
+    "src/zk_witness.rs": "10ecf1ce8a8bc617074cf45a052ed272e87ee807c1ad34461147d4a5017ce858"
+  },
+  "profile_sha256": "5a4837ba823036a13e9bb70f4dadbe6285562bfe15c559b9ef3ecdaf3cab7c4f",
+  "results": {
+    "original": {
+      "compile_time_assertions::embedded_cpu_entrypoint_propagates_frontend_assertion_errors": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/compile_time_assertions--embedded_cpu_entrypoint_propagates_frontend_assertion_errors.log",
+        "log_sha256": "1da5ef35c3cfb76217e7feb001c29d992f9fb72691e0db32c6c181d5df26c55f",
+        "output": "\nrunning 1 test\ntest embedded_cpu_entrypoint_propagates_frontend_assertion_errors ...       \u001b[1;36m[Verified]\u001b[0m Line 1: compile_time::assert! \"ffi assertion\"\n\nthread 'embedded_cpu_entrypoint_propagates_frontend_assertion_errors' (4230) panicked at tests/compile_time_assertions.rs:102:13:\nassertion `left == right` failed\n  left: 0\n right: -1\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    embedded_cpu_entrypoint_propagates_frontend_assertion_errors\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "compile_time_assertions::false_assertions_fail_before_emission_at_both_syntax_sites": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/compile_time_assertions--false_assertions_fail_before_emission_at_both_syntax_sites.log",
+        "log_sha256": "216fe229db4a26ee1ee2893f92ffe2d3ec5ec0791b18d6bafeb9e5bf73b0f0a4",
+        "output": "\nrunning 1 test\ntest false_assertions_fail_before_emission_at_both_syntax_sites ... \nthread 'false_assertions_fail_before_emission_at_both_syntax_sites' (4232) panicked at tests/compile_time_assertions.rs:41:9:\nfalse assertion emitted an artifact: ========================================\n=== Y Compiler v1.0 ===\n========================================\n\n[*] Found existing .ysu_hw_profile, skipping Sentinel Probe (assuming NVIDIA GeForce RTX 4070 Ti SUPER / sm_89).\n    -> Loaded AVX: true\n    -> Loaded AVX-512: true\n    -> Loaded L2 Cache Line Size: 64 bytes\n    -> Loaded CPU Memory Latency Sweep (L1/L2/L3/Mem): 4 / 14 / 53 / 393 cycles\n    -> Loaded CPU AVX-512 Instruction Throughput: 0.25 cycles per op\n    -> Loaded CPU Thread Scheduling/Context Switch Handoff Cost: 1769 cycles\n    -> Loaded GPU Name: NVIDIA GeForce RTX 4070 Ti SUPER\n    -> Loaded GPU Vendor: NVIDIA\n    -> Loaded SM Version / Compute Capability: 8.9 / 8.9\n    -> Loaded SM (Multiprocessor) Count: 66\n    -> GPU FMA/IMAD/MUFU Latencies: 6.49 / 2.51 / 41.55\n    -> GPU Memory Latencies (SMEM/L1/L2/VRAM): 37.31 / 37.31 / 92.29 / 52.68\n    -> GPU Tensor Core Latencies (F16/TF32): 42.14 / 66.66\n    -> Warp Shuffle vs SMEM Exchange: 1.02 / 5.1 cycles\n    -> Bit-Field (BFE/BFI vs AND+SHIFT): 4.53 / 4.53 vs 6.8\n    -> Branch Divergence Penalty: 4.53 cycles (uniform=4.53, divergent=9.06)\n    -> Texture Unit (TEX1D): 70.57 cycles\n    -> IMAD.WIDE: 2.59 cycles | SFU (EX2/SIN/RSQ/LG2): 17.56 / 23.5 / 39.53 / 39.53\n    -> Reduced Precision (HFMA2/BF16x2): 4.54 / 4.01 | LOP3.LUT: 4.53\n    -> FP64 DADD: 48.47 | REDUX.SUM: 60.01 | MEMBAR.GPU: 205.25 | LDC: 70.57\n    -> HW Limits: 255 regs/thread, 65536 regs/SM, warp=32, 100KB smem/SM, 16376MB VRAM\n    -> Zero Drift Types: [\"Q32.32\", \"F64\"]\n\u001b[1;36m[*]\u001b[0m Reading source: /tmp/y_const_assert_4231_0/case.ysu\n\u001b[1;32m[1/4]\u001b[0m Running Lexer...\n      -> Extracted 17 tokens.\n\u001b[1;32m[2/4]\u001b[0m Constructing AST...\n      -> Successfully parsed 1 item(s).\n\u001b[1;32m[3/4]\u001b[0m Running Semantic Type-Checker...\n      \u001b[1;36m[Verified]\u001b[0m Line 1: compile_time::assert! \"must fail\"\n      -> 0 Bank Conflicts Detected.\n      -> Fragment Roles & Linear Obligations verified.\n\n\u001b[1;32mFront-end analysis complete.\u001b[0m\n\n\u001b[1;32m[4/4]\u001b[0m Emitting LLVM IR...\n      -> Written to: /tmp/y_const_assert_4231_0/case.ll\n      Compile manually: clang -O2 -o output /tmp/y_const_assert_4231_0/case.ll c_src/runtime.c -lm\n\n\u001b[1;32mCompilation Successful!\u001b[0m\n\n\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    false_assertions_fail_before_emission_at_both_syntax_sites\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "compile_time_assertions::true_assertions_are_evaluated_and_erased": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/compile_time_assertions--true_assertions_are_evaluated_and_erased.log",
+        "log_sha256": "ed63ba0e990367fef8b75e62588133dff481531682d19b8c49527725cbd600fd",
+        "output": "\nrunning 1 test\ntest true_assertions_are_evaluated_and_erased ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "compile_time_assertions::unsupported_nonboolean_and_invalid_arithmetic_are_not_verified": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/compile_time_assertions--unsupported_nonboolean_and_invalid_arithmetic_are_not_verified.log",
+        "log_sha256": "e9bb987de61609f4a08bbcf94fa885d1f20c5303dc4aba15d3497781cd8d8587",
+        "output": "\nrunning 1 test\ntest unsupported_nonboolean_and_invalid_arithmetic_are_not_verified ... \nthread 'unsupported_nonboolean_and_invalid_arithmetic_are_not_verified' (4238) panicked at tests/compile_time_assertions.rs:76:9:\nn > 0: ========================================\n=== Y Compiler v1.0 ===\n========================================\n\n[*] Found existing .ysu_hw_profile, skipping Sentinel Probe (assuming NVIDIA GeForce RTX 4070 Ti SUPER / sm_89).\n    -> Loaded AVX: true\n    -> Loaded AVX-512: true\n    -> Loaded L2 Cache Line Size: 64 bytes\n    -> Loaded CPU Memory Latency Sweep (L1/L2/L3/Mem): 4 / 14 / 53 / 393 cycles\n    -> Loaded CPU AVX-512 Instruction Throughput: 0.25 cycles per op\n    -> Loaded CPU Thread Scheduling/Context Switch Handoff Cost: 1769 cycles\n    -> Loaded GPU Name: NVIDIA GeForce RTX 4070 Ti SUPER\n    -> Loaded GPU Vendor: NVIDIA\n    -> Loaded SM Version / Compute Capability: 8.9 / 8.9\n    -> Loaded SM (Multiprocessor) Count: 66\n    -> GPU FMA/IMAD/MUFU Latencies: 6.49 / 2.51 / 41.55\n    -> GPU Memory Latencies (SMEM/L1/L2/VRAM): 37.31 / 37.31 / 92.29 / 52.68\n    -> GPU Tensor Core Latencies (F16/TF32): 42.14 / 66.66\n    -> Warp Shuffle vs SMEM Exchange: 1.02 / 5.1 cycles\n    -> Bit-Field (BFE/BFI vs AND+SHIFT): 4.53 / 4.53 vs 6.8\n    -> Branch Divergence Penalty: 4.53 cycles (uniform=4.53, divergent=9.06)\n    -> Texture Unit (TEX1D): 70.57 cycles\n    -> IMAD.WIDE: 2.59 cycles | SFU (EX2/SIN/RSQ/LG2): 17.56 / 23.5 / 39.53 / 39.53\n    -> Reduced Precision (HFMA2/BF16x2): 4.54 / 4.01 | LOP3.LUT: 4.53\n    -> FP64 DADD: 48.47 | REDUX.SUM: 60.01 | MEMBAR.GPU: 205.25 | LDC: 70.57\n    -> HW Limits: 255 regs/thread, 65536 regs/SM, warp=32, 100KB smem/SM, 16376MB VRAM\n    -> Zero Drift Types: [\"Q32.32\", \"F64\"]\n\u001b[1;36m[*]\u001b[0m Reading source: /tmp/y_const_assert_4237_0/case.ysu\n\u001b[1;32m[1/4]\u001b[0m Running Lexer...\n      -> Extracted 28 tokens.\n\u001b[1;32m[2/4]\u001b[0m Constructing AST...\n      -> Successfully parsed 2 item(s).\n\u001b[1;32m[3/4]\u001b[0m Running Semantic Type-Checker...\n      \u001b[1;36m[Verified]\u001b[0m Line 1: compile_time::assert! \"unproved\"\n      -> 0 Bank Conflicts Detected.\n      -> Fragment Roles & Linear Obligations verified.\n\n\u001b[1;32mFront-end analysis complete.\u001b[0m\n\n\u001b[1;32m[4/4]\u001b[0m Emitting LLVM IR...\n      -> Written to: /tmp/y_const_assert_4237_0/case.ll\n      Compile manually: clang -O2 -o output /tmp/y_const_assert_4237_0/case.ll c_src/runtime.c -lm\n\n\u001b[1;32mCompilation Successful!\u001b[0m\n\n\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    unsupported_nonboolean_and_invalid_arithmetic_are_not_verified\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "bounds_control_flow::annotated_integer_width_controls_the_stored_range": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/bounds_control_flow--annotated_integer_width_controls_the_stored_range.log",
+        "log_sha256": "883bae27cf65bef1158d40e0fd5aa69e3f7e793aa338b1463e9787e40b0d94f4",
+        "output": "\nrunning 1 test\ntest annotated_integer_width_controls_the_stored_range ... \nthread 'annotated_integer_width_controls_the_stored_range' (4242) panicked at tests/bounds_control_flow.rs:54:5:\nassertion failed: check(\"let initial: I32 = 2147483647; let wide: I64 = initial; wide += 1; wide -= 2147483648; let x = arr[wide];\").is_empty()\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    annotated_integer_width_controls_the_stored_range\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "bounds_control_flow::compound_assignment_updates_or_invalidates_the_range": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/bounds_control_flow--compound_assignment_updates_or_invalidates_the_range.log",
+        "log_sha256": "462d83fbe07c5e164efb1f480905c9c7ac14758f82fb388418a23938406149ca",
+        "output": "\nrunning 1 test\ntest compound_assignment_updates_or_invalidates_the_range ... \nthread 'compound_assignment_updates_or_invalidates_the_range' (4244) panicked at tests/bounds_control_flow.rs:16:5:\naccepted invalid bounds: let i: I32 = 0; i += 100; let x = arr[i];\n[]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    compound_assignment_updates_or_invalidates_the_range\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "bounds_control_flow::each_branch_starts_from_the_entry_facts_and_exits_are_joined": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/bounds_control_flow--each_branch_starts_from_the_entry_facts_and_exits_are_joined.log",
+        "log_sha256": "b461ff6413e860643596ab7280887866dda70eeb2cb5b6a908147c5362db2b04",
+        "output": "\nrunning 1 test\ntest each_branch_starts_from_the_entry_facts_and_exits_are_joined ... \nthread 'each_branch_starts_from_the_entry_facts_and_exits_are_joined' (4246) panicked at tests/bounds_control_flow.rs:16:5:\naccepted invalid bounds: let i: I32 = 100; if false { i = 0; } let x = arr[i];\n[]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    each_branch_starts_from_the_entry_facts_and_exits_are_joined\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "bounds_control_flow::match_arms_do_not_overwrite_each_others_facts": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/bounds_control_flow--match_arms_do_not_overwrite_each_others_facts.log",
+        "log_sha256": "740116e996de1757c2755d9a4c3550dafecabfcf1b844ee2e19befb58a31c183",
+        "output": "\nrunning 1 test\ntest match_arms_do_not_overwrite_each_others_facts ... \nthread 'match_arms_do_not_overwrite_each_others_facts' (4248) panicked at tests/bounds_control_flow.rs:85:5:\n[]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    match_arms_do_not_overwrite_each_others_facts\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "frontend_semantics::calls_validate_arity_argument_types_and_return_types": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/frontend_semantics--calls_validate_arity_argument_types_and_return_types.log",
+        "log_sha256": "e654b679597e69ad3199150f83729b1e068787b9ebb51ac292338a312f218c06",
+        "output": "\nrunning 1 test\ntest calls_validate_arity_argument_types_and_return_types ... \nthread 'calls_validate_arity_argument_types_and_return_types' (4251) panicked at tests/frontend_semantics.rs:15:5:\nexpected argument(s): fn f(x: I32) -> I32 { return x; } fn main() { f(); }\n[]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    calls_validate_arity_argument_types_and_return_types\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "frontend_semantics::operators_have_types_and_boolean_conditions_are_required": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/frontend_semantics--operators_have_types_and_boolean_conditions_are_required.log",
+        "log_sha256": "36883272c43f5e30549db4271647c4f6eef4effde3d2389b7e4db5750537f8d6",
+        "output": "\nrunning 1 test\ntest operators_have_types_and_boolean_conditions_are_required ... \nthread 'operators_have_types_and_boolean_conditions_are_required' (4253) panicked at tests/frontend_semantics.rs:15:5:\nexpected condition has type: fn main() { if 1 + 2 {} }\n[]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    operators_have_types_and_boolean_conditions_are_required\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "frontend_semantics::undeclared_names_are_not_unknown_typed_values": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/frontend_semantics--undeclared_names_are_not_unknown_typed_values.log",
+        "log_sha256": "152f288bd9662dcb07c9ddfdfb05b602858c9c3c4fa1da9af59fb8afc79b811f",
+        "output": "\nrunning 1 test\ntest undeclared_names_are_not_unknown_typed_values ... \nthread 'undeclared_names_are_not_unknown_typed_values' (4255) panicked at tests/frontend_semantics.rs:15:5:\nexpected Undefined variable: fn main() -> I32 { return nonexistent; }\n[]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    undeclared_names_are_not_unknown_typed_values\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "frontend_semantics::valid_forward_calls_polymorphic_literals_and_struct_fields_work": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/frontend_semantics--valid_forward_calls_polymorphic_literals_and_struct_fields_work.log",
+        "log_sha256": "33df431e94d272032bda4e02dae5d8f89068addba2367d8b7eef106cf74c9c29",
+        "output": "\nrunning 1 test\ntest valid_forward_calls_polymorphic_literals_and_struct_fields_work ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::integer_errors_name_the_literal_and_supported_range_in_every_context": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/integer_literal_diagnostics--integer_errors_name_the_literal_and_supported_range_in_every_context.log",
+        "log_sha256": "8cc864b8984d2a5719d4ac64757348ab5d7fdd365d44fdd4c5ca0f35568840b5",
+        "output": "\nrunning 1 test\ntest integer_errors_name_the_literal_and_supported_range_in_every_context ... \nthread 'integer_errors_name_the_literal_and_supported_range_in_every_context' (4260) panicked at tests/integer_literal_diagnostics.rs:60:35:\nout-of-range number must be refused: Program { items: [Func(FuncDecl { name: \"main\", is_safe: true, is_zk_safe: false, is_zk_allow_unconstrained: false, is_ptx_emit: false, is_ghost: false, is_hdl_emit: false, params: [], ret_ty: Some(Primitive(\"U64\", Span { line: 1, col: 14 })), body: Block { stmts: [Return(Some(IntLit(0, Span { line: 1, col: 27 })), Span { line: 1, col: 20 })], span: Span { line: 1, col: 18 } }, tile: None, span: Span { line: 1, col: 4 } })] }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    integer_errors_name_the_literal_and_supported_range_in_every_context\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::integer_overflow_preserves_its_spelling_and_is_refused": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/integer_literal_diagnostics--integer_overflow_preserves_its_spelling_and_is_refused.log",
+        "log_sha256": "1ca3e556906c132a679ae62dbe69edfc09d975344514c2e15f63c0fd7651bf86",
+        "output": "\nrunning 1 test\ntest integer_overflow_preserves_its_spelling_and_is_refused ... \nthread 'integer_overflow_preserves_its_spelling_and_is_refused' (4262) panicked at tests/integer_literal_diagnostics.rs:35:9:\noverflow must not become a numeric value: Token { kind: IntLit(0), line: 1, col: 1, lexeme: \"9223372036854775808\" }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    integer_overflow_preserves_its_spelling_and_is_refused\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::malformed_float_is_refused_instead_of_becoming_zero": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/integer_literal_diagnostics--malformed_float_is_refused_instead_of_becoming_zero.log",
+        "log_sha256": "4b787fd4770acd9ba30eb5f106efca18b5f0506aeca7bd06c225850a48bf0151",
+        "output": "\nrunning 1 test\ntest malformed_float_is_refused_instead_of_becoming_zero ... \nthread 'malformed_float_is_refused_instead_of_becoming_zero' (4264) panicked at tests/integer_literal_diagnostics.rs:93:5:\ninvalid float must not become a numeric value: Token { kind: FloatLit(0.0), line: 1, col: 1, lexeme: \"1.2.3\" }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    malformed_float_is_refused_instead_of_becoming_zero\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::nonfinite_float_is_refused": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/integer_literal_diagnostics--nonfinite_float_is_refused.log",
+        "log_sha256": "45cf868e557d4ef774bab7fd73e62ec725368c6dad58e7cc85326b91ce83f8f6",
+        "output": "\nrunning 1 test\ntest nonfinite_float_is_refused ... \nthread 'nonfinite_float_is_refused' (4266) panicked at tests/integer_literal_diagnostics.rs:93:5:\ninvalid float must not become a numeric value: Token { kind: FloatLit(inf), line: 1, col: 1, lexeme: \"9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999.0\" }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    nonfinite_float_is_refused\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::ordinary_decimal_floats_and_range_tokens_still_work": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/integer_literal_diagnostics--ordinary_decimal_floats_and_range_tokens_still_work.log",
+        "log_sha256": "cf190ca6e1233df5c03149c6e4895b8ce926e5b44ce716e9d0694deb9cc63f5d",
+        "output": "\nrunning 1 test\ntest ordinary_decimal_floats_and_range_tokens_still_work ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::representable_nonnegative_integers_are_preserved": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/integer_literal_diagnostics--representable_nonnegative_integers_are_preserved.log",
+        "log_sha256": "c89f7050dc6e1728b12d0fd59766e10ebd2cd2c71f68d4c0fcb906424aee1492",
+        "output": "\nrunning 1 test\ntest representable_nonnegative_integers_are_preserved ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::signed_minimum_is_preserved_including_leading_zeroes": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/integer_literal_diagnostics--signed_minimum_is_preserved_including_leading_zeroes.log",
+        "log_sha256": "8d68f31af3fb78b69e379643e7b8e67538bf982f118094fd0595b46c07de2540",
+        "output": "\nrunning 1 test\ntest signed_minimum_is_preserved_including_leading_zeroes ... \nthread 'signed_minimum_is_preserved_including_leading_zeroes' (4272) panicked at tests/integer_literal_diagnostics.rs:83:9:\nsigned minimum was changed: UnaryOp { op: Neg, operand: IntLit(0, Span { line: 1, col: 29 }), span: Span { line: 1, col: 28 } }\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    signed_minimum_is_preserved_including_leading_zeroes\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/integer_literal_diagnostics--the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir.log",
+        "log_sha256": "1a766cc3c83f4358615e700a51040251fbf78ca2fccd5d3d510e64acf7af9c03",
+        "output": "\nrunning 1 test\ntest the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir ... \nthread 'the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir' (4274) panicked at tests/integer_literal_diagnostics.rs:150:5:\n========================================\n=== Y Compiler v1.0 ===\n========================================\n\n[*] Found existing .ysu_hw_profile, skipping Sentinel Probe (assuming NVIDIA GeForce RTX 4070 Ti SUPER / sm_89).\n    -> Loaded AVX: true\n    -> Loaded AVX-512: true\n    -> Loaded L2 Cache Line Size: 64 bytes\n    -> Loaded CPU Memory Latency Sweep (L1/L2/L3/Mem): 4 / 14 / 53 / 393 cycles\n    -> Loaded CPU AVX-512 Instruction Throughput: 0.25 cycles per op\n    -> Loaded CPU Thread Scheduling/Context Switch Handoff Cost: 1769 cycles\n    -> Loaded GPU Name: NVIDIA GeForce RTX 4070 Ti SUPER\n    -> Loaded GPU Vendor: NVIDIA\n    -> Loaded SM Version / Compute Capability: 8.9 / 8.9\n    -> Loaded SM (Multiprocessor) Count: 66\n    -> GPU FMA/IMAD/MUFU Latencies: 6.49 / 2.51 / 41.55\n    -> GPU Memory Latencies (SMEM/L1/L2/VRAM): 37.31 / 37.31 / 92.29 / 52.68\n    -> GPU Tensor Core Latencies (F16/TF32): 42.14 / 66.66\n    -> Warp Shuffle vs SMEM Exchange: 1.02 / 5.1 cycles\n    -> Bit-Field (BFE/BFI vs AND+SHIFT): 4.53 / 4.53 vs 6.8\n    -> Branch Divergence Penalty: 4.53 cycles (uniform=4.53, divergent=9.06)\n    -> Texture Unit (TEX1D): 70.57 cycles\n    -> IMAD.WIDE: 2.59 cycles | SFU (EX2/SIN/RSQ/LG2): 17.56 / 23.5 / 39.53 / 39.53\n    -> Reduced Precision (HFMA2/BF16x2): 4.54 / 4.01 | LOP3.LUT: 4.53\n    -> FP64 DADD: 48.47 | REDUX.SUM: 60.01 | MEMBAR.GPU: 205.25 | LDC: 70.57\n    -> HW Limits: 255 regs/thread, 65536 regs/SM, warp=32, 100KB smem/SM, 16376MB VRAM\n    -> Zero Drift Types: [\"Q32.32\", \"F64\"]\n\u001b[1;36m[*]\u001b[0m Reading source: /tmp/y_literal_diagnostics_4273/overflow.ysu\n\u001b[1;32m[1/4]\u001b[0m Running Lexer...\n      -> Extracted 12 tokens.\n\u001b[1;32m[2/4]\u001b[0m Constructing AST...\n      -> Successfully parsed 1 item(s).\n\u001b[1;32m[3/4]\u001b[0m Running Semantic Type-Checker...\n      -> 0 Bank Conflicts Detected.\n      -> Fragment Roles & Linear Obligations verified.\n\n\u001b[1;32mFront-end analysis complete.\u001b[0m\n\n\u001b[1;32m[4/4]\u001b[0m Emitting LLVM IR...\n      -> Written to: /tmp/y_literal_diagnostics_4273/overflow.ll\n      Compile manually: clang -O2 -o output /tmp/y_literal_diagnostics_4273/overflow.ll c_src/runtime.c -lm\n\n\u001b[1;32mCompilation Successful!\u001b[0m\n\n\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "llvm_zero_drift_integer::every_accumulation_spelling_preserves_wide_terms_and_readers": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/llvm_zero_drift_integer--every_accumulation_spelling_preserves_wide_terms_and_readers.log",
+        "log_sha256": "69e48de833932458fcd36ff676fc424901bc94e0ffd0495726a5b5813205b742",
+        "output": "\nrunning 1 test\ntest every_accumulation_spelling_preserves_wide_terms_and_readers ... \nthread 'every_accumulation_spelling_preserves_wide_terms_and_readers' (4278) panicked at tests/llvm_zero_drift_integer.rs:50:9:\nupdates -O0: run: /tmp/y_drift_i64_4277_updates/harness.c:18: int main(void): Assertion `read_expression(v) == 1' failed.\n\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    every_accumulation_spelling_preserves_wide_terms_and_readers\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.14s\n\n"
+      },
+      "llvm_zero_drift_integer::initialization_and_readback_preserve_the_full_signed_integer": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/llvm_zero_drift_integer--initialization_and_readback_preserve_the_full_signed_integer.log",
+        "log_sha256": "bfb47c0b703b70d74c9583d7dba1f542d6ded7f0daae6a745ee46594b14ca447",
+        "output": "\nrunning 1 test\ntest initialization_and_readback_preserve_the_full_signed_integer ... \nthread 'initialization_and_readback_preserve_the_full_signed_integer' (4286) panicked at tests/llvm_zero_drift_integer.rs:50:9:\nliterals -O0: run: /tmp/y_drift_i64_4285_literals/harness.c:7: int main(void): Assertion `above() == INT64_C(9007199254740993)' failed.\n\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    initialization_and_readback_preserve_the_full_signed_integer\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.07s\n\n"
+      },
+      "llvm_zero_drift_integer::integer_terms_keep_signedness_when_widened": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/llvm_zero_drift_integer--integer_terms_keep_signedness_when_widened.log",
+        "log_sha256": "a21811a1501239e4d9fbf76fb425e7153cf17b596fc382174cce71d73bb6f5f9",
+        "output": "\nrunning 1 test\ntest integer_terms_keep_signedness_when_widened ... \nthread 'integer_terms_keep_signedness_when_widened' (4294) panicked at tests/llvm_zero_drift_integer.rs:50:9:\nwiden -O0: run: /tmp/y_drift_i64_4293_widen/harness.c:7: int main(void): Assertion `initial_unsigned(UINT32_MAX) == INT64_C(4294967295)' failed.\n\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    integer_terms_keep_signedness_when_widened\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.07s\n\n"
+      },
+      "backend_function_state::llvm_buffer_element_facts_do_not_escape_their_function": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/backend_function_state--llvm_buffer_element_facts_do_not_escape_their_function.log",
+        "log_sha256": "24760c7469b3c9a47e105e12c63167dd886138644ba46ad74ef9ff934a7f19c5",
+        "output": "\nrunning 1 test\ntest llvm_buffer_element_facts_do_not_escape_their_function ... \nthread 'llvm_buffer_element_facts_do_not_escape_their_function' (4303) panicked at tests/backend_function_state.rs:119:5:\nassertion `left == right` failed: the earlier pointer must not license a later scalar as a buffer\n  left: []\n right: [\"`block_ptr2d_load` needs its first argument to be a `GlobalMemory<T>` or `SharedMemory<T>` binding so the element type is known. Refusing rather than assuming F32.\"]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    llvm_buffer_element_facts_do_not_escape_their_function\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n"
+      },
+      "backend_function_state::llvm_directives_are_local_to_functions_and_kernels": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/backend_function_state--llvm_directives_are_local_to_functions_and_kernels.log",
+        "log_sha256": "12875491527b4bfefa90e90c659aafdaaa7c0d5a6427e59fb219e9eae129fbcd",
+        "output": "\nrunning 1 test\ntest llvm_directives_are_local_to_functions_and_kernels ... \nthread 'llvm_directives_are_local_to_functions_and_kernels' (4305) panicked at tests/backend_function_state.rs:74:13:\nstate leaked across definitions: [\"Line 2: `acc` is a @ZeroDrift accumulator, so the only assignments that preserve drift-freedom are `acc = acc + <term>` and `acc = acc - <term>` (or `+=` / `-=`). Assigning anything else would have to round the value into the accumulator's exact representation, and whether that is lossless depends on the expression.\"]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    llvm_directives_are_local_to_functions_and_kernels\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n"
+      },
+      "backend_function_state::llvm_inferred_locals_do_not_inherit_old_signedness": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/backend_function_state--llvm_inferred_locals_do_not_inherit_old_signedness.log",
+        "log_sha256": "92af00bca29a42e44ecd606060d490cdc75f0a1111da8daad884a426285c8f94",
+        "output": "\nrunning 1 test\ntest llvm_inferred_locals_do_not_inherit_old_signedness ... \nthread 'llvm_inferred_locals_do_not_inherit_old_signedness' (4307) panicked at tests/backend_function_state.rs:48:5:\nsignedness returned a wrong value\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    llvm_inferred_locals_do_not_inherit_old_signedness\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.04s\n\n"
+      },
+      "backend_function_state::ptx_directives_are_local_to_each_kernel": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/backend_function_state--ptx_directives_are_local_to_each_kernel.log",
+        "log_sha256": "6db58364a2528182645374b323aa138dd143f7d4bdee5ad00b8c237af3ccaf68",
+        "output": "\nrunning 1 test\ntest ptx_directives_are_local_to_each_kernel ... \nthread 'ptx_directives_are_local_to_each_kernel' (4315) panicked at tests/backend_function_state.rs:130:5:\n[\"Line 2: `acc` is a @ZeroDrift accumulator, and this assignment is not an exact accumulation. Only `acc += e`, `acc -= e` and their `acc = acc + e` / `acc = acc - e` spellings preserve drift-freedom; anything else reintroduces the rounding the directive exists to remove.\"]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    ptx_directives_are_local_to_each_kernel\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n"
+      },
+      "backend_function_state::ptx_double_registers_start_fresh_in_each_kernel": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/backend_function_state--ptx_double_registers_start_fresh_in_each_kernel.log",
+        "log_sha256": "a5257874d31f89753e60218934922265fe7687e8f4a28a62911f1511faa441cc",
+        "output": "\nrunning 1 test\ntest ptx_double_registers_start_fresh_in_each_kernel ... \nthread 'ptx_double_registers_start_fresh_in_each_kernel' (4317) panicked at tests/backend_function_state.rs:194:5:\nassertion `left == right` failed: double scratch registers must start fresh in the second kernel\n  left: \".visible .entry ordinary(\\n    .param .u64 out_0,\\n    .param .b32 x_1\\n)\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 11\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 32 (to maximize SM occupancy)\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: NaN% (0 active blocks per SM)\\n.maxnreg 32\\n{\\n    .reg .b32 %r<1>;\\n    .reg .f32 %f<2>;\\n    .reg .b64 %rd<4>;\\n    .reg .pred %p<2>;\\n    .reg .f64 %fd<16>;\\n\\n    ld.param.u64 %rd0, [out_0];\\n    ld.param.f32 %f0, [x_1];\\n    // [Y ZERO DRIFT] acc: F32 accumulated exactly as Q32.32\\n    mov.f32 %f1, 0.0;\\n    cvt.f64.f32 %fd8, %f1;\\n    mul.f64 %fd9, %fd8, 0d41F0000000000000;\\n    setp.lt.f64 %p0, %fd9, 0d0000000000000000;\\n    selp.f64 %fd10, 0dBFE0000000000000, 0d3FE0000000000000, %p0;\\n    add.f64 %fd11, %fd9, %fd10;\\n    cvt.rzi.s64.f64 %rd2, %fd11;\\n    mov.s64 %rd1, %rd2;\\n    cvt.f64.f32 %fd12, %f0;\\n    mul.f64 %fd13, %fd12, 0d41F0000000000000;\\n    setp.lt.f64 %p1, %fd13, 0d0000000000000000;\\n    selp.f64 %fd14, 0dBFE0000000000000, 0d3FE0000000000000, %p1;\\n    add.f64 %fd15, %fd13, %fd14;\\n    cvt.rzi.s64.f64 %rd3, %fd15;\\n    add.s64 %rd1, %rd1, %rd3;\\n    mov.u32 %r0, 0;\\n    st.global.u32 [%rd0], %r0;\\n}\"\n right: \".visible .entry ordinary(\\n    .param .u64 out_0,\\n    .param .b32 x_1\\n)\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 11\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 32 (to maximize SM occupancy)\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: NaN% (0 active blocks per SM)\\n.maxnreg 32\\n{\\n    .reg .b32 %r<1>;\\n    .reg .f32 %f<2>;\\n    .reg .b64 %rd<4>;\\n    .reg .pred %p<2>;\\n    .reg .f64 %fd<8>;\\n\\n    ld.param.u64 %rd0, [out_0];\\n    ld.param.f32 %f0, [x_1];\\n    // [Y ZERO DRIFT] acc: F32 accumulated exactly as Q32.32\\n    mov.f32 %f1, 0.0;\\n    cvt.f64.f32 %fd0, %f1;\\n    mul.f64 %fd1, %fd0, 0d41F0000000000000;\\n    setp.lt.f64 %p0, %fd1, 0d0000000000000000;\\n    selp.f64 %fd2, 0dBFE0000000000000, 0d3FE0000000000000, %p0;\\n    add.f64 %fd3, %fd1, %fd2;\\n    cvt.rzi.s64.f64 %rd2, %fd3;\\n    mov.s64 %rd1, %rd2;\\n    cvt.f64.f32 %fd4, %f0;\\n    mul.f64 %fd5, %fd4, 0d41F0000000000000;\\n    setp.lt.f64 %p1, %fd5, 0d0000000000000000;\\n    selp.f64 %fd6, 0dBFE0000000000000, 0d3FE0000000000000, %p1;\\n    add.f64 %fd7, %fd5, %fd6;\\n    cvt.rzi.s64.f64 %rd3, %fd7;\\n    add.s64 %rd1, %rd1, %rd3;\\n    mov.u32 %r0, 0;\\n    st.global.u32 [%rd0], %r0;\\n}\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    ptx_double_registers_start_fresh_in_each_kernel\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s\n\n"
+      },
+      "backend_function_state::ptx_labels_start_fresh_in_each_kernel": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/backend_function_state--ptx_labels_start_fresh_in_each_kernel.log",
+        "log_sha256": "179279e73cd3c0e65a72c6c3a6b30417a6fafb391a767447d37b65331ca8f22c",
+        "output": "\nrunning 1 test\ntest ptx_labels_start_fresh_in_each_kernel ... \nthread 'ptx_labels_start_fresh_in_each_kernel' (4321) panicked at tests/backend_function_state.rs:217:5:\nassertion `left == right` failed: branch labels must start fresh in the second kernel\n  left: \".visible .entry ordinary(\\n    .param .u64 out_0,\\n    .param .b32 x_1\\n)\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 8\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 32 (to maximize SM occupancy)\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: NaN% (0 active blocks per SM)\\n.maxnreg 32\\n{\\n    .reg .b32 %r<2>;\\n    .reg .f32 %f<4>;\\n    .reg .b64 %rd<1>;\\n    .reg .pred %p<2>;\\n\\n    ld.param.u64 %rd0, [out_0];\\n    ld.param.f32 %f0, [x_1];\\n    mov.f32 %f1, 0.0;\\n    setp.gt.f32 %p0, %f0, %f1;\\n    selp.u32 %r0, 1, 0, %p0;\\n    // [HEURISTIC] Branch Divergence Penalty is 0 cycles.\\n    // if: emitting BRANCH execution (block cost 1 cy).\\n    setp.eq.u32 %p1, %r0, 0;\\n    @%p1 bra $IF_END_3;\\n    mov.f32 %f2, 1.0;\\n    add.f32 %f3, %f0, %f2;\\n    mov.f32 %f0, %f3;\\n    $IF_END_3:\\n    mov.u32 %r1, 0;\\n    st.global.u32 [%rd0], %r1;\\n}\"\n right: \".visible .entry ordinary(\\n    .param .u64 out_0,\\n    .param .b32 x_1\\n)\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 8\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 32 (to maximize SM occupancy)\\n    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: NaN% (0 active blocks per SM)\\n.maxnreg 32\\n{\\n    .reg .b32 %r<2>;\\n    .reg .f32 %f<4>;\\n    .reg .b64 %rd<1>;\\n    .reg .pred %p<2>;\\n\\n    ld.param.u64 %rd0, [out_0];\\n    ld.param.f32 %f0, [x_1];\\n    mov.f32 %f1, 0.0;\\n    setp.gt.f32 %p0, %f0, %f1;\\n    selp.u32 %r0, 1, 0, %p0;\\n    // [HEURISTIC] Branch Divergence Penalty is 0 cycles.\\n    // if: emitting BRANCH execution (block cost 1 cy).\\n    setp.eq.u32 %p1, %r0, 0;\\n    @%p1 bra $IF_END_1;\\n    mov.f32 %f2, 1.0;\\n    add.f32 %f3, %f0, %f2;\\n    mov.f32 %f0, %f3;\\n    $IF_END_1:\\n    mov.u32 %r1, 0;\\n    st.global.u32 [%rd0], %r1;\\n}\"\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    ptx_labels_start_fresh_in_each_kernel\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s\n\n"
+      },
+      "zk_field_context::retained_circuits_and_witnesses_survive_interleaved_fields": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/zk_field_context--retained_circuits_and_witnesses_survive_interleaved_fields.log",
+        "log_sha256": "0a71cc7601202b07cfedbe4ec6032810a3669c3fcac09fad09217f88e401ca40",
+        "output": "\nrunning 1 test\ntest retained_circuits_and_witnesses_survive_interleaved_fields ... \nthread 'retained_circuits_and_witnesses_survive_interleaved_fields' (4326) panicked at tests/zk_field_context.rs:142:9:\nassertion `left == right` failed\n  left: [Fr([8589934590, 6378425256633387010, 11064306276430008309, 1739710354780652911]), Fr([3483395353741361115, 3494632259903994625, 6657987792994187913, 108272644256946680]), Fr([415066004289224689, 11886516471525959549, 3696305541684646538, 3035258219084094862]), Fr([9228596375838178219, 14290212061799404182, 9928428982186570094, 3729990794399021376]), Fr([7325893618770571042, 7669230817548362005, 3998652055792006517, 6990313998492574199])]\n right: [Fr([12436184717236109307, 3962172157175319849, 7381016538464732718, 1011752739694698287]), Fr([3483395353741361115, 3494632259903994625, 6657987792994187913, 108272644256946680]), Fr([415066004289224689, 11886516471525959549, 3696305541684646538, 3035258219084094862]), Fr([10450186061224083345, 10483896779711983875, 1527219305273012123, 324817932770840041]), Fr([10865252065513308034, 3923669177528391808, 5223524846957658662, 3360076151854934903])]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    retained_circuits_and_witnesses_survive_interleaved_fields\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.03s\n\n"
+      },
+      "zk_field_context::retained_elements_keep_their_value_arithmetic_and_identity": {
+        "status": "fail",
+        "log": "/tmp/y-review-before-after-final-20260913/original-logs/zk_field_context--retained_elements_keep_their_value_arithmetic_and_identity.log",
+        "log_sha256": "5f1819664569940257a00ae4e68b85b88a270d243509635bdc3226a95557a66b",
+        "output": "\nrunning 1 test\ntest retained_elements_keep_their_value_arithmetic_and_identity ... \nthread 'retained_elements_keep_their_value_arithmetic_and_identity' (4328) panicked at tests/zk_field_context.rs:67:5:\nassertion `left == right` failed\n  left: None\n right: Some(7)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nFAILED\n\nfailures:\n\nfailures:\n    retained_elements_keep_their_value_arithmetic_and_identity\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.02s\n\n"
+      }
+    },
+    "patched": {
+      "compile_time_assertions::embedded_cpu_entrypoint_propagates_frontend_assertion_errors": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/compile_time_assertions--embedded_cpu_entrypoint_propagates_frontend_assertion_errors.log",
+        "log_sha256": "458fe00c9d926a96a5b8fdc6f5a2259ba64df088b8fd89a96c6935b93c29682c",
+        "output": "\nrunning 1 test\ntest embedded_cpu_entrypoint_propagates_frontend_assertion_errors ...       \u001b[1;36m[Verified]\u001b[0m Line 1: compile-time assertion \"ffi control\"\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "compile_time_assertions::false_assertions_fail_before_emission_at_both_syntax_sites": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/compile_time_assertions--false_assertions_fail_before_emission_at_both_syntax_sites.log",
+        "log_sha256": "2cd7b01f3781794e4561c16e0d14ba004da6043506e4e50ae45fccf5d4c1330a",
+        "output": "\nrunning 1 test\ntest false_assertions_fail_before_emission_at_both_syntax_sites ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "compile_time_assertions::true_assertions_are_evaluated_and_erased": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/compile_time_assertions--true_assertions_are_evaluated_and_erased.log",
+        "log_sha256": "ed63ba0e990367fef8b75e62588133dff481531682d19b8c49527725cbd600fd",
+        "output": "\nrunning 1 test\ntest true_assertions_are_evaluated_and_erased ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "compile_time_assertions::unsupported_nonboolean_and_invalid_arithmetic_are_not_verified": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/compile_time_assertions--unsupported_nonboolean_and_invalid_arithmetic_are_not_verified.log",
+        "log_sha256": "352b66851497f7a7eee6facb81db80416d2aa9c504c4d76e8a374d0d105e1170",
+        "output": "\nrunning 1 test\ntest unsupported_nonboolean_and_invalid_arithmetic_are_not_verified ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s\n\n"
+      },
+      "bounds_control_flow::annotated_integer_width_controls_the_stored_range": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/bounds_control_flow--annotated_integer_width_controls_the_stored_range.log",
+        "log_sha256": "3f82710ff3dffa5e41382f91b942aac25940e66e872c4c21efd330e193ee1f19",
+        "output": "\nrunning 1 test\ntest annotated_integer_width_controls_the_stored_range ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "bounds_control_flow::compound_assignment_updates_or_invalidates_the_range": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/bounds_control_flow--compound_assignment_updates_or_invalidates_the_range.log",
+        "log_sha256": "9e696a14bd57547b4b9da2b26bb55d90f29a58777a0740c97713893b32906b60",
+        "output": "\nrunning 1 test\ntest compound_assignment_updates_or_invalidates_the_range ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "bounds_control_flow::each_branch_starts_from_the_entry_facts_and_exits_are_joined": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/bounds_control_flow--each_branch_starts_from_the_entry_facts_and_exits_are_joined.log",
+        "log_sha256": "ef9057999ab0cfc45009e60c3760d49e4f14a9d5639df24fc106e052426dac72",
+        "output": "\nrunning 1 test\ntest each_branch_starts_from_the_entry_facts_and_exits_are_joined ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "bounds_control_flow::match_arms_do_not_overwrite_each_others_facts": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/bounds_control_flow--match_arms_do_not_overwrite_each_others_facts.log",
+        "log_sha256": "f39253347939ca5fcff7078d0939dc948bb9fe3731a1826cbc06eb1234f9b99f",
+        "output": "\nrunning 1 test\ntest match_arms_do_not_overwrite_each_others_facts ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "frontend_semantics::calls_validate_arity_argument_types_and_return_types": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/frontend_semantics--calls_validate_arity_argument_types_and_return_types.log",
+        "log_sha256": "05890f40f85412d5ce993d5db9f0527a26a73a65f7f50e037e7b8896b91797c7",
+        "output": "\nrunning 1 test\ntest calls_validate_arity_argument_types_and_return_types ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "frontend_semantics::operators_have_types_and_boolean_conditions_are_required": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/frontend_semantics--operators_have_types_and_boolean_conditions_are_required.log",
+        "log_sha256": "c9cc742d88055351a0c434ad7bec32517cf1d81cfd9d460354d56a9d6425de13",
+        "output": "\nrunning 1 test\ntest operators_have_types_and_boolean_conditions_are_required ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "frontend_semantics::undeclared_names_are_not_unknown_typed_values": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/frontend_semantics--undeclared_names_are_not_unknown_typed_values.log",
+        "log_sha256": "d12e6a1399c8989e537f2ab044753925d6e57cd30d30f5533b1eaca6cdf1c9e3",
+        "output": "\nrunning 1 test\ntest undeclared_names_are_not_unknown_typed_values ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "frontend_semantics::valid_forward_calls_polymorphic_literals_and_struct_fields_work": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/frontend_semantics--valid_forward_calls_polymorphic_literals_and_struct_fields_work.log",
+        "log_sha256": "33df431e94d272032bda4e02dae5d8f89068addba2367d8b7eef106cf74c9c29",
+        "output": "\nrunning 1 test\ntest valid_forward_calls_polymorphic_literals_and_struct_fields_work ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::integer_errors_name_the_literal_and_supported_range_in_every_context": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/integer_literal_diagnostics--integer_errors_name_the_literal_and_supported_range_in_every_context.log",
+        "log_sha256": "7f3b03cf60b58673035a70bed80431401ee047dcea411afb0d72239f88af1361",
+        "output": "\nrunning 1 test\ntest integer_errors_name_the_literal_and_supported_range_in_every_context ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::integer_overflow_preserves_its_spelling_and_is_refused": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/integer_literal_diagnostics--integer_overflow_preserves_its_spelling_and_is_refused.log",
+        "log_sha256": "5476525abacdd91b5c88dd3ec31d6bbd8aa68844f6b49cfe31bfa5931354da1a",
+        "output": "\nrunning 1 test\ntest integer_overflow_preserves_its_spelling_and_is_refused ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::malformed_float_is_refused_instead_of_becoming_zero": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/integer_literal_diagnostics--malformed_float_is_refused_instead_of_becoming_zero.log",
+        "log_sha256": "6a1e5479ace524cf7619f111b086b82f266b5d2426060a9c3735b45950315632",
+        "output": "\nrunning 1 test\ntest malformed_float_is_refused_instead_of_becoming_zero ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::nonfinite_float_is_refused": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/integer_literal_diagnostics--nonfinite_float_is_refused.log",
+        "log_sha256": "03477aa787719e3d9c55078547534142ff75eb4c610d4386179ee140dbf29f8e",
+        "output": "\nrunning 1 test\ntest nonfinite_float_is_refused ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::ordinary_decimal_floats_and_range_tokens_still_work": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/integer_literal_diagnostics--ordinary_decimal_floats_and_range_tokens_still_work.log",
+        "log_sha256": "cf190ca6e1233df5c03149c6e4895b8ce926e5b44ce716e9d0694deb9cc63f5d",
+        "output": "\nrunning 1 test\ntest ordinary_decimal_floats_and_range_tokens_still_work ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::representable_nonnegative_integers_are_preserved": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/integer_literal_diagnostics--representable_nonnegative_integers_are_preserved.log",
+        "log_sha256": "c89f7050dc6e1728b12d0fd59766e10ebd2cd2c71f68d4c0fcb906424aee1492",
+        "output": "\nrunning 1 test\ntest representable_nonnegative_integers_are_preserved ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::signed_minimum_is_preserved_including_leading_zeroes": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/integer_literal_diagnostics--signed_minimum_is_preserved_including_leading_zeroes.log",
+        "log_sha256": "7ca4680cadc3fa69cf47d404f31072d2594a59c0c039d7627663d0438f14089b",
+        "output": "\nrunning 1 test\ntest signed_minimum_is_preserved_including_leading_zeroes ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "integer_literal_diagnostics::the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/integer_literal_diagnostics--the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir.log",
+        "log_sha256": "10e2ab5f770682c17f7cad66abb2ab8ff82399247f4af2d44d8f69f70f2e7116",
+        "output": "\nrunning 1 test\ntest the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n"
+      },
+      "llvm_zero_drift_integer::every_accumulation_spelling_preserves_wide_terms_and_readers": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/llvm_zero_drift_integer--every_accumulation_spelling_preserves_wide_terms_and_readers.log",
+        "log_sha256": "3d401076818a27e0b53fb6f66cdefdbce8ec2b857e89a502c54afbce560bd832",
+        "output": "\nrunning 1 test\ntest every_accumulation_spelling_preserves_wide_terms_and_readers ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.08s\n\n"
+      },
+      "llvm_zero_drift_integer::initialization_and_readback_preserve_the_full_signed_integer": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/llvm_zero_drift_integer--initialization_and_readback_preserve_the_full_signed_integer.log",
+        "log_sha256": "4451b591236d0d59f10c6e2e0502d133416e6969a323f481744ea4e7777a6f19",
+        "output": "\nrunning 1 test\ntest initialization_and_readback_preserve_the_full_signed_integer ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.08s\n\n"
+      },
+      "llvm_zero_drift_integer::integer_terms_keep_signedness_when_widened": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/llvm_zero_drift_integer--integer_terms_keep_signedness_when_widened.log",
+        "log_sha256": "3c3f19caf402a52b2786a9b6340cf64cbc1d3337f48124a3e2c03e60d8f4664b",
+        "output": "\nrunning 1 test\ntest integer_terms_keep_signedness_when_widened ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.07s\n\n"
+      },
+      "backend_function_state::llvm_buffer_element_facts_do_not_escape_their_function": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/backend_function_state--llvm_buffer_element_facts_do_not_escape_their_function.log",
+        "log_sha256": "854b88b5b2e166f008111b004f5822951a6610a500bc4e2a619e7dfa132d3d64",
+        "output": "\nrunning 1 test\ntest llvm_buffer_element_facts_do_not_escape_their_function ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n"
+      },
+      "backend_function_state::llvm_directives_are_local_to_functions_and_kernels": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/backend_function_state--llvm_directives_are_local_to_functions_and_kernels.log",
+        "log_sha256": "713448c25731ff87bec7cba229ecb6528c402482ad44f0c3197131ff924bc561",
+        "output": "\nrunning 1 test\ntest llvm_directives_are_local_to_functions_and_kernels ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.13s\n\n"
+      },
+      "backend_function_state::llvm_inferred_locals_do_not_inherit_old_signedness": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/backend_function_state--llvm_inferred_locals_do_not_inherit_old_signedness.log",
+        "log_sha256": "bb5219e462c488c13667bb7dd0b6356a0a7dd94c5798bf8da96e2041ca10b34d",
+        "output": "\nrunning 1 test\ntest llvm_inferred_locals_do_not_inherit_old_signedness ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.03s\n\n"
+      },
+      "backend_function_state::ptx_directives_are_local_to_each_kernel": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/backend_function_state--ptx_directives_are_local_to_each_kernel.log",
+        "log_sha256": "4a5d656c53c0c8174887dbd262b160b1939ee9a0cd3e03c0052985189a242796",
+        "output": "\nrunning 1 test\ntest ptx_directives_are_local_to_each_kernel ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s\n\n"
+      },
+      "backend_function_state::ptx_double_registers_start_fresh_in_each_kernel": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/backend_function_state--ptx_double_registers_start_fresh_in_each_kernel.log",
+        "log_sha256": "3faedac5eb40a3870ea2fd3b8a323f8054b82ac99dd193ea151b8f4284d8c066",
+        "output": "\nrunning 1 test\ntest ptx_double_registers_start_fresh_in_each_kernel ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s\n\n"
+      },
+      "backend_function_state::ptx_labels_start_fresh_in_each_kernel": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/backend_function_state--ptx_labels_start_fresh_in_each_kernel.log",
+        "log_sha256": "896a12c421c0d08b38ca6b2cf01a82cf8597c777c4bb9457d01588faad1dc9d6",
+        "output": "\nrunning 1 test\ntest ptx_labels_start_fresh_in_each_kernel ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s\n\n"
+      },
+      "zk_field_context::retained_circuits_and_witnesses_survive_interleaved_fields": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/zk_field_context--retained_circuits_and_witnesses_survive_interleaved_fields.log",
+        "log_sha256": "b36970e9e696e979d06ae621e891f2661af41f4b73f66ab54e8e8074b89d5907",
+        "output": "\nrunning 1 test\ntest retained_circuits_and_witnesses_survive_interleaved_fields ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.01s\n\n"
+      },
+      "zk_field_context::retained_elements_keep_their_value_arithmetic_and_identity": {
+        "status": "pass",
+        "log": "/tmp/y-review-before-after-final-20260913/patched-logs/zk_field_context--retained_elements_keep_their_value_arithmetic_and_identity.log",
+        "log_sha256": "f128256e9fd045cb75fc1b63920ee44af515906c74fd76b0ef767a87501945a3",
+        "output": "\nrunning 1 test\ntest retained_elements_keep_their_value_arithmetic_and_identity ... \nthread 'retained_elements_keep_their_value_arithmetic_and_identity' (4541) panicked at src/zk_field.rs:953:9:\nassertion `left == right` failed: cannot add elements from different scalar fields\n  left: FieldContext(\"21888242871839275222246405745257275088548364400416034343698204186575808495617\")\n right: FieldContext(\"52435875175126190479447740508185965837690552500527637822603658699938581184513\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nthread 'retained_elements_keep_their_value_arithmetic_and_identity' (4541) panicked at src/zk_field.rs:980:9:\nassertion `left == right` failed: cannot multiply elements from different scalar fields\n  left: FieldContext(\"21888242871839275222246405745257275088548364400416034343698204186575808495617\")\n right: FieldContext(\"52435875175126190479447740508185965837690552500527637822603658699938581184513\")\nok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.01s\n\n"
+      }
+    }
+  },
+  "transitions": {
+    "compile_time_assertions::embedded_cpu_entrypoint_propagates_frontend_assertion_errors": "fail -> pass",
+    "compile_time_assertions::false_assertions_fail_before_emission_at_both_syntax_sites": "fail -> pass",
+    "compile_time_assertions::true_assertions_are_evaluated_and_erased": "pass -> pass",
+    "compile_time_assertions::unsupported_nonboolean_and_invalid_arithmetic_are_not_verified": "fail -> pass",
+    "bounds_control_flow::annotated_integer_width_controls_the_stored_range": "fail -> pass",
+    "bounds_control_flow::compound_assignment_updates_or_invalidates_the_range": "fail -> pass",
+    "bounds_control_flow::each_branch_starts_from_the_entry_facts_and_exits_are_joined": "fail -> pass",
+    "bounds_control_flow::match_arms_do_not_overwrite_each_others_facts": "fail -> pass",
+    "frontend_semantics::calls_validate_arity_argument_types_and_return_types": "fail -> pass",
+    "frontend_semantics::operators_have_types_and_boolean_conditions_are_required": "fail -> pass",
+    "frontend_semantics::undeclared_names_are_not_unknown_typed_values": "fail -> pass",
+    "frontend_semantics::valid_forward_calls_polymorphic_literals_and_struct_fields_work": "pass -> pass",
+    "integer_literal_diagnostics::integer_errors_name_the_literal_and_supported_range_in_every_context": "fail -> pass",
+    "integer_literal_diagnostics::integer_overflow_preserves_its_spelling_and_is_refused": "fail -> pass",
+    "integer_literal_diagnostics::malformed_float_is_refused_instead_of_becoming_zero": "fail -> pass",
+    "integer_literal_diagnostics::nonfinite_float_is_refused": "fail -> pass",
+    "integer_literal_diagnostics::ordinary_decimal_floats_and_range_tokens_still_work": "pass -> pass",
+    "integer_literal_diagnostics::representable_nonnegative_integers_are_preserved": "pass -> pass",
+    "integer_literal_diagnostics::signed_minimum_is_preserved_including_leading_zeroes": "fail -> pass",
+    "integer_literal_diagnostics::the_cli_refuses_a_u64_literal_it_cannot_lower_without_writing_ir": "fail -> pass",
+    "llvm_zero_drift_integer::every_accumulation_spelling_preserves_wide_terms_and_readers": "fail -> pass",
+    "llvm_zero_drift_integer::initialization_and_readback_preserve_the_full_signed_integer": "fail -> pass",
+    "llvm_zero_drift_integer::integer_terms_keep_signedness_when_widened": "fail -> pass",
+    "backend_function_state::llvm_buffer_element_facts_do_not_escape_their_function": "fail -> pass",
+    "backend_function_state::llvm_directives_are_local_to_functions_and_kernels": "fail -> pass",
+    "backend_function_state::llvm_inferred_locals_do_not_inherit_old_signedness": "fail -> pass",
+    "backend_function_state::ptx_directives_are_local_to_each_kernel": "fail -> pass",
+    "backend_function_state::ptx_double_registers_start_fresh_in_each_kernel": "fail -> pass",
+    "backend_function_state::ptx_labels_start_fresh_in_each_kernel": "fail -> pass",
+    "zk_field_context::retained_circuits_and_witnesses_survive_interleaved_fields": "fail -> pass",
+    "zk_field_context::retained_elements_keep_their_value_arithmetic_and_identity": "fail -> pass"
+  },
+  "builds": {
+    "original": {
+      "success": true,
+      "output": "   Compiling proc-macro2 v1.0.107\n   Compiling quote v1.0.47\n   Compiling unicode-ident v1.0.24\n   Compiling cfg-if v1.0.4\n   Compiling libc v0.2.189\n   Compiling typenum v1.20.1\n   Compiling version_check v0.9.5\n   Compiling serde_core v1.0.229\n   Compiling subtle v2.6.1\n   Compiling const-oid v0.9.6\n   Compiling serde v1.0.229\n   Compiling autocfg v1.5.1\n   Compiling zerocopy v0.8.55\n   Compiling allocator-api2 v0.2.21\n   Compiling once_cell v1.21.4\n   Compiling paste v1.0.15\n   Compiling cpufeatures v0.2.17\n   Compiling foldhash v0.2.0\n   Compiling base16ct v0.2.0\n   Compiling unicode-segmentation v1.13.3\n   Compiling unicode-xid v0.2.6\n   Compiling equivalent v1.0.2\n   Compiling ruint-macro v1.2.1\n   Compiling itoa v1.0.18\n   Compiling crossbeam-utils v0.8.22\n   Compiling crossbeam-epoch v0.9.20\n   Compiling crossbeam-deque v0.8.7\n   Compiling shlex v2.0.1\n   Compiling find-msvc-tools v0.1.9\n   Compiling radium v0.7.0\n   Compiling thiserror v2.0.19\n   Compiling rayon-core v1.13.0\n   Compiling keccak v0.2.0\n   Compiling tap v1.0.1\n   Compiling funty v2.0.0\n   Compiling arrayvec v0.7.8\n   Compiling getrandom v0.3.4\n   Compiling wyz v0.5.1\n   Compiling syn v1.0.109\n   Compiling pin-project-lite v0.2.17\n   Compiling hex v0.4.3\n   Compiling Y-compiler v1.0.0 (/tmp/y-review-before-after-final-20260913/original)\n   Compiling cc v1.4.0\n   Compiling zmij v1.0.23\n   Compiling tracing-core v0.1.36\n   Compiling cpufeatures v0.3.0\n   Compiling byteorder v1.5.0\n   Compiling keccak v0.1.6\n   Compiling serde_json v1.0.151\n   Compiling arrayref v0.3.9\n   Compiling memchr v2.8.3\n   Compiling generic-array v0.14.7\n   Compiling ahash v0.8.12\n   Compiling num-traits v0.2.19\n   Compiling hashbrown v0.15.5\n   Compiling convert_case v0.10.0\n   Compiling tracing v0.1.44\n   Compiling tracing-subscriber v0.2.25\n   Compiling syn v2.0.119\n   Compiling syn v3.0.3\n   Compiling hybrid-array v0.4.14\n   Compiling num-integer v0.1.46\n   Compiling num-complex v0.4.6\n   Compiling blst v0.3.17\n   Compiling secp256k1-sys v0.11.0\n   Compiling c-kzg v2.1.8\n   Compiling getrandom v0.2.17\n   Compiling num_cpus v1.17.0\n   Compiling num-bigint v0.4.8\n   Compiling num-iter v0.1.46\n   Compiling rand_core v0.9.5\n   Compiling rand_core v0.6.4\n   Compiling threadpool v1.8.1\n   Compiling crypto-common v0.2.2\n   Compiling block-buffer v0.12.1\n   Compiling ff v0.13.1\n   Compiling group v0.13.0\n   Compiling digest v0.11.3\n   Compiling sha3 v0.11.0\n   Compiling ripemd v0.2.0\n   Compiling sha2 v0.11.0\n   Compiling hashbrown v0.17.1\n   Compiling const-hex v1.19.1\n   Compiling bitflags v2.13.1\n   Compiling num-rational v0.4.2\n   Compiling serde_derive v1.0.229\n   Compiling enum-ordinalize-derive v4.4.2\n   Compiling thiserror-impl v2.0.19\n   Compiling num v0.4.3\n   Compiling aurora-engine-modexp v1.2.0\n   Compiling indexmap v2.14.0\n   Compiling derivative v2.2.0\n   Compiling enum-ordinalize v4.4.2\n   Compiling ppv-lite86 v0.2.21\n   Compiling rand_chacha v0.3.1\n   Compiling rand_chacha v0.9.0\n   Compiling rand v0.9.5\n   Compiling rand v0.8.7\n   Compiling ark-std v0.6.0\n   Compiling zeroize_derive v1.5.0\n   Compiling educe v0.6.0\n   Compiling alloy-rlp-derive v0.3.16\n   Compiling derive_more-impl v2.1.1\n   Compiling ark-serialize-derive v0.5.0\n   Compiling ark-serialize-derive v0.6.0\n   Compiling ark-ff-asm v0.6.0\n   Compiling auto_impl v1.3.0\n   Compiling ark-ff-macros v0.5.0\n   Compiling ark-ff-macros v0.6.0\n   Compiling ark-ff-asm v0.5.0\n   Compiling derive-where v1.6.1\n   Compiling ark-crypto-primitives-macros v0.5.0\n   Compiling secp256k1 v0.31.1\n   Compiling zeroize v1.9.0\n   Compiling der v0.7.10\n   Compiling merlin v3.0.0\n   Compiling either v1.17.0\n   Compiling bytes v1.12.1\n   Compiling bitvec v1.1.1\n   Compiling nonmax v0.5.5\n   Compiling rayon v1.12.0\n   Compiling itertools v0.13.0\n   Compiling itertools v0.14.0\n   Compiling crypto-common v0.1.7\n   Compiling block-buffer v0.10.4\n   Compiling crypto-bigint v0.5.5\n   Compiling digest v0.10.7\n   Compiling alloy-rlp v0.3.16\n   Compiling sha2 v0.10.9\n   Compiling hmac v0.12.1\n   Compiling signature v2.2.0\n   Compiling ark-serialize v0.6.0\n   Compiling blake2 v0.10.6\n   Compiling rfc6979 v0.4.0\n   Compiling ruint v1.20.0\n   Compiling sec1 v0.7.3\n   Compiling spki v0.7.3\n   Compiling ark-ff v0.6.0\n   Compiling elliptic-curve v0.13.8\n   Compiling ecdsa v0.16.9\n   Compiling primeorder v0.13.6\n   Compiling k256 v0.13.4\n   Compiling p256 v0.13.2\n   Compiling derive_more v2.1.1\n   Compiling alloy-primitives v1.6.1\n   Compiling ark-std v0.5.0\n   Compiling ark-serialize v0.5.0\n   Compiling ark-ff v0.5.0\n   Compiling revm-primitives v42.0.0\n   Compiling alloy-eip7928 v0.4.5\n   Compiling alloy-eip7702 v0.6.3\n   Compiling alloy-eip2930 v0.2.3\n   Compiling revm-bytecode v42.0.0\n   Compiling revm-state v42.0.0\n   Compiling revm-database-interface v42.0.0\n   Compiling revm-context-interface v42.0.0\n   Compiling revm-database v42.0.0\n   Compiling ark-poly v0.6.0\n   Compiling revm-context v42.0.0\n   Compiling revm-interpreter v42.0.0\n   Compiling ark-poly v0.5.0\n   Compiling ark-relations v0.5.1\n   Compiling ark-ec v0.6.0\n   Compiling ark-snark v0.5.1\n   Compiling ark-ec v0.5.0\n   Compiling ark-bn254 v0.6.0\n   Compiling ark-bls12-381 v0.6.0\n   Compiling ark-crypto-primitives v0.5.0\n   Compiling ark-bn254 v0.5.0\n   Compiling ark-groth16 v0.5.0\n   Compiling revm-precompile v42.0.1\n   Compiling y-gpu v0.1.0 (/tmp/y-review-before-after-final-20260913/original/crates/y-gpu)\n   Compiling revm-handler v42.0.1\n   Compiling revm-inspector v42.0.1\n   Compiling revm v42.0.1\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.11s\n"
+    },
+    "patched": {
+      "success": true,
+      "output": "   Compiling Y-compiler v1.0.0 (/home/yumin/NVME files/YSU-engine-main/YSU-engine-main/src/Y_lang/Y)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s\n"
+    }
+  },
+  "compiler_inputs_manifest_sha256": "c267d425990ca813dc0887bf34606ff39e084dc281186a69ed86d953f9fe5a1f"
+}

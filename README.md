@@ -125,9 +125,10 @@ repository's own investigation documents contradict.
   arithmetic, `mul.wide.u32`, carry-flag chains, 128-bit vector loads), gated by
   `tests/ptx_integer_datapath.rs`, which runs 16 operations over 4,096
   full-range `u32` pairs on the device. That is what unblocked the BN254 kernels
-  below. **Sub-word widths (`U8`/`U16`/`I8`/`I16`) are still refused**, because
-  an element type is also a stride and there is no byte width threaded through
-  the address math.
+  below. **`GlobalMemory<U8/U16/I8/I16>` is supported**, with byte-accurate
+  strides and signed or unsigned loads. Arithmetic promotes these values to
+  32 bits; stores truncate to the buffer width. Sub-word local declarations,
+  `SharedMemory` and `L2Memory` elements remain refused.
 - **There is no AMD/ROCm backend.** `src/rocm_emitter.rs` was 173 lines
   compiled into the library and called by **nothing** — no CLI flag, no test,
   no caller anywhere in the tree — and has been deleted, along with
@@ -157,14 +158,22 @@ repository's own investigation documents contradict.
 This is the most complete part of the project.
 
 **Not in a default build.** Without `--features zk` the binary prints `The ZK
-Circuit Backend is not compiled into this binary` and **exits 0** — a silent
-no-op that reads as a fast successful run.
+Circuit Backend is not compiled into this binary` and **exits 1**.
 
 ```bash
 cargo build --release --features zk
 Y circuit.ysu   --target=r1cs --witness input.json   # Y's own language
 Y circuit.circom --target=r1cs -l path/to/circomlib  # circom 2.x
 ```
+
+Field values, circuits and witness graphs retain their scalar-field context,
+so BN254 and BLS compilations can be interleaved without changing retained
+values or artifact headers. Mixed-field arithmetic and witness inputs are
+rejected. `Fr` remains `Copy` with allocation-free arithmetic; on 64-bit hosts
+it occupies 40 bytes (32 bytes of Montgomery limbs and an 8-byte context
+pointer). Parameters are retained once per distinct modulus for the process
+lifetime. The earlier performance measurements below have not been rerun for
+this representation.
 
 ### It plugs into the existing toolchain
 
@@ -2114,6 +2123,11 @@ throughout.
 | `-o`, `--output <path>` | output path | real |
 | `--autotune` / `--autotune-force` / `--no-autotune` | GEMM tile selection: measure / re-measure / analytic model only | real |
 | `--portable` | clears the probed AVX / AVX-512 feature bits | real |
+
+Y integer literals currently use the signed 64-bit range, including
+`-9223372036854775808`. Positive literals above `9223372036854775807` are
+diagnosed as unsupported even in `U64` expressions. Malformed numeric literals
+and floating-point literals outside the finite `F64` range are also rejected.
 
 **`--emit-zk-ptx` is the one line in this table to read sceptically**, and the
 previous edition of this paragraph — "nothing in the test suite runs it or checks

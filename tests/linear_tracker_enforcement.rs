@@ -48,7 +48,7 @@ fn compile(name: &str, body: &str) -> String {
     std::fs::write(
         &path,
         format!(
-            "kernel {}(A: GlobalMemory<F32>, B: GlobalMemory<F32>, N: I32) {{\n{}\n}}\n\nfn main() {{\n}}\n",
+            "kernel {}(A: GlobalMemory<F32>, B: GlobalMemory<F32>, N: I32) {{\n    let pipe = Pipeline::init();\n{}\n}}\n\nfn main() {{\n}}\n",
             name, body
         ),
     )

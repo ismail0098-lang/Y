@@ -7,14 +7,23 @@ it barely multiplies. Y was 154x faster than circom on that circuit and
 **13.5x slower on Poseidon** — this file is about the second number, and about
 what it took to close it.
 
-> **Status: fixed.** `Fr` is now a `Copy` `[u64; 4]` in Montgomery form
-> (`src/zk_field.rs`), and `optimize_circuit` no longer dominates what is left.
+> **Status: fixed.** `Fr` uses four Montgomery limbs and an immutable
+> field-context pointer, remains `Copy` (`src/zk_field.rs`), and
+> `optimize_circuit` no longer dominates what is left.
 > Emit for the 1000-hash chain went **9.35 s -> 0.91 s**, allocations
 > **356 M -> 5.6 M**, dense-circuit peak RSS **4.84 -> 1.42 KB/constraint**, and
 > Y is now **2.6x faster than circom** on the same circuit rather than 13.5x
 > slower. The sections below are the original
 > diagnosis, kept because the reasoning is what generalises; the results are at
 > the bottom.
+
+The measurements in this file predate the immutable-context change. `Fr` now
+occupies 40 bytes on 64-bit hosts, compared with the measured representation's
+32 bytes. Arithmetic still allocates nothing; one parameter allocation per
+distinct modulus is retained for the process lifetime. This keeps existing
+values, circuits and witnesses valid when different scalar fields are used in
+the same process. Performance and memory measurements have not been rerun for
+the larger representation.
 
 Reproduce with `Y_ZK_TIMING=1`, and allocation counts with
 `cargo build --release --features zk,alloc-stats`.
@@ -24,10 +33,10 @@ Reproduce with `Y_ZK_TIMING=1`, and allocation counts with
 Worth stating because the CPU GEMM work was originally framed as being "for ZK
 and SMT":
 
-- No threading primitives in any `zk_*.rs` — no `thread::`, `spawn`, `rayon`,
-  `par_iter`, `Mutex`, or atomics beyond the counters added for this profile.
-  It cannot be hiding in a dependency either: `[dependencies]` in `Cargo.toml`
-  is **empty**. arkworks is `[dev-dependencies]`, a test oracle only.
+- ZK compilation does not spawn workers. A process-wide mutex protects the
+  field-parameter registry when selecting a field; field arithmetic reads
+  immutable parameters without locking. `[dependencies]` in `Cargo.toml` is
+  **empty**. arkworks is `[dev-dependencies]`, a test oracle only.
 - `cpu_gemm` is referenced from exactly one place, `llvm_emitter.rs`.
   `--target=r1cs` routes to `ZkEmitter`, which lowers to BN254 field
   constraints. There is no path from a ZK compile to the GEMM kernel, and the

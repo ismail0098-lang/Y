@@ -589,7 +589,7 @@ fn calls_that_hand_out_no_reference_still_verify() {
     ];
     for (name, body, _) in cases {
         let src = format!(
-            "fn main() {{\n    @safe {{\n        @invariant(i >= 0)\n        for i in 0..10 {{\n            {}\n        }}\n    }}\n}}\n",
+            "fn bump(value: I32) -> I32 {{ return value + 1; }}\nfn main() {{\n    @safe {{\n        @invariant(i >= 0)\n        for i in 0..10 {{\n            {}\n        }}\n    }}\n}}\n",
             body
         );
         let Some(out) = compile_with_solver(name, &src) else {
@@ -662,6 +662,14 @@ fn an_invariant_over_a_body_assigned_variable_can_be_verified() {
         (
             "entry_while",
             "fn main() {\n    let i: I32 = 0;\n    @invariant(i >= 0)\n    while i < 4 {\n        i = i + 1;\n    }\n}\n",
+        ),
+        (
+            "entry_while_i64",
+            "fn main() {\n    let i: I64 = 0;\n    @invariant(i >= 0)\n    while i < 4 {\n        i = i + 1;\n    }\n}\n",
+        ),
+        (
+            "entry_for_i64",
+            "fn main() {\n    let acc: I64 = 0;\n    @invariant(acc >= 0)\n    for i in 0..4 {\n        acc = acc + 1;\n    }\n}\n",
         ),
     ];
     for (name, src) in cases {
@@ -741,6 +749,10 @@ fn body_violations_are_still_caught() {
         (
             "entry_while_dec",
             "fn main() {\n    let i: I32 = 0;\n    @invariant(i >= 0)\n    while i < 4 {\n        i = i - 1;\n    }\n}\n",
+        ),
+        (
+            "entry_while_i64_dec",
+            "fn main() {\n    let i: I64 = 0;\n    @invariant(i >= 0)\n    while i < 4 {\n        i = i - 1;\n    }\n}\n",
         ),
     ];
     for (name, src) in cases {

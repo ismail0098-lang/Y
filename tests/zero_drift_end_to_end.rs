@@ -58,7 +58,7 @@ fn y_source() -> String {
     // Report the difference in exact Q32.32 units, so a discrepancy of a single
     // representable step shows up as 1 rather than rounding away to 0.
     s.push_str(&format!(
-        "    let diff: I32 = (fwd - rev) * {:.1};\n    print_int(diff);\n}}\n",
+        "    let diff: F32 = (fwd - rev) * {:.1};\n    print_int(diff);\n}}\n",
         SCALE
     ));
     s
