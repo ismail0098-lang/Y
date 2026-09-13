@@ -538,9 +538,15 @@ def the_measurements_read_their_inputs():
         bad += 1
     # (c2) the second-refusal census, restricted to two kernels.  A doc-reading
     #      implementation answers with the corpus figure whatever it is handed.
+    def _nlev(k):
+        # `ptx_back_edges` REFUSES a module with no defined subject; a bare call
+        # in a comprehension turns that refusal into a crash, and a crash in a
+        # gate reads as a missing feature.
+        try: return loopcfg.nest_shape(loopcfg.ptx_back_edges(f'corpus/{k}.ptx')[2])[1]
+        except Exception: return None
     two = [k for k in sorted(os.path.basename(x)[:-4] for x in glob.glob('corpus/*.ptx'))
            if os.path.exists(f'corpus/{k}.sass')
-           and loopcfg.nest_shape(loopcfg.ptx_back_edges(f'corpus/{k}.ptx')[2])[1] > 1][:2]
+           and (_n := _nlev(k)) is not None and _n > 1][:2]
     if len(two) < 2:
         print('FAIL: fewer than two multi-back-edge kernels; the control is vacuous')
         bad += 1

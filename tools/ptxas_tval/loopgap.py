@@ -34,6 +34,10 @@ BACKEDGE = re.compile(r'(PTX|SASS) has (\d+) back edges')
 # The ADDRESS and the count in this refusal are properties of the kernel, not
 # of the gap -- left in, every kernel is its own singleton bucket and the
 # census stops aggregating.  Same normalisation as the back-edge count above.
+# `this PTX module holds N entry points (...)` / `this disassembly holds N
+# .text sections (...)`.  The parenthesised list is per-kernel; the form is not.
+SUBJECT = re.compile(r'this (PTX module|disassembly) holds \d+ (?:entry points|\.text sections)')
+
 UNPLACEABLE = re.compile(r'(PTX|SASS) branch form this CFG cannot place at 0x[0-9a-f]+: (\'[^\']*\')')
 
 
@@ -53,6 +57,14 @@ def reason_key(msg, kernel=None):
     key then says `shape unknown` rather than naming a shape it did not
     measure."""
     msg = msg.split('\n')[0].strip()
+    # A module with no defined subject.  The names of the functions are what
+    # varies between kernels and the FORM is what a reader has to act on, so
+    # they are folded exactly as the unplaceable-branch form is -- a key that
+    # keeps them apart reports one bucket per kernel, which is not a census.
+    m = SUBJECT.search(msg)
+    if m:
+        return (f'{m.group(1)} holds more than one '
+                f'{"entry point" if m.group(1) == "PTX module" else ".text section"}')
     m = UNPLACEABLE.search(msg)
     if m:
         # keep the FORM, which is what a lift would have to learn; drop the
