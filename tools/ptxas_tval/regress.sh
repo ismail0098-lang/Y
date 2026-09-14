@@ -74,4 +74,65 @@ for t in "loopval o1/exact_pv" "loopval o1/naive_gemm_f32" \
     *)                     echo "$out" | grep -q '^VALIDATED' || bad=$((bad+1)) ;;
   esac
 done
+# The GLOBAL MEMORY MODEL's preconditions (memorder.py).  Every row below except
+# the two controls is a program the validator VALIDATED before memorder.py
+# existed, and six of the nine are WRONG translations built by hand from
+# ptxas's own output -- see each .ptx header.  The directions are the result:
+#
+#   REFUSED   las_sass las_ptx   a load that could read back a store, one row per
+#                                side, so neither half of the check can go alone
+#   REFUSED   lsls               the CORRECT ptxas output for las_ptx, and the
+#                                price of refusing: the model cannot tell it from
+#                                the wrong one.  A store-ordered memory model is
+#                                what turns this row green while las_ptx stays red
+#   UNPROVED  swap_alias swap_off3   stores reordered across a possible overlap
+#   VALIDATED swap_off4 off3     the controls: a reorder that cannot overlap, and
+#                                overlapping stores in the SAME order
+#   REFUSED   pstore pstore_wrong    a store BEFORE a loop, which loopval never
+#                                counted -- the wrong one wrote a different value
+#   VALIDATED pret               a predicated early return, CORRECT -- UNPROVED
+#                                before, because ptxexec read `ret` as `pass`
+#   UNPROVED  pret_wrong         the same with the SASS EXIT deleted -- VALIDATED
+#                                before: the pair's verdicts were inverted
+for n in las_sass las_ptx lsls swap_alias swap_off3 swap_off4 off3 pret pret_wrong; do
+  out=$(timeout 300 python3 tval.py "mem/$n.ptx" "mem/$n.sass" 12 3 15 2>&1 | tail -1)
+  printf '%-22s %s\n' "mem/$n" "$out"
+  case "$n" in
+    swap_off4|off3|pret)  echo "$out" | grep -q '^VALIDATED' || bad=$((bad+1)) ;;
+    pret_wrong)           echo "$out" | grep -q '^UNPROVED.*guard' || bad=$((bad+1)) ;;
+    swap_alias|swap_off3) echo "$out" | grep -q '^UNPROVED.*REORDERED' || bad=$((bad+1)) ;;
+    *)                    echo "$out" | grep -q '^REFUSED.*read back' || bad=$((bad+1)) ;;
+  esac
+done
+for n in pstore pstore_wrong; do
+  out=$(timeout 300 python3 loopval.py "mem/$n.ptx" "mem/$n.sass" 60 wide 2>&1 | tail -1)
+  printf '%-22s %s\n' "mem/$n" "$out"
+  echo "$out" | grep -q '^REFUSED.*store in the SASS prologue\|^REFUSED.*store in the PTX prologue' || bad=$((bad+1))
+done
+# The LOOP validator's other sites.  Each `_wrong`/`_exit`/`_nostore` row was
+# VALIDATED by loopval before this change; `loop_swap` is their control and
+# `loop_ls` is a correct translation refused only because the body is run twice.
+for n in loop_ls loop_swap loop_swap_wrong loop_swap_exit loop_body_exit loop_nostore loop_ret_wrong; do
+  out=$(timeout 300 python3 loopval.py "mem/$n.ptx" "mem/$n.sass" 60 wide 2>&1 | tail -1)
+  printf '%-22s %s\n' "mem/$n" "$out"
+  case "$n" in
+    loop_ls)         echo "$out" | grep -q '^REFUSED.*read back'        || bad=$((bad+1)) ;;
+    loop_swap)       echo "$out" | grep -q '^VALIDATED'                 || bad=$((bad+1)) ;;
+    loop_swap_wrong) echo "$out" | grep -q '^UNPROVED.*REORDERED'       || bad=$((bad+1)) ;;
+    loop_nostore)    echo "$out" | grep -q '^REFUSED.*stores nothing'   || bad=$((bad+1)) ;;
+    *)               echo "$out" | grep -q '^REFUSED.*can end the program' || bad=$((bad+1)) ;;
+  esac
+done
+# THE THIRD VALIDATOR.  `batch.validate` pairs global stores too, and its only
+# standing caller is `smemval` on a kernel with no loads -- so without these
+# rows its two new checks would be reached by nothing.  A guard consulted at
+# two of three sites is the bug this directory keeps finding.
+for n in las_sass las_ptx swap_alias; do
+  out=$(timeout 300 python3 smemval.py "mem/$n.ptx" "mem/$n.sass" 60 wide 2>&1 | tail -1)
+  printf '%-22s %s\n' "smemval mem/$n" "$out"
+  case "$n" in
+    swap_alias) echo "$out" | grep -q '^UNPROVED.*REORDERED' || bad=$((bad+1)) ;;
+    *)          echo "$out" | grep -q '^REFUSED.*read back'  || bad=$((bad+1)) ;;
+  esac
+done
 if [ "$bad" -ne 0 ]; then echo; echo "FAIL: $bad standing result(s) moved."; exit 1; fi

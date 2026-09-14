@@ -9,6 +9,7 @@ output is a correctness claim must reject.)
 import re, sys
 from z3 import *
 import smem
+import memorder
 
 W = 32
 def bv(n): return BitVecVal(n, W)
@@ -32,8 +33,7 @@ class Sass:
         self.sym = sym                    # shared symbol table with the PTX side
         self.mem = sym['mem']
         self.alive = BoolVal(True)
-        self.stores = []
-        self.loads = []
+        memorder.install(self)  # order-recording `loads`/`stores` -- see memorder.py
         self.defs = []          # (pc, name, expr) for every register definition
         self.wide = []          # (pc, 33-bit value:carry) for accumulating insns
         self.pc = 0

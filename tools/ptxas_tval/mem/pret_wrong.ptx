@@ -1,0 +1,31 @@
+// A WRONG TRANSLATION the validator VALIDATED before this change: pret with the
+// SASS `@P0 EXIT` deleted, so it stores for every thread.  With `ret` read as a
+// no-op the PTX said the same thing, and the two agreed.  The pair's verdicts
+// were INVERTED -- the right translation refuted, the wrong one proved.
+// Standing result: UNPROVED.
+.version 7.8
+.target sm_89
+.address_size 64
+.visible .entry probe(
+    .param .u64 P0, .param .u64 P1, .param .u64 P2,
+    .param .u64 P3, .param .u64 P4, .param .u64 P5
+)
+{
+    .reg .b32 %r<8>;
+    .reg .f32 %f<8>;
+    .reg .b64 %rd<32>;
+    .reg .pred %p<2>;
+    ld.param.u64 %rd0, [P0];
+    ld.param.u64 %rd1, [P1];
+    ld.param.u64 %rd3, [P3];
+    mov.u32 %r0, %tid.x;
+    cvt.u64.u32 %rd10, %r0;
+    shl.b64 %rd11, %rd10, 2;
+    add.u64 %rd20, %rd0, %rd11;
+    add.u64 %rd21, %rd1, %rd11;
+    add.u64 %rd23, %rd3, %rd11;
+    ld.global.f32 %f0, [%rd20];
+    setp.ge.u32 %p0, %r0, 4;
+    @%p0 ret;
+    st.global.f32 [%rd23], %f0;
+}

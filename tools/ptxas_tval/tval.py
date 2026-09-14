@@ -15,7 +15,7 @@ proof); they differ only in completeness.
 """
 import sys, time, random, collections
 from z3 import *
-import sassexec, ptxexec, mulmode, params, batch, conc
+import sassexec, ptxexec, mulmode, params, batch, conc, memorder
 
 def build(ptxf, sassf, mode, layout, sf, inv):
     mul = mulmode.MODES[mode]()
@@ -29,6 +29,15 @@ def run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     _, layout = params.parse(ptxf)
     sym0 = batch.mk(mul0, layout)
     P0 = ptxexec.run_ptx(ptxf, sym0); S0 = sassexec.run_sass(sassf, sym0)
+    # BEFORE anything is paired: the memory model reads every global load from
+    # the initial array, so a program with a read-back is one it cannot represent
+    # (memorder.py).  This validator VALIDATED a translation that hoists a load
+    # above the store it could read back, until this line existed.
+    try:
+        memorder.require_no_read_back('PTX', [P0])
+        memorder.require_no_read_back('SASS', [S0])
+    except memorder.Refusal as e:
+        return 'REFUSED', str(e), 0
     if len(P0.loads)!=len(S0.loads) or len(P0.stores)!=len(S0.stores):
         return 'UNPROVED', f'load/store counts {len(P0.loads)}/{len(S0.loads)} {len(P0.stores)}/{len(S0.stores)}', 0
     pre0=[ULT(sym0['tid_x'],BitVecVal(1024,32)), ULT(sym0['ctaid_x'],BitVecVal(1<<24,32))]
@@ -49,6 +58,17 @@ def run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     for i in range(len(P0.stores)):
         if not same(P0.stores[i][2], S0.stores[sperm[i]][2]): return 'UNPROVED', f'store {i} guard', nobl
         nobl+=1
+    # The pairing above is BY ADDRESS and in any order, so two stores the SASS
+    # performs in the opposite order were accepted however they overlap.  One
+    # obligation per reordered pair; none for an identity pairing (memorder.py).
+    try:
+        reord = memorder.reorder_obligations(list(P0.stores), sperm)
+    except memorder.Refusal as e:
+        return 'REFUSED', str(e), nobl
+    for (i, j), claim in reord:
+        s=Solver(); s.set('timeout',20*1000); s.add(pre0); s.add(Not(claim)); r=str(s.check())
+        nobl+=1
+        if r!='unsat': return 'UNPROVED', f'stores {i} and {j} are REORDERED and may overlap [{r}]', nobl
     log(f'  loads/addresses/guards: {nobl} obligations, load perm {lperm}, store perm {sperm}')
 
     pool={}

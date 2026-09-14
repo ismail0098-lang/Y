@@ -78,7 +78,12 @@ repository's own investigation documents contradict.
   research tool (`tools/ptxas_tval/`), not a CI gate, and it covers one
   compilation of one kernel at a time. **The three refutations are what the
   other thirteen are worth** — a validator that always said VALIDATED would
-  report every row identically.
+  report every row identically. **A further 21 rows pin the validator's own
+  effect model**: ten are wrong translations built by hand from `ptxas` output
+  that it VALIDATED until those rows existed — a load that could read back a
+  store, reordered stores that may overlap, an `EXIT` or early `ret` it could not
+  see, a store before a loop it never compared — and are now refused or refuted
+  by name, with the sixteen rows above unchanged.
   [Details](docs/ptxas_translation_validation.md).
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
