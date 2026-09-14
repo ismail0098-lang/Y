@@ -8,7 +8,7 @@
 """
 import sys, os, glob, time, traceback, importlib
 from z3 import *
-import sassexec, ptxexec, mulmode, params
+import sassexec, ptxexec, mulmode, params, memorder
 
 def mk(mul, layout, ab=None):
     sym = {'stackptr': BitVec('stackptr',32),
@@ -45,6 +45,14 @@ def validate(ptx, sass, budget, mode='uf'):
     _, layout = params.parse(ptx)
     sym = mk(mul, layout)
     P = ptxexec.run_ptx(ptx, sym); S = sassexec.run_sass(sass, sym)
+    # See memorder.py, and the identical guard in tval.run: this is the third
+    # validator that pairs global stores, and a guard consulted at two of three
+    # sites is the bug this directory keeps finding.
+    try:
+        memorder.require_no_read_back('PTX', [P])
+        memorder.require_no_read_back('SASS', [S])
+    except memorder.Refusal as e:
+        return 'REFUSED', str(e), 0
     if len(P.loads)!=len(S.loads) or len(P.stores)!=len(S.stores):
         return 'UNPROVED', f'load/store counts {len(P.loads)}/{len(S.loads)} {len(P.stores)}/{len(S.stores)}', 0
     pre=[ULT(sym['tid_x'],BitVecVal(1024,32)), ULT(sym['ctaid_x'],BitVecVal(1<<24,32))]
@@ -82,6 +90,14 @@ def validate(ptx, sass, budget, mode='uf'):
     for i in range(len(P.stores)):
         if not same(P.stores[i][2], S.stores[sperm[i]][2]): return 'UNPROVED', f'store {i} guard', n
         n+=1
+    try:
+        reord = memorder.reorder_obligations(list(P.stores), sperm)
+    except memorder.Refusal as e:
+        return 'REFUSED', str(e), n
+    for (i, j), claim in reord:
+        s=Solver(); s.set('timeout',20*1000); s.add(pre); s.add(Not(claim)); r=str(s.check())
+        n+=1
+        if r!='unsat': return 'UNPROVED', f'stores {i} and {j} are REORDERED and may overlap [{r}]', n
     # values, with the loads abstracted so both sides share the loaded words
     pool={}
     def sf(i,k): return pool.setdefault((i,k), BitVec(f'L{i}_{k}',32))

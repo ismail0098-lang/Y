@@ -46,7 +46,7 @@ proof.
 """
 import re, sys, time, random
 from z3 import *
-import loopcfg, ptxexec, sassexec, params, batch, mulmode, conc, mac64
+import loopcfg, ptxexec, sassexec, params, batch, mulmode, conc, mac64, memorder
 
 
 # ---------- selectors: a name for one 32-bit slot of a side's state ----------
@@ -258,10 +258,58 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
     se0   = sassexec.run_insns(S['epilogue'], sym, 'sass epilogue')
     pg0   = ptxexec.run_lines(P['pre_guard'], sym)
 
+    # FIRST, because it is the more fundamental refusal: "the model cannot
+    # represent this program" outranks "this validator does not handle it yet",
+    # and a store in the body followed by a load in the next iteration is a
+    # read-back that would survive lifting the store-in-body refusal below.
+    # Execution order: the header runs before every trip and once more on exit,
+    # and the body runs TWICE here so a store in one iteration followed by a load
+    # in the next is in the sequence (memorder.require_no_read_back).  Placed
+    # after the store-in-body refusal, the second copy of the body was
+    # unreachable -- a guard no fixture can reach is an untested one.
+    memorder.require_no_read_back('PTX', [pp, pg0, pb0, pg0, pb0, pg0, pe0])
+    memorder.require_no_read_back('SASS', [sprol, sb0, sb0, se0])
     if pb0.stores or sb0.stores:
         raise Exception(f'store inside the loop body (ptx {len(pb0.stores)}, sass '
                         f'{len(sb0.stores)}); this validator compares the stores after '
                         f'the loop only  (refusing, not guessing)')
+    # A STORE BEFORE THE LOOP WAS NOT REFUSED, IT WAS INVISIBLE.  The STORES
+    # obligation below compares the EPILOGUE's stores and nothing else, so a
+    # prologue store -- or one in the PTX header region that runs every
+    # iteration -- was never counted: a kernel with two stores reported "1
+    # stores", and a hand-built translation storing a DIFFERENT value before
+    # the loop VALIDATED.  Refused by name; comparing them is the named next step.
+    for where, region in (('PTX prologue', pp), ('PTX loop header', pg0),
+                          ('SASS prologue', sprol)):
+        if region.stores:
+            raise memorder.Refusal(
+                f'store in the {where} ({len(region.stores)}); this validator compares '
+                f'the stores after the loop only, so a store before it would go '
+                f'uncompared  (refusing, not guessing)')
+    # AN EXIT BEFORE THE EPILOGUE WAS A PATH THE REGION SPLIT DID NOT FOLLOW.
+    # `sassexec` models EXIT by narrowing `alive`, and stores respect `alive` --
+    # WITHIN one region.  The regions here are executed separately, so an EXIT in
+    # the prologue (a zero-trip guard that ends the program) or in the body (a
+    # loop cut short) never reached the epilogue's stores.  Measured on HEAD:
+    # a translation whose zero-trip guard EXITs instead of branching to the
+    # epilogue VALIDATED (the ENTRY obligation is only posed for a BRA), and so
+    # did one that EXITs from the body instead of iterating.  Refused by name.
+    # Both sides: `ptxexec` models a predicated `ret` the same way now.
+    for where, region in (('SASS prologue', sprol), ('SASS loop body', sb0),
+                          ('PTX prologue', pp), ('PTX loop header', pg0),
+                          ('PTX loop body', pb0)):
+        if not is_true(simplify(region.alive)):
+            raise memorder.Refusal(
+                f'{where} can end the program (EXIT / ret); the epilogue is validated '
+                f'as if it always runs, which a program that may end first does not '
+                f'do  (refusing, not guessing)')
+    # NOTHING TO PROVE IS NOT A PROOF.  `tval.run` has refused a kernel that
+    # stores nothing since a crash there was found; this validator did not, and
+    # a loop pair with no store on either side VALIDATED with "0 stores".
+    if not pe0.stores and not se0.stores:
+        raise memorder.Refusal(
+            'this loop kernel stores nothing on either side -- there is nothing to '
+            'prove equal  (refusing, not guessing)')
 
     neg, pidx = P['guard_pred']
     if pg0.p.get(pidx) is None: raise Exception('the PTX guard predicate is never defined')
@@ -410,6 +458,10 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
         if len(hit) != 1:
             return 'UNPROVED', f'epilogue store {i} matched {len(hit)} sass stores', n
         perm.append(hit[0])
+    for (i, j), claim in memorder.reorder_obligations(list(pe.stores), perm):
+        r = prove(claim); n += 1
+        if r != 'unsat':
+            return 'UNPROVED', f'epilogue stores {i} and {j} are REORDERED and may overlap: {r}', n
     for i, (pa, pv, pgd) in enumerate(pe.stores):
         sa, sv, sg = se.stores[perm[i]]
         r = prove(pgd == sg); n += 1

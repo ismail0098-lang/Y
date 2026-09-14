@@ -10,6 +10,7 @@ import re, sys
 from z3 import *
 import fpmode
 import smem
+import memorder
 
 W = 32
 def bv(n): return BitVecVal(n, W)
@@ -21,12 +22,23 @@ class Ptx:
         self.r = {}; self.rd = {}; self.p = {}; self.f = {}
         self.cc = BoolVal(False)          # the PTX carry flag
         self.sym = sym; self.mem = sym['mem']
-        self.stores = []; self.loads = []; self.defs = []; self.wide = []; self.pc = 0; self.count = 0; self.ops = set(); self.undef = 0
+        # FALSE once the kernel may have returned.  See the `ret` arm.
+        self.alive = BoolVal(True)
+        self.defs = []; self.wide = []; self.pc = 0; self.count = 0; self.ops = set(); self.undef = 0
+        # `loads` and `stores` record their PROGRAM ORDER as they grow -- see
+        # memorder.py for why the order is recorded by the list and not per arm.
+        memorder.install(self)
         # Shared memory is STATE, not a trace.  The global loads/stores above are
-        # a log the validator matches by address permutation, which works only
-        # because a kernel never reads back what it wrote to global memory in the
-        # same launch.  A shared roundtrip is exactly that read-back, so it needs
-        # an array.  See smem.py for the barrier model.
+        # a log the validator matches by address permutation.
+        #
+        # THIS COMMENT USED TO SAY that works "because a kernel never reads back
+        # what it wrote to global memory in the same launch" -- an assumption
+        # stated as a fact and checked by nothing.  It is false of kernels in the
+        # corpus as an ordering property, and the validator VALIDATED a
+        # hand-built translation that hoists a load above a store it could read
+        # back.  It is checked now (memorder.require_no_read_back).  A shared
+        # roundtrip is exactly that read-back, so shared memory needs an array.
+        # See smem.py for the barrier model.
         self.smem = sym.get('smem')
         self.bar = sym.get('bar')
         self.smem_layout = sym.get('smem_layout', {})
@@ -162,6 +174,12 @@ class Ptx:
         m = re.match(r'^@(!?%p\d+)\s+(.*)$', line)
         if m: pred, line = m.group(1), m.group(2)
         g = BoolVal(True) if pred is None else self.P(pred)
+        # After a possible early return, every effect is conditional on still
+        # running.  This is the ONE place a guard is computed, so every write,
+        # load, store and barrier inherits it.  Left untouched while `alive` is
+        # true, so a kernel with no early return builds exactly the terms it did.
+        if not is_true(self.alive):
+            g = self.alive if is_true(g) else And(self.alive, g)
         self.pc += 1
         parts = line.split(None, 1)
         op = parts[0]
@@ -366,7 +384,15 @@ class Ptx:
             self.wd(ops[0], self.D(ops[1]), g)
         elif op == 'cvt.u32.u64':   self.wr(ops[0], Extract(31,0,self.D(ops[1])), g)
         elif op in ('cvt.s64.s32',): self.wd(ops[0], SignExt(32, self.R(ops[1])), g)
-        elif op == 'ret':           pass
+        elif op == 'ret':
+            # THIS WAS `pass`, AND THE PTX IS THE SIDE THAT DEFINES CORRECT.  A
+            # predicated `@%p ret` is an early return -- ptxas lowers it to a
+            # predicated EXIT, which sassexec models by narrowing `alive` -- and
+            # reading it as a no-op made every store after it unconditional in
+            # the specification.  Measured on HEAD: the CORRECT translation came
+            # back UNPROVED (`store 0 guard`) and a WRONG one that drops the exit
+            # VALIDATED.  The verdicts were inverted, not merely weak.
+            self.alive = simplify(And(self.alive, Not(g)))
         # --- integer ALU -----------------------------------------------
         elif op in ('sub.u32','sub.s32'): self.wr(ops[0], self.R(ops[1]) - self.R(ops[2]), g)
         elif op == 'neg.s32':       self.wr(ops[0], -self.R(ops[1]), g)

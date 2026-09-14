@@ -82,6 +82,68 @@ from the shipped kernel by splitting the instruction back into two — a corpus
 containing nothing the validator refutes cannot be told apart from a validator
 that always says VALIDATED.
 
+### The validator's effect model had six blind spots
+
+Every row above is a claim about **stores** — where, under what guard, what
+value — and so is every obligation. The model of *when* an effect happens and
+*what* a load reads was never itself checked. Asked, it could not see an effect
+in six places, and **each was demonstrated by a translation built by hand from
+`ptxas`'s own output that the unmodified validator VALIDATED**. All six are
+closed and all are asserted by `regress.sh` from `tools/ptxas_tval/mem/`, whose
+`.ptx` headers say what each fixture is and what it used to get.
+
+| blind spot | wrong translation that VALIDATED before | now |
+|---|---|---|
+| a global load always reads the *initial* memory | `las_sass` (the SASS moves a store above a load that can read it back); `las_ptx` (the SASS hoists a load above the PTX store it could read) | REFUSED, each side on its own row |
+| stores paired by address may land in any order | `swap_alias` (two output pointers, swapped); `swap_off3` (+0 and +3, swapped); `loop_swap_wrong` (the same in a loop's epilogue) | UNPROVED — one disjointness obligation per reordered pair, `sat` |
+| `loopval` compares the epilogue's stores only | `pstore_wrong` (a store before the loop writes a different value) | REFUSED |
+| an `EXIT` never crosses a region boundary | `loop_swap_exit` (the zero-trip guard `EXIT`s past both epilogue stores); `loop_body_exit` (the body `EXIT`s instead of iterating); `loop_ret_wrong` (the SASS drops the body's early exit) | REFUSED |
+| a PTX `ret` is a no-op | `pret_wrong` (the SASS drops a predicated early exit) — and the **correct** `pret` came back UNPROVED | `pret` **VALIDATED**, `pret_wrong` UNPROVED |
+| a loop kernel has something to prove | `loop_nostore` ("0 stores") | REFUSED |
+
+Ten distinct wrong translations. `batch.validate` — the third validator that
+pairs global stores, reached through `smemval.py` — VALIDATED three of them as
+well (11 obligations each), so its two new checks are driven by rows of their
+own rather than inherited from the other two.
+
+**All sixteen standing rows are unchanged**, verdict and obligation count, 361
+in total — diffed before and after each change rather than assumed. That is not
+coverage, and the reason is measured: no standing row has a global load after a
+store on either side, every store pairing in every row is the identity, and the
+four loop rows store nothing outside the epilogue. **The blind spots were
+latent**, which is the argument for closing them while nothing depends on them.
+
+**`ptxexec` stated the first one as a fact about kernels** — *"a kernel never
+reads back what it wrote to global memory in the same launch"* — and nothing
+checked it. As an ordering property it is false of kernels in the corpus — a
+global load after a store in program order, or both inside one loop body —
+`y_cpu_matmul` among them, and identically at `-O1` and `-O3`. What was true is
+narrower: no *validated* kernel had one. That is checked now instead of stated.
+(No count is given here on purpose: it was measured by a one-off scan, and a
+figure in this document that no gate re-derives is how a count goes stale.)
+
+**The PTX early return inverted a verdict pair, not merely weakened one.**
+`ptxexec` read `ret` as `pass`, so the specification side made every store after
+a predicated return unconditional: the correct translation was refuted and the
+wrong one proved. It is modelled now the way `sassexec` already modelled `EXIT`
+— an `alive` term conjoined into the guard at the one place a guard is
+computed, and left untouched while it is true, so a kernel with no early return
+builds exactly the terms it did before.
+
+**The refusals have a price, and it is stated as standing rows rather than a
+footnote.** `lsls` is `ptxas`'s *correct* output for `las_ptx`'s PTX — it kept
+the store above the load it could not prove unaliased — and it is REFUSED,
+because a model that reads every load from the initial array cannot tell it from
+the wrong one. Before this, it validated both. A store-ordered memory model is
+what would turn `lsls` green while `las_ptx` stays red. `loop_ls` and `pstore`
+are the same price paid in the loop validator.
+
+**The order is recorded by the list type, not by each executor arm.** A load or
+store appended at an arm that forgot to log its position would make the
+read-back check vacuous for exactly that opcode — the guard-consulted-at-one-site
+bug — so `memorder.py` replaces both lists with a type that records on `append`
+and refuses every other mutation, and self-checks at import.
+
 ### The three `neg` rows are one opcode in two lowerings
 
 `neg/folded` and `neg/unfoldable` contain the same PTX instruction. One
@@ -809,6 +871,14 @@ relation is preserved — a fixpoint, since the candidate pairs are discovered
 rather than declared), `LOOPCOND` (same trip count), `STORES` (same effects,
 under a permutation).
 
+`STORES` compares the **epilogue's** stores and nothing else, and that is now
+enforced rather than assumed: a store in the prologue, in the PTX loop header or
+in the body is refused by name; so is an `EXIT` or `ret` in the prologue or the
+body — a path on which the epilogue never runs, which the region split does not
+follow — and so is a loop kernel that stores nothing on either side. Before
+that, each of those shapes VALIDATED a hand-built wrong translation; see
+*The validator's effect model had six blind spots* above.
+
 `exact_pv` — the one kernel here that also carries a Rocq proof — validates at `-O1` with
 14 obligations, 3 relation pairs and **1 multiplier identity assumed**. It does
 *not* validate at `-O2`/`-O3`, where `ptxas` unrolls the loop ×4. The
@@ -867,6 +937,13 @@ chain is not a proof about `ptxas`.
   about the silicon is a separate claim, supported by device probes (the MUFU
   identifications, the carry chain, the 64-bit MAC) and sampled rather than
   proved. Neither substitutes for the other.
+- **Global memory is an initial array plus an order-free store trace, and the
+  two conditions that make that exact are checked, not modelled.** A kernel in
+  which a global load could read back an earlier store is REFUSED, and two
+  stores a translation reorders must be provably disjoint. That is sound and
+  incomplete: `mem/lsls` is `ptxas`'s *correct* output and is refused, because
+  the model cannot tell it from the wrong `mem/las_ptx`. A store-ordered memory
+  model is what would validate the first and still refuse the second.
 - **`vpdpwssd`, Rocq's kernel and the processor executing its own ISA remain in
   the trusted base**, as `src/exact_gemm_certificate.rs` says.
 - **No result here is CI-gated.** It needs the CUDA toolkit, `z3`, and minutes to
@@ -882,7 +959,7 @@ Needs `python3` with `z3-solver`, and `ptxas` + `nvdisasm` from the CUDA toolkit
 ```sh
 cd tools/ptxas_tval
 ./build_corpus.sh          # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
-./regress.sh               # ALL sixteen standing results, ~50 s
+./regress.sh               # ALL standing results: 16 kernel rows + 21 effect-model rows, ~60 s
 python3 fpgate.py          # every float opcode a committed artifact carries
 python3 docgate.py         # the doc figures that describe a measurement
 python3 gap.py --rank      # cost per kernel, reach per opcode      (~15 min)
@@ -1374,6 +1451,23 @@ more short. At `-O1` the corpus is 66 kernels, **113** distinct blockers and
 > more-than-one-back-edge bucket split into its three shapes (+2 strings) —
 > `python3 frontier.py` is what reported the stale figure, by name, on the run
 > that made it stale.
+
+> **SUPERSEDED — re-measured at the level this claim is about, and the one
+> sufficiency case does not survive.** The paragraph below says the lift is
+> "the one item in the corpus with a sufficiency case". The second-refusal
+> census above was taken on the `-O3` corpus only; run over every kernel
+> re-assembled at `-O1`, the level this claim is made at, it answers the same:
+> no multi-back-edge kernel is left clear, and `y_cpu_matmul` still has a store
+> in the body of one PTX and one SASS level. Behind that is a blocker neither
+> census counts: the middle loop's store is followed by the next iteration's
+> inner loads, a read-back the memory model cannot represent (see *The
+> validator's effect model had six blind spots*). So the lift is necessary and
+> sufficient for nothing at **either** level, and the honest price of its one
+> candidate is a nested lift, a store-in-body relation **and** an order-aware
+> memory model. The two "SASS levels branch inside the body" the census also
+> reports for it are the child loops' zero-trip guards, which sit in the parent's
+> own body — a misattribution by the level decomposition, in the pessimistic
+> direction, recorded and not fixed. The paragraph is kept below as written.
 
 So the lift is not "sufficient for nothing". It is the one item in the corpus
 with a sufficiency case, and paying for it buys a **new standing result** rather
