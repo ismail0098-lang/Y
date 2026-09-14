@@ -158,6 +158,54 @@ repository's own investigation documents contradict.
 
 ---
 
+## What is verified, and what is not
+
+"Verified" means three different things in this repository, and the difference
+matters more than any single row below:
+
+- **Proved** — a Rocq theorem (24 files, no axioms, nothing admitted, run by
+  `cargo test`) or a Z3 query, about a *model* of the emitted code, tied to the
+  real code by a test or, for the exact GEMM and the attention schedule, by
+  rendering both from one description and requiring byte-identity.
+- **Validated** — one `ptxas` translation of one kernel file checked by z3: the
+  SASS stores exactly what the PTX stores, for that compilation, at that
+  architecture and optimisation level.
+- **Tested** — differentials, corpus sweeps and mutation tables. Strong evidence,
+  and not a proof.
+
+| kernel | proved | validated through `ptxas` | trusted or open |
+|---|---|---|---|
+| **CPU exact GEMM** (`vpdpwssd`) | **End to end**: the threaded, tiled, row- or K-split kernel holds the source dot products. The operand licence is checked exhaustively over int16, and a compilation emits its own certificate. | not applicable | `vpdpwssd`'s semantics (pinned on hardware, not proved); the ordering `pthread_join` imposes (ThreadSanitizer, dynamic); everything below the LLVM IR |
+| **Exact int8 attention** | Launch schedule byte-identical to the proof; exact at every launch geometry and every order the atomics land; a proved softmax error bound. Certificate emitted. | **no** | `ptxas` is trusted; `KFix` is not checked at the launch boundary; the int8 `V` quantisation is not modelled |
+| **int8 tensor-core GEMM** | Schedule (block-size guard, grid stride) *and* the value: exact in int32, with the emitter refusing `K > 133,120` | **no** — opcode and loop-structure gaps | the proof-to-code tie is transcription plus a gate, not extraction; no shared-memory staging (0.40x cuBLASLt) |
+| **`exact_pv`** | Holds the source dot product; both its ceilings stated | **yes, at `-O1`** | **the one kernel both proved and validated**; `-O2`/`-O3` unroll and are not matched; neither ceiling is checked at launch |
+| **f16 / fp8 tensor-core GEMMs** | the warp tile partition only (an illegal tile is refused) | no | **the value carries no proof: 923 of the 925 `mma.sync` this repository emits are floating point** |
+
+**The translation validator** has validated six committed kernels —
+`bn254_permute`, `bn254_sub_vec`, `ptx_carry_chain`, `exact_pv` (`-O1`),
+`naive_gemm_f32` (`-O1`) and `smem_roundtrip` — plus probe fixtures, and refutes
+the rows that are wrong on purpose. It is itself trusted: the executors are
+Python, z3 is trusted, one multiplier identity is assumed, and its float facts
+are refereed on one card rather than proved. What it cannot reach today: kernels
+with more than one loop back edge, a store inside a loop body, a load that could
+read back a store, float conversions, and `-O2`/`-O3` unrolling — which leaves
+most of the corpus outside it.
+
+**Outside the kernels.** The ZK backend's control-flow lowering is proved in Rocq
+over a model of the emitter, and its range, bit-decomposition, comparison and
+division gadgets are proved sound with Z3; Groth16 proofs are compared element
+for element with arkworks. `@invariant` is discharged by Z3 and refuses what it
+cannot model. The rest — the general LLVM backend, `--emit-native`,
+`--emit-cpu`, the type checker, the ZK optimisation passes — is tested, not
+verified.
+
+**The floor under all of it**: Rocq's kernel, z3, clang and LLVM, `ptxas` for
+every translation not validated, the CUDA driver, the ISA's semantics and the
+silicon. The emitted certificates list these as `NOT CHECKED` rather than
+implying otherwise.
+
+---
+
 ## Zero-Knowledge Backend (R1CS → Groth16)
 
 This is the most complete part of the project.
@@ -1903,8 +1951,8 @@ understates them.
 **That one bucket held three shapes needing three different validators**, and
 splitting it inverts the ranking: 30 are `SEQUENTIAL` (one loop after another —
 the cheap lift, and the *furthest* kernels in the corpus at 21–23 opcodes each),
-5 are `MIXED`, and 3 are a depth-3 `NESTED` loop, which is where the one kernel
-with a sufficiency case sits.
+5 are `MIXED`, and 3 are a depth-3 `NESTED` loop, which is where `y_cpu_matmul`
+— the kernel that once looked like the lift's sufficiency case — sits.
 
 **The two sides were reading different functions, and that is why this says 38
 where it used to say 32.** A module with more than one function has no defined
@@ -1922,7 +1970,8 @@ tensor-core item and the back-edge item share a blocker.
 
 > **This paragraph used to end "supporting more than one back edge is the
 > largest single lever in the corpus".** That was retracted in the doc — it
-> blocks 34 kernels and, at the level the corpus is built at, unblocks *none*,
+> blocked 34 kernels as then counted (38 now) and, at the level the corpus is
+> built at, unblocks *none*,
 > because every one of them also has an opcode gap. **The retraction landed in
 > one file of two**, which is the same defect as the certificate count that was
 > published in six places and gated in none. The current position, measured by
@@ -1935,8 +1984,10 @@ tensor-core item and the back-edge item share a blocker.
 > anything else. `liftgap.py` asks what is behind it — decompose the nest and run
 > the remaining structural predicates at every level a lift would produce — and
 > the answer is **0 of 38**: `y_cpu_matmul` has a **store in the body**, which
-> `loopval` refuses because it compares the stores *after* the loop. The lift is
-> sufficient for nothing at either level.
+> `loopval` refuses because it compares the stores *after* the loop. That census
+> had only ever read the `-O3` build; **re-run over every kernel re-assembled at
+> `-O1` it is still 0 of 38**, so the lift is sufficient for nothing at either
+> level — measured at both now, where it had been inferred at one.
 
 The census also puts a number on how the opcode census
 under-reports: `bra` reads as 37 kernels where a textual scan finds 48, split
@@ -1954,6 +2005,45 @@ The register-model refactor that would reach the rest of that family was built a
 a probe, measured, and **cancelled**: it reaches one kernel with no stores, and
 paying for it means threading register declarations through the loop validator's
 live-in recovery.
+
+#### The validator could not see six kinds of effect
+
+Pricing the honest lift means asking what a store inside a loop body needs from
+the memory model, and the model turned out to have two preconditions nothing
+checked. Both executors read every global load from the *initial* array and pair
+stores by address in any order — exact only if no load follows a store and no
+reordered store overlaps another. The PTX executor's own comment asserted the
+first as a fact about kernels. It held in every standing row by their shape, and
+it is false of `y_cpu_matmul`: the lift's one candidate carries a third blocker
+neither census counted.
+
+Built by hand from `ptxas` output and run on the **unmodified** validator — the
+loop fixtures on an archive of the previous commit, so no edit could leak into the
+"before" — ten wrong translations came back VALIDATED:
+
+| what the model assumed | wrong translation | before | now |
+|---|---|---|---|
+| a global load reads the initial memory | `las_sass`, `las_ptx` | VALIDATED | REFUSED |
+| stores may land in any order | `swap_alias`, `swap_off3`, `loop_swap_wrong` | VALIDATED | UNPROVED — `sat` |
+| the loop validator compares the epilogue's stores only | `pstore_wrong` | VALIDATED | REFUSED |
+| an `EXIT` never crosses a region boundary | `loop_swap_exit`, `loop_body_exit`, `loop_ret_wrong` | VALIDATED | REFUSED |
+| a PTX `ret` is a no-op | `pret_wrong` | VALIDATED | UNPROVED |
+| a loop kernel has something to prove | `loop_nostore` | VALIDATED | REFUSED |
+
+The `ret` row was an **inverted pair on the specification side**: the correct
+early-return translation came back UNPROVED while the wrong one validated.
+Modelling the return as an alive term at the one place a guard is computed makes
+the correct one **VALIDATE** — the only change here that adds reach. The third
+validator that pairs global stores, reached only through the shared-memory
+driver, had validated three of the ten as well, so every check now sits at all
+three sites. The sixteen standing rows are byte-identical in verdict and
+obligation count, and `regress.sh` grows to 37 rows.
+
+The price is stated as rows too. `lsls` is `ptxas`'s **correct** output — it
+keeps a store above a load it cannot prove unaliased, respecting the possibility
+the model ignored — and it is now REFUSED, because a model that reads every load
+from the initial array cannot tell it from its wrong twin. A store-ordered memory
+model is what would turn it green, and it is the real price of the back-edge lift.
 
 Also measured, and reported separately because they are different claims:
 `rcp.approx` differs from `rcp.rn` on **13.23%** of inputs on the device and
@@ -2078,26 +2168,35 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # ~655 tests
-cargo test --release --features zk      # ~905 tests, ZK included
+cargo test --release                    # ~700 tests
+cargo test --release --features zk      # ~955 tests, ZK included
 cargo test --release -p y-gpu           # the sibling crate; a bare `cargo test`
                                         # builds the root package ONLY and does
                                         # not run these 8
 ```
 
-**Four gates are conditional on an external tool, and a missing tool makes them
-SKIP AND REPORT `ok`.** A green run is therefore not by itself evidence that
-they ran — read this list before trusting one:
+**Many gates are conditional on an external tool or a device, and a missing one
+makes them SKIP AND REPORT `ok`.** Each prints a notice; the green summary line
+does not show it. A green run is therefore not by itself evidence that they
+ran — read this list before trusting one:
 
-| tool | gate | what it is the only check for |
+| needs | for example | what they are the only check for |
 |---|---|---|
-| `z3` | `safe_invariant_enforcement` | that `@safe`'s `@invariant` is discharged at all rather than assumed |
-| `ptxas` | `ptx_portability`, `ptx_intrinsics_assemble`, `coprocessor_ptx_assembles` | that emitted PTX is legal, at architectures this machine does not have |
+| `coqc` | `proofs_are_checked`, `exact_gemm_certificate`, `attention_certificate` | that the proofs, and the certificates a compilation emits, are checked at all |
+| `z3` | `safe_invariant_enforcement`, `zk_gadget_soundness` | that `@invariant` is discharged rather than assumed, and that the ZK gadgets are sound |
+| `clang` | the `exact_gemm_*` model suites, `backend_differential`, `zk_llvm_differential` | that the emitted LLVM computes what the proofs' models and the other backends say |
+| `llvm-as` / `llvm-dis` | `emitted_attribute_groups` | that an emitted module's attribute groups are coherent and a non-AVX-512 target gets no AVX-512 code |
+| ThreadSanitizer | `exact_gemm_thread_sanitizer` | the happens-before edges in the threaded exact GEMM |
+| `ptxas` | `ptx_portability`, `ptx_intrinsics_assemble`, `coprocessor_ptx_assembles`, `fma_contraction` | that emitted PTX is legal, at architectures this machine does not have |
+| a CUDA driver | `gpu_batch_invariance`, `gpu_attention_invariance`, `ptx_integer_datapath`, the `zk_gpu_*` suites | that a kernel computes the right answer on the device |
 | `solc` + Node (`npm install solc`) | `zk_solidity_verifier` | that the generated Groth16 verifier accepts a real proof on a real EVM |
 | `circom` | `circom_frontend`, `tools/circomlib_coverage.py` | that Y agrees with the reference compiler |
-| `rustc` | `cpu_emitter_output_compiles` | that the Rust `--emit-cpu` prints is Rust |
+| `rustc` | `cpu_emitter_lowering` | that the arithmetic `--emit-cpu` prints computes the right answer |
 
-That list is here because the third one had been skipping. Installing `solc`
+`cpu_emitter_output_compiles` is deliberately absent: without `rustc` it fails
+rather than skips.
+
+That list is here because the Solidity gate had been skipping. Installing `solc`
 made it run — and with the G2 coordinate order reverted to `(c0, c1)`, the bug
 the module comment in `src/zk_solidity.rs` exists to prevent, it **failed
 immediately**. Before the install, the same mutation passed the whole suite in
