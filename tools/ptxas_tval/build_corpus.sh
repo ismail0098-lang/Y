@@ -59,6 +59,59 @@ if [ -f "$REPO/tests/exact_pv.ptx" ]; then
     && echo "  o1/exact_pv rebuilt at -O1"
 fi
 
+# y_cpu_matmul is the NESTED subject (nestval.py): three loops, a store in the
+# middle one, rotated at -O1 with each child's zero-trip guard in its parent's
+# body and an EXIT guarding the whole nest.  Its five wrong twins are derived
+# here from the genuine output, each by ONE asserted instruction substitution,
+# so a ptxas that changes that output fails this build instead of silently
+# testing a different program:
+#   w1_store_stride    the store's row stride is K, not N          -> iteration store address
+#   w2_acc_add         the accumulator adds instead of multiply-adds -> iteration store value
+#   w3_acc_init        the inner accumulator starts at 1, not 0      -> never proposed
+#   w7_acc_init_k0     the inner accumulator is 1.0 exactly when K == 0 -> BASE (child):
+#                      random simulation cannot draw K == 0, so the pair IS
+#                      proposed, and the loop is skipped and that value stored
+#   w4_top_guard       the EXIT guard tests N, not M                 -> ENTRY (top level)
+#   w5_inner_guard     the inner zero-trip guard tests N, not K      -> ENTRY (child)
+#   w6_inner_backedge  the inner back edge tests N, not K            -> LOOPCOND
+if [ -f "$REPO/tests/y_cpu_matmul.ptx" ]; then
+  arch=$(grep -m1 -oE '^\.target[[:space:]]+sm_[0-9]+[a-z]*' "$REPO/tests/y_cpu_matmul.ptx" | awk '{print $2}')
+  ptxas -O1 -arch="$arch" -o o1/y_cpu_matmul.cubin "$REPO/tests/y_cpu_matmul.ptx" 2>/dev/null \
+    && nvdisasm -c o1/y_cpu_matmul.cubin > o1/y_cpu_matmul.sass \
+    && cp "$REPO/tests/y_cpu_matmul.ptx" o1/y_cpu_matmul.ptx \
+    && echo "  o1/y_cpu_matmul rebuilt at -O1" || exit 1
+  python3 - o1 <<'PY' || exit 1
+import sys
+d = sys.argv[1]
+src = open(f'{d}/y_cpu_matmul.sass').read()
+ptx = open(f'{d}/y_cpu_matmul.ptx').read()
+I = '                   '
+twins = {
+ 'w1_store_stride':   ('/*01f0*/' + I + 'IMAD R3, R0.reuse, c[0x0][0x17c], R7 ;',
+                       '/*01f0*/' + I + 'IMAD R3, R0.reuse, c[0x0][0x180], R7 ;'),
+ 'w2_acc_add':        ('/*01c0*/' + I + 'FFMA R9, R8, R10, R9 ;',
+                       '/*01c0*/' + I + 'FADD R9, R8, R9 ;'),
+ 'w3_acc_init':       ('/*0090*/' + I + 'IMAD.MOV.U32 R9, RZ, RZ, RZ ;',
+                       '/*0090*/' + I + 'IMAD.MOV.U32 R9, RZ, RZ, 0x1 ;'),
+ 'w7_acc_init_k0':    ('/*0090*/' + I + 'IMAD.MOV.U32 R9, RZ, RZ, RZ ;',
+                       '/*0090*/' + I + 'IMAD.MOV.U32 R9, RZ, RZ, 0x3f800000 ;\n'
+                       '        /*0098*/' + I + 'FSEL R9, RZ, R9, P0 ;'),
+ 'w4_top_guard':      ('/*0010*/' + I + 'ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x178], PT ;',
+                       '/*0010*/' + I + 'ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x17c], PT ;'),
+ 'w5_inner_guard':    ('/*0080*/' + I + 'ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x180], PT ;',
+                       '/*0080*/' + I + 'ISETP.LT.U32.AND P0, PT, RZ, c[0x0][0x17c], PT ;'),
+ 'w6_inner_backedge': ('/*01a0*/' + I + 'ISETP.GE.U32.AND P0, PT, R6, c[0x0][0x180], PT ;',
+                       '/*01a0*/' + I + 'ISETP.GE.U32.AND P0, PT, R6, c[0x0][0x17c], PT ;'),
+}
+for name, (a, b) in twins.items():
+    if src.count(a) != 1:
+        raise SystemExit(f'y_cpu_matmul -O1 output moved: anchor for {name} found {src.count(a)} times')
+    open(f'{d}/y_cpu_matmul_{name}.sass', 'w').write(src.replace(a, b))
+    open(f'{d}/y_cpu_matmul_{name}.ptx', 'w').write(ptx)
+print(f'  o1/y_cpu_matmul: {len(twins)} wrong twins derived')
+PY
+fi
+
 # naive_gemm_f32 is the other -O1 subject, and it is a TRIPLE rather than a
 # kernel.  The shipped PTX now says `fma.rn.f32` -- one rounding, which is what
 # the hardware performs -- and it VALIDATES.  Both other readings of the same

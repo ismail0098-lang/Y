@@ -47,7 +47,7 @@ so each check carries a floor AND a positive control that goes through the SAME
 code path: a PERTURBED census and a PERTURBED artifact must both be reported.
 A control that re-implements the check is a second measurement.
 """
-import collections, glob, os, re, sys, tempfile
+import collections, glob, json, os, re, shutil, sys, tempfile
 
 import frontier
 import liftgap
@@ -569,10 +569,72 @@ def the_measurements_read_their_inputs():
     return bad
 
 
+def digest_with(kernel):
+    """`frontier.digest()` over a tree in which one corpus artifact changed.
+
+    The INPUT is perturbed -- a symlink farm with one `.ptx` rewritten -- and the
+    digest is taken by the same call the stamp check makes."""
+    here = os.getcwd()
+    tmp = tempfile.mkdtemp(prefix='docgate_stamp_')
+    try:
+        os.makedirs(os.path.join(tmp, 'corpus'))
+        for f in glob.glob('corpus/*'):
+            os.symlink(os.path.abspath(f), os.path.join(tmp, 'corpus', os.path.basename(f)))
+        for m in frontier.MODELS:
+            os.symlink(os.path.abspath(m), os.path.join(tmp, m))
+        tgt = os.path.join(tmp, 'corpus', kernel + '.ptx')
+        os.unlink(tgt)
+        open(tgt, 'w').write(open(f'corpus/{kernel}.ptx').read() + '// perturbed\n')
+        os.chdir(tmp)
+        return frontier.digest()
+    finally:
+        os.chdir(here)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_frontier_stamp(tree=None, doc_text=None):
+    """The frontier census's doc figures, in seconds, against the census's own stamp.
+
+    THE FIGURES WENT STALE FOR TWO COMMITS AND THIS IS WHY.  `frontier.py` asserts
+    them, but only when its minutes-long census runs, and every gate run after a
+    fixture rewrite moved them was `frontier.py --selftest`, which never reaches
+    the figures.  So the census now stamps the TREE it measured
+    (`frontier.write_stamp`), and this check fails when the stamp is for a
+    different tree -- the doc's figures are unconfirmed until the census runs --
+    and otherwise compares the doc against the stamped measurement through
+    `frontier.compare_doc`, the census's own comparison, never a copy."""
+    if not os.path.exists(frontier.STAMP):
+        print(f'FAIL: {frontier.STAMP} is missing -- run `python3 frontier.py` and '
+              '`python3 frontier.py --o1`')
+        return 1
+    stamp = json.load(open(frontier.STAMP))
+    tree = frontier.digest() if tree is None else tree
+    bad = 0
+    for key, o1, cmd in (('O3', False, 'python3 frontier.py'),
+                         ('O1', True, 'python3 frontier.py --o1')):
+        e = stamp.get(key)
+        if not e:
+            print(f'FAIL: {frontier.STAMP} has no {key} measurement -- run `{cmd}`')
+            bad += 1
+            continue
+        want = tree + ('|o1' if o1 else '')
+        if e['digest'] != want:
+            print(f'FAIL: the {key} census was stamped on a different tree '
+                  f'({e["digest"][:12]} != {want[:12]}), so the doc\'s {key} figures are '
+                  f'unconfirmed until `{cmd}` runs (minutes)')
+            bad += 1
+            continue
+        bad += frontier.compare_doc(e['summary'], o1, doc_text)
+    if not bad:
+        print(f'ok: frontier census figures, both levels, against the stamp for tree '
+              f'{tree[:12]}')
+    return bad
+
+
 if __name__ == '__main__':
     bad = (check_loop_census() + check_staging_table()
            + check_optimisation_level_gaps() + the_shape_is_measured_from_the_artifact()
-           + check_second_refusal())
+           + check_second_refusal() + check_frontier_stamp())
     # POSITIVE CONTROLS, through the same code path.  Without these a parse that
     # recovered nothing, or a comparison that compared nothing, reports ok.
     # The FAIL lines they print below are the controls WORKING; they are the
@@ -590,6 +652,18 @@ if __name__ == '__main__':
     if check_second_refusal(perturb='NESTED depth 9') == 0:
         print('FAIL: a perturbed second-refusal census was not reported -- '
               'the comparison is dead')
+        bad += 1
+    if check_frontier_stamp(tree=digest_with('bn254_fr_mul')) == 0:
+        print('FAIL: a tree with one corpus artifact changed still matches the stamp -- '
+              'the digest comparison is dead')
+        bad += 1
+    _doc = open(DOC).read()
+    _bumped, _n = re.subn(r'(\d+\s+kernels,\s+\*\*)(\d+)(\*\*\s+distinct\s+blockers)',
+                          lambda m: m.group(1) + str(int(m.group(2)) + 1) + m.group(3),
+                          _doc, count=1)
+    if _n != 1 or check_frontier_stamp(doc_text=_bumped) == 0:
+        print('FAIL: a doc with its -O3 distinct-blocker figure moved still matches the '
+              'stamp -- the figure comparison is dead')
         bad += 1
     print('  control: a perturbed census, artifact and -O figure are all reported')
     bad += the_measurements_read_their_inputs()

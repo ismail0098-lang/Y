@@ -55,16 +55,18 @@ def fresh(ptxf):
     return batch.mk(mulmode.MODES['wide'](), layout)
 
 def ptx_insns(path):
-    out, started = [], False
-    for line in open(path):
-        s = line.strip()
-        if s.startswith('//') or not s: continue
-        if s.startswith('.') or s.endswith('(') : continue
-        if s == '{': started = True; continue
-        if s == '}': break
-        if not started or not s.endswith(';'): continue
-        out.append(s[:-1].strip())
-    return out
+    """The PTX instructions, read by `loopcfg`'s scanner rather than a copy of it.
+
+    This file kept its own scanner, and it ended at the FIRST `}` -- an inner
+    brace of the `{ ... }` blocks `quantization_pass` emits -- so for seven
+    kernels the opcode gap was measured over 10-43% of the program.  The same
+    `break` was fixed in `ptxexec` and `loopcfg` and not here: one fix, two of
+    its three sites.  Importing the scanner makes it one site.  A module with two
+    entry points is refused, exactly as `ptxexec.run_ptx` refuses it, instead of
+    being censused over whichever entry the file happens to declare first."""
+    import loopcfg
+    raw, _, _ = loopcfg.ptx_back_edges(path)
+    return [t for k, t in raw if k == 'i']
 
 def sass_insns(path):
     out = []

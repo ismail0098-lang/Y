@@ -32,6 +32,20 @@ def build(ptxf, sassf, mode, layout, sf, inv, sinv, lrep=None):
     return P, sassexec.run_sass(sassf, symS), symP
 
 def run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
+    """`_run`, with a refusal raised INSIDE an executor reported as a refusal.
+
+    `memorder` refuses a trace it cannot represent, and it can do so from inside
+    `ptxexec`/`sassexec` while they build the state -- before any obligation is
+    posed.  That escaped here as a traceback, so `regress.sh` read a crash where
+    the tool meant "REFUSED", and a crash reads as a missing feature.  `batch`
+    already caught it; this validator did not."""
+    try:
+        return _run(ptxf, sassf, NS, B1, B2, log)
+    except memorder.Refusal as e:
+        return 'REFUSED', f'{e}', 0
+
+
+def _run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     t_start = time.time(); nobl = 0
     mul0 = mulmode.MODES['wide']()
     _, layout = params.parse(ptxf)

@@ -179,4 +179,49 @@ for n in las_sass las_ptx swap_alias lsls; do
     *)          echo "$out" | grep -q '^UNPROVED.*store 1 value: sat' || bad=$((bad+1)) ;;
   esac
 done
+# THE NEST VALIDATOR (nestval.py).  `y_cpu_matmul` at -O1 is three nested loops
+# with a store in the middle one -- the kernel the multi-back-edge lift was
+# priced on -- and it VALIDATES at exactly 17 obligations.  Every row after it
+# is asserted in its OWN direction, because a nest validator that always said
+# VALIDATED would report that row identically:
+#   w1..w6          one wrong instruction each, refuted at the obligation that
+#                   mutation breaks (store address, store value, BASE, two
+#                   ENTRY guards, LOOPCOND)
+#   nest_accum      b[0] += a[i]: a read-back ACROSS iterations, VALIDATED
+#   nest_accum_stale  the same with b[0] loaded once before the loop: refuted,
+#                   and only a model carrying memory between iterations can see it
+#   _rn, _muladd, exact_pv   agreement with loopval on single loops
+#   loop_swap_exit  an EXIT zero-trip guard with stores after the nest: refused
+for t in o1/y_cpu_matmul o1/y_cpu_matmul_w1_store_stride o1/y_cpu_matmul_w2_acc_add \
+         o1/y_cpu_matmul_w3_acc_init o1/y_cpu_matmul_w4_top_guard o1/y_cpu_matmul_w5_inner_guard \
+         o1/y_cpu_matmul_w6_inner_backedge o1/y_cpu_matmul_w7_acc_init_k0 mem/nest_accum mem/nest_accum_stale \
+         o1/naive_gemm_f32_rn o1/naive_gemm_f32_muladd o1/exact_pv mem/loop_ls mem/loop_swap_exit; do
+  out=$(timeout 600 python3 nestval.py "$t.ptx" "$t.sass" 20 2>&1 | tail -1)
+  printf '%-22s %s\n' "nest ${t#*/}" "$out"
+  case "$t" in
+    o1/y_cpu_matmul)             echo "$out" | grep -q '^VALIDATED  17 obligations'                 || bad=$((bad+1)) ;;
+    *w1_store_stride)            echo "$out" | grep -q '^UNPROVED.*iteration store 0 address'       || bad=$((bad+1)) ;;
+    *w2_acc_add)                 echo "$out" | grep -q '^UNPROVED.*iteration store 0 value: sat'    || bad=$((bad+1)) ;;
+    *w3_acc_init|*w7_acc_init_k0) echo "$out" | grep -q '^UNPROVED.*iteration store 0 value: sat'   || bad=$((bad+1)) ;;
+    *w4_top_guard|*w5_inner_guard) echo "$out" | grep -q '^UNPROVED.*ENTRY: zero-trip guards disagree' || bad=$((bad+1)) ;;
+    *w6_inner_backedge)          echo "$out" | grep -q '^UNPROVED.*LOOPCOND'                        || bad=$((bad+1)) ;;
+    mem/nest_accum_stale)        echo "$out" | grep -q '^UNPROVED.*iteration store 0 value: sat'    || bad=$((bad+1)) ;;
+    o1/naive_gemm_f32_muladd)    echo "$out" | grep -q '^UNPROVED.*epilogue store 0 value: sat'     || bad=$((bad+1)) ;;
+    mem/loop_swap_exit)          echo "$out" | grep -q '^REFUSED.*EXITs when the nest runs zero times' || bad=$((bad+1)) ;;
+    *)                           echo "$out" | grep -q '^VALIDATED'                                 || bad=$((bad+1)) ;;
+  esac
+done
+# A REFUSAL RAISED INSIDE AN EXECUTOR IS A REFUSAL, NOT A CRASH.  `memorder`
+# can refuse while `ptxexec`/`sassexec` build the state, and `tval.run` let that
+# escape as a traceback.  No fixture reaches it (a real kernel that does would
+# be a refusal worth its own row), so the executor is made to raise and the
+# row asserts `tval.run` names it -- through `run` itself, not a copy of it.
+out=$(timeout 60 python3 -c "
+import tval, ptxexec, memorder
+def boom(*a, **k): raise memorder.Refusal('probe refusal from inside an executor')
+ptxexec.run_ptx = boom
+v, msg, n = tval.run('mem/lsls.ptx', 'mem/lsls.sass', log=lambda *a: None)
+print(v, n, msg)" 2>&1 | tail -1)
+printf '%-22s %s\n' "tval executor refusal" "$out"
+echo "$out" | grep -q '^REFUSED 0 probe refusal from inside an executor' || bad=$((bad+1))
 if [ "$bad" -ne 0 ]; then echo; echo "FAIL: $bad standing result(s) moved."; exit 1; fi
