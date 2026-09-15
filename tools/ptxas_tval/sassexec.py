@@ -31,7 +31,6 @@ class Sass:
     def __init__(self, sym):
         self.R = {}; self.P = {}; self.UR = {}
         self.sym = sym                    # shared symbol table with the PTX side
-        self.mem = sym['mem']
         self.alive = BoolVal(True)
         memorder.install(self)  # order-recording `loads`/`stores` -- see memorder.py
         self.defs = []          # (pc, name, expr) for every register definition
@@ -45,6 +44,24 @@ class Sass:
         self.smem_ops = []
         self.smem_snaps = []      # array contents ENTERING each barrier
         self.align_obs = []
+
+    def gload(self, addr, i, k, off=None, nbytes=4):
+        """THE ONLY PATH TO GLOBAL MEMORY, pinned at import -- the twin of
+        `ptxexec.Ptx.gload`, and the two must build a load's term the same way
+        or nothing downstream means anything.  See that docstring."""
+        if 'abstract' in self.sym:
+            base = self.sym['abstract'](i, k)
+            if not self.stores:
+                return base
+            # see ptxexec.Ptx.gload for the address hook
+            hook = self.sym.get('abstract_addr')
+            at_ = hook('L', i) if hook else addr
+            sts = ([(hook('S', j), v, gg) for j, (_a, v, gg) in enumerate(self.stores)]
+                   if hook else list(self.stores))
+            return memorder.read_through(sts, at_ if off is None else at_ + BitVecVal(off, 64),
+                                         base, nbytes)
+        a = addr if off is None else addr + BitVecVal(off, 64)
+        return memorder.read_through(self.stores, a, Select(self.sym['mem'], a), nbytes)
 
     # ---- operand readers -------------------------------------------------
     def rd(self, o):
@@ -499,6 +516,14 @@ class Sass:
                                self.sym['fp']('FMIN', self.frd(ops[1]), self.frd(ops[2]), side='sass'),
                                self.sym['fp']('FMAX', self.frd(ops[1]), self.frd(ops[2]), side='sass')), g)
         elif opc == 'LOP3.LUT':
+            # A SIXTH OPERAND, READ BY NOTHING until now.  Every one of the corpus's
+            # LOP3.LUT carries `!PT` there, so its meaning has never been exercised
+            # -- which is exactly when a dropped operand is invisible.  Refuse any
+            # other value by name rather than read the three sources as if it were
+            # absent (the `BRA P1, label` shape, one opcode over).
+            if len(ops) != 6 or ops[5] != '!PT':
+                raise Exception(f'unmodelled LOP3.LUT form {body!r}: the sixth operand is '
+                                f'not `!PT`  (refusing, not guessing)')
             lut = int(ops[4], 16)
             self.wr(ops[0], self.lop3(rd(ops[1]), rd(ops[2]), rd(ops[3]), lut), g)
         elif opc == 'LEA':
@@ -552,26 +577,21 @@ class Sass:
             addr = self.gaddr(ops[1])
             i = len(self.loads); self.loads.append((addr, g))
             for k in range(4):
-                v = (self.sym['abstract'](i, k) if 'abstract' in self.sym
-                     else Select(self.mem, addr + BitVecVal(4*k, 64)))
-                self.wr(f'R{base+k}', v, g)
+                self.wr(f'R{base+k}', self.gload(addr, i, k, 4*k), g)
         elif opc in ('LDG.E','LDG.E.U32','LDG.E.128.CONSTANT','LDG.E.CONSTANT'):
             addr = self.gaddr(ops[1])
             i = len(self.loads); self.loads.append((addr, g))
             nw = 4 if '128' in opc else 1
             base = int(ops[0][1:])
             for k in range(nw):
-                v = (self.sym['abstract'](i,k) if 'abstract' in self.sym
-                     else Select(self.mem, addr + BitVecVal(4*k,64)))
-                self.wr(f'R{base+k}', v, g)
+                self.wr(f'R{base+k}', self.gload(addr, i, k, 4*k), g)
         elif opc in ('LDG.E.S8','LDG.E.U8','LDG.E.S16','LDG.E.U16'):
             # same word-per-byte-address convention as ptxexec's ld.global.s8;
             # the two must agree or nothing downstream means anything
             addr = self.gaddr(ops[1])
             i = len(self.loads); self.loads.append((addr, g))
-            w = (self.sym['abstract'](i,0) if 'abstract' in self.sym
-                 else Select(self.mem, addr))
             nb = 8 if opc.endswith('8') else 16
+            w = self.gload(addr, i, 0, None, nb // 8)
             byte = Extract(nb-1, 0, w)
             self.wr(ops[0], (SignExt(W-nb, byte) if '.S' in opc else ZeroExt(W-nb, byte)), g)
         elif opc == 'STG.E.64':
@@ -579,6 +599,11 @@ class Sass:
             # split exactly as ptxexec's st.global.u64 does: lo at addr, hi at +4
             self.stores.append((addr, self.rd(f'R{vb}'), g))
             self.stores.append((addr + BitVecVal(4, 64), self.rd(f'R{vb+1}'), g))
+        elif opc in ('STG.E.U8','STG.E.S8','STG.E.U16','STG.E.S16'):
+            # the SASS half of ptxexec's sub-word store; `subword_abi.py` measures it
+            addr = self.gaddr(ops[0])
+            nb = 8 if opc.endswith('8') else 16
+            self.stores.append((addr, Extract(nb - 1, 0, self.rd(ops[1])), g))
         elif opc in ('STG.E',):
             addr = self.gaddr(ops[0])
             self.stores.append((addr, self.rd(ops[1]), g))
@@ -607,6 +632,9 @@ def bra_target(ops):
     return re.fullmatch(r'`\(\.L_(\w+)\)', ops[0])
 
 
+memorder.pin_one_memory_path(Sass)
+
+
 def _self_check():
     """Both halves, at import.  A parse that accepts everything, or nothing, is
     what a missing refusal and an over-refusal look like respectively."""
@@ -618,6 +646,20 @@ def _self_check():
                             'operand is being dropped  (guessing, not refusing)')
     if bra_target(['R4']):
         raise Exception('sassexec: a non-label BRA operand is accepted')
+    # LOP3.LUT's sixth operand: every corpus instance is `!PT`, so no fixture can
+    # see the refusal of any other value removed.  Both halves, here.
+    from z3 import Array, BitVecSort
+    sym = {'mem': Array('sassexec_lop3_mem', BitVecSort(64), BitVecSort(32))}
+    st = Sass(sym); st.labels = {}; st.joins = []
+    st.step('LOP3.LUT R0, R1, R2, R3, 0xc0, !PT', 0)
+    try:
+        st.step('LOP3.LUT R0, R1, R2, R3, 0xc0, P1', 0x10)
+        raise AssertionError('sassexec: a LOP3.LUT with a non-`!PT` sixth operand was '
+                             'read as if it were absent  (guessing, not refusing)')
+    except AssertionError:
+        raise
+    except Exception:
+        pass
 
 
 _self_check()

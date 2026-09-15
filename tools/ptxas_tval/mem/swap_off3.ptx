@@ -3,6 +3,11 @@
 // overlap by one byte, so the byte at +3 differs.  Refuted (sat).  This row and
 // swap_off4 are the boundary, one byte wide.
 // Standing result: UNPROVED.
+// ON THE DEVICE THIS PROGRAM FAULTS.  A 32-bit global store at an address that is
+// not a multiple of 4 is `misaligned address` on sm_89 (`subword_abi.py`, the
+// alignment census), so no run ends with the overlapping bytes this fixture is
+// about.  It pins the ARITHMETIC of the reorder obligation, which the model
+// states without faults; that the model describes no fault is a stated limit.
 .version 7.8
 .target sm_89
 .address_size 64

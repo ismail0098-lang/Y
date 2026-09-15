@@ -264,11 +264,16 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
     # read-back that would survive lifting the store-in-body refusal below.
     # Execution order: the header runs before every trip and once more on exit,
     # and the body runs TWICE here so a store in one iteration followed by a load
-    # in the next is in the sequence (memorder.require_no_read_back).  Placed
-    # after the store-in-body refusal, the second copy of the body was
-    # unreachable -- a guard no fixture can reach is an untested one.
-    memorder.require_no_read_back('PTX', [pp, pg0, pb0, pg0, pb0, pg0, pe0])
-    memorder.require_no_read_back('SASS', [sprol, sb0, sb0, se0])
+    # in the next is in the sequence.  Placed after the store-in-body refusal,
+    # the second copy of the body was unreachable -- a guard no fixture can
+    # reach is an untested one.
+    #
+    # ACROSS REGIONS ONLY.  The executors read a load through the stores made
+    # earlier in the SAME region (memorder.read_through), so a read-back inside
+    # the epilogue is modelled.  One that crosses a region boundary is not: each
+    # region runs in a fresh state whose store trace starts empty.
+    memorder.require_no_read_back_across('PTX', [pp, pg0, pb0, pg0, pb0, pg0, pe0])
+    memorder.require_no_read_back_across('SASS', [sprol, sb0, sb0, se0])
     if pb0.stores or sb0.stores:
         raise Exception(f'store inside the loop body (ptx {len(pb0.stores)}, sass '
                         f'{len(sb0.stores)}); this validator compares the stores after '
@@ -458,6 +463,9 @@ def validate(ptx_path, sass_path, budget=60, mode='wide', samples=24, verbose=Tr
         if len(hit) != 1:
             return 'UNPROVED', f'epilogue store {i} matched {len(hit)} sass stores', n
         perm.append(hit[0])
+    for i, (pa, pv, pgd) in enumerate(pe.stores):
+        wp, ws = pv.size(), se.stores[perm[i]][1].size()
+        if wp != ws: return 'UNPROVED', f'epilogue store {i} width: ptx {wp} bits, sass {ws} bits', n
     for (i, j), claim in memorder.reorder_obligations(list(pe.stores), perm):
         r = prove(claim); n += 1
         if r != 'unsat':

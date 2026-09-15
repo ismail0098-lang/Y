@@ -45,13 +45,14 @@ them moves — the two UNPROVED rows included.
 | `bn254_permute` | **VALIDATED** | 30 | 0.2 s | branching `ptxas` invented |
 | `bn254_sub_vec` | **VALIDATED** | 88 | 12.6 s | |
 | `ptx_carry_chain` | **VALIDATED** | 123 | 33.4 s | 24 predicated instructions |
+| `ptx_subword_ops` | **VALIDATED** | 31 | 0.3 s | **sub-word stores**, and a load that can read one back — measured 2026-09-15 |
 | `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.1 s | across a **loop**; 1 multiplier identity assumed |
 | `smem_roundtrip` | **VALIDATED** | 18 | 0.2 s | **shared memory**, 1 barrier |
 | `naive_gemm_f32` @ `-O1` | **VALIDATED** | 9 | 0.2 s | **a shipped GEMM** — the emitter says `fma.rn.f32` |
 | `naive_gemm_f32_muladd` @ `-O1` | UNPROVED | 7 | 0.2 s | the form Y used to ship — `store 0 value: sat` |
 | `naive_gemm_f32_rn` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden*, at a different SASS |
 
-Thirteen kernels validated, **361 obligations**, and three UNPROVED rows that
+Fourteen kernels validated, **392 obligations**, and three UNPROVED rows that
 are results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
 UNPROVED and are discussed under *The wall* below — neither produced a `sat`.
 
@@ -94,7 +95,7 @@ closed and all are asserted by `regress.sh` from `tools/ptxas_tval/mem/`, whose
 
 | blind spot | wrong translation that VALIDATED before | now |
 |---|---|---|
-| a global load always reads the *initial* memory | `las_sass` (the SASS moves a store above a load that can read it back); `las_ptx` (the SASS hoists a load above the PTX store it could read) | REFUSED, each side on its own row |
+| a global load always reads the *initial* memory | `las_sass` (the SASS moves a store above a load that can read it back); `las_ptx` (the SASS hoists a load above the PTX store it could read) | REFUTED (`store 1: sat`), each side on its own row — REFUSED until the store-ordered model below |
 | stores paired by address may land in any order | `swap_alias` (two output pointers, swapped); `swap_off3` (+0 and +3, swapped); `loop_swap_wrong` (the same in a loop's epilogue) | UNPROVED — one disjointness obligation per reordered pair, `sat` |
 | `loopval` compares the epilogue's stores only | `pstore_wrong` (a store before the loop writes a different value) | REFUSED |
 | an `EXIT` never crosses a region boundary | `loop_swap_exit` (the zero-trip guard `EXIT`s past both epilogue stores); `loop_body_exit` (the body `EXIT`s instead of iterating); `loop_ret_wrong` (the SASS drops the body's early exit) | REFUSED |
@@ -130,6 +131,12 @@ wrong one proved. It is modelled now the way `sassexec` already modelled `EXIT`
 computed, and left untouched while it is true, so a kernel with no early return
 builds exactly the terms it did before.
 
+> **Paid, 2026-09-15.** `lsls` VALIDATES and both wrong twins are refuted with a
+> counterexample: a global load reads memory as updated by the stores before it,
+> byte by byte. See *The memory model reads through stores* below. `pstore` and
+> `loop_ls` do **not** move, and measuring why is part of that section — neither
+> was ever waiting on the memory model alone. The paragraph is kept as written.
+
 **The refusals have a price, and it is stated as standing rows rather than a
 footnote.** `lsls` is `ptxas`'s *correct* output for `las_ptx`'s PTX — it kept
 the store above the load it could not prove unaliased — and it is REFUSED,
@@ -143,6 +150,136 @@ store appended at an arm that forgot to log its position would make the
 read-back check vacuous for exactly that opcode — the guard-consulted-at-one-site
 bug — so `memorder.py` replaces both lists with a type that records on `append`
 and refuses every other mutation, and self-checks at import.
+
+### The memory model reads through stores, and one corpus kernel needed it
+
+A global load reads the memory **as updated by every earlier store on its own
+side** (`memorder.read_through`), byte by byte, and a store carries its width as
+its value's width. So a load hoisted above a store it could read back builds a
+*different* term from the load below it, and the store value it feeds is
+**refuted** rather than refused. `mem/lsls` — `ptxas`'s correct output, and the
+price the refusal paid — **VALIDATES**; `las_ptx` and `las_sass` come back
+`store 1: sat`. The straight-line validators no longer refuse a read-back.
+`loopval` still refuses one that crosses a region boundary, because it executes
+regions separately and a region's store trace starts empty.
+
+**Every standing row builds byte-identical terms**, and that is measured, not
+argued. The executors' terms were fingerprinted per row, one process per row,
+against a `git archive` of the previous commit: **31 of 34 rows identical**, and
+the 3 that differ are exactly the read-back fixtures whose terms are supposed to
+change. With nothing stored yet `read_through` returns its base unchanged and
+builds no z3 node, and every standing row loads before its first store.
+
+**Getting there found a hazard the fingerprints could see and no verdict can.**
+The first version moved **nine** standing rows' fingerprints without one
+executor line changing. The cause was `memorder`'s import-time self-check: it
+built and freed more z3 nodes, z3 reuses a freed node's number, and the multiply
+primitive and the float functions order their operands by that number — so a
+self-check edit reorders commutative operands in unrelated kernels' terms. With
+the self-check removed on both sides, 31 of 34 matched. The check's historical
+main-context allocation is kept as it was and everything added since runs in a
+**private z3 `Context`**, so a future self-check edit cannot perturb a proof term.
+The same mechanism as *Two censuses in one interpreter changed a verdict*, reached
+through an import rather than a preamble.
+
+**The first working version was 300x slower on the one row it was for.** A load
+after a store is an ITE over byte-address differences, and with each side's own
+address terms the solver re-proves every address equality inside it: **8–11 s**
+for `lsls`'s one store value, against the 15 s refinement budget. The pairing
+phase had already proved each SASS load and store address equal to its PTX
+partner's, so the SASS side's read-through is built from those addresses
+(`abstract_addr`): **0.03 s**. `regress.sh` asserts `lsls` at **exactly 10
+obligations** — the eleventh is the direct-multiply refinement, which runs only
+when the abstraction cannot discharge the read-through, so the count is the
+structural form of that performance property.
+
+#### The one corpus kernel it reaches, and what that needed
+
+Priced before building. None of the eight straight-line kernels the frontier
+calls clear has a read-back on either side — measured by running the executors —
+so **the store-ordered model alone validates no corpus kernel.** The loop kernels
+with a read-back also need the store-in-body lift. The one straight-line kernel
+whose need it *is* is `ptx_subword_ops`: its PTX loads `A8` again after a byte
+store to `OBack8`, and it was blocked on three opcodes — `cvt.u8.u32`,
+`st.global.s8`, `STG.E.S8` — that the width-less model could not make sound. With
+widths it can, and three more things were needed:
+
+* **Two device facts, refereed by `subword_abi.py`.** `STG.E.{U,S}{8,16}` write
+  exactly their low bytes, little-endian, and nothing else: 192 stores (two
+  probes, 32 lanes, 3 stores each) into poisoned words at byte offsets inside a
+  lane, 0 disagreements. `cvt.u8.u32`
+  **truncates**: 32 vectors, 12 of them separating truncation from saturation,
+  0 disagreeing. That PTX opcode has no executable definition other than running
+  it, so for it a `ptxas` bug is in the trusted base, as for `max.f32`.
+* **Loads at one proved address share one base symbol.** The kernel reads `A8[i]`
+  twice, and the pairing refused `load 0 address matched 2`. That refusal was
+  right when a pairing chose which initial-memory symbol a load got; it is not a
+  choice now, because the base stands for the initial memory *at an address* —
+  one value however many loads read it — and the read-through supplies whatever
+  was stored in between (`memorder.pair_by_address`).
+* **Stores of different widths are refused as a pair**, rather than crashing on a
+  z3 sort mismatch.
+
+**It VALIDATES, 31 obligations**, and its two wrong twins — built by hand from
+`ptxas`'s own SASS — are asserted in their own directions: `mem/subword_hoist`
+(the read-back load hoisted above the byte store) is **refuted, `store 6: sat`**,
+and `mem/subword_widen` (the byte store widened to a word) is **UNPROVED on the
+store width**. `regress.sh` grows to 42 rows — the forty-second is below.
+
+#### A device fact the model does not describe
+
+A 16-bit store at an odd byte offset **faulted** in the first referee probe, so
+the referee now opens with an alignment census, one kernel and one process per
+case because a fault is sticky in a CUDA context:
+
+```
+st.global.u8   offset 0..3:    ok    ok    ok    ok
+st.global.u16  offset 0..3:    ok FAULT    ok FAULT
+st.global.u32  offset 0..3:    ok FAULT FAULT FAULT
+ld.global.u8   offset 0..3:    ok    ok    ok    ok
+ld.global.u16  offset 0..3:    ok FAULT    ok FAULT
+ld.global.u32  offset 0..3:    ok FAULT FAULT FAULT
+fault messages: ['misaligned address']
+```
+
+An access of width *w* runs iff its address is a multiple of *w*, on sm_89 —
+asserted, not printed. **The executors model no fault**, for any width, and
+never did. So `mem/off3` and `mem/swap_off3`, whose headers described two word
+stores at `+0` and `+3` ending with different bytes, describe programs that
+**fault** on the device: they pin the reorder obligation's arithmetic, not a run.
+Their headers say so now. Mixed widths can overlap legally — a byte store inside
+an aligned word — and the model states that case too.
+
+#### A pairing order nothing pinned
+
+Loads in an equal-address group share one base, so the order their members pair
+in does not matter. **Stores are different**: pairing two stores at one address
+in reverse compares the second store's value with the first's, so a correct
+translation goes UNPROVED — soundness holds (the reorder obligation still refuses
+a reversed same-address pair), completeness does not. No row had two stores at
+one address, and the mutation that reverses a group's pairing **survived the
+first table**. `mem/sls_alias` closes it: store to `P2[i]`, load `P3[i]`, store to
+`P2[i]` again. `P3` may alias `P2`, so `ptxas` can neither forward the store into
+the load nor delete the first store as dead, and its genuine output keeps both.
+It VALIDATES, and with the pairing reversed it is `UNPROVED — stores 0 and 1 are
+REORDERED and may overlap`.
+
+#### What the queue had conflated
+
+The queue said the store-ordered model was "what would make `lsls` / `loop_ls` /
+`pstore` validate". Measured: it turns **`lsls`** green. `pstore` has **no load**
+at all — its header says so — so no memory model can be what it needs; it needs
+prologue stores *compared* rather than refused. `loop_ls` is refused on a
+read-back that crosses an iteration, which is the store-in-body lift.
+
+#### A latent dropped operand, found on the way
+
+Every one of the corpus's 2,879 `LOP3.LUT` carries a sixth operand, `!PT`, and
+`sassexec` read nothing past the fifth. Its meaning has never been exercised — the
+exact condition under which a dropped operand is invisible — so any other value
+is refused by name now, pinned at import because no fixture can reach it: the
+`BRA P1, label` shape, one opcode over. (The 61 seven-operand hits are
+`PLOP3.LUT`, a different, unmodelled opcode.)
 
 ### The three `neg` rows are one opcode in two lowerings
 
@@ -344,7 +481,9 @@ kernel uses, and it overturned the obvious read:
   (none device-validated) and f16 pack/unpack. FFMA contraction used to be on
   that list and no longer is: the rotation states both halves of its own
   fusion, so those kernels are now exactly as deep as their opcodes.
-- `ptx_subword_ops` is the cheapest kernel left: 8 unknown PTX ops, all integer,
+- **Built 2026-09-15, and it VALIDATES** — see *The memory model reads through
+  stores*. Kept as written:
+  `ptx_subword_ops` is the cheapest kernel left: 8 unknown PTX ops, all integer,
   no float, no branch, no loop, no shared memory. **Both halves of that are
   wrong, and it is measured below** — the dynamic gap is *three* opcodes, not
   eight, and the SASS side does branch. It is also the wrong kernel to build.
@@ -937,13 +1076,14 @@ chain is not a proof about `ptxas`.
   about the silicon is a separate claim, supported by device probes (the MUFU
   identifications, the carry chain, the 64-bit MAC) and sampled rather than
   proved. Neither substitutes for the other.
-- **Global memory is an initial array plus an order-free store trace, and the
-  two conditions that make that exact are checked, not modelled.** A kernel in
-  which a global load could read back an earlier store is REFUSED, and two
-  stores a translation reorders must be provably disjoint. That is sound and
-  incomplete: `mem/lsls` is `ptxas`'s *correct* output and is refused, because
-  the model cannot tell it from the wrong `mem/las_ptx`. A store-ordered memory
-  model is what would validate the first and still refuse the second.
+- **Global memory is store-ordered and byte-faithful, and it describes no
+  fault.** A load reads through every earlier store on its side, and two stores a
+  translation reorders must be provably disjoint. On the device a 16- or 32-bit
+  global access at a misaligned address **faults** (`subword_abi.py`), and the
+  model says nothing about a program that faults. `loopval` executes regions
+  separately, so a load that could read back a store made in an *earlier region*
+  is still REFUSED. Initial memory is a word per byte address, which admits more
+  memories than the machine has — sound for equivalence, never complete.
 - **`vpdpwssd`, Rocq's kernel and the processor executing its own ISA remain in
   the trusted base**, as `src/exact_gemm_certificate.rs` says.
 - **No result here is CI-gated.** It needs the CUDA toolkit, `z3`, and minutes to
@@ -959,7 +1099,8 @@ Needs `python3` with `z3-solver`, and `ptxas` + `nvdisasm` from the CUDA toolkit
 ```sh
 cd tools/ptxas_tval
 ./build_corpus.sh          # tests/*.ptx -> corpus/ and o1/, via ptxas + nvdisasm
-./regress.sh               # ALL standing results: 16 kernel rows + 21 effect-model rows, ~60 s
+./regress.sh               # ALL standing results: 17 kernel rows + 25 memory-model rows, ~RUNTIME
+python3 subword_abi.py     # device referee: alignment census, sub-word stores, u8 conversion
 python3 fpgate.py          # every float opcode a committed artifact carries
 python3 docgate.py         # the doc figures that describe a measurement
 python3 gap.py --rank      # cost per kernel, reach per opcode      (~15 min)
@@ -1050,6 +1191,14 @@ kernel where one side masks in a register and the other in the store). Doing it
 properly means a width field through six unpack sites in `loopval.py`,
 `batch.py` and `muls.py`. **Not built** — the measurement said not to, and
 refusing sub-word stores today leaves the tool sound rather than leaving a hole.
+
+> **Built 2026-09-15, because the decision stopped being a trade-off.** A
+> byte-faithful memory model gives a store its width, so a sub-word store is
+> compared as exactly the bytes it writes — neither the truncated-value nor the
+> full-register compromise. `ptx_subword_ops` VALIDATES and its two wrong twins
+> are refuted. "Worth nothing" was right about **reach** and wrong as a verdict:
+> it is the one corpus kernel whose validation needs a read-back to be modelled,
+> which is what made it the store-ordered model's only corpus reach.
 
 ### The loop kernels are gated twice, and only one gate had been counted
 
@@ -1409,10 +1558,10 @@ is checking while both are wrong:
   gap — that is not a gap of zero and is its own blocker.
 
 **In the committed corpus every blocker has a sole-count of zero.** 66 kernels,
-**109** distinct blockers, and not one of them would validate a kernel on its own
+**101** distinct blockers, and not one of them would validate a kernel on its own
 — including every item then on the queue. `cvt.rn.f16.f32` is sole blocker of
 nothing; so is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the
-back-edge lift. That is the honest state of a corpus where **8 kernels are clear,
+back-edge lift. That is the honest state of a corpus where **9 kernels are clear,
 the median is 15 blockers and 31 of 66 are 21 or more**, and it is why "reach"
 kept naming work that buys nothing.
 
@@ -1427,8 +1576,8 @@ limit, three on each side.
 
 Measured over the whole corpus at that level, **at `-O1` exactly one kernel is
 one blocker away: `y_cpu_matmul`** — everything else is either clear or two or
-more short. At `-O1` the corpus is 66 kernels, **113** distinct blockers and
-**10** clear (`exact_pv` and `naive_gemm_f32` join the eight, which is the same
+more short. At `-O1` the corpus is 66 kernels, **105** distinct blockers and
+**11** clear (`exact_pv` and `naive_gemm_f32` join the nine, which is the same
 `-O` effect the corrected bullet above measures).
 
 > **Those two counts were published and gated by NOTHING until this
@@ -1451,6 +1600,20 @@ more short. At `-O1` the corpus is 66 kernels, **113** distinct blockers and
 > more-than-one-back-edge bucket split into its three shapes (+2 strings) —
 > `python3 frontier.py` is what reported the stale figure, by name, on the run
 > that made it stale.
+
+> **They moved again, 109 → 101 at `-O3` and 113 → 105 at `-O1`, and only 3 of
+> the 8 belong to the increment that noticed.** `ptx_subword_ops` went 3 → 0 —
+> `cvt.u8.u32`, `st.global.s8` and `STG.E.S8` blocked it and nothing else — so it
+> is the ninth clear kernel at `-O3` and the eleventh at `-O1`. The other net 5
+> came from `a1b524d`, which rewrote two fixtures for unrelated reasons:
+> `test_drift` fell 17 → 6, losing seven float64 blockers no other kernel
+> carries, and `deterministic_reduce` rose 9 → 12, gaining two. **So 109 and 113
+> were right when `8b7122a` published them and stale from `a1b524d` on, through
+> two more commits.** The cache key was not at fault — it hashes the corpus as well
+> as the modules — and nothing ran the census: its cache is dated an hour before
+> `8b7122a`, and every gate run since was `frontier.py --selftest`, which checks
+> the controls over two kernels and never reaches `check_doc`. A figure asserted
+> only by a minutes-long command is asserted only when somebody pays for it.
 
 > **SUPERSEDED — re-measured at the level this claim is about, and the one
 > sufficiency case does not survive.** The paragraph below says the lift is
@@ -1525,6 +1688,24 @@ census validated `exact_pv` again and the control reported itself vacuous rather
 than passing quietly. So more volume is not more contamination, and **a control
 that sets up its own experiment cannot inherit whatever the process has already
 done**: it runs in a child now, every time.
+
+**It went vacuous a second time, in a fresh child, and that is what retired a
+fixed recipe.** The child ran exactly 60 rounds of unrelated census work, and
+after the memory model's self-check moved into a private z3 `Context` — a change
+that alters only which nodes are built and freed at import — the in-process census
+validated `exact_pv` again. Sweeping the preamble, one fresh child per size, at the
+previous commit and on the change:
+
+```
+preamble        0   5   12   30   60   120   240
+at e509590      V   U   U    V    U    V     U
+after it        V   U   U    V    V    U     U
+```
+
+Non-monotone at **both** commits, and 60 and 120 swapped. A contaminating count
+is a fact about the current construction history, not about the hazard, so the
+control tries 5, 12, 60, 120 and 240 in order, uses the first that contaminates,
+and reports itself vacuous only if none does.
 
 > And the cache hid the fix. `frontier.py`'s digest keyed on the corpus and on
 > the *executor* sources and not on `frontier.py` itself — where `PTX_DISCOUNT`

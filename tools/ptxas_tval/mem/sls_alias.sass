@@ -1,0 +1,49 @@
+	.target	sm_89
+
+	.elftype	@"ET_EXEC"
+
+
+//--------------------- .text.probe               --------------------------
+	.section	.text.probe,"ax",@progbits
+	.sectioninfo	@"SHI_REGISTERS=12"
+	.align	128
+        .global         probe
+        .type           probe,@function
+        .size           probe,(.L_x_1 - probe)
+        .other          probe,@"STO_CUDA_ENTRY STV_DEFAULT"
+probe:
+.text.probe:
+        /*0000*/                   IMAD.MOV.U32 R1, RZ, RZ, c[0x0][0x28] ;
+        /*0010*/                   S2R R0, SR_TID.X ;
+        /*0020*/                   ULDC.64 UR4, c[0x0][0x118] ;
+        /*0030*/                   IMAD.SHL.U32 R6, R0, 0x4, RZ ;
+        /*0040*/                   SHF.R.U32.HI R0, RZ, 0x1e, R0 ;
+        /*0050*/                   IADD3 R4, P0, R6, c[0x0][0x160], RZ ;
+        /*0060*/                   IADD3.X R5, R0, c[0x0][0x164], RZ, P0, !PT ;
+        /*0070*/                   LDG.E R5, [R4.64] ;
+        /*0080*/                   IADD3 R2, P0, R6.reuse, c[0x0][0x170], RZ ;
+        /*0090*/                   IADD3 R6, P1, R6, c[0x0][0x178], RZ ;
+        /*00a0*/                   IADD3.X R3, R0.reuse, c[0x0][0x174], RZ, P0, !PT ;
+        /*00b0*/                   IADD3.X R7, R0, c[0x0][0x17c], RZ, P1, !PT ;
+        /*00c0*/                   STG.E [R2.64], R5 ;
+        /*00d0*/                   LDG.E R6, [R6.64] ;
+        /*00e0*/                   IMAD.IADD R9, R5, 0x1, R6 ;
+        /*00f0*/                   STG.E [R2.64], R9 ;
+        /*0100*/                   EXIT ;
+.L_x_0:
+        /*0110*/                   BRA `(.L_x_0);
+        /*0120*/                   NOP;
+        /*0130*/                   NOP;
+        /*0140*/                   NOP;
+        /*0150*/                   NOP;
+        /*0160*/                   NOP;
+        /*0170*/                   NOP;
+        /*0180*/                   NOP;
+        /*0190*/                   NOP;
+        /*01a0*/                   NOP;
+        /*01b0*/                   NOP;
+        /*01c0*/                   NOP;
+        /*01d0*/                   NOP;
+        /*01e0*/                   NOP;
+        /*01f0*/                   NOP;
+.L_x_1:

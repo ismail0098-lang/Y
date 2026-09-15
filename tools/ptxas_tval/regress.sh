@@ -74,40 +74,78 @@ for t in "loopval o1/exact_pv" "loopval o1/naive_gemm_f32" \
     *)                     echo "$out" | grep -q '^VALIDATED' || bad=$((bad+1)) ;;
   esac
 done
-# The GLOBAL MEMORY MODEL's preconditions (memorder.py).  Every row below except
-# the two controls is a program the validator VALIDATED before memorder.py
-# existed, and six of the nine are WRONG translations built by hand from
-# ptxas's own output -- see each .ptx header.  The directions are the result:
+# The GLOBAL MEMORY MODEL (memorder.py).  Every row below except the controls is
+# a program the validator VALIDATED before memorder.py existed, and six of the
+# nine are WRONG translations built by hand from ptxas's own output -- see each
+# .ptx header.  The directions are the result:
 #
-#   REFUSED   las_sass las_ptx   a load that could read back a store, one row per
-#                                side, so neither half of the check can go alone
-#   REFUSED   lsls               the CORRECT ptxas output for las_ptx, and the
-#                                price of refusing: the model cannot tell it from
-#                                the wrong one.  A store-ordered memory model is
-#                                what turns this row green while las_ptx stays red
+#   UNPROVED  las_sass las_ptx   a load that could read back a store, one row per
+#                                side: REFUTED with a counterexample (`store 1:
+#                                sat`) now that a load reads through the stores
+#                                before it.  They were REFUSED while the model
+#                                read every load from the initial array; asserting
+#                                the `sat` is what separates a refutation from a
+#                                solver timeout
+#   VALIDATED lsls               the CORRECT ptxas output for las_ptx.  It was the
+#                                refusal's price -- the old model could not tell
+#                                it from the wrong one -- and turning it green
+#                                while las_ptx stays refuted is what the
+#                                store-ordered model is for
 #   UNPROVED  swap_alias swap_off3   stores reordered across a possible overlap
 #   VALIDATED swap_off4 off3     the controls: a reorder that cannot overlap, and
 #                                overlapping stores in the SAME order
 #   REFUSED   pstore pstore_wrong    a store BEFORE a loop, which loopval never
 #                                counted -- the wrong one wrote a different value
+#   VALIDATED sls_alias          two stores to ONE address with a possible read-back
+#                                between them, ptxas's genuine output.  It pins the
+#                                ORDER memorder.pair_by_address pairs a same-address
+#                                group in: reversed, this correct row goes UNPROVED,
+#                                and no other row has two stores at one address
 #   VALIDATED pret               a predicated early return, CORRECT -- UNPROVED
 #                                before, because ptxexec read `ret` as `pass`
 #   UNPROVED  pret_wrong         the same with the SASS EXIT deleted -- VALIDATED
 #                                before: the pair's verdicts were inverted
-for n in las_sass las_ptx lsls swap_alias swap_off3 swap_off4 off3 pret pret_wrong; do
-  out=$(timeout 300 python3 tval.py "mem/$n.ptx" "mem/$n.sass" 12 3 15 2>&1 | tail -1)
+for n in las_sass las_ptx lsls swap_alias swap_off3 swap_off4 off3 sls_alias pret pret_wrong; do
+  full=$(timeout 300 python3 tval.py "mem/$n.ptx" "mem/$n.sass" 12 3 15 2>&1)
+  out=$(echo "$full" | tail -1)
   printf '%-22s %s\n' "mem/$n" "$out"
   case "$n" in
-    swap_off4|off3|pret)  echo "$out" | grep -q '^VALIDATED' || bad=$((bad+1)) ;;
+    # lsls at EXACTLY 10: the eleventh obligation is the direct-multiply refinement,
+    # which runs only when the abstraction cannot discharge the read-through --
+    # measured 8-11 s without the address hook, 0.03 s with it.  The count is the
+    # structural form of that performance property; a timing would be flaky.
+    lsls)                 echo "$out" | grep -q '^VALIDATED  10 obligations' || bad=$((bad+1)) ;;
+    swap_off4|off3|sls_alias|pret) echo "$out" | grep -q '^VALIDATED' || bad=$((bad+1)) ;;
     pret_wrong)           echo "$out" | grep -q '^UNPROVED.*guard' || bad=$((bad+1)) ;;
     swap_alias|swap_off3) echo "$out" | grep -q '^UNPROVED.*REORDERED' || bad=$((bad+1)) ;;
-    *)                    echo "$out" | grep -q '^REFUSED.*read back' || bad=$((bad+1)) ;;
+    las_sass|las_ptx)     { echo "$out" | grep -q '^UNPROVED' && echo "$full" | grep -q '^  store 1: sat$'; } || bad=$((bad+1)) ;;
+    *)                    bad=$((bad+1)) ;;
   esac
 done
 for n in pstore pstore_wrong; do
   out=$(timeout 300 python3 loopval.py "mem/$n.ptx" "mem/$n.sass" 60 wide 2>&1 | tail -1)
   printf '%-22s %s\n' "mem/$n" "$out"
   echo "$out" | grep -q '^REFUSED.*store in the SASS prologue\|^REFUSED.*store in the PTX prologue' || bad=$((bad+1))
+done
+# SUB-WORD STORES AND A REAL READ-BACK.  `ptx_subword_ops` is a committed corpus
+# kernel: its PTX loads A8 again AFTER a byte store to OBack8, and it stores
+# sub-word values.  It was blocked on three opcodes the old memory model could
+# not make sound (it had no store width) and on a read-back it refused.  It
+# VALIDATES now, and its two wrong twins are each asserted in their own direction
+# -- a corpus row that turns green is worth what its refutations are worth:
+#   subword_hoist  the SASS read-back hoisted above the byte store: REFUTED
+#   subword_widen  the byte store widened to a word: UNPROVED on the store width
+# The device facts under it (a sub-word store writes exactly its bytes; u8
+# conversion truncates; wide accesses fault misaligned) are `subword_abi.py`.
+for n in corpus/ptx_subword_ops mem/subword_hoist mem/subword_widen; do
+  full=$(timeout 900 python3 tval.py "$n.ptx" "$n.sass" 12 3 15 2>&1)
+  out=$(echo "$full" | tail -1)
+  printf '%-22s %s\n' "$n" "$out"
+  case "$n" in
+    corpus/ptx_subword_ops) echo "$out" | grep -q '^VALIDATED' || bad=$((bad+1)) ;;
+    mem/subword_hoist)      { echo "$out" | grep -q '^UNPROVED' && echo "$full" | grep -q '^  store 6: sat$'; } || bad=$((bad+1)) ;;
+    mem/subword_widen)      echo "$out" | grep -q '^UNPROVED.*store 5 width: ptx 8 bits, sass 32 bits' || bad=$((bad+1)) ;;
+  esac
 done
 # The LOOP validator's other sites.  Each `_wrong`/`_exit`/`_nostore` row was
 # VALIDATED by loopval before this change; `loop_swap` is their control and
@@ -127,12 +165,18 @@ done
 # standing caller is `smemval` on a kernel with no loads -- so without these
 # rows its two new checks would be reached by nothing.  A guard consulted at
 # two of three sites is the bug this directory keeps finding.
-for n in las_sass las_ptx swap_alias; do
+#
+# `lsls` is here too: the address hook that makes a read-through cheap is wired
+# into this validator separately (`batch.validate` builds its own abstract
+# posing), so its correct read-back needs a row of its own or that wiring is
+# reached by nothing.
+for n in las_sass las_ptx swap_alias lsls; do
   out=$(timeout 300 python3 smemval.py "mem/$n.ptx" "mem/$n.sass" 60 wide 2>&1 | tail -1)
   printf '%-22s %s\n' "smemval mem/$n" "$out"
   case "$n" in
-    swap_alias) echo "$out" | grep -q '^UNPROVED.*REORDERED' || bad=$((bad+1)) ;;
-    *)          echo "$out" | grep -q '^REFUSED.*read back'  || bad=$((bad+1)) ;;
+    swap_alias) echo "$out" | grep -q '^UNPROVED.*REORDERED'        || bad=$((bad+1)) ;;
+    lsls)       echo "$out" | grep -q '^VALIDATED'                  || bad=$((bad+1)) ;;
+    *)          echo "$out" | grep -q '^UNPROVED.*store 1 value: sat' || bad=$((bad+1)) ;;
   esac
 done
 if [ "$bad" -ne 0 ]; then echo; echo "FAIL: $bad standing result(s) moved."; exit 1; fi

@@ -2173,9 +2173,10 @@ a barrier — against a negative control that is *refuted*, because `ptxas`
 contracts `mul.f32`+`add.f32` into an `FFMA` unless the program says `.rn`.
 
 > Those two figures are what this entry measured on 2026-09-04 and are kept as
-> written. The standing results have since grown to **sixteen rows, 361
-> obligations, thirteen validated and three refuted**, and one of them is a
-> shipped GEMM: the emitter was taught to say `fma.rn.f32`, which is
+> written. The standing results have since grown to **seventeen rows, 392
+> obligations, fourteen validated and three refuted** — one of them a corpus
+> kernel storing sub-word values after a load that can read them back — and one
+> of them is a shipped GEMM: the emitter was taught to say `fma.rn.f32`, which is
 > byte-identical in SASS, so the artifact now names the rounding the machine
 > performs. See `docs/ptxas_translation_validation.md`, which `regress.sh`
 > asserts row by row.

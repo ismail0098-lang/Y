@@ -17,11 +17,19 @@ import sys, time, random, collections
 from z3 import *
 import sassexec, ptxexec, mulmode, params, batch, conc, memorder
 
-def build(ptxf, sassf, mode, layout, sf, inv):
+def build(ptxf, sassf, mode, layout, sf, inv, sinv, lrep=None):
     mul = mulmode.MODES[mode]()
-    symP = batch.mk(mul, layout, sf)
-    symS = dict(symP); symS['abstract'] = lambda j,k: sf(inv[j], k)
-    return ptxexec.run_ptx(ptxf, symP), sassexec.run_sass(sassf, symS), symP
+    # Loads at one proved address share ONE base symbol, the initial memory there.
+    rep = (lambda i: i) if lrep is None else (lambda i: lrep[i])
+    symP = batch.mk(mul, layout, (lambda i,k: sf(rep(i), k)) if lrep is not None else sf)
+    symS = dict(symP); symS['abstract'] = lambda j,k: sf(rep(inv[j]), k)
+    P = ptxexec.run_ptx(ptxf, symP)
+    # A load read THROUGH a store is spelled with the PTX side's addresses on
+    # both sides: the pairing above proved each SASS load and store address equal
+    # to its PTX partner's.  See ptxexec.Ptx.gload for the measurement.
+    symS['abstract_addr'] = lambda kind, j: (P.loads[inv[j]][0] if kind == 'L'
+                                             else P.stores[sinv[j]][0])
+    return P, sassexec.run_sass(sassf, symS), symP
 
 def run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     t_start = time.time(); nobl = 0
@@ -29,29 +37,36 @@ def run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     _, layout = params.parse(ptxf)
     sym0 = batch.mk(mul0, layout)
     P0 = ptxexec.run_ptx(ptxf, sym0); S0 = sassexec.run_sass(sassf, sym0)
-    # BEFORE anything is paired: the memory model reads every global load from
-    # the initial array, so a program with a read-back is one it cannot represent
-    # (memorder.py).  This validator VALIDATED a translation that hoists a load
-    # above the store it could read back, until this line existed.
-    try:
-        memorder.require_no_read_back('PTX', [P0])
-        memorder.require_no_read_back('SASS', [S0])
-    except memorder.Refusal as e:
-        return 'REFUSED', str(e), 0
+    # A READ-BACK IS MODELLED, NOT REFUSED.  Each executor reads a global load
+    # through the stores it has already made (memorder.read_through), so a load
+    # hoisted above a store it could read back builds a different term from the
+    # one below it and the store it feeds is refuted.  This validator VALIDATED
+    # such a translation while loads read the initial array, and then refused
+    # every read-back -- including ptxas's correct `mem/lsls`.
     if len(P0.loads)!=len(S0.loads) or len(P0.stores)!=len(S0.stores):
         return 'UNPROVED', f'load/store counts {len(P0.loads)}/{len(S0.loads)} {len(P0.stores)}/{len(S0.stores)}', 0
     pre0=[ULT(sym0['tid_x'],BitVecVal(1024,32)), ULT(sym0['ctaid_x'],BitVecVal(1<<24,32))]
     def same(a,b,to=20):
         s=Solver(); s.set('timeout',to*1000); s.add(pre0); s.add(a!=b); return str(s.check())=='unsat'
-    lperm=[]; sperm=[]
+    # Pairing by PROVED address equality; several accesses at one address form a
+    # group rather than a refusal -- see memorder.pair_by_address.  One obligation
+    # counted per access, exactly as before.
+    lhits=[]
     for i in range(len(P0.loads)):
-        hit=[j for j in range(len(S0.loads)) if same(P0.loads[i][0],S0.loads[j][0])]
-        if len(hit)!=1: return 'UNPROVED', f'load {i} address matched {len(hit)}', nobl
-        lperm.append(hit[0]); nobl+=1
+        lhits.append([j for j in range(len(S0.loads)) if same(P0.loads[i][0],S0.loads[j][0])]); nobl+=1
+    lperm, lrep = memorder.pair_by_address(lhits)
+    if lperm is None: return 'UNPROVED', f'load {lrep} address', nobl
+    shits=[]
     for i in range(len(P0.stores)):
-        hit=[j for j in range(len(S0.stores)) if same(P0.stores[i][0],S0.stores[j][0])]
-        if len(hit)!=1: return 'UNPROVED', f'store {i} address matched {len(hit)}', nobl
-        sperm.append(hit[0]); nobl+=1
+        shits.append([j for j in range(len(S0.stores)) if same(P0.stores[i][0],S0.stores[j][0])]); nobl+=1
+    sperm, _ = memorder.pair_by_address(shits)
+    if sperm is None: return 'UNPROVED', f'store {_} address', nobl
+    # A store's width is its value's.  Two stores paired by address with
+    # different widths do not leave the same bytes, and comparing their values
+    # would be a z3 sort error rather than an answer.
+    for i in range(len(P0.stores)):
+        wp, ws = P0.stores[i][1].size(), S0.stores[sperm[i]][1].size()
+        if wp != ws: return 'UNPROVED', f'store {i} width: ptx {wp} bits, sass {ws} bits', nobl
     for i in range(len(P0.loads)):
         if not same(P0.loads[i][1], S0.loads[lperm[i]][1]): return 'UNPROVED', f'load {i} guard', nobl
         nobl+=1
@@ -74,8 +89,12 @@ def run(ptxf, sassf, NS=8, B1=5, B2=60, log=print):
     pool={}
     def sf(i,k): return pool.setdefault((i,k), BitVec(f'L{i}_{k}',32))
     inv={j:i for i,j in enumerate(lperm)}
-    Pw,Sw,symW = build(ptxf,sassf,'wide',layout,sf,inv)
-    Pd,Sd,symD = build(ptxf,sassf,'direct',layout,sf,inv)
+    sinv={j:i for i,j in enumerate(sperm)}
+    # A unique pairing passes no representative map, so a result with no shared
+    # address builds exactly the calls it always did.
+    lr = lrep if any(r != i for i, r in enumerate(lrep)) else None
+    Pw,Sw,symW = build(ptxf,sassf,'wide',layout,sf,inv,sinv,lr)
+    Pd,Sd,symD = build(ptxf,sassf,'direct',layout,sf,inv,sinv,lr)
     # Every obligation is stated UNDER THE GUARD.  Out of range both programs
     # store nothing, and their intermediates are then free to differ -- ptxas
     # zeroes a register with SEL where the PTX predicates a mov, and neither
