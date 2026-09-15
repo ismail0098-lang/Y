@@ -70,20 +70,22 @@ repository's own investigation documents contradict.
   beside the `.ll`, and so does `--emit-attention-ptx`.
   What the verified kernel *costs* is measured separately and is
   [in its own section](#what-the-verified-kernel-costs) — it is not free.
-- **Translation validation against `ptxas`**: **sixteen standing rows — thirteen
+- **Translation validation against `ptxas`**: **seventeen standing rows — fourteen
   validated, three refuted** — including one across a loop, one using shared
-  memory and a barrier, and **a shipped GEMM**. Each is proved to store exactly
-  what its PTX stores, by symbolically executing the PTX and the SASS `ptxas`
-  emitted from it and discharging 361 obligations in z3. It is a by-hand
-  research tool (`tools/ptxas_tval/`), not a CI gate, and it covers one
-  compilation of one kernel at a time. **The three refutations are what the
-  other thirteen are worth** — a validator that always said VALIDATED would
-  report every row identically. **A further 21 rows pin the validator's own
-  effect model**: ten are wrong translations built by hand from `ptxas` output
-  that it VALIDATED until those rows existed — a load that could read back a
-  store, reordered stores that may overlap, an `EXIT` or early `ret` it could not
-  see, a store before a loop it never compared — and are now refused or refuted
-  by name, with the sixteen rows above unchanged.
+  memory and a barrier, one storing sub-word values after a load that can read
+  them back, and **a shipped GEMM**. Each is proved to store exactly what its PTX
+  stores, by symbolically executing the PTX and the SASS `ptxas` emitted from it
+  and discharging 392 obligations in z3. It is a by-hand research tool
+  (`tools/ptxas_tval/`), not a CI gate, and it covers one compilation of one
+  kernel at a time. **The three refutations are what the other fourteen are
+  worth** — a validator that always said VALIDATED would report every row
+  identically. **A further 25 rows pin the validator's own memory and effect
+  model**: ten are wrong translations built by hand from `ptxas` output that it
+  VALIDATED until those rows existed — a load that could read back a store,
+  reordered stores that may overlap, an `EXIT` or early `ret` it could not see, a
+  store before a loop it never compared — and are now refused or refuted by name.
+  A global load reads through the stores before it, so `ptxas`'s *correct*
+  read-back validates while its wrong twins are refuted with a counterexample.
   [Details](docs/ptxas_translation_validation.md).
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
@@ -181,15 +183,17 @@ matters more than any single row below:
 | **`exact_pv`** | Holds the source dot product; both its ceilings stated | **yes, at `-O1`** | **the one kernel both proved and validated**; `-O2`/`-O3` unroll and are not matched; neither ceiling is checked at launch |
 | **f16 / fp8 tensor-core GEMMs** | the warp tile partition only (an illegal tile is refused) | no | **the value carries no proof: 923 of the 925 `mma.sync` this repository emits are floating point** |
 
-**The translation validator** has validated six committed kernels —
-`bn254_permute`, `bn254_sub_vec`, `ptx_carry_chain`, `exact_pv` (`-O1`),
-`naive_gemm_f32` (`-O1`) and `smem_roundtrip` — plus probe fixtures, and refutes
-the rows that are wrong on purpose. It is itself trusted: the executors are
-Python, z3 is trusted, one multiplier identity is assumed, and its float facts
-are refereed on one card rather than proved. What it cannot reach today: kernels
-with more than one loop back edge, a store inside a loop body, a load that could
-read back a store, float conversions, and `-O2`/`-O3` unrolling — which leaves
-most of the corpus outside it.
+**The translation validator** has validated seven committed kernels —
+`bn254_permute`, `bn254_sub_vec`, `ptx_carry_chain`, `ptx_subword_ops`, `exact_pv`
+(`-O1`), `naive_gemm_f32` (`-O1`) and `smem_roundtrip` — plus probe fixtures, and
+refutes the rows that are wrong on purpose. It is itself trusted: the executors
+are Python, z3 is trusted, one multiplier identity is assumed, and its float and
+memory facts are refereed on one card rather than proved. What it cannot reach
+today: kernels with more than one loop back edge, a store inside a loop body, a
+load that reads back a store made in another loop region, float conversions, and
+`-O2`/`-O3` unrolling — which leaves most of the corpus outside it. And it models
+no fault: a misaligned 16- or 32-bit access faults on the device and the model
+says nothing about that program.
 
 **Outside the kernels.** The ZK backend's control-flow lowering is proved in Rocq
 over a model of the emitter, and its range, bit-decomposition, comparison and
@@ -1844,13 +1848,14 @@ models is a hard error, never a guess.**
 | `bn254_permute` | **VALIDATED** | 30 | 0.2 s | branching `ptxas` invented |
 | `bn254_sub_vec` | **VALIDATED** | 88 | 11.9 s | |
 | `ptx_carry_chain` | **VALIDATED** | 123 | 26.7 s | 24 predicated instructions |
+| `ptx_subword_ops` | **VALIDATED** | 31 | 0.3 s | **sub-word stores**, and a load that can read one back |
 | `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.1 s | across a **loop** |
 | `smem_roundtrip` | **VALIDATED** | 18 | 0.2 s | **shared memory**, 1 barrier |
 | `naive_gemm_f32` @ `-O1` | **VALIDATED** | 9 | 0.2 s | **a shipped GEMM** |
 | `naive_gemm_f32_muladd` | UNPROVED | 7 | 0.2 s | the form Y *used to* ship |
 | `naive_gemm_f32_rn` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden* |
 
-Sixteen rows, 361 obligations, **thirteen VALIDATED and three refuted** —
+Seventeen rows, 392 obligations, **fourteen VALIDATED and three refuted** —
 asserted by `regress.sh` in the direction each currently reads, because a run in
 which an UNPROVED row turns green is a regression too. `fma/plain` is the same
 kernel as `rn` without the `.rn` suffixes: `ptxas` contracts `mul.f32`+`add.f32`
@@ -1937,7 +1942,10 @@ each of the three blocks **exactly one kernel**, it is the only corpus kernel
 using a sub-word store at all, and its SASS branch is already exercised by a
 passing kernel. Cheapest *and* worth nothing. Not built, and the reason is
 recorded: stores carry no width, so modelling one forces a soundness decision the
-tool has never had to make, and refusing them today leaves it sound.
+tool has never had to make, and refusing them today leaves it sound. **Built
+since, and it validates** — a byte-faithful memory model gives a store its
+width, so the soundness decision stopped being a trade-off; see *The memory model
+reads through stores* below.
 
 **The loop kernels are gated twice and only one gate had been counted.**
 `loopval` refuses on loop *structure*, independently of opcodes, so closing every
@@ -2044,6 +2052,36 @@ keeps a store above a load it cannot prove unaliased, respecting the possibility
 the model ignored — and it is now REFUSED, because a model that reads every load
 from the initial array cannot tell it from its wrong twin. A store-ordered memory
 model is what would turn it green, and it is the real price of the back-edge lift.
+
+#### The memory model reads through stores
+
+Built, and priced first. A global load now reads memory **as updated by every
+earlier store on its own side**, byte by byte, with a store's width taken from its
+value. `lsls` **validates** and both wrong twins are **refuted** (`store 1:
+sat`). Every one of the sixteen standing rows builds **byte-identical terms** —
+fingerprinted per row against the previous commit, 31 of 34 identical, the three
+that differ being exactly the read-back fixtures.
+
+Two things had to be found before that was true. Extending the memory model's
+import-time self-check moved **nine standing rows' terms without one executor
+line changing**: z3 reuses a freed node's number, and the multiply primitive
+orders operands by that number, so the new checks run in a private z3 context. And
+the first working version took **8–11 s** for `lsls`'s one store value, re-proving
+address equalities the pairing had already proved; building the read-through from
+those addresses takes it to **0.03 s**, and `regress.sh` pins it at exactly ten
+obligations — the eleventh would be the refinement that only a slow posing needs.
+
+**On its own it validates no corpus kernel**: none of the eight clear straight-line
+kernels has a read-back. Its one corpus reach is `ptx_subword_ops`, which also
+needed sub-word stores — sound to model only once a store has a width — and two
+device facts: sub-word stores write exactly their bytes, and `cvt.u8.u32`
+truncates rather than saturates. **It validates, 31 obligations**, with a hoisted
+read-back twin refuted and a widened-store twin refused on width. The referee also
+found that **a 16- or 32-bit global access at a misaligned address faults** on the
+device, which the model does not describe — so two fixtures that pinned
+overlapping word stores at `+0` and `+3` describe programs that fault, and now say
+so. And the queue had conflated three rows: `pstore` has no load at all, so it
+needs prologue stores *compared*; `loop_ls` needs the store-in-body lift.
 
 Also measured, and reported separately because they are different claims:
 `rcp.approx` differs from `rcp.rn` on **13.23%** of inputs on the device and

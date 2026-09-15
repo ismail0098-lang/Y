@@ -551,11 +551,26 @@ def isolation_control():
     so a control that inherits whatever the process has already done is not a
     controlled experiment.  It said so rather than passing quietly, which is
     what the "or it is vacuous" leg is for; the repair is to give it a fresh
-    interpreter every time."""
+    interpreter every time.
+
+    AND IT SWEEPS THE PREAMBLE, because a fixed one went vacuous a second time.
+    The first version used exactly 60 rounds, and a change that only altered what
+    z3 terms get built elsewhere (the memory model's self-check) moved the hazard:
+    exact_pv at -O1, inline verdict per preamble size, one fresh child each --
+
+        preamble      0   5   12   30   60   120   240
+        at e509590    V   U   U    V    U    V     U
+        after it      V   U   U    V    V    U     U
+
+    Non-monotone at BOTH commits, and 60 and 120 swapped.  The contamination is
+    z3 node-id order, so any single count is a fact about today's construction
+    history, not about the hazard.  The control tries PREAMBLES in order and uses
+    the first that contaminates; only if none does is it vacuous."""
     import subprocess
     src = r"""
 import os, sys, glob, tempfile, shutil, contextlib, io
 import frontier, gap, loopgap
+N = int(sys.argv[1])
 d = tempfile.mkdtemp(prefix='frontier_iso_'); os.makedirs(d + '/corpus')
 s = frontier.build_at('corpus/exact_pv.ptx', 1, d)
 if s is None:
@@ -566,35 +581,45 @@ for k in ('y_cpu_matmul', 'bn254_permute'):
     for e in ('.ptx', '.sass'):
         shutil.copy('corpus/' + k + e, d + '/corpus')
 os.chdir(d)
-for _ in range(60):
+for _ in range(N):
     gap.census('y_cpu_matmul'); gap.census('bn254_permute')
 with contextlib.redirect_stdout(io.StringIO()):
     inline = loopgap.census(['exact_pv'])[0][1]
-    isolated = frontier.structural(['exact_pv'])
+    isolated = frontier.structural(['exact_pv']) if inline != 'VALIDATED' else '-'
 print('VERDICT', inline, '|', isolated)
 """
     env = dict(os.environ)
     env['PYTHONPATH'] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + env.get('PYTHONPATH', '')
-    r = subprocess.run([sys.executable, '-c', src], capture_output=True, text=True, env=env)
-    line = [l for l in r.stdout.splitlines() if l.startswith(('VERDICT', 'BUILD-FAILED'))]
-    if not line:
-        print('FAIL: the isolation control produced no verdict:\n' + r.stderr[-1500:])
-        return 1
-    if line[-1] == 'BUILD-FAILED':
-        print('FAIL: could not assemble exact_pv at -O1 for the isolation control')
-        return 1
-    inline, isolated = (x.strip() for x in line[-1][len('VERDICT'):].split('|'))
-    if inline == 'VALIDATED':
-        print('FAIL: the in-process census still validates exact_pv after a preamble, so this '
-              'control is vacuous -- re-read why `structural` runs in its own process')
-        return 1
-    if isolated not in ('{}', ''):
-        print(f'FAIL: the isolated census refuses exact_pv at -O1 ({isolated}); '
-              'the process boundary is not doing its job')
-        return 1
-    print(f'  control: after a preamble the in-process census says {inline} for exact_pv at -O1 '
-          'and the isolated one still validates it')
-    return 0
+    tried = []
+    for n in PREAMBLES:
+        r = subprocess.run([sys.executable, '-c', src, str(n)], capture_output=True, text=True, env=env)
+        line = [l for l in r.stdout.splitlines() if l.startswith(('VERDICT', 'BUILD-FAILED'))]
+        if not line:
+            print('FAIL: the isolation control produced no verdict:\n' + r.stderr[-1500:])
+            return 1
+        if line[-1] == 'BUILD-FAILED':
+            print('FAIL: could not assemble exact_pv at -O1 for the isolation control')
+            return 1
+        inline, isolated = (x.strip() for x in line[-1][len('VERDICT'):].split('|'))
+        tried.append(f'{n}:{inline}')
+        if inline == 'VALIDATED':
+            continue
+        if isolated not in ('{}', ''):
+            print(f'FAIL: the isolated census refuses exact_pv at -O1 ({isolated}) after a '
+                  f'{n}-round preamble; the process boundary is not doing its job')
+            return 1
+        print(f'  control: after a {n}-round preamble the in-process census says {inline} for '
+              f'exact_pv at -O1 and the isolated one still validates it (tried {", ".join(tried)})')
+        return 0
+    print(f'FAIL: the in-process census still validates exact_pv after every preamble tried '
+          f'({", ".join(tried)}), so this control is vacuous -- re-read why `structural` runs '
+          'in its own process')
+    return 1
+
+
+# Tried in order; the first that contaminates is used.  Not one count, because the
+# contaminating counts move whenever term construction elsewhere changes.
+PREAMBLES = (5, 12, 60, 120, 240)
 
 
 

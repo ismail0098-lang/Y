@@ -18,7 +18,8 @@
 #   pstore    pstore pstore_wrong
 #   loop      loop_ls loop_swap loop_swap_wrong loop_swap_exit loop_body_exit loop_nostore loop_ret_wrong
 #   batch     smemval:las_sass smemval:las_ptx smemval:swap_alias
-# Baseline: RRRUUVVVU RR RVURRRR RRU
+# Baseline: UUVUUVVVU RR RVURRRR UUU   (RRRUUVVVU RR RVURRRR RRU before the
+# store-ordered model: las_sass/las_ptx refuted rather than refused, lsls validated)
 cd "$(dirname "$0")"
 ./mkbase.sh mem_base.tgz || exit 1
 OUT="${MEMMUT_OUT:-/tmp/_memmut}"; mkdir -p "$OUT"
@@ -67,31 +68,17 @@ open('memorder.py','w').write(s.replace(a+b, b+a))
 P
 run 'Z0 CONTROL: two independent assignments reordered (no-op)'
 
-M <<'P'
-s=open('tval.py').read()
-a="""        memorder.require_no_read_back('PTX', [P0])
-        memorder.require_no_read_back('SASS', [S0])
-"""
-assert s.count(a)==1
-open('tval.py','w').write(s.replace(a,"        pass\n"))
-P
-run 'Z1 tval: read-back check removed (the original state)'
+# RETIRED Z1: it mutated the read-back REFUSAL or the single store width, both replaced by the
+# store-ordered model, so its anchor no longer exists and it could only print
+# PATCH DID NOT APPLY.  Successor: rtmut.sh R1/R1b.
 
-M <<'P'
-s=open('tval.py').read()
-a="        memorder.require_no_read_back('SASS', [S0])\n"
-assert s.count(a)==1
-open('tval.py','w').write(s.replace(a,""))
-P
-run 'Z2 tval: PTX side only'
+# RETIRED Z2: it mutated the read-back REFUSAL or the single store width, both replaced by the
+# store-ordered model, so its anchor no longer exists and it could only print
+# PATCH DID NOT APPLY.  Successor: rtmut.sh R1b.
 
-M <<'P'
-s=open('tval.py').read()
-a="        memorder.require_no_read_back('PTX', [P0])\n"
-assert s.count(a)==1
-open('tval.py','w').write(s.replace(a,""))
-P
-run 'Z3 tval: SASS side only'
+# RETIRED Z3: it mutated the read-back REFUSAL or the single store width, both replaced by the
+# store-ordered model, so its anchor no longer exists and it could only print
+# PATCH DID NOT APPLY.  Successor: rtmut.sh R1b.
 
 M <<'P'
 s=open('tval.py').read()
@@ -101,15 +88,9 @@ open('tval.py','w').write(s.replace(a,"        reord = []\n"))
 P
 run 'Z4 tval: reorder obligation removed'
 
-M <<'P'
-s=open('batch.py').read()
-a="""        memorder.require_no_read_back('PTX', [P])
-        memorder.require_no_read_back('SASS', [S])
-"""
-assert s.count(a)==1
-open('batch.py','w').write(s.replace(a,"        pass\n"))
-P
-run 'Z5 batch: read-back check removed (third validator)'
+# RETIRED Z5: it mutated the read-back REFUSAL or the single store width, both replaced by the
+# store-ordered model, so its anchor no longer exists and it could only print
+# PATCH DID NOT APPLY.  Successor: rtmut.sh R1b (the batch rows).
 
 M <<'P'
 s=open('batch.py').read()
@@ -121,8 +102,8 @@ run 'Z6 batch: reorder obligation removed'
 
 M <<'P'
 s=open('loopval.py').read()
-a="""    memorder.require_no_read_back('PTX', [pp, pg0, pb0, pg0, pb0, pg0, pe0])
-    memorder.require_no_read_back('SASS', [sprol, sb0, sb0, se0])
+a="""    memorder.require_no_read_back_across('PTX', [pp, pg0, pb0, pg0, pb0, pg0, pe0])
+    memorder.require_no_read_back_across('SASS', [sprol, sb0, sb0, se0])
 """
 assert s.count(a)==1
 open('loopval.py','w').write(s.replace(a,""))
@@ -131,11 +112,11 @@ run 'Z7 loopval: read-back check removed'
 
 M <<'P'
 s=open('loopval.py').read()
-a="""    memorder.require_no_read_back('PTX', [pp, pg0, pb0, pg0, pb0, pg0, pe0])
-    memorder.require_no_read_back('SASS', [sprol, sb0, sb0, se0])
+a="""    memorder.require_no_read_back_across('PTX', [pp, pg0, pb0, pg0, pb0, pg0, pe0])
+    memorder.require_no_read_back_across('SASS', [sprol, sb0, sb0, se0])
 """
-b="""    memorder.require_no_read_back('PTX', [pp, pg0, pb0, pg0, pe0])
-    memorder.require_no_read_back('SASS', [sprol, sb0, se0])
+b="""    memorder.require_no_read_back_across('PTX', [pp, pg0, pb0, pg0, pe0])
+    memorder.require_no_read_back_across('SASS', [sprol, sb0, se0])
 """
 assert s.count(a)==1
 open('loopval.py','w').write(s.replace(a,b))
@@ -203,25 +184,13 @@ open('ptxexec.py','w').write(s.replace(a,"            pass\n"))
 P
 run 'Z14 ptxexec: alive narrowed but never applied to effects'
 
-M <<'P'
-s=open('memorder.py').read()
-a="STORE_WIDTH_BYTES = 4\n"
-assert s.count(a)==1
-open('memorder.py','w').write(s.replace(a,"STORE_WIDTH_BYTES = 3\n"))
-P
-run 'Z15 memorder: store width 3 (the import self-check)'
+# RETIRED Z15: it mutated the read-back REFUSAL or the single store width, both replaced by the
+# store-ordered model, so its anchor no longer exists and it could only print
+# PATCH DID NOT APPLY.  Successor: memorder's private self-check (mixed widths).
 
-M <<'P'
-s=open('memorder.py').read()
-a="STORE_WIDTH_BYTES = 4\n"
-b="\n_self_check()\n"
-assert s.count(a)==1 and s.count(b)==1
-s=s.replace(a,"STORE_WIDTH_BYTES = 3\n").replace(b,"\n")
-# the width is also the value size the shape check demands, so keep that at 32
-s=s.replace("v.size() == 8 * STORE_WIDTH_BYTES","v.size() == 32")
-open('memorder.py','w').write(s)
-P
-run 'Z15b COMPOUND: width 3 AND the self-check removed'
+# RETIRED Z15b: it mutated the read-back REFUSAL or the single store width, both replaced by the
+# store-ordered model, so its anchor no longer exists and it could only print
+# PATCH DID NOT APPLY.  Successor: memorder's private self-check (mixed widths).
 
 M <<'P'
 s=open('memorder.py').read()
@@ -240,13 +209,9 @@ open('memorder.py','w').write(s.replace(a,"").replace(b,"\n"))
 P
 run 'Z16b COMPOUND: order not recorded AND the self-check removed'
 
-M <<'P'
-s=open('memorder.py').read()
-a="    if first >= 0 and 'L' in seq[first:]:\n"
-assert s.count(a)==1
-open('memorder.py','w').write(s.replace(a,"    if 'L' in seq and 'S' in seq:\n"))
-P
-run 'Z17 OVER-REFUSAL: refuse any kernel with both a load and a store'
+# RETIRED Z17: it mutated the read-back REFUSAL or the single store width, both replaced by the
+# store-ordered model, so its anchor no longer exists and it could only print
+# PATCH DID NOT APPLY.  Successor: rtmut.sh R16.
 
 ./restore.sh >/dev/null; rm -rf __pycache__; touch *.py; run 'BASE (bottom, restored)'
 rm -f mem_base.tgz guard_base.tgz

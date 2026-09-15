@@ -1,0 +1,83 @@
+	.target	sm_89
+
+	.elftype	@"ET_EXEC"
+
+
+//--------------------- .text.subword_ops         --------------------------
+	.section	.text.subword_ops,"ax",@progbits
+	.sectioninfo	@"SHI_REGISTERS=24"
+	.align	128
+        .global         subword_ops
+        .type           subword_ops,@function
+        .size           subword_ops,(.L_x_3 - subword_ops)
+        .other          subword_ops,@"STO_CUDA_ENTRY STV_DEFAULT"
+subword_ops:
+.text.subword_ops:
+        /*0000*/                   IMAD.MOV.U32 R1, RZ, RZ, c[0x0][0x28] ;
+        /*0010*/                   S2R R0, SR_CTAID.X ;
+        /*0020*/                   ULDC.64 UR4, c[0x0][0x118] ;
+        /*0030*/                   S2R R3, SR_TID.X ;
+        /*0040*/                   IMAD R0, R0, 0x100, R3 ;
+        /*0050*/                   ISETP.GE.U32.AND P0, PT, R0.reuse, c[0x0][0x1b8], PT ;
+        /*0060*/                   IADD3 R2, P1, R0.reuse, c[0x0][0x160], RZ ;
+        /*0070*/                   IADD3 R4, P2, R0.reuse, c[0x0][0x168], RZ ;
+        /*0080*/                   LEA R6, P3, R0.reuse, c[0x0][0x170], 0x1 ;
+        /*0090*/                   IMAD.X R3, RZ, RZ, c[0x0][0x164], P1 ;
+        /*00a0*/                   LEA R8, P1, R0.reuse, c[0x0][0x178], 0x1 ;
+        /*00b0*/                   IMAD.X R5, RZ, RZ, c[0x0][0x16c], P2 ;
+        /*00c0*/                   LEA.HI.X R7, R0, c[0x0][0x174], RZ, 0x1, P3 ;
+        /*00d0*/                   LEA.HI.X R9, R0.reuse, c[0x0][0x17c], RZ, 0x1, P1 ;
+        /*00e0*/              @!P0 LDG.E.S8 R13, [R2.64] ;
+        /*00f0*/              @!P0 LDG.E.U8 R4, [R4.64] ;
+        /*0100*/              @!P0 LDG.E.S16 R6, [R6.64] ;
+        /*0110*/              @!P0 LDG.E.U16 R8, [R8.64] ;
+        /*0120*/                   LEA R10, P1, R0.reuse, c[0x0][0x180], 0x2 ;
+        /*0130*/                   BSSY B0, `(.L_x_0) ;
+        /*0140*/                   LEA R12, P2, R0, c[0x0][0x188], 0x2 ;
+        /*0150*/                   LEA.HI.X R11, R0.reuse, c[0x0][0x184], RZ, 0x2, P1 ;
+        /*0160*/                   LEA R14, P1, R0, c[0x0][0x190], 0x2 ;
+        /*0170*/                   LEA.HI.X R15, R0.reuse, c[0x0][0x194], RZ, 0x2, P1 ;
+        /*0180*/                   SEL R17, R13, RZ, !P0 ;
+        /*0190*/                   LEA.HI.X R13, R0, c[0x0][0x18c], RZ, 0x2, P2 ;
+        /*01a0*/                   SEL R16, R4, RZ, !P0 ;
+        /*01b0*/              @!P0 STG.E [R10.64], R17 ;
+        /*01c0*/                   LEA R4, P2, R0, c[0x0][0x198], 0x2 ;
+        /*01d0*/                   SEL R19, R6, RZ, !P0 ;
+        /*01e0*/                   IMAD.IADD R20, R17.reuse, 0x1, R16 ;
+        /*01f0*/                   LEA R6, P1, R0, c[0x0][0x1a0], 0x2 ;
+        /*0200*/              @!P0 STG.E [R12.64], R16 ;
+        /*0210*/                   SEL R21, R8, RZ, !P0 ;
+        /*0220*/                   IMAD R18, R17, R16, R19 ;
+        /*0230*/                   LEA.HI.X R5, R0.reuse, c[0x0][0x19c], RZ, 0x2, P2 ;
+        /*0240*/              @!P0 STG.E [R14.64], R19 ;
+        /*0250*/                   LEA.HI.X R7, R0, c[0x0][0x1a4], RZ, 0x2, P1 ;
+        /*0260*/                   IMAD.IADD R17, R18, 0x1, -R21 ;
+        /*0270*/                   IADD3 R8, P1, R0.reuse, c[0x0][0x1a8], RZ ;
+        /*0280*/              @!P0 STG.E [R4.64], R21 ;
+        /*0290*/                   LEA R10, P2, R0, c[0x0][0x1b0], 0x2 ;
+        /*02a0*/              @!P0 STG.E [R6.64], R17 ;
+        /*02b0*/                   LEA.HI.X R11, R0, c[0x0][0x1b4], RZ, 0x2, P2 ;
+        /*02c0*/                   IMAD.X R9, RZ, RZ, c[0x0][0x1ac], P1 ;
+        /*02d0*/               @P0 BRA `(.L_x_1) ;
+        /*02e0*/                   LOP3.LUT R5, R20, 0xff, RZ, 0xc0, !PT ;
+        /*02f0*/                   LDG.E.S8 R2, [R2.64] ;
+        /*0300*/                   STG.E.S8 [R8.64], R5 ;
+.L_x_1:
+        /*0310*/                   BSYNC B0 ;
+.L_x_0:
+        /*0320*/                   SEL R2, R2, RZ, !P0 ;
+        /*0330*/               @P0 EXIT ;
+        /*0340*/                   SHF.R.S32.HI R3, RZ, 0x2, R2 ;
+        /*0350*/                   STG.E [R10.64], R3 ;
+        /*0360*/                   EXIT ;
+.L_x_2:
+        /*0370*/                   BRA `(.L_x_2);
+        /*0380*/                   NOP;
+        /*0390*/                   NOP;
+        /*03a0*/                   NOP;
+        /*03b0*/                   NOP;
+        /*03c0*/                   NOP;
+        /*03d0*/                   NOP;
+        /*03e0*/                   NOP;
+        /*03f0*/                   NOP;
+.L_x_3:

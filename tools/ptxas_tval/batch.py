@@ -45,14 +45,10 @@ def validate(ptx, sass, budget, mode='uf'):
     _, layout = params.parse(ptx)
     sym = mk(mul, layout)
     P = ptxexec.run_ptx(ptx, sym); S = sassexec.run_sass(sass, sym)
-    # See memorder.py, and the identical guard in tval.run: this is the third
-    # validator that pairs global stores, and a guard consulted at two of three
-    # sites is the bug this directory keeps finding.
-    try:
-        memorder.require_no_read_back('PTX', [P])
-        memorder.require_no_read_back('SASS', [S])
-    except memorder.Refusal as e:
-        return 'REFUSED', str(e), 0
+    # See memorder.py and tval.run: a read-back is modelled by the executors now,
+    # not refused here.  This is the third validator that pairs global stores,
+    # and a guard consulted at two of three sites is the bug this directory keeps
+    # finding -- so the width check below is here as well.
     if len(P.loads)!=len(S.loads) or len(P.stores)!=len(S.stores):
         return 'UNPROVED', f'load/store counts {len(P.loads)}/{len(S.loads)} {len(P.stores)}/{len(S.stores)}', 0
     pre=[ULT(sym['tid_x'],BitVecVal(1024,32)), ULT(sym['ctaid_x'],BitVecVal(1<<24,32))]
@@ -74,19 +70,22 @@ def validate(ptx, sass, budget, mode='uf'):
         the weaker test is refused by the `len(hit)!=1` count."""
         s=Solver(); s.set('timeout',to*1000); s.add(pre); s.add(And(g, a!=b)); return str(s.check())=='unsat'
     n=0
-    lperm=[]
+    lhits=[]
     for i in range(len(P.loads)):
-        hit=[j for j in range(len(S.loads)) if same_if(P.loads[i][1], P.loads[i][0], S.loads[j][0])]
-        if len(hit)!=1: return 'UNPROVED', f'load {i} matched {len(hit)} sass loads', n
-        lperm.append(hit[0]); n+=1
+        lhits.append([j for j in range(len(S.loads)) if same_if(P.loads[i][1], P.loads[i][0], S.loads[j][0])]); n+=1
+    lperm, lrep = memorder.pair_by_address(lhits)
+    if lperm is None: return 'UNPROVED', f'load {lrep} sass loads', n
     for i in range(len(P.loads)):
         if not same(P.loads[i][1], S.loads[lperm[i]][1]): return 'UNPROVED', f'load {i} guard', n
         n+=1
-    sperm=[]
+    shits=[]
     for i in range(len(P.stores)):
-        hit=[j for j in range(len(S.stores)) if same_if(P.stores[i][2], P.stores[i][0], S.stores[j][0])]
-        if len(hit)!=1: return 'UNPROVED', f'store {i} matched {len(hit)} sass stores', n
-        sperm.append(hit[0]); n+=1
+        shits.append([j for j in range(len(S.stores)) if same_if(P.stores[i][2], P.stores[i][0], S.stores[j][0])]); n+=1
+    sperm, why = memorder.pair_by_address(shits)
+    if sperm is None: return 'UNPROVED', f'store {why} sass stores', n
+    for i in range(len(P.stores)):
+        wp, ws = P.stores[i][1].size(), S.stores[sperm[i]][1].size()
+        if wp != ws: return 'UNPROVED', f'store {i} width: ptx {wp} bits, sass {ws} bits', n
     for i in range(len(P.stores)):
         if not same(P.stores[i][2], S.stores[sperm[i]][2]): return 'UNPROVED', f'store {i} guard', n
         n+=1
@@ -102,8 +101,14 @@ def validate(ptx, sass, budget, mode='uf'):
     pool={}
     def sf(i,k): return pool.setdefault((i,k), BitVec(f'L{i}_{k}',32))
     inv={j:i for i,j in enumerate(lperm)}
-    symP=mk(mul,layout,sf); symS=dict(symP); symS['abstract']=lambda j,k: sf(inv[j],k)
-    P2=ptxexec.run_ptx(ptx,symP); S2=sassexec.run_sass(sass,symS)
+    # loads at one proved address share one base symbol -- memorder.pair_by_address
+    symP=mk(mul,layout,lambda i,k: sf(lrep[i],k)); symS=dict(symP); symS['abstract']=lambda j,k: sf(lrep[inv[j]],k)
+    P2=ptxexec.run_ptx(ptx,symP)
+    # addresses a read-through compares are the PTX side's, which the pairing
+    # proved equal where the access happens -- see ptxexec.Ptx.gload
+    sinv={j:i for i,j in enumerate(sperm)}
+    symS['abstract_addr']=lambda kind, j: (P2.loads[inv[j]][0] if kind=='L' else P2.stores[sinv[j]][0])
+    S2=sassexec.run_sass(sass,symS)
     pre2=[ULT(symP['tid_x'],BitVecVal(1024,32)), ULT(symP['ctaid_x'],BitVecVal(1<<24,32))]
     for i in range(len(P2.stores)):
         pa,pv,pg = P2.stores[i]; sa,sv,sg = S2.stores[sperm[i]]

@@ -21,24 +21,24 @@ class Ptx:
     def __init__(self, sym):
         self.r = {}; self.rd = {}; self.p = {}; self.f = {}
         self.cc = BoolVal(False)          # the PTX carry flag
-        self.sym = sym; self.mem = sym['mem']
+        self.sym = sym
         # FALSE once the kernel may have returned.  See the `ret` arm.
         self.alive = BoolVal(True)
         self.defs = []; self.wide = []; self.pc = 0; self.count = 0; self.ops = set(); self.undef = 0
         # `loads` and `stores` record their PROGRAM ORDER as they grow -- see
         # memorder.py for why the order is recorded by the list and not per arm.
         memorder.install(self)
-        # Shared memory is STATE, not a trace.  The global loads/stores above are
-        # a log the validator matches by address permutation.
+        # Shared memory is STATE, not a trace.  The global stores above are a log
+        # the validator matches by address permutation, and a global LOAD reads
+        # the initial memory as updated by every earlier store on this side
+        # (`gload`, memorder.read_through).
         #
-        # THIS COMMENT USED TO SAY that works "because a kernel never reads back
-        # what it wrote to global memory in the same launch" -- an assumption
-        # stated as a fact and checked by nothing.  It is false of kernels in the
-        # corpus as an ordering property, and the validator VALIDATED a
-        # hand-built translation that hoists a load above a store it could read
-        # back.  It is checked now (memorder.require_no_read_back).  A shared
-        # roundtrip is exactly that read-back, so shared memory needs an array.
-        # See smem.py for the barrier model.
+        # THIS COMMENT ONCE SAID the log worked "because a kernel never reads
+        # back what it wrote to global memory in the same launch" -- an
+        # assumption stated as a fact and checked by nothing, false of kernels in
+        # the corpus, and a hand-built translation that hoists a load above a
+        # store it could read back VALIDATED.  It was then refused; it is
+        # modelled now.  See smem.py for the barrier model.
         self.smem = sym.get('smem')
         self.bar = sym.get('bar')
         self.smem_layout = sym.get('smem_layout', {})
@@ -169,6 +169,41 @@ class Ptx:
         f = self.sym.get('mul')
         return f('hi', a, b) if f else Extract(2*W-1, W, ZeroExt(W,a) * ZeroExt(W,b))
 
+    def gload(self, addr, i, k, off=None, nbytes=4):
+        """THE ONLY PATH TO GLOBAL MEMORY, pinned at import.
+
+        `addr` is the load's address, `off` a byte offset added to it for a word
+        of a vector load (None: none -- a scalar load uses the bare address, and
+        the term must stay the one it always was), `i` the load's index and `k`
+        the word within it.  The base is what the load reads with nothing stored:
+        the symbol the validator shares between paired loads, or the initial
+        array.  `memorder.read_through` then reads it through every store this
+        side has already made.
+
+        The offset term is built only when something needs it.  The multiply
+        primitive orders its operands by z3 node id, so building a node an
+        abstract-mode load never used would renumber every term after it."""
+        if 'abstract' in self.sym:
+            base = self.sym['abstract'](i, k)
+            if not self.stores:
+                return base
+            # THE ADDRESSES, TOO, ARE THE ONES THE PAIRING PROVED.  With a store
+            # before the load, the value is a byte-by-byte ITE over address
+            # differences; left in each side's own spelling the solver re-proves
+            # every address equality inside it -- `mem/lsls` measured 8-11 s for
+            # one store value, against 0.03 s with the addresses the validator
+            # had already shown equal.  The hook maps this side's load and store
+            # indices to them, and is consulted only here, where a read-through
+            # happens, so no result without a read-back builds a different term.
+            hook = self.sym.get('abstract_addr')
+            at_ = hook('L', i) if hook else addr
+            sts = ([(hook('S', j), v, gg) for j, (_a, v, gg) in enumerate(self.stores)]
+                   if hook else list(self.stores))
+            return memorder.read_through(sts, at_ if off is None else at_ + BitVecVal(off, 64),
+                                         base, nbytes)
+        a = addr if off is None else addr + BitVecVal(off, 64)
+        return memorder.read_through(self.stores, a, Select(self.sym['mem'], a), nbytes)
+
     def step(self, line):
         pred = None
         m = re.match(r'^@(!?%p\d+)\s+(.*)$', line)
@@ -273,15 +308,11 @@ class Ptx:
             addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
             i = len(self.loads); self.loads.append((addr, g))
             for k, d in enumerate(dsts):
-                v = (self.sym['abstract'](i, k) if 'abstract' in self.sym
-                     else Select(self.mem, addr + BitVecVal(4*k, 64)))
-                self.wr(d, v, g)
+                self.wr(d, self.gload(addr, i, k, 4*k), g)
         elif op in ('ld.global.u32','ld.global.s32','ld.global.b32','ld.global.nc.u32'):
             addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
             i = len(self.loads); self.loads.append((addr, g))
-            v = (self.sym['abstract'](i,0) if 'abstract' in self.sym
-                 else Select(self.mem, addr))
-            self.wr(ops[0], v, g)
+            self.wr(ops[0], self.gload(addr, i, 0), g)
         # --- a PTX macro-op: ptxas does not transliterate it, it inlines a
         # --- refinement sequence.  Named refusal, with the reason.
         elif op in fpmode.MACRO_OPS:
@@ -332,27 +363,36 @@ class Ptx:
         elif op == 'ld.global.f32':
             addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
             i = len(self.loads); self.loads.append((addr, g))
-            v = (self.sym['abstract'](i,0) if 'abstract' in self.sym else Select(self.mem, addr))
-            self.wf(ops[0], v, g)
+            self.wf(ops[0], self.gload(addr, i, 0), g)
         # --- sub-word global loads.
-        # MEMORY MODEL: `mem` is Array(BV64 -> BV32) -- the 32-bit word AT a byte
-        # address.  A byte load takes the low byte of the word at that address.
-        # That is NOT a faithful byte-addressed memory (a byte load at `a` and a
-        # word load at `a` alias in it), but BOTH EXECUTORS USE EXACTLY THIS
-        # CONVENTION, which is what equivalence needs; where the two programs
-        # address differently the model reports a difference, which is the safe
-        # direction.
+        # MEMORY MODEL: the initial memory is Array(BV64 -> BV32) -- the 32-bit
+        # word AT a byte address, little-endian -- and a byte load takes the low
+        # byte of it.  Distinct addresses are independent words in that array,
+        # which ADMITS MORE memories than the machine has (a word at `a` and one
+        # at `a+1` share three bytes on the machine) and so is sound for
+        # equivalence, never complete.  After a store the load is read byte by
+        # byte through it (`gload`), which IS byte-faithful.
         elif op in ('ld.global.s8','ld.global.u8','ld.global.s16','ld.global.u16'):
             addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
             i = len(self.loads); self.loads.append((addr, g))
-            w = (self.sym['abstract'](i,0) if 'abstract' in self.sym
-                 else Select(self.mem, addr))
             nb = 8 if op.endswith('8') else 16
+            w = self.gload(addr, i, 0, None, nb // 8)
             byte = Extract(nb-1, 0, w)
             self.wr(ops[0], (SignExt(W-nb, byte) if '.s' in op else ZeroExt(W-nb, byte)), g)
         elif op == 'st.global.f32':
             addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
             self.stores.append((addr, self.F(ops[1]), g))
+        elif op in ('st.global.u8','st.global.s8','st.global.u16','st.global.s16'):
+            # A SUB-WORD STORE.  Refused while the memory model had no width --
+            # compared by address alone an 8-bit store and a 32-bit one at the same
+            # address are indistinguishable.  The store carries its width as its
+            # VALUE's width now (memorder.store_width), and `subword_abi.py`
+            # measures on the device that STG.E.{U,S}{8,16} write exactly their
+            # low bytes, little-endian, and nothing else.  Signedness does not
+            # change the stored bits.
+            addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
+            nb = 8 if op.endswith('8') else 16
+            self.stores.append((addr, Extract(nb - 1, 0, self.R(ops[1])), g))
         elif op in ('st.global.u32','st.global.s32','st.global.b32'):
             addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
             self.stores.append((addr, self.R(ops[1]), g))
@@ -383,6 +423,12 @@ class Ptx:
         elif op in ('mov.u64','mov.s64','mov.b64'):
             self.wd(ops[0], self.D(ops[1]), g)
         elif op == 'cvt.u32.u64':   self.wr(ops[0], Extract(31,0,self.D(ops[1])), g)
+        elif op == 'cvt.u8.u32':
+            # To u8 from u32: TRUNCATES, and the upper register bits are zero.
+            # Measured by `subword_abi.py` (it could as well saturate; the two agree
+            # below 256).  This PTX opcode has no executable definition other than
+            # running it, so for this one instruction a ptxas bug is trusted.
+            self.wr(ops[0], ZeroExt(24, Extract(7, 0, self.R(ops[1]))), g)
         elif op in ('cvt.s64.s32',): self.wd(ops[0], SignExt(32, self.R(ops[1])), g)
         elif op == 'ret':
             # THIS WAS `pass`, AND THE PTX IS THE SIDE THAT DEFINES CORRECT.  A
@@ -436,9 +482,7 @@ class Ptx:
             addr = self.D(re.fullmatch(r'\[(.*)\]', ops[1]).group(1))
             i = len(self.loads); self.loads.append((addr, g))
             for k2,d in enumerate(dsts):
-                v = (self.sym['abstract'](i,k2) if 'abstract' in self.sym
-                     else Select(self.mem, addr + BitVecVal(4*k2,64)))
-                self.wr(d, v, g)
+                self.wr(d, self.gload(addr, i, k2, 4*k2), g)
         elif op in ('st.global.v2.u32','st.global.v2.b32'):
             addr = self.SA(re.fullmatch(r'\[(.*)\]', ops[0]).group(1))
             srcs = re.fullmatch(r'\{(.*)\}', ops[1]).group(1).split(',')
@@ -451,6 +495,9 @@ class Ptx:
             self.stores.append((addr+BitVecVal(4,64), Extract(63,32,v), g))
         else:
             raise Exception(f'UNMODELLED PTX OPCODE {op!r}  (refusing, not guessing)')
+
+memorder.pin_one_memory_path(Ptx)
+
 
 def run_lines(lines, sym, seed=None):
     """Run an explicit list of instruction strings.

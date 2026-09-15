@@ -2,6 +2,11 @@
 // in the SAME order.  VALIDATED with no reorder obligation, which stops "refuse
 // overlapping stores" passing.
 // Standing result: VALIDATED.
+// ON THE DEVICE THIS PROGRAM FAULTS.  A 32-bit global store at an address that is
+// not a multiple of 4 is `misaligned address` on sm_89 (`subword_abi.py`, the
+// alignment census), so no run ends with the overlapping bytes this fixture is
+// about.  It pins the ARITHMETIC of the reorder obligation, which the model
+// states without faults; that the model describes no fault is a stated limit.
 .version 7.8
 .target sm_89
 .address_size 64
