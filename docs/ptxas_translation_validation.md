@@ -1039,6 +1039,95 @@ above no longer overstates, and `proofs/ExactPvExact.v` now proves what
 three. `tests/exact_pv_proof.rs` gates it — the overlap between the proved set
 and the validated set is asserted rather than described.
 
+### Nested loops: `nestval.py`, and the lift's one candidate validates
+
+`loopval.py` validates one loop. `nestval.py` validates a **tree** of them, and it
+reuses `loopval`'s relation machinery — live-ins, proposal by simulation, the
+phasing between a PTX top test and a SASS bottom test — rather than restating
+it. `loopval` is untouched, so every standing row it produces is byte-identical.
+
+| kernel | verdict | obligations | what it shows |
+|---|---|---|---|
+| `y_cpu_matmul` @ `-O1` | **VALIDATED** | 17 | **three nested loops**, a store in the middle one |
+| `…_w1_store_stride` | UNPROVED | 10 | the store's row stride is K — refuted at the iteration store **address** |
+| `…_w2_acc_add` | UNPROVED | 10 | the accumulator adds — refuted at the iteration store **value** |
+| `…_w3_acc_init` | UNPROVED | 10 | the inner accumulator starts at 1 — its pair is never even proposed |
+| `…_w7_acc_init_k0` | UNPROVED | 11 | the accumulator is 1.0 **exactly when K = 0** — only the child's **BASE** can see it |
+| `…_w4_top_guard` | UNPROVED | 17 | the `EXIT` guard tests N — **ENTRY**, top level |
+| `…_w5_inner_guard` | UNPROVED | 8 | the inner zero-trip guard tests N — **ENTRY**, child |
+| `…_w6_inner_backedge` | UNPROVED | 7 | the inner back edge tests N — **LOOPCOND** |
+| `mem/nest_accum` | **VALIDATED** | 7 | `b[0] += a[i]`: a load reading back the **previous iteration's** store |
+| `mem/nest_accum_stale` | UNPROVED | 5 | the same, with `b[0]` loaded once before the loop |
+
+The twins are derived by `build_corpus.sh` from `ptxas`'s genuine output, one
+asserted instruction substitution each, so a `ptxas` whose output moves fails the
+build instead of silently testing a different program. `regress.sh` asserts every
+row in its own direction.
+
+**How a nest is validated.** Each loop gets `loopval`'s obligations — `BASE`,
+`ENTRY`, `STEP`, `LOOPCOND` — plus `STORES` for **one iteration**, and it gets them
+*in the state its parent has reached*: when a parent's iteration arrives at a
+child, the child is proved right there, both sides at once, and then replaced by
+its **effect**. Every relation pair it proved becomes one fresh symbol shared by
+the two sides, every other slot it writes a fresh symbol of its own side, and if
+it stores, memory becomes one fresh shared array. That is sound for a stated
+reason: the pairs hold at the child's exit whatever its trip count (`BASE` covers
+zero trips, `STEP` the rest, `LOOPCOND` makes the counts equal), and memory is
+equal at exit because it was equal at entry and every iteration made the same
+stores. Shared symbols forget *how* the outputs depend on the inputs, which costs
+completeness and never soundness.
+
+**Memory is carried, not refused.** Every iteration of a loop that stores starts
+from one fresh memory array shared by both sides — the induction hypothesis
+"memory is equal at the header" — and `STORES` discharges the step. So a load in
+iteration k+1 that reads back iteration k's store is *modelled*. `nest_accum` is
+the case that needs it, and `loopval` refuses it; `nest_accum_stale` is the case
+that shows the model is doing the work: its first iteration agrees with the PTX,
+and a validator reading the loop-entry memory in every iteration validates it.
+
+**The pricing named four pieces and there were five.** It said a nested relation,
+a store-in-body obligation and an order-aware memory model, and the level census
+misattributed two in-body branches — which are the child loops' zero-trip guards,
+because `ptxas` rotates every loop to a bottom test and places the guard
+immediately before the header, inside the parent. All of that held. What no
+census counted: **the SASS nest is guarded by `@!P0 EXIT`**, not by a branch — the
+program ends if the outer loop would run zero times. `loopval` refuses a prologue
+that can end the program, by name, and that refusal was added one increment ago.
+`nestval` accepts it at the top level only, poses `ENTRY` on it, and requires that
+nothing after the nest stores; `loop_swap_exit` is the row where something does.
+
+**Two defects were found by building it, and neither was in the new code.**
+
+* **Commutative operands are ordered by z3 node id at construction** — `FADD` and
+  `FMAX` in `fpmode`, all three multiply factories in `mulmode` — and node ids
+  reuse freed numbers, so the order depends on everything the process built
+  before. Measured: `o1/naive_gemm_f32_rn` was UNPROVED on the first validation
+  in a process and VALIDATED on the second, on identical inputs, because a PTX
+  and a SASS product with equal *values* but different load-guard *shapes* landed
+  on opposite sides of the accumulator. `nestval` adds `f(a,b) == f(b,a)` ground
+  instances to every obligation, each licensed exactly as the canonicalisation it
+  neutralises (`FMAX`'s flag is consulted). No term is built differently, so no
+  other validator moves; twenty validations in one process now agree with every
+  fresh-process run.
+* **`sassexec.gaddr` indexed the register dict** for a 64-bit address's two
+  halves, so an address pair computed *outside* the region raised `KeyError`
+  instead of becoming a live-in. `nest_accum_stale` — whose address is hoisted
+  into the prologue — crashed the validator rather than being refuted. It reads
+  through `rd` now, which is what every other register read does; where both
+  halves are defined nothing changes, and all 42 earlier `regress.sh` rows are
+  identical.
+
+**What it does not do.** `y_cpu_matmul` is validated at `-O1`, not at the level
+the corpus ships: at `-O3` it has a two-opcode SASS gap and `ptxas` unrolls from
+`-O2`. The frontier census still reports it one blocker away, because its
+structural column is `loopval`'s refusal; that is a statement about `loopval`.
+Refused by name: more than one loop at the top level (so every `SEQUENTIAL` and
+`MIXED` kernel), a store in an iteration followed by a child loop or a later load
+in the same iteration, a SASS loop with no zero-trip guard, a child whose
+loop-carried symbols also occur in the state it is entered from, and a PTX carry
+flag live inside the nest. **Those last refusals are reached by no fixture**, so
+they are untested guards, stated as such.
+
 ## The one unbroken chain
 
 For `exact_pv`, and for no other kernel in the repository, both steps are
@@ -1558,7 +1647,7 @@ is checking while both are wrong:
   gap — that is not a gap of zero and is its own blocker.
 
 **In the committed corpus every blocker has a sole-count of zero.** 66 kernels,
-**101** distinct blockers, and not one of them would validate a kernel on its own
+**102** distinct blockers, and not one of them would validate a kernel on its own
 — including every item then on the queue. `cvt.rn.f16.f32` is sole blocker of
 nothing; so is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the
 back-edge lift. That is the honest state of a corpus where **9 kernels are clear,
@@ -1576,7 +1665,7 @@ limit, three on each side.
 
 Measured over the whole corpus at that level, **at `-O1` exactly one kernel is
 one blocker away: `y_cpu_matmul`** — everything else is either clear or two or
-more short. At `-O1` the corpus is 66 kernels, **105** distinct blockers and
+more short. At `-O1` the corpus is 66 kernels, **106** distinct blockers and
 **11** clear (`exact_pv` and `naive_gemm_f32` join the nine, which is the same
 `-O` effect the corrected bullet above measures).
 
@@ -1615,6 +1704,21 @@ more short. At `-O1` the corpus is 66 kernels, **105** distinct blockers and
 > the controls over two kernels and never reaches `check_doc`. A figure asserted
 > only by a minutes-long command is asserted only when somebody pays for it.
 
+> **And they moved once more, 101 → 102 and 105 → 106, because the opcode
+> census's own PTX scanner still ended at the first `}`.** The brace-depth fix
+> had reached `ptxexec` and `loopcfg` and not `gap.ptx_insns`; it reads
+> `loopcfg`'s scanner now. Old against new over the corpus: 59 kernels identical
+> instruction for instruction, and the 7 that changed are the 7 recorded — five
+> coprocessor kernels each gain the two `ldmatrix` forms and an f16 `mma.sync` the
+> truncated scan never reached (4 → 7 blockers), and the two split paged-decode
+> modules become a named two-entry-point refusal instead of an opcode list read
+> from whichever entry came first (29 → 27). Clear counts, median and the tail are
+> unchanged. **These figures cannot go stale silently any more**: the census
+> writes `frontier_stamp.json` — the tree it measured and what it found — and
+> `docgate.py`, which runs in seconds, fails when that stamp is for a different
+> tree and otherwise checks this paragraph against it through the census's own
+> comparison.
+
 > **SUPERSEDED — re-measured at the level this claim is about, and the one
 > sufficiency case does not survive.** The paragraph below says the lift is
 > "the one item in the corpus with a sufficiency case". The second-refusal
@@ -1631,6 +1735,15 @@ more short. At `-O1` the corpus is 66 kernels, **105** distinct blockers and
 > reports for it are the child loops' zero-trip guards, which sit in the parent's
 > own body — a misattribution by the level decomposition, in the pessimistic
 > direction, recorded and not fixed. The paragraph is kept below as written.
+
+> **SUPERSEDED AGAIN — built, and the candidate validates.** `nestval.py`
+> validates `y_cpu_matmul` at `-O1` with 17 obligations: all three loops, the
+> middle loop's store compared in every iteration, and the next iteration's inner
+> loads reading memory carried across. The pieces priced above were real, and they
+> were all of it but one — the SASS nest is guarded by an `EXIT`, which `loopval`
+> refuses and no census counted. The frontier still lists the kernel with one
+> blocker left, because its structural column is `loopval`'s refusal. See
+> *Nested loops* under *Loops*.
 
 So the lift is not "sufficient for nothing". It is the one item in the corpus
 with a sufficiency case, and paying for it buys a **new standing result** rather

@@ -86,6 +86,11 @@ repository's own investigation documents contradict.
   store before a loop it never compared — and are now refused or refuted by name.
   A global load reads through the stores before it, so `ptxas`'s *correct*
   read-back validates while its wrong twins are refuted with a counterexample.
+  **And a nest validator** (`nestval.py`) takes the first kernel with nested
+  loops through: `y_cpu_matmul` at `-O1` — three loops, a store in the middle one
+  — validates at 17 obligations, and each of its seven wrong twins, plus a loop that
+  forgets the previous iteration's store, is refuted at the obligation its
+  mutation breaks.
   [Details](docs/ptxas_translation_validation.md).
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
@@ -181,17 +186,19 @@ matters more than any single row below:
 | **Exact int8 attention** | Launch schedule byte-identical to the proof; exact at every launch geometry and every order the atomics land; a proved softmax error bound. Certificate emitted. | **no** | `ptxas` is trusted; `KFix` is not checked at the launch boundary; the int8 `V` quantisation is not modelled |
 | **int8 tensor-core GEMM** | Schedule (block-size guard, grid stride) *and* the value: exact in int32, with the emitter refusing `K > 133,120` | **no** — opcode and loop-structure gaps | the proof-to-code tie is transcription plus a gate, not extraction; no shared-memory staging (0.40x cuBLASLt) |
 | **`exact_pv`** | Holds the source dot product; both its ceilings stated | **yes, at `-O1`** | **the one kernel both proved and validated**; `-O2`/`-O3` unroll and are not matched; neither ceiling is checked at launch |
+| **`y_cpu_matmul`** (three nested loops) | nothing | **yes, at `-O1`**, by the nest validator | the first multi-loop kernel validated; at `-O3` it has a SASS opcode gap and `-O2` up unroll |
 | **f16 / fp8 tensor-core GEMMs** | the warp tile partition only (an illegal tile is refused) | no | **the value carries no proof: 923 of the 925 `mma.sync` this repository emits are floating point** |
 
-**The translation validator** has validated seven committed kernels —
+**The translation validator** has validated eight committed kernels —
 `bn254_permute`, `bn254_sub_vec`, `ptx_carry_chain`, `ptx_subword_ops`, `exact_pv`
-(`-O1`), `naive_gemm_f32` (`-O1`) and `smem_roundtrip` — plus probe fixtures, and
-refutes the rows that are wrong on purpose. It is itself trusted: the executors
-are Python, z3 is trusted, one multiplier identity is assumed, and its float and
-memory facts are refereed on one card rather than proved. What it cannot reach
-today: kernels with more than one loop back edge, a store inside a loop body, a
-load that reads back a store made in another loop region, float conversions, and
-`-O2`/`-O3` unrolling — which leaves most of the corpus outside it. And it models
+(`-O1`), `naive_gemm_f32` (`-O1`), `smem_roundtrip` and `y_cpu_matmul` (`-O1`, a
+three-loop nest) — plus probe fixtures, and refutes the rows that are wrong on
+purpose. It is itself trusted: the executors are Python, z3 is trusted, one
+multiplier identity is assumed, and its float and memory facts are refereed on
+one card rather than proved. What it cannot reach today: more than one loop at
+the same level (every `SEQUENTIAL` and `MIXED` kernel), a store before a child
+loop in the same iteration, float conversions, and `-O2`/`-O3` unrolling — which
+leaves most of the corpus outside it. And it models
 no fault: a misaligned 16- or 32-bit access faults on the device and the model
 says nothing about that program.
 
@@ -1996,6 +2003,12 @@ tensor-core item and the back-edge item share a blocker.
 > had only ever read the `-O3` build; **re-run over every kernel re-assembled at
 > `-O1` it is still 0 of 38**, so the lift is sufficient for nothing at either
 > level — measured at both now, where it had been inferred at one.
+>
+> **And then it was built.** `nestval.py` validates `y_cpu_matmul` at `-O1`:
+> the nested relation, the store compared in every iteration, and memory carried
+> between iterations were the price, plus one piece no census counted — the SASS
+> nest is guarded by an `EXIT`, which `loopval` refuses. The census above measured
+> `loopval`'s refusals, and that is still what it measures.
 
 The census also puts a number on how the opcode census
 under-reports: `bra` reads as 37 kernels where a textual scan finds 48, split

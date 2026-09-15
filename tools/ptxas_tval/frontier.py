@@ -385,13 +385,15 @@ def perturbed_corpus(kernel, extra):
 DOC = '../../docs/ptxas_translation_validation.md'
 
 
-def doc_figures(o1):
+def doc_figures(o1, text=None):
     """The figures the doc publishes about THIS census, for `check_doc`.
 
     Whitespace-tolerant: both files wrap, and a sentence-shaped pattern with
     hard spaces in it matches only until somebody reflows a paragraph -- and
-    then the gate reports the claim as MISSING rather than as wrong."""
-    d = open(DOC).read()
+    then the gate reports the claim as MISSING rather than as wrong.
+
+    `text` lets a control hand in a PERTURBED doc through this same parse."""
+    d = open(DOC).read() if text is None else text
     if o1:
         # THE COUNTS TOO, not just the sole-blocker set.  Asserting only the set
         # left `112 distinct blockers and 10 clear` published and gated by
@@ -415,25 +417,64 @@ def doc_figures(o1):
             'tail_n': int(b.group(3)), 'tail_of': int(b.group(4)), 'tail_at': int(b.group(5))}
 
 
+STAMP = 'frontier_stamp.json'
+
+
+def summarise(rows):
+    """Everything `check_doc` compares, and nothing more.
+
+    It is what the census STAMPS (`write_stamp`), so `docgate` can check the doc
+    against the last measurement in seconds without re-running minutes of census.
+    The stamp is a measurement, not a certificate: it is written whether or not
+    the doc agrees, and the comparison is made by `compare_doc` on both paths."""
+    return {'kernels': len(rows),
+            'counts': sorted(len(b) for b in rows.values()),
+            'distinct': len({b for bs in rows.values() for b in bs}),
+            'sole': sorted(k for k, b in rows.items() if len(b) == 1)}
+
+
+def write_stamp(rows, o1):
+    """Record which TREE this measurement is of.
+
+    WHY IT EXISTS.  The published figures were stale for two commits: a fixture
+    rewrite moved them, nothing re-ran the census, and every gate run was
+    `--selftest`, which never reaches `check_doc`.  A figure checked only by a
+    minutes-long command is checked only when somebody pays for it.  With the
+    digest stamped, `docgate` -- seconds, and run by every increment -- fails the
+    moment the tree the figures were measured on stops being this tree."""
+    s = json.load(open(STAMP)) if os.path.exists(STAMP) else {}
+    s['O1' if o1 else 'O3'] = {'digest': digest() + ('|o1' if o1 else ''),
+                               'summary': summarise(rows)}
+    json.dump(s, open(STAMP, 'w'), indent=1, sort_keys=True)
+    open(STAMP, 'a').write('\n')
+
+
 def check_doc(rows, o1):
     """Assert, do not merely print.  A census figure that lands in a document and
     is checked by nothing decays the moment somebody edits an emitter -- this
     repository's own recorded lesson, and `docgate.py` exists because of it.
     `docgate` cannot pay for this one (the census is minutes), so the tool that
-    already paid asserts its own published numbers, the way `regress.sh` does."""
-    want = doc_figures(o1)
+    already paid asserts its own published numbers, the way `regress.sh` does --
+    and stamps them, so `docgate` can check them against the stamp instead."""
+    return compare_doc(summarise(rows), o1)
+
+
+def compare_doc(summ, o1, text=None):
+    """The comparison, on a `summarise` result.  One implementation for the census
+    and for `docgate`'s stamp check, so the two cannot disagree about the doc."""
+    want = doc_figures(o1, text)
     if want is None:
         print('FAIL: the doc no longer states the figures this census publishes')
         return 1
-    counts = sorted(len(b) for b in rows.values())
-    sole = [k for k, b in rows.items() if len(b) == 1]
+    counts = summ['counts']
+    sole = summ['sole']
     if o1:
         if set(sole) != want['one']:
             print(f'FAIL: doc says exactly {sorted(want["one"])} is one blocker away at -O1; '
                   f'measured {sorted(sole)}')
             return 1
-        got1 = {'kernels': len(rows),
-                'distinct': len({b for bs in rows.values() for b in bs}),
+        got1 = {'kernels': summ['kernels'],
+                'distinct': summ['distinct'],
                 'clear': sum(1 for c in counts if c == 0)}
         bad1 = {k: (want[k], got1[k]) for k in got1 if want[k] != got1[k]}
         if bad1:
@@ -444,11 +485,11 @@ def check_doc(rows, o1):
               f'{got1["kernels"]} kernels / {got1["distinct"]} distinct / {got1["clear"]} '
               'clear -- as published')
         return 0
-    got = {'kernels': len(rows), 'distinct': len({b for bs in rows.values() for b in bs}),
+    got = {'kernels': summ['kernels'], 'distinct': summ['distinct'],
            'clear': sum(1 for c in counts if c == 0),
            'median': counts[(len(counts) - 1) // 2],
            'tail_n': sum(1 for c in counts if c >= want['tail_at']),
-           'tail_of': len(rows), 'tail_at': want['tail_at']}
+           'tail_of': summ['kernels'], 'tail_at': want['tail_at']}
     bad = {k: (want[k], got[k]) for k in want if want[k] != got[k]}
     if bad:
         for k, (w, g) in sorted(bad.items()):
@@ -641,5 +682,8 @@ if __name__ == '__main__':
     blocks, sole, clear = report(rows)
     print('\n--- the doc figures this census publishes ---')
     bad = check_doc(rows, o1)
+    write_stamp(rows, o1)
+    print(f'  stamp: {STAMP} [{"O1" if o1 else "O3"}] records this measurement at tree '
+          f'{digest()[:12]}; docgate compares the doc against it')
     print('\n--- positive controls ---')
     sys.exit(bad + controls(rows, clear))

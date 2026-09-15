@@ -142,7 +142,14 @@ class Sass:
         if not m:
             raise Exception(f'unmodelled global addressing {o!r}  (refusing, not guessing)')
         ab = int(m.group(1))
-        addr = u64(self.R[ab+1], self.R[ab])
+        # THROUGH `rd`, not `self.R[...]`.  A register never written in the
+        # region is a LIVE-IN, and `rd` materialises it as `sass_undef_R<n>` like
+        # every other read; indexing the dict raised `KeyError` instead, so a
+        # region whose address pair is computed OUTSIDE it (a load hoisted into
+        # the prologue) crashed the validator rather than being validated or
+        # refuted.  Where both halves are defined `rd` returns them unchanged, so
+        # no term any validator already builds is touched.
+        addr = u64(self.rd(f'R{ab+1}'), self.rd(f'R{ab}'))
         if m.group(2):
             addr = addr + BitVecVal(int(m.group(2), 0), 64)
         return simplify(addr)
