@@ -110,6 +110,38 @@ def scan(harnesses=None, read=None):
     return applied, bad
 
 
+def coverage(harnesses=None, read=None):
+    """Which harnesses this gate can PARSE, and which contribute nothing.
+
+    MEASURED, because the headline is a null metric otherwise: `scan` reports
+    "N patch steps, every one of them changes the file it targets", which reads
+    as a statement about the harnesses and is a statement about the ones whose
+    steps it could recover.  It recognises a heredoc that names a LITERAL target
+    file, and a harness whose rows pass the target through a shell variable --
+    the `row "label" file "$(sub ...)"` style two recent increments used --
+    yields no steps at all and is silently uncovered.
+
+    Measured when this was written: 3 of 14 harnesses contribute all 22 steps,
+    and the decorative row this gate was written for happened to sit in one of
+    the three.  A row that has gone decorative in the other 11 is caught only
+    when somebody RUNS that table -- which is the exact decay this gate exists
+    to remove.  Those harnesses do assert their own anchors at run time and
+    print `MUTATION DID NOT APPLY`, so they are checked late rather than not at
+    all; making them checkable from here is its own increment, because running
+    the eleven will surface rows that rotted several increments ago.
+    """
+    read = read or (lambda p: open(os.path.join(HERE, p)).read())
+    hs = harnesses if harnesses is not None else sorted(
+        os.path.basename(x) for x in glob.glob(os.path.join(HERE, '*mut*.sh')))
+    out = {}
+    for h in hs:
+        try:
+            out[h] = len(steps(read(h)))
+        except OSError:
+            continue
+    return out
+
+
 def _controls():
     """Two positive controls, through the same `apply` the real scan uses."""
     ok = True
@@ -153,6 +185,12 @@ def main():
         print(f'FAIL: {h}: a {kind} step targeting {target} is DECORATIVE -- '
               f'{why}, so the row runs an unmutated tree')
     if not bad:
+        cov = coverage()
+        blind = sorted(h for h, k in cov.items() if not k)
+        if blind:
+            print(f'  note: {len(cov) - len(blind)} of {len(cov)} harnesses contribute '
+                  f'all {applied} steps; these yield none to a static scan and are '
+                  f'checked only when their own table is run: {", ".join(blind)}')
         print(f'ok: {applied} patch steps across the mutation harnesses, every '
               f'one of them changes the file it targets')
     return 0 if ok and not bad else 1

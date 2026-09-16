@@ -1674,7 +1674,7 @@ neither existing column does:
   had computed it.
 
 A kernel has more than one kind of blocker, gated by different layers, so the
-census crosses three measurements — and imports all three rather than restating
+census crosses four measurements — and imports all four rather than restating
 any, because a second implementation of an aggregation agrees with the thing it
 is checking while both are wrong:
 
@@ -1683,15 +1683,115 @@ is checking while both are wrong:
   a loop, and counting it dresses a structural blocker up as a feature gap);
 * the **structural** refusal from `loopgap`, for any kernel with control flow;
 * a **setup** failure, which executes nothing and so reports an *empty* opcode
-  gap — that is not a gap of zero and is its own blocker.
+  gap — that is not a gap of zero and is its own blocker;
+* the **unroll** layer from `unroll.py`, because `loopval`'s relation holds at
+  the loop header and so needs the two loops in lockstep. This one was crossed
+  in last and the section below is about why.
 
 **In the committed corpus every blocker has a sole-count of zero.** 66 kernels,
-**104** distinct blockers, and not one of them would validate a kernel on its own
+**105** distinct blockers, and not one of them would validate a kernel on its own
 — including every item then on the queue. `cvt.rn.f16.f32` is sole blocker of
 nothing; so is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the
 back-edge lift. That is the honest state of a corpus where **9 kernels are clear,
 the median is 15 blockers and 31 of 66 are 21 or more**, and it is why "reach"
 kept naming work that buys nothing.
+
+#### The fourth layer, and why the distance was a lower bound for eight increments
+
+Everything above crosses three layers and reports the result as a **ranking**.
+It is not one. `loopval`'s simulation relation holds at the loop *header*, so it
+needs the two loops to run in **lockstep**; if `ptxas` unrolled the SASS loop by
+k then the PTX body has to be composed k times, with a peeled prologue and a
+remainder cascade. `unroll.py` has measured that layer since before the frontier
+existed and **the frontier crossed it not at all**, so every distance printed
+above was a lower bound. This file's own residue has said so for eight
+increments.
+
+**The structural reason it was never crossed is not that anybody judged it hard:
+`unroll.py` had no `if __name__ == '__main__'` guard.** Every line of it was
+module-level code that ran a whole-corpus census on import, so `import unroll`
+printed a table and no tool could ask it a question. The layer was not
+un-crossed because it was expensive; it was un-crossed because the file was a
+script wearing a module's name.
+
+**THE PROXY, and its premise stated so it can be checked rather than believed.**
+Count the *observable* operations in each loop level's own body on each side —
+global loads and stores, and the async global-to-shared copies. `ptxas` cannot
+**invent** a global access, so if the SASS body holds k times as many as the PTX
+body, the SASS loop is running the PTX body k times. The converse premise — that
+it cannot **delete** one — is **false and measurably so**: hoisting a
+loop-invariant load out of a body is legal and common, and four corpus kernels
+show a level *shrinking*. So a shrink is a refusal, not a ratio.
+
+**GROUND TRUTH EXISTS FOR THREE KERNELS AND THE PROXY AGREES WITH IT SIX TIMES
+OUT OF SIX.** `exact_pv`, `naive_gemm_f32` and `y_cpu_matmul` are standing
+VALIDATED results at `-O1` — `loopval` has *proved* their PTX and SASS
+equivalent, which it can only do if the loops run in lockstep — and all three are
+refused at the `-O3` the corpus ships. The proxy reports `MATCHED` for all three
+at `-O1` and `UNROLLED` for all three at `-O3`. That is a check in **both**
+directions against a verdict reached by a completely different route, and it is
+what makes the layer worth crossing into a published ranking. `y_cpu_matmul`'s
+levels read `2↔2, 1↔1, 0↔0` at `-O1` and `2↔8, 1↔9, 0↔0` at `-O3`; the eight
+extra loads at level 1 are the **peeled remainder of the inner loop hoisted into
+its parent**, which is peel-and-remainder made countable.
+
+**WHAT IT REFUSES RATHER THAN GUESSES**, and each of the three was a number this
+file used to print. It took PTX back edge 0 against SASS back edge 0 whatever the
+two nests looked like, which is how `bn254_fr_mul` reported an unroll factor of
+**55** from *six* PTX loops against *one* SASS loop; the two sides must now agree
+on `(kind, count, depth)` **and** on which loop is inside which before any level
+is paired. A level that shrank is refused. So is a PTX body with nothing
+observable in it against a SASS body with something, because `ptxas` cannot
+invent one and that is a wrong pairing rather than an infinite factor.
+
+A level with **no** observable operation on **either** side is *vacuous*, not
+undecidable — `y_cpu_matmul`'s outermost loop is five instructions of counter and
+nothing else. Reading it as undecidable makes the whole kernel undecidable, which
+is what the first version of this rewrite did and what the ground-truth check
+caught.
+
+The census, at `-O3`:
+
+| verdict | n |
+|---|---|
+| `MATCHED` | **24** |
+| `UNROLLED` | **3** |
+| `REFUSED` | **18** |
+| `no loop` | **21** |
+
+The 18 refusals are 12 unpairable nests, 4 levels that shrank and 2 subjects the
+back-edge finder will not define. The previous proxy answered for 17 of 66 and
+called 23 of them `nan` — that bucket was not "unknown", it was the proxy being
+blind to `cp.async` staging on both sides at once (`\bLDG\b` does not match
+`LDGSTS`, and `cp.async…global` is not `ld.global`), so the ratio was 0/0.
+Counting the async family takes those 23 from `nan` to a verdict.
+
+**What crossing it changes.** At `-O3` the three kernels the frontier ranked
+*nearest* — `exact_pv`, `naive_gemm_f32` and `y_cpu_matmul`, each at distance 3
+and each blocked by the *same* three items — move to distance **4**, and the
+corpus goes to **105** distinct blockers. At `-O1` **nothing moves**: all three
+are `MATCHED` there, so no blocker is added and the corpus stays at 108 distinct
+and 12 clear. That asymmetry is the layer doing exactly what ground truth says it
+should.
+
+**A blocker is added only where the proxy DECIDES.** A refusal is the instrument
+failing to answer, and recording it as a blocker would be a guess in the
+pessimistic direction — so those kernels are named instead, under a
+`STILL A LOWER BOUND` heading that `frontier.py` prints: **18 of 66 at `-O3` and
+10 at `-O1`**. The distance for those is still a lower bound. The difference from
+before is that it is *named* rather than silent.
+
+> **A control fired at `-O1` and caught a bug in this very integration.** A
+> kernel the frontier calls *clear* must not be UNROLLED or REFUSED by the
+> layer, or the ranking claims a kernel is zero features away while an uncounted
+> layer blocks it. The first wiring re-derived the unroll verdict inside
+> `report`/`controls` — which run *after* the `-O1` census has chdir'd back out
+> of its temporary `-O1` corpus — so it compared an `-O1` clear set against an
+> `-O3` unroll measurement and reported all three as contradictions. The
+> verdicts are recorded by `measure` **in the directory it read**, and asking
+> for one that was never measured now raises rather than being answered from
+> whatever corpus happens to be underfoot. This increment's own subject, in the
+> control written to catch it.
 
 #### …and at `-O1` the kernel that was one blocker away is now CLEAR
 

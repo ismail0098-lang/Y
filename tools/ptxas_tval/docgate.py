@@ -54,6 +54,7 @@ import liftgap
 import loopcfg
 import loopgap
 import mutgate
+import unroll
 
 DOC = '../../docs/ptxas_translation_validation.md'
 README = '../../README.md'
@@ -591,6 +592,137 @@ def the_measurements_read_their_inputs():
     return bad
 
 
+UNROLL_ROW = re.compile(r'^\|\s*`?(MATCHED|UNROLLED|REFUSED|UNDECIDED|no loop)`?\s*\|'
+                        r'\s*\*\*(\d+)\*\*\s*\|', re.M)
+
+
+def measure_unroll_census(only=None, d='corpus'):
+    """The unroll layer's tally.  IMPORTED, never restated.
+
+    A second implementation of the census would agree with the doc while both
+    were wrong -- the recorded failure mode of an agreement gate whose two sides
+    move together."""
+    rows = unroll.census(ks=only, d=d)
+    agg = collections.Counter()
+    for _k, (v, _det) in rows.items():
+        agg['no loop' if v is None else v] += 1
+    return len(rows), agg
+
+
+def doc_unroll_census(text):
+    """The tally the doc publishes, as {verdict: n}."""
+    return {m.group(1): int(m.group(2)) for m in UNROLL_ROW.finditer(text)}
+
+
+def check_unroll_census(perturb=None):
+    """The FOURTH layer's census, against the document.
+
+    It is measured live rather than read from the frontier stamp because it is
+    0.2 s -- pure text scanning, no solver -- and a live measurement beats a
+    cached one wherever it is cheap enough to take."""
+    bad = 0
+    doc = open(DOC).read()
+    total, agg = measure_unroll_census()
+    if perturb:
+        agg = collections.Counter(agg); agg[perturb] = agg.get(perturb, 0) + 1
+    stated = doc_unroll_census(doc)
+    if not stated:
+        print('FAIL: the doc states no unroll census; the comparison below would '
+              'assert nothing')
+        return 1
+    for v, n in sorted(agg.items()):
+        if v not in stated:
+            print(f'FAIL: the unroll census reports {n} {v} and the doc does not state '
+                  f'that verdict at all')
+            bad += 1
+        elif stated[v] != n:
+            print(f'FAIL: the doc says {stated[v]} {v}; measured {n}')
+            bad += 1
+    for v in stated:
+        if v not in agg:
+            print(f'FAIL: the doc states a {v} bucket the census does not produce')
+            bad += 1
+    # GROUND TRUTH.  The claim that makes the layer worth crossing into a
+    # published ranking is that it agrees with verdicts derived by another
+    # route.  Asserted here as well as in `unroll.selftest`, because this is
+    # the gate every increment runs.
+    for k, d, want in unroll.GROUND_TRUTH:
+        got, det = unroll.factor(k, d)
+        if got != want:
+            print(f'FAIL: {k} at {d} is a standing {"VALIDATED" if want == "MATCHED" else "refused"} '
+                  f'result, so the unroll layer must say {want}; it says {got} ({det})')
+            bad += 1
+    if not bad:
+        print(f'ok: the unroll census over {total} kernels matches the doc, and the layer '
+              f'agrees with all {len(unroll.GROUND_TRUTH)} standing verdicts')
+    return bad
+
+
+README_FRONTIER = re.compile(
+    r'(\d+)\s+kernels,\s+(\d+)\s+distinct\s+blockers\s+and\s+(\d+)\s+clear\s+at\s+`-O3`;'
+    r'\s+(\d+)\s+and\s+\*\*(\d+)\*\*\s*\n?>?\s*at\s+`-O1`')
+
+
+def check_readme_frontier(stamp=None, readme_text=None):
+    """The README's copy of the frontier figures, against the census's stamp.
+
+    IT IS THE DEFECT THE PARAGRAPH IS ABOUT.  That blockquote exists to record a
+    retraction that "landed in one file of two", and it then published the
+    census figures in a second file with the doc's copy gated and its own gated
+    by nothing.  Whitespace-tolerant deliberately: a sentence-shaped pattern
+    with hard spaces matches only until somebody reflows the paragraph, and then
+    this reports the claim as MISSING rather than as wrong."""
+    stamp = stamp if stamp is not None else (
+        json.load(open(frontier.STAMP)) if os.path.exists(frontier.STAMP) else {})
+    text = readme_text if readme_text is not None else open(README).read()
+    m = README_FRONTIER.search(text)
+    if not m:
+        print('FAIL: the README states no frontier figures in the form this gate reads; '
+              'the comparison below would assert nothing')
+        return 1
+    bad = 0
+    want = {}
+    for key in ('O3', 'O1'):
+        e = stamp.get(key)
+        if not e:
+            print(f'FAIL: no {key} measurement stamped, so the README figures are '
+                  f'unconfirmed')
+            return 1
+        want[key] = (e['summary']['kernels'], e['summary']['distinct'],
+                     e['summary']['counts'].count(0))
+    got = ((int(m.group(1)), int(m.group(2)), int(m.group(3))),
+           (int(m.group(1)), int(m.group(4)), int(m.group(5))))
+    for key, g in zip(('O3', 'O1'), got):
+        if g != want[key]:
+            print(f'FAIL: the README says {key} is {g} (kernels, distinct, clear); '
+                  f'the stamped census measured {want[key]}')
+            bad += 1
+    if not bad:
+        print(f'ok: the README frontier figures agree with the stamp at both levels')
+    return bad
+
+
+def perturbed_unroll(kernel):
+    """`unroll.factor` over a corpus in which one kernel's SASS body was doubled.
+
+    The INPUT is perturbed and the verdict is taken by the same call the census
+    makes.  A control applied to the ANSWER cannot see the measurement being
+    subverted to read something else."""
+    tmp = tempfile.mkdtemp(prefix='docgate_unroll_')
+    try:
+        shutil.copy(f'corpus/{kernel}.ptx', f'{tmp}/{kernel}.ptx')
+        out = []
+        for line in open(f'corpus/{kernel}.sass'):
+            out.append(line)
+            body = line.strip().split('*/')[-1].strip().rstrip(';').strip()
+            if unroll.SASS_OBS.match(body):
+                out.append(line)
+        open(f'{tmp}/{kernel}.sass', 'w').writelines(out)
+        return unroll.factor(kernel, tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def digest_with(kernel):
     """`frontier.digest()` over a tree in which one corpus artifact changed.
 
@@ -656,7 +788,8 @@ def check_frontier_stamp(tree=None, doc_text=None):
 if __name__ == '__main__':
     bad = (check_loop_census() + check_staging_table()
            + check_optimisation_level_gaps() + the_shape_is_measured_from_the_artifact()
-           + check_second_refusal() + check_frontier_stamp())
+           + check_second_refusal() + check_unroll_census() + check_frontier_stamp()
+           + check_readme_frontier())
     # POSITIVE CONTROLS, through the same code path.  Without these a parse that
     # recovered nothing, or a comparison that compared nothing, reports ok.
     # The FAIL lines they print below are the controls WORKING; they are the
@@ -687,7 +820,25 @@ if __name__ == '__main__':
         print('FAIL: a doc with its -O3 distinct-blocker figure moved still matches the '
               'stamp -- the figure comparison is dead')
         bad += 1
-    print('  control: a perturbed census, artifact and -O figure are all reported')
+    if check_unroll_census(perturb='UNROLLED') == 0:
+        print('FAIL: a perturbed unroll tally was not reported -- the comparison is dead')
+        bad += 1
+    # AND THE MEASUREMENT ITSELF, not only the comparison.  A doubled SASS body
+    # must read as UNROLLED through the same `unroll.factor` the census uses;
+    # without this the tally check passes over a layer that decided nothing.
+    _rm = re.sub(r'(\d+) distinct blockers and', lambda m: str(int(m.group(1)) + 1)
+                 + ' distinct blockers and', open(README).read(), count=1)
+    if check_readme_frontier(readme_text=_rm) == 0:
+        print('FAIL: a README with its distinct-blocker figure moved still matches the '
+              'stamp -- the comparison is dead')
+        bad += 1
+    _v, _d = perturbed_unroll('rmsnorm_residual_4096')
+    if _v != 'UNROLLED':
+        print(f'FAIL: a SASS body with every observable operation doubled reports '
+              f'{_v} ({_d}); the unroll measurement is not reading its artifact')
+        bad += 1
+    print('  control: a perturbed census, artifact, -O figure and unroll tally are all '
+          'reported, and a doubled SASS body reads as UNROLLED')
     bad += the_measurements_read_their_inputs()
     # EVERY MUTATION ROW'S PATCH MUST BITE.  A table is the only evidence in
     # this directory that a check is load-bearing, and a row whose anchor has
