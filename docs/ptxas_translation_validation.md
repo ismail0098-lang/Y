@@ -1119,8 +1119,9 @@ nothing after the nest stores; `loop_swap_exit` is the row where something does.
 
 **What it does not do.** `y_cpu_matmul` is validated at `-O1`, not at the level
 the corpus ships: at `-O3` it has a two-opcode SASS gap and `ptxas` unrolls from
-`-O2`. The frontier census still reports it one blocker away, because its
-structural column is `loopval`'s refusal; that is a statement about `loopval`.
+`-O2`. The frontier census reported it one blocker away for a whole increment
+after that, because its structural column asked `loopval` alone; it asks the
+suite now and the kernel is clear at `-O1`.
 Refused by name: more than one loop at the top level (so every `SEQUENTIAL` and
 `MIXED` kernel), a store in an iteration followed by a child loop or a later load
 in the same iteration, a SASS loop with no zero-trip guard, a child whose
@@ -1291,33 +1292,62 @@ refusing sub-word stores today leaves the tool sound rather than leaving a hole.
 
 ### The loop kernels are gated twice, and only one gate had been counted
 
-`gap.py` measures opcodes. `loopval` refuses on loop **structure**, and the two
-are independent — closing every opcode gap would leave a kernel refused for a
-reason nobody had counted. `loopgap.py` is that census. It runs `loopval` over
-every kernel with PTX control flow and aggregates the refusal, which is possible
-only because `loopval` refuses by name and never guesses.
+`gap.py` measures opcodes. The validator refuses on loop **structure**, and the
+two are independent — closing every opcode gap would leave a kernel refused for a
+reason nobody had counted. `loopgap.py` is that census. It runs the validator
+over every kernel with PTX control flow and aggregates the refusal, which is
+possible only because the validator refuses by name and never guesses.
+
+**It asks the SUITE, and that is not what it used to do.** `loopval` handles one
+loop and `nestval` one nest; the census reported `loopval`'s answer alone, which
+is a FIRST-REFUSAL reading of the structural column — the exact defect `gap.py`
+exists to avoid on the opcode column, arrived at here because there used to be
+only one loop validator. `suite_validate` asks `nestval` exactly where
+`loopval`'s refusal is the one it exists to lift, a back-edge **count**; every
+other `loopval` refusal stands.
 
 **It takes none of them:**
 
 ```
 48 kernels with PTX control flow; 0 validated
+   answered by: loopval 8, nestval 40
 
- 30  PTX: more than one back edge, SEQUENTIAL depth 1
-  5  PTX: more than one back edge, MIXED depth 2
-  3  PTX: more than one back edge, NESTED depth 3
-  2  SASS branch form this CFG cannot place: '@P BRA P1, `(.L)'
+ 24  PTX: more than one loop at one level, SEQUENTIAL depth 1
+  6  PTX back edge is predicated; the recognised shape tests at the TOP
+  4  PTX loop has 3 own branches; only its exit test is allowed
+  3  SASS branch form this CFG cannot place: '@P BRA P1, `(.L)'
   2  SASS branch form this CFG cannot place: 'BRA.DIV ~URZ, `(.L)'
   2  PTX module holds more than one entry point
+  2  PTX branch outside the loop nest
+  1  PTX: more than one loop at one level, MIXED depth 2
   1  SASS back edge is unconditional
   1  PTX loop body has more than one branch
   1  PTX: loop finder found NO back edge
   1  SASS: loop finder found NO back edge
 ```
 
-**38 of 48 refuse for one reason: more than one back edge.** That includes all
-23 FP16 tensor-core GEMMs, which have three. So the recorded "21–27 opcodes
-each" understates them — they are behind an opcode gap *and* behind a structural
-one, and only the first had been measured.
+**25 of 48 refuse for one reason: more than one loop at one level.** That
+includes all 23 FP16 tensor-core GEMMs, which have three loops. So the recorded
+"21–27 opcodes each" understates them — they are behind an opcode gap *and*
+behind a structural one, and only the first had been measured.
+
+> **This block read `38` under one bucket and THREE DIFFERENT BLOCKERS were
+> sitting behind it.** `loopval` refuses on the back-edge count before it looks
+> at anything else, so every kernel with more than one loop was filed under a
+> blocker `nestval` lifts. Asked the suite instead: the four `gemm_fp8` carry
+> three branches of their own inside the loop, `int8_gemm` and `int8_gemm_scaled`
+> branch outside the nest, and `y_cpu_matmul`'s SASS holds the `@!P0 BRA P1`
+> form — which is **not a new blocker at all**, it is one already counted for
+> `naive_gemm_f32` and `exact_pv`, so its reach was understated by one. The
+> `NESTED depth 3` bucket is gone entirely; every kernel in it had a real
+> blocker underneath.
+>
+> **`answered by` is part of the published census for the same reason the rows
+> are.** A dispatch that stopped reaching `nestval` would leave every row above
+> plausible while the census was wrong about what the validator can do, so
+> `docgate.py` asserts the split and `loopgap.py --selftest` asserts both legs —
+> on `y_cpu_matmul` at `-O1`, the one kernel in the tree where the two members
+> disagree about the **verdict** rather than about the words.
 
 > **This block read `24 / 9` and the 9 was a DETECTION failure, not a capacity
 > one.** `loopcfg`'s PTX branch pattern hardcoded `%p(\d+)`, which is a lexical
@@ -1450,6 +1480,15 @@ structural predicates at every level a lift would produce.
 
 **Zero.** Every one of the 38 is still refused by a NAMED check `loopcfg` never
 reached.
+
+> **SCOPE, since `nestval` exists now.** This census runs the structural
+> predicates of a HYPOTHETICAL multi-loop `loopval`; it is not a validator and
+> it does not report the suite's answer. `nestval` **is** that lift for the
+> `NESTED` shape, and it validates `y_cpu_matmul` at `-O1` — so for those three
+> kernels the real answer is `nestval`'s and this block is a statement about a
+> validator nobody built. For the 35 `SEQUENTIAL` and `MIXED` kernels nothing is
+> built, so it still answers, and the ranking it produced still stands: the
+> cheap shape is the furthest kernels in the corpus.
 
 > **This read `0 of 32` and then read `6 of 38`, and the 6 were an OPTIMISTIC
 > answer — the one direction this file's own docstring says it cannot give.**
@@ -1647,27 +1686,40 @@ is checking while both are wrong:
   gap — that is not a gap of zero and is its own blocker.
 
 **In the committed corpus every blocker has a sole-count of zero.** 66 kernels,
-**102** distinct blockers, and not one of them would validate a kernel on its own
+**104** distinct blockers, and not one of them would validate a kernel on its own
 — including every item then on the queue. `cvt.rn.f16.f32` is sole blocker of
 nothing; so is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the
 back-edge lift. That is the honest state of a corpus where **9 kernels are clear,
 the median is 15 blockers and 31 of 66 are 21 or more**, and it is why "reach"
 kept naming work that buys nothing.
 
-#### …and at `-O1` it is not empty, which re-ranks the queue
+#### …and at `-O1` the kernel that was one blocker away is now CLEAR
 
 Crossing sufficiency with the optimisation level is what the corrected bullet
-above makes necessary, and it changes the answer. **`y_cpu_matmul` at `-O1` has
-an empty opcode gap on both sides** — measured by the real census, not by a text
-scan: its `-O3` `PLOP3.LUT`/`UIADD3` are gone, no new opcode replaces them, and
-its PTX gap is `bra` alone. Its **only** remaining blocker is the multi-back-edge
-limit, three on each side.
+above makes necessary, and it changed the answer twice. **`y_cpu_matmul` at
+`-O1` has an empty opcode gap on both sides** — measured by the real census, not
+by a text scan: its `-O3` `PLOP3.LUT`/`UIADD3` are gone, no new opcode replaces
+them, and its PTX gap is `bra` alone. Its only remaining blocker was the
+multi-back-edge limit, three on each side — and `nestval` lifts exactly that, so
+once the census asks the **suite** instead of `loopval` alone the kernel has no
+blocker left at all.
 
-Measured over the whole corpus at that level, **at `-O1` exactly one kernel is
-one blocker away: `y_cpu_matmul`** — everything else is either clear or two or
-more short. At `-O1` the corpus is 66 kernels, **106** distinct blockers and
-**11** clear (`exact_pv` and `naive_gemm_f32` join the nine, which is the same
-`-O` effect the corrected bullet above measures).
+Measured over the whole corpus at that level, at `-O1` **no kernel is one
+blocker away** — everything else is either clear or two or more short. At
+`-O1` the corpus is 66 kernels, **108** distinct blockers and **12** clear
+(`exact_pv`, `naive_gemm_f32` and `y_cpu_matmul` join the nine — the first two
+by the `-O` effect the corrected bullet above measures, the third because the
+census stopped reporting one member's refusal as the suite's). **The frontier is
+empty at distance 1 at both levels**, and this time for a better reason than
+before: not "the row does not survive being asked what is behind it" but "the
+row validates".
+
+> **This section read "at `-O1` exactly one kernel is one blocker away:
+> `y_cpu_matmul`", and 106 / 11.** Both were true of a census that asked
+> `loopval`; neither was true of the validator. The figures moved 102 → 104 and
+> 106 → 108 because the structural keys changed with the dispatch — the
+> `NESTED depth 3` bucket vanished and the three blockers behind it are named
+> now — and the clear counts moved 9 / 11 → 9 / **12**.
 
 > **Those two counts were published and gated by NOTHING until this
 > increment.** `check_doc`'s `-O1` branch asserted the sole-blocker SET and
@@ -1741,9 +1793,10 @@ more short. At `-O1` the corpus is 66 kernels, **106** distinct blockers and
 > middle loop's store compared in every iteration, and the next iteration's inner
 > loads reading memory carried across. The pieces priced above were real, and they
 > were all of it but one — the SASS nest is guarded by an `EXIT`, which `loopval`
-> refuses and no census counted. The frontier still lists the kernel with one
-> blocker left, because its structural column is `loopval`'s refusal. See
-> *Nested loops* under *Loops*.
+> refuses and no census counted. **SUPERSEDED IN TURN:** the frontier listed the
+> kernel with one blocker left for one increment after that, because its
+> structural column asked `loopval` alone. It asks the suite now — see *The loop
+> kernels are gated twice* — and `y_cpu_matmul` is clear at `-O1`.
 
 So the lift is not "sufficient for nothing". It is the one item in the corpus
 with a sufficiency case, and paying for it buys a **new standing result** rather

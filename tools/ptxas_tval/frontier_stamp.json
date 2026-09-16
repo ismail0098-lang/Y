@@ -1,6 +1,6 @@
 {
  "O1": {
-  "digest": "28ec39588eddd64b49664a54c694bc7501c0ad65ddb64c4a579749d6bece79f8|o1",
+  "digest": "0207e09d4ce8372c1bbfa54fed6fee78239cbcd3de447d98ed242a97ea2bb4a0|o1",
   "summary": {
    "counts": [
     0,
@@ -14,7 +14,7 @@
     0,
     0,
     0,
-    1,
+    0,
     3,
     3,
     3,
@@ -70,15 +70,13 @@
     27,
     32
    ],
-   "distinct": 106,
+   "distinct": 108,
    "kernels": 66,
-   "sole": [
-    "y_cpu_matmul"
-   ]
+   "sole": []
   }
  },
  "O3": {
-  "digest": "28ec39588eddd64b49664a54c694bc7501c0ad65ddb64c4a579749d6bece79f8",
+  "digest": "0207e09d4ce8372c1bbfa54fed6fee78239cbcd3de447d98ed242a97ea2bb4a0",
   "summary": {
    "counts": [
     0,
@@ -148,7 +146,7 @@
     27,
     27
    ],
-   "distinct": 102,
+   "distinct": 104,
    "kernels": 66,
    "sole": []
   }

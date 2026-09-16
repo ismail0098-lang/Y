@@ -22,8 +22,12 @@ agreement gate whose two sides move together.
 
   structure   `loopgap`, for any kernel with control flow.  A kernel whose
               every opcode is modelled can still be refused because its loop
-              shape is outside what `loopval.validate` handles, and that is a
-              separate blocker that no opcode work removes.
+              shape is outside what the validator handles, and that is a
+              separate blocker that no opcode work removes.  `loopgap` asks the
+              SUITE -- `loopval` for one loop, `nestval` for one nest.  It used
+              to ask `loopval` alone, which is a FIRST-REFUSAL reading of this
+              column and is what listed `y_cpu_matmul` at -O1 as one blocker
+              away from a structure `nestval` VALIDATES.
 
   setup       the census could not build an initial state, so it executed
               nothing and reports an EMPTY opcode gap.  That is not a gap of
@@ -400,12 +404,20 @@ def doc_figures(o1, text=None):
         # NOTHING -- a gate that asserts the ROUTE and never the NUMBER, which
         # is the certificate-count defect one increment later, in the gate
         # written to stop published figures going stale.
-        m = re.search(r'at `-O1` exactly one kernel is\s+one blocker away:\s+`(\w+)`', d)
-        n = re.search(r'At `-O1` the corpus is\s+(\d+)\s+kernels,\s+\*\*(\d+)\*\*\s+'
+        # EITHER form, and one of them is REQUIRED.  The sole-blocker set at
+        # -O1 is empty now, and a parse that can only express "exactly one" has
+        # no way to say so -- it would report the doc as MISSING the claim,
+        # which is a gate failing rather than a gate checking.  The empty case
+        # is a positive sentence in the doc for the same reason: a gate must not
+        # accept the absence of a claim as agreement with it.
+        m = re.search(r'at\s+`-O1`\s+exactly\s+one\s+kernel\s+is\s+one\s+blocker\s+away:'
+                      r'\s+`(\w+)`', d)
+        z = re.search(r'at\s+`-O1`\s+\*\*no\s+kernel\s+is\s+one\s+blocker\s+away\*\*', d)
+        n = re.search(r'At\s+`-O1`\s+the\s+corpus\s+is\s+(\d+)\s+kernels,\s+\*\*(\d+)\*\*\s+'
                       r'distinct\s+blockers\s+and\s+\*\*(\d+)\*\*\s+clear', d)
-        if not m or not n:
+        if (not m and not z) or not n:
             return None
-        return {'one': {m.group(1)}, 'kernels': int(n.group(1)),
+        return {'one': {m.group(1)} if m else set(), 'kernels': int(n.group(1)),
                 'distinct': int(n.group(2)), 'clear': int(n.group(3))}
     a = re.search(r'(\d+)\s+kernels,\s+\*\*(\d+)\*\*\s+distinct\s+blockers', d)
     b = re.search(r'\*\*(\d+)\s+kernels\s+are\s+clear,\s+the\s+median\s+is\s+(\d+)\s+blockers'

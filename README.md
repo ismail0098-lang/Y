@@ -1955,13 +1955,25 @@ width, so the soundness decision stopped being a trade-off; see *The memory mode
 reads through stores* below.
 
 **The loop kernels are gated twice and only one gate had been counted.**
-`loopval` refuses on loop *structure*, independently of opcodes, so closing every
-opcode gap would leave a kernel refused for a reason nobody had measured.
-`loopgap.py` is that census — possible only because `loopval` refuses by name —
-and it takes **none of the 48** kernels with control flow. **38 of the 48 refuse
-for one reason: more than one back edge** (38 on the PTX side, 0 on the SASS),
-including all 23 tensor-core GEMMs, which have three. So "21–27 opcodes each"
-understates them.
+The validator refuses on loop *structure*, independently of opcodes, so closing
+every opcode gap would leave a kernel refused for a reason nobody had measured.
+`loopgap.py` is that census — possible only because the validator refuses by
+name — and it takes **none of the 48** kernels with control flow. **25 of the 48
+refuse for one reason: more than one loop at one level** (25 on the PTX side, 0
+on the SASS), including all 23 tensor-core GEMMs, which have three loops. So
+"21–27 opcodes each" understates them.
+
+**That census asked ONE member of a two-member suite, and three different
+blockers were hiding behind its biggest bucket.** `loopval` handles one loop and
+`nestval` one nest; `loopval` refuses on the back-edge *count* before it looks at
+anything else, so every multi-loop kernel was filed under a blocker `nestval`
+lifts. Asked the suite: the four `gemm_fp8` carry three branches of their own
+inside the loop, `int8_gemm` and `int8_gemm_scaled` branch outside the nest, and
+`y_cpu_matmul`'s SASS holds an `@!P0 BRA P1` form that was **already counted for
+two other kernels**, so its reach was understated. Which member answered is now
+a published, gated figure — a dispatch that stopped reaching `nestval` would
+leave every row of the census plausible and the census wrong about what the
+validator can do.
 
 **That one bucket held three shapes needing three different validators**, and
 splitting it inverts the ranking: 30 are `SEQUENTIAL` (one loop after another —
@@ -1991,8 +2003,11 @@ tensor-core item and the back-edge item share a blocker.
 > one file of two**, which is the same defect as the certificate count that was
 > published in six places and gated in none. The current position, measured by
 > `frontier.py`: in the committed corpus **no single item is the sole blocker of
-> any kernel**, and at `-O1` exactly one is — `y_cpu_matmul` has an empty opcode
-> gap on both sides there and only the back-edge limit left.
+> any kernel**, and at `-O1` **none is either** — `y_cpu_matmul` has an empty
+> opcode gap on both sides there, and its back-edge refusal was `loopval`'s
+> rather than the validator's, so once the census asks the suite the kernel is
+> clear. 66 kernels, 104 distinct blockers and 9 clear at `-O3`; 108 and **12**
+> at `-O1`.
 >
 > **And that last row does not survive either.** A refusal census reports the
 > FIRST refusal; `loopcfg` refuses on the back-edge count before it looks at
@@ -2007,8 +2022,10 @@ tensor-core item and the back-edge item share a blocker.
 > **And then it was built.** `nestval.py` validates `y_cpu_matmul` at `-O1`:
 > the nested relation, the store compared in every iteration, and memory carried
 > between iterations were the price, plus one piece no census counted — the SASS
-> nest is guarded by an `EXIT`, which `loopval` refuses. The census above measured
-> `loopval`'s refusals, and that is still what it measures.
+> nest is guarded by an `EXIT`, which `loopval` refuses. **The census above
+> measured `loopval`'s refusals for one increment after that and now measures the
+> suite's**, which is what takes `y_cpu_matmul` from "one blocker away" to clear
+> at `-O1`.
 
 The census also puts a number on how the opcode census
 under-reports: `bra` reads as 37 kernels where a textual scan finds 48, split
