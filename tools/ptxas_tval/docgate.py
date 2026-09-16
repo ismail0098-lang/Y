@@ -53,6 +53,7 @@ import frontier
 import liftgap
 import loopcfg
 import loopgap
+import mutgate
 
 DOC = '../../docs/ptxas_translation_validation.md'
 README = '../../README.md'
@@ -83,8 +84,10 @@ def measure_loop_census(only=None):
     if only is not None:
         ks = [k for k in ks if k in only]
     agg = collections.Counter()
+    who = collections.Counter()
     nval = 0
-    for _k, v, msg, _n, _dt in loopgap.census(ks):
+    for _k, v, msg, _n, _dt, _who in loopgap.census(ks):
+        who[_who] += 1
         if v == 'VALIDATED':
             nval += 1
         else:
@@ -94,23 +97,35 @@ def measure_loop_census(only=None):
             # census against a shapeless measurement -- i.e. report every row as
             # missing, which is a gate failing rather than a gate checking.
             agg[loopgap.reason_key(msg, _k)] += 1
-    return len(ks), nval, agg
+    return len(ks), nval, agg, who
 
 
 def doc_loop_census(text):
-    """The fenced block the doc publishes, as {reason: n}."""
-    m = re.search(r'```\n(\d+) kernels with PTX control flow; (\d+) validated\n\n(.*?)```',
+    """The fenced block the doc publishes: (total, validated, who, {reason: n}).
+
+    The `answered by` line is PART of the published census rather than
+    decoration.  The answer now depends on WHICH member of the validator suite
+    was asked, and a dispatch that stopped reaching `nestval` would leave every
+    row below plausible while the census was wrong about what the validator can
+    do.  Parsing it is what makes that a gated figure instead of a claim."""
+    m = re.search(r'```\n(\d+) kernels with PTX control flow; (\d+) validated\n'
+                  r'   answered by: ([^\n]*)\n\n(.*?)```',
                   text, re.S)
     if not m:
         return None
+    who = {}
+    for part in m.group(3).split(','):
+        fs = part.split()
+        if len(fs) == 2:
+            who[fs[0]] = int(fs[1])
     rows = {}
-    for line in m.group(3).splitlines():
+    for line in m.group(4).splitlines():
         line = line.strip()
         if not line:
             continue
         n, reason = line.split(None, 1)
         rows[reason.strip()] = int(n)
-    return int(m.group(1)), int(m.group(2)), rows
+    return int(m.group(1)), int(m.group(2)), who, rows
 
 
 def readme_staging_table(text):
@@ -134,8 +149,8 @@ def check_loop_census(perturb=None):
     if published is None:
         print('FAIL: the loop-structure census block is not in the doc at all')
         return 1
-    total, nval, rows = published
-    n_k, n_v, agg = measure_loop_census()
+    total, nval, doc_who, rows = published
+    n_k, n_v, agg, who = measure_loop_census()
     if perturb:
         agg = collections.Counter(agg)
         agg[perturb] = agg.get(perturb, 0) + 1
@@ -146,6 +161,9 @@ def check_loop_census(perturb=None):
     bad = 0
     if (n_k, n_v) != (total, nval):
         print(f'FAIL: doc says {total} kernels / {nval} validated; measured {n_k} / {n_v}')
+        bad += 1
+    if dict(who) != doc_who:
+        print(f'FAIL: doc says the census was answered by {doc_who}; measured {dict(who)}')
         bad += 1
     # Reasons are matched on the doc's own (possibly truncated) text, because
     # the doc wraps and `loopgap` prints a parenthetical the doc drops.
@@ -164,8 +182,9 @@ def check_loop_census(perturb=None):
     # The prose total, DERIVED the way the prose derives it: both sides of the
     # same reason.  It was the half of this figure that stayed right while the
     # block went stale, so it is not redundant with the rows above.
-    both = sum(n for r, n in agg.items() if 'more than one back edge' in r)
-    m = re.search(r'\*\*(\d+) of (\d+) refuse for one reason: more than one back edge\.\*\*', doc)
+    both = sum(n for r, n in agg.items() if 'more than one loop at one level' in r)
+    m = re.search(r'\*\*(\d+) of (\d+) refuse for one reason: more than one loop at one '
+                  r'level\.\*\*', doc)
     if not m:
         print('FAIL: the prose sentence deriving the back-edge total is gone')
         bad += 1
@@ -181,14 +200,17 @@ def check_loop_census(perturb=None):
     # pattern with hard spaces in it matches only until someone reflows a
     # paragraph -- and then the gate reports the claim as missing.
     rm = re.search(r'\*\*(\d+)\s+of\s+the\s+(\d+)\s+refuse\s+for\s+one\s+reason:\s+more\s+than\s+one'
-                   r'\s+back\s+edge\*\*\s+\((\d+)\s+on\s+the\s+PTX\s+side,\s+(\d+)\s+on\s+the\s+SASS\)',
+                   r'\s+loop\s+at\s+one\s+level\*\*\s+\((\d+)\s+on\s+the\s+PTX\s+side,'
+                   r'\s+(\d+)\s+on\s+the\s+SASS\)',
                    open(README).read())
     if not rm:
         print('FAIL: the README no longer states the back-edge census')
         bad += 1
     else:
-        pn = sum(n for r, n in agg.items() if r.startswith('PTX') and 'more than one back edge' in r)
-        sn = sum(n for r, n in agg.items() if r.startswith('SASS') and 'more than one back edge' in r)
+        pn = sum(n for r, n in agg.items()
+                 if r.startswith('PTX') and 'more than one loop at one level' in r)
+        sn = sum(n for r, n in agg.items()
+                 if r.startswith('SASS') and 'more than one loop at one level' in r)
         got = tuple(int(x) for x in rm.groups())
         if got != (both, n_k, pn, sn):
             print(f'FAIL: README says {got}; measured {(both, n_k, pn, sn)} '
@@ -196,7 +218,7 @@ def check_loop_census(perturb=None):
             bad += 1
     if not bad:
         print(f'ok: loop-structure census, {n_k} kernels, {len(rows)} buckets, '
-              f'{both} behind more than one back edge, doc and README agreeing')
+              f'{both} behind more than one loop at one level, doc and README agreeing')
     return bad
 
 
@@ -516,7 +538,7 @@ def the_measurements_read_their_inputs():
         print('FAIL: fewer than two control-flow kernels; the input control is vacuous')
         return 1
     sub = ks[:2]
-    n_k, _n_v, _agg = measure_loop_census(only=sub)
+    n_k, _n_v, _agg, _who = measure_loop_census(only=sub)
     if n_k != 2:
         print(f'FAIL: the census was handed {sub} and reported {n_k} kernels; '
               'it is not reading the corpus it was given')
@@ -667,6 +689,19 @@ if __name__ == '__main__':
         bad += 1
     print('  control: a perturbed census, artifact and -O figure are all reported')
     bad += the_measurements_read_their_inputs()
+    # EVERY MUTATION ROW'S PATCH MUST BITE.  A table is the only evidence in
+    # this directory that a check is load-bearing, and a row whose anchor has
+    # rotted runs an unmutated tree and reports the baseline -- silently, since
+    # nobody re-runs an old table.  `mutgate` carries its own controls and its
+    # own floor; it is here because this is the gate that runs every increment.
+    # THE CENSUS'S DISPATCH.  Its answer now depends on WHICH member of the
+    # validator suite is asked, and that decision is invisible in a reason
+    # table -- a dispatch that never reaches `nestval` reports a perfectly
+    # plausible census.  `loopgap`'s own controls assert both legs.
+    print()
+    bad += loopgap._selftest()
+    print()
+    bad += mutgate.main()
     if bad:
         print(f'\nFAIL: {bad} doc figure(s) disagree with the measurement.')
         sys.exit(1)

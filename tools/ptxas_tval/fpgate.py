@@ -35,9 +35,14 @@ def structural(k, o1=False):
     p, s = f'{d}/{k}.ptx', f'{d}/{k}.sass'
     if not os.path.exists(s): return ('-', 'no build')
     if not loopgap.has_control_flow(p): return ('-', '(no loop)')
+    # THE SUITE, through `loopgap` rather than a second dispatch of its own.
+    # "What does the validator say about this kernel" must have ONE answer; a
+    # second copy here is `feedback-guards-consulted-at-one-site` waiting to
+    # happen.  Measured: every kernel this gate names is a single loop, so the
+    # two members agree and no verdict in this file moves.
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            v, msg, _ = loopval.validate(p, s, 20, 'wide')
+            _who, v, msg, _n = loopgap.suite_validate(k, 20, 'wide', d)
     except Exception as e:
         v, msg = 'REFUSED', str(e)
     return (v, v if v == 'VALIDATED' else loopgap.reason_key(msg))

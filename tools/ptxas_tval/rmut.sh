@@ -43,15 +43,27 @@ sed -i 's/^    return re.search(r.\^\\s\*(@\\S+\\s+)?bra(\\.uni)?\\s., open(ptxf
 grep -q 'return False' loopgap.py || echo '  !! R1 DID NOT APPLY'
 rm -rf __pycache__; run 'R1 loopgap examines no kernels (floor must fire)'
 
-# --- R2: collapse ZERO back edges into the more-than-one bucket.  Both are
-# --- phrased "has N back edges" by loopval; merging them reports the larger.
+# --- R2: collapse ZERO back edges into the more-than-one bucket.  The two are
+# --- opposite problems (a loop finder coming up empty against capacity) and
+# --- merging them reports the larger.
+# ---
+# --- THIS ROW WAS DECORATIVE and `mutgate.py` is what found it.  Its anchor was
+# --- a one-line ternary that the shape-split increment rewrote underneath it,
+# --- so the heredoc died with `ValueError: substring not found` BEFORE it wrote
+# --- anything and the row went on reporting the baseline.  Every substitution
+# --- below asserts, so the next rewrite says so instead of going quiet.
 ./restore.sh >/dev/null
 python3 - <<'P'
-s=open('loopgap.py').read()
-a=s.index("        return (f'{side}: loop finder found NO back edge' if n == 0")
-b=s.index("    return re.sub(r'\\s+', ' ', msg)")
-s=s[:a]+"        return f'{side}: has N back edges'\n"+s[b:]
-open('loopgap.py','w').write(s)
+s = open('loopgap.py').read()
+for a, b in (("        return f'{m.group(1)}: loop finder found NO back edge'",
+              "        return f'{m.group(1)}: has N back edges'"),
+             ("            return f'{side}: loop finder found NO back edge'",
+              "            return f'{side}: has N back edges'"),
+             ("        return f'{side}: more than one loop at one level, {shape}'",
+              "        return f'{side}: has N back edges'")):
+    assert s.count(a) == 1, f'R2 anchor missing or not unique: {a!r}'
+    s = s.replace(a, b)
+open('loopgap.py', 'w').write(s)
 P
 rm -rf __pycache__; run 'R2 zero and >1 back edges folded into one bucket'
 
