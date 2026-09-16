@@ -2006,8 +2006,25 @@ tensor-core item and the back-edge item share a blocker.
 > any kernel**, and at `-O1` **none is either** — `y_cpu_matmul` has an empty
 > opcode gap on both sides there, and its back-edge refusal was `loopval`'s
 > rather than the validator's, so once the census asks the suite the kernel is
-> clear. 66 kernels, 104 distinct blockers and 9 clear at `-O3`; 108 and **12**
+> clear. 66 kernels, 105 distinct blockers and 9 clear at `-O3`; 108 and **12**
 > at `-O1`.
+>
+> **And that census was itself a LOWER BOUND, for eight increments.** It crossed
+> three layers — opcodes, loop structure, setup — and not the fourth:
+> `loopval`'s relation holds at the loop header, so it needs the two loops in
+> lockstep, and `ptxas` unrolls. `unroll.py` has measured that since before the
+> frontier existed and **the frontier never asked it**, because that file had no
+> `if __name__ == '__main__'` guard: importing it ran a whole-corpus census, so
+> no tool could ask it a question. Crossed in now. At `-O3` the three kernels
+> the frontier ranked *nearest* — `exact_pv`, `naive_gemm_f32`, `y_cpu_matmul`,
+> each at distance 3 and each blocked by the *same* three items — move to
+> distance **4**; at `-O1` all three are 1:1 so nothing moves. The proxy agrees
+> with those three kernels' standing `-O1` VALIDATED verdicts and their `-O3`
+> refusals, **six out of six**, which is a check against a result reached by a
+> completely different route. Where it cannot decide it refuses by name, and
+> `frontier.py` prints those kernels under `STILL A LOWER BOUND` — 18 of 66 at
+> `-O3`, 10 at `-O1` — so what remains of the lower bound is *named* rather than
+> silent.
 >
 > **And that last row does not survive either.** A refusal census reports the
 > FIRST refusal; `loopcfg` refuses on the back-edge count before it looks at

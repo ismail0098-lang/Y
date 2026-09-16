@@ -77,6 +77,11 @@ import collections, glob, hashlib, json, os, re, sys
 
 import gap
 import loopgap
+import unroll
+
+# The unroll layer's verdict per kernel, recorded by `measure` IN THE DIRECTORY
+# IT READ.  See `unroll_unknown` for why this may not be re-derived later.
+_UNROLL = {}
 
 CACHE = '.frontier_cache{}.json'
 # `bra` is loopval's layer, not an unmodelled opcode -- see the docstring.
@@ -171,7 +176,48 @@ def measure(only=None):
         rows[k] = sorted(set(blockers))
     for k, reason in structural(ks).items():
         rows[k] = sorted(set(rows[k] + ['loop:' + reason]))
+    # THE FOURTH LAYER.  `loopval`'s relation holds at the loop header, so it
+    # needs the two loops in lockstep; a kernel whose SASS loop composes the
+    # PTX body k times is blocked by that whatever its opcodes say.  For eight
+    # increments this file crossed three layers and reported the result as a
+    # ranking, which made every distance a LOWER BOUND.
+    #
+    # A blocker is added only where the proxy DECIDES.  A refusal is the
+    # instrument failing to answer, and recording it as a blocker would be a
+    # guess in the pessimistic direction -- so those kernels are reported by
+    # `unroll_unknown` instead, which is what makes the remaining lower bound
+    # explicit rather than silent.
+    _UNROLL.clear()
+    for k in ks:
+        v, det = unroll.factor(k)
+        _UNROLL[k] = (v, det)
+        if v == 'UNROLLED':
+            rows[k] = sorted(set(rows[k] + ['unroll:' + unroll.UNROLL_KEY]))
     return rows
+
+
+def unroll_unknown(rows=None):
+    """Kernels whose unroll status the proxy cannot decide.
+
+    For these -- and only these -- the distance `report` prints is still a lower
+    bound.  Naming them is the difference between a ranking that states its own
+    limit and one that does not.
+
+    READ FROM `_UNROLL`, NEVER RE-MEASURED, and that is not a cache.  The -O1
+    census runs `measure` inside a TEMPORARY directory of -O1 artifacts and
+    chdirs back before `report` and `controls` run, so re-measuring here reads
+    the -O3 corpus and answers about the wrong artifact.  Caught by the
+    consistency control below, which compared an -O1 clear set against an -O3
+    unroll verdict and said so -- this increment's own subject, committed in the
+    control written to catch it.  A kernel measured by nobody RAISES rather than
+    being silently answered from whatever corpus happens to be underfoot."""
+    ks = sorted(rows) if rows is not None else sorted(_UNROLL)
+    missing = [k for k in ks if k not in _UNROLL]
+    if missing:
+        raise Exception(f'the unroll layer was not measured for {missing[:3]} -- '
+                        '`measure` records it in the directory it read, so asking '
+                        'here without a census would answer about another tree')
+    return {k: _UNROLL[k][1] for k in ks if _UNROLL[k][0] in ('REFUSED', 'UNDECIDED')}
 
 
 def structural(ks):
@@ -349,6 +395,13 @@ def report(rows):
         print(f'{sole[b]:5d} {n:7d}  {b[:88]}')
     if not sum(sole.values()):
         print('\nNo single feature validates any kernel: the frontier is empty at distance 1.')
+    unk = unroll_unknown(rows)
+    if unk:
+        print(f'\n=== STILL A LOWER BOUND for {len(unk)} of {len(rows)} kernels ===')
+        print('The unroll proxy cannot decide these, so a fourth blocker may stand')
+        print('behind the distance printed above.  It is named, not assumed.')
+        for k in sorted(unk):
+            print(f'  {k:46s} {unk[k][:70]}')
     return blocks, sole, clear
 
 
@@ -524,6 +577,13 @@ def controls(rows, clear):
     corpus census, which is minutes.  A control that perturbs the ANSWER
     instead cannot see the measurement being subverted to read something else;
     that hole was found by mutation in `docgate.py`, one file over."""
+    # SNAPSHOT FIRST.  The controls below call `measure` again over a perturbed
+    # corpus, and `measure` clears `_UNROLL` -- so reading it afterwards sees
+    # the probe's two kernels rather than the census's.  Caught by the vacuity
+    # leg of the layer-crossing control, which reported having nothing to
+    # assert instead of passing.
+    snap = dict(_UNROLL)
+    unr = sorted(k for k, (v, _d) in snap.items() if v == 'UNROLLED')
     two = sorted(rows)[:2]
     pert = measure(only=two)
     if sorted(pert) != two:
@@ -541,6 +601,51 @@ def controls(rows, clear):
               ' it is not reading the artifact it was handed')
         return 1
     print(f'  control: {k} is clear, and reports {got} once its PTX gains one unmodelled opcode')
+    # THE LAYER MUST NOT CONTRADICT THE CLEAR SET.  A kernel reported as having
+    # no blocker is one the validator could plausibly reach; if the unroll layer
+    # refused it, or called it unrolled, the frontier would be claiming a kernel
+    # is zero features away while an uncounted layer blocked it -- which is
+    # exactly the defect this layer was crossed in to remove.  Checkable
+    # cheaply, and it holds at both levels: every clear kernel is either
+    # loop-free or MATCHED.
+    bad = {k: _UNROLL[k] for k in clear
+           if _UNROLL.get(k, ('?',))[0] in ('UNROLLED', 'REFUSED', 'UNDECIDED')}
+    if bad:
+        print(f'FAIL: the frontier calls these kernels clear and the unroll layer '
+              f'does not agree: {bad}')
+        return 1
+    print(f'  control: all {len(clear)} clear kernels are loop-free or 1:1 under the '
+          f'unroll layer, so it contradicts none of them')
+    # AND THE LAYER IS ACTUALLY CROSSED.  Deleting the four lines in `measure`
+    # that add the blocker leaves every figure above plausible and every other
+    # control green -- the census simply stops counting a layer, which is the
+    # state this file was in for eight increments.  Asserted through `rows`,
+    # which is what `measure` produced.
+    # STATED AS A BICONDITIONAL, and that is what makes it non-vacuous at BOTH
+    # levels.  "at least one kernel must be UNROLLED" is false of the -O1
+    # corpus -- where all three of the layer's ground-truth kernels are
+    # MATCHED, which is the correct state and not a defect -- so that rule
+    # failed a census that was right.  A kernel carries the blocker IFF the
+    # layer calls it UNROLLED: at -O3 that catches the crossing being removed,
+    # at -O1 it catches a blocker being added to a kernel that is 1:1, and
+    # neither direction is silent about the other.
+    #
+    # At -O1 there is no UNROLLED kernel, so the crossing itself is checked
+    # there by nothing; it is checked by the -O3 census and by `--selftest`,
+    # whose sub-corpus includes `exact_pv` for exactly that reason.
+    wrong = []
+    for k in sorted(snap):
+        has = any(b.startswith('unroll:') for b in rows.get(k, []))
+        want = snap[k][0] == 'UNROLLED'
+        if has != want:
+                wrong.append((k, snap[k][0], 'blocker' if has else 'no blocker'))
+    if wrong:
+        print(f'FAIL: the unroll verdict and the unroll blocker disagree for {wrong}; '
+              f'the layer is measured and not crossed, or crossed where it decided '
+              f'nothing')
+        return 1
+    print(f'  control: every one of {len(snap)} kernels carries an unroll blocker '
+          f'exactly when the layer calls it UNROLLED ({len(unr)} do)')
     return cache_key_control() + isolation_control()
 
 
@@ -682,7 +787,10 @@ if __name__ == '__main__':
         # It probes the controls and not the census, and says so on stdout so a
         # reader cannot mistake its output for a frontier.
         ks = sorted(os.path.basename(x)[:-4] for x in glob.glob('corpus/*.ptx'))
-        sub = measure(only=ks[:2])
+        # `exact_pv` is in this sub-corpus DELIBERATELY: it is the kernel the
+        # unroll layer blocks, and without it the layer-crossing control below
+        # is vacuous on exactly the path a mutation harness runs.
+        sub = measure(only=ks[:2] + ['exact_pv'])
         print('# controls only -- this is NOT the corpus census')
         sys.exit(controls(sub, sorted(k for k, b in sub.items() if not b)))
     o1 = '--o1' in sys.argv[1:]

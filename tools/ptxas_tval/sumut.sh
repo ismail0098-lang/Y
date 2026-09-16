@@ -92,6 +92,6 @@ row "S10 OVER-REFUSAL: the suite refuses always" loopgap.py "$(sub "\"    p, s =
 # S11's first form carried backticks through two layers of shell quoting and
 # did not apply -- the harness said so instead of running an unmutated tree.
 row "S11 the doc drops the -O1 sole-blocker claim" ../../docs/ptxas_translation_validation.md "$(sub "\"**no kernel is one\nblocker away**\"" "\"the sole-blocker set is what it is\"")"
-row "S12 the doc's -O3 distinct figure goes stale" ../../docs/ptxas_translation_validation.md "$(sub "\"**104** distinct blockers, and not one of them\"" "\"**103** distinct blockers, and not one of them\"")"
+row "S12 the doc's -O3 distinct figure goes stale" ../../docs/ptxas_translation_validation.md "$(sub "\"**105** distinct blockers, and not one of them\"" "\"**103** distinct blockers, and not one of them\"")"
 row "S13 the README's copy of the census goes stale" ../../README.md "$(sub "\"**25 of the 48\nrefuse for one reason: more than one loop at one level** (25 on the PTX side, 0\"" "\"**38 of the 48\nrefuse for one reason: more than one loop at one level** (38 on the PTX side, 0\"")"
 row "BASE again" '' ''

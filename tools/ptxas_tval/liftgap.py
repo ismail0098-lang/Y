@@ -57,7 +57,7 @@ PTX_BRA    = loopcfg.PTX_BRA
 SASS_BRA   = loopcfg.SASS_BRA
 
 
-def _children(iv, i):
+def children(iv, i):
     """Indices of the back edges IMMEDIATELY inside back edge `i`."""
     h, e = iv[i][0], iv[i][1]
     inside = [j for j in range(len(iv))
@@ -67,7 +67,7 @@ def _children(iv, i):
                        for k in inside)]
 
 
-def _own(items, key, lo, hi, holes):
+def own(items, key, lo, hi, holes):
     """`items` between lo and hi, minus the closed ranges in `holes`."""
     out = []
     for it in items:
@@ -89,8 +89,8 @@ def levels(ptx_path, sass_path):
         iv = [(b[0], b[1]) for b in backs]
         out = []
         for i, (h, e) in enumerate(iv):
-            holes = [(iv[j][0], iv[j][1]) for j in _children(iv, i)]
-            body = _own(items, key, h, e, holes)
+            holes = [(iv[j][0], iv[j][1]) for j in children(iv, i)]
+            body = own(items, key, h, e, holes)
             txt = [text(x) for x in body]
             stores = [t for t in txt if store_re.match(t)]
             # the level's own exit test is a branch and is expected; anything
