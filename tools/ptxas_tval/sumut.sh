@@ -86,7 +86,9 @@ row "S6 mutgate applies no step (floor)" mutgate.py "$(sub "\"    for m in HERED
 # ANCHOR is the probe: the assert fires, nothing is written, the row runs an
 # unmutated tree -- which is the defect this gate exists for.
 row "S7 rmut.sh R2's anchor broken again" rmut.sh "$(sub "\"for a, b in ((\\\"        return f'{m.group(1)}: loop finder found NO back edge'\\\",\"" "\"for a, b in ((\\\"        return f'{m.group(1)}: a string that is not in the file'\\\",\"")"
-row "S8 mutgate reports no no-ops" mutgate.py "$(sub "\"            bad.append((h, kind, target, 'the patch changes nothing'))\"" "\"            pass\"")"
+# S8's anchor moved when mutgate grew the other three harness styles; the gate
+# reported its own row as decorative, which is the gate working.
+row "S8 mutgate reports no no-ops" mutgate.py "$(sub "\"                bad.append((h, kind, what, 'the patch changes nothing'))\"" "\"                pass\"")"
 row "S9 fpgate back to its own dispatch" fpgate.py "$(sub "\"            _who, v, msg, _n = loopgap.suite_validate(k, 20, 'wide', d)\"" "\"            v, msg, _ = loopval.validate(p, s, 20, 'wide')\"")"
 row "S10 OVER-REFUSAL: the suite refuses always" loopgap.py "$(sub "\"    p, s = f'{d}/{k}.ptx', f'{d}/{k}.sass'\n    try:\"" "\"    p, s = f'{d}/{k}.ptx', f'{d}/{k}.sass'\n    return 'loopval', 'REFUSED', 'probe: refuse everything', 0\n    try:\"")"
 # S11's first form carried backticks through two layers of shell quoting and
