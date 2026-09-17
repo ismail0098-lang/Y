@@ -29,6 +29,15 @@ agreement gate whose two sides move together.
               column and is what listed `y_cpu_matmul` at -O1 as one blocker
               away from a structure `nestval` VALIDATES.
 
+  wall        `wall.verdict`, the solver wall as a PROXY: the worst barrier
+              region's symbolic integer multiply count against thresholds
+              DERIVED from named region-level ground truth.  Without it the
+              frontier called nine kernels clear at -O3 and four of those have
+              never validated -- so "clear" was an upper bound and any ranking
+              on top of it, a joint-sufficiency one above all, inherited that.
+              A blocker is added only where the proxy says PAST; UNDECIDED is
+              named as a lower bound, like the unroll layer's refusals.
+
   setup       the census could not build an initial state, so it executed
               nothing and reports an EMPTY opcode gap.  That is not a gap of
               zero and must never be ranked as one; it is its own blocker.
@@ -78,10 +87,12 @@ import collections, glob, hashlib, json, os, re, sys
 import gap
 import loopgap
 import unroll
+import wall
 
 # The unroll layer's verdict per kernel, recorded by `measure` IN THE DIRECTORY
 # IT READ.  See `unroll_unknown` for why this may not be re-derived later.
 _UNROLL = {}
+_WALL = {}
 
 CACHE = '.frontier_cache{}.json'
 # `bra` is loopval's layer, not an unmodelled opcode -- see the docstring.
@@ -193,7 +204,26 @@ def measure(only=None):
         _UNROLL[k] = (v, det)
         if v == 'UNROLLED':
             rows[k] = sorted(set(rows[k] + ['unroll:' + unroll.UNROLL_KEY]))
+    # THE FIFTH LAYER, crossed the same way and for the same reason: a blocker
+    # only where the proxy DECIDES.  PTX-side, so it answers identically at -O1.
+    _WALL.clear()
+    for k in ks:
+        v, det = wall.verdict(k)
+        _WALL[k] = (v, det)
+        if v == 'PAST':
+            rows[k] = sorted(set(rows[k] + ['wall:' + wall.WALL_KEY]))
     return rows
+
+
+def wall_unknown(rows=None):
+    """Kernels the wall proxy cannot decide -- READ FROM `_WALL`, for the reason
+    `unroll_unknown` records: re-measuring here would read whatever corpus is
+    underfoot, which after the -O1 census is not the one measured."""
+    ks = sorted(rows) if rows is not None else sorted(_WALL)
+    missing = [k for k in ks if k not in _WALL]
+    if missing:
+        raise Exception(f'the wall layer was not measured for {missing[:3]}')
+    return {k: _WALL[k][1] for k in ks if _WALL[k][0] in ('REFUSED', 'UNDECIDED')}
 
 
 def unroll_unknown(rows=None):
@@ -402,6 +432,14 @@ def report(rows):
         print('behind the distance printed above.  It is named, not assumed.')
         for k in sorted(unk):
             print(f'  {k:46s} {unk[k][:70]}')
+    wunk = wall_unknown(rows)
+    if wunk:
+        print(f'\n=== STILL A LOWER BOUND for {len(wunk)} of {len(rows)} kernels (wall) ===')
+        print('The wall proxy cannot decide these -- their worst region sits between the')
+        print('largest measured PROVED and the smallest measured UNKNOWN, or its work is')
+        print('not the symbolic integer multiply the ground truth measures.')
+        for k in sorted(wunk):
+            print(f'  {k:46s} {wunk[k][:70]}')
     return blocks, sole, clear
 
 
@@ -451,6 +489,9 @@ def doc_figures(o1, text=None):
 
     `text` lets a control hand in a PERTURBED doc through this same parse."""
     d = open(DOC).read() if text is None else text
+    one = _one_away(d, o1)
+    if one is None:
+        return None
     if o1:
         # THE COUNTS TOO, not just the sole-blocker set.  Asserting only the set
         # left `112 distinct blockers and 10 clear` published and gated by
@@ -463,23 +504,44 @@ def doc_figures(o1, text=None):
         # which is a gate failing rather than a gate checking.  The empty case
         # is a positive sentence in the doc for the same reason: a gate must not
         # accept the absence of a claim as agreement with it.
-        m = re.search(r'at\s+`-O1`\s+exactly\s+one\s+kernel\s+is\s+one\s+blocker\s+away:'
-                      r'\s+`(\w+)`', d)
-        z = re.search(r'at\s+`-O1`\s+\*\*no\s+kernel\s+is\s+one\s+blocker\s+away\*\*', d)
         n = re.search(r'At\s+`-O1`\s+the\s+corpus\s+is\s+(\d+)\s+kernels,\s+\*\*(\d+)\*\*\s+'
                       r'distinct\s+blockers\s+and\s+\*\*(\d+)\*\*\s+clear', d)
-        if (not m and not z) or not n:
+        if not n:
             return None
-        return {'one': {m.group(1)} if m else set(), 'kernels': int(n.group(1)),
+        return {'one': one, 'kernels': int(n.group(1)),
                 'distinct': int(n.group(2)), 'clear': int(n.group(3))}
     a = re.search(r'(\d+)\s+kernels,\s+\*\*(\d+)\*\*\s+distinct\s+blockers', d)
     b = re.search(r'\*\*(\d+)\s+kernels\s+are\s+clear,\s+the\s+median\s+is\s+(\d+)\s+blockers'
                   r'\s+and\s+(\d+)\s+of\s+(\d+)\s+are\s+(\d+)\s+or\s+more\*\*', d)
     if not a or not b:
         return None
-    return {'kernels': int(a.group(1)), 'distinct': int(a.group(2)),
+    return {'one': one, 'kernels': int(a.group(1)), 'distinct': int(a.group(2)),
             'clear': int(b.group(1)), 'median': int(b.group(2)),
             'tail_n': int(b.group(3)), 'tail_of': int(b.group(4)), 'tail_at': int(b.group(5))}
+
+
+def _one_away(d, o1):
+    """The set of kernels the doc says are ONE blocker away at a level, or None
+    if it states no such claim.
+
+    A SET, at BOTH levels.  The parse used to hardwire the -O3 answer as "every
+    sole-count is zero" and the -O1 one as "exactly one kernel, or none", and the
+    wall layer made both false at once: it is the sole blocker of four kernels at
+    each level.  A parse that can only express the previous answer reports the
+    new one as a MISSING claim, which is a gate failing rather than checking.
+    The empty set is a positive sentence for the reason the old `-O1` form was:
+    a gate must not accept the absence of a claim as agreement with it."""
+    lvl = '1' if o1 else '3'
+    z = re.search(r'at\s+`-O' + lvl + r'`\s+\*\*no\s+kernel\s+is\s+one\s+blocker\s+away\*\*', d)
+    m = re.search(r'at\s+`-O' + lvl + r'`\s+the\s+kernels\s+one\s+blocker\s+away\s+are\s+'
+                  r'((?:`\w+`(?:,\s*(?:and\s+)?|\s+and\s+)?)+)', d)
+    if z and m:
+        return None                  # contradictory claims are not a claim
+    if z:
+        return set()
+    if m:
+        return set(re.findall(r'`(\w+)`', m.group(1)))
+    return None
 
 
 STAMP = 'frontier_stamp.json'
@@ -555,18 +617,18 @@ def compare_doc(summ, o1, text=None):
            'median': counts[(len(counts) - 1) // 2],
            'tail_n': sum(1 for c in counts if c >= want['tail_at']),
            'tail_of': summ['kernels'], 'tail_at': want['tail_at']}
-    bad = {k: (want[k], got[k]) for k in want if want[k] != got[k]}
+    bad = {k: (want[k], got[k]) for k in want if k != 'one' and want[k] != got[k]}
     if bad:
         for k, (w, g) in sorted(bad.items()):
             print(f'FAIL: doc says {k}={w}; measured {g}')
         return 1
-    if sole:
-        print(f'FAIL: the doc says every blocker has a sole-count of zero; {sorted(sole)} '
-              'is one blocker away')
+    if set(sole) != want['one']:
+        print(f'FAIL: the doc says {sorted(want["one"])} are one blocker away at -O3; '
+              f'measured {sorted(sole)}')
         return 1
     print(f'  doc: {got["kernels"]} kernels, {got["distinct"]} distinct blockers, '
           f'{got["clear"]} clear, median {got["median"]}, {got["tail_n"]} at '
-          f'{got["tail_at"]}+, sole-count zero throughout -- as published')
+          f'{got["tail_at"]}+, one blocker away {sorted(sole)} -- as published')
     return 0
 
 
@@ -583,6 +645,7 @@ def controls(rows, clear):
     # leg of the layer-crossing control, which reported having nothing to
     # assert instead of passing.
     snap = dict(_UNROLL)
+    wsnap = dict(_WALL)
     unr = sorted(k for k, (v, _d) in snap.items() if v == 'UNROLLED')
     two = sorted(rows)[:2]
     pert = measure(only=two)
@@ -646,6 +709,28 @@ def controls(rows, clear):
         return 1
     print(f'  control: every one of {len(snap)} kernels carries an unroll blocker '
           f'exactly when the layer calls it UNROLLED ({len(unr)} do)')
+    # THE WALL, the same biconditional.  Unlike unroll it holds non-vacuously at
+    # BOTH levels: the proxy reads PTX, so its PAST set does not move with -O.
+    wwrong = []
+    for k in sorted(wsnap):
+        has = any(b.startswith('wall:') for b in rows.get(k, []))
+        if has != (wsnap[k][0] == 'PAST'):
+            wwrong.append((k, wsnap[k][0], 'blocker' if has else 'no blocker'))
+    if wwrong:
+        print(f'FAIL: the wall verdict and the wall blocker disagree for {wwrong}')
+        return 1
+    past = sorted(k for k, (v, _d) in wsnap.items() if v == 'PAST')
+    if not past:
+        print('FAIL: no kernel is PAST the wall, so the crossing control asserts nothing')
+        return 1
+    # CALIBRATION through the census, not only in `wall --selftest`: no kernel the
+    # standing results validate may carry a wall blocker.
+    cal = sorted(k for k in wall.regress_validated() if any(b.startswith('wall:') for b in rows.get(k, [])))
+    if cal:
+        print(f'FAIL: regress.sh validates {cal} and the census gives them a wall blocker')
+        return 1
+    print(f'  control: every one of {len(wsnap)} kernels carries a wall blocker exactly when '
+          f'the proxy says PAST ({len(past)} do), and none of them is a validated kernel')
     return cache_key_control() + isolation_control()
 
 
@@ -790,7 +875,11 @@ if __name__ == '__main__':
         # `exact_pv` is in this sub-corpus DELIBERATELY: it is the kernel the
         # unroll layer blocks, and without it the layer-crossing control below
         # is vacuous on exactly the path a mutation harness runs.
-        sub = measure(only=ks[:2] + ['exact_pv'])
+        # `bn254_permute` is here because the first two are both blocked now --
+        # `bn254_fr_mul_fast` by the wall -- and the injection control needs a
+        # CLEAR kernel; `bn254_fr_mul_fast` is what makes the wall crossing
+        # control non-vacuous on this path.
+        sub = measure(only=ks[:2] + ['exact_pv', 'bn254_permute'])
         print('# controls only -- this is NOT the corpus census')
         sys.exit(controls(sub, sorted(k for k, b in sub.items() if not b)))
     o1 = '--o1' in sys.argv[1:]

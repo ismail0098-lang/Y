@@ -785,8 +785,32 @@ def check_frontier_stamp(tree=None, doc_text=None):
     return bad
 
 
+def check_wall_bracket(text=None):
+    """The doc's statement of the solver wall, against `wall.py`'s DERIVED
+    thresholds.
+
+    The wall used to be quoted as "between 29 and 65 multiplies" -- a kernel-level
+    reading, re-quoted as current for weeks while the region-level measurements
+    under it said 33 and 49.  `wall.py` derives the two numbers from named
+    ground truth; this is what stops the doc's copy of them drifting from that."""
+    import wall
+    d = open(DOC).read() if text is None else text
+    m = re.search(r'solver\s+wall\s+between\s+\*\*(\d+)\*\*\s+and\s+\*\*(\d+)\*\*\s+'
+                  r'symbolic\s+integer\s+multiplies\s+per\s+barrier\s+region', d)
+    if not m:
+        print('FAIL: the doc states no region-level wall bracket in the form this gate reads')
+        return 1
+    got = (int(m.group(1)), int(m.group(2)))
+    if got != (wall.UNDER_AT, wall.PAST_AT):
+        print(f'FAIL: the doc says the wall is between {got}; wall.py derives '
+              f'{(wall.UNDER_AT, wall.PAST_AT)} from its ground truth')
+        return 1
+    print(f'ok: the doc\'s wall bracket {got} is the one wall.py derives from its ground truth')
+    return 0
+
+
 if __name__ == '__main__':
-    bad = (check_loop_census() + check_staging_table()
+    bad = (check_wall_bracket() + check_loop_census() + check_staging_table()
            + check_optimisation_level_gaps() + the_shape_is_measured_from_the_artifact()
            + check_second_refusal() + check_unroll_census() + check_frontier_stamp()
            + check_readme_frontier())
@@ -819,6 +843,18 @@ if __name__ == '__main__':
     if _n != 1 or check_frontier_stamp(doc_text=_bumped) == 0:
         print('FAIL: a doc with its -O3 distinct-blocker figure moved still matches the '
               'stamp -- the figure comparison is dead')
+        bad += 1
+    # the ONE-AWAY SET, both levels: drop one name from the -O3 sentence.
+    _dropped, _n = re.subn(r'(at\s+`-O3`\s+the\s+kernels\s+one\s+blocker\s+away\s+are\s+)`\w+`,\s*',
+                           r'\1', _doc, count=1)
+    if _n != 1 or check_frontier_stamp(doc_text=_dropped) == 0:
+        print('FAIL: a doc missing one kernel from its -O3 one-blocker-away set still '
+              'matches the stamp -- the set comparison is dead')
+        bad += 1
+    _wb, _n = re.subn(r'(solver\s+wall\s+between\s+\*\*)(\d+)', lambda m: m.group(1)
+                      + str(int(m.group(2)) - 4), _doc, count=1)
+    if _n != 1 or check_wall_bracket(text=_wb) == 0:
+        print('FAIL: a doc with its wall bracket moved still passes -- the wall comparison is dead')
         bad += 1
     if check_unroll_census(perturb='UNROLLED') == 0:
         print('FAIL: a perturbed unroll tally was not reported -- the comparison is dead')
