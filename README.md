@@ -1920,10 +1920,14 @@ cancelled the feature the measurement was taken to justify. `ptx_carry_chain`
 validates with 29 multiplies in 24 s; `bn254_fr_mul_fast` has 65 and is UNPROVED
 after 9,705 s — with 261 of 276 cut points closed and **no `sat`**. Asking the
 counterfactual (*if every opcode were modelled, what could the solver close?*)
-puts **51 of 66 kernels under that wall** using barriers as cut points — and
-inverts the ranking: the 23 tensor-core GEMMs look deepest and are tractable at
-39–61 multiplies per barrier region, while the field kernels look shallow and run
-244–717. "33 kernels are behind shared memory" was false; shared memory alone
+used to put "51 of 66 kernels under that wall" and call the 23 tensor-core GEMMs
+tractable at 39–61 multiplies per barrier region. **Neither survives
+`wall.py`.** Measured at region level against named ground truth, the wall is
+between **33** (largest region PROVED) and **49** (smallest region `unknown`)
+*symbolic integer* multiplies — and the GEMMs' multiplies are almost all index
+arithmetic by an immediate, which no measurement has put at the wall in either
+direction. So the corpus is **25 under, 10 past, 29 undecided, 2 refused**, and all
+ten past are field kernels (65–717). "33 kernels are behind shared memory" was false; shared memory alone
 unlocks exactly one, a test fixture. It was still right to build, because it is
 what *creates* the cut points the GEMMs need.
 
@@ -2002,11 +2006,15 @@ tensor-core item and the back-edge item share a blocker.
 > because every one of them also has an opcode gap. **The retraction landed in
 > one file of two**, which is the same defect as the certificate count that was
 > published in six places and gated in none. The current position, measured by
-> `frontier.py`: in the committed corpus **no single item is the sole blocker of
-> any kernel**, and at `-O1` **none is either** — `y_cpu_matmul` has an empty
-> opcode gap on both sides there, and its back-edge refusal was `loopval`'s
+> `frontier.py`: in the committed corpus **no opcode, staging set or lift is the
+> sole blocker of any kernel**, at either level — `y_cpu_matmul` has an empty
+> opcode gap on both sides at `-O1`, and its back-edge refusal was `loopval`'s
 > rather than the validator's, so once the census asks the suite the kernel is
-> clear. 66 kernels, 105 distinct blockers and 9 clear at `-O3`; 108 and **12**
+> clear. **The one blocker with a non-zero sole-count is the solver wall**, crossed
+> in as a fifth layer: four field kernels (`bn254_fr_mul_fast`, `bn254_g1_add`,
+> `bn254_g1_dbl`, `bn254_ntt4_fused`) that the four-layer census called clear, that
+> never validated, and that are past the wall.
+> 66 kernels, 106 distinct blockers and 5 clear at `-O3`; 109 and **8**
 > at `-O1`.
 >
 > **And that census was itself a LOWER BOUND, for eight increments.** It crossed

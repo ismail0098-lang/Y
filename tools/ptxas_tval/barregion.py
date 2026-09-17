@@ -18,7 +18,9 @@ import re, sys
 REAL_SASS_MUL = re.compile(r'^(IMAD|IMUL|XMAD)')
 FAKE_SASS_MUL = re.compile(r'^IMAD\.(MOV|IADD)')
 
-def regions(f, isptx):
+def regions(f, isptx, text=False):
+    """Per barrier region, the mnemonics -- or `(mnemonic, instruction)` pairs
+    when `text`, for a caller that needs the operands (`wall.py`)."""
     cur, out = [], []
     for ln in open(f):
         if isptx:
@@ -30,6 +32,7 @@ def regions(f, isptx):
             if not m: continue
             op = m.group(1)
             if op.startswith('bar.sync'): out.append(cur); cur = []; continue
+            if text: cur.append((op, t.rstrip(';').strip())); continue
         else:
             m = re.search(r'\*/\s+(@!?\w+\s+)?([A-Z][A-Z0-9_.]*)', ln)
             if not m: continue
@@ -40,18 +43,28 @@ def regions(f, isptx):
     return out
 
 def muls(r, isptx):
+    # `fma.` IS A MULTIPLY.  It was left out, so every kernel whose multiplies
+    # the emitter states as a fused `fma.rn.f32` -- 11 of the corpus -- was
+    # under-counted, which is the OPTIMISTIC direction for a wall proxy.  None of
+    # the wall's ground-truth kernels contains one, so no threshold moves.
     if isptx:
-        return sum(1 for o in r if o.startswith(('mul.', 'mad.')))
+        return sum(1 for o in r if o.startswith(('mul.', 'mad.', 'fma.')))
     return sum(1 for o in r if REAL_SASS_MUL.match(o) and not FAKE_SASS_MUL.match(o))
 
-WALL = 65
-for k in sys.argv[1:]:
-    print(f'--- {k}')
-    for tag, f, isp in (('PTX', f'corpus/{k}.ptx', True), ('SASS', f'corpus/{k}.sass', False)):
-        rs = regions(f, isp)
-        c = [muls(r, isp) for r in rs]
-        w = max(c) if c else 0
-        print(f'   {tag:4s} {len(rs):2d} regions  insn {[len(r) for r in rs]}')
-        print(f'   {"":4s}    mul/region {c}')
-        print(f'   {"":4s}    WORST {w}   vs wall {WALL}  -> {"OVER by %.1fx" % (w/WALL) if w > WALL else "UNDER"}')
-    print()
+# THE CLI IS GUARDED.  It ran at import, so any tool importing this module with
+# arguments of its own -- `frontier.py --selftest` -- tried to open
+# `corpus/--selftest.ptx` and crashed: the `unroll.py` defect, one module over.
+# The wall is `wall.py`'s now, derived from measured ground truth.
+if __name__ == '__main__':
+  import wall
+  WALL = wall.PAST_AT
+  for k in sys.argv[1:]:
+      print(f'--- {k}')
+      for tag, f, isp in (('PTX', f'corpus/{k}.ptx', True), ('SASS', f'corpus/{k}.sass', False)):
+          rs = regions(f, isp)
+          c = [muls(r, isp) for r in rs]
+          w = max(c) if c else 0
+          print(f'   {tag:4s} {len(rs):2d} regions  insn {[len(r) for r in rs]}')
+          print(f'   {"":4s}    mul/region {c}')
+          print(f'   {"":4s}    WORST {w}   vs wall {WALL}  -> {"OVER by %.1fx" % (w/WALL) if w > WALL else "UNDER"}')
+      print()

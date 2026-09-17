@@ -409,13 +409,37 @@ that an abstraction is too weak.
 Every scope census here counted *opcodes*, which silently assumes the executors
 are what gate the corpus. The standing table says otherwise: `ptx_carry_chain`
 has 29 multiplies and validates in 24 s; `bn254_fr_mul_fast` has 65 and is
-UNPROVED after 9,705 s with 261 of 276 cut points closed and **no `sat`**. There
-is a solver wall between 29 and 65 multiplies per query.
+UNPROVED after 9,705 s with 261 of 276 cut points closed and **no `sat`**.
+
+> **"A solver wall between 29 and 65 multiplies per query" was a KERNEL-level
+> reading and it was re-quoted as current long after the region-level measurement
+> under it said otherwise.** `bn254_ntt4_fused` has barrier regions of 33, 49, 193,
+> 193, 193 and 225 PTX multiplies; its barrier 0 PROVED and its barrier 1 was
+> `unknown` at a 600 s budget — re-measured 2026-09-17, 731.6 s, identical. Every
+> ground-truth multiply is register × register; the GEMMs' integer multiplies are
+> almost all index arithmetic by an immediate, which is linear for a solver.
+
+The measured bracket is a solver wall between **33** and **49** symbolic integer
+multiplies per barrier region — derived in `wall.py` from named ground truth
+rather than written down, and gated by `docgate.py`.
 
 `tractable.py` asks the counterfactual — *if every opcode were modelled, how many
-kernels could the solver close?* — using barriers as cut points:
+kernels could the solver close?* — using barriers as cut points. It is
+three-valued now, because a region between the largest measured PROVED and the
+smallest measured UNKNOWN is on neither side of anything measured:
 
-**51 of 66 fall under the wall. 15 are over it.**
+**25 UNDER, 29 UNDECIDED, 10 PAST, 2 REFUSED** (two entry points).
+
+> It used to read **"51 of 66 fall under the wall. 15 are over it."**, against a
+> transcribed `WALL = 65` and every multiply counted. `fma.` was not counted at
+> all (11 kernels under-counted, optimistically), and the two split paged-decode
+> modules were counted as one program across both entry points.
+
+> **The paragraph below is RETRACTED as a claim about the solver.** The GEMMs'
+> 39–61 are almost all multiplies by an immediate; nothing of that shape has been
+> measured at the wall in either direction, so every one of them is UNDECIDED, not
+> tractable. What survives is the field-kernel half: all ten PAST kernels are
+> field arithmetic.
 
 And the ranking inverts. The 23 FP16 tensor-core GEMM kernels look like the
 deepest bucket — five unmodelled features each — and are the **tractable** one:
@@ -1685,16 +1709,25 @@ is checking while both are wrong:
 * a **setup** failure, which executes nothing and so reports an *empty* opcode
   gap — that is not a gap of zero and is its own blocker;
 * the **unroll** layer from `unroll.py`, because `loopval`'s relation holds at
-  the loop header and so needs the two loops in lockstep. This one was crossed
-  in last and the section below is about why.
+  the loop header and so needs the two loops in lockstep;
+* the **wall** layer from `wall.py`: a kernel whose worst barrier region has at
+  least as many symbolic integer multiplies as the smallest region measured
+  `unknown`. Crossed in last; the section after the unroll one is about it.
 
-**In the committed corpus every blocker has a sole-count of zero.** 66 kernels,
-**105** distinct blockers, and not one of them would validate a kernel on its own
-— including every item then on the queue. `cvt.rn.f16.f32` is sole blocker of
-nothing; so is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the
-back-edge lift. That is the honest state of a corpus where **9 kernels are clear,
-the median is 15 blockers and 31 of 66 are 21 or more**, and it is why "reach"
-kept naming work that buys nothing.
+**In the committed corpus exactly one blocker has a non-zero sole-count, and it is
+the solver wall.** 66 kernels, **106** distinct blockers; at `-O3` the kernels one
+blocker away are `bn254_fr_mul_fast`, `bn254_g1_add`, `bn254_g1_dbl` and
+`bn254_ntt4_fused` — each has no unmodelled opcode, no structural refusal and no
+unroll blocker, and each is past the wall. No opcode, no staging set and no lift
+is the sole blocker of anything: `cvt.rn.f16.f32` is sole blocker of nothing; so
+is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the back-edge lift.
+That is the honest state of a corpus where **5 kernels are clear, the median is 15
+blockers and 31 of 66 are 21 or more**, and it is why "reach" kept naming work
+that buys nothing.
+
+> **Before the wall was crossed this read "every blocker has a sole-count of
+> zero" and "9 kernels are clear", at 105 distinct.** The four kernels above were
+> the difference: clear to four layers, never validated, and past the solver.
 
 #### The fourth layer, and why the distance was a lower bound for eight increments
 
@@ -1793,6 +1826,61 @@ before is that it is *named* rather than silent.
 > whatever corpus happens to be underfoot. This increment's own subject, in the
 > control written to catch it.
 
+#### The fifth layer: the solver wall
+
+**"Clear" was an upper bound, and the item it was about to justify was the one to
+rank wrong.** The queue named a joint-sufficiency measure as the largest open
+item: `exact_pv`, `naive_gemm_f32` and `y_cpu_matmul` were recorded as three
+blockers away and sharing all three. Re-derived before building, they are **four**
+away (the fourth is the unroll layer's peel-and-remainder), and the best joint set
+the frontier then offered was elsewhere: the integer-division lowering, six or
+seven blockers clearing **six** kernels. Five of those six are field kernels with
+83–259 symbolic multiplies in their worst region.
+
+The calibration that says so is the frontier's own clear set. At `-O3` it called
+**nine** kernels clear and **five** of them are standing VALIDATED results; the
+other four never validated, and the split between them is exact on one variable —
+worst barrier region **≤ 29** multiplies for all five that validate, **≥ 65** for
+all four that do not.
+
+`wall.py` makes that a layer. Three-valued, because the honest answer between the
+largest region measured PROVED and the smallest measured `unknown` is *nobody has
+measured it*:
+
+| verdict | kernels | meaning |
+|---|---|---|
+| UNDER | 25 | worst region ≤ 33 multiplies |
+| PAST | **10** | worst region has ≥ 49 **symbolic integer** multiplies — every one of them field arithmetic |
+| UNDECIDED | 29 | between the thresholds, or past them only on work the ground truth never measured |
+| REFUSED | 2 | two entry points, which a region count would read as one program |
+
+A frontier blocker is added only for PAST; the other 31 are printed by
+`frontier.py` under `STILL A LOWER BOUND ... (wall)`. The layer answers identically
+at `-O1` and `-O3` because it reads the PTX.
+
+**Three ways the obvious version would have been wrong, each caught before
+publishing.**
+
+* **Counting every multiply put 15 GEMMs PAST.** Their integer multiplies are
+  index arithmetic by an immediate — `mul.lo.u32 R, R, 4`, `mad.lo.u32 R, R, 136,
+  R` — and every ground-truth multiply is register × register. A float multiply is
+  excluded for the same reason: no float region has been measured at the wall.
+* **`barregion.muls` did not count `fma.`**, so 11 kernels were under-counted —
+  the optimistic direction for a wall.
+* **The two-entry-point check matched nothing**, because `.visible .entry` has a
+  second dot before `entry`; the split paged-decode modules read PAST. The
+  synthetic two-entry control in `wall.py --selftest` is what said so.
+
+**`barregion.py` ran its CLI at import**, so any tool importing it with arguments
+of its own crashed trying to open `corpus/--selftest.ptx` — the `unroll.py`
+defect, one module over, found before the frontier crossed it.
+
+**The calibration is ground truth reached by another route.** `wall.py` reads the
+kernels `regress.sh` asserts VALIDATED — eight, including the three `-O1` loop
+kernels — and fails if any is not UNDER; `frontier.py`'s controls repeat that
+through the census, and hold the biconditional *blocker iff PAST* non-vacuously at
+both levels.
+
 #### …and at `-O1` the kernel that was one blocker away is now CLEAR
 
 Crossing sufficiency with the optimisation level is what the corrected bullet
@@ -1804,15 +1892,19 @@ multi-back-edge limit, three on each side — and `nestval` lifts exactly that, 
 once the census asks the **suite** instead of `loopval` alone the kernel has no
 blocker left at all.
 
-Measured over the whole corpus at that level, at `-O1` **no kernel is one
-blocker away** — everything else is either clear or two or more short. At
-`-O1` the corpus is 66 kernels, **108** distinct blockers and **12** clear
-(`exact_pv`, `naive_gemm_f32` and `y_cpu_matmul` join the nine — the first two
+Measured over the whole corpus at that level, at `-O1` the kernels one blocker
+away are `bn254_fr_mul_fast`, `bn254_g1_add`, `bn254_g1_dbl` and
+`bn254_ntt4_fused` — the same four as at `-O3`, and for the same one blocker, the
+solver wall, which is measured on the PTX and so does not move with the level. At
+`-O1` the corpus is 66 kernels, **109** distinct blockers and **8** clear
+(`exact_pv`, `naive_gemm_f32` and `y_cpu_matmul` join the five — the first two
 by the `-O` effect the corrected bullet above measures, the third because the
-census stopped reporting one member's refusal as the suite's). **The frontier is
-empty at distance 1 at both levels**, and this time for a better reason than
-before: not "the row does not survive being asked what is behind it" but "the
-row validates".
+census stopped reporting one member's refusal as the suite's).
+
+> **This read "no kernel is one blocker away" and 108 / 12, and "the frontier is
+> empty at distance 1 at both levels".** Both were true of a census crossing four
+> layers. With the wall crossed the frontier is NOT empty at distance 1 — its
+> distance-1 set is exactly the four field kernels no opcode work can reach.
 
 > **This section read "at `-O1` exactly one kernel is one blocker away:
 > `y_cpu_matmul`", and 106 / 11.** Both were true of a census that asked
