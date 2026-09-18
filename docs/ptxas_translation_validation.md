@@ -514,6 +514,8 @@ kernel uses, and it overturned the obvious read:
 - `ptx_integer_ops` yields a **finding** rather than a kernel: `ptxas` implements
   32-bit `div.u32`/`rem.u32` through the *float* unit — `I2F.U32.RP`, `MUFU.RCP`,
   `F2I.TRUNC`. An integer PTX operation lowered as a floating-point macro-op.
+  **Refereed on the device since 2026-09-18** — see *The integer-division
+  lowering: refereed three layers deep*; its obligation is past the solver.
 
 ### The real gap, measured by running the executor
 
@@ -1880,6 +1882,89 @@ kernels `regress.sh` asserts VALIDATED — eight, including the three `-O1` loop
 kernels — and fails if any is not UNDER; `frontier.py`'s controls repeat that
 through the census, and hold the biconditional *blocker iff PAST* non-vacuously at
 both levels.
+
+#### The integer-division lowering: refereed three layers deep, and the obligation is past the solver
+
+**The band measurement the wall layer asked for cannot be taken yet.** The corpus
+has exactly three regions between the two thresholds — region 0 of
+`bn254_ntt4_fused_high{2,3,4}`, each at 48 symbolic multiplies — and `smemval`
+refuses all three in 0.3 s on `UNMODELLED SASS OPCODE 'I2F.U32.RP'`. Priced both
+ways before anything was built: if that region PROVES, `UNDER_AT` rises to 48 and
+ten kernels leave UNDECIDED; if it answers `unknown`, nothing moves, because the
+only regions at 48 belong to kernels already PAST. Either way it sits behind the
+same blocker set as `ptx_integer_ops` — the lowering of a u32 `div`/`rem`:
+
+    e  = F2I.FTZ.U32.TRUNC.NTZ( MUFU.RCP( I2F.U32.RP(d) ) + 0x0ffffffe )
+    e2 = e + HI(e * (-d*e))              # IMAD.HI.U32's addend is the 64-bit PAIR
+    q0 = HI(e2 * n); r0 = n - d*q0;  two conditional corrections  ->  (q, r)
+
+The float half has no bitvector model, and matching the sequence as `UDiv` would
+be a hole: it assumes the lowering correct, which is the thing under validation.
+The alternative is to measure, over the whole finite domain, exactly the facts a
+validator would have to assume. `divlow_abi.py` runs three device probes and
+asserts every figure below; each probe's `est()` is checked instruction for
+instruction against `corpus/ptx_integer_ops.sass`.
+
+| fact | domain | result |
+|---|---|---|
+| the window: `e ≤ I = ⌊2³²/d⌋` and `(I−e)² ≤ I` | all 2³²−1 divisors | zero exceptions; max `(I−e)²/I` is **exactly 1**, max slack **512**, both attained |
+| Lemma A: `I−1 ≤ e2 ≤ I` | all 2³²−1 divisors | zero exceptions; the deficit of **1 is attained**, so the one-unit bound is tight |
+| Lemma B: the corrections are exact at **both** estimates Lemma A admits | every `d` × 10 structured `n`, plus 12 `d` × every `n` | 0 failures in 1.85 × 10¹¹ checks |
+
+**Exhaust as far up the chain as the domain stays finite.** Measuring only the
+window leaves a solver two composed 32×32 multiplies before the tail begins;
+measuring through the Newton step leaves it one. Lemma A depends on `d` alone, so
+it can be exhausted, and a validator can assume it the way it assumes `FSEL` is a
+bit-exact select.
+
+**The second correction exists for `e2 = I−1` and nothing else.** With it removed
+(`divmut.sh` D3), `e2 = I` never fails and `e2 = I−1` fails 4,295,021,506 times.
+
+**The tail is past the solver.** With `d` symbolic, z3 answered `unknown`, and
+never `sat`, on every posing tried (2026-09-18, one machine):
+
+| posing | budget | answer |
+|---|---|---|
+| window assumed, goal via `UDiv`/`URem` | 1200 s | unknown |
+| window assumed, goal as `q·d + r = n ∧ r < d` | 1200 s | unknown |
+| Lemma A assumed, 96-bit `I` | 600 s | unknown |
+| Lemma A assumed, `I` eliminated (`e2·d ≤ 2³² < (e2+2)·d`), division-free goal | 900 s | unknown |
+| split: `q0 ≤ n/d` from `e2·d ≤ 2³²` | 900 s | unknown |
+| split: the correction step given `q−2 ≤ q0 ≤ q` | 300 s | unknown |
+
+The last row was expected to be instant and is not: `r0 = n − d·q0` multiplies two
+symbolic variables, so once `d` is symbolic no piece of the tail is linear. With
+`d` **concrete**, Lemma A is `unsat` (proved) in 0.0–87.5 s for five of six values
+tried. The difficulty is the symbolic divisor, not the lemma. Lemma B is true on
+every case measured, so this is a solver limit rather than a false lemma. That is
+also why the executor side is **not built**: modelling the four float opcodes as
+one windowed estimate would turn `ptx_integer_ops` from REFUSED into UNPROVED and
+change nothing else.
+
+**This is a measured counterexample to the wall proxy.** `wall.py` calls
+`ptx_integer_ops` UNDER, with 23 symbolic multiplies in its worst region, and its
+obligation is past the solver. Two reasons, and only the first is a counting fix:
+
+* `barregion.muls` counts `mul.`/`mad.`/`fma.` and **no integer `div.`/`rem.`**.
+  33 of 66 corpus kernels contain one. Counting each as one multiply moves nine
+  GEMMs from UNDECIDED to PAST and moves `ptx_integer_ops` only from 23 to 25.
+  Whether one is the right weight is unmeasured; zero is the optimistic direction,
+  the same defect as the uncounted `fma.` above. **Recorded, not fixed.**
+* The hard part is not an instruction count at all. It is a division on the PTX
+  side against a multiply chain on the SASS side, a composition that no per-region
+  count can see. The proxy's premise that two regions with equal counts can differ
+  in cost now has a measured instance, and it is decisive here.
+
+**Four defects of mine on the way, each a false result, three in the direction
+that reads as a refutation.** An unbounded 96-bit `I` wrapped, so the query
+answered `sat` with slack −2,622,498,317. A window squared in 64 bits wrapped
+`(2³²)²` to 0 and admitted `e = 0`. The window referee overflowed u64 and reported
+368,450,712 violations at `C = 2` against 767 at `C = 1`; a looser bound cannot
+fail more often, and that is what caught it. The first probe emitted
+`F2I.U32.TRUNC.NTZ` where the corpus has the `.FTZ` form, and the fix was to change
+the instruction rather than argue that denormals cannot reach it. **In a
+bitvector query, every intermediate needs the width of its largest value, and a
+width error most often shows up as a counterexample.**
 
 #### …and at `-O1` the kernel that was one blocker away is now CLEAR
 
