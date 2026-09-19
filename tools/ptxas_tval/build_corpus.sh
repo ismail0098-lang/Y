@@ -25,7 +25,7 @@ OUT=corpus
 # the repository no longer ships -- the stale-artifact class this whole corpus
 # exists downstream of, one layer down.  Found exactly that way, when
 # hello.coprocessor.ptx was deleted and the corpus still reported 67.
-rm -rf "$OUT" o1
+rm -rf "$OUT" o1 idiv
 mkdir -p "$OUT"
 command -v ptxas    >/dev/null || { echo "ptxas not on PATH (CUDA toolkit)";    exit 1; }
 command -v nvdisasm >/dev/null || { echo "nvdisasm not on PATH (CUDA toolkit)"; exit 1; }
@@ -161,6 +161,40 @@ PY
       && nvdisasm -c o1/$v.cubin > o1/$v.sass \
       && echo "  o1/$v rebuilt at -O1"
   done
+fi
+
+# ptx_integer_ops is the u32 DIVISION subject (divest.py, intenc.py): the only
+# corpus kernel whose SASS carries ptxas's div/rem lowering and nothing past it.
+# Its twins are derived from the genuine output, each by ONE asserted
+# substitution, into idiv/ (not corpus/, which the census counts):
+#   no_second_corr   the quotient's second correction is gone      -> refuted: e2 = I-1 needs it
+#   rem_wrong        the remainder's second correction subtracts 0  -> refuted
+#   rem_any_at_d0    the d == 0 select is unpredicated, so the rem is a
+#                    different value ONLY at d == 0                -> VALIDATED: the PTX
+#                    ISA leaves x % 0 unspecified (the positive control for that)
+#   bias_moved       the estimate's bit-pattern bias is one larger  -> REFUSED by name:
+#                    the device facts were measured for 0x0ffffffe
+if [ -f "$OUT/ptx_integer_ops.sass" ]; then
+  mkdir -p idiv
+  python3 - "$OUT" <<'PY' || exit 1
+import sys
+d = sys.argv[1]
+src = open(f'{d}/ptx_integer_ops.sass').read()
+ptx = open(f'{d}/ptx_integer_ops.ptx').read()
+I = '               '
+twins = {
+ 'no_second_corr': (I + '@P2 IADD3 R4, R4, 0x1, RZ ;', I + '    NOP ;'),
+ 'rem_wrong':      ('IMAD.IADD R13, R14.reuse, 0x1, -R5 ;', 'IMAD.IADD R13, R14.reuse, 0x1, RZ ;'),
+ 'rem_any_at_d0':  (I + '@P3 SEL R3, R13, R14, P2 ;', I + '    SEL R3, R13, R14, P2 ;'),
+ 'bias_moved':     ('IADD3 R8, R10, 0xffffffe, RZ ;', 'IADD3 R8, R10, 0xfffffff, RZ ;'),
+}
+for name, (a, b) in twins.items():
+    if src.count(a) != 1:
+        raise SystemExit(f'ptx_integer_ops output moved: anchor for {name} found {src.count(a)} times')
+    open(f'idiv/{name}.sass', 'w').write(src.replace(a, b))
+    open(f'idiv/{name}.ptx', 'w').write(ptx)
+print(f'  idiv/: {len(twins)} twins of ptx_integer_ops derived')
+PY
 fi
 
 echo "corpus: $ok kernels, $skip skipped"

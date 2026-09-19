@@ -62,6 +62,7 @@ proofs/.nia.cache
 # per-run baselines the mutation harnesses snapshot with mkbase.sh.
 tools/ptxas_tval/corpus/
 tools/ptxas_tval/o1/
+tools/ptxas_tval/idiv/
 tools/ptxas_tval/*.tgz
 # `frontier.py`'s census cache. Minutes to build, DERIVED from the corpus and
 # the executor sources, and keyed on a digest of both so it refuses to answer

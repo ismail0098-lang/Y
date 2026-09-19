@@ -28,6 +28,9 @@ class Ptx:
         # `loads` and `stores` record their PROGRAM ORDER as they grow -- see
         # memorder.py for why the order is recorded by the list and not per arm.
         memorder.install(self)
+        # (unspecified value, the condition under which the program produced it)
+        # -- see `unspecified`.
+        self.unspec = []
         # Shared memory is STATE, not a trace.  The global stores above are a log
         # the validator matches by address permutation, and a global LOAD reads
         # the initial memory as updated by every earlier store on this side
@@ -168,6 +171,23 @@ class Ptx:
     def hi(self, a, b):
         f = self.sym.get('mul')
         return f('hi', a, b) if f else Extract(2*W-1, W, ZeroExt(W,a) * ZeroExt(W,b))
+
+    def unspecified(self, cond, val):
+        """`val` where `cond` does not hold, and an UNSPECIFIED value where it does.
+
+        The PTX ISA, for `div` and for `rem`: "Division by zero yields an
+        unspecified, machine-specific value."  These arms used to inherit z3's
+        own convention (x/0 = all ones, x%0 = x), which is a DIFFERENT and
+        stronger specification than the one the translator is held to -- and it
+        refuted ptxas's correct `rem.u32` lowering at d = 0, where the silicon
+        returns 0xffffffff.  A value the spec does not constrain is a fresh
+        symbol, and `tval.py` treats a store of one as satisfiable by any SASS
+        value (see `unspecified_obligations` there) rather than as a value to be
+        matched -- asking a fresh symbol to equal something is unprovable, so
+        an executor that only made it fresh would be sound and useless."""
+        u = BitVec(f'ptx_unspec_{len(self.unspec)}', val.size())
+        self.unspec.append((u, cond))
+        return If(cond, u, val)
 
     def gload(self, addr, i, k, off=None, nbytes=4):
         """THE ONLY PATH TO GLOBAL MEMORY, pinned at import.
@@ -451,10 +471,11 @@ class Ptx:
             self.wd(ops[0], ZeroExt(32,self.R(ops[1])) * ZeroExt(32,self.R(ops[2])), g)
         elif op == 'mul.wide.s32':
             self.wd(ops[0], SignExt(32,self.R(ops[1])) * SignExt(32,self.R(ops[2])), g)
-        elif op == 'div.u32':       self.wr(ops[0], UDiv(self.R(ops[1]), self.R(ops[2])), g)
-        elif op == 'div.s32':       self.wr(ops[0], self.R(ops[1]) / self.R(ops[2]), g)
-        elif op == 'rem.u32':       self.wr(ops[0], URem(self.R(ops[1]), self.R(ops[2])), g)
-        elif op == 'rem.s32':       self.wr(ops[0], SRem(self.R(ops[1]), self.R(ops[2])), g)
+        elif op in ('div.u32', 'div.s32', 'rem.u32', 'rem.s32'):
+            a, b = self.R(ops[1]), self.R(ops[2])
+            f = {'div.u32': UDiv, 'div.s32': lambda x, y: x / y,
+                 'rem.u32': URem, 'rem.s32': SRem}[op]
+            self.wr(ops[0], self.unspecified(b == BitVecVal(0, 32), f(a, b)), g)
         elif op in ('min.u32',):    self.wr(ops[0], If(ULE(self.R(ops[1]),self.R(ops[2])), self.R(ops[1]), self.R(ops[2])), g)
         elif op in ('max.u32',):    self.wr(ops[0], If(UGE(self.R(ops[1]),self.R(ops[2])), self.R(ops[1]), self.R(ops[2])), g)
         elif op in ('min.s32',):    self.wr(ops[0], If(self.R(ops[1])<=self.R(ops[2]), self.R(ops[1]), self.R(ops[2])), g)

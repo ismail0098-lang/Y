@@ -117,6 +117,6 @@ open('unroll.py','w').write(u.replace(ua,ub))")"
 # hazard: it makes the EXPECTATION disagree with the measurement, which is the
 # only way to see whether the assertion is live at all.
 row "U9c the ground-truth expectation itself is wrong" unroll.py "$(sub "\"('exact_pv', 'corpus', 'UNROLLED')\"" "\"('exact_pv', 'corpus', 'MATCHED')\"")"
-row "U12 the README's copy of the figures goes stale" ../../README.md "$(sub "\"106 distinct blockers and 5 clear\"" "\"104 distinct blockers and 5 clear\"")"
+row "U12 the README's copy of the figures goes stale" ../../README.md "$(sub "\"103 distinct blockers and 6 clear\"" "\"104 distinct blockers and 6 clear\"")"
 row "U11 OVER-REFUSAL: every kernel is UNROLLED" unroll.py "$(sub "\"    ratios, vacuous = [], 0\"" "\"    return 'UNROLLED', 'probe: everything'\n    ratios, vacuous = [], 0\"")"
 row "BASE again" '' ''

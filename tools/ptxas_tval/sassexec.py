@@ -9,7 +9,7 @@ output is a correctness claim must reject.)
 import re, sys
 from z3 import *
 import smem
-import memorder
+import memorder, divest
 
 W = 32
 def bv(n): return BitVecVal(n, W)
@@ -37,6 +37,9 @@ class Sass:
         self.wide = []          # (pc, 33-bit value:carry) for accumulating insns
         self.pc = 0
         self.undef = 0
+        self.assume = []      # measured facts every obligation may use -- see divest.py
+        self.nest = 0
+        self.ests = {}        # id of a fresh estimate -> (e, d)
         self.count = 0
         self.forms = set()
         self.smem = sym.get('smem')       # see smem.py
@@ -75,6 +78,10 @@ class Sass:
             if i not in self.R:
                 self.undef += 1
                 self.R[i] = BitVec(f'sass_undef_R{i}', W)
+            if isinstance(self.R[i], divest.Tagged):
+                raise Exception(f'R{i} holds {self.R[i]!r} and is read outside the '
+                                f'estimate chain the device facts were measured for  '
+                                f'(refusing, not guessing)')
             return self.R[i]
         m = re.fullmatch(r'c\[0x0\]\[0x([0-9a-f]+)\]', o)
         if m:
@@ -203,6 +210,64 @@ class Sass:
         self.R[i] = simplify(val if is_true(g) else If(g, val, old))
         self.defs.append((self.pc, o, self.R[i]))
 
+    def est_link(self, opc, ops, g):
+        """One link of the u32 division estimate (divest.py), or False.
+
+        I2F.U32.RP -> MUFU.RCP -> IADD3 +0x0ffffffe -> F2I.FTZ.U32.TRUNC.NTZ,
+        each consuming the previous link's tagged result.  The last link yields a
+        FRESH estimate and records the measured facts about it."""
+        def src(o):
+            m = re.fullmatch(r'R(\d+)', o.replace('.reuse', ''))
+            return self.R.get(int(m.group(1))) if m else None
+        chain = {'MUFU.RCP': 'i2f', 'IADD3': 'rcp', 'F2I.FTZ.U32.TRUNC.NTZ': 'bias'}
+        if opc == 'I2F.U32.RP':
+            v = divest.Tagged('i2f', self.rd(ops[1]))
+        elif opc in chain:
+            t = src(ops[1])
+            if not isinstance(t, divest.Tagged):
+                if opc == 'IADD3':
+                    return False          # an ordinary add
+                raise Exception(f'UNMODELLED SASS OPCODE {opc!r} outside the division '
+                                f'estimate chain  (refusing, not guessing)')
+            if t.stage != chain[opc]:
+                raise Exception(f'{opc} consumes {t!r}, not the link it follows  '
+                                f'(refusing, not guessing)')
+            if opc == 'IADD3' and (len(ops) != 4 or ops[2] != hex(divest.BIAS)
+                                   or ops[3] != 'RZ'):
+                raise Exception(f'IADD3 {ops} on the estimate is not the measured '
+                                f'bias +0x{divest.BIAS:x}  (refusing, not guessing)')
+            if opc == 'F2I.FTZ.U32.TRUNC.NTZ':
+                if not is_true(g):
+                    raise Exception('a predicated division estimate  (refusing, not guessing)')
+                e = BitVec(f'div_est_{self.nest}', W); self.nest += 1
+                self.ests[e.get_id()] = (e, t.d)
+                ASSUMED.add('u32 division estimate: window + Lemma A (divlow_abi.py, exhaustive)')
+                self.wr(ops[0], e, g)
+                return True
+            v = divest.Tagged({'MUFU.RCP': 'rcp', 'IADD3': 'bias'}[opc], t.d)
+        else:
+            return False
+        if not is_true(g):
+            raise Exception('a predicated division estimate link  (refusing, not guessing)')
+        self.R[int(ops[0][1:])] = v
+        return True
+
+    def est_transfer(self, a, dst, g):
+        """Lemma A is a fact about newton(e, d); the SASS computes that value its
+        own way (a 65-bit sum with the pair {e:0}, `-d` as an IMAD.MOV).  If the
+        register just written is PROVED equal to newton(e, d), the fact is
+        restated about THAT node -- a proved transfer, not an assumption -- so
+        the obligation and the fact share one term and, over Int, one variable.
+        With the fact stated only on its own spelling the division store was
+        `unknown` at 120 s over Int."""
+        if a.get_id() not in self.ests or not is_true(g):
+            return
+        e, d = self.ests[a.get_id()]
+        v = self.R[int(dst[1:])]
+        s = Solver(); s.set('timeout', 10000); s.add(v != divest.newton(e, d))
+        if str(s.check()) == 'unsat':
+            self.assume.append(divest.lemma_a(v, d))
+
     def widen(self, val, carry):
         self.wide.append((self.pc,
                           simplify(Concat(If(carry, BitVecVal(1,1), BitVecVal(0,1)), val)),
@@ -316,6 +381,8 @@ class Sass:
         self.forms.add(opc)
         R, rd = self.rd, self.rd
 
+        if self.est_link(opc, ops, g):
+            return
         if opc in ('NOP',):
             pass
         elif opc == 'UMOV':
@@ -353,6 +420,19 @@ class Sass:
         elif opc in ('FMUL','FADD','FFMA','FSUB'):
             n = 3 if opc == 'FFMA' else 2
             self.wr(ops[0], self.sym['fp'](opc, *[self.frd(o) for o in ops[1:1+n]], side='sass'), g)
+        elif opc == 'SHF.L.U32':
+            # The LOW word of the funnel {Rc:Ra} << n.  For n < 32 that is Ra << n
+            # on any reading of the funnel; what the hardware does at n >= 32
+            # (clamp, or take the amount mod 32) has NOT been refereed, so there
+            # the value is a fresh unknown -- sound, and complete exactly where the
+            # amount is provably below 32, as it is after the `& 0x1f` ptxas
+            # emits for `shl.b32`.
+            n = rd(ops[2])
+            lo = Extract(W-1, 0, Concat(rd(ops[3]), rd(ops[1])) << ZeroExt(32, n))
+            self.nshf = getattr(self, 'nshf', 0) + 1
+            self.wr(ops[0], If(ULT(n, BitVecVal(32, W)), lo,
+                               BitVec(f'shf_l_wide_{self.nshf}', W)), g)
+            ASSUMED.add('SHF.L.U32 (no .HI) = low word of the funnel, amount < 32 only')
         elif opc.startswith('SHF.'):
             # funnel shift: {Rc:Ra} shifted, .HI takes the upper word.
             f = opc.split('.')
@@ -428,7 +508,7 @@ class Sass:
                 v = cb.get(x)
                 return self.sym[v if isinstance(v,str) else f'{v[0]}_{v[1]}'] if v is not None else BitVecVal(0,W)
             self.UR[i] = g2(a); self.UR[i+1] = g2(a+4)
-        elif opc in ('IMAD', 'IMAD.MOV.U32', 'IMAD.SHL.U32', 'IMAD.U32', 'IMAD.IADD'):
+        elif opc in ('IMAD', 'IMAD.MOV.U32', 'IMAD.MOV', 'IMAD.SHL.U32', 'IMAD.U32', 'IMAD.IADD'):
             if opc == 'IMAD.SHL.U32': ASSUMED.add('IMAD.SHL.U32 = IMAD (multiply pipe shift)')
             self.wr(ops[0], self.mul_lo(rd(ops[1]), rd(ops[2])) + rd(ops[3]), g)
         elif opc == 'IMAD.X':
@@ -443,8 +523,10 @@ class Sass:
             # ptxas puts PTX's `mad.hi.cc.u32` addend in the UPPER half, with
             # zero below, so the 32-bit reading is wrong on every such kernel.
             if len(ops) == 4:      # d, a, b, c
-                s, _ = self.mul_hi_wide(rd(ops[1]), rd(ops[2]), ops[3])
+                a1 = rd(ops[1])   # BEFORE the write: `IMAD.HI.U32 R9, R9, ...` overwrites it
+                s, _ = self.mul_hi_wide(a1, rd(ops[2]), ops[3])
                 self.wr(ops[0], s, g)
+                self.est_transfer(a1, ops[0], g)
             elif len(ops) == 5:    # d, Pout, a, b, c
                 s, co = self.mul_hi_wide(rd(ops[2]), rd(ops[3]), ops[4])
                 self.wr(ops[0], s, g); self.wp(ops[1], co, g); self.widen(s, co)
