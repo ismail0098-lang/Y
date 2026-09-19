@@ -224,4 +224,45 @@ v, msg, n = tval.run('mem/lsls.ptx', 'mem/lsls.sass', log=lambda *a: None)
 print(v, n, msg)" 2>&1 | tail -1)
 printf '%-22s %s\n' "tval executor refusal" "$out"
 echo "$out" | grep -q '^REFUSED 0 probe refusal from inside an executor' || bad=$((bad+1))
+# THE u32 DIVISION LOWERING.  ptx_integer_ops was REFUSED on I2F.U32.RP, and
+# its tail was `unknown` over bitvectors on six posings; divest.py models the
+# estimate as a fresh value carrying the two device-measured facts
+# (divlow_abi.py), and intenc.py discharges the tail over Int.  The twins are
+# derived by build_corpus.sh and are asserted by the STORE that fails, since
+# the verdict alone cannot tell the quotient from the remainder:
+#   no_second_corr   refuted at store 3 (the quotient): e2 = I-1 needs it
+#   rem_wrong        refuted at store 4 (the remainder)
+#   rem_any_at_d0    VALIDATED: differs only at d == 0, where the PTX ISA says
+#                    the result is unspecified -- the positive control for that
+#   bias_moved       REFUSED by name: the facts were measured for 0x0ffffffe
+#   udiv/twice       one division stored twice: VALIDATED
+#   udiv/twice_split the second store differs from the first ONLY at d == 0:
+#                    unspecified is ONE value, so this is refuted -- by the
+#                    consistency check and by nothing else (no corpus kernel
+#                    stores a quotient twice, so without this pair that check
+#                    would be a guard nothing reaches)
+#   udiv/and1        only the quotient's LOW BIT is stored; at d == 0 the spec
+#                    allows 0 or 1 and nothing else, which tval cannot express,
+#                    so the store is refused by name (conservatively UNPROVED)
+#   udiv/and1_two    ...and made to store 2 at d == 0: the same refusal.  With
+#                    it removed this twin is STILL unproved, because `(n/d) & 1`
+#                    does not prove over Int at d != 0 either -- so the refusal
+#                    is reached but not isolated, and the rows assert it FIRES
+# The genuine row asserts it went through the Int rung, or a change that made
+# it pass for another reason would read as this result.
+for p in corpus/ptx_integer_ops idiv/no_second_corr idiv/rem_wrong idiv/rem_any_at_d0 idiv/bias_moved udiv/twice udiv/twice_split udiv/and1 udiv/and1_two; do
+  full=$(timeout 900 python3 tval.py "$p.ptx" "$p.sass" 12 3 15 2>&1)
+  out=$(echo "$full" | tail -1)
+  printf '%-22s %s\n' "$(basename $p)" "$out"
+  case "$p" in
+    corpus/ptx_integer_ops) echo "$out" | grep -q '^VALIDATED .*3 over Int'                         || bad=$((bad+1)) ;;
+    idiv/no_second_corr)    { echo "$out" | grep -q '^UNPROVED' && echo "$full" | grep -q 'store 3: sat'; } || bad=$((bad+1)) ;;
+    idiv/rem_wrong)         { echo "$out" | grep -q '^UNPROVED' && echo "$full" | grep -q 'store 4: sat'; } || bad=$((bad+1)) ;;
+    idiv/rem_any_at_d0)     echo "$out" | grep -q '^VALIDATED'                                      || bad=$((bad+1)) ;;
+    idiv/bias_moved)        echo "$out" | grep -q '^REFUSED.*not the measured bias'                 || bad=$((bad+1)) ;;
+    udiv/twice)             echo "$out" | grep -q '^VALIDATED'                                      || bad=$((bad+1)) ;;
+    udiv/twice_split)       { echo "$out" | grep -q '^UNPROVED' && echo "$full" | grep -q 'same unspecified division'; } || bad=$((bad+1)) ;;
+    udiv/and1|udiv/and1_two) { echo "$out" | grep -q '^UNPROVED' && echo "$full" | grep -q 'computed FROM an unspecified division'; } || bad=$((bad+1)) ;;
+  esac
+done
 if [ "$bad" -ne 0 ]; then echo; echo "FAIL: $bad standing result(s) moved."; exit 1; fi

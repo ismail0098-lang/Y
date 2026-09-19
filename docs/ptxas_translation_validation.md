@@ -46,13 +46,14 @@ them moves — the two UNPROVED rows included.
 | `bn254_sub_vec` | **VALIDATED** | 88 | 12.6 s | |
 | `ptx_carry_chain` | **VALIDATED** | 123 | 33.4 s | 24 predicated instructions |
 | `ptx_subword_ops` | **VALIDATED** | 31 | 0.3 s | **sub-word stores**, and a load that can read one back — measured 2026-09-15 |
+| `ptx_integer_ops` | **VALIDATED** | 65 | 23 s | **u32 `div`/`rem` through the float unit**; 3 stores proved over Int — measured 2026-09-19 |
 | `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.1 s | across a **loop**; 1 multiplier identity assumed |
 | `smem_roundtrip` | **VALIDATED** | 18 | 0.2 s | **shared memory**, 1 barrier |
 | `naive_gemm_f32` @ `-O1` | **VALIDATED** | 9 | 0.2 s | **a shipped GEMM** — the emitter says `fma.rn.f32` |
 | `naive_gemm_f32_muladd` @ `-O1` | UNPROVED | 7 | 0.2 s | the form Y used to ship — `store 0 value: sat` |
 | `naive_gemm_f32_rn` @ `-O1` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden*, at a different SASS |
 
-Fourteen kernels validated, **392 obligations**, and three UNPROVED rows that
+Fifteen kernels validated, **457 obligations**, and three UNPROVED rows that
 are results rather than gaps. `bn254_fr_mul_fast` and `bn254_ntt4_fused` are
 UNPROVED and are discussed under *The wall* below — neither produced a `sat`.
 
@@ -514,8 +515,9 @@ kernel uses, and it overturned the obvious read:
 - `ptx_integer_ops` yields a **finding** rather than a kernel: `ptxas` implements
   32-bit `div.u32`/`rem.u32` through the *float* unit — `I2F.U32.RP`, `MUFU.RCP`,
   `F2I.TRUNC`. An integer PTX operation lowered as a floating-point macro-op.
-  **Refereed on the device since 2026-09-18** — see *The integer-division
-  lowering: refereed three layers deep*; its obligation is past the solver.
+  **Refereed on the device since 2026-09-18, and VALIDATED since 2026-09-19** —
+  see *…and it was past the BITVECTOR solver*. The 2026-09-18 note read "its
+  obligation is past the solver"; it was past z3's bitvector engine only.
 
 ### The real gap, measured by running the executor
 
@@ -1432,9 +1434,12 @@ Two corrections came out of running that cross:
   > by running the real census at both levels: `y_cpu_matmul` **2 → 0**
   > (`PLOP3.LUT`, `UIADD3`, both gone), `exact_pv` **2 → 0**,
   > `naive_gemm_f32` **2 → 0**. Two more move without changing size, which is
-  > the sharper form of the same point: `bn254_fr_mul` **2 → 2**
-  > (`CALL.REL.NOINC` out, `CS2R` in) and `int8_gemm_scaled` **4 → 4**
-  > (`SHF.L.U32` out, `CS2R` in) — **the count is not the thing that moves**.
+  > the sharper form of the same point: `bn254_fr_mul` **1 → 1**
+  > (`CALL.REL.NOINC` out, `CS2R` in) — **the count is not the thing that
+  > moves** — and `int8_gemm_scaled` **3 → 4** (`CS2R` in). These two read
+  > `2 → 2` and `4 → 4` until 2026-09-19, when `SHF.L.U32` was modelled: it had
+  > been one of each kernel's `-O3` blockers, and `int8_gemm_scaled`'s `-O1`
+  > build does not contain it.
   > The old claim was written from one kernel where it happens to hold, and
   > generalised.
   >
@@ -1717,15 +1722,23 @@ is checking while both are wrong:
   `unknown`. Crossed in last; the section after the unroll one is about it.
 
 **In the committed corpus exactly one blocker has a non-zero sole-count, and it is
-the solver wall.** 66 kernels, **106** distinct blockers; at `-O3` the kernels one
+the solver wall.** 66 kernels, **103** distinct blockers; at `-O3` the kernels one
 blocker away are `bn254_fr_mul_fast`, `bn254_g1_add`, `bn254_g1_dbl` and
 `bn254_ntt4_fused` — each has no unmodelled opcode, no structural refusal and no
 unroll blocker, and each is past the wall. No opcode, no staging set and no lift
 is the sole blocker of anything: `cvt.rn.f16.f32` is sole blocker of nothing; so
 is the whole `cp.async`/`ldmatrix`/`HMMA` staging set; so is the back-edge lift.
-That is the honest state of a corpus where **5 kernels are clear, the median is 15
-blockers and 31 of 66 are 21 or more**, and it is why "reach" kept naming work
+That is the honest state of a corpus where **6 kernels are clear, the median is 14
+blockers and 13 of 66 are 21 or more**, and it is why "reach" kept naming work
 that buys nothing.
+
+> **Until 2026-09-19 this read 106 distinct, 5 clear, median 15 and 31 at 21+.**
+> Modelling the u32 division estimate took `ptx_integer_ops` to clear (it
+> validates) and removed three blockers corpus-wide (`I2F.U32.RP`, `IMAD.MOV`,
+> `SHF.L.U32`). Adding each kernel's newly modelled opcodes back to its set
+> reproduces the old figures exactly, so the move is attributable to that and to
+> nothing else. The tail fell from 31 to 13 because many GEMMs sat at 21-22 and
+> carried two of the three.
 
 > **Before the wall was crossed this read "every blocker has a sole-count of
 > zero" and "9 kernels are clear", at 105 distinct.** The four kernels above were
@@ -1920,6 +1933,9 @@ bit-exact select.
 **The second correction exists for `e2 = I−1` and nothing else.** With it removed
 (`divmut.sh` D3), `e2 = I` never fails and `e2 = I−1` fails 4,295,021,506 times.
 
+> **Superseded 2026-09-19:** past the *bitvector* engine only; over Int the same
+> obligation is `unsat` in 0.1–0.2 s. See the next section. Kept as measured.
+
 **The tail is past the solver.** With `d` symbolic, z3 answered `unknown`, and
 never `sat`, on every posing tried (2026-09-18, one machine):
 
@@ -1966,6 +1982,174 @@ the instruction rather than argue that denormals cannot reach it. **In a
 bitvector query, every intermediate needs the width of its largest value, and a
 width error most often shows up as a counterexample.**
 
+#### …and it was past the BITVECTOR solver, not past the solver: `ptx_integer_ops` validates
+
+> **SUPERSEDES the section above on two claims.** "The tail is past the solver" is
+> false: it was past z3's *bitvector* engine. Posed over integers with the u32
+> wraps written out, the same obligation is `unsat` in 0.1–0.2 s. And the "measured
+> counterexample to the wall proxy" goes with it. `wall.py` calls
+> `ptx_integer_ops` UNDER, and it now VALIDATES. The tables above are kept as
+> measured: every bitvector posing did answer `unknown`.
+
+**The measurement came first, and it inverted the previous increment's
+recommendation.** The residue named "Int arithmetic rather than bitvectors for the
+correction step" as unmeasured. Measured (z3 `QF_NIA`, `d` symbolic, u32 wraps
+explicit as `r = x − k·2³², 0 ≤ r < 2³²`):
+
+| posing over Int | answer |
+|---|---|
+| Lemma B at `e2 = I` | `unsat`, 0.0 s |
+| Lemma B at `e2 = I−1` | `unsat`, 0.1 s |
+| premises alone (control) | `sat`, 0.0 s |
+| `e2 = I−2` (control: Lemma A's width is needed) | `sat`, 0.1 s |
+| `e2 = I+1` (control) | `sat`, 0.0 s |
+| second correction removed at `e2 = I−1` (control) | `sat`, 0.0 s |
+| window ⇒ Lemma A (Newton step derived) | `unknown`, 300 s |
+| window + Lemma A on the Newton term ⇒ tail | `unsat`, 0.2 s |
+
+So the wall was the THEORY. The bitvector engine bit-blasts two composed 32×32
+products, where the integer engine reasons about their bounds. What remains
+underivable is Lemma A from the window, in either theory. That is fine, because
+Lemma A is measured exhaustively; it is exactly the part a device can settle and a
+solver cannot.
+
+**What was built, and why each piece is sound:**
+
+* **`divest.py`: the estimate is ONE fresh value per chain, carrying the measured
+  facts.** `I2F.U32.RP → MUFU.RCP → IADD3 +0x0ffffffe → F2I.FTZ.U32.TRUNC.NTZ`, each
+  link consuming the previous one's TAGGED result. The last link yields a fresh
+  `e`. A tagged intermediate read by anything else, a predicated link, or
+  a bias other than `0x0ffffffe` is a refusal by name, because the facts were
+  measured for that chain and nothing else. The sequence is **not matched as
+  `UDiv`**: the Newton step and the tail are executed as the SASS spells them, and
+  the obligation still has to relate them to the PTX.
+* **Lemma A is the ONE assumption, and it is stated on the SASS's own Newton
+  node after a proof.** The fact is about `newton(e, d)`; ptxas computes that value
+  its own way (a 65-bit sum with the pair `{e:0}`, `-d` from an `IMAD.MOV`). When
+  `IMAD.HI.U32` writes a value, a bitvector query proves it equal to
+  `newton(e, d)`, and only then is Lemma A (conditional on `d ≠ 0`) recorded about
+  that node. With the fact stated only on its own spelling, the div store was
+  `unknown` at 120 s over Int. The window is measured and NOT assumed. A first
+  version recorded it, with Lemma A on its own spelling beside it, and removing
+  both left every mutation-table row unchanged, so they were deleted. A fact that
+  looks load-bearing and is not is a claim nobody checks.
+* **`intenc.py`: an EXACT bitvector→Int translation, used as the last rung.**
+  A w-bit value is an integer in `[0, 2^w)`, and every operation that can leave
+  the range is reduced by a fresh quotient. The integer formula is satisfiable
+  exactly when the bitvector one is, so its `unsat` is a proof. Anything it
+  cannot translate (a variable shift, a bitwise op other than a low-bit mask) is
+  refused, so the rung answers `unknown`. It runs only on `unknown`, and FIRST for
+  an obligation about a division estimate.
+* **`ptxexec.py`: division by zero is UNSPECIFIED.** The PTX ISA, for `div` and for
+  `rem`: *"Division by zero yields an unspecified, machine-specific value."* The
+  executor had inherited z3's convention (`x/0` = all ones, `x%0` = `x`). That is a
+  stronger specification than the one ptxas is held to, and it refuted ptxas's
+  correct `rem.u32` at `d = 0`, where the silicon returns `0xffffffff`. Now each
+  quotient is `If(d = 0, u, x)` with `u` fresh. tval splits a store that mentions
+  one: where every divisor is non-zero the stores must agree as always; where one
+  is zero, the PTX store must BE `u` (then any SASS value meets the spec), and
+  every store of the same `u` must store the same SASS value, because unspecified
+  is one value, not a different one per store.
+* **`SHF.L.U32` without `.HI`, refereed (`shf_abi.py`)**: the low word of the funnel
+  equals `Ra << n` at all 32 amounts below 32, 384 cases, 0 disagreements. At
+  `n ≥ 32` the silicon returns 0 (clamp); the model leaves that a fresh unknown,
+  sound and complete wherever the amount is provably below 32, as it is after the
+  `& 0x1f` ptxas emits. The first probe masked the amount in C, and nvvm folded the
+  mask into the shift and emitted `SHF.L.W.U32`, the wrap-mode form, which is a
+  different instruction. The shape check refused it, which is what it is for.
+
+**The result.** `corpus/ptx_integer_ops`: **VALIDATED, 65 obligations, 17 stores,
+three of them discharged over Int** (the quotient, the remainder, and a 64-bit
+carry-out that was `unknown` over bitvectors). Its twins are derived by
+`build_corpus.sh`, each by one asserted substitution, and asserted in
+`regress.sh` by the store that fails:
+
+| fixture | what changed | verdict |
+|---|---|---|
+| `idiv/no_second_corr` | the quotient's second correction removed | UNPROVED, `store 3: sat` |
+| `idiv/rem_wrong` | the remainder's second correction subtracts 0 | UNPROVED, `store 4: sat` |
+| `idiv/rem_any_at_d0` | the `d = 0` select unpredicated, so the rem differs ONLY at `d = 0` | **VALIDATED** (the positive control for "unspecified") |
+| `idiv/bias_moved` | the bias one larger | REFUSED by name |
+| `udiv/twice` | one quotient stored twice | VALIDATED |
+| `udiv/twice_split` | the second store differs from the first only at `d = 0` | UNPROVED, by the consistency check alone |
+| `udiv/and1` | only the quotient's low bit stored | UNPROVED, by name: a store computed FROM an unspecified value is refused |
+| `udiv/and1_two` | ...made to store 2 at `d = 0` | UNPROVED, the same refusal |
+
+The `and1` pair is the refusal's only fixture, and it does not isolate it. At
+`d = 0` the spec allows 0 or 1 there and nothing else; tval cannot express "any
+value in the image of `& 1`", so it refuses. With the refusal removed, the twin is
+still UNPROVED, because `(n/d) & 1` does not prove over Int at `d ≠ 0` either. The
+rows assert the refusal FIRES; nothing yet shows it is what stands between the
+twin and a false VALIDATED.
+
+**The encoder needed four repairs before the real kernel went through, and the
+first was a soundness bug.** The memo keyed on z3 node ids of terms it did not keep
+alive. z3 reuses a freed node's id, so a term could inherit another term's
+encoding. The div store answered **`sat` in 0.0 s** in one run and `unknown` in
+the next. A spurious `sat` is the safe direction, but the same bug could as easily
+produce a spurious `unsat`, which is a false proof. Every keyed node is retained
+now. The other three were completeness, each found by bisecting the SASS spelling
+against a hand-written posing that proved. (1) Upper-bound tracking, so a 32×32
+product carried in 64 bits is not wrapped. (2) **Deferred reduction**: a wrap
+feeding a same-width operation is consumed unreduced, since `(x mod 2^w)·y ≡ x·y`,
+so `d·(0−q0)` stays a product of the program's own values. (3) Constants at or
+above `2^(w−1)` enter arithmetic as `c − 2^w`: z3 spells `−q0` as
+`bvmul #xffffffff q0`, and `(2³²−1)·q0·d` needs a quotient the size of `q0·d` to
+reduce. Plus one quotient per `(dividend, divisor)`, shared by `UDiv` and `URem`,
+and a proved store equality kept as a fact for the stores after it. Before the last
+two the remainder stayed `unknown`. **The integer engine is sensitive to spelling
+in a way the bitvector engine is not**: one change took the hand posing from
+`unsat` in 8.5 s to `unknown`. That fragility is recorded, not solved; the twin
+`no_second_corr` shows it (its unrelated carry-out store answered `unknown` there
+while the genuine kernel proves it).
+
+**Mutation table (`idmut.sh`): 19 rows, 16 probes, one verdict letter per
+fixture** (`ptx_integer_ops`, `no_second_corr`, `rem_wrong`, `rem_any_at_d0`,
+`bias_moved`, `twice`, `twice_split`, `and1`, `and1_two`). BASE and the control
+read `VUUVRVUUU` at the top and again at the bottom.
+
+| probe | letters | caught by |
+|---|---|---|
+| M1 the estimate chain unmodelled (the original state) | `RRRRRRRRR` | every fixture refuses |
+| M3 Lemma A not transferred onto the SASS node | `UUUURUUUU` | the genuine kernel and every passing twin |
+| M4 Lemma A one unit wider | `UUUURUUUU` | the same |
+| M5 the encoder's subtraction reversed | import FAIL | the encoder self-check |
+| M6 deferred reduction off / M7 unsigned constants | `UUUURUUUU` | the genuine kernel |
+| M8 separate quotients for `UDiv` and `URem` | `UUUURVUUU` | the remainder |
+| M9 division by zero back to z3's convention | `UUUVRVUUU` | the genuine kernel's rem at `d = 0` |
+| M10 the consistency check removed | `VUUVRVVUU` | **`twice_split` alone** |
+| M12 no fact relevant / M13 no proved-store facts | `UUUURUUUU` / `UUUURVUUU` | the genuine kernel |
+| M14 the bias not checked | `VUUVVVUUU` | **`bias_moved` alone**: it VALIDATES with the wrong chain's facts assumed |
+| M15 `SHF.L.U32` as a right shift | `UUUURVUUU` | the genuine kernel |
+
+Four survivors, each sorted rather than counted as coverage:
+
+* **M5b**, the subtraction reversed with the self-check off, is green, and that is a
+  confirmation. After `simplify`, `a − b` is `a + 0xffffffff·b`, so the encoder's
+  `BSUB` and `BNEG` arms are reached ONLY by the self-check. The first run of M5
+  was green for that reason, which is why the self-check now also encodes
+  unrewritten terms.
+* **M2**, the facts recorded on their own spelling, was green on the first run.
+  Only the TRANSFERRED Lemma A is ever used by a proof, so the unused facts were
+  deleted and the row retired.
+* **M11**, the stores-the-value-itself refusal removed, is green: see the `and1`
+  pair above. The refusal is reached but not isolated.
+* **M16**, a tagged intermediate readable outside the chain, is green because no
+  fixture reads one. Without the check a tagged value reaches z3 arithmetic and
+  CRASHES, so the direction is fail-closed either way.
+
+**A fact that does not concern an obligation is withheld from it.** The 64-bit
+carry-out store is `unsat` over Int in 0.6 s alone and `unknown` at 60 s with the
+division facts beside it. So an obligation is given only the facts about an
+estimate it mentions. That is sound either way: an omitted fact only makes an
+obligation harder.
+
+**What this does NOT cover.** The SIGNED lowering (`I2F.RP`, `IABS`), which is what
+the NTT kernels use, stays REFUSED. The unrolled field kernels are PAST the wall
+regardless. `loopval`, `nestval` and `batch` ignore the estimate facts, which is
+sound but incomplete. And the Int rung's success depends on formula shape, as
+above.
+
 #### …and at `-O1` the kernel that was one blocker away is now CLEAR
 
 Crossing sufficiency with the optimisation level is what the corrected bullet
@@ -1981,8 +2165,8 @@ Measured over the whole corpus at that level, at `-O1` the kernels one blocker
 away are `bn254_fr_mul_fast`, `bn254_g1_add`, `bn254_g1_dbl` and
 `bn254_ntt4_fused` — the same four as at `-O3`, and for the same one blocker, the
 solver wall, which is measured on the PTX and so does not move with the level. At
-`-O1` the corpus is 66 kernels, **109** distinct blockers and **8** clear
-(`exact_pv`, `naive_gemm_f32` and `y_cpu_matmul` join the five — the first two
+`-O1` the corpus is 66 kernels, **106** distinct blockers and **9** clear
+(`exact_pv`, `naive_gemm_f32` and `y_cpu_matmul` join the six — the first two
 by the `-O` effect the corrected bullet above measures, the third because the
 census stopped reporting one member's refusal as the suite's).
 

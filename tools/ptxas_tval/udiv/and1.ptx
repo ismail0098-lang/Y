@@ -1,0 +1,35 @@
+//
+// One u32 division, and only its LOW BIT stored.  At d == 0 the quotient is
+// unspecified, so the stored value may be 0 or 1 -- and NOTHING ELSE.  tval
+// cannot express "any value in the image of `& 1`", so it refuses by name: a
+// store computed FROM an unspecified division is UNPROVED, conservatively.
+// udiv/and1_two.sass is ptxas's genuine output made to store 2 at d == 0, a
+// value no quotient can produce.  With that refusal removed the twin VALIDATES
+// -- which is why the refusal exists, and this pair is its only fixture.
+//
+.version 7.8
+.target sm_89
+.address_size 64
+
+.visible .entry and1(
+    .param .u64 pA, .param .u64 pB, .param .u64 pO)
+{
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<12>;
+    ld.param.u64 %rd0, [pA];
+    ld.param.u64 %rd1, [pB];
+    ld.param.u64 %rd2, [pO];
+    mov.u32 %r0, %tid.x;
+    cvt.u64.u32 %rd9, %r0;
+    shl.b64 %rd3, %rd9, 2;
+    add.u64 %rd4, %rd0, %rd3;
+    add.u64 %rd5, %rd1, %rd3;
+    ld.global.u32 %r1, [%rd4];
+    ld.global.u32 %r2, [%rd5];
+    div.u32 %r3, %r1, %r2;
+    shl.b64 %rd6, %rd9, 3;
+    add.u64 %rd7, %rd2, %rd6;
+    and.b32 %r4, %r3, 1;
+    st.global.u32 [%rd7], %r4;
+    ret;
+}

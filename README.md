@@ -70,14 +70,15 @@ repository's own investigation documents contradict.
   beside the `.ll`, and so does `--emit-attention-ptx`.
   What the verified kernel *costs* is measured separately and is
   [in its own section](#what-the-verified-kernel-costs) — it is not free.
-- **Translation validation against `ptxas`**: **seventeen standing rows — fourteen
+- **Translation validation against `ptxas`**: **eighteen standing rows — fifteen
   validated, three refuted** — including one across a loop, one using shared
   memory and a barrier, one storing sub-word values after a load that can read
-  them back, and **a shipped GEMM**. Each is proved to store exactly what its PTX
+  them back, one whose u32 `div`/`rem` `ptxas` lowers through the float unit, and
+  **a shipped GEMM**. Each is proved to store exactly what its PTX
   stores, by symbolically executing the PTX and the SASS `ptxas` emitted from it
-  and discharging 392 obligations in z3. It is a by-hand research tool
+  and discharging 457 obligations in z3. It is a by-hand research tool
   (`tools/ptxas_tval/`), not a CI gate, and it covers one compilation of one
-  kernel at a time. **The three refutations are what the other fourteen are
+  kernel at a time. **The three refutations are what the other fifteen are
   worth** — a validator that always said VALIDATED would report every row
   identically. **A further 25 rows pin the validator's own memory and effect
   model**: ten are wrong translations built by hand from `ptxas` output that it
@@ -91,6 +92,15 @@ repository's own investigation documents contradict.
   — validates at 17 obligations, and each of its seven wrong twins, plus a loop that
   forgets the previous iteration's store, is refuted at the obligation its
   mutation breaks.
+  **The u32 division is validated without being assumed**: `ptxas` computes it
+  as a float reciprocal estimate, a Newton step and two corrections. The estimate
+  is modelled as a fresh value carrying one fact measured exhaustively on the
+  device over all 2³²−1 divisors, and the rest is executed as the SASS spells it.
+  The tail was `unknown` over bitvectors at up to 1200 s and proves in under a
+  second once translated exactly into integer arithmetic. `ptx_integer_ops`
+  validates at 65 obligations; a twin missing one correction is refuted, and one
+  that differs only at division by zero validates, because the PTX ISA leaves
+  that result unspecified.
   [Details](docs/ptxas_translation_validation.md).
 - **Zero runtime dependencies.** `[dependencies]` in `Cargo.toml` is empty; the
   compiler ships its own BN254 field arithmetic and its own JSON reader. The
@@ -1856,13 +1866,14 @@ models is a hard error, never a guess.**
 | `bn254_sub_vec` | **VALIDATED** | 88 | 11.9 s | |
 | `ptx_carry_chain` | **VALIDATED** | 123 | 26.7 s | 24 predicated instructions |
 | `ptx_subword_ops` | **VALIDATED** | 31 | 0.3 s | **sub-word stores**, and a load that can read one back |
+| `ptx_integer_ops` | **VALIDATED** | 65 | 23 s | **u32 `div`/`rem`** lowered through the float unit; 3 stores proved over Int |
 | `exact_pv` @ `-O1` | **VALIDATED** | 14 | 1.1 s | across a **loop** |
 | `smem_roundtrip` | **VALIDATED** | 18 | 0.2 s | **shared memory**, 1 barrier |
 | `naive_gemm_f32` @ `-O1` | **VALIDATED** | 9 | 0.2 s | **a shipped GEMM** |
 | `naive_gemm_f32_muladd` | UNPROVED | 7 | 0.2 s | the form Y *used to* ship |
 | `naive_gemm_f32_rn` | **VALIDATED** | 9 | 0.2 s | the contraction *forbidden* |
 
-Seventeen rows, 392 obligations, **fourteen VALIDATED and three refuted** —
+Eighteen rows, 457 obligations, **fifteen VALIDATED and three refuted** —
 asserted by `regress.sh` in the direction each currently reads, because a run in
 which an UNPROVED row turns green is a regression too. `fma/plain` is the same
 kernel as `rn` without the `.rn` suffixes: `ptxas` contracts `mul.f32`+`add.f32`
@@ -2014,8 +2025,9 @@ tensor-core item and the back-edge item share a blocker.
 > in as a fifth layer: four field kernels (`bn254_fr_mul_fast`, `bn254_g1_add`,
 > `bn254_g1_dbl`, `bn254_ntt4_fused`) that the four-layer census called clear, that
 > never validated, and that are past the wall.
-> 66 kernels, 106 distinct blockers and 5 clear at `-O3`; 109 and **8**
-> at `-O1`.
+> 66 kernels, 103 distinct blockers and 6 clear at `-O3`; 106 and **9**
+> at `-O1` (106 / 5 and 109 / 8 until the u32 division estimate was modelled,
+> which took `ptx_integer_ops` to clear).
 >
 > **And that census was itself a LOWER BOUND, for eight increments.** It crossed
 > three layers — opcodes, loop structure, setup — and not the fourth:

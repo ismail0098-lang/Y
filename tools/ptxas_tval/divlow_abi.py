@@ -31,10 +31,12 @@ solver two composed 32x32 multiplies before the tail even starts; measuring
 through the Newton step leaves it one.  Exhaust as far up the chain as the
 domain stays finite.
 
-WHAT THIS DOES NOT DO: discharge the tail.  With `d` symbolic, z3 answered
-`unknown` -- never `sat` -- on six posings of it (with UDiv, division-free, I
-eliminated, and the three split lemmas), at budgets up to 1200 s.  Lemma B is
-true on every case measured, so that is a SOLVER limit, not a false lemma.  See
+WHAT THIS DOES NOT DO: discharge the tail -- tval.py does.  With `d` symbolic,
+z3's BITVECTOR engine answered `unknown` on six posings of it at budgets up to
+1200 s; translated exactly into integer arithmetic (intenc.py) the same tail is
+`unsat` in under a second, given Lemma A.  So of the three facts here, the
+validator ASSUMES only Lemma A (divest.py); the window is measured and not
+assumed, and Lemma B is proved rather than sampled.  See
 docs/ptxas_translation_validation.md.
 
 Only est() touches an ISA fact; e2, q0 and the corrections are integer
