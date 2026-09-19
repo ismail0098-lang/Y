@@ -2192,6 +2192,12 @@ look shallow and run 244–717. The bullet above is right that the boundary must
 be stated; what it did not anticipate is that stating it would be the cheap part.
 Write-up: [Translation validation for `ptxas`](ptxas_translation_validation.md).
 
+> The "unproved after 9,705 s" in this entry does NOT reproduce, re-measured
+> 2026-09-19: at default budgets the first sweep alone takes 16,237 s and closes 17
+> of 276 partial sums, and the validator of the commit that published the figure
+> is still in its first sweep at 9,810 s. The verdict stands (UNPROVED, no `sat`);
+> the time and the 261-of-276 do not. See the tval write-up.
+
 **Inventory correction, measured 2026-08-31.** "XOR bank swizzling" reads as a
 transformation that exists and needs a proof. It does not exist in any path a
 kernel can take. `src/bank_conflict.rs` is real — the type checker searches for

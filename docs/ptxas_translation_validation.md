@@ -410,7 +410,20 @@ that an abstraction is too weak.
 Every scope census here counted *opcodes*, which silently assumes the executors
 are what gate the corpus. The standing table says otherwise: `ptx_carry_chain`
 has 29 multiplies and validates in 24 s; `bn254_fr_mul_fast` has 65 and is
-UNPROVED after 9,705 s with 261 of 276 cut points closed and **no `sat`**.
+UNPROVED with **no `sat`**: at default budgets its first sweep closes 17 of 276
+partial sums in 16,237 s.
+
+> **This paragraph used to say "UNPROVED after 9,705 s with 261 of 276 cut points
+> closed", and that does not reproduce.** Re-measured 2026-09-19 with today's
+> `tval.py` (first sweep: 17 of 276 in 16,237 s) and with the `tval.py` of
+> `b427333`, the commit that published it, on byte-identical PTX and SASS: still
+> in its first sweep at 9,810 s. The two builds' direct-mode terms are
+> byte-identical; their `wide`-mode terms differ in let-binding numbering with sizes
+> within 5 bytes of 43 MB -- consistent with commutative operand order, not checked
+> term for term -- so this is not a regression of the validator; the budgets or artifact of
+> the original run were not recorded. The VERDICT stands, and it is the one
+> `wall.py` uses -- and this row does not set a threshold anyway: the smallest
+> region measured `unknown` is `bn254_ntt4_fused` barrier 1, at 49.
 
 > **"A solver wall between 29 and 65 multiplies per query" was a KERNEL-level
 > reading and it was re-quoted as current long after the region-level measurement
@@ -453,6 +466,47 @@ behind shared memory" was false — shared memory alone unlocks exactly **one**,
 a 64-instruction test fixture. It was still the right thing to build, for a
 different reason: it is the prerequisite for the 23 tractable GEMMs *and* the
 thing that creates the cut points that put them under the wall.
+
+#### ...and this wall IS the solver, not the theory
+
+The division tail was `unknown` over bitvectors on six posings and `unsat` in
+0.2 s over Int, so the obvious question is whether the field wall is the same
+artifact. `intwall.py` asks it on tval's own partial-sum obligations: each of the
+first N proposed pairs, in sweep-1 conditions, of the bitvector engine and of the
+exact Int translation, at one budget.
+
+    bn254_fr_mul_fast, 40 pairs, 60 s each      (intwall.py, 2026-09-19)
+      both unsat           23
+      both unknown         14
+      bitvector unsat,
+        Int unknown         3
+    Int closes 0 pairs the bitvector engine does not
+
+**It is not.** The division tail reasons about the bounds of a few products; a
+CIOS carry chain is many products whose low and high words must be matched
+exactly, which is bit-level reasoning in either theory. So the Int rung stays
+where it is -- first for estimate obligations, last on `unknown` for stores --
+and is not added to the partial-sum sweep, where it would cost 60 s per hard pair
+and buy nothing measured.
+
+The Int rung's answers are **run-dependent**: the exploratory run and
+`intwall.py` both lost three pairs, but not the same three -- pair 7 was `unknown`
+in the first and `unsat` in the second, pair 12 the other way round -- on the same
+obligations. The two processes had built different terms first, and this directory has already
+recorded that z3 node ids -- which order commutative operands and key the
+encoder's memo -- depend on construction history. A three-pair "Int loses" count
+is therefore not a stable figure; the zero in the last line is the claim.
+
+**And that zero is a null metric until the Int engine is shown live**: it is also
+what the tool reports if the Int query fell back to the bitvector one, or if
+`intenc` refused every formula (it answers `unknown` then). So `intwall.py` counts
+the Int queries it made and requires them to equal the pairs asked, and requires
+the Int engine to prove at least one pair by itself. `iwmut.sh`, control row
+first and BASE at both ends: the Int query replaced by the bitvector one, the Int
+engine answering `unknown` to everything, tval's anchor moved (it must refuse
+rather than run the unpatched validator), and the pair rows never recorded each
+fail by name; **the compound that removes the proved-something check and silences
+the engine is green**, which is that check's justification.
 
 ### `sat` and `unknown` are not the same result
 
