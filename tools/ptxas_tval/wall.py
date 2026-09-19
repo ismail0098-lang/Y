@@ -4,7 +4,8 @@ WHY IT EXISTS.  The frontier called nine kernels at -O3 CLEAR and five of them
 validate.  The other four -- `bn254_fr_mul_fast`, `bn254_ntt4_fused`,
 `bn254_g1_dbl`, `bn254_g1_add` -- have no unmodelled opcode, no structural
 refusal and no unroll blocker, and are past the solver: `bn254_fr_mul_fast` is
-UNPROVED after 9,705 s with no `sat`.  So "clear" was an UPPER bound on what
+UNPROVED with no `sat` (first sweep: 17 of 276 partial sums in 16,237 s), and the
+exact Int translation does not help it (`intwall.py`).  So "clear" was an UPPER bound on what
 validates, and any ranking built on it -- a joint-sufficiency measure above all
 -- inherited that.  Measured before building this: the best six-blocker set the
 frontier offered (the integer-division lowering) clears six kernels, and five of
@@ -53,7 +54,7 @@ GROUND_TRUTH = (
     ('ptx_carry_chain',   0, 'PROVED',  'regress.sh standing row, VALIDATED'),
     ('bn254_ntt4_fused',  0, 'PROVED',  'smemval, shared memory entering barrier 0 PROVED EQUAL'),
     ('bn254_ntt4_fused',  1, 'UNKNOWN', 'smemval, barrier 1 solver said unknown at a 600 s budget'),
-    ('bn254_fr_mul_fast', 0, 'UNKNOWN', 'tval, UNPROVED after 9,705 s, 261/276 cut points, no sat'),
+    ('bn254_fr_mul_fast', 0, 'UNKNOWN', 'tval, UNPROVED, no sat; first sweep 17/276 in 16,237 s (2026-09-19)'),
 )
 
 WALL_KEY = ('a barrier region has at least as many multiplies as the smallest '

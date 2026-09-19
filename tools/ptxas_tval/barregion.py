@@ -1,7 +1,7 @@
 r"""Does a barrier partition the solver problem?
 
 The wall in this corpus is ~65 multiplies (bn254_fr_mul_fast: 65 mul/mad,
-UNPROVED at 9705s; ptx_carry_chain: 29, VALIDATED at 24s).  A `bar.sync` is a
+UNPROVED, no sat; ptx_carry_chain: 29, VALIDATED at 24s).  A `bar.sync` is a
 natural cut point -- shared memory is the interface across it -- so the question
 that decides whether shared memory is worth building is not "how many kernels
 does it unlock" but "how many MULTIPLIES does the biggest region still have".

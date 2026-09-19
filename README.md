@@ -1929,7 +1929,12 @@ positive control through the same classifier it uses.
 **The binding constraint is the solver, not opcode coverage**, and measuring that
 cancelled the feature the measurement was taken to justify. `ptx_carry_chain`
 validates with 29 multiplies in 24 s; `bn254_fr_mul_fast` has 65 and is UNPROVED
-after 9,705 s — with 261 of 276 cut points closed and **no `sat`**. Asking the
+with **no `sat`** — its first sweep closes 17 of 276 partial sums in 16,237 s.
+(This README used to say 261 of 276 in 9,705 s. That does not reproduce, not even
+with the validator of the commit that published it, so it is withdrawn.) Nor is it
+the theory this time: asked of both engines at 60 s, the exact Int translation that
+proved the division tail closes **none** of the 14 pairs the bitvector engine
+cannot (`tools/ptxas_tval/intwall.py`). Asking the
 counterfactual (*if every opcode were modelled, what could the solver close?*)
 used to put "51 of 66 kernels under that wall" and call the 23 tensor-core GEMMs
 tractable at 39–61 multiplies per barrier region. **Neither survives
