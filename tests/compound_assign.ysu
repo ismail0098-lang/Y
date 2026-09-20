@@ -1,0 +1,19 @@
+// `x op= e` IS `x = x op e`, and this backend had an arm for the second and,
+// outside a @ZeroDrift accumulator, none for the first: every other compound
+// assignment fell through to `emit_stmt`'s `_ => {}` and emitted NOTHING.
+//
+// `acc += 7` therefore left `acc` at its old value, under a clean compile,
+// exit 0, and a module `ptxas` accepts. It survived because no kernel in this
+// corpus uses `+=` in a body -- the 256 occurrences in `bn254_g1_add.ysu` are
+// comments, and the two sources that really use it are host programs this
+// backend refuses for declaring no `kernel`.
+kernel compound_assign(Dst: GlobalMemory<U32>, N: I32) {
+    let j: I32 = block_idx_x() * block_dim_x() + thread_idx_x();
+    let mut acc: U32 = 1;
+    acc += 7;
+    acc -= 2;
+    acc *= 3;
+    block_ptr2d_store(Dst, 0, j, N, 1, N, acc);
+}
+
+fn main() {}

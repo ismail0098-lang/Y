@@ -1,0 +1,13 @@
+// The SAME kernel with every compound assignment written out longhand. The two
+// must emit byte-identical PTX: that is the assertion, and it needs no
+// knowledge of what correct PTX looks like.
+kernel compound_assign(Dst: GlobalMemory<U32>, N: I32) {
+    let j: I32 = block_idx_x() * block_dim_x() + thread_idx_x();
+    let mut acc: U32 = 1;
+    acc = acc + 7;
+    acc = acc - 2;
+    acc = acc * 3;
+    block_ptr2d_store(Dst, 0, j, N, 1, N, acc);
+}
+
+fn main() {}
