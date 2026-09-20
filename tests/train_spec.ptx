@@ -6,12 +6,12 @@
     .param .u64 weights_0,
     .param .b32 size_1
 )
-    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 13
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 14
     // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 32 (to maximize SM occupancy)
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 100.00% (6 active blocks per SM)
 .maxnreg 32
 {
-    .reg .b32 %r<3>;
+    .reg .b32 %r<4>;
     .reg .f32 %f<2>;
     .reg .b64 %rd<4>;
     .reg .pred %p<3>;
@@ -37,6 +37,7 @@
     $LOOP_START_0:
     setp.ge.u32 %p1, %r1, %r2;
     @%p1 bra $LOOP_END_1;
+    mov.u32 %r3, %r1;   // own register: `%r1` is another binding's
     cvt.f64.f32 %fd4, %f0;
     mul.f64 %fd5, %fd4, 0d41F0000000000000;
     setp.lt.f64 %p2, %fd5, 0d0000000000000000;
