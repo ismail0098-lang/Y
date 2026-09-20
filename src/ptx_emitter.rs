@@ -2824,6 +2824,41 @@ declare it as a Q format.\n{}",
                 let instr = if matches!(op, BinaryOp::Sub) { "sub.s64" } else { "add.s64" };
                 writeln!(&mut self.ptx_buffer, "    {} {}, {}, {};", instr, acc, acc, fixed).unwrap();
             }
+            // Every OTHER compound assignment fell through every arm below
+            // and landed in this function's `_ => {}`, so `s += 7;` on an
+            // ordinary scalar emitted NOTHING: the kernel kept `s`'s old value,
+            // compiled clean, assembled clean and exited 0.
+            //
+            // It survived because no kernel in this corpus uses `+=` in a body
+            // -- the 256 occurrences in `bn254_g1_add.ysu` are all COMMENTS
+            // (`// t += a * b_i`), and `hello.ysu`/`simple_test.ysu` are host
+            // programs this backend refuses for having no `kernel`. So the
+            // statement is reachable from the surface syntax and reached by
+            // nothing that runs.
+            //
+            // DESUGARED, not reimplemented: `x op= e` IS `x = x op e`, and
+            // `Stmt::Assign` already carries the target-resolution rules
+            // (including the refusal for a 4-wide vector, which `+=` needs for
+            // exactly the same reason `=` does). A second implementation is how
+            // the two spellings of one statement come to compute different
+            // functions -- which is what the `@ZeroDrift` arm above exists to
+            // stop, one guard up. The same desugaring fixed the identical hole
+            // in `zk_emitter`.
+            Stmt::CompoundAssign { target, op, value, span } => {
+                self.emit_stmt(
+                    &Stmt::Assign {
+                        target: target.clone(),
+                        value: Expr::BinaryOp {
+                            op: op.clone(),
+                            left: Box::new(target.clone()),
+                            right: Box::new(value.clone()),
+                            span: span.clone(),
+                        },
+                        span: span.clone(),
+                    },
+                    hw_profile,
+                );
+            }
             // `acc = acc + e` is the SAME statement as `acc += e`, and this
             // emitter had an arm for one and not the other - so the running-sum
             // form fell through to `Stmt::Assign` below, which read the
@@ -2867,10 +2902,42 @@ declare it as a Q format.\n{}",
                 }
             }
             Stmt::Assign {
-                target, value, ..
+                target, value, span,
             } => {
                 let val_reg = self.emit_expr(value, None, hw_profile);
                 if let Expr::Ident(name, _) = target {
+                    // A target this backend cannot resolve used to fall out of
+                    // the `if let` and emit NOTHING, so the assignment simply
+                    // did not happen - under "Compilation Successful!", exit 0,
+                    // and a module `ptxas` accepts. The live case is a `U32x4`:
+                    // `a = 7;` computed `mov.u32 %r20, 7;` into a register
+                    // nothing reads and dropped the write, because a v4 lives
+                    // in `vec_vars` (four registers) and never in `variables`.
+                    if self.vec_vars.contains_key(name) {
+                        self.unsupported_expr(
+                            &format!(
+                                "assigning to `{}`, which is a 4-wide vector: it names \
+                                 four registers, not one, so there is no single `mov` \
+                                 for this. Assign the lanes you want to scalar `let`s \
+                                 and store those",
+                                name
+                            ),
+                            span,
+                        );
+                    } else if !self.variables.contains_key(name) {
+                        // The type checker rejects a wholly undefined name
+                        // first, so this arm is defensive and NOT COVERED -
+                        // verified by mutation: neutering it leaves every suite
+                        // green, because no fixture can reach it. It is kept
+                        // because the design rule says an unhandled target must
+                        // refuse, and because it is one deleted front-end guard
+                        // away from being live; dropping the write is the one
+                        // outcome that cannot be told from a correct compile.
+                        self.unsupported_expr(
+                            &format!("assigning to the undefined name `{}`", name),
+                            span,
+                        );
+                    }
                     if let Some(tgt_reg) = self.variables.get(name).cloned() {
                         // The width of the `mov` used to be read off the
                         // VALUE's register prefix, so `x = y` where `x: U64`
@@ -3066,7 +3133,17 @@ declare it as a Q format.\n{}",
             Stmt::Match { span, .. } => {
                 self.unsupported_stmt("`match`", span);
             }
-            _ => {}
+            // NO `_ => {}` ARM, DELIBERATELY. It used to sit here and it was
+            // not decorative: a `CompoundAssign` whose target is not a
+            // @ZeroDrift accumulator fell through every guarded arm and landed
+            // in it, so `s += 7;` emitted nothing at all.
+            //
+            // With every `Stmt` variant carrying an unguarded arm, rustc says
+            // this catch-all is unreachable -- so removing it makes a NEW
+            // variant a compile error here instead of a statement that silently
+            // does not happen. That is the same device `remap_witness_op` uses,
+            // and for the same reason. Do not put it back to silence a future
+            // "non-exhaustive patterns" error; add the arm the error asks for.
         }
     }
 
@@ -3150,6 +3227,24 @@ declare it as a Q format.\n{}",
                 // `pid_m`/`pid_n`. There is no legitimate bare name left, so
                 // reaching here means the program named something that does
                 // not exist.
+                // A `U32x4` is DEFINED and simply not a single register, so
+                // reporting it as undefined sends the reader looking for a typo
+                // in a name they declared on the line above. `resolve_chisel_registers`
+                // has said the right thing here since it was written; this is the
+                // same guard at the other site.
+                if self.vec_vars.contains_key(name) {
+                    self.unsupported_expr(
+                        &format!(
+                            "`{}`, which is a 4-wide vector, used where a single \
+                             register is wanted: it names four registers, not one. \
+                             Read the lane you want (`{}.x`/`.y`/`.z`/`.w`) into a \
+                             scalar `let` first and name that",
+                            name, name
+                        ),
+                        span,
+                    );
+                    return "".into();
+                }
                 self.unsupported_expr(&format!("the undefined name `{}`", name), span);
                 "".into()
             }
