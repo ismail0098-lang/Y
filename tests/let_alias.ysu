@@ -1,0 +1,25 @@
+// A grid-stride loop whose induction variable is initialised from another
+// binding -- the shape every grid-stride kernel in this repository is written
+// in, and the shape that made `let mut k: I32 = tid;` alias `tid`'s register.
+//
+// `tid` is assigned NOWHERE in this program, so thread t must add 1 at index
+// t. If the binding aliases, the loop's `k = k + bsz` writes through `tid`,
+// and after the loop `tid` holds the first value >= N in its residue class --
+// so every thread writes somewhere past the live range and Out[t] stays 0.
+//
+// Out is sized by the caller to N + 2*bsz, so a clobbered index is still
+// inside the allocation: this test must observe a WRONG ANSWER, not a fault.
+kernel let_alias(Out: GlobalMemory<I32>, N: I32) {
+    let tid: I32 = thread_idx_x();
+    let bsz: I32 = block_dim_x();
+
+    let mut k: I32 = tid;
+    @invariant(k >= 0)
+    while k < N {
+        k = k + bsz;
+    }
+
+    atomic_add(Out, tid, 1);
+}
+
+fn main() {}

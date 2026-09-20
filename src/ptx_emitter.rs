@@ -1058,6 +1058,48 @@ impl PtxEmitter {
     /// wants. Float/integer conversion rounds to nearest for int->float and
     /// truncates toward zero for float->int, matching the `as` semantics of
     /// every language Y's surface syntax resembles.
+    /// Give a binding its own register when the initialiser handed back one
+    /// that another binding already owns.
+    ///
+    /// `emit_convert` returns its argument UNCHANGED when no conversion is
+    /// needed, so `let mut k: I32 = tid;` bound `k` to the very register `tid`
+    /// lives in. A later `k = k + bsz` writes through `Stmt::Assign` into that
+    /// register, so **assigning one variable silently changed another**:
+    ///
+    /// ```text
+    ///     mov.u32 %r1, %tid.x;      // tid
+    ///     add.s32 %r3, %r1, %r2;    // k + bsz
+    ///     mov.u32 %r1, %r3;         // k = ...  <- clobbers tid
+    /// ```
+    ///
+    /// The program then stored at `tid + blockDim.x` for a `tid` the source
+    /// never assigns. It compiles clean, `ptxas` accepts it, and it is only
+    /// correct when nothing reads the aliased name afterwards - which is why a
+    /// kernel launched with `gridDim.x >= n` can match a reference exactly and
+    /// diverge at every other geometry.
+    ///
+    /// Mutability cannot be the trigger: `Stmt::Let` carries no `mut` flag
+    /// (see `ast.rs`), and a binding that is never assigned costs one `mov`
+    /// that `ptxas` coalesces. Aliasing is the property that matters anyway -
+    /// a register two names can reach is a hazard whichever of them is written.
+    fn copy_if_aliased(&mut self, reg: String) -> String {
+        if !self.variables.values().any(|owned| *owned == reg) {
+            return reg;
+        }
+        let ty = self.ty_of(&reg);
+        let dst = self.alloc_ty(ty);
+        writeln!(
+            &mut self.ptx_buffer,
+            "    mov.{} {}, {};   // own register: `{}` is another binding's",
+            ty.reg_mem(),
+            dst,
+            reg,
+            reg
+        )
+        .unwrap();
+        dst
+    }
+
     fn emit_convert(&mut self, reg: &str, to: ScalarTy) -> String {
         let from = self.ty_of(reg);
         if from == to {
@@ -2618,6 +2660,12 @@ declare it as a Q format.\n{}",
                             Some(t) => self.emit_convert(&val_str, t),
                             None => val_str,
                         };
+                        // Every OTHER site that binds a name allocates a fresh
+                        // register (kernel params, the loop variable, a zero
+                        // init, a drift accumulator), so this arm is the only
+                        // one that can make two names share one - which makes
+                        // it the only one that needs the copy.
+                        let reg = self.copy_if_aliased(reg);
                         self.variables.insert(name.clone(), reg);
                     } else if Self::binds_a_linear_token(expr) {
                         // `cp_async` yields a LINEAR TOKEN, not a value: the

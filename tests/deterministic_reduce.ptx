@@ -8,14 +8,14 @@
     .param .u64 Mx_2,
     .param .b32 N_3
 )
-    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 80
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 82
     // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 128 (to maximize SM occupancy)
     // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 33.33% (2 active blocks per SM)
 .maxnreg 128
 {
     .reg .b32 %r<22>;
     .reg .f32 %f<1>;
-    .reg .b64 %rd<29>;
+    .reg .b64 %rd<30>;
     .reg .pred %p<7>;
 
     ld.param.u64 %rd0, [Src_0];
@@ -44,30 +44,31 @@
     cvt.s64.s32 %rd15, %r7;
     mov.u32 %r8, 2147483647;
     neg.s32 %r9, %r8;
+    mov.u64 %rd16, %rd12;   // own register: `%rd12` is another binding's
     // while ...
     $WHILE_START_0:
-    cvt.s64.s32 %rd16, %r0;
-    setp.lt.s64 %p1, %rd12, %rd16;
+    cvt.s64.s32 %rd17, %r0;
+    setp.lt.s64 %p1, %rd16, %rd17;
     selp.u32 %r10, 1, 0, %p1;
     setp.eq.u32 %p0, %r10, 0;
     @%p0 bra $WHILE_END_1;
-    cvt.u32.u64 %r11, %rd12;
+    cvt.u32.u64 %r11, %rd16;
     mov.u32 %r12, 0;
     mov.u32 %r13, 1;
     // [Y 2D TENSOR BLOCK POINTER LOAD - 2D STRIDED MASKED ACCESS]
     mul.lo.s32 %r15, %r12, %r0;
     add.s32 %r14, %r15, %r11;
-    cvt.u64.u32 %rd18, %r14;
-    shl.b64 %rd17, %rd18, 2;
-    add.u64 %rd19, %rd0, %rd17;
+    cvt.u64.u32 %rd19, %r14;
+    shl.b64 %rd18, %rd19, 2;
+    add.u64 %rd20, %rd0, %rd18;
     setp.lt.u32 %p2, %r12, %r13;
     setp.lt.u32 %p3, %r11, %r0;
     and.pred %p4, %p2, %p3;
-    @%p4 ld.global.u32 %r16, [%rd19];
+    @%p4 ld.global.u32 %r16, [%rd20];
     @!%p4 mov.u32 %r16, 0;
-    cvt.s64.s32 %rd20, %r16;
-    add.s64 %rd21, %rd15, %rd20;
-    mov.u64 %rd15, %rd21;
+    cvt.s64.s32 %rd21, %r16;
+    add.s64 %rd22, %rd15, %rd21;
+    mov.u64 %rd15, %rd22;
     setp.gt.s32 %p5, %r16, %r9;
     selp.u32 %r17, 1, 0, %p5;
     // [HEURISTIC] Branch Divergence Penalty is 4.53 cycles.
@@ -76,20 +77,20 @@
     @%p6 bra $IF_END_3;
     mov.u32 %r9, %r16;
     $IF_END_3:
-    add.s64 %rd22, %rd12, %rd14;
-    mov.u64 %rd12, %rd22;
+    add.s64 %rd23, %rd16, %rd14;
+    mov.u64 %rd16, %rd23;
     bra $WHILE_START_0;
     $WHILE_END_1:
     mov.u32 %r18, 0;
     mov.u32 %r19, %r18;
-    cvt.u64.u32 %rd23, %r19;
-    shl.b64 %rd24, %rd23, 3;
-    add.u64 %rd25, %rd1, %rd24;
-    red.global.add.u64 [%rd25], %rd15;
+    cvt.u64.u32 %rd24, %r19;
+    shl.b64 %rd25, %rd24, 3;
+    add.u64 %rd26, %rd1, %rd25;
+    red.global.add.u64 [%rd26], %rd15;
     mov.u32 %r20, 0;
     mov.u32 %r21, %r20;
-    cvt.u64.u32 %rd26, %r21;
-    shl.b64 %rd27, %rd26, 2;
-    add.u64 %rd28, %rd2, %rd27;
-    red.global.max.s32 [%rd28], %r9;
+    cvt.u64.u32 %rd27, %r21;
+    shl.b64 %rd28, %rd27, 2;
+    add.u64 %rd29, %rd2, %rd28;
+    red.global.max.s32 [%rd29], %r9;
 }
