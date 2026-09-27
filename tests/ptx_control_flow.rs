@@ -8,7 +8,9 @@
 //!     let i: I32 = 0;
 //!     @invariant(i >= 0)
 //!     while i < N { i = i + 1; }
-//!     store(A, 0, i);
+//!     store(A, 0, i);        // (buffer, index, value): this stored the INDEX -
+//!                            // see tests/ptx_builtin_arity.rs; the fixture
+//!                            // below writes store(A[0], i)
 //! }
 //! ```
 //!
@@ -79,7 +81,7 @@ const WHILE_KERNEL: &str = "kernel k(A: GlobalMemory<F32>, N: I32) {\n\
     \x20   while i < N {\n\
     \x20       i = i + 1;\n\
     \x20   }\n\
-    \x20   store(A, 0, i);\n\
+    \x20   store(A[0], i);\n\
 }\n";
 
 /// The loop must actually be in the output, in the right order.
@@ -144,7 +146,7 @@ fn statements_without_a_lowering_are_refused() {
     let cases = [
         (
             "ptxcf_match",
-            "kernel k(A: GlobalMemory<F32>, N: I32) {\n    match N {\n        _ => N\n    }\n    store(A, 0, 1.0);\n}\n",
+            "kernel k(A: GlobalMemory<F32>, N: I32) {\n    match N {\n        _ => N\n    }\n    store(A[0], 1.0);\n}\n",
             "`match`",
         ),
         (
@@ -158,7 +160,7 @@ fn statements_without_a_lowering_are_refused() {
             // rule that a fixture stopped by an earlier pass must fail rather
             // than pass.
             "ptxcf_ret_value",
-            "kernel k(A: GlobalMemory<F32>, N: I32) {\n    store(A, 0, 1.0);\n    return N;\n}\n",
+            "kernel k(A: GlobalMemory<F32>, N: I32) {\n    store(A[0], 1.0);\n    return N;\n}\n",
             "declares no return type",
         ),
     ];
@@ -195,7 +197,7 @@ fn statements_without_a_lowering_are_refused() {
 /// neither the construct nor a reason. It is exhaustive now.
 #[test]
 fn a_break_never_silently_compiles() {
-    let src = "kernel k(A: GlobalMemory<F32>, N: I32) {\n    @invariant(i >= 0)\n    for i in 0..4 {\n        break;\n    }\n    store(A, 0, 1.0);\n}\n";
+    let src = "kernel k(A: GlobalMemory<F32>, N: I32) {\n    @invariant(i >= 0)\n    for i in 0..4 {\n        break;\n    }\n    store(A[0], 1.0);\n}\n";
     match emit("ptxcf_break", src) {
         Ok(ptx) => panic!("a `break` compiled; the emitter drops it:\n{}", ptx),
         Err(diag) => assert!(
@@ -213,10 +215,10 @@ fn a_break_never_silently_compiles() {
 /// nothing.
 #[test]
 fn ordinary_kernels_still_compile() {
-    let plain = "kernel k(A: GlobalMemory<F32>, N: I32) {\n    @invariant(i >= 0)\n    for i in 0..4 {\n        store(A, i, 1.0);\n    }\n}\n";
+    let plain = "kernel k(A: GlobalMemory<F32>, N: I32) {\n    @invariant(i >= 0)\n    for i in 0..4 {\n        store(A[i], 1.0);\n    }\n}\n";
     assert!(emit("ptxcf_ok_for", plain).is_ok(), "a plain `for` kernel must still compile");
 
-    let bare_ret = "kernel k(A: GlobalMemory<F32>, N: I32) {\n    store(A, 0, 1.0);\n    return;\n}\n";
+    let bare_ret = "kernel k(A: GlobalMemory<F32>, N: I32) {\n    store(A[0], 1.0);\n    return;\n}\n";
     let ptx = emit("ptxcf_ok_ret", bare_ret).expect("a bare `return;` must still compile");
     assert!(
         ptx.contains("ret;"),

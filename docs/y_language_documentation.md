@@ -438,7 +438,7 @@ Y supports parametric polymorphism (generics) for structs, implementations, and 
 Y divides data types into two main categories: primitive scalar types and hardware-aware layout types.
 
 ### 5.1 Scalar and Compound Types
-* **Floating-Point**: `F16` (half precision), `BF16` (bfloat16), `TF32` (TensorFloat-32), `F32` (single float), `F64` (double float).
+* **Floating-Point**: `F16` (half precision), `BF16` (bfloat16), `TF32` (TensorFloat-32), `F32` (single float), `F64` (double float). What each one means inside a PTX kernel - `F64` is a full value type there, `F16` is a buffer element type only - is in §20.5.
 * **Integers**: `I8` through `I64` (signed), `U8` through `U64` (unsigned) (e.g., standard sizing from 8-bit to 64-bit).
 * **Fixed-Point**: `QFixed` types represent values using fixed fractional scaling. For example, `Q32.32` reserves 32 bits for the integer part and 32 bits for the fraction.
 * **References**: `&T` represents an immutable reference; `&mut T` represents a mutable reference.
@@ -1054,6 +1054,15 @@ fn main() -> I32 {
 ---
 
 ### Example 2: Matrix Multiplication (GEMM) Kernel
+
+**Status: this example does not compile** (checked 2026-09-27, verbatim, with
+`--emit-ptx`): the type checker refuses it before any backend runs (`Pipeline`
+is not a known generic type; the loop has no `@invariant`), and past that the
+fragment surface it uses (`Fragment::zero`, `ldmatrix`, `mma_sync`, a fragment
+store) has no PTX lowering in this backend. The tensor-core GEMM that works is
+the `@tile`-dispatched kernel in `tests/gemm_f16_*.ysu`. It is kept as a sketch
+of the intended surface.
+
 ```ysu
 @require(avx512 >= 1)
 kernel matmul(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
@@ -1102,7 +1111,10 @@ kernel matmul(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) 
     }
 
     // Write final output register fragments back to global memory
-    store(acc, C);
+    // NOT IMPLEMENTED: there is no fragment store. This line used to read
+    // `store(acc, C);` - the arguments reversed, and `store` writes ONE scalar:
+    // `store(place, value)`, e.g. `store(C[i], v)` (see §20.6). The working
+    // tensor-core GEMM is the `@tile`-dispatched kernel in tests/gemm_f16_*.ysu.
 }
 ```
 
@@ -2566,7 +2578,7 @@ This section maps common CUDA C++ and standard C++ patterns directly to their Y 
 | `wmma::fill_fragment(frag_c, 0.0f);` | `Fragment::zero()` |
 | `wmma::load_matrix_sync(frag_a, ptr, stride);` | `ldmatrix(smem_buf)` — stride and swizzle computed automatically |
 | `wmma::mma_sync(frag_c, frag_a, frag_b, frag_c);` | `acc = mma_sync(frag_A, frag_B, frag_C);` |
-| `wmma::store_matrix_sync(ptr, frag_c, stride, layout);` | `store(acc, C);` |
+| `wmma::store_matrix_sync(ptr, frag_c, stride, layout);` | **No equivalent** - there is no fragment store. `store(place, value)` writes one scalar (§20.6); an earlier version of this row wrote `store(acc, C)`, with the arguments reversed. |
 
 ### 13.4 Async Memory Transfers (cp.async)
 
@@ -2768,32 +2780,24 @@ fn clamp_val<T>(val: T, min_v: T, max_v: T) -> T {
 }
 ```
 
-### 13.13 SIMD Intrinsics vs. Y Vector Types (`@avx_emit`)
+### 13.13 SIMD Intrinsics vs. Y Vector Types (`@avx_emit`) — NOT AVAILABLE
 
-Instead of writing compiler-specific C++ AVX intrinsics (`_mm256_loadu_ps`, `_mm256_fmadd_ps`), Y provides native vector types (`VecTy<T, N>`) coupled with `@avx_emit` decorators that lower directly to 256-bit AVX-256 / 512-bit AVX-512 ISA instructions.
+This section used to show a `vector_fma` written with `@avx_emit`,
+`VecTy<F32, 8>` locals, a bare `load(a)` and `store(c, vc)`, as Y's answer to
+`_mm256_loadu_ps` / `_mm256_fmadd_ps`. None of it compiles:
 
-```cpp
-// C++ AVX-256 Intrinsics
-#include <immintrin.h>
+* `@avx_emit` is a **hard syntax error** (`Unexpected top-level item`) - see §9.7.
+* No backend lowers a `VecTy<F32, 8>` value to AVX. `--emit-cpu` prints
+  scalar Rust for you to paste and contains no SIMD at all.
+* There is no bare `load`; the PTX loads are `block_ptr2d_load` and
+  `GlobalMemory::load(A[i])`.
+* `store(c, vc)` had `store`'s argument order right - `(place, value)` - but
+  `store` writes ONE scalar, and in `--emit-cpu` it is refused as a GPU
+  intrinsic (§20.6).
 
-void vector_fma(const float* a, const float* b, float* c) {
-    __m256 va = _mm256_loadu_ps(a);
-    __m256 vb = _mm256_loadu_ps(b);
-    __m256 vc = _mm256_fmadd_ps(va, vb, _mm256_setzero_ps());
-    _mm256_storeu_ps(c, vc);
-}
-```
-
-```ysu
-// Y Hardware-Sentient AVX Vectorization
-@avx_emit
-fn vector_fma(a: GlobalMemory<F32>, b: GlobalMemory<F32>, c: GlobalMemory<F32>) {
-    let va: VecTy<F32, 8> = load(a);
-    let vb: VecTy<F32, 8> = load(b);
-    let vc: VecTy<F32, 8> = va * vb;
-    store(c, vc);
-}
-```
+There is therefore no Y equivalent of hand-written AVX intrinsics today. For the
+CPU GEMM the LLVM backend's substituted kernels are where SIMD happens (see
+`docs/cpu_gemm_tuning.md`).
 
 ### 13.14 Concurrency, Atomics & Thread Synchronization
 
@@ -2868,20 +2872,23 @@ After the Sentinel probe runs, `.ysu_hw_profile` contains cycle-accurate measure
 
 ```ysu
 // Use L2_PERSIST for data accessed repeatedly across loop iterations
-// (e.g. weight matrices in attention, BVH node data in deep traversals)
+// (e.g. weight matrices in attention, BVH node data in deep traversals).
+// W is a GlobalMemory<F16>: the load widens the half to F32 exactly.
 @cache_policy(L2_PERSIST, reuse_count=8)
-let weights: F16 = load(W);
+let weights: F32 = GlobalMemory::load(W[i]);      // ld.global.lu.b16 + cvt.f32.f16
 
-// Use L2_STREAM for data written once and never re-read
-// (e.g. output tiles, streaming reductions)
-@cache_policy(L2_STREAM)
-output[i] = result;
-
-// Use L2_EVICT_FIRST for inputs that should not pollute L2
-// (e.g. large activation tensors in single-pass inference)
-@cache_policy(L2_EVICT_FIRST)
-let act: F16 = load(A);
+output[i] = weights;                              // no store takes a cache policy
 ```
+
+This snippet used to read `let weights: F16 = load(W);`, `@cache_policy(L2_STREAM)
+output[i] = result;` and `let act: F16 = load(A);`. There is no bare `load`; an
+`F16` local is refused in a PTX kernel (§20.5); and `output[i] = result` used to
+compile and silently drop the store - it stores now (§20.6), but no store honours
+a cache policy.
+
+**`L2_EVICT_FIRST` on a load currently emits PTX that `ptxas` rejects**
+(`ld.global.L2::evict_first.f32`: that qualifier exists only for 256-bit vector
+loads), after a clean compile. Known and not yet fixed - see CLAUDE.md.
 
 **Rule of thumb:**
 - Weights / BVH nodes repeatedly accessed → `L2_PERSIST`
@@ -2975,7 +2982,7 @@ Each `Fragment<MMA_m16n8k16, ...>` occupies a fixed number of 32-bit registers:
 
 The RTX 4070 Ti SUPER has **255 registers per thread**. If you chain more than ~20 MMA operations without storing intermediate accumulators, you will exhaust the register file and spill to local memory (measured at ~125 cycles/access vs ~4 cycles for registers).
 
-**Rule:** Keep the number of live `Fragment` variables below 30 at any given point in the kernel. Interleave `store(acc, C)` calls to free registers between MMA pipeline stages.
+**Rule:** Keep the number of live `Fragment` variables below 30 at any given point in the kernel. (This used to say to interleave `store(acc, C)` calls; there is no fragment store - `store(place, value)` writes one scalar, see §20.6.)
 
 ### 14.8 ZeroDrift Fixed-Point Accumulation
 
@@ -3056,15 +3063,16 @@ The `ldmatrix(src)` intrinsic selects the correct PTX `ldmatrix` variant based o
 | B (2 registers) | `ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {r0,r1}, [ptr];` |
 | C / D (F32, 4 regs) | Loaded via standard `ld.shared.f32` sequence — no `ldmatrix` |
 
-### 15.5 Accumulator Initialization & Store
+### 15.5 Accumulator Initialization & Store — NOT IMPLEMENTED in `--emit-ptx`
 
 ```ysu
-// Initialize to zero (emits mov.f32 %rN, 0f00000000 for each register)
+// Refused by --emit-ptx: `Fragment::zero()` has no PTX lowering there.
 let mut acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
 
-// Store result back to global memory
-store(acc, C);
-// Emits: wmma-equivalent store or direct st.global.f32 per accumulator register
+// There is no fragment store. This block used to show `store(acc, C);`,
+// with the arguments reversed and a fragment as the value; `store` is
+// `store(place, value)` and writes ONE scalar (§20.6). The tensor-core
+// GEMMs that work are the `@tile`-dispatched kernels in tests/gemm_f16_*.ysu.
 ```
 
 ### 15.6 Full MMA Example (F16 → F32 accumulation)
@@ -3099,7 +3107,10 @@ kernel matmul_mma(
         acc = mma_sync(frag_A, frag_B, frag_C);
     }
 
-    store(acc, C);
+    // NOT IMPLEMENTED: there is no fragment store. This line used to read
+    // `store(acc, C);` - the arguments reversed, and `store` writes ONE scalar:
+    // `store(place, value)`, e.g. `store(C[i], v)` (see §20.6). The working
+    // tensor-core GEMM is the `@tile`-dispatched kernel in tests/gemm_f16_*.ysu.
 }
 ```
 
@@ -3414,7 +3425,7 @@ Y supports the following primitive numeric types. GPU types are only valid in ke
 | `Q32.32` | 64 | 32 | 32 | CPU only |
 | `Q16.48` | 64 | 16 | 48 | CPU only |
 
-Fixed-point types are used with `@ZeroDrift` for verified drift-free accumulation. They are not supported in GPU kernels.
+Fixed-point types are used with `@ZeroDrift` for verified drift-free accumulation, which the PTX backend honours (an accumulator declared `F32` with `@bounds` is lowered as `Q32.32`). Outside `@ZeroDrift` a Q-format value, parameter or buffer element is **refused** in a PTX kernel: the backend has no fixed-point arithmetic, and it used to hold the value in an f32 register (or write a `GlobalMemory<Q16.16>` element as a raw `u32`) without saying so.
 
 ### 20.4 Type Casting
 
@@ -3426,6 +3437,10 @@ let y: F32 = x as F32;    // I32 -> F32 widening
 let z: I16 = x as I16;    // I32 -> I16 narrowing (may truncate)
 let h: F16 = y as F16;    // F32 -> F16 (precision loss, no error)
 ```
+
+In a **PTX kernel** the last line is refused: an `F16` value is not a register
+type there (§20.5). Declare it `F32` and store it into a `GlobalMemory<F16>`,
+which rounds it to nearest-even.
 
 Implicit coercion **does not happen** in Y. Mixing types in expressions is a compile error:
 
@@ -3441,8 +3456,65 @@ error[E0308]: mismatched types — use explicit `as` cast
 | Fragment C / D (Tensor Core accumulator) | `F32`, `F16` |
 | RT Core outputs (`rt_nearest_neighbor`) | `I32` (neighbor indices) + implicit `F32` distances in SMEM |
 | `@ZeroDrift` accumulator | `Q32.32`, `Q16.48` |
-| General kernel variables | `F32`, `I32`, `U32`, `F64`, `I64`, `U64` |
+| Kernel values - `let`, scalar parameters (PTX) | `F32`, `F64`, `I32`, `U32`, `I64`, `U64`, `bool` (a 0/1 `U32`) |
+| Buffer element types - `GlobalMemory<T>` (PTX) | `F16`, `F32`, `F64`, `I8`, `I16`, `I32`, `I64`, `U8`, `U16`, `U32`, `U64` |
 | `@atomic` fields | `I32`, `U32`, `U64`, `bool` |
+
+**`F64` is a full value type in a PTX kernel**: `%fd` registers, `.f64`
+arithmetic (division is `div.rn.f64`; a source-level `a*b + c` is one
+`fma.rn.f64`, which is what `ptxas` would contract it to anyway), an eight-byte
+`.param` slot, and an eight-byte buffer stride. A float literal in an F64
+context is the exact double: `let x: F64 = 0.1` is 0.1, not the widened f32
+0.1, and `1.0 / 3.0` there is a double division.
+
+**`F16` is a buffer element type only**, like `I8`/`U16`: a load widens it to
+`F32` exactly (`cvt.f32.f16`) and a store rounds any value to nearest-even
+(`cvt.rn.f16.*`, directly from an F64 so it is rounded once). An `F16` **local
+or parameter is refused**, because an F16 value would be an f32 register whose
+declared type promises rounding to f16 after every operation - which the LLVM
+backend's `half` performs and the PTX backend would not.
+
+**Measured before this was true (2026-09-26):** `F64` and `F16` were silently
+compiled as `f32`. `let x: F64 = 3.0; store(Out, x + x);` wrote four bytes into
+an eight-byte slot, which read back as -2.53e-98; the `F16` version wrote four
+bytes into a two-byte slot and overwrote the element beside it. Both exited 0
+and `ptxas` accepted both. `tests/ptx_float_widths.rs` checks the bytes on the
+card.
+
+Refused by name in a PTX kernel: an `F16` or sub-word integer value, a Q format
+outside `@ZeroDrift`, `String`/`char`, and a buffer whose element is none of the
+types above (`GlobalMemory<Q16.16>`, `GlobalMemory<bool>`). The f32-only
+intrinsics (`block_tile_*`, `BlockTile::*`, the 3-D block pointers, the v4
+forms, `vec_add_v4`, `rmsnorm_v4`, `swiglu_v4`) refuse any buffer that is not
+`F32`.
+
+### 20.6 Storing and Loading in a PTX Kernel
+
+| Operation | Spelling | Width |
+| :--- | :--- | :--- |
+| Store one element | `Out[i] = v`, or `store(place, value)` - exactly two arguments | the buffer's element type |
+| Load one element | `GlobalMemory::load(A[i])` or `block_ptr2d_load(A, row, col, stride, max_r, max_c)` | the buffer's element type |
+| Masked 2-D store | `block_ptr2d_store(A, row, col, stride, max_r, max_c, value)` | the buffer's element type |
+
+`place` is an **address**: `Out[i]` (element `i`, at the element's stride, with
+a bounds trap where the index is not proven safe) or a bare buffer `Out`
+(element 0). The value is converted to the buffer's element type - an `I32`
+into a `GlobalMemory<F32>` is a numeric conversion, not a reinterpretation of
+the bits, and an F16 slot gets the value rounded to nearest-even.
+
+**`store(Out, i, v)` is refused**, as is every built-in called with more
+arguments than it takes. It used to be silently truncated to `store(Out, i)`,
+which stored the INDEX: `store(Out, 0, 7)` wrote 0. Write `store(Out[i], v)`.
+
+**`Out[i] = v` is the same store as `store(Out[i], v)`.** It used to compute
+`v` and silently DROP the store, under a clean compile. `Out[i] += v` is refused:
+it reads `Out[i]`, and element reads are not lowered (below).
+
+**Reading `A[i]` as a value does not load it** in this backend: `Expr::Index`
+evaluates to the element's ADDRESS (which is what `store` and
+`GlobalMemory::load` take), so `let v: F32 = A[1];` converts the address to a
+float. Load with `GlobalMemory::load(A[i])`. (Known and not yet refused - see
+CLAUDE.md.)
 
 ---
 
@@ -3680,7 +3752,7 @@ All compiler error codes, their meanings, and the section where they are demonst
 | :--- | :--- | :--- |
 | `B0001` | Bank conflict detected (warning, not error) | Add `swizzle=330` to `SmemLayout` or restructure access pattern |
 | `W0001` | `chisel {}` block detected inside `@safe` scope | Review inline PTX manually — safety guarantees do not apply |
-| `W0002` | Fragment register count exceeds 30 live variables | Interleave `store()` calls to reduce register pressure |
+| `W0002` | Fragment register count exceeds 30 live variables | **Not implemented** - nothing in `src/` emits this code. Reduce live `Fragment` variables; there is no fragment `store()` to interleave (§20.6). |
 
 ---
 

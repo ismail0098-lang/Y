@@ -382,10 +382,13 @@ fn cp_async_honours_its_byte_count_and_rejects_illegal_ones() {
 fn short_intrinsic_calls_are_refused_not_guessed() {
     // (name, body, expected arity in the message)
     for (name, body, want) in [
-        ("a_store2d_short", "block_ptr2d_store(A, 0, N, N, 1.0);", "7"),
-        ("a_store3d_short", "block_ptr3d_store(A, 0, N);", "4"),
-        ("a_ptr2dload_short", "let v: F32 = block_ptr2d_load(A, 0);", "3"),
-        ("a_tile_load_short", "let t: F32 = block_tile_load(A);", "2"),
+        ("a_store2d_short", "block_ptr2d_store(A, 0, N, N, 1.0);", "exactly 7 arguments"),
+        // Was "4", and that minimum was WRONG: the stored value is argument
+        // 10 and fell back to `%f0` below it. (The single digits here were
+        // also vacuous - the banner prints "64 bytes".)
+        ("a_store3d_short", "block_ptr3d_store(A, 0, N);", "exactly 10 arguments"),
+        ("a_ptr2dload_short", "let v: F32 = block_ptr2d_load(A, 0);", "3 to 6 arguments"),
+        ("a_tile_load_short", "let t: F32 = block_tile_load(A);", "2 or 3 arguments"),
     ] {
         let (log, ptx) = compile(name, body);
         assert!(
@@ -419,8 +422,8 @@ fn short_intrinsic_calls_are_refused_not_guessed() {
     // and the first version of the gate covered only bare identifiers - so
     // these stayed open while the test above passed. Two arms, one bug.
     for (name, body, want) in [
-        ("a_bt_store_short", "BlockTile::store(A, 0);", "3"),
-        ("a_bt_load_short", "let v: F32 = BlockTile::load(A);", "2"),
+        ("a_bt_store_short", "BlockTile::store(A, 0);", "3 or 4 arguments"),
+        ("a_bt_load_short", "let v: F32 = BlockTile::load(A);", "2 or 3 arguments"),
     ] {
         let (log, ptx) = compile(name, body);
         assert!(
