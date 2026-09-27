@@ -126,10 +126,15 @@ fn the_documented_drift_example_still_compiles() {
 
 #[test]
 fn a_string_literal_is_refused_rather_than_left_as_an_empty_operand() {
+    // Six arguments, which is what `block_ptr2d_load` reads. This fixture
+    // used to pass SEVEN, and the seventh was silently dropped - the
+    // over-long-call bug `tests/ptx_builtin_arity.rs` covers, in a test.
+    // With the arity gate in place a seventh argument is refused first, and
+    // this test would be checking that refusal instead of the string one.
     let r = emit_ptx(
         "strlit",
         "kernel k(A: GlobalMemory<F32>) {\n    \
-         let t: u32 = block_ptr2d_load(A, \"hi\", 0, 0, 1, 1, 1);\n}\n",
+         let t: u32 = block_ptr2d_load(A, \"hi\", 0, 0, 1, 1);\n}\n",
     );
     assert!(
         !r.ok,

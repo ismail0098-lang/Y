@@ -97,7 +97,7 @@ const ALIAS_FORM: &str = r#"
 kernel k(C: GlobalMemory<F16>) {
     type ATile = SmemLayout<F16, rows=16, cols=64, swizzle=330>;
     let t = SharedMemory::alloc<ATile>();
-    store(C, 0, 1.0);
+    store(C[0], 1.0);
 }
 
 fn main() {}
@@ -106,8 +106,8 @@ fn main() {}
 /// The spelling that compiled clean and produced PTX `ptxas` rejects.
 const PARAM_FORM: &str = r#"
 kernel k(T: SmemLayout<F16, rows=16, cols=64>, C: GlobalMemory<F16>) {
-    let v: F16 = T[3];
-    store(C, 0, v);
+    let v = T[3];
+    store(C[0], v);
 }
 
 fn main() {}

@@ -158,6 +158,72 @@ fn ptx_version_ge(a: &str, b: &str) -> bool {
 /// .target sm_120") - under a success message and exit 0. Any future site
 /// that writes a `.version` line must call this, not a literal.
 /// The three things `let x: T = {};` can mean in this backend.
+/// How many arguments a built-in accepts. See `PtxEmitter::builtin_arity`.
+#[derive(Clone, Copy, Debug)]
+enum Arity {
+    Exactly(usize),
+    /// `min..=max`: the operands past `min` default to a LITERAL.
+    Range(usize, usize),
+    /// Exactly one of these counts (one value broadcast, or all four).
+    OneOf(&'static [usize]),
+    /// Refused at any count, by a message naming the real reason.
+    Refused,
+}
+
+impl Arity {
+    fn accepts(self, n: usize) -> bool {
+        match self {
+            Arity::Exactly(k) => n == k,
+            Arity::Range(lo, hi) => lo <= n && n <= hi,
+            Arity::OneOf(ks) => ks.contains(&n),
+            Arity::Refused => true,
+        }
+    }
+
+    fn lowest(self) -> Option<usize> {
+        match self {
+            Arity::Exactly(k) | Arity::Range(k, _) => Some(k),
+            Arity::OneOf(ks) => ks.iter().copied().min(),
+            Arity::Refused => None,
+        }
+    }
+
+    /// "exactly 2 arguments", "3 to 6 arguments", "2 or 5 arguments".
+    fn describe(self) -> String {
+        match self {
+            Arity::Exactly(0) => "no arguments".to_string(),
+            Arity::Exactly(1) => "exactly 1 argument".to_string(),
+            Arity::Exactly(k) => format!("exactly {} arguments", k),
+            Arity::Range(lo, hi) if hi == lo + 1 => format!("{} or {} arguments", lo, hi),
+            Arity::Range(lo, hi) => format!("{} to {} arguments", lo, hi),
+            Arity::OneOf(ks) => {
+                let parts: Vec<String> = ks.iter().map(|k| k.to_string()).collect();
+                format!("{} arguments", parts.join(" or "))
+            }
+            Arity::Refused => "no call at all".to_string(),
+        }
+    }
+}
+
+/// What a declared type means for a value binding. See
+/// `PtxEmitter::declared_value`.
+enum DeclaredValue {
+    /// No annotation, or one that is not a scalar declaration (a buffer, a
+    /// tile, an array): the binding takes what its initialiser produced.
+    Inferred,
+    /// A scalar held in a register; the initialiser converts into it.
+    Scalar(ScalarTy),
+    /// Already exactly what its only producer yields (`U32x4`).
+    AsProduced,
+    /// Cannot be honoured here, with the reason. Refused before the
+    /// initialiser is emitted.
+    Refused(String),
+    /// A name this backend does not know (a struct, an enum, `AsyncToken`).
+    /// Refused only if the initialiser produces a VALUE: `cp_async` binds a
+    /// linear token and produces no register, and that is legal.
+    Unknown(String),
+}
+
 enum ZeroInitKind {
     /// A scalar register to set to zero.
     Scalar(ScalarTy),
@@ -309,7 +375,17 @@ impl CtaTileConfig {
 /// is why `tests/ptx_carry_chain.rs` checks every one of them against plain
 /// Rust `u64` arithmetic on the device rather than string-matching the PTX.
 fn carry_op(name: &str, argc: usize) -> Option<&'static str> {
-    let (op, want) = match name {
+    match carry_spec(name) {
+        Some((op, want)) if argc == want => Some(op),
+        _ => None,
+    }
+}
+
+/// The instruction and operand count of each carry-chain intrinsic - one table
+/// that both `carry_op` and `builtin_arity` read, so the count a call is gated
+/// on cannot drift from the count its lowering uses.
+fn carry_spec(name: &str) -> Option<(&'static str, usize)> {
+    Some(match name {
         "add_cc_u32" => ("add.cc.u32", 2),
         "addc_u32" => ("addc.u32", 2),
         "addc_cc_u32" => ("addc.cc.u32", 2),
@@ -323,12 +399,7 @@ fn carry_op(name: &str, argc: usize) -> Option<&'static str> {
         "madc_hi_u32" => ("madc.hi.u32", 3),
         "madc_hi_cc_u32" => ("madc.hi.cc.u32", 3),
         _ => return None,
-    };
-    if argc == want {
-        Some(op)
-    } else {
-        None
-    }
+    })
 }
 
 fn ptx_const_f64(expr: &Expr) -> Option<f64> {
@@ -350,14 +421,31 @@ fn ptx_const_f64(expr: &Expr) -> Option<f64> {
 /// the fallback, so an untyped `%r` still behaves exactly as it did before this
 /// existed - as a signed 32-bit index.
 ///
-/// Widths narrower than 32 bits are deliberately absent. An element type is
-/// also a *stride*, and supporting `U8` would mean threading a byte width
-/// through every address computation in this file; a half-done version that
-/// loaded `ld.global.u8` at a 4-byte stride is worse than a refusal. See
-/// `reject_unsupported_element_types`.
+/// Widths narrower than 32 bits are MEMORY FORMATS here, not register types:
+/// `U8`/`I8`/`U16`/`I16`/`F16` are buffer element types that a load widens
+/// into their [`Self::promoted`] register type and a store narrows back. See
+/// `reject_unsupported_element_types` and `reject_value_type`.
+///
+/// **`F64` and `F16` used to be absent, and absence was not a refusal.**
+/// `from_name` returned `None` for them and every caller read `None` as "no
+/// annotation", so `let x: F64 = 3.0; store(Out, x + x);` into a
+/// `GlobalMemory<F64>` emitted `mov.f32`/`add.f32`/`st.global.f32` - four
+/// bytes into an eight-byte slot, which the card read back as -2.53e-98 - and
+/// the `F16` version wrote four bytes into a two-byte slot, overwriting the
+/// element beside it. Clean compile, exit 0, `ptxas` happy.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ScalarTy {
     F32,
+    /// A first-class register type: `%fd` registers, `.f64` arithmetic, an
+    /// 8-byte stride. What the LLVM backend calls `double`.
+    F64,
+    /// A memory format only, like the sub-word integers: a load widens it to
+    /// `F32` exactly (`cvt.f32.f16`), a store rounds to nearest-even
+    /// (`cvt.rn.f16.*`). It is never a register type - see
+    /// [`Self::promoted`] - and an `F16` *local* is refused, because the LLVM
+    /// backend's `half` rounds after every operation and a promoted f32
+    /// register would not.
+    F16,
     U32,
     I32,
     U64,
@@ -372,6 +460,8 @@ impl ScalarTy {
     fn from_name(n: &str) -> Option<ScalarTy> {
         Some(match n {
             "F32" => ScalarTy::F32,
+            "F64" => ScalarTy::F64,
+            "F16" => ScalarTy::F16,
             "U32" => ScalarTy::U32,
             "I32" => ScalarTy::I32,
             "U64" => ScalarTy::U64,
@@ -385,11 +475,14 @@ impl ScalarTy {
     }
 
     fn is_float(self) -> bool {
-        matches!(self, ScalarTy::F32)
+        matches!(self, ScalarTy::F32 | ScalarTy::F64 | ScalarTy::F16)
     }
 
+    /// Eight bytes wide. Decides the `.b64` bitwise suffix, the `.param .b64`
+    /// slot and the v4 refusal; float-ness is decided separately everywhere
+    /// it matters, so `F64` belongs here.
     fn is_64(self) -> bool {
-        matches!(self, ScalarTy::U64 | ScalarTy::I64)
+        matches!(self, ScalarTy::U64 | ScalarTy::I64 | ScalarTy::F64)
     }
 
     fn is_signed(self) -> bool {
@@ -407,10 +500,13 @@ impl ScalarTy {
     /// and a store truncates it back. That is C's integer-promotion rule and it
     /// is the whole semantic model for these types here — see
     /// [`Self::promoted`] for what it costs.
+    ///
+    /// `F16` is one too: a load widens it to `F32` exactly and a store rounds
+    /// it back to nearest-even. It is never a register type.
     fn is_subword(self) -> bool {
         matches!(
             self,
-            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16
+            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16 | ScalarTy::F16
         )
     }
 
@@ -431,6 +527,7 @@ impl ScalarTy {
         match self {
             ScalarTy::U8 | ScalarTy::U16 => ScalarTy::U32,
             ScalarTy::I8 | ScalarTy::I16 => ScalarTy::I32,
+            ScalarTy::F16 => ScalarTy::F32,
             other => other,
         }
     }
@@ -447,9 +544,9 @@ impl ScalarTy {
     fn bytes(self) -> u32 {
         match self {
             ScalarTy::U8 | ScalarTy::I8 => 1,
-            ScalarTy::U16 | ScalarTy::I16 => 2,
+            ScalarTy::U16 | ScalarTy::I16 | ScalarTy::F16 => 2,
             ScalarTy::F32 | ScalarTy::U32 | ScalarTy::I32 => 4,
-            ScalarTy::U64 | ScalarTy::I64 => 8,
+            ScalarTy::U64 | ScalarTy::I64 | ScalarTy::F64 => 8,
         }
     }
 
@@ -477,9 +574,18 @@ impl ScalarTy {
     /// `ld.global.u8` zero-extends, so this must carry signedness even though
     /// the 32- and 64-bit forms do not. Getting it wrong turns every negative
     /// int8 into a large positive number - assembles, launches, wrong answer.
+    ///
+    /// `F16` is `b16`, and it is the one width whose loaded bits are NOT yet
+    /// the value: they must go through `cvt.f32.f16` into a float register
+    /// (and a store through `cvt.rn.f16.*`). `ld.global.b16` straight into an
+    /// f32 register would hand back raw half bits as a float. So `F16` loads
+    /// and stores go through `emit_load_elem` / `emit_store_elem`, and every
+    /// other `mem()` consumer refuses `F16` before it gets here.
     fn mem(self) -> &'static str {
         match self {
             ScalarTy::F32 => "f32",
+            ScalarTy::F64 => "f64",
+            ScalarTy::F16 => "b16",
             ScalarTy::U32 | ScalarTy::I32 => "u32",
             ScalarTy::U64 | ScalarTy::I64 => "u64",
             ScalarTy::U8 => "u8",
@@ -501,11 +607,18 @@ impl ScalarTy {
     }
 
     /// `mem()` restricted to the register-width types, for use by `reg_mem`.
+    ///
+    /// Exhaustive, no `_` arm: this used to end `_ => "u32"`, which would have
+    /// given an `F64` register a 32-bit `mov` the moment `F64` existed.
     fn mem_wide(self) -> &'static str {
         match self {
             ScalarTy::F32 => "f32",
+            ScalarTy::F64 => "f64",
             ScalarTy::U64 | ScalarTy::I64 => "u64",
-            _ => "u32",
+            ScalarTy::U32 | ScalarTy::I32 => "u32",
+            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16 | ScalarTy::F16 => {
+                unreachable!("reg_mem() promotes memory formats to a register width first")
+            }
         }
     }
 
@@ -515,6 +628,7 @@ impl ScalarTy {
     fn arith(self) -> &'static str {
         match self.promoted() {
             ScalarTy::F32 => "f32",
+            ScalarTy::F64 => "f64",
             ScalarTy::U32 => "u32",
             ScalarTy::I32 => "s32",
             ScalarTy::U64 => "u64",
@@ -523,7 +637,7 @@ impl ScalarTy {
             // this arm is unreachable. It is spelled out rather than `_ =>`
             // so that adding a width without deciding its arithmetic type is
             // a compile error, per the design rule.
-            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16 => {
+            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16 | ScalarTy::F16 => {
                 unreachable!("promoted() must map sub-word types to a register width")
             }
         }
@@ -539,17 +653,25 @@ impl ScalarTy {
     }
 
     /// The zero of this type, as a PTX immediate.
+    ///
+    /// A float `mov` REFUSES an integer immediate - `ptxas` answers
+    /// `mov.f32 %f0, 0;` and `mov.f64 %fd0, 0;` with "Arguments mismatch" -
+    /// so every `mov` of a zero must take its immediate from here. The `F64`
+    /// zero is spelled as its bit pattern, the form `ptx_f64` uses for every
+    /// other double this file writes.
     fn zero_imm(self) -> &'static str {
-        if self.is_float() {
-            "0.0"
-        } else {
-            "0"
+        match self.promoted() {
+            ScalarTy::F64 => "0d0000000000000000",
+            t if t.is_float() => "0.0",
+            _ => "0",
         }
     }
 
     fn name(self) -> &'static str {
         match self {
             ScalarTy::F32 => "F32",
+            ScalarTy::F64 => "F64",
+            ScalarTy::F16 => "F16",
             ScalarTy::U32 => "U32",
             ScalarTy::I32 => "I32",
             ScalarTy::U64 => "U64",
@@ -638,14 +760,31 @@ pub struct PtxEmitter {
     /// Absent means f32, which is what every load site assumed unconditionally
     /// before the integer datapath existed.
     ptr_elem: std::collections::HashMap<String, ScalarTy>,
-    /// `@ZeroDrift` accumulators: name -> (register holding the fixed-point
-    /// value, representation chosen for it).
-    /// name -> (accumulator register, representation, is the value an
-    /// INTEGER rather than a fixed-point encoding of a float?). The third
+    /// Registers holding an untyped float literal, with the literal's FULL
+    /// f64 value (and registers folded from two of them by `+ - * /`).
+    ///
+    /// A float literal is emitted as `mov.f32`, which is right for the F32
+    /// default, but the type checker gives a literal its EXPECTED type: in
+    /// `let x: F64 = 0.1` the literal is an F64 0.1. Widening the f32
+    /// register instead would give (double)(float)0.1 = 0.10000000149011612.
+    /// `emit_convert` to F64 re-materialises the literal from here, exactly.
+    ///
+    /// Only UNOWNED registers count: once a literal's register is bound to a
+    /// name it is that variable's F32 value (the type checker types `let y =
+    /// 0.1` as F32) and may be reassigned, so `emit_convert` checks ownership.
+    float_lit: std::collections::HashMap<String, f64>,
+    /// `type X = T;` aliases seen in the current kernel, so a `let x: X`
+    /// resolves through them rather than reading as "no annotation".
+    type_aliases: std::collections::HashMap<String, Type>,
+    /// `@ZeroDrift` accumulators: name -> (accumulator register,
+    /// representation, is the value an INTEGER rather than a fixed-point
+    /// encoding of a float?, the value type a READ produces). The third
     /// field is what stops an exact `I64` accumulator being read through
-    /// `f32` on every access.
-    zero_drift:
-        std::collections::HashMap<String, (String, crate::zero_drift::DriftRepr, bool)>,
+    /// `f32` on every access; the fourth does the same for an `F64` one.
+    zero_drift: std::collections::HashMap<
+        String,
+        (String, crate::zero_drift::DriftRepr, bool, ScalarTy),
+    >,
     /// Measured accumulate costs driving that choice.
     drift_costs: crate::zero_drift::CostTable,
     /// One line per `@ZeroDrift` binding.
@@ -790,6 +929,8 @@ impl PtxEmitter {
             reg_ty: std::collections::HashMap::new(),
             vec_vars: std::collections::HashMap::new(),
             ptr_elem: std::collections::HashMap::new(),
+            float_lit: std::collections::HashMap::new(),
+            type_aliases: std::collections::HashMap::new(),
             zero_drift: std::collections::HashMap::new(),
             drift_costs: crate::zero_drift::CostTable::new(),
             drift_report: Vec::new(),
@@ -853,21 +994,36 @@ impl PtxEmitter {
     /// Without this the exact `I64` path round-tripped every added term
     /// through `f64` - exact only up to 2^53, on an accumulator whose entire
     /// promise is that it is exact.
+    ///
+    /// `value_ty` is the accumulator's DECLARED value type (F32 or F64). The
+    /// term is widened to f64 by its register's TYPE. This used to be decided
+    /// by the register's NAME - `%f` and not `%fd` meant f32, anything else was
+    /// read as an s64 - so an `F64` term (`%fd`) was converted as though it
+    /// were a 64-bit integer, and every integer term went through
+    /// `cvt.rn.f64.s64` whatever its width, which `ptxas` rejects for a 32-bit
+    /// register. An f32 term into an F32 accumulator keeps its exact
+    /// instruction: that literal is an F32 in the type checker's eyes, so
+    /// widening its f32 rounding is the declared meaning, not a precision loss.
     fn emit_drift_to_fixed(
         &mut self,
         src: &str,
         repr: crate::zero_drift::DriftRepr,
         integer_domain: bool,
+        value_ty: ScalarTy,
     ) -> String {
         if integer_domain {
             return self.emit_convert(src, ScalarTy::I64);
         }
-        let widened = self.alloc_regf64();
-        if src.starts_with("%f") && !src.starts_with("%fd") {
-            writeln!(&mut self.ptx_buffer, "    cvt.f64.f32 {}, {};", widened, src).unwrap();
+        let widened = if value_ty != ScalarTy::F64 && self.ty_of(src) == ScalarTy::F32 {
+            let w = self.alloc_ty(ScalarTy::F64);
+            writeln!(&mut self.ptx_buffer, "    cvt.f64.f32 {}, {};", w, src).unwrap();
+            w
         } else {
-            writeln!(&mut self.ptx_buffer, "    cvt.rn.f64.s64 {}, {};", widened, src).unwrap();
-        }
+            // F64 accumulator (an f32 LITERAL term is re-materialised as the
+            // exact double the type checker says it is), or an F64/integer
+            // term into any accumulator.
+            self.emit_convert(src, ScalarTy::F64)
+        };
         let out = self.alloc_reg64();
         if repr.frac_bits() == 0 {
             writeln!(&mut self.ptx_buffer, "    cvt.rzi.s64.f64 {}, {};", out, widened).unwrap();
@@ -914,25 +1070,49 @@ impl PtxEmitter {
     /// used to narrow `s64 -> f64 -> f32` unconditionally, so every read of an
     /// exact `I64` accumulator silently lost everything above 2^24 - the
     /// `ld.global.f32`-on-a-`U32`-buffer bug, one directive over.
+    ///
+    /// An `F64` accumulator reads back as an `F64` for the same reason: the
+    /// narrowing to f32 was unconditional, so an exact accumulator declared
+    /// `F64` would hand every reader 24 bits of mantissa. **Currently
+    /// unreachable, checked rather than assumed:** `select_repr` refuses every
+    /// `F64` accumulator (no fixed-point representation holds F64's
+    /// resolution), so this branch is defence for the day it does not. Not
+    /// counted as covered by any test.
     fn emit_drift_from_fixed(
         &mut self,
         src: &str,
         repr: crate::zero_drift::DriftRepr,
         integer_domain: bool,
+        value_ty: ScalarTy,
     ) -> String {
         if integer_domain {
             let out = self.alloc_ty(ScalarTy::I64);
             writeln!(&mut self.ptx_buffer, "    mov.s64 {}, {};", out, src).unwrap();
             return out;
         }
-        let as_f64 = self.alloc_regf64();
+        let as_f64 = self.alloc_ty(ScalarTy::F64);
         writeln!(&mut self.ptx_buffer, "    cvt.rn.f64.s64 {}, {};", as_f64, src).unwrap();
+        if value_ty == ScalarTy::F64 {
+            if repr.frac_bits() == 0 {
+                return as_f64;
+            }
+            let unscaled = self.alloc_ty(ScalarTy::F64);
+            writeln!(
+                &mut self.ptx_buffer,
+                "    div.rn.f64 {}, {}, {};",
+                unscaled,
+                as_f64,
+                Self::ptx_f64(repr.scale())
+            )
+            .unwrap();
+            return unscaled;
+        }
         let out = self.alloc_regf32();
         if repr.frac_bits() == 0 {
             writeln!(&mut self.ptx_buffer, "    cvt.rn.f32.f64 {}, {};", out, as_f64).unwrap();
             return out;
         }
-        let unscaled = self.alloc_regf64();
+        let unscaled = self.alloc_ty(ScalarTy::F64);
         writeln!(
             &mut self.ptx_buffer,
             "    div.rn.f64 {}, {}, {};",
@@ -979,9 +1159,10 @@ impl PtxEmitter {
         let ty = ty.promoted();
         let r = match ty {
             ScalarTy::F32 => self.alloc_regf32(),
+            ScalarTy::F64 => self.alloc_regf64(),
             ScalarTy::U64 | ScalarTy::I64 => self.alloc_reg64(),
             ScalarTy::U32 | ScalarTy::I32 => self.alloc_reg32(),
-            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16 => {
+            ScalarTy::U8 | ScalarTy::I8 | ScalarTy::U16 | ScalarTy::I16 | ScalarTy::F16 => {
                 unreachable!("promoted() must map sub-word types to a register width")
             }
         };
@@ -999,7 +1180,11 @@ impl PtxEmitter {
         if let Some(t) = self.reg_ty.get(reg) {
             return *t;
         }
-        if reg.starts_with("%f") {
+        // `%fd` BEFORE `%f`: every double also starts with `%f`, and the
+        // `@ZeroDrift` helpers allocate `%fd` registers without recording them.
+        if reg.starts_with("%fd") {
+            ScalarTy::F64
+        } else if reg.starts_with("%f") {
             ScalarTy::F32
         } else if reg.starts_with("%rd") {
             ScalarTy::U64
@@ -1047,6 +1232,68 @@ impl PtxEmitter {
         match e {
             Expr::Index { base, .. } => self.elem_ty_of(base),
             _ => None,
+        }
+    }
+
+    /// The element type an ADDRESS argument points at: `A[i]` (the indexed
+    /// buffer's) or a bare buffer `A` (its element 0). `index_elem_ty` answers
+    /// only the first, so a bare-buffer `store(Out, v)` took its width from
+    /// the VALUE.
+    fn place_elem_ty(&self, e: &Expr) -> Option<ScalarTy> {
+        self.index_elem_ty(e).or_else(|| self.elem_ty_of(e))
+    }
+
+    /// The register a store of `val` into an `elem` slot writes, so that
+    /// `st.global.{elem.mem()}` is right for every width: the value converted
+    /// to `elem`, or - for `F16`, which is never a register type - its bits
+    /// rounded to nearest-even in a `.b16` register.
+    fn emit_store_operand(&mut self, val: &str, elem: ScalarTy) -> String {
+        if elem == ScalarTy::F16 {
+            self.emit_f16_bits(val)
+        } else {
+            self.emit_convert(val, elem)
+        }
+    }
+
+    /// Loads one `elem` from `[addr]` into `res`, a register of `elem`'s
+    /// promoted type. `qual` is the cache qualifier (`""`, `".ca"`, ...).
+    /// With `pred`, the load is predicated and `res` gets the element's zero
+    /// where `pred` is false.
+    ///
+    /// `F16` is the width whose loaded bits are not yet the value: they are
+    /// staged through a `.b16` register and widened with `cvt.f32.f16`, which
+    /// is exact. Every other width emits exactly what the load sites always
+    /// did.
+    fn emit_load_into(
+        &mut self,
+        res: &str,
+        elem: ScalarTy,
+        addr: &str,
+        qual: &str,
+        pred: Option<&str>,
+    ) {
+        if elem == ScalarTy::F16 {
+            let h = self.alloc_reg16();
+            match pred {
+                Some(p) => {
+                    writeln!(&mut self.ptx_buffer, "    @{} ld.global{}.b16 {}, [{}];", p, qual, h, addr).unwrap();
+                    writeln!(&mut self.ptx_buffer, "    @!{} mov.b16 {}, 0;", p, h).unwrap();
+                }
+                None => {
+                    writeln!(&mut self.ptx_buffer, "    ld.global{}.b16 {}, [{}];", qual, h, addr).unwrap();
+                }
+            }
+            writeln!(&mut self.ptx_buffer, "    cvt.f32.f16 {}, {};", res, h).unwrap();
+            return;
+        }
+        match pred {
+            Some(p) => {
+                writeln!(&mut self.ptx_buffer, "    @{} ld.global{}.{} {}, [{}];", p, qual, elem.mem(), res, addr).unwrap();
+                writeln!(&mut self.ptx_buffer, "    @!{} mov.{} {}, {};", p, elem.reg_mem(), res, elem.zero_imm()).unwrap();
+            }
+            None => {
+                writeln!(&mut self.ptx_buffer, "    ld.global{}.{} {}, [{}];", qual, elem.mem(), res, addr).unwrap();
+            }
         }
     }
 
@@ -1100,10 +1347,61 @@ impl PtxEmitter {
         dst
     }
 
+    /// The full f64 value of an untyped float literal held in `reg`, if `reg`
+    /// is one and no name owns it. See `float_lit` for why ownership matters.
+    fn unowned_float_lit(&self, reg: &str) -> Option<f64> {
+        let v = *self.float_lit.get(reg)?;
+        if self.variables.values().any(|owned| owned == reg) {
+            return None;
+        }
+        Some(v)
+    }
+
+    /// `reg` rounded to nearest-even into the bits of an f16, in a `.b16`
+    /// register - the only form `st.global.b16` and `cvt.f32.f16` accept.
+    ///
+    /// Converts DIRECTLY from the source type (`cvt.rn.f16.f64`,
+    /// `cvt.rn.f16.s32`, ...) rather than through f32: `F64 -> F32 -> F16`
+    /// rounds twice, and for a value near an f16 tie the two roundings can
+    /// land on different sides of it. A float literal rounds from its exact
+    /// double, which is what the type checker says an F16-context literal is.
+    fn emit_f16_bits(&mut self, reg: &str) -> String {
+        let h = self.alloc_reg16();
+        if let Some(v) = self.unowned_float_lit(reg) {
+            let d = self.alloc_ty(ScalarTy::F64);
+            writeln!(&mut self.ptx_buffer, "    mov.f64 {}, {};", d, Self::ptx_f64(v)).unwrap();
+            writeln!(&mut self.ptx_buffer, "    cvt.rn.f16.f64 {}, {};", h, d).unwrap();
+            return h;
+        }
+        let from = self.ty_of(reg);
+        writeln!(&mut self.ptx_buffer, "    cvt.rn.f16.{} {}, {};", from.arith(), h, reg).unwrap();
+        h
+    }
+
     fn emit_convert(&mut self, reg: &str, to: ScalarTy) -> String {
         let from = self.ty_of(reg);
         if from == to {
             return reg.to_string();
+        }
+        // An F16 never lives in a register. Converting TO it means rounding to
+        // f16 precision and holding the result promoted, i.e. an f32 register
+        // whose value is exactly an f16 - never the unrounded f32, which is
+        // what treating F16 as "just F32" produced.
+        if to == ScalarTy::F16 {
+            let h = self.emit_f16_bits(reg);
+            let dst = self.alloc_ty(ScalarTy::F32);
+            writeln!(&mut self.ptx_buffer, "    cvt.f32.f16 {}, {};", dst, h).unwrap();
+            return dst;
+        }
+        // A literal meeting an F64 is an F64 literal (the type checker gives
+        // it the expected type), so it is re-materialised exactly rather than
+        // widened from its f32 rounding.
+        if to == ScalarTy::F64 {
+            if let Some(v) = self.unowned_float_lit(reg) {
+                let dst = self.alloc_ty(ScalarTy::F64);
+                writeln!(&mut self.ptx_buffer, "    mov.f64 {}, {};", dst, Self::ptx_f64(v)).unwrap();
+                return dst;
+            }
         }
         // Same width, different signedness: a reinterpretation, not a
         // conversion. `cvt.u32.u32` would be a legal no-op, but going through
@@ -1131,9 +1429,16 @@ impl PtxEmitter {
                 };
                 format!("cvt.{}.{}", dst_suffix, src_suffix)
             }
-            (false, true) => format!("cvt.rn.f32.{}", from.arith()),
-            (true, false) => format!("cvt.rzi.{}.f32", to.arith()),
-            (true, true) => unreachable!("F32 is the only float type"),
+            (false, true) => format!("cvt.rn.{}.{}", to.arith(), from.arith()),
+            (true, false) => format!("cvt.rzi.{}.{}", to.arith(), from.arith()),
+            (true, true) => match (from, to) {
+                // Widening is exact and takes no rounding modifier.
+                (ScalarTy::F32, ScalarTy::F64) => "cvt.f64.f32".to_string(),
+                (ScalarTy::F64, ScalarTy::F32) => "cvt.rn.f32.f64".to_string(),
+                // `from` comes from `ty_of`, which never answers F16 (it is
+                // never a register type), and `to == F16` returned above.
+                (f, t) => unreachable!("no register-to-register conversion {:?} -> {:?}", f, t),
+            },
         };
         writeln!(&mut self.ptx_buffer, "    {} {}, {};", instr, dst, reg).unwrap();
         dst
@@ -1147,7 +1452,14 @@ impl PtxEmitter {
     /// a value above 2^31 turns negative halfway through an address.
     fn promote(l: ScalarTy, r: ScalarTy) -> ScalarTy {
         if l.is_float() || r.is_float() {
-            return ScalarTy::F32;
+            // The wider float wins, as C's usual arithmetic conversions and
+            // the LLVM backend's `fpext` both have it. `l` and `r` are
+            // register types, so neither is ever F16.
+            return if l == ScalarTy::F64 || r == ScalarTy::F64 {
+                ScalarTy::F64
+            } else {
+                ScalarTy::F32
+            };
         }
         match (l.is_64() || r.is_64(), l.is_signed() && r.is_signed()) {
             (true, true) => ScalarTy::I64,
@@ -1196,10 +1508,11 @@ impl PtxEmitter {
             let vt = self.ty_of(l);
             if vt.is_float() {
                 self.emit_errors.push(format!(
-                    "Line {}: `{}` is not defined on F32. A shift is a bit operation; \
+                    "Line {}: `{}` is not defined on {}. A shift is a bit operation; \
                      convert to an integer type first.",
                     span.line,
-                    if matches!(op, BinaryOp::Shl) { "<<" } else { ">>" }
+                    if matches!(op, BinaryOp::Shl) { "<<" } else { ">>" },
+                    vt.name()
                 ));
                 return l.to_string();
             }
@@ -1229,7 +1542,7 @@ impl PtxEmitter {
             BinaryOp::Sub => format!("sub.{}", ty.arith()),
             BinaryOp::Mul => {
                 if ty.is_float() {
-                    "mul.f32".to_string()
+                    format!("mul.{}", ty.arith())
                 } else {
                     // `mul.lo` keeps the low half, i.e. wrapping multiplication.
                     // The high half is reachable through `mul_wide_u32`.
@@ -1237,7 +1550,11 @@ impl PtxEmitter {
                 }
             }
             BinaryOp::Div => {
-                if ty.is_float() {
+                if ty == ScalarTy::F64 {
+                    // There is no `div.approx.f64`; `.rn` is IEEE division,
+                    // which is what the LLVM backend's `fdiv double` computes.
+                    "div.rn.f64".to_string()
+                } else if ty.is_float() {
                     "div.approx.f32".to_string()
                 } else {
                     format!("div.{}", ty.arith())
@@ -1246,8 +1563,9 @@ impl PtxEmitter {
             BinaryOp::Mod => {
                 if ty.is_float() {
                     self.emit_errors.push(format!(
-                        "Line {}: `%` is not defined on F32 in this backend.",
-                        span.line
+                        "Line {}: `%` is not defined on {} in this backend.",
+                        span.line,
+                        ty.name()
                     ));
                     return lc;
                 }
@@ -1256,8 +1574,9 @@ impl PtxEmitter {
             BinaryOp::BitAnd | BinaryOp::And => {
                 if ty.is_float() {
                     self.emit_errors.push(format!(
-                        "Line {}: bitwise `&` is not defined on F32.",
-                        span.line
+                        "Line {}: bitwise `&` is not defined on {}.",
+                        span.line,
+                        ty.name()
                     ));
                     return lc;
                 }
@@ -1266,8 +1585,9 @@ impl PtxEmitter {
             BinaryOp::BitOr | BinaryOp::Or => {
                 if ty.is_float() {
                     self.emit_errors.push(format!(
-                        "Line {}: bitwise `|` is not defined on F32.",
-                        span.line
+                        "Line {}: bitwise `|` is not defined on {}.",
+                        span.line,
+                        ty.name()
                     ));
                     return lc;
                 }
@@ -1276,8 +1596,9 @@ impl PtxEmitter {
             BinaryOp::BitXor => {
                 if ty.is_float() {
                     self.emit_errors.push(format!(
-                        "Line {}: bitwise `^` is not defined on F32.",
-                        span.line
+                        "Line {}: bitwise `^` is not defined on {}.",
+                        span.line,
+                        ty.name()
                     ));
                     return lc;
                 }
@@ -1294,8 +1615,26 @@ impl PtxEmitter {
             | BinaryOp::Shl
             | BinaryOp::Shr => unreachable!("handled before operand promotion"),
         };
+        // Two untyped literals make an untyped literal: `1.0 / 3.0` is an F32
+        // division here (the default), but in `let x: F64 = 1.0 / 3.0` the
+        // type checker types both literals F64, so the F64 value is folded in
+        // f64 and recorded for `emit_convert` - otherwise the F64 binding
+        // would get the f32 quotient widened, 0.3333333432674408.
+        let folded = match (self.unowned_float_lit(l), self.unowned_float_lit(r)) {
+            (Some(a), Some(b)) => match op {
+                BinaryOp::Add => Some(a + b),
+                BinaryOp::Sub => Some(a - b),
+                BinaryOp::Mul => Some(a * b),
+                BinaryOp::Div => Some(a / b),
+                _ => None,
+            },
+            _ => None,
+        };
         let dst = self.alloc_ty(ty);
         writeln!(&mut self.ptx_buffer, "    {} {}, {}, {};", instr, dst, lc, rc).unwrap();
+        if let Some(v) = folded {
+            self.float_lit.insert(dst.clone(), v);
+        }
         dst
     }
 
@@ -1420,9 +1759,20 @@ impl PtxEmitter {
         let product = Self::promote(self.ty_of(&ar), self.ty_of(&br));
         let sum = Self::promote(product, self.ty_of(&cr));
         if sum.is_float() && !ar.is_empty() && !br.is_empty() && !cr.is_empty() {
-            let a32 = self.emit_convert(&ar, ScalarTy::F32);
-            let b32 = self.emit_convert(&br, ScalarTy::F32);
-            let c32 = self.emit_convert(&cr, ScalarTy::F32);
+            // The fused type is the PROMOTED one, F32 or F64. This used to
+            // convert all three operands to F32 unconditionally, which would
+            // have narrowed an F64 `a*b + c` to single precision; `ptxas`
+            // contracts `mul.f64` + `add.f64` into one `DFMA` exactly as it
+            // does for f32 (measured), so F64 states the fusion the same way.
+            // All three literal: the F64-context value, fused like the rest.
+            let lits = (
+                self.unowned_float_lit(&ar),
+                self.unowned_float_lit(&br),
+                self.unowned_float_lit(&cr),
+            );
+            let a32 = self.emit_convert(&ar, sum);
+            let b32 = self.emit_convert(&br, sum);
+            let c32 = self.emit_convert(&cr, sum);
             // A subtraction is the same instruction with one operand
             // negated, and WHICH operand is decided by which side the multiply
             // is on -- getting that backwards computes `a*b + c` for
@@ -1437,24 +1787,36 @@ impl PtxEmitter {
             // rounding the hardware does not perform. `neg.f32` replaces the
             // `mul.f32` the `fma` absorbs: two instructions before, two after.
             let (a32, c32) = if matches!(fold, BinaryOp::Sub) {
-                let n = self.alloc_ty(ScalarTy::F32);
+                let n = self.alloc_ty(sum);
                 if mul_first {
-                    writeln!(&mut self.ptx_buffer, "    neg.f32 {}, {};", n, c32).unwrap();
+                    writeln!(&mut self.ptx_buffer, "    neg.{} {}, {};", sum.arith(), n, c32).unwrap();
                     (a32, n)
                 } else {
-                    writeln!(&mut self.ptx_buffer, "    neg.f32 {}, {};", n, a32).unwrap();
+                    writeln!(&mut self.ptx_buffer, "    neg.{} {}, {};", sum.arith(), n, a32).unwrap();
                     (n, c32)
                 }
             } else {
                 (a32, c32)
             };
-            let dst = self.alloc_ty(ScalarTy::F32);
+            let dst = self.alloc_ty(sum);
             writeln!(
                 &mut self.ptx_buffer,
-                "    fma.rn.f32 {}, {}, {}, {};",
-                dst, a32, b32, c32
+                "    fma.rn.{} {}, {}, {}, {};",
+                sum.arith(),
+                dst,
+                a32,
+                b32,
+                c32
             )
             .unwrap();
+            if let (Some(a), Some(b), Some(c)) = lits {
+                let v = match (&fold, mul_first) {
+                    (BinaryOp::Sub, true) => a.mul_add(b, -c),
+                    (BinaryOp::Sub, false) => (-a).mul_add(b, c),
+                    _ => a.mul_add(b, c),
+                };
+                self.float_lit.insert(dst.clone(), v);
+            }
             return Some(dst);
         }
 
@@ -1515,6 +1877,22 @@ impl PtxEmitter {
                 let GenericArg::Type(Type::Primitive(name, _) | Type::Ident(name, _)) = a else {
                     continue;
                 };
+                // An element type this backend cannot stride is refused. A
+                // name `ScalarTy::from_name` does not know used to record NO
+                // element type, and every load and store site reads "none" as
+                // f32 - the path `F16` and `F64` took, silently, before they
+                // were known. `BF16`, `TF32`, a Q format, `bool` or a struct
+                // as an element would still take it.
+                if ScalarTy::from_name(name).is_none() {
+                    self.emit_errors.push(format!(
+                        "[PTX] `{}: {}<{}>` cannot be lowered: this backend has no \
+                         lowering for a {} element, and without one every load and store \
+                         of it would read `.f32` at a 4-byte stride. Element types are \
+                         F16, F32, F64 and the integers I8..I64 / U8..U64.",
+                        param.name, base, name, name
+                    ));
+                    continue;
+                }
                 // `SharedMemory` addressing is still 32-bit-only: the shared
                 // surface indexes in 16-byte units (`shared_load_v4`) and has
                 // no byte-addressed form, so a sub-word element there would be
@@ -1538,17 +1916,148 @@ impl PtxEmitter {
     /// See [`Self::reject_unsupported_element_types`] for why this is a
     /// deliberate boundary and not an unfinished one.
     fn reject_subword_local(&mut self, name: &str, ty_name: &str, line: usize) -> bool {
-        if !ScalarTy::from_name(ty_name).is_some_and(ScalarTy::is_subword) {
+        // Integer sub-words only: `F16` is a memory format too, but its
+        // refusal is about rounding, not wraparound - see `declared_value`.
+        if !ScalarTy::from_name(ty_name).is_some_and(|t| t.is_subword() && !t.is_float()) {
             return false;
         }
-        self.emit_errors.push(format!(
+        self.emit_errors.push(Self::subword_local_message(name, ty_name, line));
+        true
+    }
+
+    fn subword_local_message(name: &str, ty_name: &str, line: usize) -> String {
+        format!(
             "Line {}: `let {}: {}` cannot be lowered: PTX has no sub-word register class, so \
              this would be a 32-bit value whose declared type promises 8- or 16-bit wraparound \
              it will not perform. Sub-word types are buffer element types only - load from a \
              `GlobalMemory<{}>` into an I32/U32 and the width is honoured by the load.",
             line, name, ty_name, ty_name
-        ));
-        true
+        )
+    }
+
+    /// Why an `F16` cannot be a value here - one sentence shared by the `let`,
+    /// zero-init and parameter refusals so they cannot drift apart.
+    const F16_VALUE_REFUSAL: &'static str =
+        "`F16` is a buffer element type in this backend, not a value type: a load from a \
+         `GlobalMemory<F16>` widens it to F32 exactly and a store rounds it back to \
+         nearest-even (`cvt.rn.f16.*`). An F16 value would be an f32 register whose declared \
+         type promises f16 rounding after every operation - which the LLVM backend's `half` \
+         performs and this one would not. Declare it F32 (or F64) and let the buffer's element \
+         type do the conversion.";
+
+    /// A declared type as the user spelled it, for diagnostics.
+    fn type_display(t: &Type) -> String {
+        match t {
+            Type::Primitive(n, _) | Type::Ident(n, _) => n.clone(),
+            Type::Generic { base, .. } => format!("{}<...>", base),
+            Type::Array { element, .. } => format!("[{}; ...]", Self::type_display(element)),
+            Type::Reference { mutable, inner, .. } => {
+                format!("&{}{}", if *mutable { "mut " } else { "" }, Self::type_display(inner))
+            }
+            Type::BlockTile { element, .. } => format!("BlockTile<{}, ...>", Self::type_display(element)),
+        }
+    }
+
+    /// Why a scalar kernel parameter of type `p` cannot be lowered, if it
+    /// cannot. Sub-word INTEGER parameters stay accepted (a promoted load, as
+    /// before); these are the names that used to fall to the `ld.param.u32`
+    /// catch-all and be read as a 32-bit integer.
+    fn refused_param_type(p: &str) -> Option<String> {
+        if p == "F16" {
+            return Some(Self::F16_VALUE_REFUSAL.to_string());
+        }
+        if Self::is_q_format(p) {
+            return Some(format!(
+                "`{}` is a fixed-point @ZeroDrift representation, not a parameter type; \
+                 pass an F32/F64 or an integer.",
+                p
+            ));
+        }
+        if p == "String" || p == "char" {
+            return Some(format!("`{}` has no representation in a GPU kernel.", p));
+        }
+        None
+    }
+
+    /// A Q-format name (`Q16.16`, `Q32.32`) - a `@ZeroDrift` representation.
+    fn is_q_format(n: &str) -> bool {
+        n.strip_prefix('Q')
+            .and_then(|rest| rest.split_once('.'))
+            .is_some_and(|(i, f)| {
+                !i.is_empty()
+                    && !f.is_empty()
+                    && i.bytes().all(|b| b.is_ascii_digit())
+                    && f.bytes().all(|b| b.is_ascii_digit())
+            })
+    }
+
+    /// What a declared type means for a VALUE binding - a `let`, or the
+    /// `{}` zero-initialiser of one.
+    ///
+    /// **This replaces "`from_name` returned `None`, so the binding is
+    /// unannotated".** `None` meant two opposite things - "no annotation" and
+    /// "an annotation this backend does not understand" - and the second read
+    /// as the first, so `let x: F64 = 3.0` bound the literal's f32 register
+    /// and computed in f32. Every answer here is now explicit, and an
+    /// annotation that cannot be honoured is refused with its reason instead
+    /// of being dropped.
+    fn declared_value(&self, ty: Option<&Type>) -> DeclaredValue {
+        let mut ty = ty.cloned();
+        // Aliases resolve through `type X = T;`. The bound stops a cycle, which
+        // the front end should never produce, from hanging the compiler.
+        for _ in 0..32 {
+            let n = match &ty {
+                None => return DeclaredValue::Inferred,
+                Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => n.clone(),
+                // Not scalar declarations: a buffer, a tile, an array, a
+                // reference. What they bind is decided by their initialisers
+                // (a pointer alias, a tile declaration) exactly as before.
+                Some(_) => return DeclaredValue::Inferred,
+            };
+            if let Some(t) = ScalarTy::from_name(&n) {
+                return if t == ScalarTy::F16 {
+                    DeclaredValue::Refused(Self::F16_VALUE_REFUSAL.to_string())
+                } else if t.is_subword() {
+                    DeclaredValue::Refused(
+                        "PTX has no sub-word register class, so this would be a 32-bit value \
+                         whose declared type promises 8- or 16-bit wraparound it will not \
+                         perform. Sub-word types are buffer element types only."
+                            .to_string(),
+                    )
+                } else {
+                    DeclaredValue::Scalar(t)
+                };
+            }
+            match n.as_str() {
+                // A bool is the canonical 0/1 U32 that every comparison and
+                // `true`/`false` already produce here.
+                "bool" => return DeclaredValue::Scalar(ScalarTy::U32),
+                // Produced only by the v4 loads, as a marker `Stmt::Let`
+                // unpacks into four registers.
+                "U32x4" => return DeclaredValue::AsProduced,
+                "String" | "char" => {
+                    return DeclaredValue::Refused(format!(
+                        "`{}` has no representation in a GPU kernel.",
+                        n
+                    ))
+                }
+                q if Self::is_q_format(q) => {
+                    return DeclaredValue::Refused(format!(
+                        "`{}` is a fixed-point representation for a @ZeroDrift accumulator. \
+                         Outside @ZeroDrift this backend has no fixed-point arithmetic, and \
+                         holding it in an f32 register would give it float rounding under a \
+                         type that promises none. Add @ZeroDrift, or declare it F32/F64.",
+                        q
+                    ))
+                }
+                _ => {}
+            }
+            match self.type_aliases.get(&n) {
+                Some(target) => ty = Some(target.clone()),
+                None => return DeclaredValue::Unknown(n),
+            }
+        }
+        DeclaredValue::Refused("the type alias chain does not terminate.".to_string())
     }
 
     /// Record the element type of each typed buffer parameter, so the load and
@@ -1572,23 +2081,33 @@ impl PtxEmitter {
         }
     }
 
-    /// Refuse to lower `intrinsic` against a non-float buffer.
+    /// Refuse to lower `intrinsic` against a buffer whose element is not F32.
     ///
-    /// The typed datapath covers the load/store paths a field kernel needs
+    /// The typed datapath covers the load/store paths a kernel needs
     /// (`block_ptr2d_load` / `block_ptr2d_store` / `Index` / `GlobalMemory::load`
-    /// / `store`). The rest of this file's memory intrinsics - vectorised
-    /// loads, `ldmatrix`, `cp.async` staging, the tile-GEMM machinery - are
-    /// f32/f16 by construction. Rather than let one of them quietly load a
-    /// `u32` buffer as floats, which is precisely the bug the datapath exists
-    /// to end, they call this and the build fails with the type named.
+    /// / `store`). The rest of this file's memory intrinsics - the tile
+    /// intrinsics, the 3-D block pointers, the v4 load/store forms, the fused
+    /// vector kernels - hardcode `.f32` and a 4-byte stride. Rather than let
+    /// one of them quietly load a `u32` buffer as floats, which is precisely
+    /// the bug the datapath exists to end, they call this and the build fails
+    /// with the type named.
+    ///
+    /// **This used to refuse only NON-FLOAT buffers and said "an f32/f16
+    /// path". None of these is an f16 path**: an `F16` or `F64` buffer passed
+    /// the check because `F16`/`F64` had no recorded element type at all, and
+    /// was then read at the f32 stride with `ld.global.f32`. It was consulted
+    /// by two intrinsics of the eleven that hardcode f32; it is called by all
+    /// of them now. `ptr` may be a buffer or an address (`A[i]`); an
+    /// expression whose element type is unknown passes, as before.
     ///
     /// Returns true when the caller must stop.
-    fn reject_non_float_buffer(&mut self, intrinsic: &str, ptr: &Expr) -> bool {
-        match self.elem_ty_of(ptr) {
-            Some(t) if !t.is_float() => {
+    fn reject_non_f32_buffer(&mut self, intrinsic: &str, ptr: &Expr) -> bool {
+        match self.place_elem_ty(ptr) {
+            Some(t) if t != ScalarTy::F32 => {
                 self.emit_errors.push(format!(
-                    "[PTX] `{}` has no lowering for a {} buffer; it is an f32/f16 path. \
-                     Use block_ptr2d_load / block_ptr2d_store for integer element types.",
+                    "[PTX] `{}` has no lowering for a {} buffer: it is an f32-only path \
+                     (`.f32` at a 4-byte stride). Use block_ptr2d_load / block_ptr2d_store, \
+                     which follow the buffer's element type.",
                     intrinsic,
                     t.name()
                 ));
@@ -1596,6 +2115,12 @@ impl PtxEmitter {
             }
             _ => false,
         }
+    }
+
+    /// `reject_non_f32_buffer` over every argument of an intrinsic whose
+    /// operands are ALL f32 buffers or addresses (`vec_add_v4(a, b, c)`).
+    fn reject_non_f32_buffers(&mut self, intrinsic: &str, ptrs: &[Expr]) -> bool {
+        ptrs.iter().any(|p| self.reject_non_f32_buffer(intrinsic, p))
     }
 
     /// Does this initialiser produce a linear token rather than a value?
@@ -1608,66 +2133,154 @@ impl PtxEmitter {
             if matches!(&**func, Expr::Ident(n, _) if n == "cp_async"))
     }
 
-    /// Required argument count for intrinsics whose missing operands would
-    /// otherwise alias an unrelated register.
+    /// How many arguments each built-in accepts - the MINIMUM and the MAXIMUM.
     ///
-    /// **This is the design-rule table applied to arity.** Every one of these
-    /// lowerings reads its operands as `if args.len() >= N { emit(args[N-1]) }
-    /// else { "%r0".into() }` - so calling one with too few arguments does not
-    /// fail, it substitutes *whatever happens to live in `%r0`/`%rd0`/`%f0`*,
-    /// which is another variable in the same kernel. Two outcomes, both bad:
-    /// the register has the wrong type and `ptxas` rejects the module after the
-    /// compiler has printed "Compilation Successful!" and exited 0, or it has
-    /// the right type and the kernel silently computes with the wrong operand.
+    /// **This is the design-rule table applied to arity, in both directions.**
     ///
-    /// Found by giving `block_ptr2d_store` five arguments instead of seven: the
-    /// value being stored became the bounds limit, emitting
-    /// `setp.lt.u32 %p0, %r6, %f0` - a u32 compared against an f32 register.
+    /// *Too few.* Every lowering reads its operands as `if args.len() >= N {
+    /// emit(args[N-1]) } else { "%r0".into() }` - so a short call does not fail,
+    /// it substitutes *whatever happens to live in `%r0`/`%rd0`/`%f0`*, which is
+    /// another variable in the same kernel. Found by giving `block_ptr2d_store`
+    /// five arguments instead of seven: the stored value became the bounds
+    /// limit, emitting `setp.lt.u32 %p0, %r6, %f0`. The minimum is the last
+    /// position whose fallback is a REGISTER; trailing operands that default to
+    /// a LITERAL (`block_tile_store`'s bound, `128`) are genuinely optional.
     ///
-    /// **The count here is the last position whose fallback is a REGISTER, not
-    /// the total number of parameters.** Several of these lowerings have
-    /// genuinely optional trailing operands that default to a literal -
-    /// `block_tile_store`'s bound falls back to `128`, which is a defensible
-    /// default and not an aliased register - so requiring the full parameter
-    /// list would reject calls that were always correct. The first version of
-    /// this table did exactly that and broke
-    /// `supported_intrinsics_emit_assemblable_ptx`, which calls
-    /// `block_tile_store` with three arguments.
+    /// *Too many.* The table used to be minimum-only - 62 `args.len() >= N`
+    /// guards and no maximum anywhere - so an over-long call was silently
+    /// TRUNCATED. `store` is `store(place, value)`, and its natural spelling
+    /// `store(Out, 0, 7)` (buffer, index, value, like `atomic_add`) stored the
+    /// INDEX: the card read back `00 00 00 00`, exit 0, `ptxas` happy. Every
+    /// test in this repo that used `store` wrote the three-argument form.
     ///
-    /// Only `block_ptr2d_store` is called by any kernel in this repo, and
-    /// always with its full seven, so this gate cannot break working code. The
-    /// rest are reachable from the surface syntax and used by nothing, exactly
-    /// like the Hopper intrinsics in gotcha #8.
-    fn required_arity(fname: &str) -> Option<usize> {
+    /// **Every built-in the `Expr::Call` lowering matches is in here**, and
+    /// `builtin_arity_covers_every_lowered_name` (the `tests_builtin_arity`
+    /// module at the end of this file) fails when a name in the lowering has no
+    /// row - a built-in added without an arity would otherwise accept any count
+    /// again. `tests/ptx_builtin_arity.rs` drives the gate through the binary. A name absent from this
+    /// table is not a built-in and is refused by the unknown-name arm.
+    ///
+    /// Two rows had the MINIMUM wrong as well, found by writing the maximum:
+    /// `block_ptr3d_store` was listed at 4, but its stored VALUE is argument 10
+    /// and falls back to `%f0` - so `block_ptr3d_store(A, d0, d1, d2)` stored
+    /// an unrelated register; and `block_ptr3d_store_v4` read its four values
+    /// only at exactly 13 arguments, so 11 or 12 dropped the extras and
+    /// broadcast the first.
+    fn builtin_arity(fname: &str) -> Option<Arity> {
+        if let Some((_, n)) = carry_spec(fname) {
+            return Some(Arity::Exactly(n));
+        }
         Some(match fname {
-            "block_cdiv" | "block_ptr2d_advance" | "block_ptr3d_advance"
-            | "shfl_sync_bfly" | "shfl_sync_bfly_b32" | "ld_global_v4_f32"
-            | "load_v4" | "warp_reduce_max" | "warp_reduce_sum" => 1,
-            "block_tile_load" | "tile_load" | "st_global_v4_f32"
-            | "store_v4" => 2,
-            "block_ptr2d_load" | "block_tile_store" | "tile_store"
-            | "make_block_ptr2d" | "rmsnorm_fast" | "rmsnorm_v4"
-            | "swiglu_fast" | "swiglu_v4" | "vec_add_v4" | "vector_add_v4"
-            | "vec_add_unrolled4" => 3,
-            "block_ptr3d_load" | "block_ptr3d_load_v4" | "block_ptr3d_store"
-            | "make_block_ptr3d" => 4,
-            "block_ptr2d_store" => 7,
-            "block_ptr3d_store_v4" => 10,
+            // Nullary: they read no argument at all, so any argument was
+            // discarded - `block_arange(0, 128)` returned `%tid.x`.
+            "thread_id" | "global_thread_id" | "thread_idx" | "thread_idx_x"
+            | "thread_idx_y" | "thread_idx_z" | "block_idx_x" | "block_idx_y"
+            | "block_idx_z" | "block_dim_x" | "block_dim_y" | "block_dim_z"
+            | "grid_dim_x" | "grid_dim_y" | "grid_dim_z" | "barrier_sync" | "membar"
+            | "block_arange" => Arity::Exactly(0),
+            "ld_global_v4_f32" | "load_v4" | "warp_reduce_sum" | "warp_reduce_max"
+            | "u64_lo32" | "u64_hi32" | "shared_alloc_u32" => Arity::Exactly(1),
+            "store" | "mul_wide_u32" | "mul_wide_s32" | "shared_load_v4" => Arity::Exactly(2),
+            "atomic_add" | "atomic_max" | "rmsnorm_v4" | "rmsnorm_fast" | "swiglu_v4"
+            | "swiglu_fast" | "vec_add_unrolled4" => Arity::Exactly(3),
+            // A 4th argument used to select 4x unrolling by its mere PRESENCE,
+            // its value discarded: `vec_add_v4(a, b, c, 0)` unrolled too.
+            // `vec_add_unrolled4` is the spelling that says it.
+            "vec_add_v4" | "vector_add_v4" => Arity::Exactly(3),
+            "block_ptr2d_load_v4" | "shared_store_v4" => Arity::Exactly(6),
+            "block_ptr2d_store" => Arity::Exactly(7),
+            "block_ptr2d_store_v4" | "block_ptr3d_store" => Arity::Exactly(10),
+            // One value (broadcast to all four lanes) or four; two or three
+            // values used to fill the remaining lanes with the first.
+            "st_global_v4_f32" | "store_v4" => Arity::OneOf(&[2, 5]),
+            "block_ptr3d_store_v4" => Arity::OneOf(&[10, 13]),
+            "cp_async" => Arity::Range(2, 3),
+            "shfl_sync_bfly" | "shfl_sync_bfly_b32" | "block_ptr2d_advance"
+            | "block_ptr3d_advance" | "block_cdiv" => Arity::Range(1, 2),
+            "block_tile_load" | "tile_load" => Arity::Range(2, 3),
+            "block_tile_store" | "tile_store" => Arity::Range(3, 4),
+            "block_ptr2d_load" | "make_block_ptr2d" => Arity::Range(3, 6),
+            "block_ptr3d_load" | "block_ptr3d_load_v4" | "make_block_ptr3d" => Arity::Range(4, 9),
+            // Refused whatever they are given, by a message that names the
+            // real reason; an arity message would only hide it.
+            "cp_async_bulk" | "tma_load" | "tma_load_2d" | "wgmma_async"
+            | "wgmma_mma_async" | "mbarrier_init" | "mbarrier_arrive"
+            | "mbarrier_try_wait" | "mma_sync" => Arity::Refused,
             _ => return None,
         })
     }
 
-    /// `required_arity`, for the `Namespace::member` callees.
-    ///
-    /// Same rule and same reason: the count is the last position whose fallback
-    /// is a REGISTER. `BlockTile::load`'s bound falls back to the literal `128`
-    /// and is genuinely optional; its offset falls back to `%r0` and is not.
-    fn required_path_arity(namespace: &str, member: &str) -> Option<usize> {
+    /// `builtin_arity`, for the `Namespace::member` callees.
+    fn path_arity(namespace: &str, member: &str) -> Option<Arity> {
         Some(match (namespace, member) {
-            ("BlockTile", "load") => 2,
-            ("BlockTile", "store") => 3,
+            ("barrier", "sync") => Arity::Exactly(0),
+            ("GlobalMemory", "load") | ("GlobalMemory", "load_v4") | ("GlobalMemory", "ld_v4") => {
+                Arity::Exactly(1)
+            }
+            ("GlobalMemory", "store_v4") | ("GlobalMemory", "st_v4") => Arity::OneOf(&[2, 5]),
+            ("BlockTile", "load") => Arity::Range(2, 3),
+            ("BlockTile", "store") => Arity::Range(3, 4),
             _ => return None,
         })
+    }
+
+    /// `builtin_arity`, for method calls on a pipeline (`pipe.wait(tok)`).
+    fn method_arity(member: &str) -> Option<Arity> {
+        Some(match member {
+            // The token is what `linear_tracker` checks; the lowering needs
+            // none, so `pipe.wait()` stays legal.
+            "wait" => Arity::Range(0, 1),
+            "commit" => Arity::Exactly(0),
+            _ => return None,
+        })
+    }
+
+    /// A built-in-specific repair for a refused count, where the generic one
+    /// would send the reader the wrong way.
+    fn arity_hint(name: &str) -> &'static str {
+        match name {
+            "store" => {
+                "; `store` takes (place, value) - write `store(Out[i], v)` or `Out[i] = v`. \
+                 The (buffer, index, value) spelling used to store the INDEX"
+            }
+            "block_arange" => {
+                "; it yields this thread's index, so write `start + block_arange()` \
+                 for a non-zero start"
+            }
+            "vec_add_v4" | "vector_add_v4" => {
+                "; for the 4x-unrolled form call `vec_add_unrolled4(a, b, c)`"
+            }
+            "st_global_v4_f32" | "store_v4" | "GlobalMemory::store_v4" | "GlobalMemory::st_v4" => {
+                "; give one value (stored to all four lanes) or all four"
+            }
+            _ => "",
+        }
+    }
+
+    /// The arity gate every callee arm runs before any lowering. Returns true
+    /// when the call was refused and the caller must stop.
+    fn reject_bad_arity(&mut self, name: &str, arity: Option<Arity>, given: usize) -> bool {
+        let Some(arity) = arity else { return false };
+        if arity.accepts(given) {
+            return false;
+        }
+        let consequence = match arity.lowest() {
+            Some(lo) if given < lo => {
+                "a missing operand would be read from an unrelated register rather than reported"
+            }
+            _ => "an extra argument would be silently dropped rather than reported",
+        };
+        self.unsupported_intrinsic(
+            name,
+            &format!(
+                "it takes {} and was given {}; {}{}",
+                arity.describe(),
+                given,
+                consequence,
+                Self::arity_hint(name)
+            ),
+        );
+        true
     }
 
     /// A statement this backend cannot lower, refused by name.
@@ -1683,6 +2296,11 @@ impl PtxEmitter {
     /// store(A, 0, i);              // stored 0, whatever N was
     /// ```
     ///
+    /// (That `store` is the three-argument spelling, which was itself
+    /// silently truncated to `store(A, 0)` - so "stored 0" had TWO causes. The
+    /// missing loop is what the emitted PTX shows; the constant is doubly
+    /// explained. The form is refused now: write `store(A[0], i)`.)
+    ///
     /// No `ptxas` gate can catch that, for the reason gotcha #8 states: a
     /// MISSING instruction assembles perfectly.
     /// `let x: T = {};` - a zero-initialiser.
@@ -1694,11 +2312,27 @@ impl PtxEmitter {
     /// kernel. It is what `python/tests/test_gpu_architect_features.py` uses to
     /// declare a tile, which is why that documented test command has been
     /// failing.
-    fn emit_zero_init_let(&mut self, name: &str, ty: Option<&Type>, span: &Span) {
-        match Self::zero_init_kind(ty) {
+    fn emit_zero_init_let(
+        &mut self,
+        name: &str,
+        ty: Option<&Type>,
+        declared: &DeclaredValue,
+        span: &Span,
+    ) {
+        // A scalar the resolver understood - including through a `type X = T`
+        // alias, which `zero_init_kind` alone reads as an aggregate.
+        let kind = match declared {
+            DeclaredValue::Scalar(t) => ZeroInitKind::Scalar(*t),
+            _ => Self::zero_init_kind(ty),
+        };
+        match kind {
             ZeroInitKind::Scalar(t) => {
                 let reg = self.alloc_ty(t);
-                writeln!(&mut self.ptx_buffer, "    mov.{} {}, 0;", t.reg_mem(), reg).unwrap();
+                // `zero_imm`, not a bare `0`: a float `mov` refuses an integer
+                // immediate, so `let x: F32 = {};` emitted `mov.f32 %f0, 0;`
+                // and `ptxas` rejected the module after a clean compile.
+                writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", t.reg_mem(), reg, t.zero_imm())
+                    .unwrap();
                 self.variables.insert(name.to_string(), reg);
             }
             ZeroInitKind::TileDeclaration => {
@@ -1933,6 +2567,11 @@ or `shared_alloc_u32` for a shared-memory array.",
     /// }
     /// ```
     ///
+    /// (That three-argument `store` was truncated to `store(C, 0)`, so the
+    /// literal `0` written below is the INDEX whatever the read produced - the
+    /// "produced no value" half of the finding is not established by it. The
+    /// form is refused now: write `store(C[0], v)`.)
+    ///
     /// which compiled clean, printed "Compilation Successful!", exited 0, and
     /// emitted `add.u64 %rd3, %r0, %rd2` - a `.b32` register added to a `.b64`
     /// one - that `ptxas` rejects outright with "Arguments mismatch for
@@ -1963,13 +2602,18 @@ or `shared_alloc_u32` for a shared-memory array.",
     fn param_slot(&mut self, kernel_name: &str, param: &Param) -> &'static str {
         match &param.ty {
             Type::Generic { base, .. } if base == "GlobalMemory" => ".param .u64",
-            Type::Primitive(p, _) | Type::Ident(p, _) => {
-                if ScalarTy::from_name(p).map_or(false, |t| t.is_64()) {
-                    ".param .b64"
-                } else {
-                    ".param .b32"
-                }
-            }
+            Type::Primitive(p, _) | Type::Ident(p, _) => match ScalarTy::from_name(p) {
+                // An F64 argument is eight bytes of double. It used to fall to
+                // the `.b32` arm below - `from_name` did not know it - so the
+                // host's double was read as a 32-bit integer.
+                Some(ScalarTy::F64) => ".param .f64",
+                Some(t) if t.is_64() => ".param .b64",
+                // Refused by `emit_kernel` (see `refused_param_type`); the slot
+                // only has to keep the signature well-formed, and a refused
+                // compile writes no module.
+                Some(ScalarTy::F16) => ".param .b16",
+                _ => ".param .b32",
+            },
             other => {
                 let what = match other {
                     Type::Generic { base, .. } => format!("`{base}<...>`"),
@@ -2128,6 +2772,8 @@ or `shared_alloc_u32` for a shared-memory array.",
         self.reg_ty.clear();
         self.vec_vars.clear();
         self.ptr_elem.clear();
+        self.float_lit.clear();
+        self.type_aliases.clear();
         self.zero_drift.clear();
         self.record_pointer_element_types(kernel);
 
@@ -2153,6 +2799,16 @@ or `shared_alloc_u32` for a shared-memory array.",
                     let r = self.alloc_reg64();
                     writeln!(&mut self.ptx_buffer, "    ld.param.u64 {}, [{}_{}];", r, param.name, i).unwrap();
                     self.variables.insert(param.name.clone(), r);
+                }
+                // A parameter type that cannot be a value here is refused by
+                // name rather than loaded as a 32-bit integer, which is what
+                // the catch-all below did with `x: F16` or `q: Q16.16`.
+                Type::Primitive(p, _) | Type::Ident(p, _) if Self::refused_param_type(p).is_some() => {
+                    let why = Self::refused_param_type(p).expect("checked by the guard");
+                    self.emit_errors.push(format!(
+                        "[PTX] kernel `{}`'s parameter `{}: {}` cannot be lowered: {}",
+                        kernel.name, param.name, p, why
+                    ));
                 }
                 // A scalar parameter is loaded in its declared type. The
                 // catch-all below is still `ld.param.u32` into an untyped `%r`,
@@ -2581,11 +3237,31 @@ or `shared_alloc_u32` for a shared-memory array.",
                                 ty_name.as_str(),
                                 "I8" | "I16" | "I32" | "I64" | "U8" | "U16" | "U32" | "U64"
                             );
+                        // What a READ of this accumulator produces. An `F64`
+                        // accumulator reads back as an `F64`; every other
+                        // float-encoded one as the historical `F32` (an `F16`
+                        // one included - F16 is never a register type).
+                        let value_ty = if integer_domain {
+                            ScalarTy::I64
+                        } else if ty_name == "F64" {
+                            ScalarTy::F64
+                        } else {
+                            ScalarTy::F32
+                        };
                         match init {
                             Some(expr) => {
                                 let v = self.emit_expr(expr, cache_policy.as_ref(), hw_profile);
-                                if v.starts_with("%f") || integer_domain {
-                                    let fixed = self.emit_drift_to_fixed(&v, repr, integer_domain);
+                                // Every initialiser that produced a value is
+                                // converted. This tested the register's NAME
+                                // (`%f`...), so an integer initialiser of a
+                                // fixed-point accumulator was DROPPED: `let acc:
+                                // F32 = 5;` under @ZeroDrift started at 0 and
+                                // the kernel stored 0.0. An empty `v` is an
+                                // initialiser that refused, and has already
+                                // failed the build.
+                                if !v.is_empty() {
+                                    let fixed =
+                                        self.emit_drift_to_fixed(&v, repr, integer_domain, value_ty);
                                     writeln!(&mut self.ptx_buffer, "    mov.s64 {}, {};", acc, fixed).unwrap();
                                 } else {
                                     writeln!(&mut self.ptx_buffer, "    mov.u64 {}, 0;", acc).unwrap();
@@ -2595,7 +3271,8 @@ or `shared_alloc_u32` for a shared-memory array.",
                                 writeln!(&mut self.ptx_buffer, "    mov.u64 {}, 0;", acc).unwrap();
                             }
                         }
-                        self.zero_drift.insert(name.clone(), (acc.clone(), repr, integer_domain));
+                        self.zero_drift
+                            .insert(name.clone(), (acc.clone(), repr, integer_domain, value_ty));
                         self.variables.insert(name.clone(), acc);
                     }
                     Err(why) => {
@@ -2629,13 +3306,27 @@ declare it as a Q format.\n{}",
                         return;
                     }
                 }
+                // Resolved once, and refused before anything is emitted when
+                // the annotation can never be a value here (F16, a Q format
+                // outside @ZeroDrift, ...). See `declared_value`.
+                let declared = self.declared_value(ty.as_ref());
+                if let DeclaredValue::Refused(why) = &declared {
+                    self.emit_errors.push(format!(
+                        "Line {}: `let {}: {}` cannot be lowered: {}",
+                        span.line,
+                        name,
+                        ty.as_ref().map(Self::type_display).unwrap_or_default(),
+                        why
+                    ));
+                    return;
+                }
                 if let Some(expr) = init {
                     // Decided BEFORE `emit_expr` runs: a zero-initialiser is a
                     // declaration, and asking the expression layer to produce a
                     // value for it records a refusal for a construct that is
                     // perfectly legal here.
                     if matches!(expr, Expr::ZeroInit(_)) {
-                        self.emit_zero_init_let(name, ty.as_ref(), span);
+                        self.emit_zero_init_let(name, ty.as_ref(), &declared, span);
                         return;
                     }
                     let val_str = self.emit_expr(expr, cache_policy.as_ref(), hw_profile);
@@ -2650,15 +3341,21 @@ declare it as a Q format.\n{}",
                         // datapath there was nothing to convert *to*, so this
                         // arm dropped `ty` entirely and the binding simply
                         // aliased whatever register the initialiser produced.
-                        let declared = match ty {
-                            Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => {
-                                ScalarTy::from_name(n)
+                        let reg = match &declared {
+                            DeclaredValue::Scalar(t) => self.emit_convert(&val_str, *t),
+                            DeclaredValue::Inferred | DeclaredValue::AsProduced => val_str,
+                            DeclaredValue::Unknown(t) => {
+                                self.emit_errors.push(format!(
+                                    "Line {}: `let {}: {}` cannot be lowered: this backend does \
+                                     not know the type `{}` - structs, enums and other named \
+                                     types have no representation in a kernel - and ignoring the \
+                                     annotation would bind whatever the initialiser produced \
+                                     under a type it does not have.",
+                                    span.line, name, t, t
+                                ));
+                                return;
                             }
-                            _ => None,
-                        };
-                        let reg = match declared {
-                            Some(t) => self.emit_convert(&val_str, t),
-                            None => val_str,
+                            DeclaredValue::Refused(_) => unreachable!("refused above"),
                         };
                         // Every OTHER site that binds a name allocates a fresh
                         // register (kernel params, the loop variable, a zero
@@ -2703,8 +3400,12 @@ declare it as a Q format.\n{}",
                     }
                 }
             }
-            Stmt::TypeAlias { name, .. } => {
+            Stmt::TypeAlias { name, ty, .. } => {
                 writeln!(&mut self.ptx_buffer, "    // type {} defined", name).unwrap();
+                // Recorded so `let x: X` resolves through it. It used to be a
+                // comment and nothing else, so `type D = F64; let x: D = 3.0;`
+                // read `D` as "no annotation" and computed in f32.
+                self.type_aliases.insert(name.clone(), ty.clone());
             }
             Stmt::For {
                 loop_var,
@@ -2811,7 +3512,7 @@ declare it as a Q format.\n{}",
                     Expr::Ident(n, _) => n.clone(),
                     _ => unreachable!(),
                 };
-                let (acc, repr, integer_domain) = self.zero_drift[&name].clone();
+                let (acc, repr, integer_domain, value_ty) = self.zero_drift[&name].clone();
                 if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
                     self.emit_errors.push(format!(
                         "Line {}: `{:?}=` is not exact on the @ZeroDrift accumulator `{}`. Only \
@@ -2820,7 +3521,7 @@ declare it as a Q format.\n{}",
                     ));
                 }
                 let rhs = self.emit_expr(value, None, hw_profile);
-                let fixed = self.emit_drift_to_fixed(&rhs, repr, integer_domain);
+                let fixed = self.emit_drift_to_fixed(&rhs, repr, integer_domain, value_ty);
                 let instr = if matches!(op, BinaryOp::Sub) { "sub.s64" } else { "add.s64" };
                 writeln!(&mut self.ptx_buffer, "    {} {}, {}, {};", instr, acc, acc, fixed).unwrap();
             }
@@ -2845,6 +3546,19 @@ declare it as a Q format.\n{}",
             // stop, one guard up. The same desugaring fixed the identical hole
             // in `zk_emitter`.
             Stmt::CompoundAssign { target, op, value, span } => {
+                // `A[i] += v` desugars to `A[i] = A[i] + v`, which READS
+                // `A[i]` as a value - and `Expr::Index` evaluates to the
+                // element's ADDRESS in this backend, so the sum would be the
+                // address plus `v`. Refused until element reads are lowered.
+                if !matches!(target, Expr::Ident(..)) {
+                    self.unsupported_stmt(
+                        "a compound assignment to an element (`A[i] op= v`): it reads the \
+                         element, and this backend evaluates `A[i]` to its ADDRESS, not \
+                         its value. Write `store(A[i], GlobalMemory::load(A[i]) + v)`",
+                        span,
+                    );
+                    return;
+                }
                 self.emit_stmt(
                     &Stmt::Assign {
                         target: target.clone(),
@@ -2876,11 +3590,11 @@ declare it as a Q format.\n{}",
                     Expr::Ident(n, _) => n.clone(),
                     _ => unreachable!(),
                 };
-                let (acc, repr, integer_domain) = self.zero_drift[&name].clone();
+                let (acc, repr, integer_domain, value_ty) = self.zero_drift[&name].clone();
                 match crate::zero_drift::running_sum(target, value) {
                     Some((op, term)) => {
                         let rhs = self.emit_expr(term, None, hw_profile);
-                        let fixed = self.emit_drift_to_fixed(&rhs, repr, integer_domain);
+                        let fixed = self.emit_drift_to_fixed(&rhs, repr, integer_domain, value_ty);
                         let instr = if matches!(op, BinaryOp::Sub) { "sub.s64" } else { "add.s64" };
                         writeln!(
                             &mut self.ptx_buffer,
@@ -2951,6 +3665,35 @@ declare it as a Q format.\n{}",
                         let src = self.emit_convert(&val_reg, ty);
                         writeln!(&mut self.ptx_buffer, "    mov.{} {}, {};", ty.reg_mem(), tgt_reg, src).unwrap();
                     }
+                } else if let Some(elem) = match target {
+                    Expr::Index { base, .. } => self.elem_ty_of(base),
+                    _ => None,
+                } {
+                    // Every target that is not a plain name used to fall out
+                    // of the `if let` above and emit NOTHING: `Out[i] = 2.5;`
+                    // computed `mov.f32 %f0, 2.5;` and dropped the store,
+                    // under "Compilation Successful!", exit 0, and a module
+                    // `ptxas` accepts. An element of a buffer parameter is the
+                    // store `store(Out[i], v)` makes - same address (the
+                    // element's stride, the bounds trap), same conversion into
+                    // the element type - so it is lowered as exactly that.
+                    if !val_reg.is_empty() {
+                        let addr = self.emit_expr(target, None, hw_profile);
+                        let v = self.emit_store_operand(&val_reg, elem);
+                        writeln!(&mut self.ptx_buffer, "    st.global.{} [{}], {};", elem.mem(), addr, v)
+                            .unwrap();
+                    }
+                } else {
+                    // A field, a dereference, or an element of something that
+                    // is not a buffer parameter: this backend has no storage
+                    // to write, so the assignment is refused rather than
+                    // silently dropped.
+                    self.unsupported_stmt(
+                        "assigning to this target: only a plain variable name or an \
+                         element of a buffer parameter (`A[i] = v`) can be assigned in a \
+                         kernel (this backend has no struct fields or pointer stores)",
+                        span,
+                    );
                 }
             }
             Stmt::Expr(expr) => {
@@ -3204,13 +3947,16 @@ declare it as a Q format.\n{}",
                     val_str = format!("{}.0", val_str);
                 }
                 writeln!(&mut self.ptx_buffer, "    mov.f32 {}, {};", reg, val_str).unwrap();
+                // The F32 default above is right where nothing else is
+                // expected; an F64 context re-materialises the exact value.
+                self.float_lit.insert(reg.clone(), *val);
                 reg
             }
             Expr::Ident(name, span) => {
                 // Reading a @ZeroDrift accumulator converts back out of its
                 // integer domain; the stored value stays exact.
-                if let Some((reg, repr, integer_domain)) = self.zero_drift.get(name).cloned() {
-                    return self.emit_drift_from_fixed(&reg, repr, integer_domain);
+                if let Some((reg, repr, integer_domain, value_ty)) = self.zero_drift.get(name).cloned() {
+                    return self.emit_drift_from_fixed(&reg, repr, integer_domain, value_ty);
                 }
                 if let Some(reg) = self.variables.get(name) {
                     return reg.clone();
@@ -3284,6 +4030,11 @@ declare it as a Q format.\n{}",
                         };
                         writeln!(&mut self.ptx_buffer, "    neg.{} {}, {};", suffix, out, v)
                             .unwrap();
+                        // `-0.1` is a literal too: without this an F64 context
+                        // widened the f32 rounding of every negative literal.
+                        if let Some(lit) = self.unowned_float_lit(&v) {
+                            self.float_lit.insert(out.clone(), -lit);
+                        }
                         out
                     }
                     other => {
@@ -3389,25 +4140,11 @@ declare it as a Q format.\n{}",
             Expr::Call { func, args, .. } => {
                 match &**func {
                     Expr::Ident(fname, _) => {
-                        // Arity gate, before any lowering runs. See
-                        // `required_arity`: a short call otherwise silently
-                        // reads an unrelated register instead of failing.
-                        if let Some(want) = Self::required_arity(fname) {
-                            // `<`, not `!=`: trailing operands past `want`
-                            // default to literals and are legitimately optional.
-                            if args.len() < want {
-                                let n = args.len();
-                                self.unsupported_intrinsic(
-                                    fname,
-                                    &format!(
-                                        "it needs at least {} arguments and was given {}; \
-                                         a missing operand would be read from an unrelated \
-                                         register rather than reported",
-                                        want, n
-                                    ),
-                                );
-                                return "".into();
-                            }
+                        // Arity gate, before any lowering runs, in BOTH
+                        // directions - see `builtin_arity`: a short call reads
+                        // an unrelated register, a long one drops arguments.
+                        if self.reject_bad_arity(fname, Self::builtin_arity(fname), args.len()) {
+                            return "".into();
                         }
                         if fname == "cp_async" && args.len() >= 2 {
                             let src_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
@@ -3449,11 +4186,16 @@ declare it as a Q format.\n{}",
                             self.emit_cp_async_commit();
                             "".into()
                         } else if fname == "vec_add_v4" || fname == "vector_add_v4" || fname == "vec_add_unrolled4" {
+                            if self.reject_non_f32_buffers(fname, &args[..args.len().min(3)]) {
+                                return "".into();
+                            }
                             let a_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let b_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
                             let c_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
 
-                            let unroll_count = if fname == "vec_add_unrolled4" || args.len() >= 4 { 4 } else { 1 };
+                            // By NAME only: a 4th argument used to turn unrolling
+                            // on by its presence, value discarded (`builtin_arity`).
+                            let unroll_count = if fname == "vec_add_unrolled4" { 4 } else { 1 };
 
                             for u in 0..unroll_count {
                                 let offset = u * 16;
@@ -3498,6 +4240,9 @@ declare it as a Q format.\n{}",
                             }
                             "".into()
                         } else if fname == "rmsnorm_v4" || fname == "rmsnorm_fast" {
+                            if self.reject_non_f32_buffers(fname, &args[..args.len().min(3)]) {
+                                return "".into();
+                            }
                             let x_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let w_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
                             let out_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
@@ -3608,6 +4353,9 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    st.global.cs.v4.f32 [{}], {{{}, {}, {}, {}}};", out_ptr, o0, o1, o2, o3).unwrap();
                             "".into()
                         } else if fname == "swiglu_v4" || fname == "swiglu_fast" {
+                            if self.reject_non_f32_buffers(fname, &args[..args.len().min(3)]) {
+                                return "".into();
+                            }
                             let gate_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let up_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
                             let out_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
@@ -3689,6 +4437,9 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    st.global.cs.v4.f32 [{}], {{{}, {}, {}, {}}};", out_ptr, res0, res1, res2, res3).unwrap();
                             "".into()
                         } else if fname == "ld_global_v4_f32" || fname == "load_v4" {
+                            if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
+                                return "".into();
+                            }
                             let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let mut cache_str = ".ca";
                             if let Some(cp) = cache_policy {
@@ -3705,6 +4456,9 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    ld.global{}.v4.f32 {{{}, {}, {}, {}}}, [{}];", cache_str, f0, f1, f2, f3, addr_reg).unwrap();
                             f0
                         } else if fname == "st_global_v4_f32" || fname == "store_v4" {
+                            if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
+                                return "".into();
+                            }
                             let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let v0 = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%f0".to_string() };
                             let v1 = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { v0.clone() };
@@ -3892,17 +4646,29 @@ declare it as a Q format.\n{}",
                             nctaid
 
                         } else if fname == "store" && args.len() >= 2 {
+                            // `store(place, value)` - EXACTLY two arguments
+                            // (`builtin_arity`). `place` is an address: a
+                            // buffer (`Out`, its element 0) or an element of one
+                            // (`Out[i]`, which `Expr::Index` lowers to an
+                            // ADDRESS with the element's stride and the bounds
+                            // trap). The (buffer, index, value) spelling every
+                            // other store intrinsic uses is refused by the arity
+                            // gate: it used to store the INDEX.
                             let addr_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
                             let val_raw = self.emit_expr(&args[1], cache_policy, hw_profile);
                             // The buffer's element type wins over the value's,
                             // and the value is converted into it. Picking the
                             // width off the value's register prefix (as this
                             // did) writes 4 bytes for a `U64` value into a
-                            // `U64` array.
+                            // `U64` array - and it still did for the BARE-buffer
+                            // form, which only consulted `Expr::Index`: `store(
+                            // Out, 7)` into a `GlobalMemory<U64>` was
+                            // `st.global.u32`, and into a `GlobalMemory<F64>` a
+                            // 1.5 went out as `st.global.f32`.
                             let elem = self
-                                .index_elem_ty(&args[0])
+                                .place_elem_ty(&args[0])
                                 .unwrap_or_else(|| self.ty_of(&val_raw));
-                            let val_reg = self.emit_convert(&val_raw, elem);
+                            let val_reg = self.emit_store_operand(&val_raw, elem);
                             writeln!(&mut self.ptx_buffer, "    st.global.{} [{}], {};", elem.mem(), addr_reg, val_reg).unwrap();
                             "".into()
                         // ── Widening and limb intrinsics ──────────────────
@@ -3935,6 +4701,19 @@ declare it as a Q format.\n{}",
                         {
                             let storing = fname.ends_with("store_v4");
                             let elem = self.elem_ty_or_f32(&args[0]);
+                            // Four F16 lanes are 8 bytes and would need b16
+                            // staging per lane; `mem()` would otherwise emit
+                            // `.v4.b16` into four f32 registers - raw half bits
+                            // read back as floats.
+                            if elem == ScalarTy::F16 {
+                                self.unsupported_intrinsic(
+                                    fname,
+                                    "has no F16 form: its lanes are 32-bit registers, and an \
+                                     F16 element must be widened with `cvt.f32.f16` one at a \
+                                     time. Use block_ptr2d_load / block_ptr2d_store.",
+                                );
+                                return "".into();
+                            }
                             if elem.is_64() {
                                 self.unsupported_intrinsic(
                                     fname,
@@ -4074,7 +4853,7 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    shr.u64 {}, {}, 32;", sh, w).unwrap();
                             self.emit_convert(&sh, ScalarTy::U32)
                         } else if fname == "block_tile_load" || fname == "tile_load" {
-                            if !args.is_empty() && self.reject_non_float_buffer(fname, &args[0]) {
+                            if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
                                 return "".into();
                             }
                             let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
@@ -4094,7 +4873,7 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", pred, res).unwrap();
                             res
                         } else if fname == "block_tile_store" || fname == "tile_store" {
-                            if !args.is_empty() && self.reject_non_float_buffer(fname, &args[0]) {
+                            if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
                                 return "".into();
                             }
                             let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
@@ -4146,8 +4925,7 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_r, row_reg, max_r_reg).unwrap();
                             writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_c, col_reg, max_c_reg).unwrap();
                             writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_valid, p_r, p_c).unwrap();
-                            writeln!(&mut self.ptx_buffer, "    @{} ld.global.{} {}, [{}];", p_valid, elem.mem(), res, addr).unwrap();
-                            writeln!(&mut self.ptx_buffer, "    @!{} mov.{} {}, {};", p_valid, elem.reg_mem(), res, elem.zero_imm()).unwrap();
+                            self.emit_load_into(&res, elem, &addr, "", Some(&p_valid));
                             res
                         } else if fname == "block_ptr2d_store" {
                             let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
@@ -4166,7 +4944,8 @@ declare it as a Q format.\n{}",
                             // Storing an `I32` into a `GlobalMemory<F32>` (or
                             // the reverse) converts rather than reinterpreting
                             // the bits, which is what `Out[i] = count` means.
-                            let val_reg = self.emit_convert(&val_raw, elem);
+                            // An `F16` slot takes the value's rounded half bits.
+                            let val_reg = self.emit_store_operand(&val_raw, elem);
 
                             let lin_idx = self.alloc_reg32();
                             let lin_off = self.alloc_reg32();
@@ -4196,6 +4975,9 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    add.s32 {}, {}, {};", next_row, row_reg, delta_r).unwrap();
                             next_row
                         } else if fname == "make_block_ptr3d" || fname == "block_ptr3d_load" || fname == "block_ptr3d_load_v4" {
+                            if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
+                                return "".into();
+                            }
                             let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let d0_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let d1_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
@@ -4252,6 +5034,9 @@ declare it as a Q format.\n{}",
                                 res
                             }
                         } else if fname == "block_ptr3d_store" || fname == "block_ptr3d_store_v4" {
+                            if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
+                                return "".into();
+                            }
                             let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let d0_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let d1_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
@@ -4567,26 +5352,21 @@ declare it as a Q format.\n{}",
                         // offset falls back to `%r0` and its value to `%f0` -
                         // and the first version of the gate only covered `Ident`,
                         // so these were still open. Two match arms, one bug.
-                        if let Some(want) = Self::required_path_arity(namespace, member) {
-                            if args.len() < want {
-                                let (ns, me, n) =
-                                    (namespace.clone(), member.clone(), args.len());
-                                self.unsupported_intrinsic(
-                                    &format!("{}::{}", ns, me),
-                                    &format!(
-                                        "it needs at least {} arguments and was given \
-                                         {}; a missing operand would be read from an \
-                                         unrelated register rather than reported",
-                                        want, n
-                                    ),
-                                );
-                                return "".into();
-                            }
+                        let path = format!("{}::{}", namespace, member);
+                        if self.reject_bad_arity(
+                            &path,
+                            Self::path_arity(namespace, member),
+                            args.len(),
+                        ) {
+                            return "".into();
                         }
                         if namespace == "barrier" && member == "sync" {
                             writeln!(&mut self.ptx_buffer, "    bar.sync 0;").unwrap();
                             "".into()
                         } else if namespace == "BlockTile" && member == "load" {
+                            if !args.is_empty() && self.reject_non_f32_buffer(&path, &args[0]) {
+                                return "".into();
+                            }
                             let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let bound_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "128".to_string() };
@@ -4604,6 +5384,9 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    @!{} mov.f32 {}, 0.0;", pred, res).unwrap();
                             res
                         } else if namespace == "BlockTile" && member == "store" {
+                            if !args.is_empty() && self.reject_non_f32_buffer(&path, &args[0]) {
+                                return "".into();
+                            }
                             let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let val_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%f0".to_string() };
@@ -4620,6 +5403,9 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}], {};", pred, addr, val_reg).unwrap();
                             "".into()
                         } else if namespace == "GlobalMemory" && (member == "load_v4" || member == "ld_v4") {
+                            if !args.is_empty() && self.reject_non_f32_buffer(&path, &args[0]) {
+                                return "".into();
+                            }
                             let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let f0 = self.alloc_regf32();
                             let f1 = self.alloc_regf32();
@@ -4628,6 +5414,9 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    ld.global.ca.v4.f32 {{{}, {}, {}, {}}}, [{}];", f0, f1, f2, f3, addr_reg).unwrap();
                             f0
                         } else if namespace == "GlobalMemory" && (member == "store_v4" || member == "st_v4") {
+                            if !args.is_empty() && self.reject_non_f32_buffer(&path, &args[0]) {
+                                return "".into();
+                            }
                             let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let v0 = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%f0".to_string() };
                             let v1 = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { v0.clone() };
@@ -4644,9 +5433,11 @@ declare it as a Q format.\n{}",
                                     cache_str = ".L2::evict_first";
                                 }
                             }
+                            // `A[i]` or a bare buffer `A` (its element 0): the
+                            // bare form used to load f32 whatever `A` held.
                             let elem = args
                                 .first()
-                                .and_then(|a| self.index_elem_ty(a))
+                                .and_then(|a| self.place_elem_ty(a))
                                 .unwrap_or(ScalarTy::F32);
                             let addr_reg = if !args.is_empty() {
                                 self.emit_expr(&args[0], cache_policy, hw_profile)
@@ -4654,7 +5445,7 @@ declare it as a Q format.\n{}",
                                 "%rd0".to_string()
                             };
                             let dst = self.alloc_ty(elem);
-                            writeln!(&mut self.ptx_buffer, "    ld.global{}.{} {}, [{}];", cache_str, elem.mem(), dst, addr_reg).unwrap();
+                            self.emit_load_into(&dst, elem, &addr_reg, cache_str, None);
                             dst
                         } else {
                             // An unhandled `Namespace::member(...)` call. This is
@@ -4692,6 +5483,15 @@ declare it as a Q format.\n{}",
                     // discarded in the back end: the kernel reads the
                     // destination while `cp.async` is still in flight, which is
                     // a data race that shows up as intermittently wrong numbers.
+                    Expr::MemberAccess { member, .. }
+                        if self.reject_bad_arity(
+                            &format!("<pipeline>.{}", member),
+                            Self::method_arity(member),
+                            args.len(),
+                        ) =>
+                    {
+                        "".into()
+                    }
                     Expr::MemberAccess { member, .. } if member == "wait" => {
                         self.emit_cp_async_wait(0);
                         "".into()
@@ -12646,5 +13446,108 @@ mod tests_swiglu_tile_override {
 
         std::env::remove_var("Y_SWIGLU_TILE");
         assert_eq!(PtxEmitter::swiglu_tile_override(), None, "unset must mean 'use the default'");
+    }
+}
+
+#[cfg(test)]
+mod tests_builtin_arity {
+    use super::*;
+
+    const SRC: &str = include_str!("ptx_emitter.rs");
+
+    /// Every quoted name that follows `needle` in this file.
+    fn quoted_after(needle: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = SRC;
+        while let Some(i) = rest.find(needle) {
+            rest = &rest[i + needle.len()..];
+            if let Some(end) = rest.find('"') {
+                let name = &rest[..end];
+                if !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The census: EVERY name the `Expr::Call` lowering compares a callee
+    /// against has a row in `builtin_arity`, so a built-in added without one
+    /// cannot quietly accept any argument count again - which is what every
+    /// built-in did in the MAXIMUM direction before the table had one.
+    #[test]
+    fn builtin_arity_covers_every_lowered_name() {
+        let mut names = quoted_after("fname == \"");
+        // The carry-chain intrinsics are matched through `carry_spec`, not by
+        // a literal comparison.
+        let carry: Vec<String> = quoted_after("\n        \"")
+            .into_iter()
+            .filter(|n| carry_spec(n).is_some())
+            .collect();
+        assert_eq!(carry.len(), 12, "the carry table should hold twelve intrinsics: {:?}", carry);
+        names.extend(carry);
+        // Non-vacuity: an extractor that recovered nothing would pass the loop
+        // below perfectly. These are the names the two reported bugs live in.
+        assert!(names.len() >= 60, "recovered only {} names: {:?}", names.len(), names);
+        for must in ["store", "block_ptr3d_store", "thread_idx_x", "mul_wide_u32", "cp_async"] {
+            assert!(names.iter().any(|n| n == must), "census missed `{}`", must);
+        }
+        let missing: Vec<&String> =
+            names.iter().filter(|n| PtxEmitter::builtin_arity(n).is_none()).collect();
+        assert!(
+            missing.is_empty(),
+            "built-ins with no arity row - a call to them accepts ANY argument count: {:?}",
+            missing
+        );
+    }
+
+    /// The same census for `Namespace::member` callees.
+    #[test]
+    fn path_arity_covers_every_lowered_path() {
+        let mut pairs = Vec::new();
+        let mut rest = SRC;
+        let needle = "namespace == \"";
+        while let Some(i) = rest.find(needle) {
+            rest = &rest[i + needle.len()..];
+            let Some(end) = rest.find('"') else { break };
+            let ns = rest[..end].to_string();
+            // `member == "a"` and `(member == "a" || member == "b")` on the
+            // same line.
+            let line_end = rest.find('\n').unwrap_or(rest.len());
+            for m in rest[..line_end].split("member == \"").skip(1) {
+                if let Some(e) = m.find('"') {
+                    pairs.push((ns.clone(), m[..e].to_string()));
+                }
+            }
+        }
+        pairs.sort();
+        pairs.dedup();
+        // `Fragment::zero` and `SharedMemory::alloc` are compared only in the
+        // NON-call `Expr::Path` arm, where they are refused by name; the call
+        // arm's unknown-path fallback refuses them too.
+        let called: Vec<&(String, String)> = pairs
+            .iter()
+            .filter(|(ns, m)| !(ns == "Fragment" && m == "zero") && !(ns == "SharedMemory" && m == "alloc"))
+            .collect();
+        assert!(called.len() >= 6, "recovered only {:?}", called);
+        let missing: Vec<&&(String, String)> = called
+            .iter()
+            .filter(|(ns, m)| PtxEmitter::path_arity(ns, m).is_none())
+            .collect();
+        assert!(missing.is_empty(), "paths with no arity row: {:?}", missing);
+    }
+
+    #[test]
+    fn arity_shapes_accept_exactly_what_they_say() {
+        assert!(Arity::Exactly(2).accepts(2) && !Arity::Exactly(2).accepts(3));
+        assert!(Arity::Range(3, 6).accepts(3) && Arity::Range(3, 6).accepts(6));
+        assert!(!Arity::Range(3, 6).accepts(2) && !Arity::Range(3, 6).accepts(7));
+        assert!(Arity::OneOf(&[10, 13]).accepts(13) && !Arity::OneOf(&[10, 13]).accepts(12));
+        assert_eq!(Arity::Exactly(0).describe(), "no arguments");
+        assert_eq!(Arity::Range(2, 3).describe(), "2 or 3 arguments");
+        assert_eq!(Arity::Range(3, 6).describe(), "3 to 6 arguments");
+        assert_eq!(Arity::OneOf(&[2, 5]).describe(), "2 or 5 arguments");
     }
 }

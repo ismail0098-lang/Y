@@ -21,7 +21,6 @@ const PRELUDE_FNS: &[&str] = &[
     "y_barrier_sync",
     "println",
     "print_int",
-    "store",
 ];
 
 pub struct CpuEmitter {
@@ -632,14 +631,16 @@ impl CpuEmitter {
             arg_strs.push(self.emit_expr(a));
         }
 
-        if matches!(fname.as_str(), "cp_async" | "ldmatrix" | "mma_sync") {
+        // `store` joins them. Its lowering here was
+        // `{place}.store_aligned_ptr({value} as *mut f32)`: a method of the
+        // deleted `avx_wrapper` module, called on a raw pointer, with the VALUE
+        // cast to a pointer - Rust nothing can compile, printed under a
+        // success banner. It indexed `arg_strs[1]` unconditionally, so
+        // `store(Out)` PANICKED the compiler, and `store(Out, 0, 7)` dropped
+        // the 7. `store` writes a `GlobalMemory` buffer, a GPU surface.
+        if matches!(fname.as_str(), "cp_async" | "ldmatrix" | "mma_sync" | "store") {
             let span = func.span();
             return self.unsupported_gpu_intrinsic(&fname, &span);
-        } else if fname == "store" {
-            return format!(
-                "{}.store_aligned_ptr({} as *mut f32)",
-                arg_strs[0], arg_strs[1]
-            );
         }
 
         // A plain identifier this blob does not define is a GPU intrinsic or a

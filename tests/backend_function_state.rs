@@ -158,7 +158,7 @@ fn assemble(tag: &str, module: &str) {
 #[test]
 fn ptx_directives_are_local_to_each_kernel() {
     let preceding = "kernel preceding() { @ZeroDrift let acc: I64 = 7; }";
-    let ordinary = "kernel ordinary(out: GlobalMemory<F32>) { let mut acc: F32 = 1.5; acc = 7.5; store(out, 0, acc); }";
+    let ordinary = "kernel ordinary(out: GlobalMemory<F32>) { let mut acc: F32 = 1.5; acc = 7.5; store(out[0], acc); }";
     let standalone = ptx(ordinary);
     let combined = ptx(&format!("{preceding}\n{ordinary}"));
     assert_eq!(
@@ -170,10 +170,10 @@ fn ptx_directives_are_local_to_each_kernel() {
 
 #[test]
 fn ptx_double_registers_start_fresh_in_each_kernel() {
-    // General F64 values are not a supported PTX scalar type. The supported
-    // fixed-point conversion path allocates actual double scratch registers.
+    // The fixed-point conversion path allocates actual double scratch
+    // registers, without an F64 value anywhere in the source.
     // With no branch in this fixture, label numbering cannot mask that check.
-    let body = "(out: GlobalMemory<F32>, x: F32) { @bounds(min=0, max=1000) @ZeroDrift let mut acc: F32 = 0.0; acc += x; store(out, 0, acc); }";
+    let body = "(out: GlobalMemory<F32>, x: F32) { @bounds(min=0, max=1000) @ZeroDrift let mut acc: F32 = 0.0; acc += x; store(out[0], acc); }";
     let ordinary = format!("kernel ordinary{body}");
     let standalone = ptx(&ordinary);
     let combined = ptx(&format!("kernel preceding{body}\n{ordinary}"));
@@ -200,7 +200,7 @@ fn ptx_double_registers_start_fresh_in_each_kernel() {
 
 #[test]
 fn ptx_labels_start_fresh_in_each_kernel() {
-    let body = "(out: GlobalMemory<F32>, x: F32) { let mut acc: F32 = x; if x > 0.0 { acc = x + 1.0; } store(out, 0, acc); }";
+    let body = "(out: GlobalMemory<F32>, x: F32) { let mut acc: F32 = x; if x > 0.0 { acc = x + 1.0; } store(out[0], acc); }";
     let ordinary = format!("kernel ordinary{body}");
     let standalone = ptx(&ordinary);
     let combined = ptx(&format!("kernel preceding{body}\n{ordinary}"));
