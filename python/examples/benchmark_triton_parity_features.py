@@ -127,8 +127,16 @@ def main():
     compiled_mlp = y_inductor(gm, [x_in])
     t_compile_ms = (time.perf_counter() - t_compile_start) * 1000.0
 
-    t_compiled_us = measure_latency(lambda: compiled_mlp(x_in))
-    t_uncompiled_us = measure_latency(lambda: mlp(x_in))
+    # Both arms under `no_grad`. The compiled arm used to be the only one: the
+    # old y_inductor wrapped the original graph in `torch.no_grad()` and
+    # compiled nothing, so this compared eager PyTorch without autograd
+    # bookkeeping against eager PyTorch with it. Of this block, y_inductor
+    # lowers only the residual add (it lowers add/sub/mul/relu); the report
+    # below says what ran as Y.
+    with torch.no_grad():
+        t_compiled_us = measure_latency(lambda: compiled_mlp(x_in))
+        t_uncompiled_us = measure_latency(lambda: mlp(x_in))
+    print(compiled_mlp.y_report.summary())
 
     print(f"  y_inductor Graph Compile Time : {t_compile_ms:.2f} ms")
     print(f"  Compiled Graph Execution      : {t_compiled_us:.2f} µs")

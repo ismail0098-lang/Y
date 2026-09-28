@@ -107,9 +107,14 @@ class TestTritonParity(unittest.TestCase):
         out = compiled_fn(x)
 
         expected = model(x)
-        self.assertTrue(torch.allclose(out, expected, atol=1e-4))
-        self.assertTrue(getattr(compiled_fn, "_y_compiled", False))
-        self.assertEqual(getattr(compiled_fn, "_backend", None), "y_inductor")
+        self.assertTrue(torch.equal(out, expected))
+        # y_inductor lowers elementwise float32 CUDA subgraphs only (see
+        # test_inductor.py). This model runs on the CPU, so nothing is lowered,
+        # and the report says why. This test used to assert `_y_compiled` was
+        # True - a flag the old backend set while compiling nothing at all.
+        report = compiled_fn.y_report
+        self.assertEqual(report.kernels, [])
+        self.assertEqual(len(report.not_lowered), 2, report.summary())
 
 if __name__ == "__main__":
     unittest.main()
