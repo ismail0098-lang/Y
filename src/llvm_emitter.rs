@@ -212,8 +212,6 @@ pub struct LlvmEmitter {
     enum_variants: BTreeMap<String, i32>,
     /// Track whether the current block already has a terminator
     block_terminated: bool,
-    /// Store current cache policy during let bindings
-    current_cache_policy: Option<String>,
     /// Accumulators declared `@ZeroDrift`: representation and whether the
     /// declared value is an integer. Integer values stay in their integer
     /// domain on reads and writes; fixed-point floats require conversion.
@@ -393,7 +391,6 @@ impl LlvmEmitter {
             enums: BTreeMap::new(),
             enum_variants: BTreeMap::new(),
             block_terminated: false,
-            current_cache_policy: None,
             zero_drift: BTreeMap::new(),
             drift_costs: crate::zero_drift::CostTable::new(),
             emit_errors: Vec::new(),
@@ -494,12 +491,16 @@ impl LlvmEmitter {
             )
             .unwrap();
         } else {
+            // `@gpu_uncached` is `volatile` and nothing else. It also used to
+            // carry `!nontemporal`, which on a scalar x86 load compiles to the
+            // same `mov` (there is no scalar non-temporal load) - and on the
+            // STORE side became `movnti`, which breaks the ordering the
+            // attribute exists for. See `emit_store_with_attrs`.
             let volatile_str = if is_volatile { " volatile" } else { "" };
-            let nontemporal_str = if is_volatile { ", !nontemporal !0" } else { "" };
             writeln!(
                 &mut self.output,
-                "  {} = load{} {}, ptr {}{}{}",
-                tmp, volatile_str, ty, ptr, align_str, nontemporal_str
+                "  {} = load{} {}, ptr {}{}",
+                tmp, volatile_str, ty, ptr, align_str
             )
             .unwrap();
         }
@@ -563,12 +564,20 @@ impl LlvmEmitter {
             )
             .unwrap();
         } else {
+            // `@gpu_uncached` is `volatile` and nothing else. The store used to
+            // carry `!nontemporal` as well, which x86-64 lowers to `movnti`: a
+            // non-temporal store, and the one kind of ordinary store the x86
+            // memory model lets become visible BEFORE an earlier store. So
+            // `c.data = v; c.status = 1;` could publish the flag ahead of the
+            // data it guards - the status-flag pattern the attribute is
+            // documented for. A plain volatile store is ordered after the
+            // data store, and on the load side `!nontemporal` compiled to the
+            // same `mov` as without it.
             let volatile_str = if is_volatile { " volatile" } else { "" };
-            let nontemporal_str = if is_volatile { ", !nontemporal !0" } else { "" };
             writeln!(
                 &mut self.output,
-                "  store{} {} {}, ptr {}{}{}",
-                volatile_str, ty, val, ptr, align_str, nontemporal_str
+                "  store{} {} {}, ptr {}{}",
+                volatile_str, ty, val, ptr, align_str
             )
             .unwrap();
         }
@@ -1064,6 +1073,19 @@ impl LlvmEmitter {
         prog: &Program,
         profile: &crate::sentinel::HardwareProfile,
     ) -> String {
+        // `@cache_policy` is refused here, not lowered. Its four policies are
+        // NVIDIA L2 eviction priorities and x86 has no instruction that sets
+        // a cache line's eviction priority. This backend used to emit a
+        // mapping, and on x86-64 at clang -O2 it did nothing the directive
+        // names: `L2_EVICT_FIRST`'s `!nontemporal` on a scalar load compiled
+        // to the same `mov` as no policy, `L2_PERSIST`'s `llvm.prefetch` came
+        // out as a `prefetcht0` scheduled AFTER the load of the same address,
+        // and `L2_EVICT_LAST` and `L2_STREAM` were dropped - all four exit 0.
+        for site in crate::ast::cache_policy_sites(prog) {
+            self.emit_errors
+                .push(crate::ast::cache_policy_refusal("LLVM backend", &site));
+        }
+
         // Phase 0: Collect struct layouts and function signatures
         self.functions.insert(
             "ystr_new".into(),
@@ -1330,6 +1352,9 @@ impl LlvmEmitter {
         self.wln("declare void @exit(i32) noreturn");
         self.wln("declare void @println(ptr)");
         self.wln("declare void @print_int(i64)");
+        // No longer called: its one caller was the `L2_PERSIST` mapping,
+        // and `@cache_policy` is refused now. The declaration stays so the
+        // prelude, and so every module this backend emits, is unchanged.
         self.wln("declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)");
         self.wln("declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)");
         self.wln("");
@@ -1450,7 +1475,10 @@ impl LlvmEmitter {
             self.output.push_str(&t);
         }
 
-        // Nontemporal metadata definition
+        // Metadata node `!0`, referenced by `!uniform_branch` on loop branches.
+        // It was also the operand of `!nontemporal`, which this backend no
+        // longer emits (see `emit_store_with_attrs`). Kept in every module so
+        // the prelude and the emitted text of every other program are unchanged.
         self.wln("!0 = !{i32 1}");
 
         self.output.clone()
@@ -1538,7 +1566,6 @@ impl LlvmEmitter {
         self.zero_drift.clear();
         self.loop_exit_stack.clear();
         self.block_terminated = false;
-        self.current_cache_policy = None;
         self.current_load_hint = None;
     }
 
@@ -2219,16 +2246,9 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                 };
                 self.emit_store(&fixed, &format!("%{}", name), repr.llvm_type());
             }
-            Stmt::Let {
-                name,
-                init,
-                cache_policy,
-                ..
-            } => {
-                if let Some(cp) = cache_policy {
-                    self.current_cache_policy = Some(cp.policy.clone());
-                }
-
+            // A `@cache_policy` on this `let` never reaches here: `emit_program`
+            // refuses the whole program first (see the comment there).
+            Stmt::Let { name, init, .. } => {
                 // alloca is already done in entry
                 if let Some(init_expr) = init {
                     // Set load hint so `load()` intrinsic uses the LHS type
@@ -2306,8 +2326,6 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         }
                     }
                 }
-
-                self.current_cache_policy = None;
             }
             // `sum = sum + rhs` on a @ZeroDrift accumulator.
             //
@@ -2549,7 +2567,6 @@ representation, and whether that is lossless depends on the expression.",
                 body,
                 is_uniform_branch,
                 tile,
-                prefetch_stride,
                 ..
             } => {
                 let s = self.emit_expr(start, None, None);
@@ -2562,13 +2579,10 @@ representation, and whether that is lossless depends on the expression.",
                     writeln!(&mut self.output, "  ; [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}", t.block_m, t.block_n, t.block_k).unwrap();
                 }
 
-                if let Some(pf) = prefetch_stride {
-                    if let Some(ref stride_expr) = pf.stride {
-                        writeln!(&mut self.output, "  ; [Y PREFETCH] @prefetch_stride({:?}) -- solver-guided cache warming", stride_expr).unwrap();
-                    } else {
-                        writeln!(&mut self.output, "  ; [Y PREFETCH] @prefetch_stride(auto) -- compiler deduces optimal prefetch distance").unwrap();
-                    }
-                }
+                // `@prefetch_stride` never reaches here: the type checker
+                // refuses it, because no backend lowers it. This arm used to
+                // write it into the module as a COMMENT ("solver-guided cache
+                // warming") and emit no prefetch.
 
                 let metadata = if *is_uniform_branch {
                     ", !uniform_branch !0 ; Maps to BRANCH_UNIFORM_CYCLES scheduling baseline"
@@ -3507,21 +3521,6 @@ representation, and whether that is lossless depends on the expression.",
                     "load" => {
                         let ptr_val = self.emit_expr(&args[0], None, None);
                         let tmp = self.fresh_tmp();
-                        let mut metadata = String::new();
-
-                        if let Some(policy) = &self.current_cache_policy.clone() {
-                            if policy == "L2_EVICT_FIRST" {
-                                metadata = ", !nontemporal !0".to_string();
-                            } else if policy == "L2_PERSIST" {
-                                // 0 = Read, 3 = High temporal locality, 1 = Data cache
-                                writeln!(
-                                    &mut self.output,
-                                    "  call void @llvm.prefetch.p0(ptr {}, i32 0, i32 3, i32 1)",
-                                    ptr_val
-                                )
-                                .unwrap();
-                            }
-                        }
 
                         // Infer load type from the LHS variable's alloca type.
                         // The caller (emit_stmt for Let) will coerce if needed.
@@ -3538,8 +3537,8 @@ representation, and whether that is lossless depends on the expression.",
                         });
                         writeln!(
                             &mut self.output,
-                            "  {} = load {}, ptr {}{}",
-                            tmp, load_ty, ptr_val, metadata
+                            "  {} = load {}, ptr {}",
+                            tmp, load_ty, ptr_val
                         )
                         .unwrap();
                         return tmp;

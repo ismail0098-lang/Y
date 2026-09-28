@@ -941,7 +941,9 @@ impl Parser {
         let mut invariant = None;
         let mut is_uniform_branch = false;
         let mut tile = None;
-        let mut prefetch_stride = None;
+        // Always `None`: `@prefetch_stride` is refused in the attribute loop
+        // below. The AST keeps the field, so this is what fills it.
+        let prefetch_stride: Option<PrefetchStrideAttr> = None;
         let mut max_iterations = None;
 
         loop {
@@ -1050,22 +1052,23 @@ impl Parser {
                         col: start_tok.col,
                     },
                 });
-            } else if self.match_token(TokenKind::AtPrefetchStride) {
-                let ps_tok = self.peek().clone();
-                let mut stride_val = None;
-                if self.match_token(TokenKind::LParen) {
-                    if !self.check(TokenKind::RParen) {
-                        stride_val = Some(Box::new(self.parse_expr()?));
-                    }
-                    self.expect(TokenKind::RParen, "')' after @prefetch_stride")?;
-                }
-                prefetch_stride = Some(PrefetchStrideAttr {
-                    stride: stride_val,
-                    span: Span {
-                        line: ps_tok.line,
-                        col: ps_tok.col,
-                    },
-                });
+            } else if self.check(TokenKind::AtPrefetchStride) {
+                // No backend lowers `@prefetch_stride`, so it is refused here,
+                // the one place that sees every statement it can precede. It
+                // used to be stored on a `for` and DROPPED before anything
+                // else - which is how the language reference's own examples
+                // wrote it, above a `let`. On a `for`, its one reader was the
+                // LLVM backend, which wrote it into the module as a COMMENT
+                // ("solver-guided cache warming") and emitted no prefetch; the
+                // PTX backend never read it. A reader is not proof the reader
+                // does anything.
+                return Err(format!(
+                    "Line {}: `@prefetch_stride` is not implemented. No backend emits a prefetch \
+                     for it: it used to parse and change nothing - dropped outright unless it \
+                     preceded a `for` - so the program compiled as if it were absent.\n  \
+                     hint: remove the attribute.",
+                    self.peek().line
+                ));
             } else if self.match_token(TokenKind::AtMaxIterations) {
                 self.expect(TokenKind::LParen, "'(' after @max_iterations")?;
                 let n_expr = self.parse_expr()?;
@@ -2469,11 +2472,37 @@ mod tests {
         }
     }
 
+    /// `@prefetch_stride` is refused before ANY statement. Refusing it only on
+    /// a `for` would leave the form the language reference used - above a
+    /// `let` - where the parser used to drop it without a word.
+    #[test]
+    fn prefetch_stride_is_refused_wherever_it_is_written() {
+        for stmt in [
+            "for i in 0..10 { let mut d = 0; }",
+            "let x: I32 = 1;",
+            "x = 2;",
+        ] {
+            let src = format!(
+                "fn f() {{\n    let mut x: I32 = 0;\n    @prefetch_stride(64)\n    {stmt}\n}}\n"
+            );
+            let err = parse(&src).expect_err(&format!("`@prefetch_stride` accepted before `{stmt}`"));
+            assert!(
+                err.contains("`@prefetch_stride` is not implemented") && err.contains("Line 3"),
+                "the refusal before `{stmt}` must name the directive and its line, got: {err}"
+            );
+        }
+        // Control: the same statements parse without it.
+        assert!(parse("fn f() {\n    let mut x: I32 = 0;\n    x = 2;\n}\n").is_ok());
+    }
+
     #[test]
     fn test_parse_experimental_features() {
+        // `@prefetch_stride` used to be the first statement here, with an
+        // assertion that it parsed and was stored on the loop - which pinned a
+        // directive no backend lowered as a working feature. It is refused now:
+        // see `prefetch_stride_is_refused_wherever_it_is_written`.
         let src = "
             fn test_loop() {
-                @prefetch_stride(8)
                 for i in 0..10 {
                     let mut data = 0;
                 }
@@ -2491,11 +2520,8 @@ mod tests {
         assert_eq!(prog.items.len(), 1);
         if let Item::Func(f) = &prog.items[0] {
             assert_eq!(f.body.stmts.len(), 3);
-            
-            // Check prefetch_stride on For loop
-            if let Stmt::For { prefetch_stride, .. } = &f.body.stmts[0] {
-                assert!(prefetch_stride.is_some());
-                assert!(prefetch_stride.as_ref().unwrap().stride.is_some());
+
+            if let Stmt::For { .. } = &f.body.stmts[0] {
             } else {
                 panic!("Expected For loop stmt");
             }

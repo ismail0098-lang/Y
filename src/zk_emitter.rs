@@ -1956,6 +1956,12 @@ impl ZkEmitter {
     // ────────────────────────────────────────────────────────
 
     pub fn emit_program(&mut self, prog: &Program) -> Result<String, String> {
+        // A circuit has no memory hierarchy for `@cache_policy` to address, so
+        // the directive is refused rather than dropped.
+        if let Some(site) = crate::ast::cache_policy_sites(prog).first() {
+            return Err(crate::ast::cache_policy_refusal("Circuit target", site));
+        }
+
         // Flatten items recursively (entering modules) to allow seamless function lookups
         let mut flat_items = Vec::new();
         fn flatten_items(items: &[Item], dest: &mut Vec<Item>) {
