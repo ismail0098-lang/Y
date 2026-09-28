@@ -1278,17 +1278,21 @@ impl PtxEmitter {
         elem: ScalarTy,
         addr: &str,
         qual: &str,
+        policy: Option<&str>,
         pred: Option<&str>,
     ) {
+        // An `.L2::cache_hint` load names its `createpolicy` register after
+        // the address; see `load_cache_hint`.
+        let pol = policy.map(|p| format!(", {}", p)).unwrap_or_default();
         if elem == ScalarTy::F16 {
             let h = self.alloc_reg16();
             match pred {
                 Some(p) => {
-                    writeln!(&mut self.ptx_buffer, "    @{} ld.global{}.b16 {}, [{}];", p, qual, h, addr).unwrap();
+                    writeln!(&mut self.ptx_buffer, "    @{} ld.global{}.b16 {}, [{}]{};", p, qual, h, addr, pol).unwrap();
                     writeln!(&mut self.ptx_buffer, "    @!{} mov.b16 {}, 0;", p, h).unwrap();
                 }
                 None => {
-                    writeln!(&mut self.ptx_buffer, "    ld.global{}.b16 {}, [{}];", qual, h, addr).unwrap();
+                    writeln!(&mut self.ptx_buffer, "    ld.global{}.b16 {}, [{}]{};", qual, h, addr, pol).unwrap();
                 }
             }
             writeln!(&mut self.ptx_buffer, "    cvt.f32.f16 {}, {};", res, h).unwrap();
@@ -1296,11 +1300,11 @@ impl PtxEmitter {
         }
         match pred {
             Some(p) => {
-                writeln!(&mut self.ptx_buffer, "    @{} ld.global{}.{} {}, [{}];", p, qual, elem.mem(), res, addr).unwrap();
+                writeln!(&mut self.ptx_buffer, "    @{} ld.global{}.{} {}, [{}]{};", p, qual, elem.mem(), res, addr, pol).unwrap();
                 writeln!(&mut self.ptx_buffer, "    @!{} mov.{} {}, {};", p, elem.reg_mem(), res, elem.zero_imm()).unwrap();
             }
             None => {
-                writeln!(&mut self.ptx_buffer, "    ld.global{}.{} {}, [{}];", qual, elem.mem(), res, addr).unwrap();
+                writeln!(&mut self.ptx_buffer, "    ld.global{}.{} {}, [{}]{};", qual, elem.mem(), res, addr, pol).unwrap();
             }
         }
     }
@@ -3221,20 +3225,13 @@ or `shared_alloc_u32` for a shared-memory array.",
         cache_policy: Option<&CachePolicyAttr>,
         hw_profile: &HardwareProfile,
     ) -> String {
-        let mut cache_str = ".ca";
-        if let Some(cp) = cache_policy {
-            if cp.policy == "L2_PERSIST" {
-                cache_str = ".lu";
-            } else if cp.policy == "L2_EVICT_FIRST" {
-                cache_str = ".L2::evict_first";
-            }
-        }
         // `A[i]` or a bare buffer `A` (its element 0): the
         // bare form used to load f32 whatever `A` held.
         let elem = self.place_elem_ty(place).unwrap_or(ScalarTy::F32);
         let addr_reg = self.emit_addr(place, cache_policy, hw_profile);
+        let (qual, policy) = self.load_cache_hint(cache_policy);
         let dst = self.alloc_ty(elem);
-        self.emit_load_into(&dst, elem, &addr_reg, cache_str, None);
+        self.emit_load_into(&dst, elem, &addr_reg, qual, policy.as_deref(), None);
         dst
     }
 
@@ -3261,6 +3258,165 @@ or `shared_alloc_u32` for a shared-memory array.",
             }
         }
         bad
+    }
+
+    /// The cache operator - and, for an L2 eviction priority, the policy
+    /// register - that a load under `@cache_policy(P)` takes.
+    ///
+    /// The mapping is the PTX ISA's, for the meaning the language reference
+    /// gives each policy (section 9.2):
+    ///
+    /// | policy | means | emitted |
+    /// | --- | --- | --- |
+    /// | none | | `ld.global.ca` |
+    /// | `L2_STREAM` | read once | `ld.global.cs` - "allocates global lines with evict-first policy in L1 and L2" |
+    /// | `L2_EVICT_FIRST` | evict as soon as possible | `createpolicy.fractional.L2::evict_first` + `ld.global.L2::cache_hint` |
+    /// | `L2_EVICT_LAST`, `L2_PERSIST` | keep resident | `createpolicy.fractional.L2::evict_last` + `ld.global.L2::cache_hint` |
+    ///
+    /// It used to emit `.L2::evict_first` for `L2_EVICT_FIRST` - a qualifier
+    /// `ld` takes only for `.v8.b32`/`.v4.b64` on sm_100, so `ptxas` rejected
+    /// the module after a clean compile - `.lu` for `L2_PERSIST`, which on a
+    /// global address "performs a load cached streaming operation (ld.cs)",
+    /// i.e. EVICT FIRST, the opposite of persist; and nothing at all for
+    /// `L2_EVICT_LAST` and `L2_STREAM`. `createpolicy` needs sm_80 and PTX
+    /// 7.4, so below sm_80 an L2 priority is refused rather than dropped.
+    fn load_cache_hint(
+        &mut self,
+        cache_policy: Option<&CachePolicyAttr>,
+    ) -> (&'static str, Option<String>) {
+        let Some(cp) = cache_policy else {
+            return (".ca", None);
+        };
+        let priority = match cp.policy.as_str() {
+            "L2_STREAM" => return (".cs", None),
+            "L2_EVICT_FIRST" => "evict_first",
+            "L2_EVICT_LAST" | "L2_PERSIST" => "evict_last",
+            other => {
+                self.emit_errors.push(format!(
+                    "Line {}: `@cache_policy({})` has no lowering in this backend.",
+                    cp.span.line, other
+                ));
+                return (".ca", None);
+            }
+        };
+        if self.sm_level() < 80 {
+            self.emit_errors.push(format!(
+                "Line {}: `@cache_policy({})` sets an L2 eviction priority, which needs \
+                 `createpolicy` (sm_80 and later); this build targets {}. Drop the \
+                 directive or use L2_STREAM (`ld.global.cs`), which every target has.",
+                cp.span.line, cp.policy, self.sm_target
+            ));
+            return (".ca", None);
+        }
+        self.require_ptx_version("7.4");
+        let pol = self.alloc_reg64();
+        writeln!(
+            &mut self.ptx_buffer,
+            "    createpolicy.fractional.L2::{}.b64 {}, 1.0;",
+            priority, pol
+        )
+        .unwrap();
+        (".L2::cache_hint", Some(pol))
+    }
+
+    /// Counts the loads in `e` that honour a `@cache_policy`, and names the
+    /// ones that would drop it. Honoured by an element read `A[i]`,
+    /// `GlobalMemory::load` and `ld_global_v4_f32`/`load_v4`; every other
+    /// load built-in ignores the policy it is handed. Exhaustive, no `_ =>`.
+    fn cache_policy_loads(e: &Expr, honoured: &mut usize, dropped: &mut Vec<String>) {
+        const HONOURS: &[&str] = &["ld_global_v4_f32", "load_v4"];
+        const DROPS: &[&str] = &[
+            "block_ptr2d_load", "make_block_ptr2d", "block_ptr2d_load_v4", "block_ptr3d_load",
+            "block_ptr3d_load_v4", "make_block_ptr3d", "block_tile_load", "tile_load",
+            "shared_load_v4", "cp_async",
+        ];
+        match e {
+            Expr::Index { index, .. } => {
+                *honoured += 1;
+                Self::cache_policy_loads(index, honoured, dropped);
+            }
+            Expr::Call { func, args, .. } => {
+                match &**func {
+                    Expr::Ident(n, _) if HONOURS.contains(&n.as_str()) => *honoured += 1,
+                    Expr::Ident(n, _) if DROPS.contains(&n.as_str()) => dropped.push(n.clone()),
+                    Expr::Path { namespace, member, .. } => match (namespace.as_str(), member.as_str()) {
+                        ("GlobalMemory", "load") => *honoured += 1,
+                        ("GlobalMemory", "load_v4") | ("GlobalMemory", "ld_v4") | ("BlockTile", "load") => {
+                            dropped.push(format!("{}::{}", namespace, member))
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+                for a in args {
+                    Self::cache_policy_loads(a, honoured, dropped);
+                }
+            }
+            Expr::GenericCall { args, .. } => {
+                for a in args {
+                    Self::cache_policy_loads(a, honoured, dropped);
+                }
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                Self::cache_policy_loads(left, honoured, dropped);
+                Self::cache_policy_loads(right, honoured, dropped);
+            }
+            Expr::UnaryOp { operand, .. } => Self::cache_policy_loads(operand, honoured, dropped),
+            Expr::MemberAccess { base, .. } => Self::cache_policy_loads(base, honoured, dropped),
+            Expr::StructLit { fields, .. } => {
+                for (_, v) in fields {
+                    Self::cache_policy_loads(v, honoured, dropped);
+                }
+            }
+            Expr::Ident(..)
+            | Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::StringLit(..)
+            | Expr::CharLit(..)
+            | Expr::BoolLit(..)
+            | Expr::SelfLit(..)
+            | Expr::Path { .. }
+            | Expr::BlockExpr(..)
+            | Expr::ZeroInit(..) => {}
+        }
+    }
+
+    /// Refuse a `let` whose `@cache_policy` no load in its initialiser would
+    /// honour. The policy used to be handed to every load built-in and read by
+    /// two, so `@cache_policy(L2_PERSIST) let v = block_ptr2d_load(...)`
+    /// compiled clean and emitted a plain load. Returns true when refused.
+    fn reject_unhonoured_cache_policy(
+        &mut self,
+        name: &str,
+        cache_policy: Option<&CachePolicyAttr>,
+        init: Option<&Expr>,
+    ) -> bool {
+        let Some(cp) = cache_policy else {
+            return false;
+        };
+        let mut honoured = 0;
+        let mut dropped = Vec::new();
+        if let Some(e) = init {
+            Self::cache_policy_loads(e, &mut honoured, &mut dropped);
+        }
+        let why = if !dropped.is_empty() {
+            format!(
+                "`{}` does not take a cache policy, so it would be silently dropped",
+                dropped.join("`, `")
+            )
+        } else if honoured == 0 {
+            "the initialiser loads nothing from global memory, so there is nothing for it \
+             to apply to"
+                .to_string()
+        } else {
+            return false;
+        };
+        self.emit_errors.push(format!(
+            "Line {}: `@cache_policy({})` on `let {}`: {}. A policy is honoured by an \
+             element read (`A[i]`), `GlobalMemory::load` and `ld_global_v4_f32`.",
+            cp.span.line, cp.policy, name, why
+        ));
+        true
     }
 
     /// Refuse a kernel in which a register loaded as an element VALUE is used
@@ -3437,6 +3593,9 @@ or `shared_alloc_u32` for a shared-memory array.",
             // running total is exact and independent of the order the terms
             // arrived in - which on a GPU is decided by the launch geometry.
             Stmt::Let { name, ty, init, zero_drift: Some(_), bounds, span, cache_policy, .. } => {
+                if self.reject_unhonoured_cache_policy(name, cache_policy.as_ref(), init.as_ref()) {
+                    return;
+                }
                 let ty_name = match ty {
                     Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => n.clone(),
                     _ => "F32".to_string(),
@@ -3549,6 +3708,9 @@ declare it as a Q format.\n{}",
                 span,
                 ..
             } => {
+                if self.reject_unhonoured_cache_policy(name, cache_policy.as_ref(), init.as_ref()) {
+                    return;
+                }
                 // A sub-word local is refused before anything is emitted for
                 // it: PTX has no sub-word register, so honouring the
                 // declaration is impossible and ignoring it would silently give
@@ -4650,19 +4812,13 @@ declare it as a Q format.\n{}",
                                 return "".into();
                             }
                             let addr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
-                            let mut cache_str = ".ca";
-                            if let Some(cp) = cache_policy {
-                                if cp.policy == "L2_PERSIST" {
-                                    cache_str = ".lu";
-                                } else if cp.policy == "L2_EVICT_FIRST" {
-                                    cache_str = ".L2::evict_first";
-                                }
-                            }
+                            let (qual, policy) = self.load_cache_hint(cache_policy);
+                            let pol = policy.map(|p| format!(", {}", p)).unwrap_or_default();
                             let f0 = self.alloc_regf32();
                             let f1 = self.alloc_regf32();
                             let f2 = self.alloc_regf32();
                             let f3 = self.alloc_regf32();
-                            writeln!(&mut self.ptx_buffer, "    ld.global{}.v4.f32 {{{}, {}, {}, {}}}, [{}];", cache_str, f0, f1, f2, f3, addr_reg).unwrap();
+                            writeln!(&mut self.ptx_buffer, "    ld.global{}.v4.f32 {{{}, {}, {}, {}}}, [{}]{};", qual, f0, f1, f2, f3, addr_reg, pol).unwrap();
                             f0
                         } else if fname == "st_global_v4_f32" || fname == "store_v4" {
                             if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
@@ -5134,7 +5290,7 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_r, row_reg, max_r_reg).unwrap();
                             writeln!(&mut self.ptx_buffer, "    setp.lt.u32 {}, {}, {};", p_c, col_reg, max_c_reg).unwrap();
                             writeln!(&mut self.ptx_buffer, "    and.pred {}, {}, {};", p_valid, p_r, p_c).unwrap();
-                            self.emit_load_into(&res, elem, &addr, "", Some(&p_valid));
+                            self.emit_load_into(&res, elem, &addr, "", None, Some(&p_valid));
                             res
                         } else if fname == "block_ptr2d_store" {
                             let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };

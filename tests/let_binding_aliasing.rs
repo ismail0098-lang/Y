@@ -305,8 +305,13 @@ fn the_grid_stride_loop_does_not_destroy_the_thread_index() {
     let d_out = ctx.alloc(slots * 4).unwrap();
     ctx.memset_u8(&d_out, 0).unwrap();
 
-    let n_arg = N as i32;
-    let args = vec![d_out.device_ptr(), (&n_arg as *const i32) as u64];
+    // `launch` takes argument VALUES (it hands the driver a pointer to each).
+    // This used to pass `(&n_arg as *const i32) as u64` - the address of a
+    // host stack slot, whose low 32 bits the kernel read as `N` - so the loop
+    // count depended on ASLR: negative as an I32 and the loop never ran, which
+    // made the aliasing bug invisible; large and it ran up to 2^31/BLOCK times
+    // and a clobbered index wrote far outside the buffer.
+    let args = vec![d_out.device_ptr(), N as u64];
     ctx.launch(&module, (1, 1, 1), (BLOCK, 1, 1), 0, &args)
         .expect("launch failed");
     ctx.synchronize().expect("kernel did not complete");

@@ -716,13 +716,23 @@ kernel drift_demo() {
 
 ### 9.2 `@cache_policy`
 * **Syntax**: `@cache_policy(PolicyType, [options])`
-* **Usage**: Decorator for let-bindings that load from memory.
+* **Usage**: Decorator for a `let` whose initialiser loads from global memory.
 * **Function**: Tells the compiler which memory load instructions to emit to optimize cache usage.
-* **Policies**:
-  * `L2_PERSIST`: Flags memory pages to remain resident in L2 cache.
-  * `L2_EVICT_FIRST`: Evicts the loaded cache line as soon as possible to free up cache space.
-  * `L2_EVICT_LAST`: Prevents early eviction of this data.
-  * `L2_STREAM`: Streams data directly to registers, bypassing the cache entirely.
+* **Policies**, and what the PTX backend emits for each (PTX ISA wording quoted):
+  * `L2_PERSIST`, `L2_EVICT_LAST`: keep the line resident -
+    `createpolicy.fractional.L2::evict_last` + `ld.global.L2::cache_hint`
+    ("suitable for data that should remain persistent in cache").
+  * `L2_EVICT_FIRST`: evict the line first -
+    `createpolicy.fractional.L2::evict_first` + `ld.global.L2::cache_hint`.
+  * `L2_STREAM`: read once - `ld.global.cs`, which "allocates global lines with
+    evict-first policy in L1 and L2". No global load bypasses L2 entirely.
+  * The three L2 priorities need `createpolicy`: sm_80 and later, PTX ISA 7.4
+    (the module declares 7.4 when it uses one). Below sm_80 they are refused.
+* **Honoured by** an element read `A[i]`, `GlobalMemory::load` and
+  `ld_global_v4_f32`. A policy on any other statement - a store, a `let` whose
+  load is `block_ptr2d_load` or another load that ignores it, or a `let` that
+  loads nothing - is **refused** rather than parsed and dropped.
+* `reuse_count=N` is parsed and not lowered by any backend.
 * **Example**:
 ```ysu
 // Keep weights in L2 Cache for reuse
@@ -1125,18 +1135,23 @@ kernel matmul(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) 
 kernel stream_vector_add(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, N: I32) {
     @invariant(i >= 0)
     for i in 0..N {
-        // Stream data to bypass L1/L2 caches
+        // Read once: `ld.global.cs` (evict-first in L1 and L2)
         @cache_policy(L2_STREAM)
         let a_val: F32 = A[i];
 
         @cache_policy(L2_STREAM)
         let b_val: F32 = B[i];
 
-        @cache_policy(L2_STREAM)
         C[i] = a_val + b_val;
     }
 }
 ```
+
+This example used to put `@cache_policy(L2_STREAM)` on the store `C[i] = ...`
+too, where it was parsed and dropped - no store takes a cache policy, and a
+policy on anything but a `let` is refused now. It also lacked the `@invariant`
+a loop needs, so it did not compile; and until 2026-09-27 reading `A[i]` gave
+the element's ADDRESS (§20.6), so once it did compile it added two addresses.
 
 ---
 
@@ -2613,10 +2628,16 @@ The Y version enforces at compile time that `pipe.wait(tx)` is called before `sm
 | CUDA C++ | Y Equivalent |
 | :--- | :--- |
 | `ld.global.ca` (L1/L2 cache) | Default load (no decorator) |
-| `ld.global.cg` (L2 only) | `@cache_policy(L2_EVICT_FIRST)` |
 | `ld.global.cs` (streaming, evict-first) | `@cache_policy(L2_STREAM)` |
-| `ld.global.lu` (last-use, invalidate) | `@cache_policy(L2_EVICT_LAST)` |
-| `ld.global.nc` (non-coherent / read-only) | `@cache_policy(L2_PERSIST)` |
+| `createpolicy ... L2::evict_first` + `ld.global.L2::cache_hint` | `@cache_policy(L2_EVICT_FIRST)` |
+| `createpolicy ... L2::evict_last` + `ld.global.L2::cache_hint` | `@cache_policy(L2_EVICT_LAST)` or `@cache_policy(L2_PERSIST)` |
+| `ld.global.cg`, `ld.global.nc` | No equivalent |
+
+This table used to map `L2_EVICT_FIRST` to `.cg`, `L2_EVICT_LAST` to `.lu` and
+`L2_PERSIST` to `.nc`, and the compiler emitted a fourth set: `.lu` for
+`L2_PERSIST` (on a global address `ld.lu` "performs a load cached streaming
+operation", i.e. evict first), a qualifier `ptxas` rejects for `L2_EVICT_FIRST`,
+and nothing for the other two. See §9.2.
 
 ### 13.7 Inline PTX
 
@@ -2876,7 +2897,7 @@ After the Sentinel probe runs, `.ysu_hw_profile` contains cycle-accurate measure
 // (e.g. weight matrices in attention, BVH node data in deep traversals).
 // W is a GlobalMemory<F16>: the load widens the half to F32 exactly.
 @cache_policy(L2_PERSIST, reuse_count=8)
-let weights: F32 = GlobalMemory::load(W[i]);      // ld.global.lu.b16 + cvt.f32.f16
+let weights: F32 = GlobalMemory::load(W[i]);      // createpolicy + ld.global.L2::cache_hint.b16 + cvt.f32.f16
 
 output[i] = weights;                              // no store takes a cache policy
 ```
@@ -2887,14 +2908,14 @@ output[i] = result;` and `let act: F16 = load(A);`. There is no bare `load`; an
 compile and silently drop the store - it stores now (§20.6), but no store honours
 a cache policy.
 
-**`L2_EVICT_FIRST` on a load currently emits PTX that `ptxas` rejects**
-(`ld.global.L2::evict_first.f32`: that qualifier exists only for 256-bit vector
-loads), after a clean compile. Known and not yet fixed - see CLAUDE.md.
+`L2_EVICT_FIRST` on a load used to emit `ld.global.L2::evict_first.f32`, which
+`ptxas` rejects (`ld` takes that qualifier only for 256-bit vector loads on
+sm_100), after a clean compile. It is an L2 cache hint now (§9.2).
 
 **Rule of thumb:**
 - Weights / BVH nodes repeatedly accessed → `L2_PERSIST`
-- Large one-shot reads → `L2_EVICT_FIRST`
-- Write-only outputs → `L2_STREAM`
+- Large one-shot reads → `L2_STREAM` or `L2_EVICT_FIRST`
+- Stores take no cache policy.
 
 ### 14.3 Eliminating Shared Memory Bank Conflicts
 

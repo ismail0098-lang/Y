@@ -387,7 +387,9 @@ fn an_element_read_is_the_same_load_as_global_memory_load() {
 /// position. A position lowered as a value would load the element and use the
 /// loaded bits as the address, which the backend refuses by name ("an element
 /// VALUE ... is used as an ADDRESS") - so each of these compiling is the
-/// statement that its position is an address.
+/// statement that its position is an address. Each is also assembled where
+/// `ptxas` is present, which rejects a float register used as an address
+/// independently of that check.
 #[test]
 fn every_address_position_still_takes_an_address() {
     let probes: &[(&str, &str)] = &[
@@ -414,11 +416,45 @@ fn every_address_position_still_takes_an_address() {
                 body
             ),
         );
-        if !e.ok || e.ptx.is_none() {
-            failures.push(format!("{}: {}", tag, e.log.trim()));
+        match (&e.ptx, e.ok) {
+            (Some(ptx), true) => {
+                if let Err(why) = assembles(tag, ptx) {
+                    failures.push(format!("{}: ptxas rejects it: {}", tag, why.trim()));
+                }
+            }
+            _ => failures.push(format!("{}: {}", tag, e.log.trim())),
         }
     }
     assert!(failures.is_empty(), "address positions that no longer take an address:\n{}", failures.join("\n"));
+}
+
+/// `ptxas` over `ptx` at the module's own `.target`; `Ok` when there is no
+/// `ptxas` to ask (the element-value check still ran in the compiler).
+fn assembles(tag: &str, ptx: &str) -> Result<(), String> {
+    if Command::new("ptxas").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let target = ptx
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(".target "))
+        .expect("module declares no .target")
+        .trim()
+        .to_string();
+    let f = std::env::temp_dir().join(format!("y_element_reads_asm_{}_{}.ptx", std::process::id(), tag));
+    std::fs::write(&f, ptx).unwrap();
+    let out = Command::new("ptxas")
+        .arg(format!("-arch={}", target))
+        .arg(&f)
+        .arg("-o")
+        .arg("/dev/null")
+        .output()
+        .expect("run ptxas");
+    let _ = std::fs::remove_file(&f);
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).to_string())
+    }
 }
 
 /// Whether the first instruction matching `op` comes after `bar.sync`.
