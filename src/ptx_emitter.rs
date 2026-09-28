@@ -773,6 +773,13 @@ pub struct PtxEmitter {
     /// name it is that variable's F32 value (the type checker types `let y =
     /// 0.1` as F32) and may be reassigned, so `emit_convert` checks ownership.
     float_lit: std::collections::HashMap<String, f64>,
+    /// Registers that hold an ELEMENT VALUE loaded by reading `A[i]` in a
+    /// value position. None of them may appear inside `[...]`: Y cannot turn
+    /// an element's value into a pointer, so one there means an address
+    /// position was lowered as a value - a load of the element's bits used as
+    /// the address of the load. `check_element_values_are_not_addresses`
+    /// refuses the kernel if it happens. See `emit_addr`.
+    element_value_regs: std::collections::HashSet<String>,
     /// `type X = T;` aliases seen in the current kernel, so a `let x: X`
     /// resolves through them rather than reading as "no annotation".
     type_aliases: std::collections::HashMap<String, Type>,
@@ -930,6 +937,7 @@ impl PtxEmitter {
             vec_vars: std::collections::HashMap::new(),
             ptr_elem: std::collections::HashMap::new(),
             float_lit: std::collections::HashMap::new(),
+            element_value_regs: std::collections::HashSet::new(),
             type_aliases: std::collections::HashMap::new(),
             zero_drift: std::collections::HashMap::new(),
             drift_costs: crate::zero_drift::CostTable::new(),
@@ -2773,6 +2781,7 @@ or `shared_alloc_u32` for a shared-memory array.",
         self.vec_vars.clear();
         self.ptr_elem.clear();
         self.float_lit.clear();
+        self.element_value_regs.clear();
         self.type_aliases.clear();
         self.zero_drift.clear();
         self.record_pointer_element_types(kernel);
@@ -2891,6 +2900,7 @@ or `shared_alloc_u32` for a shared-memory array.",
 
         // Take back the body_buffer and restore the original self.ptx_buffer
         let body_code = std::mem::replace(&mut self.ptx_buffer, saved_buffer);
+        self.check_element_values_are_not_addresses(&kernel.name, &body_code);
 
         // Flush any module-scope declarations the body emitter queued up
         // (currently just `.extern .shared` for a pipelined tile-GEMM
@@ -3078,6 +3088,234 @@ or `shared_alloc_u32` for a shared-memory array.",
         }
     }
 
+    /// The ADDRESS of element `index` of `base`: its stride, the bounds trap
+    /// where the index is not proven safe, and the shared-memory swizzle where
+    /// the type checker recorded one. This is what `Expr::Index` used to
+    /// evaluate to in every position; it is reached through `emit_addr` now.
+    fn emit_index_address(
+        &mut self,
+        base: &Expr,
+        index: &Expr,
+        span: &Span,
+        cache_policy: Option<&CachePolicyAttr>,
+        hw_profile: &HardwareProfile,
+    ) -> String {
+        let base_reg = self.emit_expr(base, cache_policy, hw_profile);
+        let idx_reg = self.emit_expr(index, cache_policy, hw_profile);
+
+        let idx_u64 = self.alloc_reg64();
+        writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", idx_u64, idx_reg).unwrap();
+
+        let is_safe = crate::type_checker::SAFE_INDICES.with(|set| {
+            set.borrow().contains(&(span.line, span.col))
+        });
+        let array_size = crate::type_checker::INDEX_ARRAY_SIZES.with(|map| {
+            map.borrow().get(&(span.line, span.col)).cloned()
+        });
+
+        if !is_safe {
+            if let Some(size) = array_size {
+                let pred = self.alloc_pred();
+                writeln!(&mut self.ptx_buffer, "    setp.ge.u64 {}, {}, {};", pred, idx_u64, size).unwrap();
+                writeln!(&mut self.ptx_buffer, "    @{} trap;", pred).unwrap();
+            }
+        }
+
+        let swizzle_pattern = crate::type_checker::INDEX_SWIZZLES.with(|map| {
+            map.borrow().get(&(span.line, span.col)).cloned()
+        });
+
+        if let Some(swizzle) = swizzle_pattern {
+            // Apply dynamic swizzling in PTX to avoid bank conflicts!
+            // byte_addr = idx_u64 * 2 (since SharedMemoryTile uses F16 elements = 2 bytes)
+            let byte_addr = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 1;", byte_addr, idx_u64).unwrap();
+
+            // chunk_idx = byte_addr / 16
+            let chunk_idx = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    shr.u64 {}, {}, 4;", chunk_idx, byte_addr).unwrap();
+
+            // row = threadIdx.x % 16
+            let tid = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
+            let row = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 15;", row, tid).unwrap();
+
+            // xor_val = ((row >> swizzle.offset) & mask) << shift
+            let mut current_val = row.clone();
+            if swizzle.offset > 0 {
+                let temp = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, {};", temp, current_val, swizzle.offset).unwrap();
+                current_val = temp;
+            }
+            let mask = (1 << swizzle.xor_bits) - 1;
+            let temp_masked = self.alloc_reg32();
+            writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, {};", temp_masked, current_val, mask).unwrap();
+            current_val = temp_masked;
+            if swizzle.base_shift > 0 {
+                let temp_shifted = self.alloc_reg32();
+                writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, {};", temp_shifted, current_val, swizzle.base_shift).unwrap();
+                current_val = temp_shifted;
+            }
+            let xor_val_u64 = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", xor_val_u64, current_val).unwrap();
+
+            // new_chunk = chunk_idx ^ xor_val
+            let new_chunk = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    xor.b64 {}, {}, {};", new_chunk, chunk_idx, xor_val_u64).unwrap();
+
+            // reconstruct byte_addr: swizzled_offset = (new_chunk * 16) | (byte_addr % 16)
+            let new_chunk_shifted = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 4;", new_chunk_shifted, new_chunk).unwrap();
+            let byte_offset = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    and.b64 {}, {}, 15;", byte_offset, byte_addr).unwrap();
+            let swizzled_offset = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    or.b64 {}, {}, {};", swizzled_offset, new_chunk_shifted, byte_offset).unwrap();
+
+            let addr_reg = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr_reg, base_reg, swizzled_offset).unwrap();
+            addr_reg
+        } else {
+            // The stride is the element's size, not a constant 4. A
+            // `GlobalMemory<U64>` indexed at a 4-byte stride reads
+            // half of one element and half of the next.
+            let elem = self.elem_ty_or_f32(base);
+            let offset_reg = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, {};", offset_reg, idx_u64, elem.log2_bytes()).unwrap();
+
+            let addr_reg = self.alloc_reg64();
+            writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr_reg, base_reg, offset_reg).unwrap();
+            addr_reg
+        }
+    }
+
+    /// An argument in an ADDRESS position: `A[i]` is the address of element
+    /// `i`, anything else (a bare buffer `A`) is what `emit_expr` gives.
+    ///
+    /// Every memory built-in's buffer operand, `store`'s place, `cp_async`'s
+    /// source and destination, and an indexed assignment target come through
+    /// here. Everything else is a VALUE, where `A[i]` loads. A position
+    /// lowered through `emit_expr` by mistake loads the element and uses the
+    /// loaded bits as an address, and
+    /// `check_element_values_are_not_addresses` refuses the kernel.
+    fn emit_addr(
+        &mut self,
+        e: &Expr,
+        cache_policy: Option<&CachePolicyAttr>,
+        hw_profile: &HardwareProfile,
+    ) -> String {
+        match e {
+            Expr::Index { base, index, span } => {
+                self.emit_index_address(base, index, span, cache_policy, hw_profile)
+            }
+            _ => self.emit_expr(e, cache_policy, hw_profile),
+        }
+    }
+
+    /// One element loaded from `place` (`A[i]`, or a bare buffer `A` for its
+    /// element 0) into a register of the element's promoted type. Shared by
+    /// `GlobalMemory::load(place)` and reading `A[i]` as a value.
+    fn emit_element_load(
+        &mut self,
+        place: &Expr,
+        cache_policy: Option<&CachePolicyAttr>,
+        hw_profile: &HardwareProfile,
+    ) -> String {
+        let mut cache_str = ".ca";
+        if let Some(cp) = cache_policy {
+            if cp.policy == "L2_PERSIST" {
+                cache_str = ".lu";
+            } else if cp.policy == "L2_EVICT_FIRST" {
+                cache_str = ".L2::evict_first";
+            }
+        }
+        // `A[i]` or a bare buffer `A` (its element 0): the
+        // bare form used to load f32 whatever `A` held.
+        let elem = self.place_elem_ty(place).unwrap_or(ScalarTy::F32);
+        let addr_reg = self.emit_addr(place, cache_policy, hw_profile);
+        let dst = self.alloc_ty(elem);
+        self.emit_load_into(&dst, elem, &addr_reg, cache_str, None);
+        dst
+    }
+
+    /// The instructions in `body` that put one of `regs` inside `[...]` - an
+    /// address operand, `[%rd4]` or `[%rd4+16]`. Pure, so the one guard no
+    /// correct compile can reach is still tested (`tests_element_reads`).
+    fn element_values_used_as_addresses<'a>(
+        regs: &std::collections::HashSet<String>,
+        body: &'a str,
+    ) -> Vec<&'a str> {
+        let mut bad = Vec::new();
+        for line in body.lines() {
+            let mut rest = line;
+            while let Some(at) = rest.find('[') {
+                let after = &rest[at + 1..];
+                let end = after
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '%' || c == '_'))
+                    .unwrap_or(after.len());
+                if regs.contains(&after[..end]) {
+                    bad.push(line.trim());
+                    break;
+                }
+                rest = after;
+            }
+        }
+        bad
+    }
+
+    /// Refuse a kernel in which a register loaded as an element VALUE is used
+    /// as an ADDRESS. Nothing in Y turns an element's value into a pointer,
+    /// so a loaded register inside `[...]` can only mean an address position
+    /// was lowered through `emit_expr` rather than `emit_addr` - which would
+    /// load `A[i]` and then load or store through the loaded bits. For a
+    /// 64-bit element that assembles and runs; for the others `ptxas` may
+    /// reject it on another machine. Either way it is refused here, by name.
+    fn check_element_values_are_not_addresses(&mut self, kernel: &str, body: &str) {
+        let bad = Self::element_values_used_as_addresses(&self.element_value_regs, body);
+        if let Some(first) = bad.first() {
+            self.emit_errors.push(format!(
+                "[PTX] internal error in kernel `{}`: an element VALUE loaded by `A[i]` is \
+                 used as an ADDRESS in `{}` ({} instruction(s)). An address position was \
+                 lowered as a value; the kernel is refused rather than emitted.",
+                kernel,
+                first,
+                bad.len()
+            ));
+        }
+    }
+
+    /// True when evaluating `e` reads registers and nothing else - no memory
+    /// (an element `A[i]`, a `GlobalMemory::load`), no built-in call (which
+    /// may touch memory or the carry flag), and nothing this backend does not
+    /// model. The barrier-hoisting pass moves only such expressions across a
+    /// barrier. Exhaustive, no `_ =>` arm: a new expression kind must decide.
+    fn reads_only_registers(e: &Expr) -> bool {
+        match e {
+            Expr::Ident(..)
+            | Expr::IntLit(..)
+            | Expr::FloatLit(..)
+            | Expr::BoolLit(..)
+            | Expr::CharLit(..) => true,
+            Expr::BinaryOp { left, right, .. } => {
+                Self::reads_only_registers(left) && Self::reads_only_registers(right)
+            }
+            Expr::UnaryOp { operand, .. } => Self::reads_only_registers(operand),
+            // A lane of a 4-wide vector is one of its four registers.
+            Expr::MemberAccess { base, member, .. } => {
+                matches!(member.as_str(), "x" | "y" | "z" | "w") && Self::reads_only_registers(base)
+            }
+            Expr::Index { .. }
+            | Expr::Call { .. }
+            | Expr::GenericCall { .. }
+            | Expr::Path { .. }
+            | Expr::StructLit { .. }
+            | Expr::BlockExpr(..)
+            | Expr::StringLit(..)
+            | Expr::SelfLit(..)
+            | Expr::ZeroInit(..) => false,
+        }
+    }
+
     fn emit_block(&mut self, block: &Block, hw_profile: &HardwareProfile) {
         let mut stmts = block.stmts.clone();
 
@@ -3131,17 +3369,31 @@ or `shared_alloc_u32` for a shared-memory array.",
                 let j = i + 1;
                 let mut hoisted = Vec::new();
                 while j < stmts.len() && hoist_count < budget {
+                    // Only a write to a REGISTER, computed from registers,
+                    // may cross a barrier. An element store (`Out[i] = a + b`)
+                    // is a memory write, and moving it above the barrier lets
+                    // a thread that reads `Out` before the barrier see it; an
+                    // element read (`A[i] + 1`) is a memory read, and moving
+                    // it above the barrier reads what another thread has not
+                    // written yet. Both were reachable: an indexed assignment
+                    // became a store, and reading `A[i]` became a load, after
+                    // this rule was written - and a `GlobalMemory::load` in
+                    // arithmetic always was one.
                     let value = match &stmts[j] {
                         Stmt::Let {
                             init: Some(v @ Expr::BinaryOp { .. }),
                             ..
                         } => v,
                         Stmt::Assign {
+                            target: Expr::Ident(..),
                             value: v @ Expr::BinaryOp { .. },
                             ..
                         } => v,
                         _ => break,
                     };
+                    if !Self::reads_only_registers(value) {
+                        break;
+                    }
                     let mut reads = Vec::new();
                     Self::collect_idents(value, &mut reads);
                     if !reads
@@ -3546,19 +3798,35 @@ declare it as a Q format.\n{}",
             // stop, one guard up. The same desugaring fixed the identical hole
             // in `zk_emitter`.
             Stmt::CompoundAssign { target, op, value, span } => {
-                // `A[i] += v` desugars to `A[i] = A[i] + v`, which READS
-                // `A[i]` as a value - and `Expr::Index` evaluates to the
-                // element's ADDRESS in this backend, so the sum would be the
-                // address plus `v`. Refused until element reads are lowered.
-                if !matches!(target, Expr::Ident(..)) {
-                    self.unsupported_stmt(
-                        "a compound assignment to an element (`A[i] op= v`): it reads the \
-                         element, and this backend evaluates `A[i]` to its ADDRESS, not \
-                         its value. Write `store(A[i], GlobalMemory::load(A[i]) + v)`",
-                        span,
-                    );
-                    return;
-                }
+                // `A[i] op= v` is `A[i] = A[i] op v`: the right-hand `A[i]` is a
+                // value (a load) and the target an address (a store). It was
+                // refused while reading `A[i]` gave its ADDRESS, which would
+                // have stored the address plus `v`.
+                //
+                // The index is evaluated ONCE, into a register bound to a name
+                // no program can spell, so the load and the store address the
+                // same element whatever the index expression is. Desugaring
+                // the index twice is only right while every index expression
+                // is side-effect free, which is true today and enforced by
+                // nothing.
+                let mut hidden = None;
+                let target = match target {
+                    Expr::Index { base, index, span: ispan } if self.elem_ty_of(base).is_some() => {
+                        let idx = self.emit_expr(index, None, hw_profile);
+                        if idx.is_empty() {
+                            return;
+                        }
+                        let name = format!("\0index{}", idx);
+                        self.variables.insert(name.clone(), idx);
+                        hidden = Some(name.clone());
+                        Expr::Index {
+                            base: base.clone(),
+                            index: Box::new(Expr::Ident(name, ispan.clone())),
+                            span: ispan.clone(),
+                        }
+                    }
+                    other => other.clone(),
+                };
                 self.emit_stmt(
                     &Stmt::Assign {
                         target: target.clone(),
@@ -3572,6 +3840,9 @@ declare it as a Q format.\n{}",
                     },
                     hw_profile,
                 );
+                if let Some(name) = hidden {
+                    self.variables.remove(&name);
+                }
             }
             // `acc = acc + e` is the SAME statement as `acc += e`, and this
             // emitter had an arm for one and not the other - so the running-sum
@@ -3678,7 +3949,7 @@ declare it as a Q format.\n{}",
                     // element's stride, the bounds trap), same conversion into
                     // the element type - so it is lowered as exactly that.
                     if !val_reg.is_empty() {
-                        let addr = self.emit_expr(target, None, hw_profile);
+                        let addr = self.emit_addr(target, None, hw_profile);
                         let v = self.emit_store_operand(&val_reg, elem);
                         writeln!(&mut self.ptx_buffer, "    st.global.{} [{}], {};", elem.mem(), addr, v)
                             .unwrap();
@@ -4048,94 +4319,32 @@ declare it as a Q format.\n{}",
                     }
                 }
             }
-            Expr::Index { base, index, span } => {
-                let base_reg = self.emit_expr(base, cache_policy, hw_profile);
-                let idx_reg = self.emit_expr(index, cache_policy, hw_profile);
-
-                let idx_u64 = self.alloc_reg64();
-                writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", idx_u64, idx_reg).unwrap();
-
-                let is_safe = crate::type_checker::SAFE_INDICES.with(|set| {
-                    set.borrow().contains(&(span.line, span.col))
-                });
-                let array_size = crate::type_checker::INDEX_ARRAY_SIZES.with(|map| {
-                    map.borrow().get(&(span.line, span.col)).cloned()
-                });
-
-                if !is_safe {
-                    if let Some(size) = array_size {
-                        let pred = self.alloc_pred();
-                        writeln!(&mut self.ptx_buffer, "    setp.ge.u64 {}, {}, {};", pred, idx_u64, size).unwrap();
-                        writeln!(&mut self.ptx_buffer, "    @{} trap;", pred).unwrap();
-                    }
+            // READING `A[i]` LOADS THE ELEMENT. It used to evaluate to the
+            // element's ADDRESS, in every position: `let v: F32 = A[1];`
+            // emitted `cvt.rn.f32.u64 %f0, %rd4` - the address of `A[1]`,
+            // converted to a float - under a clean compile, exit 0, and a
+            // module `ptxas` accepts. The address positions (`store`'s place,
+            // `GlobalMemory::load`'s argument, every memory built-in's buffer)
+            // go through `emit_addr` now, and every other position is a value.
+            //
+            // The load is `GlobalMemory::load(A[i])`'s, shared rather than
+            // restated, so the two spellings emit the same instructions.
+            Expr::Index { base, span, .. } => {
+                if self.elem_ty_of(base).is_none() {
+                    // Not reachable from a program the type checker accepts
+                    // today: every indexable name in a kernel is a buffer
+                    // parameter. Kept so a new indexable thing is refused
+                    // rather than loaded as f32 (the old `elem_ty_or_f32`).
+                    self.unsupported_expr(
+                        "reading an element of something that is not a `GlobalMemory<T>` \
+                         parameter: this backend loads elements of buffer parameters only",
+                        span,
+                    );
+                    return "".into();
                 }
-
-                let swizzle_pattern = crate::type_checker::INDEX_SWIZZLES.with(|map| {
-                    map.borrow().get(&(span.line, span.col)).cloned()
-                });
-
-                if let Some(swizzle) = swizzle_pattern {
-                    // Apply dynamic swizzling in PTX to avoid bank conflicts!
-                    // byte_addr = idx_u64 * 2 (since SharedMemoryTile uses F16 elements = 2 bytes)
-                    let byte_addr = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 1;", byte_addr, idx_u64).unwrap();
-
-                    // chunk_idx = byte_addr / 16
-                    let chunk_idx = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    shr.u64 {}, {}, 4;", chunk_idx, byte_addr).unwrap();
-
-                    // row = threadIdx.x % 16
-                    let tid = self.alloc_reg32();
-                    writeln!(&mut self.ptx_buffer, "    mov.u32 {}, %tid.x;", tid).unwrap();
-                    let row = self.alloc_reg32();
-                    writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, 15;", row, tid).unwrap();
-
-                    // xor_val = ((row >> swizzle.offset) & mask) << shift
-                    let mut current_val = row.clone();
-                    if swizzle.offset > 0 {
-                        let temp = self.alloc_reg32();
-                        writeln!(&mut self.ptx_buffer, "    shr.u32 {}, {}, {};", temp, current_val, swizzle.offset).unwrap();
-                        current_val = temp;
-                    }
-                    let mask = (1 << swizzle.xor_bits) - 1;
-                    let temp_masked = self.alloc_reg32();
-                    writeln!(&mut self.ptx_buffer, "    and.b32 {}, {}, {};", temp_masked, current_val, mask).unwrap();
-                    current_val = temp_masked;
-                    if swizzle.base_shift > 0 {
-                        let temp_shifted = self.alloc_reg32();
-                        writeln!(&mut self.ptx_buffer, "    shl.b32 {}, {}, {};", temp_shifted, current_val, swizzle.base_shift).unwrap();
-                        current_val = temp_shifted;
-                    }
-                    let xor_val_u64 = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    cvt.u64.u32 {}, {};", xor_val_u64, current_val).unwrap();
-
-                    // new_chunk = chunk_idx ^ xor_val
-                    let new_chunk = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    xor.b64 {}, {}, {};", new_chunk, chunk_idx, xor_val_u64).unwrap();
-
-                    // reconstruct byte_addr: swizzled_offset = (new_chunk * 16) | (byte_addr % 16)
-                    let new_chunk_shifted = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, 4;", new_chunk_shifted, new_chunk).unwrap();
-                    let byte_offset = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    and.b64 {}, {}, 15;", byte_offset, byte_addr).unwrap();
-                    let swizzled_offset = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    or.b64 {}, {}, {};", swizzled_offset, new_chunk_shifted, byte_offset).unwrap();
-
-                    let addr_reg = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr_reg, base_reg, swizzled_offset).unwrap();
-                    addr_reg
-                } else {
-                    // The stride is the element's size, not a constant 4. A
-                    // `GlobalMemory<U64>` indexed at a 4-byte stride reads
-                    // half of one element and half of the next.
-                    let elem = self.elem_ty_or_f32(base);
-                    let offset_reg = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    shl.b64 {}, {}, {};", offset_reg, idx_u64, elem.log2_bytes()).unwrap();
-
-                    let addr_reg = self.alloc_reg64();
-                    writeln!(&mut self.ptx_buffer, "    add.u64 {}, {}, {};", addr_reg, base_reg, offset_reg).unwrap();
-                    addr_reg
-                }
+                let v = self.emit_element_load(expr, cache_policy, hw_profile);
+                self.element_value_regs.insert(v.clone());
+                v
             }
             Expr::Call { func, args, .. } => {
                 match &**func {
@@ -4147,8 +4356,8 @@ declare it as a Q format.\n{}",
                             return "".into();
                         }
                         if fname == "cp_async" && args.len() >= 2 {
-                            let src_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
-                            let dest_reg = self.emit_expr(&args[1], cache_policy, hw_profile);
+                            let src_reg = self.emit_addr(&args[0], cache_policy, hw_profile);
+                            let dest_reg = self.emit_addr(&args[1], cache_policy, hw_profile);
                             // The byte count used to be hardcoded to 16 and the
                             // third argument discarded, so `cp_async(dst, src, 4)`
                             // copied 16 bytes and overran the destination by 12.
@@ -4189,9 +4398,9 @@ declare it as a Q format.\n{}",
                             if self.reject_non_f32_buffers(fname, &args[..args.len().min(3)]) {
                                 return "".into();
                             }
-                            let a_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
-                            let b_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
-                            let c_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
+                            let a_ptr = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let b_ptr = if args.len() >= 2 { self.emit_addr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
+                            let c_ptr = if args.len() >= 3 { self.emit_addr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
 
                             // By NAME only: a 4th argument used to turn unrolling
                             // on by its presence, value discarded (`builtin_arity`).
@@ -4243,9 +4452,9 @@ declare it as a Q format.\n{}",
                             if self.reject_non_f32_buffers(fname, &args[..args.len().min(3)]) {
                                 return "".into();
                             }
-                            let x_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
-                            let w_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
-                            let out_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
+                            let x_ptr = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let w_ptr = if args.len() >= 2 { self.emit_addr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
+                            let out_ptr = if args.len() >= 3 { self.emit_addr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
 
                             let x0 = self.alloc_regf32();
                             let x1 = self.alloc_regf32();
@@ -4356,9 +4565,9 @@ declare it as a Q format.\n{}",
                             if self.reject_non_f32_buffers(fname, &args[..args.len().min(3)]) {
                                 return "".into();
                             }
-                            let gate_ptr = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
-                            let up_ptr = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
-                            let out_ptr = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
+                            let gate_ptr = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let up_ptr = if args.len() >= 2 { self.emit_addr(&args[1], cache_policy, hw_profile) } else { "%rd1".to_string() };
+                            let out_ptr = if args.len() >= 3 { self.emit_addr(&args[2], cache_policy, hw_profile) } else { "%rd2".to_string() };
 
                             // Hoisted 128-bit SIMD vector loads
                             let g0 = self.alloc_regf32();
@@ -4440,7 +4649,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
                                 return "".into();
                             }
-                            let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let addr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let mut cache_str = ".ca";
                             if let Some(cp) = cache_policy {
                                 if cp.policy == "L2_PERSIST" {
@@ -4459,7 +4668,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
                                 return "".into();
                             }
-                            let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let addr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let v0 = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%f0".to_string() };
                             let v1 = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { v0.clone() };
                             let v2 = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { v0.clone() };
@@ -4654,7 +4863,7 @@ declare it as a Q format.\n{}",
                             // trap). The (buffer, index, value) spelling every
                             // other store intrinsic uses is refused by the arity
                             // gate: it used to store the INDEX.
-                            let addr_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let addr_reg = self.emit_addr(&args[0], cache_policy, hw_profile);
                             let val_raw = self.emit_expr(&args[1], cache_policy, hw_profile);
                             // The buffer's element type wins over the value's,
                             // and the value is converted into it. Picking the
@@ -4700,7 +4909,7 @@ declare it as a Q format.\n{}",
                             && args.len() >= 6
                         {
                             let storing = fname.ends_with("store_v4");
-                            let elem = self.elem_ty_or_f32(&args[0]);
+                            let elem = self.place_elem_ty(&args[0]).unwrap_or(ScalarTy::F32);
                             // Four F16 lanes are 8 bytes and would need b16
                             // staging per lane; `mem()` would otherwise emit
                             // `.v4.b16` into four f32 registers - raw half bits
@@ -4722,7 +4931,7 @@ declare it as a Q format.\n{}",
                                 );
                                 return "".into();
                             }
-                            let ptr_reg = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let ptr_reg = self.emit_addr(&args[0], cache_policy, hw_profile);
                             let row_reg = self.emit_expr(&args[1], cache_policy, hw_profile);
                             let col_reg = self.emit_expr(&args[2], cache_policy, hw_profile);
                             let stride_reg = self.emit_expr(&args[3], cache_policy, hw_profile);
@@ -4856,7 +5065,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
                                 return "".into();
                             }
-                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let bound_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "128".to_string() };
 
@@ -4876,7 +5085,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
                                 return "".into();
                             }
-                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let val_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%f0".to_string() };
                             let bound_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "128".to_string() };
@@ -4891,7 +5100,7 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    @{} st.global.f32 [{}], {};", pred, addr, val_reg).unwrap();
                             "".into()
                         } else if fname == "make_block_ptr2d" || fname == "block_ptr2d_load" {
-                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let row_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let col_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
                             let stride_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "1024".to_string() };
@@ -4903,7 +5112,7 @@ declare it as a Q format.\n{}",
                             let elem = if args.is_empty() {
                                 ScalarTy::F32
                             } else {
-                                self.elem_ty_or_f32(&args[0])
+                                self.place_elem_ty(&args[0]).unwrap_or(ScalarTy::F32)
                             };
 
                             let lin_idx = self.alloc_reg32();
@@ -4928,7 +5137,7 @@ declare it as a Q format.\n{}",
                             self.emit_load_into(&res, elem, &addr, "", Some(&p_valid));
                             res
                         } else if fname == "block_ptr2d_store" {
-                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let row_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let col_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
                             let stride_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "1024".to_string() };
@@ -4939,7 +5148,7 @@ declare it as a Q format.\n{}",
                             let elem = if args.is_empty() {
                                 ScalarTy::F32
                             } else {
-                                self.elem_ty_or_f32(&args[0])
+                                self.place_elem_ty(&args[0]).unwrap_or(ScalarTy::F32)
                             };
                             // Storing an `I32` into a `GlobalMemory<F32>` (or
                             // the reverse) converts rather than reinterpreting
@@ -4978,7 +5187,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
                                 return "".into();
                             }
-                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let d0_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let d1_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
                             let d2_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "%r2".to_string() };
@@ -5037,7 +5246,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(fname, &args[0]) {
                                 return "".into();
                             }
-                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let d0_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let d1_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%r1".to_string() };
                             let d2_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "%r2".to_string() };
@@ -5162,7 +5371,7 @@ declare it as a Q format.\n{}",
                             && args.len() >= 2
                         {
                             let storing = fname.ends_with("store_v4");
-                            let base = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let base = self.emit_addr(&args[0], cache_policy, hw_profile);
                             let slot = self.emit_expr(&args[1], cache_policy, hw_profile);
                             let slot32 = self.emit_convert(&slot, ScalarTy::U32);
                             let slot64 = self.alloc_ty(ScalarTy::U64);
@@ -5215,7 +5424,7 @@ declare it as a Q format.\n{}",
                             // `docs/deterministic_inference.md`, and until
                             // these existed it could not be written in Y at
                             // all, only in hand-written PTX.
-                            let elem = self.elem_ty_or_f32(&args[0]);
+                            let elem = self.place_elem_ty(&args[0]).unwrap_or(ScalarTy::F32);
                             if elem.is_float() {
                                 // `red.global.add.f32` is real hardware and is
                                 // exactly the instruction that makes GPU
@@ -5247,7 +5456,7 @@ declare it as a Q format.\n{}",
                                 );
                                 return "".into();
                             }
-                            let base = self.emit_expr(&args[0], cache_policy, hw_profile);
+                            let base = self.emit_addr(&args[0], cache_policy, hw_profile);
                             let idx = self.emit_expr(&args[1], cache_policy, hw_profile);
                             let val_raw = self.emit_expr(&args[2], cache_policy, hw_profile);
                             let val = self.emit_convert(&val_raw, elem);
@@ -5367,7 +5576,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(&path, &args[0]) {
                                 return "".into();
                             }
-                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let bound_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "128".to_string() };
 
@@ -5387,7 +5596,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(&path, &args[0]) {
                                 return "".into();
                             }
-                            let ptr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let ptr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let offset_reg = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%r0".to_string() };
                             let val_reg = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { "%f0".to_string() };
                             let bound_reg = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { "128".to_string() };
@@ -5406,7 +5615,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(&path, &args[0]) {
                                 return "".into();
                             }
-                            let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let addr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let f0 = self.alloc_regf32();
                             let f1 = self.alloc_regf32();
                             let f2 = self.alloc_regf32();
@@ -5417,7 +5626,7 @@ declare it as a Q format.\n{}",
                             if !args.is_empty() && self.reject_non_f32_buffer(&path, &args[0]) {
                                 return "".into();
                             }
-                            let addr_reg = if !args.is_empty() { self.emit_expr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
+                            let addr_reg = if !args.is_empty() { self.emit_addr(&args[0], cache_policy, hw_profile) } else { "%rd0".to_string() };
                             let v0 = if args.len() >= 2 { self.emit_expr(&args[1], cache_policy, hw_profile) } else { "%f0".to_string() };
                             let v1 = if args.len() >= 3 { self.emit_expr(&args[2], cache_policy, hw_profile) } else { v0.clone() };
                             let v2 = if args.len() >= 4 { self.emit_expr(&args[3], cache_policy, hw_profile) } else { v0.clone() };
@@ -5425,28 +5634,11 @@ declare it as a Q format.\n{}",
                             writeln!(&mut self.ptx_buffer, "    st.global.v4.f32 [{}], {{{}, {}, {}, {}}};", addr_reg, v0, v1, v2, v3).unwrap();
                             "".into()
                         } else if namespace == "GlobalMemory" && member == "load" {
-                            let mut cache_str = ".ca";
-                            if let Some(cp) = cache_policy {
-                                if cp.policy == "L2_PERSIST" {
-                                    cache_str = ".lu";
-                                } else if cp.policy == "L2_EVICT_FIRST" {
-                                    cache_str = ".L2::evict_first";
-                                }
+                            // The arity gate above guarantees exactly one argument.
+                            match args.first() {
+                                Some(place) => self.emit_element_load(place, cache_policy, hw_profile),
+                                None => "".into(),
                             }
-                            // `A[i]` or a bare buffer `A` (its element 0): the
-                            // bare form used to load f32 whatever `A` held.
-                            let elem = args
-                                .first()
-                                .and_then(|a| self.place_elem_ty(a))
-                                .unwrap_or(ScalarTy::F32);
-                            let addr_reg = if !args.is_empty() {
-                                self.emit_expr(&args[0], cache_policy, hw_profile)
-                            } else {
-                                "%rd0".to_string()
-                            };
-                            let dst = self.alloc_ty(elem);
-                            self.emit_load_into(&dst, elem, &addr_reg, cache_str, None);
-                            dst
                         } else {
                             // An unhandled `Namespace::member(...)` call. This is
                             // how `Fragment::zero()` and `ldmatrix`-style paths
@@ -13549,5 +13741,38 @@ mod tests_builtin_arity {
         assert_eq!(Arity::Range(2, 3).describe(), "2 or 3 arguments");
         assert_eq!(Arity::Range(3, 6).describe(), "3 to 6 arguments");
         assert_eq!(Arity::OneOf(&[2, 5]).describe(), "2 or 5 arguments");
+    }
+}
+
+#[cfg(test)]
+mod tests_element_reads {
+    use super::PtxEmitter;
+    use std::collections::HashSet;
+
+    fn regs(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The net over the finished kernel body: a loaded element VALUE inside
+    /// `[...]` is found, with or without an offset, and nothing else is. No
+    /// correct compile reaches it - every address position goes through
+    /// `emit_addr` - so this is the only thing that can fail if it breaks.
+    #[test]
+    fn a_loaded_value_used_as_an_address_is_found() {
+        let body = "    ld.global.ca.f32 %f3, [%rd4];\n\
+                    \x20   ld.global.ca.u64 %rd9, [%rd7];\n\
+                    \x20   st.global.f32 [%rd9], %f3;\n\
+                    \x20   ld.global.ca.f32 %f5, [%rd9+16];\n\
+                    \x20   st.global.f32 [%rd4], %rd90;\n";
+        let got = PtxEmitter::element_values_used_as_addresses(&regs(&["%rd9", "%f3"]), body);
+        assert_eq!(
+            got,
+            vec!["st.global.f32 [%rd9], %f3;", "ld.global.ca.f32 %f5, [%rd9+16];"],
+            "a VALUE operand (`%f3` stored, `%rd90` a different register) is not an address"
+        );
+        assert!(
+            PtxEmitter::element_values_used_as_addresses(&regs(&[]), body).is_empty(),
+            "with no loaded values there is nothing to find"
+        );
     }
 }

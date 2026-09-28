@@ -564,16 +564,3 @@ fn an_indexed_assignment_stores_what_it_names() {
     assert_eq!(&out[2][..8], &[POISON; 8]);
     assert_eq!(&out[2][16..], &[POISON; 8]);
 }
-
-/// `A[i] += v` is `A[i] = A[i] + v`, and READING `A[i]` evaluates to the
-/// element's address in this backend - so it is refused rather than storing
-/// the address plus `v`. A target that is not a name or a buffer element has
-/// no storage here and is refused too.
-#[test]
-fn assignments_this_backend_cannot_honour_are_refused() {
-    refused(
-        "idx_compound",
-        "kernel k(Out: GlobalMemory<F32>) {\n    Out[0] += 2.5;\n}",
-        &["compound assignment to an element", "ADDRESS"],
-    );
-}
