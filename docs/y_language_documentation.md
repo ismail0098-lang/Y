@@ -4789,10 +4789,31 @@ test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 This section documents the Python GPU engine extensions, PyTorch Inductor compiler backend, zero-allocation launch runtime, and high-level block primitives added to Y to achieve full feature parity and performance superiority over **OpenAI Triton 3.7.0**.
 
-### 34.1 Native PyTorch Inductor Compiler Target (`y_inductor`)
-* **Overview**: Implements a native compiler backend target for PyTorch Inductor.
-* **Usage**: Allows compiling any PyTorch neural network module directly into Y GPU kernels via `torch.compile(model, backend=y_inductor)`.
-* **Implementation**: Located in `python/y_lang/inductor.py`. Lowers PyTorch FX GraphModule operators (pointwise, activations, reductions) into Y JIT kernels.
+### 34.1 `torch.compile` backend (`y_inductor`)
+* **Usage**: `torch.compile(model, backend=y_inductor)`, or `y_inductor(module, example_inputs)` directly.
+  Implemented in `python/y_lang/inductor.py`; the result carries `.y_report`.
+* **What is lowered**: connected groups of `add`, `sub`, `mul` and `relu` whose
+  every tensor operand and result is a contiguous float32 CUDA tensor of one
+  static shape (no broadcasting). A tensor-scalar `add`/`sub`/`mul` carries the
+  scalar in the kernel. Each group becomes one Y kernel, compiled through the Y
+  compiler and launched on the current CUDA stream.
+* **Everything else runs as PyTorch runs it**: `linear`, `matmul`, `silu` and
+  other activations, division, negation, reductions, broadcasting, other dtypes,
+  CPU tensors, and any call that needs autograd (so training through the
+  backend works, and runs eagerly). `.y_report` lists what was lowered, why
+  each other node was not, and per kernel how many calls launched it and how
+  many fell back.
+* **Every lowered result is bit-for-bit eager PyTorch's**, and that decides the
+  op set. A multiply is never fused with the add or subtract it feeds (ptxas
+  contracts the pair into one FMA, rounding once where eager rounds twice:
+  245,999 of 1,048,576 results differed when fused). Negation is not lowered
+  (eager canonicalises a NaN; a negation folded into a select keeps its payload).
+  Division is not lowered (Y's F32 `/` is `div.approx.f32`). A multiply by 1.0
+  is not lowered (ptxas deletes it, so a NaN keeps its payload).
+* **History**: this section used to say the backend lowered "pointwise,
+  activations, reductions" into Y kernels. It lowered nothing: it returned the
+  original graph wrapped in `torch.no_grad()`, which also broke training
+  (outputs had `requires_grad=False`, and `backward()` raised).
 
 ### 34.2 High-Level Parallel Block Primitives (`y_lang.ops.block`)
 * **Overview**: Provides parallel block-level operations exposed directly in the Y Python package:
@@ -4850,7 +4871,7 @@ This section provides a formal technical architectural comparison between **Open
 
 ### 35.1 PyTorch Compiler & Native Framework Integration
 * **OpenAI Triton**: Serves as the primary default compiler backend for `torch.compile` via PyTorch Inductor. FX GraphModule nodes are automatically lowered directly into Triton IR dialects without requiring dynamic library loading or explicit C-ABI binding code.
-* **Y Language**: Integrates with PyTorch via a Python JIT module bridge (`y_lang.inductor` and `TorchKernel`). While `y_lang` allows JIT wrapping and FX module compilation via `torch.compile(model, backend=y_inductor)`, it functions as an external runtime target rather than PyTorch's internal default backend.
+* **Y Language**: Integrates with PyTorch through `TorchKernel` (launch a compiled Y kernel on tensors) and `y_inductor`, a `torch.compile` backend that lowers only elementwise `add`/`sub`/`mul`/`relu` subgraphs over float32 CUDA tensors to Y kernels and runs everything else eagerly (§34.1). It is an external backend, not PyTorch's default, and not a general graph compiler. (This bullet used to describe "FX module compilation" by a backend that compiled nothing.)
 
 ### 35.2 High-Level Block Abstraction vs. Low-Level PTX Control
 * **OpenAI Triton**: Operates on a high-level block-centric model (`tl.tensor`). Threads, warps, shared memory allocation, and register layout conversions (`BlockedLayout` $\leftrightarrow$ `SharedLayout`) are abstracted away from the programmer and managed automatically by Triton's MLIR compiler passes.
@@ -4875,7 +4896,7 @@ This section provides a formal technical architectural comparison between **Open
 | Technical Capability | OpenAI Triton (v3.7.0) | Y Language (v1.2.0) |
 | :--- | :--- | :--- |
 | **Primary Design Focus** | High-level GPU deep learning block compiler | Hardware-sentient systems language (GPU + CPU SIMD + ZK R1CS) |
-| **PyTorch `torch.compile` Backend** | Native default Inductor backend | Custom backend target (`y_lang.inductor`) |
+| **PyTorch `torch.compile` Backend** | Native default Inductor backend | `y_inductor`: elementwise `add`/`sub`/`mul`/`relu` on float32 CUDA tensors only (§34.1) |
 | **Hardware Targets** | NVIDIA GPUs, AMD ROCm, Intel XPU | NVIDIA PTX (`sm_80`–`sm_89`; **Hopper `sm_90a` features were removed**, §33.3–33.5), Native x86 CPU, R1CS Circuits |
 | **Compiler Framework** | LLVM / MLIR Dialect Pipeline | Rust-based IR Grapher & Native PTX Emitter |
 | **Block Masking** | Automatic elementwise tensor predicate masking | 2D & 3D Block Pointer predicates (`BlockPtr2D` & `BlockPtr3D`) |
