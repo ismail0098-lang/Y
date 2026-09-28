@@ -1123,6 +1123,7 @@ kernel matmul(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) 
 ### Example 3: Stream Vector Addition with L2 Bypass
 ```ysu
 kernel stream_vector_add(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, N: I32) {
+    @invariant(i >= 0)
     for i in 0..N {
         // Stream data to bypass L1/L2 caches
         @cache_policy(L2_STREAM)
@@ -3493,7 +3494,7 @@ forms, `vec_add_v4`, `rmsnorm_v4`, `swiglu_v4`) refuse any buffer that is not
 | Operation | Spelling | Width |
 | :--- | :--- | :--- |
 | Store one element | `Out[i] = v`, or `store(place, value)` - exactly two arguments | the buffer's element type |
-| Load one element | `GlobalMemory::load(A[i])` or `block_ptr2d_load(A, row, col, stride, max_r, max_c)` | the buffer's element type |
+| Load one element | `A[i]` as a value, `GlobalMemory::load(A[i])`, or `block_ptr2d_load(A, row, col, stride, max_r, max_c)` | the buffer's element type |
 | Masked 2-D store | `block_ptr2d_store(A, row, col, stride, max_r, max_c, value)` | the buffer's element type |
 
 `place` is an **address**: `Out[i]` (element `i`, at the element's stride, with
@@ -3507,14 +3508,25 @@ arguments than it takes. It used to be silently truncated to `store(Out, i)`,
 which stored the INDEX: `store(Out, 0, 7)` wrote 0. Write `store(Out[i], v)`.
 
 **`Out[i] = v` is the same store as `store(Out[i], v)`.** It used to compute
-`v` and silently DROP the store, under a clean compile. `Out[i] += v` is refused:
-it reads `Out[i]`, and element reads are not lowered (below).
+`v` and silently DROP the store, under a clean compile. `Out[i] += v` (and
+`-=`, `*=`, ...) loads the element, applies the operator and stores it back,
+evaluating the index once.
 
-**Reading `A[i]` as a value does not load it** in this backend: `Expr::Index`
-evaluates to the element's ADDRESS (which is what `store` and
-`GlobalMemory::load` take), so `let v: F32 = A[1];` converts the address to a
-float. Load with `GlobalMemory::load(A[i])`. (Known and not yet refused - see
-CLAUDE.md.)
+**Reading `A[i]` as a value loads element `i`**, exactly as
+`GlobalMemory::load(A[i])` does - the two emit the same instructions. In an
+ADDRESS position - `store`'s place, `GlobalMemory::load`'s argument, the buffer
+operand of every memory built-in (`block_ptr2d_*`, `block_ptr3d_*`,
+`block_tile_*`, `BlockTile::*`, the v4 forms, `cp_async`, `atomic_add`,
+`atomic_max`) - `A[i]` is the element's address, and a built-in handed one
+follows the element type of the buffer it points into. Until 2026-09-27
+`A[i]` was an address in every position, so `let v: F32 = A[1];` converted
+the ADDRESS of `A[1]` to a float under a clean compile.
+
+**Memory does not move across `barrier_sync()`.** The backend hides barrier
+latency by moving arithmetic that reads only registers from after a barrier to
+before it. An element read, an element store and a `GlobalMemory::load` are not
+moved - reading `A[j]` after the barrier sees what other threads wrote before
+it.
 
 ---
 
