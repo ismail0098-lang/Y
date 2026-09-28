@@ -1083,6 +1083,20 @@ impl Parser {
             }
         }
 
+        // `@cache_policy` is stored on a `let` and nowhere else, so on any
+        // other statement it was parsed and dropped: the language reference's
+        // own `@cache_policy(L2_STREAM) C[i] = a + b;` compiled clean with the
+        // directive gone. No store honours a cache policy.
+        if let Some(cp) = &cache_policy {
+            if !self.check(TokenKind::Let) {
+                return Err(format!(
+                    "Line {}: `@cache_policy({})` applies to a `let` that loads (`let v: F32 = A[i];`); \
+                     on this statement it would be silently ignored - no store honours a cache policy.",
+                    cp.span.line, cp.policy
+                ));
+            }
+        }
+
         if self.match_token(TokenKind::Let) {
             let _mutable = self.match_token(TokenKind::Mut);
             let ident_tok = self.peek().clone();
