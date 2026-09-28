@@ -1250,6 +1250,15 @@ fn main() {
     }
 
     if emit_coprocessor {
+        // This backend builds its module from the RT/Tensor dependency graph
+        // and lowers no `let` attribute, so a `@cache_policy` would be dropped
+        // without a word. It is refused here, where the module is built, and
+        // by every other backend except --emit-ptx at its own entry.
+        if let Some(site) = ast::cache_policy_sites(&ast).first() {
+            log_error!("{}", ast::cache_policy_refusal("Co-processor backend", site));
+            exit(1);
+        }
+
         log_step!("4/4", "Running Dual-Accelerator Co-Processing Pipeline...");
         println!("      -> Phase A: IR Dependency Graphing...");
         let mut grapher = ir_grapher::DependencyGrapher::new();

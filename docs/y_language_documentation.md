@@ -401,7 +401,8 @@ Attr            = "@require" , "(" , Expr , ")"
                 | "@bounds" , "(" , Expr , ")"
                 | "@invariant" , "(" , Expr , ")"
                 | "@tile" | "@ghost" | "@divergence"
-                | "@prefetch_stride" | "@clock_domain" , [ "(" , Expr , ")" ]
+                | "@clock_domain" , [ "(" , Expr , ")" ]
+                (* "@prefetch_stride" is lexed and REFUSED -- see 9.14. *)
                 | "@zk_target" , "(" , KeyValList , ")"
                 | "@zk_safe" | "@zk_allow_unconstrained"
                 | "@max_iterations" , "(" , IntLiteral , ")"
@@ -606,7 +607,7 @@ The following table details how high-level Y structures map directly to target L
 | `@atomic` (Field Load) | `%val = load atomic i32, ptr %ptr seq_cst, align 4` |
 | `@atomic` (Field Store) | `store atomic i32 %val, ptr %ptr seq_cst, align 4` |
 | `@align(N)` | `load i32, ptr %ptr, align N` or `store i32 %val, ptr %ptr, align N` |
-| `@gpu_uncached` | `%val = load volatile i32, ptr %ptr, !nontemporal !0` |
+| `@gpu_uncached` | `%val = load volatile i32, ptr %ptr` (no `!nontemporal`: see §9.5) |
 | Zero Initialization `{}` | `call void @llvm.memset.p0.i64(ptr %var, i8 0, i64 %size, i1 false)` |
 | Array Indexing `arr[idx]` | `%ptr = getelementptr i32, ptr %arr, i32 %idx` |
 | `@inline` | `attributes #0 = { alwaysinline }` |
@@ -732,13 +733,30 @@ kernel drift_demo() {
   `ld_global_v4_f32`. A policy on any other statement - a store, a `let` whose
   load is `block_ptr2d_load` or another load that ignores it, or a `let` that
   loads nothing - is **refused** rather than parsed and dropped.
+* **Only `--emit-ptx` lowers it.** Every other backend - the default LLVM
+  backend, `--emit-cpu`, `--emit-native`, `--target=r1cs`, `--emit-zk-ptx` and
+  `--emit-coprocessor` - refuses a program that carries one, because none of
+  those targets has an instruction that sets a cache line's eviction priority.
+  The LLVM backend used to emit a mapping, and on x86-64 it did nothing the
+  policies name: `L2_EVICT_FIRST`'s `!nontemporal` on a scalar load compiled to
+  the same `mov` as no policy, `L2_PERSIST` became a `prefetcht0` scheduled
+  after the load of the same address, and the other two were dropped - all four
+  compiled and exited 0.
 * `reuse_count=N` is parsed and not lowered by any backend.
-* **Example**:
+* **Example** (a kernel, compiled with `--emit-ptx`):
 ```ysu
-// Keep weights in L2 Cache for reuse
-@cache_policy(L2_PERSIST, reuse_count=16)
-let weight_val: F32 = load(global_weights);
+// Keep weights in L2 for reuse
+kernel scale(global_weights: GlobalMemory<F32>, Out: GlobalMemory<F32>, i: I32) {
+    @cache_policy(L2_PERSIST, reuse_count=16)
+    let weight_val: F32 = global_weights[i];
+    Out[i] = weight_val;
+}
 ```
+
+This example used to read `let weight_val: F32 = load(global_weights);`, which
+compiled on no backend that honours the policy: the PTX backend refuses it (the
+host `load` reads nothing from global memory), and the LLVM backend accepted it
+and dropped the policy.
 
 ### 9.3 `@atomic`
 * **Syntax**: `@atomic`
@@ -776,16 +794,32 @@ struct ThreadState {
 
 ### 9.5 `@gpu_uncached`
 * **Syntax**: `@gpu_uncached`
-* **Usage**: Applied to memory buffers or struct fields.
-* **Function**: Bypasses GPU caches entirely. Useful for ring buffers, shared state, and GPU-to-CPU status flags.
-  * **C Backend**: Lowers to `volatile` qualifier.
-  * **LLVM Backend**: Emits `volatile` loads/stores along with `!nontemporal !0` metadata to instruct clang to bypass the cache hierarchy.
+* **Usage**: Applied to struct fields.
+* **Function**: Every load and store of the field is `volatile` on the LLVM
+  backend: each access is performed, in program order with the other volatile
+  accesses, and a polling loop cannot hoist the load out of the loop. It does
+  **not** bypass a cache, and does not need to for this use: on x86 a cached,
+  coherent store is what another core, or a device reading pinned host memory
+  over PCIe, observes.
+  * **LLVM backend**: `load volatile` / `store volatile`. It used to add
+    `!nontemporal` as well, which x86-64 lowers to `movnti` for the store - a
+    non-temporal store, the one kind of ordinary store the x86 memory model lets
+    become visible before an earlier store. So `c.data = v; c.status = 1;` could
+    publish the flag ahead of the data it guards. On the load side
+    `!nontemporal` compiled to the same `mov` as without it.
+  * **Other backends**: only the LLVM backend reads it. `--emit-cpu`,
+    `--emit-native` and `--target=r1cs` read no struct-field attribute - this
+    one, `@atomic` or `@align` - and currently emit an ordinary field. That is
+    recorded, not yet refused. The PTX backend has no struct field access.
 * **Example**:
 ```ysu
 struct IPCChannel {
-    @gpu_uncached status: I32, // Bypasses cache to guarantee immediate visibility
+    data: I32,
+    @gpu_uncached status: I32, // every access volatile; write `data` first, then `status`
 }
 ```
+This section also described a C backend, which has been removed: `--emit-c`
+reports that and exits 1.
 
 ### 9.6 `@ZeroDrift`
 * **Syntax**: `@ZeroDrift`
@@ -954,16 +988,16 @@ fn main() -> I32 {
 ```
 
 ### 9.14 `@prefetch_stride`
-* **Syntax**: `@prefetch_stride(byte_width)`
-* **Usage**: Loop structures.
-* **Function**: Inserts cache lines prefetch instructions (`_mm_prefetch` in AVX, `prefetch` in PTX) targeting memory boundaries offset by the stride width.
-* **Example**:
-```ysu
-for i in 0..512 {
-    @prefetch_stride(64) // Prefetch next cache line (64 bytes ahead)
-    process(data[i]);
-}
-```
+* **Status: NOT IMPLEMENTED, and refused.** Writing it anywhere is a compile
+  error (`` `@prefetch_stride` is not implemented ``). No backend emits a
+  prefetch for it.
+* **What it used to do**: nothing, silently. Written above a `for`, it was stored
+  on the loop and read by one consumer - the LLVM backend, which wrote it into
+  the module as a comment ("solver-guided cache warming") and emitted no
+  prefetch; the PTX backend never read it. Written above any other statement,
+  as this section's own example and three example programs below did, the
+  parser dropped it outright. This section used to say it "inserts cache line
+  prefetch instructions (`_mm_prefetch` in AVX, `prefetch` in PTX)".
 
 ### 9.15 `@clock_domain`
 * **Syntax**: `@clock_domain(name_string)`
@@ -1317,7 +1351,6 @@ fn main() -> I32 {
 fn cache_warm_process(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32) {
     // Warm L2 lines via structured stride prefetching
     for i in 0..N step 16 {
-        @prefetch_stride(64)
         @cache_policy(L2_PERSIST)
         let block: VecTy<F32, 16> = data[i];
 
@@ -1405,7 +1438,6 @@ struct BiquadFilter {
 
 fn process_audio_frame(filter: &mut BiquadFilter, input: GlobalMemory<F32>, output: GlobalMemory<F32>, len: I32) {
     for i in 0..len {
-        @prefetch_stride(64)
         let sample: F32 = input[i];
         
         // Biquad difference equation
@@ -1500,7 +1532,6 @@ fn send_ipc_payload(channel: &mut SharedIPCChannel, src: ptr, size: I32) -> bool
 fn monte_carlo_step(paths: GlobalMemory<F32>, strikes: GlobalMemory<F32>, results: GlobalMemory<F32>, size: I32) {
     // Processes 16 elements simultaneously using AVX-512 vector lanes
     for i in 0..size step 16 {
-        @prefetch_stride(64)
         let path_vector: VecTy<F32, 16> = paths[i];
         let strike_vector: VecTy<F32, 16> = strikes[i];
         
@@ -2573,7 +2604,7 @@ This section maps common CUDA C++ and standard C++ patterns directly to their Y 
 | `__global__ float* ptr` | `data: GlobalMemory<F32>` | Global memory is a first-class type |
 | `__device__ float val;` | `let val: F32 = ...;` | Regular variable in kernel scope |
 | `alignas(128) float x;` | `@align(128) let x: F32 = ...;` | `alignas` sets allocation alignment; `@align(N)` in Y sets LLVM `align N` on load/store instructions (access alignment hint), not allocation alignment. Effect is equivalent for most GPU memory patterns. |
-| `volatile float* ptr;` | `@gpu_uncached let ptr: F32 = ...;` | Non-temporal / bypass cache |
+| `volatile float* ptr;` | a struct field `@gpu_uncached status: I32,` | `volatile` loads and stores on the LLVM backend; it bypasses no cache (§9.5). A struct-field attribute only: `@gpu_uncached let ...` is a syntax error. This row used to say "Non-temporal / bypass cache" and show the `let` form. |
 
 ### 13.2 Synchronization
 

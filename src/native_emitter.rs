@@ -88,6 +88,16 @@ impl NativeEmitter {
     }
 
     pub fn emit_program(&mut self, prog: &Program) -> Vec<u8> {
+        // `@cache_policy` names an NVIDIA L2 eviction priority; this backend's
+        // straight-line x86-64 subset has no instruction that sets one, and it
+        // used to accept the directive and drop it.
+        for site in crate::ast::cache_policy_sites(prog) {
+            self.emit_errors.push(crate::ast::cache_policy_refusal(
+                "Native x86-64 Backend",
+                &site,
+            ));
+        }
+
         self.emit_elf_header();
         self.emit_entry_point();
 

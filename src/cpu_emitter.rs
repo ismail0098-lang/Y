@@ -126,6 +126,15 @@ impl CpuEmitter {
     }
 
     pub fn emit_program(&mut self, prog: &Program) -> String {
+        // `@cache_policy` names an NVIDIA L2 eviction priority, and the Rust
+        // this backend prints has nothing that sets one. It used to be dropped
+        // without a word; this is also the path `c_api::y_interpret_kernel`
+        // takes, which is why the refusal lives in the emitter.
+        for site in crate::ast::cache_policy_sites(prog) {
+            self.emit_errors
+                .push(crate::ast::cache_policy_refusal("CPU host backend", &site));
+        }
+
         // Pre-pass: which functions will be `unsafe fn`. Kernels always are.
         for item in &prog.items {
             match item {
