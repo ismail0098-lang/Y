@@ -132,7 +132,10 @@ repository's own investigation documents contradict.
   `if`/`while`/`for`/assignment, floats, strings, indexing and field access are
   refused by name with a line number, as are 64-bit types. Before that it
   emitted an ELF for all of them and computed the wrong answer under a success
-  banner — `9 / 2` returned **9**.
+  banner — `9 / 2` returned **9**. **One gap of that kind is still open:** a call
+  to a function the program does not define compiles to a call to the next
+  instruction, so `tests/coprocessor_large.ysu` builds a binary that segfaults
+  after "Compiled to native ELF executable!".
 - **Leo did not compile the ZK benchmark circuits.** Earlier tables reported
   timings for Leo at 100k and 1M constraints. Leo 4.2.0 refuses both: the
   compiled program exceeds its 512,000-byte limit (`leo build` on
@@ -172,6 +175,35 @@ repository's own investigation documents contradict.
   methods in that family produced PTX that `ptxas` rejects at their own target
   architecture. They were deleted rather than fixed. `mma.sync` — the path the
   working GEMM kernels use — was never affected.
+- **Three memory-hierarchy directives did nothing, or the wrong thing.** *(Fixed
+  since; kept here because the manual documented all three.)* `@cache_policy`:
+  on the PTX backend `L2_PERSIST` emitted `.lu` — on a global load, the ISA's
+  evict-*first* — and `L2_EVICT_FIRST` emitted a qualifier `ptxas` rejects on
+  every card; on the LLVM, CPU, native, ZK and co-processor backends every
+  policy compiled and did nothing. It lowers to `createpolicy` +
+  `ld.global.L2::cache_hint` (or `ld.global.cs`) on PTX now and is refused by
+  name everywhere else. `@gpu_uncached` stored with `movnti`, which x86 may make
+  visible before an earlier store — the status-flag-after-data use the manual
+  recommended it for — and is `volatile` only now. `@prefetch_stride` emitted
+  nothing on any backend and is refused.
+- **The PTX backend read and wrote kernel values it did not understand.**
+  *(Fixed since.)* `F64` and `F16` values compiled as `f32`, so an `F64` store
+  wrote four bytes into an eight-byte slot. Reading `A[i]` as a value produced
+  the element's *address*: the manual's own `stream_vector_add` example
+  computed `float(&A[i]) + float(&B[i])`. A built-in given an extra argument
+  dropped it, so `store(Out, 0, 7)` stored the index. And a barrier-hoisting
+  pass moved memory accesses across `bar.sync`; with the writers delayed, the
+  reads saw unwritten data in 200 of 200 launches on the card. `F64` is real
+  now, `F16` is a buffer element type (an `F16` value is refused), and each fix
+  is gated.
+- **The language manual's worked examples mostly did not compile.** Eighteen of
+  the 21 complete examples in its chapter 10 fail — on syntax the parser has
+  never accepted, or on the `@safe` checks — and one of the eighteen said so.
+  Each now states its first diagnostic, and `tests/manual_examples.rs` fails if
+  an example breaks without a note or a note outlives the failure. Three
+  reference sections described syntax that does not exist: `as` casts (Y has
+  no cast), `@unsafe { }` blocks (`@unsafe` annotates a function), and
+  `@bounds(0 <= i < n)` (the syntax is `@bounds(min, max)`).
 
 ---
 
@@ -216,7 +248,7 @@ says nothing about that program.
 over a model of the emitter, and its range, bit-decomposition, comparison and
 division gadgets are proved sound with Z3; Groth16 proofs are compared element
 for element with arkworks. `@invariant` is discharged by Z3 and refuses what it
-cannot model. The rest — the general LLVM backend, `--emit-native`,
+cannot model; a `@bounds` range is taken on trust. The rest — the general LLVM backend, `--emit-native`,
 `--emit-cpu`, the type checker, the ZK optimisation passes — is tested, not
 verified.
 
@@ -1183,7 +1215,11 @@ here because the previous version of it silently passed.
 ### `@safe` blocks and Z3-discharged invariants
 
 Code inside `@safe { }` must initialize all variables, cannot dereference raw
-pointers, and requires an `@invariant` on every loop.
+pointers, requires an `@invariant` on every loop, and must index arrays with
+bounds it can prove. `@bounds(min, max)` on a `let` is how a value the checker
+cannot bound gets a range, and **that range is taken on trust**: nothing checks
+it against the value, so a wrong annotation is an unguarded out-of-bounds access
+in code the checker calls safe.
 
 ```
 fn main() {
@@ -2252,9 +2288,11 @@ up if you look.
 
 **In any pass whose output is a correctness claim, an unhandled AST node is a
 hard error — never a silent identity, no-op, or "close enough" substitution.**
-This is written down because the same bug has now been found **39 times** — a
-`_ =>` arm that guessed instead of refusing, or, in the later cases, a correct
-guard consulted at a subset of the sites where its property has to hold. A pass
+This is written down because the same bug keeps being found: the table of
+instances has **87 rows** — one a case averted before it shipped, two in code
+nothing called — each a `_ =>` arm that guessed instead of refusing, or, in the
+later cases, a correct guard consulted at a subset of the sites where its
+property has to hold. A pass
 that silently approximates produces the paperwork of a proof without the proof,
 and the build goes green. The full table — site, silent fallback, consequence —
 is maintained in the project's engineering notes, which live outside this
@@ -2278,8 +2316,8 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # ~700 tests
-cargo test --release --features zk      # ~955 tests, ZK included
+cargo test --release                    # ~765 tests
+cargo test --release --features zk      # ~1020 tests, ZK included
 cargo test --release -p y-gpu           # the sibling crate; a bare `cargo test`
                                         # builds the root package ONLY and does
                                         # not run these 8

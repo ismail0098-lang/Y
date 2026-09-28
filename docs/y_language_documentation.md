@@ -487,17 +487,17 @@ Y utilizes structural type equivalence for layouts and complex variables. Types 
 **Example — type mismatch caught at compile time:**
 ```ysu
 fn add(a: I32, b: F32) -> I32 {
-    return a + b;  // error: cannot add I32 and F32 without explicit cast
+    return a + b;  // refused: the operands' types differ
 }
 ```
 ```
-error[E0308]: mismatched types
-  --> add.ysu:2:14
-   |
- 2 |     return a + b;
-   |              ^ expected `I32`, found `F32`
-hint: use `b as I32` or promote `a` to `F32` before the operation
+[!] The Type-Checker caught 1 semantic errors:
+    [Error] Line 2: binary operands mismatch: expected I32, got F32.
 ```
+
+There is no cast to write instead: `as` is not a keyword (§20.4). This section
+used to show a rustc-style `error[E0308]` block recommending `b as I32`; Y
+prints neither.
 
 ### 6.2 Linear Memory Obligations
 Linear tracking enforces that resources (like asynchronous memory transfers) cannot be left in indeterminate states:
@@ -879,25 +879,37 @@ fn complex_slow_path() {
 
 ### 9.9 `@safe` and `@unsafe`
 * **Syntax**: `@safe`, `@unsafe`
-* **Usage**: Blocks or function annotations.
+* **Usage**: `@safe` on a block or a function; `@unsafe` on a function only.
 * **Function**: Toggles compile-time memory safety checks (e.g. pointer arithmetic and out-of-bounds array indexing).
 * **Example**:
 ```ysu
-@unsafe {
-    let raw_addr: ptr = malloc(1024);
-    // Arbitrary pointer arithmetic allowed
+@unsafe
+fn read_through(p: &mut I32) -> I32 {
+    return *p;    // refused without `@unsafe`: a raw dereference
 }
 ```
 
+`@unsafe { ... }` as a block does not parse (`Expected expression, found
+AtUnsafe`, checked 2026-09-28); this section used to show one.
+
 ### 9.10 `@bounds`
-* **Syntax**: `@bounds(condition)`
+* **Syntax**: `@bounds(min, max)`: two numbers, both inclusive.
 * **Usage**: Variable declarations or loops.
-* **Function**: Asserts index limits to skip runtime bounds checks.
+* **Function**: Asserts a value's range, which is what lets safe code index an array with a value the checker cannot bound on its own (§6.5).
 * **Example**:
 ```ysu
-@bounds(0 <= index < 256)
-let element: I32 = my_array[index]; // Skips safety bounds checks
+@bounds(0, 255)
+let index: I32 = raw & 255;
+let element: I32 = my_array[index];    // my_array: [I32; 256]
 ```
+
+**The compiler takes the range on trust.** It is not checked against the value:
+`@bounds(0, 255) let index: I32 = raw;` compiles for any `raw`, and with
+`--emit-llvm` the load it feeds is unguarded (checked 2026-09-28). A wrong
+annotation is therefore an out-of-bounds access in code the checker calls safe.
+`max` is inclusive: `@bounds(0, 256)` on an index into a 256-element array is
+refused. The condition form this section used to show, `@bounds(0 <= index <
+256)`, does not parse (`Expected ',' in @bounds but found RParen`).
 
 ### 9.11 `@invariant`
 * **Syntax**: `@invariant(condition)`
@@ -1040,7 +1052,21 @@ fn main() {
 
 ## 10. Complete Code Examples
 
+Most of these examples are sketches of an intended surface, not programs this
+compiler accepts. Every one that does not compile says so at its head, with the
+first diagnostic it produces; an example with no status note compiles verbatim,
+with `--emit-ptx` if it declares a `kernel` and with `--emit-llvm` otherwise.
+`tests/manual_examples.rs` holds that in both directions: an example that fails
+without a note fails the test, and so does a note on an example that compiles.
+
 ### Example 1: Lock-Free Single-Producer Single-Consumer (SPSC) Ring Buffer
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the type checker refuses it before any backend runs. The
+indices into `rb.buffer` on lines 19 and 36 of the listing have no provable
+bounds, and line 36 dereferences a raw pointer (`Raw pointer dereferencing is
+forbidden in safe blocks`). It is kept as a sketch of the intended surface.
+
 ```ysu
 // Lock-Free Single-Producer Single-Consumer Ring Buffer
 struct RingBuffer {
@@ -1218,6 +1244,13 @@ fn main() -> I32 {
 ---
 
 ### Example 5: Multi-Stage Pipeline Overlapping
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-ptx`): the parser stops at the first line: a top-level `type` alias is
+not an item it accepts (`Unexpected top-level item`). Past that, `SmemLayout`
+has no lowering in any backend (§21.1). It is kept as a sketch of the intended
+surface.
+
 ```ysu
 type BufferLayout = SmemLayout<F32, rows=8, cols=32, swizzle=0>;
 
@@ -1260,6 +1293,12 @@ fn process_data(buf: &mut BufferLayout) {
 ---
 
 ### Example 6: Compiler Verification & Safety Asserts
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser refuses `@bounds(0 <= i < 100)` on line 7 of the
+listing. `@bounds` takes two numbers, `@bounds(min, max)` (§9.10). It is kept
+as a sketch of the intended surface.
+
 ```ysu
 @safe
 fn verify_computation(data: &mut [I32; 100]) -> I32 {
@@ -1288,6 +1327,12 @@ fn main() -> I32 {
 ---
 
 ### Example 7: Custom Memory Vector Allocation
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser refuses the loop header `for i in 0..v.size` on line
+24 of the listing: a range bound cannot be a field access (`Expected '{' to
+begin block but found Dot`). It is kept as a sketch of the intended surface.
+
 ```ysu
 struct FloatVector {
     data: &mut F32,
@@ -1346,6 +1391,12 @@ fn main() -> I32 {
 ---
 
 ### Example 8: Multi-Threaded Cache Warming & Prefetching
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): `@require` precedes a `fn`, and it is refused by name: it is
+supported on a `kernel` only (§9.1). It is kept as a sketch of the intended
+surface.
+
 ```ysu
 @require(avx512 >= 1)
 fn cache_warm_process(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32) {
@@ -1367,6 +1418,11 @@ fn cache_warm_process(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32
 ---
 
 ### Example 9: Multi-Clock Domain Signal Crosser
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept `@clock_domain` on a struct field
+(line 2 of the listing). It is kept as a sketch of the intended surface.
+
 ```ysu
 struct CrossDomainRegister {
     @clock_domain("clk_fast") fast_val: I32,
@@ -1395,6 +1451,12 @@ fn cross_signal(cdr: &mut CrossDomainRegister) {
 ---
 
 ### Example 10: Metastability Verification Ghost State
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept `@ghost` on a struct field (line 4
+of the listing); `@ghost` is a block (§9.13). It is kept as a sketch of the
+intended surface.
+
 ```ysu
 struct SyncState {
     value: I32,
@@ -1420,6 +1482,12 @@ fn step_synchronization(state: &mut SyncState, signal: I32) {
 ---
 
 ### Example 11: Real-Time Audio DSP Biquad Filter
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept `@cache_policy` on a struct field
+(line 3 of the listing); the directive applies to a `let` (§9.2). It is kept as
+a sketch of the intended surface.
+
 ```ysu
 struct BiquadFilter {
     // Coeffs aligned to L2 cache lines to prevent eviction during DSP loops
@@ -1462,6 +1530,11 @@ fn process_audio_frame(filter: &mut BiquadFilter, input: GlobalMemory<F32>, outp
 ---
 
 ### Example 12: Lock-Free Hazard Pointers
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser stops at `0 as ptr` on line 26 of the listing: Y has
+no `as` cast (§20.4). It is kept as a sketch of the intended surface.
+
 ```ysu
 struct HazardPointer {
     @atomic active_ptr: ptr,
@@ -1498,6 +1571,12 @@ fn release_hazard_ptr(registry: &mut HazardRegistry, thread_id: I32) {
 ---
 
 ### Example 13: Zero-Copy CUDA IPC Inter-Process Shared State
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser refuses `@bounds(0 <= size <= 512)` on line 14 of
+the listing. `@bounds` takes two numbers, `@bounds(min, max)` (§9.10). It is
+kept as a sketch of the intended surface.
+
 ```ysu
 struct SharedIPCChannel {
     @align(64) @atomic head: U64,
@@ -1527,6 +1606,12 @@ fn send_ipc_payload(channel: &mut SharedIPCChannel, src: ptr, size: I32) -> bool
 ---
 
 ### Example 14: Parallel Monte Carlo Option Pricer
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): `@require` precedes a `fn`, and it is refused by name: it is
+supported on a `kernel` only (§9.1). It is kept as a sketch of the intended
+surface.
+
 ```ysu
 @require(avx512 >= 1)
 fn monte_carlo_step(paths: GlobalMemory<F32>, strikes: GlobalMemory<F32>, results: GlobalMemory<F32>, size: I32) {
@@ -1554,6 +1639,12 @@ fn monte_carlo_step(paths: GlobalMemory<F32>, strikes: GlobalMemory<F32>, result
 ---
 
 ### Example 15: Multi-Producer Multi-Consumer (MPMC) Queue
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept a generic function: `fn
+try_enqueue_mpmc<T>(...)` on line 12 of the listing is `Expected '(' but found
+Lt`. It is kept as a sketch of the intended surface.
+
 ```ysu
 struct QueueNode<T> {
     @atomic sequence: U64,
@@ -1605,6 +1696,13 @@ fn try_dequeue_mpmc<T>(q: &mut MpmcQueue<T>, out_item: &mut T) -> bool {
 ---
 
 ### Example 16: Fast Fourier Transform (FFT) Shared Memory Butterfly
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-ptx`): the parser stops at the first line: a top-level `type` alias is
+not an item it accepts (`Unexpected top-level item`). Past that, `SmemLayout`
+has no lowering in any backend (§21.1). It is kept as a sketch of the intended
+surface.
+
 ```ysu
 type FFTLayout = SmemLayout<F32, rows=8, cols=32, swizzle=330>;
 
@@ -1673,6 +1771,12 @@ fn adjust_execution_profile(state: &mut DeviceState) {
 ---
 
 ### Example 18: Concurrent Hopscotch Hash Map
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept a generic function: `fn
+insert_map<K, V>(...)` on line 12 of the listing is `Expected '(' but found
+Lt`. It is kept as a sketch of the intended surface.
+
 ```ysu
 struct HashBucket<K, V> {
     @atomic hop_info: U32,
@@ -1704,6 +1808,13 @@ fn insert_map<K, V>(map: &mut HopscotchMap<K, V>, key: K, value: V) -> bool {
 ---
 
 ### Example 19: Bounding Volume Hierarchy (BVH) Traverse Kernel
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-ptx`): the type checker refuses it before any backend runs: the `while`
+loop on line 13 of the listing has no `@invariant`, several indices have no
+provable bounds, `ray_intersects_box` is not defined anywhere, and line 24
+dereferences a raw pointer. It is kept as a sketch of the intended surface.
+
 ```ysu
 struct BvhNode {
     min_bounds: [F32; 3],
@@ -1744,6 +1855,12 @@ kernel traverse_bvh(nodes: GlobalMemory<BvhNode>, ray_origin: [F32; 3], ray_dir:
 ---
 
 ### Example 20: Half-Precision Deep Learning Adam Optimizer Kernel
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-ptx`): the parser does not accept `TF32` as a type (line 2 of the
+listing); the floating-point types are listed in §20.2. It is kept as a sketch
+of the intended surface.
+
 ```ysu
 kernel adam_optimizer(
     weights: GlobalMemory<TF32>,
@@ -1780,6 +1897,13 @@ kernel adam_optimizer(
 ---
 
 ### Example 21: Block-Level `@safe` and `@unsafe` Safety Scope Boundaries
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept an `@unsafe { ... }` block inside a
+function body (line 8 of the listing: `Expected expression, found AtUnsafe`).
+`@unsafe` annotates a function; `@safe { ... }` is the only block form (§9.9).
+It is kept as a sketch of the intended surface.
+
 ```ysu
 struct RawBuffer {
     data_ptr: ptr,
@@ -2650,8 +2774,8 @@ The Y version enforces at compile time that `pipe.wait(tx)` is called before `sm
 | CUDA C++ | Y Equivalent | Difference |
 | :--- | :--- | :--- |
 | No equivalent | `@safe { }` | Enforces initialization, bounds, invariants at compile time |
-| No equivalent | `@unsafe { }` | Explicit opt-out of safety checks, required for raw pointer math |
-| `assert(cond)` (runtime) | `@bounds(min <= i < max)` | Static for constant indices, runtime assertion for dynamic |
+| No equivalent | `@unsafe fn` | Explicit opt-out of safety checks, required for raw pointer math. A function annotation: `@unsafe { }` as a block does not parse (§9.9) |
+| `assert(cond)` (runtime) | `@bounds(min, max)` | Asserts a range the compiler takes on trust, without checking it against the value (§9.10) |
 | No equivalent | `@invariant(expr)` | Loop invariant verified at every iteration by type checker |
 
 ### 13.6 Cache Policies
@@ -3482,24 +3606,30 @@ Fixed-point types are used with `@ZeroDrift` for verified drift-free accumulatio
 
 ### 20.4 Type Casting
 
-Explicit casts use the `as` keyword:
+**There is no cast syntax.** `as` is not a keyword, and the parser stops at it
+(checked 2026-09-28):
 
 ```ysu
 let x: I32 = 42;
-let y: F32 = x as F32;    // I32 -> F32 widening
-let z: I16 = x as I16;    // I32 -> I16 narrowing (may truncate)
-let h: F16 = y as F16;    // F32 -> F16 (precision loss, no error)
+let y: F32 = x as F32;    // Expected ';' at end of let statement but found Ident("as")
 ```
 
-In a **PTX kernel** the last line is refused: an `F16` value is not a register
-type there (§20.5). Declare it `F32` and store it into a `GlobalMemory<F16>`,
-which rounds it to nearest-even.
+What a typed `let` converts, measured with `--emit-llvm` and run:
 
-Implicit coercion **does not happen** in Y. Mixing types in expressions is a compile error:
+- **between integer widths**: `let z: I16 = x;` truncates (`x = 70000` keeps
+  only its low 16 bits), and `let back: I32 = z;` sign-extends a signed value;
+- **not between integers and floats**: `let y: F32 = x;` is
+  `Type mismatch in let assignment`, and so is the reverse. No built-in
+  converts between them either.
 
-```
-error[E0308]: mismatched types — use explicit `as` cast
-```
+Mixing types inside an expression is refused (`binary operands mismatch:
+expected I32, got F32`, §6.1). In a **PTX kernel** an `F16` value is refused
+(§20.5): declare it `F32` and store it into a `GlobalMemory<F16>`, which rounds
+it to nearest-even.
+
+This section used to document `x as F32`, `x as I16` and `y as F16`, and an
+error message recommending an explicit `as` cast. None of those casts parses,
+and Y prints no such message.
 
 ### 20.5 GPU Type Usage Rules
 
@@ -3748,7 +3878,7 @@ Operators are listed from **highest** (evaluated first) to **lowest** (evaluated
 | :---: | :--- | :--- | :---: |
 | 1 (highest) | `()` `[]` `::` `.` | Grouping, indexing, path, field access | Left |
 | 2 | `-` `!` `~` `*` `&` | Unary negation, logical NOT, bitwise NOT, deref, address-of | Right |
-| 3 | `as` | Type cast | Left |
+| 3 | `as` | Type cast: **not implemented**, the parser stops at `as` (§20.4) | Left |
 | 4 | `*` `/` `%` | Multiply, divide, modulo | Left |
 | 5 | `+` `-` | Add, subtract | Left |
 | 6 | `<<` `>>` | Bitwise left/right shift | Left |
@@ -3772,8 +3902,8 @@ let b: I32 = 1 & 3 << 2;     // = 1 & 12 = 0   (not 4)
 // Use parentheses to override:
 let c: I32 = (2 + 3) * 4;    // = 20
 
-// as (precedence 3) binds tighter than arithmetic:
-let d: F32 = 1 + x as F32;   // = 1 + (x as F32), not (1 + x) as F32
+// `as` (precedence 3) is not implemented: this line does not parse (§20.4).
+let d: F32 = 1 + x as F32;
 ```
 
 > **Note:** The `*`, `-`, and `&` symbols each perform dual roles across different precedence tiers: `*` (unary dereference at level 2 vs binary multiply at level 4), `-` (unary negation at level 2 vs binary subtraction at level 5), and `&` (unary address-of at level 2 vs binary bitwise AND at level 7). The parser distinguishes unary vs binary forms by syntactic context.
