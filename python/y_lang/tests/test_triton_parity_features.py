@@ -32,9 +32,13 @@ def test_feature_2_pytorch_inductor_backend():
     res = compiled_model(x, y)
     expected = torch.relu(x + y)
 
-    assert torch.allclose(res, expected)
-    assert getattr(compiled_model, "_y_compiled", False) is True
-    assert getattr(compiled_model, "_backend", "") == "y_inductor"
+    assert torch.equal(res, expected)
+    # CPU tensors: y_inductor lowers elementwise float32 CUDA subgraphs only,
+    # so nothing is lowered and the report says why (see test_inductor.py).
+    # This used to assert `_y_compiled` was True - a flag the old backend set
+    # while compiling nothing at all.
+    assert compiled_model.y_report.kernels == []
+    assert all("only CUDA is lowered" in why for _, _, why in compiled_model.y_report.not_lowered)
 
 def test_feature_3_block_primitives():
     """Tests feature #3: Block Primitives (scan, sort, where, associative_reduce)."""

@@ -444,7 +444,13 @@ def run_benchmarks():
 
 
 
-    # 6. PYTORCH INDUCTOR GRAPH COMPILATION (SwiGLU Block)
+    # 6. y_inductor ON A SwiGLU MODULE
+    #
+    # y_inductor lowers add/sub/mul/relu, not `silu`, so this row times eager
+    # `silu` plus the multiply as one Y kernel - not a fused SwiGLU. The report
+    # printed below says exactly what ran as Y. This row used to be labelled
+    # "PyTorch Inductor (SwiGLU)" and timed eager PyTorch outright in the Y
+    # column: y_inductor compiled nothing and returned the original graph.
     class SwiGLUModule(torch.nn.Module):
         def forward(self, g, u):
             return torch.nn.functional.silu(g) * u
@@ -454,9 +460,10 @@ def run_benchmarks():
 
     fn_y_ind = lambda: compiled_y_swi(gate, up)
     t_y_ind = measure_gpu_latency(fn_y_ind)
+    print(compiled_y_swi.y_report.summary())
 
-    print(f"  {'PyTorch Inductor (SwiGLU)':<22} | {t_y_ind:<12.2f} | {t_triton_swi:<14.2f} | {t_torch_swi:<18.2f}")
-    results.append(("PyTorch Inductor (SwiGLU)", t_y_ind, t_triton_swi, t_torch_swi))
+    print(f"  {'y_inductor (SwiGLU)':<22} | {t_y_ind:<12.2f} | {t_triton_swi:<14.2f} | {t_torch_swi:<18.2f}")
+    results.append(("y_inductor (SwiGLU)", t_y_ind, t_triton_swi, t_torch_swi))
 
     print("------------------------------------------------------------------------\n")
 
