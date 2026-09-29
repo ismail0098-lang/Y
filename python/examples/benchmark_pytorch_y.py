@@ -28,7 +28,7 @@ def main():
     print()
 
     # 2. Test FlashAttention-2 Kernel JIT Compilation
-    flash_path = repo_root / "examples" / "flash_attention.ysu"
+    flash_path = repo_root / "python" / "examples" / "kernels" / "flash_attention.ysu"
     print(f"[2] JIT Compiling Fused FlashAttention-2 Kernel ({flash_path.name})...")
     with open(flash_path, "r") as f:
         flash_code = f.read()
@@ -44,7 +44,7 @@ def main():
     print()
 
     # 3. Test RMSNorm Kernel JIT Compilation
-    rmsnorm_path = repo_root / "examples" / "rmsnorm.ysu"
+    rmsnorm_path = repo_root / "python" / "examples" / "kernels" / "rmsnorm.ysu"
     print(f"[3] JIT Compiling RMSNorm Kernel ({rmsnorm_path.name})...")
     with open(rmsnorm_path, "r") as f:
         rmsnorm_code = f.read()
@@ -54,7 +54,7 @@ def main():
     print()
 
     # 4. Test SwiGLU Kernel JIT Compilation
-    swiglu_path = repo_root / "examples" / "swiglu.ysu"
+    swiglu_path = repo_root / "python" / "examples" / "kernels" / "swiglu.ysu"
     print(f"[4] JIT Compiling SwiGLU Activation Kernel ({swiglu_path.name})...")
     with open(swiglu_path, "r") as f:
         swiglu_code = f.read()

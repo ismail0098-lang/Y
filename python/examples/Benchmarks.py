@@ -30,7 +30,7 @@ def print_header(title):
 def benchmark_jit_compilation_speed():
     print_header("1. JIT Compilation Latency & Cache Throughput")
 
-    flash_path = repo_root / "examples" / "flash_attention.ysu"
+    flash_path = repo_root / "python" / "examples" / "kernels" / "flash_attention.ysu"
     with open(flash_path, "r") as f:
         source = f.read()
 
@@ -80,9 +80,9 @@ def benchmark_ptx_codegen_targets():
     print_header("3. PTX Codegen Throughput Across Architecture Targets")
 
     kernels = [
-        ("FlashAttention-2", repo_root / "examples" / "flash_attention.ysu"),
-        ("RMSNorm",          repo_root / "examples" / "rmsnorm.ysu"),
-        ("SwiGLU",            repo_root / "examples" / "swiglu.ysu"),
+        ("FlashAttention-2", repo_root / "python" / "examples" / "kernels" / "flash_attention.ysu"),
+        ("RMSNorm",          repo_root / "python" / "examples" / "kernels" / "rmsnorm.ysu"),
+        ("SwiGLU",            repo_root / "python" / "examples" / "kernels" / "swiglu.ysu"),
     ]
 
     targets = ["sm_80", "sm_86", "sm_89", "sm_90a"]

@@ -1,0 +1,48 @@
+// ============================================================
+//  Y — Fused FlashAttention-2 Reference Kernel
+//  python/examples/kernels/flash_attention.ysu
+//
+//  STATUS (measured 2026-09-29): THIS KERNEL DOES NOT COMPILE. It declares a
+//  `Pipeline<...>` type, and the type checker refuses it: "unknown generic
+//  type `Pipeline`". Benchmarks.py, benchmark_pytorch_y.py and
+//  run_head_to_head_comparison.py compile it first, so they stop at that
+//  error. rmsnorm.ysu and swiglu.ysu compile.
+//
+//  Hardware-aware fused attention kernel with online softmax scaling,
+//  multi-stage software pipelining (cp.async), and Tensor Core MMA.
+// ============================================================
+
+kernel flash_attention(
+    Q: GlobalMemory<F16>,
+    K: GlobalMemory<F16>,
+    V: GlobalMemory<F16>,
+    O: GlobalMemory<F32>,
+    scale: F32
+) {
+    type QK_Tile = SmemLayout<F16, rows=64, cols=64, swizzle=330>;
+    let smem_Q = SharedMemory::alloc<QK_Tile>();
+    let smem_K = SharedMemory::alloc<QK_Tile>();
+    let smem_V = SharedMemory::alloc<QK_Tile>();
+
+    let mut acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
+    let pipe: Pipeline<stages=2, layout=QK_Tile> = Pipeline::init();
+
+    @invariant(kv_tile >= 0)
+    @tile(64, 64, 16)
+    for kv_tile in 0..64 step 16 {
+        let tx_Q: Transfer<Global, Shared, Async<1>, 128> = cp_async(Q[kv_tile], smem_Q);
+        let tx_K: Transfer<Global, Shared, Async<1>, 128> = cp_async(K[kv_tile], smem_K);
+        let tx_V: Transfer<Global, Shared, Async<1>, 128> = cp_async(V[kv_tile], smem_V);
+
+        pipe.wait(tx_Q);
+
+        let frag_Q: Fragment<MMA_m16n8k16, A, F16> = ldmatrix(smem_Q);
+        let frag_K: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(smem_K);
+        let frag_V: Fragment<MMA_m16n8k16, B, F16> = ldmatrix(smem_V);
+
+        let S: Fragment<MMA_m16n8k16, D, F32> = mma_sync(frag_Q, frag_K, acc);
+        acc = mma_sync(frag_Q, frag_V, S);
+    }
+
+    store(O, acc);
+}

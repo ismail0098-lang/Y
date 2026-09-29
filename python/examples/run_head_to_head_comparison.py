@@ -473,7 +473,7 @@ def benchmark_cold_jit_compilation():
     print("  COLD JIT COMPILATION LATENCY BENCHMARK")
     print("========================================================================")
 
-    flash_path = repo_root / "examples" / "flash_attention.ysu"
+    flash_path = repo_root / "python" / "examples" / "kernels" / "flash_attention.ysu"
     with open(flash_path, "r") as f:
         y_source = f.read()
 

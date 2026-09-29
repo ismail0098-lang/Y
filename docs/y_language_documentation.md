@@ -4932,6 +4932,19 @@ test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 This section documents the Python GPU engine extensions, PyTorch Inductor compiler backend, zero-allocation launch runtime, and high-level block primitives added to Y to achieve full feature parity and performance superiority over **OpenAI Triton 3.7.0**.
 
+**Where it lives.** The package is `python/` in this repository: `y_lang`, its
+tests in `python/tests` and `python/y_lang/tests`, and benchmark scripts in
+`python/examples`. Until 2026-09-29 it lived beside the compiler in a separate
+checkout and was not on `main`. It loads `target/release/liby.so` from this
+repository, so build that first; the test commands are in the README's
+*Building* section. Run it from the repository root: `compile_to_ptx`'s default
+`target_sm="auto"` reads `.ysu_hw_profile` from the working directory. From any
+other directory the hardware probe cannot run, so a profile naming an
+`Unknown GPU` is written there and the module declares the floor,
+`.target sm_80`, whatever card is present - an open defect. Of the three kernels in `python/examples/kernels`,
+`flash_attention.ysu` does not compile (it uses a `Pipeline<...>` type the type
+checker does not know), so the scripts that load it stop there.
+
 ### 34.1 `torch.compile` backend (`y_inductor`)
 * **Usage**: `torch.compile(model, backend=y_inductor)`, or `y_inductor(module, example_inputs)` directly.
   Implemented in `python/y_lang/inductor.py`; the result carries `.y_report`.

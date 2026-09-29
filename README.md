@@ -2321,7 +2321,24 @@ cargo test --release --features zk      # ~1020 tests, ZK included
 cargo test --release -p y-gpu           # the sibling crate; a bare `cargo test`
                                         # builds the root package ONLY and does
                                         # not run these 8
+
+# The Python package in python/ loads target/release/liby.so, so build first.
+# Run it, and these, from the repository root - see the note below.
+PYTHONPATH=python python3 -m unittest discover -s python/tests -p "test_*.py"
+PYTHONPATH=python python3 -m unittest discover -s python/y_lang/tests -p "test_*.py"
 ```
+
+**Neither `cargo test` command runs the Python tests**, and the second Python
+command does not collect `python/y_lang/tests/test_triton_parity_features.py`:
+its tests are plain functions and `discover` collects only `TestCase` classes.
+**Run the package from the repository root.** `compile_to_ptx`'s default
+`target_sm="auto"` reads `.ysu_hw_profile` from the working directory. From any
+other directory the hardware probe cannot run (it is looked for beside the
+Python interpreter, not the compiler), so a `.ysu_hw_profile` naming an
+`Unknown GPU` (`SM_VERSION=0.0`) is written there and the module declares the
+floor, `.target sm_80`, whatever card is present: it loads on every supported
+GPU and uses nothing newer than Ampere. Writing into the caller's directory,
+and ignoring the card, is an open defect, recorded rather than fixed.
 
 **Many gates are conditional on an external tool or a device, and a missing one
 makes them SKIP AND REPORT `ok`.** Each prints a notice; the green summary line
@@ -2491,6 +2508,8 @@ self_hosted/    compiler phases rewritten in Y (.ysu); not the default build pat
 proofs/         Rocq proofs — ExactGemmSchedule.v is GENERATED
 tests/          test programs, benchmarks, PTX assembly gates
 tools/          measurement and analysis harnesses (Python), run by hand
+python/         the Python package `y_lang`: ctypes bindings to liby.so, torch
+                interop, the `y_inductor` torch.compile backend, and its tests
   ptxas_tval/     PTX-vs-SASS translation validator — see docs/
   exact_gemm_bench/  the three-arm GEMM benchmark this README quotes
 circomlib/      vendored circomlib (upstream 2.0.5)

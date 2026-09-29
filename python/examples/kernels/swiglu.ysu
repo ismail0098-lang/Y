@@ -1,0 +1,25 @@
+// ============================================================
+//  Y — Fused SwiGLU Activation Kernel
+//  python/examples/kernels/swiglu.ysu
+//
+//  Fused Swish-Gated Linear Unit (SwiGLU) for LLM Feed-Forward Networks.
+// ============================================================
+
+kernel swiglu(
+    Gate: GlobalMemory<F32>,
+    Up: GlobalMemory<F32>,
+    Out: GlobalMemory<F32>
+) {
+    @invariant(i >= 0)
+    for i in 0..1024 step 4 {
+        let g: F32 = GlobalMemory::load(Gate);
+        let u: F32 = GlobalMemory::load(Up);
+
+        // Swish(g) = g * sigmoid(g)
+        let sig: F32 = g;
+        let swish: F32 = g * sig;
+        let res: F32 = swish * u;
+
+        store(Out, res);
+    }
+}

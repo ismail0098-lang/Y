@@ -1,0 +1,32 @@
+// ============================================================
+//  Y — RMSNorm (Root Mean Square Normalization) Kernel
+//  python/examples/kernels/rmsnorm.ysu
+//
+//  Fused vector normalization kernel for Transformer architectures (LLaMA/Mistral).
+// ============================================================
+
+kernel rmsnorm(
+    X: GlobalMemory<F32>,
+    Weight: GlobalMemory<F32>,
+    Out: GlobalMemory<F32>,
+    hidden_dim: I32,
+    eps: F32
+) {
+    let mut sum_sq: F32 = 0.0;
+
+    @invariant(i >= 0)
+    for i in 0..1024 step 4 {
+        let val: F32 = GlobalMemory::load(X);
+        sum_sq = sum_sq + val * val;
+    }
+
+    let inv_rms: F32 = sum_sq + eps;
+
+    @invariant(i >= 0)
+    for i in 0..1024 step 4 {
+        let val: F32 = GlobalMemory::load(X);
+        let w: F32 = GlobalMemory::load(Weight);
+        let norm_val: F32 = val * inv_rms * w;
+        store(Out, norm_val);
+    }
+}
