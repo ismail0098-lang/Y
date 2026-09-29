@@ -200,6 +200,18 @@ pub struct LlvmEmitter {
     mem_elem_types: BTreeMap<String, String>,
     /// Map function names to their LLVM parameter types and return type
     functions: BTreeMap<String, (Vec<String>, String)>,
+    /// Each program-defined function's parameter types AS ITS DEFINITION
+    /// DECLARES THEM, i.e. through `emit_type`. A call site used to derive
+    /// them a second time from `ast_type_to_string` through its own table,
+    /// which knew neither `U32` nor arrays and fell back to `%<name>` - so
+    /// `f(x)` with `x: U32` emitted `call i32 @f(%U32 %x)` and an array
+    /// argument `call i32 @f(%[I32] ..)`, both types the module never
+    /// defines, under "Compilation Successful!".
+    ///
+    /// `None` where the definition's type came from `emit_type`'s default
+    /// rather than a lowering: the call site then keeps its old answer, a type
+    /// clang refuses, instead of agreeing with the definition on a wrong one.
+    fn_llvm_params: BTreeMap<String, Vec<Option<String>>>,
     /// Track struct fields: StructName -> Vec<(FieldName, IRType)>
     structs: BTreeMap<String, Vec<(String, String)>>,
     /// Track struct fields AST Types: StructName -> Vec<(FieldName, ASTType)>
@@ -280,6 +292,25 @@ fn memory_element_llvm_type(ty: &Type) -> Option<String> {
         "I64" | "i64" | "u64" | "usize" => Some("i64".into()),
         _ => None,
     }
+}
+
+/// The LLVM type of a primitive type name, or `None` for one `emit_type`
+/// has no explicit lowering for (a `Q` format, `BF16`, `TF32`).
+fn primitive_llvm_type(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "I32" | "U32" | "u32" | "i32" => "i32",
+        "I64" | "U64" | "u64" | "usize" | "isize" | "i64" => "i64",
+        "U8" | "I8" => "i8",
+        "U16" => "i16",
+        "F16" | "f16" => "half",
+        "F32" | "f32" => "float",
+        "F64" | "f64" => "double",
+        "bool" => "i1",
+        "char" | "i8" | "u8" => "i8",
+        "I16" | "u16" | "i16" => "i16",
+        "String" | "Vec" | "ptr" => "ptr",
+        _ => return None,
+    })
 }
 
 fn ast_type_to_string(ty: &Type) -> String {
@@ -385,6 +416,7 @@ impl LlvmEmitter {
             pointee_types: BTreeMap::new(),
             mem_elem_types: BTreeMap::new(),
             functions,
+            fn_llvm_params: BTreeMap::new(),
             structs: BTreeMap::new(),
             ast_structs: HashMap::new(),
             struct_field_attrs: HashMap::new(),
@@ -975,24 +1007,13 @@ impl LlvmEmitter {
 
     fn emit_type(&mut self, ty: &Type) -> String {
         let res: String = match ty {
-            Type::Primitive(name, _) => match name.as_str() {
-                // `U64`/`u64` were absent and fell to the `_ => "i32"` arm
-                // below, so `let x: U64 = ...` allocated an **i32**. The PTX
-                // backend takes these types seriously (gotcha #7); this one
-                // silently halved their width.
-                "I32" | "U32" | "u32" | "i32" => "i32".into(),
-                "I64" | "U64" | "u64" | "usize" | "isize" | "i64" => "i64".into(),
-                "U8" | "I8" => "i8".into(),
-                "U16" => "i16".into(),
-                "F16" | "f16" => "half".into(),
-                "F32" | "f32" => "float".into(),
-                "F64" | "f64" => "double".into(),
-                "bool" => "i1".into(),
-                "char" | "i8" | "u8" => "i8".into(),
-                "I16" | "u16" | "i16" => "i16".into(),
-                "String" | "Vec" | "ptr" => "ptr".into(),
-                _ => "i32".into(),
-            },
+            // `U64`/`u64` were absent from this table and fell to the
+            // `"i32"` default, so `let x: U64 = ...` allocated an **i32**. The
+            // PTX backend takes these types seriously (gotcha #7); this one
+            // silently halved their width. The default is still here, and
+            // still wrong for a `Q` format outside `@ZeroDrift` - `let x:
+            // Q16.16 = 1.5` allocates an `i32` and stores `fptosi 1.5` = 1.
+            Type::Primitive(name, _) => primitive_llvm_type(name).unwrap_or("i32").into(),
             Type::Ident(name, _) => match name.as_str() {
                 "I32" | "U32" | "u32" | "i32" => "i32".into(),
                 "I64" | "U64" | "u64" | "usize" | "isize" | "i64" => "i64".into(),
@@ -1064,6 +1085,75 @@ impl LlvmEmitter {
             }
             _ => self.emit_type(ty),
         }
+    }
+
+    /// The parameter types a definition's signature declares, for its call
+    /// sites. The definition reports any type it cannot lower when it is
+    /// emitted, so the errors `emit_type` pushes here would only print every
+    /// such message twice.
+    fn definition_param_types(&mut self, params: &[Param]) -> Vec<Option<String>> {
+        let before = self.emit_errors.len();
+        let tys = params
+            .iter()
+            .map(|p| match &p.ty {
+                Type::Primitive(n, _) if primitive_llvm_type(n).is_none() => None,
+                t => Some(self.emit_type(t)),
+            })
+            .collect();
+        self.emit_errors.truncate(before);
+        tys
+    }
+
+    /// The storage type of a local array, or of the copy an array parameter
+    /// is given on entry: `[N x T]` for a literal length and a scalar element.
+    ///
+    /// **A local array used to have no storage at all.** `emit_type` answers
+    /// `ptr` for every array - right for a parameter, which arrives as a
+    /// pointer - and the `let` allocated exactly that: one pointer slot,
+    /// which `= {}` then zeroed. Every element access loaded that null
+    /// pointer and indexed from it, in 8-byte `i64` slots whatever the
+    /// element type. Measured, each under "Compilation Successful!" and each
+    /// running: `v[0] = 4; v[2] = 6; return v[0] + v[2];` exited 0 (clang
+    /// deleted the stores through null as undefined behaviour); reading a
+    /// zero-initialised element segfaulted; `let w = v;` segfaulted; an `F32`
+    /// array stored `fptosi 1.5` = 1.
+    ///
+    /// Anything this cannot hold is refused by name rather than given a
+    /// representation the element accesses do not share.
+    fn local_array_type(&mut self, ty: &Type, what: &str, span: &Span) -> Option<String> {
+        let (element, size) = match ty {
+            Type::Array { element, size, .. } => (element, size),
+            _ => return None,
+        };
+        // A whitelist on the AST, not a test of what `emit_type` answered: its
+        // primitive arm ends in `_ => "i32"`, so a `Q16.16` element would have
+        // looked like a scalar here and been stored in four integer bytes.
+        let scalar = matches!(
+            &**element,
+            Type::Primitive(n, _) if matches!(
+                n.as_str(),
+                "I8" | "I16" | "I32" | "I64" | "U8" | "U16" | "U32" | "U64"
+                    | "F16" | "F32" | "F64" | "bool" | "char"
+            )
+        );
+        let elem = self.emit_type(element);
+        let reason = match (&**size, scalar) {
+            (Expr::IntLit(n, _), true) if *n > 0 => return Some(format!("[{} x {}]", n, elem)),
+            (Expr::IntLit(n, _), true) => format!("its length is {}", n),
+            (_, true) => "its length is not an integer literal".to_string(),
+            (_, false) => format!(
+                "its elements are `{}` - this backend stores arrays of scalars only",
+                ast_type_to_string(element)
+            ),
+        };
+        self.emit_errors.push(format!(
+            "Line {}: [LLVM host backend] {} of type `{}` cannot be given storage: {}.",
+            span.line,
+            what,
+            ast_type_to_string(ty),
+            reason
+        ));
+        None
     }
 
     // ── Entry Point ─────────────────────────────────────────
@@ -1257,6 +1347,8 @@ impl LlvmEmitter {
                     let param_tys: Vec<String> =
                         f.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
                     self.functions.insert(f.name.clone(), (param_tys, ret_ty));
+                    let llvm = self.definition_param_types(&f.params);
+                    self.fn_llvm_params.insert(f.name.clone(), llvm);
                 }
                 Item::Impl(imp) => {
                     for m in &imp.methods {
@@ -1267,10 +1359,10 @@ impl LlvmEmitter {
                             .unwrap_or_else(|| "void".into());
                         let param_tys: Vec<String> =
                             m.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
-                        self.functions.insert(
-                            format!("{}_{}", imp.target_type, m.name),
-                            (param_tys, ret_ty),
-                        );
+                        let name = format!("{}_{}", imp.target_type, m.name);
+                        self.functions.insert(name.clone(), (param_tys, ret_ty));
+                        let llvm = self.definition_param_types(&m.params);
+                        self.fn_llvm_params.insert(name, llvm);
                     }
                 }
                 Item::Kernel(k) => {
@@ -1278,6 +1370,8 @@ impl LlvmEmitter {
                         k.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
                     self.functions
                         .insert(k.name.clone(), (param_tys, "void".into()));
+                    let llvm = self.definition_param_types(&k.params);
+                    self.fn_llvm_params.insert(k.name.clone(), llvm);
                 }
                 _ => {}
             }
@@ -1578,6 +1672,20 @@ impl LlvmEmitter {
             Some(ty) => self.emit_type(ty),
             None => "void".into(),
         };
+        // An array evaluates to its storage's address, and a local's storage
+        // is this function's own stack frame: `return v;` would hand the
+        // caller a pointer into a frame that no longer exists. (It returned 0
+        // where the answer was 11 before local arrays had storage at all.)
+        if let Some(t @ Type::Array { .. }) = &f.ret_ty {
+            self.emit_errors.push(format!(
+                "Line {}: [LLVM host backend] `fn {}` returns an array (`{}`); this backend \
+                 would return the address of storage in the callee's own stack frame. Return a \
+                 struct with an array field instead - a struct is returned by value.",
+                f.span.line,
+                f.name,
+                ast_type_to_string(t)
+            ));
+        }
 
         let func_name = if let Some(ref target) = self.current_impl_target {
             format!("{}_{}", target, f.name)
@@ -1608,18 +1716,7 @@ impl LlvmEmitter {
 
         // Alloca for all params so we can store/load them by name
         for p in &f.params {
-            let ty = self.emit_type(&p.ty);
-            self.locals.insert(p.name.clone(), ty.clone());
-            self.locals_ast_type
-                .insert(p.name.clone(), ast_type_to_string(&p.ty));
-            if let Some(pty) = self.get_pointee_type(&p.ty) {
-                self.pointee_types.insert(p.name.clone(), pty);
-            }
-            if let Some(ety) = memory_element_llvm_type(&p.ty) {
-                self.mem_elem_types.insert(p.name.clone(), ety);
-            }
-            writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
-            self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
+            self.emit_param_slot(p);
         }
 
         writeln!(&mut self.output, "  {} = alloca [8 x i8], align 8", Y_OOB_SINK).unwrap();
@@ -1725,14 +1822,41 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         }
                     }
                 }
-                Stmt::Let { name, ty, init, .. } => {
+                Stmt::Let { name, ty, init, span, .. } => {
+                    // A local array is given storage of its own - see
+                    // `local_array_type` for what it used to be given.
+                    let array_ty = match ty {
+                        Some(t @ Type::Array { .. }) => Some(
+                            self.local_array_type(t, "a local array", span)
+                                .unwrap_or_else(|| "ptr".into()),
+                        ),
+                        _ => None,
+                    };
+                    // This backend keeps ONE slot per name per function, so a
+                    // second `let` of a name reuses the first one's alloca.
+                    // For an array of another size or element type that is
+                    // storage of the wrong size, so it is refused rather than
+                    // written past.
+                    if let (Some(aty), Some(prev)) = (&array_ty, self.locals.get(name)) {
+                        if aty != prev {
+                            self.emit_errors.push(format!(
+                                "Line {}: [LLVM host backend] `{}` is declared again as `{}`, but \
+                                 this backend keeps one slot per name per function and the first \
+                                 declaration's is `{}`.",
+                                span.line, name, aty, prev
+                            ));
+                        }
+                    }
                     if !self.locals.contains_key(name) {
                         let ir_ty = match ty {
                             Some(t) => {
                                 if let Some(pty) = self.get_pointee_type(t) {
                                     self.pointee_types.insert(name.clone(), pty);
                                 }
-                                self.emit_type(t)
+                                match &array_ty {
+                                    Some(aty) => aty.clone(),
+                                    None => self.emit_type(t),
+                                }
                             }
                             None => {
                                 if let Some(init_expr) = init {
@@ -1766,7 +1890,10 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         if ir_ty.starts_with('%') {
                             self.pointee_types.insert(name.clone(), ir_ty.clone());
                         }
-                        writeln!(&mut self.output, "  %{} = alloca {}", name, ir_ty).unwrap();
+                        // Aggregate copies here are `memcpy` with `align 8` on
+                        // both pointers, so an array's storage must honour it.
+                        let align = if ir_ty.starts_with('[') { ", align 8" } else { "" };
+                        writeln!(&mut self.output, "  %{} = alloca {}{}", name, ir_ty, align).unwrap();
                     }
                 }
                 Stmt::For { loop_var, body, .. } => {
@@ -1807,6 +1934,51 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         }
     }
 
+    /// A parameter's named slot, for `emit_func` and `emit_kernel` alike.
+    ///
+    /// An array arrives as a pointer - the signature the definition and every
+    /// call site agree on - and is COPIED into storage of its own. Arrays are
+    /// values: the ZK backend binds each element separately, and `--emit-cpu`
+    /// prints Rust's by-value `[T; N]`, so a callee writing `a[0]` must not
+    /// write its caller's array. The type checker allows that write.
+    fn emit_param_slot(&mut self, p: &Param) {
+        self.locals_ast_type
+            .insert(p.name.clone(), ast_type_to_string(&p.ty));
+        if let Type::Array { .. } = &p.ty {
+            if let Some(aty) = self.local_array_type(&p.ty, "a parameter", &p.span) {
+                self.locals.insert(p.name.clone(), aty.clone());
+                writeln!(&mut self.output, "  %{} = alloca {}, align 8", p.name, aty).unwrap();
+                let size = self.emit_sizeof(&aty);
+                writeln!(
+                    &mut self.output,
+                    "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %{}, ptr align 1 %{}.arg, i64 {}, i1 false)",
+                    p.name, p.name, size
+                )
+                .unwrap();
+                return;
+            }
+        }
+        let ty = self.emit_type(&p.ty);
+        self.locals.insert(p.name.clone(), ty.clone());
+        if let Some(pty) = self.get_pointee_type(&p.ty) {
+            self.pointee_types.insert(p.name.clone(), pty);
+        }
+        if let Some(ety) = memory_element_llvm_type(&p.ty) {
+            self.mem_elem_types.insert(p.name.clone(), ety);
+        }
+        writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
+        self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
+    }
+
+    /// `sizeof(ty)` in bytes, by the `getelementptr ty, ptr null, 1` idiom.
+    fn emit_sizeof(&mut self, ty: &str) -> String {
+        let end = self.fresh_tmp();
+        let size = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = getelementptr {}, ptr null, i32 1", end, ty).unwrap();
+        writeln!(&mut self.output, "  {} = ptrtoint ptr {} to i64", size, end).unwrap();
+        size
+    }
+
     fn emit_kernel(&mut self, k: &KernelDecl) {
         self.reset_function_state();
 
@@ -1832,18 +2004,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         self.defined_functions.push(k.name.clone());
 
         for p in &k.params {
-            let ty = self.emit_type(&p.ty);
-            self.locals.insert(p.name.clone(), ty.clone());
-            self.locals_ast_type
-                .insert(p.name.clone(), ast_type_to_string(&p.ty));
-            if let Some(pty) = self.get_pointee_type(&p.ty) {
-                self.pointee_types.insert(p.name.clone(), pty);
-            }
-            if let Some(ety) = memory_element_llvm_type(&p.ty) {
-                self.mem_elem_types.insert(p.name.clone(), ety);
-            }
-            writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
-            self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
+            self.emit_param_slot(p);
         }
 
         writeln!(&mut self.output, "  {} = alloca [8 x i8], align 8", Y_OOB_SINK).unwrap();
@@ -3066,6 +3227,14 @@ representation, and whether that is lossless depends on the expression.",
                     .get(name)
                     .cloned()
                     .unwrap_or_else(|| "i32".into());
+                // An array evaluates to its ADDRESS, the way an array-typed
+                // struct field already does in the `MemberAccess` arm below:
+                // indexing, `let`, assignment and argument passing all want
+                // the storage, and every consumer that needs the aggregate
+                // value (`memcpy`, `insertvalue`) takes it from there.
+                if ty.starts_with('[') {
+                    return format!("%{}", name);
+                }
                 self.emit_load(&format!("%{}", name), &ty)
             }
             Expr::StringLit(s, _) => {
@@ -3317,21 +3486,35 @@ representation, and whether that is lossless depends on the expression.",
                             arg_val = tmp;
                         }
 
-                        let llvm_param_ty = match param_ty {
-                            "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
-                            "usize" | "i64" | "I64" => "i64".to_string(),
-                            "i32" | "I32" => "i32".to_string(),
-                            "I16" | "u16" | "i16" => "i16".to_string(),
-                            "F16" | "f16" => "half".to_string(),
-                            "F32" | "f32" => "float".to_string(),
-                            "F64" | "f64" => "double".to_string(),
-                            "bool" => "i1".to_string(),
-                            "char" | "i8" => "i8".to_string(),
-                            _ => {
-                                if param_ty.starts_with('&') {
-                                    "ptr".to_string()
-                                } else {
-                                    format!("%{}", param_ty)
+                        // The definition's own signature decides: `emit_type` per parameter,
+                        // the computation `define` used. The table below is only for names no
+                        // definition declares (the runtime's `String_*`/`Vec_*`); it knew neither
+                        // `U32` nor arrays, and its `%<name>` fallback named a type the module
+                        // never defines.
+                        let declared = self
+                            .fn_llvm_params
+                            .get(&func_name)
+                            .and_then(|tys| tys.get(i))
+                            .cloned()
+                            .flatten();
+                        let llvm_param_ty = match declared {
+                            Some(t) => t,
+                            None => match param_ty {
+                                "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
+                                "usize" | "i64" | "I64" => "i64".to_string(),
+                                "i32" | "I32" => "i32".to_string(),
+                                "I16" | "u16" | "i16" => "i16".to_string(),
+                                "F16" | "f16" => "half".to_string(),
+                                "F32" | "f32" => "float".to_string(),
+                                "F64" | "f64" => "double".to_string(),
+                                "bool" => "i1".to_string(),
+                                "char" | "i8" => "i8".to_string(),
+                                _ => {
+                                    if param_ty.starts_with('&') {
+                                        "ptr".to_string()
+                                    } else {
+                                        format!("%{}", param_ty)
+                                    }
                                 }
                             }
                         };
@@ -3465,21 +3648,35 @@ representation, and whether that is lossless depends on the expression.",
                         arg_val = tmp;
                     }
 
-                    let llvm_param_ty = match param_ty {
-                        "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
-                        "usize" | "i64" | "I64" => "i64".to_string(),
-                        "i32" | "I32" => "i32".to_string(),
-                        "I16" | "u16" | "i16" => "i16".to_string(),
-                        "F16" | "f16" => "half".to_string(),
-                        "F32" | "f32" => "float".to_string(),
-                        "F64" | "f64" => "double".to_string(),
-                        "bool" => "i1".to_string(),
-                        "char" | "i8" => "i8".to_string(),
-                        _ => {
-                            if param_ty.starts_with('&') {
-                                "ptr".to_string()
-                            } else {
-                                format!("%{}", param_ty)
+                    // The definition's own signature decides: `emit_type` per parameter,
+                    // the computation `define` used. The table below is only for names no
+                    // definition declares (the runtime's `String_*`/`Vec_*`); it knew neither
+                    // `U32` nor arrays, and its `%<name>` fallback named a type the module
+                    // never defines.
+                    let declared = self
+                        .fn_llvm_params
+                        .get(&func_name)
+                        .and_then(|tys| tys.get(i))
+                        .cloned()
+                        .flatten();
+                    let llvm_param_ty = match declared {
+                        Some(t) => t,
+                        None => match param_ty {
+                            "String" | "&String" | "Vec" | "&Vec" | "ptr" => "ptr".to_string(),
+                            "usize" | "i64" | "I64" => "i64".to_string(),
+                            "i32" | "I32" => "i32".to_string(),
+                            "I16" | "u16" | "i16" => "i16".to_string(),
+                            "F16" | "f16" => "half".to_string(),
+                            "F32" | "f32" => "float".to_string(),
+                            "F64" | "f64" => "double".to_string(),
+                            "bool" => "i1".to_string(),
+                            "char" | "i8" => "i8".to_string(),
+                            _ => {
+                                if param_ty.starts_with('&') {
+                                    "ptr".to_string()
+                                } else {
+                                    format!("%{}", param_ty)
+                                }
                             }
                         }
                     };
@@ -3732,10 +3929,14 @@ representation, and whether that is lossless depends on the expression.",
                             }
                         }
                     }
-                    let val = self.emit_expr(fexpr, None, Some(field_ty.clone()));
+                    let mut val = self.emit_expr(fexpr, None, Some(field_ty.clone()));
                     let mut val_ty = self.infer_type(fexpr);
                     if val == "zeroinitializer" {
                         val_ty = field_ty.clone();
+                    } else if val_ty.starts_with('[') {
+                        // An array evaluates to its address (a local, or an
+                        // array-typed field); `insertvalue` wants the value.
+                        val = self.emit_load(&val, &val_ty);
                     }
                     let coerced = self.emit_coerce(&val, &val_ty, &field_ty);
                     let new_val = self.fresh_tmp();

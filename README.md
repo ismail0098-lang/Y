@@ -138,6 +138,11 @@ repository's own investigation documents contradict.
   returned **9**; `print_int(5)` became a call to the next instruction and
   segfaulted; `return 7; return 9;` exited 9, because `return` did not end the
   function; and a program's own `fn write` was replaced by a syscall stub.
+  The default LLVM backend had a gap of the same kind until September 2026: a
+  local array was given no storage, so its writes went through a null pointer
+  (`v[0] = 4; v[2] = 6; return v[0] + v[2];` exited 0) and passing one to a
+  function emitted IR clang rejects. Arrays of scalars now have storage and are
+  passed by value; arrays of arrays, structs or strings are refused by name.
 - **Leo did not compile the ZK benchmark circuits.** Earlier tables reported
   timings for Leo at 100k and 1M constraints. Leo 4.2.0 refuses both: the
   compiled program exceeds its 512,000-byte limit (`leo build` on
