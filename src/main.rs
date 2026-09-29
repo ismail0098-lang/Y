@@ -8,26 +8,125 @@
 //  selected backend (LLVM IR, PTX, CPU, R1CS, Co-Processor).
 // ============================================================
 
-mod ast;
-mod avx_wrapper;
-mod bank_conflict;
-mod cpu_emitter;
-mod lexer;
-mod linear_tracker;
-mod llvm_emitter;
-mod parser;
-mod ptx_emitter;
-mod sentinel;
-mod type_checker;
-mod native_emitter;
-mod ir_grapher;
-mod rt_core_emitter;
-mod quantization_pass;
-mod coprocessor_scheduler;
-mod autotuner;
+// The compiler's modules live in the `y` library crate (`src/lib.rs`) and are
+// USED from here rather than re-declared with `mod`. Re-declaring them compiled
+// every one of these files a SECOND time, as private modules of this binary —
+// two crates from one set of sources. That doubled the build and, worse, made
+// `cargo build`'s dead-code census meaningless: 62 of 69 warnings were "main.rs
+// does not call this", which is a far weaker claim than "nothing uses this",
+// and the 26 blanket `#![allow(dead_code)]` attributes existed to silence them.
+// The two module lists had already drifted apart.
+use y::{
+    ast, autotuner, coprocessor_scheduler, cpu_emitter, exact_gemm_certificate, ir_grapher, lexer,
+    llvm_emitter, native_emitter, parser, ptx_emitter, require, sentinel, type_checker, zero_drift,
+};
 
 #[cfg(feature = "zk")]
-mod zk_emitter;
+use y::{circom_lower, mini_json, zk_emitter, zk_solidity, zk_witness};
+
+/// Resident and peak memory, for the `Y_ZK_TIMING` phase report.
+///
+/// Memory, not time, is what bounds the circuit sizes Y is meant to reach that
+/// other compilers cannot: cost is roughly linear per constraint, so the box's
+/// RAM sets a hard ceiling on circuit size. A user who hits it needs to know
+/// which phase peaked, and a "circuits too big for circom" claim needs the
+/// number it depends on to be visible rather than folklore.
+///
+/// Linux-only (`/proc/self/status`); silently contributes nothing elsewhere.
+#[cfg(feature = "zk")]
+mod zk_mem {
+    pub fn report() -> String {
+        #[cfg(target_os = "linux")]
+        {
+            let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+                return String::new();
+            };
+            let field = |k: &str| -> Option<f64> {
+                status
+                    .lines()
+                    .find(|l| l.starts_with(k))?
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse::<f64>()
+                    .ok()
+                    .map(|kb| kb / 1024.0 / 1024.0)
+            };
+            match (field("VmRSS:"), field("VmHWM:")) {
+                (Some(rss), Some(peak)) => {
+                    format!("   rss {:>6.2} GB   peak {:>6.2} GB", rss, peak)
+                }
+                _ => String::new(),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            String::new()
+        }
+    }
+}
+
+/// Counting allocator, reported by `Y_ZK_TIMING=1`.
+///
+/// Here because the ZK emitter's cost turned out NOT to be where the obvious
+/// reasoning put it. A Poseidon circuit is pure field arithmetic, so the natural
+/// conclusion is that it is bound by the cost of a field multiply — but
+/// measured, the 4.12 M multiplies plus 7.81 M adds in a 1000-hash chain
+/// accounted for only ~1.8 s of an 8.6 s emit. The other 81% was **356 million
+/// allocations**, because `Fr` was a heap `Vec<u32>` and every element cloned,
+/// moved into a HashMap or returned by value hit the allocator.
+///
+/// `Fr` is a stack `[u64; 4]` now (`zk_field.rs`) and that is down to 7.4 M, so
+/// this counter has done its job — it stays because it is the only instrument
+/// that could have found the answer, and the same question will be asked again.
+///
+/// A relaxed atomic increment per allocation is a few nanoseconds and does not
+/// distort the ratio it exists to measure.
+#[cfg(feature = "alloc-stats")]
+mod counting_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    pub static ALLOCS: AtomicU64 = AtomicU64::new(0);
+    pub static BYTES: AtomicU64 = AtomicU64::new(0);
+
+    pub struct Counting;
+
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            ALLOCS.fetch_add(1, Relaxed);
+            BYTES.fetch_add(l.size() as u64, Relaxed);
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+            ALLOCS.fetch_add(1, Relaxed);
+            BYTES.fetch_add(new as u64, Relaxed);
+            unsafe { System.realloc(p, l, new) }
+        }
+    }
+
+    pub fn counts() -> (u64, u64) {
+        (ALLOCS.load(Relaxed), BYTES.load(Relaxed))
+    }
+}
+
+#[cfg(feature = "alloc-stats")]
+#[global_allocator]
+static ALLOC: counting_alloc::Counting = counting_alloc::Counting;
+
+/// `(0, 0)` when the counting allocator is not compiled in.
+#[cfg(not(feature = "alloc-stats"))]
+mod counting_alloc {
+    // Every caller is on the `--features zk` path (`Y_ZK_TIMING`'s allocation
+    // readout), so in a default build this is genuinely unreachable rather
+    // than forgotten.
+    #[allow(dead_code)]
+    pub fn counts() -> (u64, u64) {
+        (0, 0)
+    }
+}
 
 use std::env;
 use std::fs;
@@ -66,12 +165,620 @@ macro_rules! log_step {
     };
 }
 
+/// `Y --emit-verifier <verification_key.json> [-o Verifier.sol] [--name N]`
+///
+/// Turns a Groth16 verifying key into a deployable Solidity contract. The key
+/// comes from a trusted setup, which Y does not perform - snarkjs
+/// (`snarkjs groth16 setup` then `snarkjs zkey export verificationkey`) and
+/// arkworks both produce a key this reads.
+#[cfg(feature = "zk")]
+fn emit_verifier_cli(args: &[String], pos: usize) {
+    let vkey_path = match args.get(pos + 1) {
+        Some(p) if !p.starts_with('-') => p.clone(),
+        _ => {
+            log_error!("--emit-verifier needs a verification key: Y --emit-verifier verification_key.json");
+            exit(1);
+        }
+    };
+    let out_path = args
+        .iter()
+        .position(|a| a == "-o" || a == "--output")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let name = args
+        .iter()
+        .position(|a| a == "--name")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "Groth16Verifier".to_string());
+
+    log_info!("Reading verifying key: {}", vkey_path);
+    let json = match fs::read_to_string(&vkey_path) {
+        Ok(j) => j,
+        Err(e) => {
+            log_error!("Failed to read {}: {}", vkey_path, e);
+            exit(1);
+        }
+    };
+    let vk = match zk_solidity::parse_snarkjs_vkey(&json) {
+        Ok(vk) => vk,
+        Err(e) => {
+            log_error!("{}", e);
+            exit(1);
+        }
+    };
+    log_info!(
+        "Groth16 / BN254, {} public input(s), {} IC points",
+        vk.num_public_inputs(),
+        vk.ic.len()
+    );
+
+    let sol = zk_solidity::emit_groth16_verifier(&vk, &name);
+    match out_path {
+        Some(p) => match fs::write(&p, &sol) {
+            Ok(()) => {
+                log_step!("done", "Wrote {} ({} bytes)", p, sol.len());
+            }
+            Err(e) => {
+                log_error!("Failed to write {}: {}", p, e);
+                exit(1);
+            }
+        },
+        None => print!("{}", sol),
+    }
+}
+
+/// Flatten an input file into one `(signal name, value text)` pair per WIRE.
+///
+/// circom's own `input.json` keys a signal by its source name and gives an
+/// array signal a JSON array - `{"in": ["1", "2"], "x": 3}` - while the wires
+/// behind it are `main.in[0]`, `main.in[1]`, `main.x`. Reading circom's file
+/// therefore means flattening it the same way `alloc_signal` flattens a
+/// declaration. `parse_scalar_map`, which this replaces, refused an array
+/// outright, so no circuit taking an array input could be given one.
+///
+/// Values keep their source text: a field element routinely exceeds 2^53 and
+/// parsing through `f64` would round it silently.
+#[cfg(feature = "zk")]
+fn flatten_inputs(prefix: &str, v: &mini_json::Json, out: &mut Vec<(String, String)>) -> Result<(), String> {
+    match v {
+        mini_json::Json::Str(t) | mini_json::Json::Num(t) => {
+            out.push((prefix.to_string(), t.clone()));
+            Ok(())
+        }
+        mini_json::Json::Arr(items) => {
+            for (i, item) in items.iter().enumerate() {
+                flatten_inputs(&format!("{}[{}]", prefix, i), item, out)?;
+            }
+            Ok(())
+        }
+        mini_json::Json::Obj(_) => Err(format!(
+            "input {:?} is a JSON object; circuit inputs are numbers, strings, or \
+             (nested) arrays of them",
+            prefix
+        )),
+        mini_json::Json::Other => Err(format!(
+            "input {:?} is not a number, string or array",
+            prefix
+        )),
+    }
+}
+
+/// Look each wire's signal name up in the supplied file, marking what it used.
+///
+/// Two spellings are accepted for the same signal: the source name circom's
+/// own `input.json` uses (`a`), and the fully-qualified name that appears in
+/// the `.sym` file (`main.a`). Y used to accept only its own third spelling,
+/// `maina`, which is neither.
+#[cfg(feature = "zk")]
+fn bind_inputs(
+    names: &[String],
+    supplied: &[(String, String)],
+    used: &mut [bool],
+    inputs_path: &str,
+    all_names: &[String],
+) -> Result<Vec<zk_emitter::Fr>, String> {
+    use zk_emitter::{BigUint, Fr};
+    let mut ordered = Vec::with_capacity(names.len());
+    for name in names {
+        let bare = name.strip_prefix("main.").unwrap_or(name);
+        let hit = supplied
+            .iter()
+            .position(|(k, _)| k == name || k == bare)
+            .ok_or_else(|| {
+                format!(
+                    "input {:?} is missing from {}; this circuit takes [{}]",
+                    bare,
+                    inputs_path,
+                    all_names.join(", ")
+                )
+            })?;
+        used[hit] = true;
+        ordered.push(Fr::from_biguint(BigUint::from_str(&supplied[hit].1)));
+    }
+    Ok(ordered)
+}
+
+/// Solves the circuit against a JSON input file and writes a `.wtns`.
+///
+/// Inputs are matched by NAME against the circuit's input signals, not by
+/// position: a file listing them in the wrong order would otherwise produce a
+/// valid proof of the wrong statement, which is exactly the class of error this
+/// backend cannot afford. Every input must be present and no unknown key is
+/// accepted.
+#[cfg(feature = "zk")]
+fn solve_and_write_witness(
+    emitter: &zk_emitter::ZkEmitter,
+    inputs_path: &str,
+    wtns_path: &str,
+) -> Result<usize, String> {
+    let json = fs::read_to_string(inputs_path)
+        .map_err(|e| format!("Failed to read {}: {}", inputs_path, e))?;
+    let root = mini_json::P { b: json.as_bytes(), i: 0 }.value()?;
+    let mini_json::Json::Obj(fields) = &root else {
+        return Err(
+            "expected a JSON object of circuit inputs, e.g. {\"x\": 3, \"in\": [1, 2]}".into(),
+        );
+    };
+    let mut supplied = Vec::new();
+    for (k, v) in fields {
+        flatten_inputs(k, v, &mut supplied)?;
+    }
+    let mut used = vec![false; supplied.len()];
+
+    // BOTH lists, and in this order: `execute_host_witness_ir` consumes
+    // `pub_in` and `priv_in` positionally. Passing `&[]` for the public list -
+    // which is what this did - left every `{public [...]}` signal at zero, so
+    // no circom circuit with a public input could be solved.
+    let pub_names = emitter.public_input_names();
+    let priv_names = emitter.private_input_names();
+    let all: Vec<String> = pub_names
+        .iter()
+        .chain(priv_names.iter())
+        .map(|n| n.strip_prefix("main.").unwrap_or(n).to_string())
+        .collect();
+    let pub_ordered = bind_inputs(&pub_names, &supplied, &mut used, inputs_path, &all)?;
+    let ordered = bind_inputs(&priv_names, &supplied, &mut used, inputs_path, &all)?;
+
+    if let Some((k, _)) = supplied.iter().zip(&used).find(|(_, u)| !**u).map(|(kv, _)| kv) {
+        return Err(format!(
+            "{} sets {:?}, which is not an input of this circuit; it takes [{}]",
+            inputs_path,
+            k,
+            all.join(", ")
+        ));
+    }
+
+    // Borrowed, not `build_circuit()`: cloning the constraint list to hand it to
+    // a read-only consumer is the largest single allocation the ZK pipeline can
+    // make, and memory is what bounds circuit size here.
+    let circuit = emitter.view();
+    let ir = emitter.build_witness_ir();
+    let (witness, satisfied) =
+        zk_witness::solve_r1cs_witness(circuit.constraints, &ir, circuit.num_variables, &pub_ordered, &ordered);
+    if !satisfied {
+        return Err(format!(
+            "no satisfying witness exists for these inputs. A range check almost \
+             certainly failed: comparisons and the bitwise, shift and division \
+             gadgets treat values as unsigned {}-bit, so a negative or oversized \
+             input is unprovable by design.",
+            zk_emitter::ZK_COMPARISON_BITS
+        ));
+    }
+    zk_emitter::ZkEmitter::write_wtns_binary_view(circuit, &witness, wtns_path)
+        .map_err(|e| format!("Failed to write {}: {}", wtns_path, e))?;
+    Ok(witness.len())
+}
+
+/// Refuse a constraint system that asserts nothing.
+///
+/// A circuit with NO constraints is satisfied by every assignment, so a Groth16
+/// proof over it verifies unconditionally and proves nothing at all. Y emitted
+/// one for `fn main() {}`, for a `main` whose body only declares an unused
+/// local, for a body that is entirely `@ghost`, and -- the case that matters --
+/// for every program whose work lives in a `kernel` rather than in `main`.
+/// Measured over `tests/`: **all 57 programs the backend accepted produced
+/// 1 wire, 0 constraints, no inputs and no outputs**, under "Compilation
+/// Successful!" and exit 0, with `.r1cs`, `.sym` and `.r1cs.txt` on disk.
+///
+/// This is the empty-artifact bug the PTX and co-processor backends had, in the
+/// one backend where the artifact is supposed to carry a soundness guarantee.
+/// An empty `.ptx` does nothing; an empty `.r1cs` ASSERTS nothing while looking
+/// exactly like a circuit that does.
+///
+/// The test is the constraint count alone, deliberately. A circuit with no
+/// PUBLIC inputs is legitimate -- that is a proof of knowledge of a witness --
+/// and so is one with no outputs, which is what a body of pure assertions
+/// emits. Neither is refused. Zero constraints is the one shape that cannot
+/// mean anything.
+///
+/// **Both front ends call this.** The `.ysu` path and the circom path build the
+/// circuit through different code and write it through different code, and the
+/// circom arm printed its own constraint count one line above the write without
+/// ever looking at it. Fixing one arm and not the other is the recurring shape
+/// in this repo's design-rule table.
+#[cfg(feature = "zk")]
+fn refuse_if_no_constraints(n: usize, source_hint: &str) {
+    if n == 0 {
+        log_error!(
+            "[ZK backend] this circuit has no constraints, so it asserts \
+             nothing - every assignment satisfies it and a proof over it would \
+             verify unconditionally. {}",
+            source_hint
+        );
+        exit(1);
+    }
+}
+
+/// Compile a circom circuit through Y's R1CS back end.
+///
+/// The whole point of the front end: a team's existing, audited `.circom`
+/// source compiles here with no rewrite, and everything downstream of
+/// constraint construction is the same code Y's own language uses.
+///
+/// `-l <dir>` adds an include search path, matching circom's own flag.
+#[cfg(feature = "zk")]
+fn compile_circom(path: &str, args: &[String]) {
+    use std::path::PathBuf;
+
+    let mut search_paths: Vec<PathBuf> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-l" || args[i] == "--link" {
+            if let Some(dir) = args.get(i + 1) {
+                search_paths.push(PathBuf::from(dir));
+            }
+            i += 1;
+        } else if let Some(dir) = args[i].strip_prefix("-l") {
+            if !dir.is_empty() {
+                search_paths.push(PathBuf::from(dir));
+            }
+        }
+        i += 1;
+    }
+
+    let output_path = args
+        .iter()
+        .position(|a| a == "-o" || a == "--output")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut p = PathBuf::from(path);
+            p.set_extension("r1cs");
+            p.to_string_lossy().to_string()
+        });
+
+    log_info!("Reading circom source: {}", path);
+    log_step!("1/2", "Parsing and lowering circom to R1CS...");
+
+    let timing = std::env::var("Y_ZK_TIMING").is_ok();
+    let t0 = std::time::Instant::now();
+    let alloc0 = counting_alloc::counts();
+
+    let emitter = match circom_lower::compile_file(std::path::Path::new(path), &search_paths) {
+        Ok(e) => e,
+        Err(e) => {
+            log_error!("circom compilation failed:");
+            eprintln!("    {}", e);
+            exit(1);
+        }
+    };
+    if timing {
+        eprintln!(
+            "[Y ZK TIMING] {:<22} {:>8.3} s{}",
+            "circom lower",
+            t0.elapsed().as_secs_f64(),
+            zk_mem::report()
+        );
+        // The circom front end shares the linear-combination layer with Y's own,
+        // so it can regress into the same quadratic accumulate — report it here
+        // too rather than only on the `.ysu` path.
+        let (calls, terms) = zk_emitter::lc_simplify_stats();
+        eprintln!(
+            "[Y ZK TIMING] {:<22} {:>12} calls, {:>12} terms scanned",
+            "lc simplify", calls, terms
+        );
+        let a1 = counting_alloc::counts();
+        if a1.0 > alloc0.0 {
+            eprintln!(
+                "[Y ZK TIMING] {:<22} {:>12} allocs, {:>9.2} GB",
+                "lower allocations",
+                a1.0 - alloc0.0,
+                (a1.1 - alloc0.1) as f64 / 1e9
+            );
+        }
+    }
+
+    let circuit = emitter.view();
+    println!(
+        "      -> {} constraints, {} wires, {} public input(s), {} private input(s), {} output(s)",
+        circuit.constraints.len(),
+        circuit.num_variables,
+        circuit.public_inputs.len(),
+        circuit.private_inputs.len(),
+        circuit.outputs.len()
+    );
+
+    refuse_if_no_constraints(
+        circuit.constraints.len(),
+        "No template in this circom source emitted one.",
+    );
+
+    log_step!("2/2", "Writing R1CS...");
+    let t1 = std::time::Instant::now();
+    if let Err(e) = emitter.write_r1cs_binary(&output_path) {
+        log_error!("failed to write {}: {}", output_path, e);
+        exit(1);
+    }
+    if timing {
+        eprintln!(
+            "[Y ZK TIMING] {:<22} {:>8.3} s{}",
+            "write_r1cs_binary",
+            t1.elapsed().as_secs_f64(),
+            zk_mem::report()
+        );
+    }
+    println!("      -> Written to: {}", output_path);
+
+    // `--witness inputs.json` also solves and writes the `.wtns`, so the whole
+    // prove path is available without a second tool.
+    if let Some(i) = args.iter().position(|a| a == "--witness") {
+        if let Some(inputs) = args.get(i + 1) {
+            let mut wtns = PathBuf::from(&output_path);
+            wtns.set_extension("wtns");
+            let wtns = wtns.to_string_lossy().to_string();
+            match solve_and_write_witness(&emitter, inputs, &wtns) {
+                Ok(n) => {
+                    println!("      -> Solved {} witness values.", n);
+                    println!("      -> Written witness to: {}", wtns);
+                }
+                Err(e) => {
+                    log_error!("witness generation failed:");
+                    eprintln!("    {}", e);
+                    exit(1);
+                }
+            }
+        }
+    }
+
+    println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
+}
+
+/// Measured accumulate costs for `@ZeroDrift`, cached in `.ysu_hw_profile`.
+///
+/// Measuring costs a couple of seconds of GPU time, so it happens once per
+/// device and is then read back. Without any measurement the selector still
+/// works - it falls back to the narrowest representation that fits, which is
+/// deterministic - so a machine with no GPU compiles fine, just less informed.
+fn load_or_measure_drift_costs(gpu_name: &str) -> zero_drift::CostTable {
+    const PROFILE: &str = ".ysu_hw_profile";
+
+    if let Ok(contents) = fs::read_to_string(PROFILE) {
+        let cached = zero_drift::parse_costs(&contents, gpu_name);
+        if !cached.is_empty() {
+            return cached;
+        }
+    }
+
+    let Some(costs) = zero_drift::measure_accumulate_costs() else {
+        return zero_drift::CostTable::new();
+    };
+
+    log_info!("Measured @ZeroDrift accumulate costs on {}", gpu_name);
+    let mut sorted: Vec<_> = costs.iter().collect();
+    sorted.sort_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (repr, ps) in &sorted {
+        println!(
+            "      -> {:>9}: {:>9.0} ps/acc  {}",
+            repr.name(),
+            ps,
+            if repr.is_exact() { "exact" } else { "not exact (never selected)" }
+        );
+    }
+
+    // Append rather than rewrite: this file also holds the sentinel probe and
+    // the autotuner's measurements.
+    use std::io::Write as _;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(PROFILE) {
+        let _ = writeln!(f, "{}", zero_drift::serialize_costs(&costs, gpu_name));
+    }
+    costs
+}
+
+/// Write one `.v` certificate per exact GEMM this compilation substituted.
+///
+/// **This is the "carrying" half of proof-carrying kernels.** The library in
+/// `proofs/` is checked once at build time against the shipped schedule; until
+/// now a user compiling their own `@ZeroDrift` nest got a fast kernel and no
+/// artifact. The certificate instantiates
+/// `ExactGemmWhole.the_threaded_gemm_holds_the_source_dot_products` at THIS
+/// compilation's flush interval and operand bound, so it travels with the
+/// `.ll` and can be checked by anyone with `coqc` and the proofs.
+///
+/// A failure to write is reported and does NOT fail the build: the kernel is
+/// correct whether or not the paperwork lands, and refusing to compile because
+/// a directory is read-only would be a worse trade than saying so. A failure
+/// to LICENSE, by contrast, is decided long before this point and does refuse.
+///
+/// `Y_NO_CERTIFICATE=1` suppresses the file. It exists for callers that
+/// compile into a directory they do not own, and for tests that want the `.ll`
+/// alone; like `Y_NO_GEMM_RECOGNISER` it is read from the environment on every
+/// call rather than cached.
+fn write_exact_gemm_certificates(
+    certs: &[exact_gemm_certificate::Certificate],
+    output_path: &str,
+    source_label: &str,
+) {
+    if certs.is_empty() {
+        return;
+    }
+    if matches!(
+        env::var("Y_NO_CERTIFICATE").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes")
+    ) {
+        println!(
+            "      -> {} exact-GEMM certificate(s) suppressed by Y_NO_CERTIFICATE",
+            certs.len()
+        );
+        return;
+    }
+    let base = std::path::Path::new(output_path);
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+    for (i, cert) in certs.iter().enumerate() {
+        // One certificate per substituted nest, so the name has to distinguish
+        // them when a program contains more than one. The first keeps the bare
+        // name because that is overwhelmingly the common case and a `_0`
+        // suffix on a lone file reads as an accident.
+        //
+        // The name is SANITISED here and not only inside the renderer, because
+        // `coqc` derives the module's logical name from the FILE name: a
+        // source called `4-bit gemm.ysu` is an ordinary file name and an
+        // illegal Coq identifier, and letting the two diverge would produce a
+        // certificate whose own "check with" line names a module that does not
+        // exist.
+        let file_stem = exact_gemm_certificate::module_stem(&if i == 0 {
+            format!("{stem}_certificate")
+        } else {
+            format!("{stem}_certificate_{i}")
+        });
+        let path = base.with_file_name(format!("{file_stem}.v"));
+        let text = exact_gemm_certificate::render(cert, source_label, &file_stem);
+        match fs::write(&path, &text) {
+            Ok(_) => println!(
+                "      -> Certificate: {} (check with `coqc -Q proofs \"\" {}.v`)",
+                path.display(),
+                file_stem
+            ),
+            Err(e) => {
+                log_error!(
+                    "could not write the exact-GEMM certificate to {}: {}. The emitted kernel \
+                     is unaffected - only the artifact recording why it is exact could not be \
+                     saved.",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+}
+
+/// Write the `.v` certificate for one emitted attention kernel.
+///
+/// `docs/proof_carrying_kernels.md` Phase 3 requires the `ptxas` trust boundary
+/// to be stated in the certificate and "never papered over". Before this there
+/// was no certificate to state it in: `--emit-attention-ptx` wrote a `.ptx` and
+/// nothing else, while three machine-checked proofs described that kernel.
+///
+/// TWO THINGS ARE DELIBERATE ABOUT WHERE THIS GOES.
+///
+/// The notice is on **stderr**. `tools/ptx_bridge.py` pipes stdout straight
+/// into `cuModuleLoadData`, so a line of diagnostic on that stream is a driver
+/// parse error rather than a message - the same reason the PTX itself is
+/// printed with no banner.
+///
+/// The file goes to the working directory, because unlike the exact-GEMM path
+/// there is no input file to sit beside. `Y_NO_CERTIFICATE=1` suppresses it,
+/// the same switch and the same loudness as the GEMM certificate: a compiler
+/// that quietly stops emitting its proof is the failure this whole programme is
+/// about.
+fn write_attention_certificate(head_dim: usize, seq_len: usize) {
+    let cert = y::exact_attention_certificate::Certificate { head_dim, seq_len };
+    let stem = y::exact_attention_certificate::file_stem(&cert);
+    if env::var("Y_NO_CERTIFICATE").is_ok() {
+        eprintln!(
+            "      -> attention certificate ({stem}.v) suppressed by Y_NO_CERTIFICATE"
+        );
+        return;
+    }
+    let source = format!("--emit-attention-ptx {head_dim} {seq_len}");
+    let text = y::exact_attention_certificate::render(&cert, &source, &stem);
+    let path = std::path::PathBuf::from(format!("{stem}.v"));
+    match fs::write(&path, text) {
+        Ok(()) => eprintln!(
+            "      -> attention certificate written to {} (check: coqc -Q <proofs> \"\" {stem}.v)",
+            path.display()
+        ),
+        // A failure here must be loud. The kernel on stdout is still the kernel
+        // the proofs describe; what is missing is the artifact SAYING so, and a
+        // silent omission is indistinguishable from a compiler that never had
+        // one.
+        Err(e) => eprintln!(
+            "      -> could not write the attention certificate to {}: {}. The emitted \
+             kernel is unchanged; what is missing is the certificate that states its \
+             trust boundary.",
+            path.display(),
+            e
+        ),
+    }
+}
+
 fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    // `--emit-attention-ptx <head_dim> <seq_len>`
+    //
+    // Advertised by `src/exact_attention.rs`'s module header ("the
+    // `--emit-attention-ptx` CLI ... all take the same string") and invoked by
+    // `tools/ptx_bridge.py`, and implemented nowhere: the flag fell through to
+    // the ordinary source-file path, which read `64` as `64.ysu` and reported a
+    // missing file. The bridge's `check=True` saw the non-zero exit, so the
+    // failure was loud rather than silent - but the surface two files documented
+    // did not exist.
+    //
+    // Handled before the banner: stdout is piped straight into
+    // `cuModuleLoadData`, so a line of ASCII art on it is a driver parse error
+    // rather than a diagnostic.
+    if let Some(pos) = args.iter().position(|a| a == "--emit-attention-ptx") {
+        let parse = |i: usize, what: &str| -> usize {
+            match args.get(i).and_then(|v| v.parse::<usize>().ok()) {
+                Some(v) => v,
+                None => {
+                    log_error!(
+                        "--emit-attention-ptx needs {}: Y --emit-attention-ptx <head_dim> <seq_len>",
+                        what
+                    );
+                    exit(1);
+                }
+            }
+        };
+        let head_dim = parse(pos + 1, "a head dimension");
+        let seq_len = parse(pos + 2, "a sequence length");
+        match y::exact_attention::attention_ptx(head_dim, seq_len) {
+            // Straight to stdout with no banner: the bridge pipes this into
+            // `cuModuleLoadData`, so anything else on the stream is a parse
+            // error in the driver rather than a diagnostic.
+            Ok(ptx) => {
+                print!("{}", ptx);
+                write_attention_certificate(head_dim, seq_len);
+            }
+            Err(why) => {
+                log_error!("{}", why);
+                exit(1);
+            }
+        }
+        return;
+    }
+
     println!("========================================");
     println!("=== Y Compiler v1.0 ===");
     println!("========================================\n");
 
-    let args: Vec<String> = env::args().collect();
+    // Verifier generation takes a verifying key, not a .ysu source, and touches
+    // none of the compilation pipeline - so handle it before the hardware probe
+    // rather than paying for a GPU probe to format a contract.
+    #[cfg(feature = "zk")]
+    if let Some(pos) = args.iter().position(|a| a == "--emit-verifier") {
+        emit_verifier_cli(&args, pos);
+        return;
+    }
+    #[cfg(not(feature = "zk"))]
+    if args.iter().any(|a| a == "--emit-verifier") {
+        log_error!("--emit-verifier requires a build with the ZK backend: cargo build --release --features zk");
+        exit(1);
+    }
 
     // Phase 0: Sentinel Hardware Probe
     let mut hw_profile = sentinel::check_or_probe_hardware();
@@ -83,9 +790,33 @@ fn main() {
 
     let mut source_file = None;
     let mut lib_paths = Vec::new();
+    // `-o` / `--output` were honoured by `--emit-verifier` and `--target=r1cs`
+    // and IGNORED by the main compile path, which read only `--output=`. So
+    // `Y foo.ysu -o bar` silently wrote `foo`, and `Y -o bar foo.ysu` compiled
+    // `bar` - the value was not consumed here, so it was taken as the source
+    // file. Consume it in one place so both readings agree.
+    let mut cli_output = None;
+    /// Every option this binary reads. An argument starting with `-` that is
+    /// not here, and does not begin with one of `KNOWN_FLAG_PREFIXES`, is a
+    /// hard error -- see the check after the loop.
+    const KNOWN_FLAGS: &[&str] = &[
+        "-o", "--output", "-I", "-l", "--link", "--name", "--witness",
+        "--portable", "--autotune", "--autotune-force", "--no-autotune",
+        "--emit-attention-ptx", "--emit-c", "--emit-coprocessor", "--emit-cpu",
+        "--emit-llvm", "--emit-native", "--emit-ptx", "--emit-r1cs",
+        "--emit-verifier", "--emit-zk-ptx", "--c",
+        "--target=c", "--target=coprocessor", "--target=cpu", "--target=llvm",
+        "--target=native", "--target=ptx", "--target=r1cs", "--target=zk-ptx",
+    ];
+    /// Options that carry their value in the same argument.
+    const KNOWN_FLAG_PREFIXES: &[&str] = &["--output=", "--lib-path=", "-I", "-l"];
+    let mut unknown_flags: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "-I" && i + 1 < args.len() {
+        if (args[i] == "-o" || args[i] == "--output") && i + 1 < args.len() {
+            cli_output = Some(args[i + 1].clone());
+            i += 2;
+        } else if args[i] == "-I" && i + 1 < args.len() {
             lib_paths.push(std::path::PathBuf::from(&args[i + 1]));
             i += 2;
         } else if args[i].starts_with("-I") {
@@ -95,12 +826,52 @@ fn main() {
             lib_paths.push(std::path::PathBuf::from(args[i].trim_start_matches("--lib-path=")));
             i += 1;
         } else if args[i].starts_with('-') {
+            if !KNOWN_FLAGS.contains(&args[i].as_str())
+                && !KNOWN_FLAG_PREFIXES.iter().any(|p| args[i].starts_with(p))
+            {
+                unknown_flags.push(args[i].clone());
+            }
             i += 1;
         } else {
             if source_file.is_none() {
                 source_file = Some(args[i].clone());
             }
             i += 1;
+        }
+    }
+
+    // An unrecognised flag used to be SKIPPED, so `Y foo.ysu --ptx` ran the
+    // LLVM backend and printed "Compiled successfully" over a native ELF. That
+    // exact command is in this repo's own build instructions, and `--ptx` is
+    // not a flag -- the PTX backend is `--emit-ptx`. `--probe` and
+    // `--nonsense-flag` behaved the same way.
+    //
+    // It is the `--c` bug in its general form: CLAUDE.md records that `--c`
+    // "used to be *silently ignored*, so the command this line documented ran
+    // the LLVM backend instead", and that one flag was fixed while the arm
+    // that ignored ALL of them was left in place. Fixing the instance and not
+    // the class is the thing this repo's design rule exists to catch.
+    if !unknown_flags.is_empty() {
+        log_error!(
+            "unrecognised option{}: {}",
+            if unknown_flags.len() == 1 { "" } else { "s" },
+            unknown_flags.join(", ")
+        );
+        eprintln!("    Known options: {}", KNOWN_FLAGS.join(" "));
+        eprintln!("    (did you mean --emit-ptx? there is no --ptx)");
+        exit(1);
+    }
+
+    // A `.circom` file is a different language and does not go through Y's
+    // lexer, parser or type checker at all - only the R1CS back end is shared.
+    // Dispatching on the extension here rather than deeper down keeps that
+    // separation honest: there is no point at which circom source is pretended
+    // to be Y source.
+    #[cfg(feature = "zk")]
+    if let Some(ref f) = source_file {
+        if std::path::Path::new(f).extension().and_then(|e| e.to_str()) == Some("circom") {
+            compile_circom(f, &args);
+            return;
         }
     }
 
@@ -290,6 +1061,9 @@ fn main() {
     // ────────────────────────────────────────────────────────
     log_step!("3/4", "Running Semantic Type-Checker...");
     let mut type_checker = TypeChecker::new();
+    type_checker.set_zk_target(
+        args.iter().any(|a| a == "--emit-r1cs" || a == "--target=r1cs"),
+    );
     type_checker.check_program(&ast);
 
     if !type_checker.errors.is_empty() {
@@ -313,94 +1087,60 @@ fn main() {
     println!("      -> 0 Bank Conflicts Detected.");
     println!("      -> Fragment Roles & Linear Obligations verified.");
 
-    // ────────────────────────────────────────────────────────
-    // Phase 3.5: Hardware Advisories (Zero Drift)
-    // ────────────────────────────────────────────────────────
-    let mut zero_drift_count = 0;
-    for item in &ast.items {
-        if let Item::Kernel(k) = item {
-            fn walk_block(b: &ast::Block, profile: &sentinel::HardwareProfile, count: &mut usize) {
-                for stmt in &b.stmts {
-                    match stmt {
-                        ast::Stmt::Let {
-                            zero_drift: Some(_),
-                            ty,
-                            ..
-                        } => {
-                            let type_name = match ty {
-                                Some(ast::Type::Ident(name, _)) => name.clone(),
-                                Some(ast::Type::Primitive(name, _)) => name.clone(),
-                                _ => "Unknown".to_string(),
-                            };
+    // NOTE: @ZeroDrift used to be reported here as a hardware "advisory" that
+    // printed what the annotation would cost and claimed the compiler would
+    // "insert a software compensation path" - while inserting nothing. It is a
+    // real lowering now, chosen per device, and the backends report what they
+    // actually selected. See src/zero_drift.rs.
 
-                            println!(
-                                "      \x1b[1;33m[Advisory]\x1b[0m @ZeroDrift requested on type: {}",
-                                type_name
-                            );
-                            if profile.drift_free_types.contains(&type_name) {
-                                println!("        -> Hardware target ({}) natively supports zero drift for {}.", profile.gpu_name, type_name);
-                                println!(
-                                    "        -> Performance tradeoff: +{} cycles penalty.",
-                                    profile.zero_drift_penalty_cycles
-                                );
-                            } else {
-                                println!("        -> \x1b[1;33mWARNING\x1b[0m: Target ({}) lacks native zero drift for {}.", profile.gpu_name, type_name);
-                                println!(
-                                    "        -> Compiler must insert software compensation path."
-                                );
-                            }
-                            *count += 1;
-                        }
-                        ast::Stmt::For { body, .. } => walk_block(body, profile, count),
-                        ast::Stmt::While { body, .. } => walk_block(body, profile, count),
-                        ast::Stmt::If {
-                            then_block,
-                            else_block,
-                            ..
-                        } => {
-                            walk_block(then_block, profile, count);
-                            if let Some(eb) = else_block {
-                                walk_block(eb, profile, count);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            walk_block(&k.body, &hw_profile, &mut zero_drift_count);
-        }
-    }
-    if zero_drift_count > 0 {
-        println!(
-            "      -> Processed {} @ZeroDrift annotations.",
-            zero_drift_count
-        );
-    }
 
     // ────────────────────────────────────────────────────────
     // Phase 4: Backend Emission
     // ────────────────────────────────────────────────────────
-    let mut target_is_cpu = false;
+    // `@require(condition)` is EVALUATED here, against real capabilities.
+    //
+    // What stood here computed a local `target_is_cpu` by scanning the
+    // condition for an identifier containing `avx512` - and that local was
+    // **written and never read**, so the directive's sole consumer produced a
+    // dead value. rustc's dead-code lint cannot see it: the write goes through
+    // an `&mut` parameter. Meanwhile §9.1 documented `@require` as terminating
+    // compilation with `error[R0001]`, a string that appeared nowhere in the
+    // compiler, and `@require(1 == 0)` compiled and emitted PTX with exit 0.
+    //
+    // This is the pre-dispatch position on purpose: every backend is reached
+    // through the dispatch below, so checking here refuses uniformly rather
+    // than once per emitter - the same reason the `@hdl_emit` refusal lives at
+    // `check_func` instead of in five backends.
+    let mut require_errors: Vec<String> = Vec::new();
+    let mut require_checked = 0usize;
     for item in &ast.items {
         if let Item::Kernel(k) = item {
             for req in &k.requires {
-                fn check_expr(e: &ast::Expr, is_cpu: &mut bool) {
-                    match e {
-                        ast::Expr::Ident(name, _) if name.contains("avx512") => *is_cpu = true,
-                        ast::Expr::BinaryOp { left, right, .. } => {
-                            check_expr(left, is_cpu);
-                            check_expr(right, is_cpu);
-                        }
-                        _ => {}
-                    }
+                require_checked += 1;
+                if let Err(e) = require::check(&req.condition, &hw_profile, req.span.line) {
+                    require_errors.push(e);
                 }
-                check_expr(&req.condition, &mut target_is_cpu);
             }
         }
     }
 
+    if !require_errors.is_empty() {
+        log_error!(
+            "{} of {} `@require` condition(s) are not satisfied:",
+            require_errors.len(),
+            require_checked
+        );
+        for e in &require_errors {
+            eprintln!("    \x1b[1;31m[Error]\x1b[0m {}", e);
+        }
+        eprintln!("\nCompilation aborted to prevent undefined hardware behavior.");
+        exit(1);
+    }
+
     // Check for target flags
-    let emit_c = args.iter().any(|a| a == "--emit-c" || a == "--target=c");
+    let emit_c = args
+        .iter()
+        .any(|a| a == "--emit-c" || a == "--target=c" || a == "--c");
     let emit_llvm = args
         .iter()
         .any(|a| a == "--emit-llvm" || a == "--target=llvm");
@@ -413,6 +1153,30 @@ fn main() {
     let emit_cpu = args
         .iter()
         .any(|a| a == "--emit-cpu" || a == "--target=cpu");
+    // Empirical autotuning: compile every candidate tile, run it on the GPU
+    // that is actually present, correctness-check it, keep the fastest, and
+    // cache the answer per (M,N,K,precision,GPU) in `.ysu_hw_profile`.
+    //
+    // TAKING a measurement is opt-in: it costs seconds of real device time,
+    // and a compiler that silently starts benchmarking on the user's GPU
+    // during an ordinary build is a bad default - especially on a shared or
+    // headless machine, or one whose GPU is busy with the job the user
+    // actually cares about. READING a measurement someone already took on
+    // this machine is free and strictly better information than the analytic
+    // model, so that happens by default (see `Autotuner::autotune`).
+    //
+    //   --autotune         measure any shape not already cached, then cache it
+    //   --autotune-force   re-measure even if cached (after a codegen change)
+    //   --no-autotune      analytic model only, ignoring the cache - for
+    //                      reproducible codegen that must not depend on what
+    //                      is on this machine's disk. Wins over the others.
+    if args.iter().any(|a| a == "--no-autotune") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Analytic);
+    } else if args.iter().any(|a| a == "--autotune-force") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Remeasure);
+    } else if args.iter().any(|a| a == "--autotune") {
+        autotuner::set_tuning_mode(autotuner::TuningMode::Measure);
+    }
     let emit_r1cs = args
         .iter()
         .any(|a| a == "--emit-r1cs" || a == "--target=r1cs");
@@ -442,6 +1206,25 @@ fn main() {
             let mut ptx_emitter = ptx_emitter::PtxEmitter::new();
             let ptx_code = ptx_emitter.emit_witness_generator_ptx(&graph);
 
+            // Writing the file regardless of what the emitter refused would
+            // hand the user a kernel that assembles and fills most of the
+            // witness with zeros - the same "green build, wrong artifact"
+            // shape the LLVM, PTX and CPU paths were fixed for. This backend
+            // lowers five of `WitnessOp`'s seventeen variants; everything
+            // else, `==`, `<`, `/`, `%`, the bitwise operators and circom's
+            // most common statement among them, is named here rather than
+            // silently zeroed.
+            if !ptx_emitter.emit_errors.is_empty() {
+                for e in &ptx_emitter.emit_errors {
+                    log_error!("{}", e);
+                }
+                eprintln!(
+                    "    The GPU witness generator supports Const, LoadInput, Add, Sub and Mul.\n    \
+                     Use `--target=r1cs --witness <in.json>` for the CPU solver, which handles all of them."
+                );
+                exit(1);
+            }
+
             let write_path = if let Some(ref sf) = source_file {
                 let path = std::path::Path::new(sf);
                 let mut p = path.to_path_buf();
@@ -467,6 +1250,15 @@ fn main() {
     }
 
     if emit_coprocessor {
+        // This backend builds its module from the RT/Tensor dependency graph
+        // and lowers no `let` attribute, so a `@cache_policy` would be dropped
+        // without a word. It is refused here, where the module is built, and
+        // by every other backend except --emit-ptx at its own entry.
+        if let Some(site) = ast::cache_policy_sites(&ast).first() {
+            log_error!("{}", ast::cache_policy_refusal("Co-processor backend", site));
+            exit(1);
+        }
+
         log_step!("4/4", "Running Dual-Accelerator Co-Processing Pipeline...");
         println!("      -> Phase A: IR Dependency Graphing...");
         let mut grapher = ir_grapher::DependencyGrapher::new();
@@ -480,6 +1272,38 @@ fn main() {
         println!("         Tensor Core nodes: {}", tensor_count);
         println!("         Cross-pipe edges:  {}", cross_edges);
         println!("         Sequential total:  {:.0} cycles", ir_graph.total_sequential_cycles());
+
+        // Nothing to fuse is not something to fuse anyway.
+        //
+        // This backend exists to overlap an RT Core pipeline with a Tensor Core
+        // one. With neither present it still emitted a complete, launchable
+        // `.visible .entry y_coprocessor_fused` whose body is `ret;`, under a
+        // **hardcoded two-parameter signature** (`param_rt_A_ptr`,
+        // `param_nns_query_ptr`) that is byte-identical for every program and
+        // derived from none of them - plus a banner comment reporting
+        // "RT Nodes: 0 | Tensor Nodes: 0 | Barriers: 0" and
+        // "Dual-accelerator PTX generated successfully!", exit 0.
+        //
+        // Measured over `tests/`: **77 of the 83 programs this backend accepted
+        // produced exactly that**, and only the six `coprocessor_*.ysu` files
+        // were real. `println("hi")` compiled to a launchable GPU kernel.
+        //
+        // It is worse than the empty module the PTX backend was writing one
+        // arm up, because it does not LOOK empty: it has an entry point, a
+        // parameter list and a schedule comment claiming to be a schedule. The
+        // repo's own rule for this is in gotcha #8 - "a named gap costs a user
+        // five minutes, a plausible-looking broken kernel costs them however
+        // long it takes to suspect the compiler".
+        if rt_count == 0 && tensor_count == 0 {
+            log_error!(
+                "[Co-processor backend] this source has no RT Core work and no \
+                 Tensor Core work, so there is nothing to fuse. The emitted \
+                 kernel would be a `ret;` under a fixed parameter list that \
+                 comes from no part of your program. Use --emit-ptx for an \
+                 ordinary kernel, or the LLVM backend for host code."
+            );
+            exit(1);
+        }
 
         println!("      -> Phase B: Co-Processor Scheduling...");
         let mut scheduler = coprocessor_scheduler::CoprocessorScheduler::new();
@@ -501,7 +1325,13 @@ fn main() {
         }
 
         println!("      -> Phase C: Fused PTX Emission...");
-        let fused_ptx = scheduler.emit_fused_ptx(&ir_graph, &hw_profile);
+        let fused_ptx = match scheduler.emit_fused_ptx(&ir_graph, &hw_profile) {
+            Ok(p) => p,
+            Err(e) => {
+                log_error!("{}", e);
+                exit(1);
+            }
+        };
 
         let write_path = if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);
@@ -521,8 +1351,50 @@ fn main() {
             "sm_80".to_string()
         };
 
+        // Emit a COMPLETE module, not an instruction stream.
+        //
+        // This used to write the scheduler's body directly under a `.version`
+        // header: no `.visible .entry`, no `.reg` declarations, and a `.shared`
+        // directive sitting at module scope inside the body. `ptxas` rejects
+        // that outright, so `--emit-coprocessor` produced a file no tool could
+        // consume - while printing "Dual-accelerator PTX generated
+        // successfully!". The only thing that knew how to finish the job was a
+        // `wrap_ptx` helper inside tests/benchmark_coprocessor_physical.py,
+        // which hand-wrote the entry point and register pools in Python.
+        //
+        // A compiler backend that emits half a kernel and relies on a benchmark
+        // script to complete it is not a backend. The envelope belongs here,
+        // and `coprocessor_ptx_assembles` now gates it on real `ptxas`.
+        //
+        // `.shared` declarations are hoisted out of the body because PTX
+        // requires them at module scope; the register pools are declared
+        // generously because the scheduler does not currently report its own
+        // high-water marks, and an over-declared virtual register costs nothing
+        // (ptxas allocates what is used).
+        let mut shared_decls = String::new();
+        let mut body = String::new();
+        for line in fused_ptx.lines() {
+            if line.trim_start().starts_with(".shared") {
+                shared_decls.push_str(line.trim_start());
+                shared_decls.push('\n');
+            } else {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+
+        let entry_name = "y_coprocessor_fused";
         let mut full_ptx = String::new();
-        full_ptx.push_str(".version 7.5\n");
+        // The `.version` is the DRIVER requirement and must come from the
+        // measured table, not a literal (gotcha 8b). Hardcoded `.version 8.0`
+        // here was wrong in BOTH directions at once: it over-states the floor
+        // by a whole CUDA major on sm_80 (7.0 is enough), so a kernel refuses
+        // to load on an 11.x driver with `CUDA_ERROR_UNSUPPORTED_PTX_VERSION`;
+        // and `ptxas` rejects it outright on Blackwell - "PTX .version 8.0
+        // does not support .target sm_120" - which this path then reported as
+        // "Dual-accelerator PTX generated successfully!" and exit 0.
+        full_ptx.push_str(ptx_emitter::ptx_version_for_sm(&target_sm));
+        full_ptx.push('\n');
         full_ptx.push_str(&format!(".target {}\n", target_sm));
         full_ptx.push_str(".address_size 64\n\n");
         full_ptx.push_str("// =======================================================\n");
@@ -531,12 +1403,42 @@ fn main() {
         full_ptx.push_str(&format!("// RT Nodes: {} | Tensor Nodes: {} | Barriers: {}\n",
             rt_count, tensor_count, sched.sync_barriers.len()));
         full_ptx.push_str("// =======================================================\n\n");
-        full_ptx.push_str(&fused_ptx);
+        full_ptx.push_str(&shared_decls);
+        full_ptx.push('\n');
+        full_ptx.push_str(&format!(
+            ".visible .entry {}(\n    .param .u64 param_rt_A_ptr,\n    .param .u64 param_nns_query_ptr\n)\n{{\n",
+            entry_name
+        ));
+        for pool in ["%r", "%rt_r", "%qr"] {
+            full_ptx.push_str(&format!("    .reg .b32 {}<100>;\n", pool));
+        }
+        for pool in ["%f", "%rt_f", "%qf"] {
+            full_ptx.push_str(&format!("    .reg .f32 {}<100>;\n", pool));
+        }
+        for pool in ["%rd", "%rt_rd", "%qrd"] {
+            full_ptx.push_str(&format!("    .reg .b64 {}<100>;\n", pool));
+        }
+        for pool in ["%p", "%rt_p", "%qp"] {
+            full_ptx.push_str(&format!("    .reg .pred {}<100>;\n", pool));
+        }
+        full_ptx.push_str("    .reg .b64 rt_A_ptr;\n    .reg .b64 nns_query_ptr;\n\n");
+        full_ptx.push_str("    ld.param.u64 rt_A_ptr, [param_rt_A_ptr];\n");
+        full_ptx.push_str("    ld.param.u64 nns_query_ptr, [param_nns_query_ptr];\n\n");
+        full_ptx.push_str(&body);
+        full_ptx.push_str("\n    ret;\n}\n");
 
         match fs::write(&write_path, &full_ptx) {
             Ok(_) => {
                 println!("      -> Written to: {}", write_path);
                 println!("      \x1b[1;32mDual-accelerator PTX generated successfully!\x1b[0m");
+                // This arm cannot fall through to the banner at the end of
+                // `main` - the dispatch below would then run the default LLVM
+                // backend over the same program - so it prints the banner
+                // itself. Exiting 0 silently made `--emit-coprocessor` the one
+                // successful path that never said so, which is the benign half
+                // of the biconditional `success_banner_means_success` pins, and
+                // it falsified that dispatch's own comment ("no arm exits 0").
+                println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
                 std::process::exit(0);
             }
             Err(e) => {
@@ -555,6 +1457,7 @@ fn main() {
         .iter()
         .find(|a| a.starts_with("--output="))
         .map(|a| a.trim_start_matches("--output=").to_string())
+        .or(cli_output)
         .unwrap_or_else(|| {
             if emit_native {
                 "output_bin".to_string()
@@ -592,7 +1495,15 @@ fn main() {
         output_path = format!("./{}", output_path);
     }
 
-    println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
+    // NOT "Compilation Successful!" - the backend has not run yet. Every arm
+    // of the dispatch below can fail and `exit(1)`, and this banner used to
+    // print above the failure: `--emit-native` on an `if`, or `--target=r1cs`
+    // on an out-of-range comparison operand, both printed success and then a
+    // hard error. The real banner is at the end of `main`, which every
+    // successful path below falls through to (no arm here exits 0). The
+    // `--emit-coprocessor` arm ABOVE does exit 0, and prints the banner
+    // itself before it does.
+    println!("\n\x1b[1;32mFront-end analysis complete.\x1b[0m\n");
 
     if emit_r1cs {
         #[cfg(not(feature = "zk"))]
@@ -604,11 +1515,59 @@ fn main() {
         #[cfg(feature = "zk")]
         {
             log_step!("4/4", "Emitting Rank-1 Constraint System (R1CS)...");
+
+            // `Y_ZK_TIMING=1` prints a per-phase breakdown. The ZK path is a
+            // single-threaded pipeline of four phases with very different
+            // costs depending on the circuit, and the totals alone are
+            // misleading: the polynomial benchmark spends almost everything in
+            // `emit_program`, while a Poseidon circuit's linear combinations
+            // are ~28 terms wide instead of 1-2 and shift the weight to the
+            // writers. Tuning against the totals of one circuit is how
+            // `to_decimal_string` came to dominate ZK compilation unnoticed.
+            let timing = std::env::var("Y_ZK_TIMING").is_ok();
+            macro_rules! phase {
+                ($label:expr, $body:expr) => {{
+                    let t0 = std::time::Instant::now();
+                    let r = $body;
+                    if timing {
+                        eprintln!(
+                            "[Y ZK TIMING] {:<22} {:>8.3} s{}",
+                            $label,
+                            t0.elapsed().as_secs_f64(),
+                            zk_mem::report()
+                        );
+                    }
+                    r
+                }};
+            }
+
+            let alloc0 = counting_alloc::counts();
             let mut emitter = zk_emitter::ZkEmitter::new();
-            match emitter.emit_program(&ast) {
+            let emitted = phase!("emit_program", emitter.emit_program(&ast));
+            if timing {
+                let a1 = counting_alloc::counts();
+                if a1.0 > alloc0.0 {
+                    eprintln!(
+                        "[Y ZK TIMING] {:<22} {:>12} allocs, {:>9.2} GB",
+                        "emit allocations",
+                        a1.0 - alloc0.0,
+                        (a1.1 - alloc0.1) as f64 / 1e9
+                    );
+                } else {
+                    eprintln!("[Y ZK TIMING] emit allocations       (build with --features alloc-stats)");
+                }
+            }
+            match emitted {
                 Ok(r1cs_text) => {
+                    refuse_if_no_constraints(
+                        emitter.constraints.len(),
+                        "Nothing in `fn main` produced a constraint; work inside \
+                         a `kernel` is not compiled to R1CS.",
+                    );
+
                     // Write binary R1CS format directly to output_path
-                    match emitter.write_r1cs_binary(&output_path) {
+                    let written = phase!("write_r1cs_binary", emitter.write_r1cs_binary(&output_path));
+                    match written {
                         Ok(_) => {
                             println!("      -> R1CS binary target compiled successfully.");
                             println!("      -> Written to: {}", output_path);
@@ -621,7 +1580,41 @@ fn main() {
 
                             // Also write human-readable constraints text to .r1cs.txt
                             let txt_path = format!("{}.r1cs.txt", prefix);
-                            let _ = fs::write(&txt_path, &r1cs_text);
+                            phase!("write_r1cs_txt", { let _ = fs::write(&txt_path, &r1cs_text); });
+
+                            if timing {
+                                let (muls, adds) = zk_emitter::field_op_counts();
+                                eprintln!(
+                                    "[Y ZK TIMING] {:<22} {:>12} muls, {:>12} adds",
+                                    "field ops", muls, adds
+                                );
+                                let (calls, terms) = zk_emitter::lc_simplify_stats();
+                                eprintln!(
+                                    "[Y ZK TIMING] {:<22} {:>12} calls, {:>12} terms scanned",
+                                    "lc simplify", calls, terms
+                                );
+                            }
+
+                            // --witness inputs.json also solves the circuit and
+                            // writes a .wtns, which is what `snarkjs groth16
+                            // prove` needs alongside the .r1cs.
+                            if let Some(inputs_path) = args
+                                .iter()
+                                .position(|a| a == "--witness")
+                                .and_then(|i| args.get(i + 1))
+                            {
+                                let wtns_path = format!("{}.wtns", prefix);
+                                match solve_and_write_witness(&emitter, inputs_path, &wtns_path) {
+                                    Ok(n) => {
+                                        println!("      -> Solved {} witness values.", n);
+                                        println!("      -> Written witness to: {}", wtns_path);
+                                    }
+                                    Err(e) => {
+                                        log_error!("{}", e);
+                                        exit(1);
+                                    }
+                                }
+                            }
                             println!("      -> Written human-readable constraints to: {}", txt_path);
                         }
                         Err(e) => {
@@ -640,6 +1633,17 @@ fn main() {
         log_step!("4/4", "Emitting Native x86-64 ELF Binary...");
         let mut emitter = NativeEmitter::new();
         let binary_output = emitter.emit_program(&ast);
+
+        // This path wrote a RUNNABLE ELF whatever the emitter had to skip. Of
+        // the backends in this repo it is the one where a silent gap costs the
+        // most, so the check goes in before the file is written at all.
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
+
         match fs::write(&output_path, &binary_output) {
             Ok(_) => {
                 println!("      -> Written to: {}", output_path);
@@ -662,7 +1666,17 @@ fn main() {
     } else if emit_llvm {
         log_step!("4/4", "Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
+        emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ll_output = emitter.emit_program(&ast, &hw_profile);
+        for line in &emitter.drift_report {
+            println!("      -> @ZeroDrift {}", line);
+        }
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
         match fs::write(&output_path, &ll_output) {
             Ok(_) => println!("      -> Written to: {}", output_path),
             Err(e) => {
@@ -670,20 +1684,77 @@ fn main() {
                 exit(1);
             }
         }
+        write_exact_gemm_certificates(
+            &emitter.exact_gemm_certificates,
+            &output_path,
+            source_file.as_deref().unwrap_or("<stdin>"),
+        );
         println!("      Compile manually: clang -O2 -o output {} c_src/runtime.c -lm", &output_path);
     } else if emit_ptx {
         log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
         println!("      -> Pass 1: Multi-Stage Asynchronous Software Pipelining Pass (cp.async multi-buffering)");
-        println!("      -> Pass 2: Automated Grid Block Swizzling Pass (8-tile Morton space-filling curve)");
-        println!("      -> Pass 3: JIT Dynamic Autotuning Pass (num_stages, num_warps search)");
+        println!("      -> Pass 2: Automated Grid Block Swizzling Pass (grouped-raster L2 locality, group size {})", ptx_emitter::GEMM_SWIZZLE_GROUP_SIZE);
+        println!(
+            "      -> Pass 3: JIT Dynamic Autotuning Pass (CTA tile / num_warps / num_stages search) [{}]",
+            match autotuner::tuning_mode() {
+                autotuner::TuningMode::Cached =>
+                    "cached measurements where available, else the analytic model; \
+                     pass --autotune to measure this GPU",
+                autotuner::TuningMode::Analytic =>
+                    "analytic model only (--no-autotune): cache ignored, nothing measured",
+                autotuner::TuningMode::Measure =>
+                    "measuring on-device, reusing any cached result for this shape",
+                autotuner::TuningMode::Remeasure =>
+                    "measuring on-device, ignoring any cached result",
+            }
+        );
         println!("      -> Pass 4: Automated Shared Memory Layout Permutation Pass (0-bank conflict XOR swizzling)");
 
-        let tuned_config = autotuner::Autotuner::autotune(1024, 1024, 1024, &hw_profile);
-        println!("         [JIT Autotuner Result] CTA Tile: {}x{}x{}, Warps: {}, Pipeline Stages: {}",
-            tuned_config.cta_m, tuned_config.cta_n, tuned_config.cta_k, tuned_config.num_warps, tuned_config.num_stages);
+        // Autotune diagnostics are printed per @tile'd kernel, using that
+        // kernel's own real compile-time M/N/K - not a single hardcoded
+        // 1024x1024x1024 guess regardless of what's actually in the source
+        // (the previous behavior here). A compile unit can hold multiple
+        // kernels, and for any @tile'd one, `emit_program` below now calls
+        // `Autotuner::autotune` itself with its real dimensions (see
+        // `ptx_emitter::emit_tensor_core_gemm_kernel`) - this block exists
+        // only to surface that same result to the CLI's own log output.
+        let mut printed_any_tune = false;
+        for item in &ast.items {
+            if let Item::Kernel(k) = item {
+                if let Some(t) = &k.tile {
+                    fn as_u32(e: &ast::Expr) -> Option<u32> {
+                        match e {
+                            ast::Expr::IntLit(v, _) if *v > 0 => u32::try_from(*v).ok(),
+                            _ => None,
+                        }
+                    }
+                    if let (Some(m), Some(n), Some(k_dim)) =
+                        (as_u32(&t.block_m), as_u32(&t.block_n), t.block_k.as_deref().and_then(as_u32))
+                    {
+                        let tuned_config = autotuner::Autotuner::autotune(m, n, k_dim, &hw_profile, autotuner::Precision::F16);
+                        println!("         [JIT Autotuner Result] `{}` (M={}, N={}, K={}): CTA Tile: {}x{}x{}, Warps: {}, Pipeline Stages: {}",
+                            k.name, m, n, k_dim, tuned_config.cta_m, tuned_config.cta_n, tuned_config.cta_k, tuned_config.num_warps, tuned_config.num_stages);
+                        printed_any_tune = true;
+                    }
+                }
+            }
+        }
+        if !printed_any_tune {
+            println!("         [JIT Autotuner] No @tile'd kernel in this source - nothing to autotune.");
+        }
 
-        let mut emitter = PtxEmitter::new();
+        let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
+        emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ptx_output = emitter.emit_program(&ast, &hw_profile);
+        for line in &emitter.drift_report {
+            println!("      -> @ZeroDrift {}", line);
+        }
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
         let write_path = if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);
             let mut p = path.to_path_buf();
@@ -703,16 +1774,38 @@ fn main() {
         println!("{}", ptx_output);
         println!("==================================");
     } else if emit_cpu {
-        log_step!("4/4", "Emitting CPU AVX-512 Host Code...");
+        log_step!("4/4", "Emitting Host Rust Source...");
         let mut emitter = CpuEmitter::new();
         let cpu_output = emitter.emit_program(&ast);
-        println!("======= GENERATED RUST/AVX BLOB =======");
+
+        // Printing the blob regardless of what the emitter refused would hand
+        // the user Rust that compiles into a different program - the same
+        // "green build, wrong artifact" shape the LLVM and PTX paths were
+        // fixed for.
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
+
+        println!("======= GENERATED RUST BLOB =======");
         println!("{}", cpu_output);
         println!("=======================================");
     } else {
         log_step!("4/4", "Compiling via LLVM IR Backend...");
         let mut emitter = LlvmEmitter::new();
         let ll_output = emitter.emit_program(&ast, &hw_profile);
+
+        // This path did not check the emitter's errors at all, so a construct
+        // the backend refused still produced a binary and exited 0 — the same
+        // "green build, wrong program" shape the PTX backend was fixed for.
+        if !emitter.emit_errors.is_empty() {
+            for e in &emitter.emit_errors {
+                log_error!("{}", e);
+            }
+            exit(1);
+        }
 
         let ll_path = format!("{}.tmp.ll", &output_path);
         match fs::write(&ll_path, &ll_output) {
@@ -724,10 +1817,60 @@ fn main() {
         }
 
         println!("      -> Invoking clang compilation...");
-        let runtime_path = "c_src/runtime.c";
-        let clang_result = std::process::Command::new("clang")
-            .args(&["-O2", "-o", &output_path, &ll_path, runtime_path, "-lm", "-lX11"])
+
+        // `c_src/runtime.c` used to be a bare CWD-relative path, so the LLVM
+        // backend only worked when Y was invoked from its own source tree:
+        // anywhere else clang reported `no such file or directory:
+        // 'c_src/runtime.c'`, which reads as a broken install rather than a
+        // wrong working directory. Search the CWD, then the directory the
+        // compiler binary lives in and its ancestors (target/release/Y ->
+        // repo root), and let `Y_RUNTIME_C` override.
+        let runtime_path = match find_runtime_c() {
+            Some(p) => p,
+            None => {
+                log_error!("could not find the Y runtime (`c_src/runtime.c`).");
+                eprintln!("    Searched $Y_RUNTIME_C, ./c_src/runtime.c, and the");
+                eprintln!("    compiler's own directory upwards. Set Y_RUNTIME_C to its path.");
+                exit(1);
+            }
+        };
+
+// `-lX11` is needed ONLY by the optional GUI surface, and linking it
+        // unconditionally made every headless machine - CI, containers, a
+        // server without libX11 - unable to compile any Y program at all.
+        // Try with it, and if X11 is what is missing, retry.
+        //
+        // The retry must also pass `-DY_NO_X11`, which compiles the ShadowPlay
+        // surface as refusing stubs. Dropping `-lX11` alone is not enough: the
+        // GUI entry points are exported symbols now (they have to be, or the
+        // program that calls them cannot link), so their bodies are emitted
+        // and reference XOpenDisplay whether or not anything calls them.
+        // Without the macro, un-static-ing them would have made libX11 a hard
+        // requirement for compiling ANY Y program - reinstating exactly the
+        // regression this fallback exists to prevent.
+        //
+        // Both spellings of "X11 is missing" are matched: `cannot find -lX11`
+        // when only the library is absent, and `X11/Xlib.h` when the
+        // development headers are too.
+        let base = ["-O2", "-o", output_path.as_str(), ll_path.as_str(), runtime_path.as_str(), "-lm"];
+        let with_x11 = std::process::Command::new("clang")
+            .args(base)
+            .arg("-lX11")
             .output();
+        let clang_result = match with_x11 {
+            Ok(o) if !o.status.success() && {
+                let e = String::from_utf8_lossy(&o.stderr);
+                e.contains("-lX11") || e.contains("X11/Xlib.h")
+            } =>
+            {
+                println!("      -> libX11 not present; linking without it (GUI calls will refuse at runtime).");
+                std::process::Command::new("clang")
+                    .args(base)
+                    .arg("-DY_NO_X11")
+                    .output()
+            }
+            other => other,
+        };
 
         match clang_result {
             Ok(output) => {
@@ -748,5 +1891,35 @@ fn main() {
             }
         }
     }
+
+    // Reached only when the selected backend produced its artifact. Every
+    // failure path above calls `exit(1)` and none of them exits 0.
+    println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
 }
 
+/// Locate `c_src/runtime.c` without assuming the working directory.
+///
+/// Order: `$Y_RUNTIME_C`, then `./c_src/runtime.c`, then `c_src/runtime.c`
+/// relative to each ancestor of the compiler binary's own directory - which
+/// covers the ordinary `target/release/Y` layout from any CWD.
+fn find_runtime_c() -> Option<String> {
+    if let Ok(p) = std::env::var("Y_RUNTIME_C") {
+        if std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    let rel = std::path::Path::new("c_src").join("runtime.c");
+    if rel.exists() {
+        return Some(rel.to_string_lossy().into_owned());
+    }
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent();
+    while let Some(d) = dir {
+        let cand = d.join("c_src").join("runtime.c");
+        if cand.exists() {
+            return Some(cand.to_string_lossy().into_owned());
+        }
+        dir = d.parent();
+    }
+    None
+}

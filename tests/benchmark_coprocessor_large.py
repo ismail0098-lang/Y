@@ -29,6 +29,20 @@ def wrap_ptx(ptx_path, name="y_coprocessor_large"):
     # Strip any non-ASCII characters to prevent JIT/ptxas compiler errors
     content = content.encode('ascii', 'ignore').decode('ascii')
     
+    # The compiler now emits a COMPLETE module with a correct header, so the
+    # header it wrote is what gets reused here. Substituting a literal
+    # discarded the measured `.version` floor (gotcha 8b) and re-introduced the
+    # bug in the harness: `.version 8.0` over-states the driver requirement on
+    # sm_80/86/89 and is REJECTED outright on Blackwell.
+    src_version = next(
+        (l.strip() for l in content.splitlines() if l.strip().startswith(".version")),
+        None,
+    )
+    src_target = next(
+        (l.strip() for l in content.splitlines() if l.strip().startswith(".target")),
+        None,
+    )
+
     # Extract module-level shared memory declarations
     shared_decls = []
     body_lines = []
@@ -47,8 +61,10 @@ def wrap_ptx(ptx_path, name="y_coprocessor_large"):
     shared_str = "\n".join(shared_decls)
     body_str = "\n".join(body_lines)
     
-    wrapped = f""".version 8.0
-.target sm_89
+    version_str = src_version or ".version 8.0"
+    target_str = src_target or ".target sm_89"
+    wrapped = f"""{version_str}
+{target_str}
 .address_size 64
 
 {shared_str}

@@ -1,0 +1,23 @@
+// The nest the exact vpdpwssd kernel is substituted for. `@ZeroDrift` plus
+// `@bounds` is what licenses the substitution: the operand magnitude is what
+// `VnniExact::license` checks against the int32 accumulator's overflow budget.
+kernel y_matmul(A: GlobalMemory<I16>, B: GlobalMemory<I16>, C: GlobalMemory<I64>, M: I32, N: I32, K: I32) {
+    @invariant(i >= 0)
+    for i in 0..M step 1 {
+        @invariant(j >= 0)
+        for j in 0..N step 1 {
+            @ZeroDrift
+            let mut sum: I64 = 0;
+            @invariant(k >= 0)
+            for k in 0..K step 1 {
+                @bounds(min=-1024, max=1024)
+                let a_val: I64 = block_ptr2d_load(A, i, k, K, M, K);
+                @bounds(min=-1024, max=1024)
+                let b_val: I64 = block_ptr2d_load(B, k, j, N, K, N);
+                sum = sum + a_val * b_val;
+            }
+            block_ptr2d_store(C, i, j, N, M, N, sum);
+        }
+    }
+}
+fn main() {}

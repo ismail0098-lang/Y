@@ -1,0 +1,76 @@
+// Probe for the carry-chained 32-bit intrinsics. Driven by
+// tests/ptx_carry_chain.rs, which checks every output against plain Rust.
+//
+// Each thread takes two 128-bit values as four little-endian limbs and does
+// three things that only work if the condition code is threaded correctly
+// through a chain:
+//
+//   s = a + b       four links, carry out
+//   d = a - b       four links, borrow out
+//   r = a*b0 + b    the two-pass mad idiom a Montgomery multiply is built from
+//
+// The multiply is the one that matters. Its `lo` pass and `hi` pass are two
+// separate chains over the same accumulator, offset by one limb, and a `_cc`
+// suffix dropped anywhere in the middle silently loses a carry -- it does not
+// fail to assemble and it does not fail on small inputs.
+kernel carry_probe(A: GlobalMemory<U32>, B: GlobalMemory<U32>, Out: GlobalMemory<U32>, N: I32) {
+    let tid: I32 = block_idx_x() * 256 + thread_idx_x();
+    let ai: I32 = tid * 4;
+    let oi: I32 = tid * 16;
+
+    let a0: U32 = block_ptr2d_load(A, 0, ai + 0, N, 1, N);
+    let a1: U32 = block_ptr2d_load(A, 0, ai + 1, N, 1, N);
+    let a2: U32 = block_ptr2d_load(A, 0, ai + 2, N, 1, N);
+    let a3: U32 = block_ptr2d_load(A, 0, ai + 3, N, 1, N);
+    let b0: U32 = block_ptr2d_load(B, 0, ai + 0, N, 1, N);
+    let b1: U32 = block_ptr2d_load(B, 0, ai + 1, N, 1, N);
+    let b2: U32 = block_ptr2d_load(B, 0, ai + 2, N, 1, N);
+    let b3: U32 = block_ptr2d_load(B, 0, ai + 3, N, 1, N);
+
+    // --- 128-bit add, carry chain ---
+    let s0: U32 = add_cc_u32(a0, b0);
+    let s1: U32 = addc_cc_u32(a1, b1);
+    let s2: U32 = addc_cc_u32(a2, b2);
+    let s3: U32 = addc_cc_u32(a3, b3);
+    let s4: U32 = addc_u32(0, 0);
+
+    // --- 128-bit subtract, borrow chain. `subc_u32(0, 0)` is 0 - 0 - borrow,
+    //     i.e. 0 or 0xFFFFFFFF -- the mask a conditional subtract wants.
+    let d0: U32 = sub_cc_u32(a0, b0);
+    let d1: U32 = subc_cc_u32(a1, b1);
+    let d2: U32 = subc_cc_u32(a2, b2);
+    let d3: U32 = subc_cc_u32(a3, b3);
+    let d4: U32 = subc_u32(0, 0);
+
+    // --- r = a * b0 + b, two passes over one accumulator ---
+    let t0: U32 = mad_lo_cc_u32(a0, b0, b0);
+    let t1: U32 = madc_lo_cc_u32(a1, b0, b1);
+    let t2: U32 = madc_lo_cc_u32(a2, b0, b2);
+    let t3: U32 = madc_lo_cc_u32(a3, b0, b3);
+    let t4: U32 = addc_u32(0, 0);
+    let r1: U32 = mad_hi_cc_u32(a0, b0, t1);
+    let r2: U32 = madc_hi_cc_u32(a1, b0, t2);
+    let r3: U32 = madc_hi_cc_u32(a2, b0, t3);
+    let r4: U32 = madc_hi_cc_u32(a3, b0, t4);
+    let r5: U32 = addc_u32(0, 0);
+
+    block_ptr2d_store(Out, 0, oi + 0, N, 1, N, s0);
+    block_ptr2d_store(Out, 0, oi + 1, N, 1, N, s1);
+    block_ptr2d_store(Out, 0, oi + 2, N, 1, N, s2);
+    block_ptr2d_store(Out, 0, oi + 3, N, 1, N, s3);
+    block_ptr2d_store(Out, 0, oi + 4, N, 1, N, s4);
+    block_ptr2d_store(Out, 0, oi + 5, N, 1, N, d0);
+    block_ptr2d_store(Out, 0, oi + 6, N, 1, N, d1);
+    block_ptr2d_store(Out, 0, oi + 7, N, 1, N, d2);
+    block_ptr2d_store(Out, 0, oi + 8, N, 1, N, d3);
+    block_ptr2d_store(Out, 0, oi + 9, N, 1, N, d4);
+    block_ptr2d_store(Out, 0, oi + 10, N, 1, N, t0);
+    block_ptr2d_store(Out, 0, oi + 11, N, 1, N, r1);
+    block_ptr2d_store(Out, 0, oi + 12, N, 1, N, r2);
+    block_ptr2d_store(Out, 0, oi + 13, N, 1, N, r3);
+    block_ptr2d_store(Out, 0, oi + 14, N, 1, N, r4);
+    block_ptr2d_store(Out, 0, oi + 15, N, 1, N, r5);
+}
+
+fn main() {
+}

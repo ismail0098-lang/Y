@@ -22,11 +22,161 @@
 //    &mut T         ptr
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
+
+/// A literal's value, for reading `@bounds` at compile time.
+fn const_f64_of(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::IntLit(v, _) => Some(*v as f64),
+        Expr::FloatLit(v, _) => Some(*v),
+        Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => const_f64_of(operand).map(|v| -v),
+        _ => None,
+    }
+}
+
+/// Symbols this module `declare`s in its own prelude, so a call to one needs no
+/// extra declaration.
+const PRELUDE_DECLARED: &[&str] = &[
+            "exit",
+            "free",
+            "llvm.memset.p0.i64",
+            "llvm.prefetch.p0",
+            "load",
+            "malloc",
+            "print_int",
+            "printf",
+            "println",
+            "yfile_read_to_string",
+            "yfile_write",
+            "ystr_char_at",
+            "ystr_clone",
+            "ystr_eq_cstr",
+            "ystr_len",
+            "ystr_new",
+            "ystr_push",
+            "ystr_push_str",
+            "yvec_get",
+            "yvec_len",
+            "yvec_new",
+            "yvec_push",
+];
+
+/// Symbols libc provides, which every host link already resolves.
+///
+/// Kept apart from `RUNTIME_SYMBOLS` because that list is asserted against
+/// `c_src/runtime.c`, and a libc name is not defined there. Deliberately
+/// short: each entry is a promise that the symbol exists on every host this
+/// backend targets, so it is not a place to park a name that merely ought to.
+pub const LIBC_SYMBOLS: &[&str] = &[
+            "usleep",
+];
+
+/// Six names were removed from this list in the same change that added the
+/// ShadowPlay surface, for the opposite reason: `init_allocator`,
+/// `is_valid_ystr`, `make_enum`, `register_ystr`, `resolve_ystr` and
+/// `ystr_hash_fn` are `static` helpers INSIDE the runtime. They emit no
+/// symbol, so listing them meant `init_allocator();` in a Y program compiled
+/// clean and then died at link with `undefined reference to 'init_allocator'`
+/// - which reads as a broken toolchain. They are refused by name now.
+///
+/// Symbols that linking `c_src/runtime.c` PROVIDES, which the LLVM path links
+/// against. That includes what the headers it pulls in define - the ShadowPlay
+/// GUI surface comes from `c_src/shadowplay_gui.h`, and leaving it off this
+/// list is what made `shadowplay.ysu`, the repo's only end-user application,
+/// stop compiling: the backend refused nine of its calls by name.
+///
+/// A call to one of these needs a `declare` emitted; a call to anything in
+/// NEITHER list and not defined in this module does not exist, and is refused.
+///
+/// These are two different questions and the first version of the refusal
+/// conflated them - which suppressed the declaration for `String_new` and
+/// turned two valid modules into invalid ones. The clang oracle caught it;
+/// review did not.
+///
+/// `runtime_symbols_match_the_runtime` asserts this list against
+/// `c_src/runtime.c` rather than re-deriving it, so the two cannot drift apart
+/// silently - the same "assert the producers AGREE" device the `.version` gate
+/// uses.
+pub const RUNTIME_SYMBOLS: &[&str] = &[
+            "Expr_BinaryExpr",
+            "Expr_BoolLit",
+            "Expr_Call",
+            "Expr_CharLit",
+            "Expr_FloatLit",
+            "Expr_Ident",
+            "Expr_Index",
+            "Expr_IntLit",
+            "Expr_MemberAccess",
+            "Expr_Path",
+            "Expr_StringLit",
+            "Expr_StructLit",
+            "Expr_UnaryExpr",
+            "MatchPattern_EnumVariant",
+            "MatchPattern_Ident",
+            "MatchPattern_Literal",
+            "Stmt_Assign",
+            "Stmt_CompoundAssign",
+            "Stmt_ExprStmt",
+            "Stmt_For",
+            "Stmt_If",
+            "Stmt_Let",
+            "Stmt_Match",
+            "Stmt_Return",
+            "Stmt_SafeBlock",
+            "Stmt_While",
+            "String_new",
+            "TokenKind_AtUnknown",
+            "TokenKind_CharLit",
+            "TokenKind_FloatLit",
+            "TokenKind_HardwareTarget",
+            "TokenKind_Ident",
+            "TokenKind_IntLit",
+            "TokenKind_MmaMod",
+            "TokenKind_StringLit",
+            "TokenKind_Unknown",
+            "cleanup_shadowplay_gui",
+            "get_broadcast_state",
+            "get_codec_state",
+            "get_file_format_state",
+            "get_indicator_state",
+            "get_instant_replay_state",
+            "get_microphone_index",
+            "get_microphone_name",
+            "get_quality_state",
+            "get_recording_state",
+            "get_replay_duration",
+            "get_replay_duration_idx",
+            "init_shadowplay_gui",
+            "is_overlay_visible",
+            "print",
+            "print_int",
+            "println",
+            "str_to_i64",
+            "update_shadowplay_gui",
+            "ychar_to_ascii",
+            "yfile_read_to_string",
+            "yfile_write",
+            "ymalloc",
+            "yrealloc",
+            "ystr_char_at",
+            "ystr_clone",
+            "ystr_eq",
+            "ystr_eq_cstr",
+            "ystr_free",
+            "ystr_len",
+            "ystr_new",
+            "ystr_push",
+            "ystr_push_str",
+            "yvec_free",
+            "yvec_get",
+            "yvec_get_char",
+            "yvec_len",
+            "yvec_new",
+            "yvec_push",
+];
 
 pub struct LlvmEmitter {
     pub output: String,
@@ -42,6 +192,12 @@ pub struct LlvmEmitter {
     locals_ast_type: BTreeMap<String, String>,
     /// Track what struct type a pointer local variable points to
     pointee_types: BTreeMap<String, String>,
+    /// Element LLVM type behind a `GlobalMemory<T>` / `SharedMemory<T>` binding.
+    /// `ast_type_to_string` folds `Generic { base, args }` down to `base`, so the
+    /// `T` is not recoverable from `locals_ast_type` — the block-pointer
+    /// intrinsics need it to pick a load/store type, and guessing gives the
+    /// silent-wrong-answer failure the `_ =>` rule exists to prevent.
+    mem_elem_types: BTreeMap<String, String>,
     /// Map function names to their LLVM parameter types and return type
     functions: BTreeMap<String, (Vec<String>, String)>,
     /// Track struct fields: StructName -> Vec<(FieldName, IRType)>
@@ -56,8 +212,26 @@ pub struct LlvmEmitter {
     enum_variants: BTreeMap<String, i32>,
     /// Track whether the current block already has a terminator
     block_terminated: bool,
-    /// Store current cache policy during let bindings
-    current_cache_policy: Option<String>,
+    /// Accumulators declared `@ZeroDrift`: representation and whether the
+    /// declared value is an integer. Integer values stay in their integer
+    /// domain on reads and writes; fixed-point floats require conversion.
+    zero_drift: BTreeMap<String, (crate::zero_drift::DriftRepr, bool)>,
+    /// Measured accumulate costs from the device, driving the choice.
+    drift_costs: crate::zero_drift::CostTable,
+    /// Constructs this backend refuses to emit: `@ZeroDrift` bindings it
+    /// cannot honour, and block-pointer intrinsics whose shape or element
+    /// type it cannot determine. Emitting something plausible instead is the
+    /// silent-wrong-answer failure the repo's design rule forbids.
+    pub emit_errors: Vec<String>,
+    /// One line per `@ZeroDrift` binding: what was chosen, and on what basis.
+    pub drift_report: Vec<String>,
+    /// One entry per exact `vpdpwssd` GEMM this compilation SUBSTITUTED.
+    ///
+    /// The certificate is only meaningful where a kernel was actually swapped
+    /// in: a nest left on the scalar exact path is already the naive nest, so
+    /// there is nothing to certify equal to it. `main.rs` renders and writes
+    /// these; the emitter does no file I/O.
+    pub exact_gemm_certificates: Vec<crate::exact_gemm_certificate::Certificate>,
     /// Hint for the load() intrinsic: the declared LHS type of the current let
     current_load_hint: Option<String>,
     /// Track all function names called during emission
@@ -68,6 +242,44 @@ pub struct LlvmEmitter {
     in_ptx_emit: bool,
     /// Stack of labels to jump to for break statements
     loop_exit_stack: Vec<String>,
+    /// Set when a kernel was replaced by the packed AVX-512 GEMM, so the
+    /// supporting module (packing routines, micro-kernel, driver) is emitted.
+    needs_gemm_module: bool,
+    /// The flush interval of the exact VNNI GEMM, when one was substituted.
+    needs_exact_gemm_module: Option<u32>,
+}
+
+/// Entry-block stack slot that masked-off block-pointer stores are redirected
+/// into. Declared in every kernel and function; it is a dead alloca whose
+/// address never escapes, so it costs nothing when unused.
+const Y_OOB_SINK: &str = "%.y_oob_sink";
+
+/// LLVM element type behind a `GlobalMemory<T>` / `SharedMemory<T>` parameter.
+/// Returns `None` for anything else, so callers can refuse rather than guess.
+fn memory_element_llvm_type(ty: &Type) -> Option<String> {
+    let Type::Generic { base, args, .. } = ty else {
+        return None;
+    };
+    if base != "GlobalMemory" && base != "SharedMemory" {
+        return None;
+    }
+    let GenericArg::Type(inner) = args.first()? else {
+        return None;
+    };
+    let name = match inner {
+        Type::Primitive(n, _) | Type::Ident(n, _) => n.as_str(),
+        _ => return None,
+    };
+    match name {
+        "F16" | "f16" | "half" => Some("half".into()),
+        "F32" | "f32" | "float" => Some("float".into()),
+        "F64" | "f64" | "double" => Some("double".into()),
+        "I8" | "i8" | "u8" => Some("i8".into()),
+        "I16" | "i16" | "u16" => Some("i16".into()),
+        "I32" | "i32" | "u32" => Some("i32".into()),
+        "I64" | "i64" | "u64" | "usize" => Some("i64".into()),
+        _ => None,
+    }
 }
 
 fn ast_type_to_string(ty: &Type) -> String {
@@ -171,6 +383,7 @@ impl LlvmEmitter {
             locals: BTreeMap::new(),
             locals_ast_type: BTreeMap::new(),
             pointee_types: BTreeMap::new(),
+            mem_elem_types: BTreeMap::new(),
             functions,
             structs: BTreeMap::new(),
             ast_structs: HashMap::new(),
@@ -178,12 +391,18 @@ impl LlvmEmitter {
             enums: BTreeMap::new(),
             enum_variants: BTreeMap::new(),
             block_terminated: false,
-            current_cache_policy: None,
+            zero_drift: BTreeMap::new(),
+            drift_costs: crate::zero_drift::CostTable::new(),
+            emit_errors: Vec::new(),
+            drift_report: Vec::new(),
+            exact_gemm_certificates: Vec::new(),
             current_load_hint: None,
             called_functions: Vec::new(),
             defined_functions: Vec::new(),
             in_ptx_emit: false,
             loop_exit_stack: Vec::new(),
+            needs_gemm_module: false,
+            needs_exact_gemm_module: None,
         }
     }
 
@@ -272,12 +491,16 @@ impl LlvmEmitter {
             )
             .unwrap();
         } else {
+            // `@gpu_uncached` is `volatile` and nothing else. It also used to
+            // carry `!nontemporal`, which on a scalar x86 load compiles to the
+            // same `mov` (there is no scalar non-temporal load) - and on the
+            // STORE side became `movnti`, which breaks the ordering the
+            // attribute exists for. See `emit_store_with_attrs`.
             let volatile_str = if is_volatile { " volatile" } else { "" };
-            let nontemporal_str = if is_volatile { ", !nontemporal !0" } else { "" };
             writeln!(
                 &mut self.output,
-                "  {} = load{} {}, ptr {}{}{}",
-                tmp, volatile_str, ty, ptr, align_str, nontemporal_str
+                "  {} = load{} {}, ptr {}{}",
+                tmp, volatile_str, ty, ptr, align_str
             )
             .unwrap();
         }
@@ -341,12 +564,20 @@ impl LlvmEmitter {
             )
             .unwrap();
         } else {
+            // `@gpu_uncached` is `volatile` and nothing else. The store used to
+            // carry `!nontemporal` as well, which x86-64 lowers to `movnti`: a
+            // non-temporal store, and the one kind of ordinary store the x86
+            // memory model lets become visible BEFORE an earlier store. So
+            // `c.data = v; c.status = 1;` could publish the flag ahead of the
+            // data it guards - the status-flag pattern the attribute is
+            // documented for. A plain volatile store is ordered after the
+            // data store, and on the load side `!nontemporal` compiled to the
+            // same `mov` as without it.
             let volatile_str = if is_volatile { " volatile" } else { "" };
-            let nontemporal_str = if is_volatile { ", !nontemporal !0" } else { "" };
             writeln!(
                 &mut self.output,
-                "  store{} {} {}, ptr {}{}{}",
-                volatile_str, ty, val, ptr, align_str, nontemporal_str
+                "  store{} {} {}, ptr {}{}",
+                volatile_str, ty, val, ptr, align_str
             )
             .unwrap();
         }
@@ -355,7 +586,158 @@ impl LlvmEmitter {
     /// Insert an LLVM conversion instruction when src_ty != dst_ty.
     /// Returns the new SSA name holding the converted value, or the
     /// original `val` if no conversion is needed.
+    /// Supplies measured accumulate costs so `@ZeroDrift` chooses on evidence.
+    /// Without this the selector falls back to narrowest-sufficient, which is
+    /// deterministic but not informed.
+    pub fn set_drift_costs(&mut self, costs: crate::zero_drift::CostTable) {
+        self.drift_costs = costs;
+    }
+
+    /// Converts a `double` into `repr`'s integer domain.
+    ///
+    /// Rounds half away from zero rather than truncating. Truncation is also
+    /// deterministic - so the accumulation would still be reorder-invariant -
+    /// but it biases every term toward zero, and a long reduction turns that
+    /// bias into a visible systematic error. The rounding is done with
+    /// `fcmp`/`select` rather than `llvm.round` so no intrinsic declaration is
+    /// needed.
+    /// `acc = acc + rhs` / `acc = acc - rhs`, the running-sum form, or `None`.
+    ///
+    /// Only the accumulator on the LEFT of the `+` is accepted. `acc = rhs +
+    /// acc` is the same value for addition and NOT for subtraction, and
+    /// accepting one shape and silently treating it as the other is how the
+    /// sign gets lost; the commuted form simply is not matched.
+    /// Delegates to `zero_drift::running_sum`, which both backends share.
+    ///
+    /// This used to be the rule's only copy. The PTX backend had no equivalent
+    /// at all, so `acc = acc + e` was an f32 accumulation there long after it
+    /// was fixed here - `feedback-gotchas-apply-to-every-backend`, found again.
+    fn drift_running_sum<'e>(
+        target: &Expr,
+        value: &'e Expr,
+    ) -> Option<(BinaryOp, &'e Expr)> {
+        crate::zero_drift::running_sum(target, value)
+    }
+
+    fn emit_to_fixed(&mut self, val: &str, repr: crate::zero_drift::DriftRepr) -> String {
+        let ity = repr.llvm_type();
+        if repr.frac_bits() == 0 {
+            let out = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = fptosi double {} to {}", out, val, ity).unwrap();
+            return out;
+        }
+        let scaled = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = fmul double {}, {:.1}",
+            scaled,
+            val,
+            repr.scale()
+        )
+        .unwrap();
+        let is_neg = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = fcmp olt double {}, 0.0", is_neg, scaled).unwrap();
+        let bias = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = select i1 {}, double -5.000000e-01, double 5.000000e-01",
+            bias, is_neg
+        )
+        .unwrap();
+        let rounded = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = fadd double {}, {}", rounded, scaled, bias).unwrap();
+        let out = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = fptosi double {} to {}", out, rounded, ity).unwrap();
+        out
+    }
+
+    /// Converts a value out of `repr`'s integer domain back to `double`.
+    fn emit_from_fixed(&mut self, val: &str, repr: crate::zero_drift::DriftRepr) -> String {
+        let ity = repr.llvm_type();
+        let as_f = self.fresh_tmp();
+        writeln!(&mut self.output, "  {} = sitofp {} {} to double", as_f, ity, val).unwrap();
+        if repr.frac_bits() == 0 {
+            return as_f;
+        }
+        let out = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = fdiv double {}, {:.1}",
+            out,
+            as_f,
+            repr.scale()
+        )
+        .unwrap();
+        out
+    }
+
+    /// Converts one term to the accumulator's storage domain. Integer terms
+    /// must never pass through `double`: values above 2^53 would be rounded
+    /// before the supposedly exact addition even starts.
+    fn emit_drift_term(
+        &mut self,
+        expr: &Expr,
+        repr: crate::zero_drift::DriftRepr,
+        integer_domain: bool,
+    ) -> String {
+        if integer_domain {
+            let value = self.emit_expr(expr, None, None);
+            let ty = self.infer_type(expr);
+            return self.emit_coerce_from(
+                &value,
+                &ty,
+                repr.llvm_type(),
+                self.expr_is_unsigned(expr),
+            );
+        }
+        let value = self.emit_expr_as_double(expr);
+        self.emit_to_fixed(&value, repr)
+    }
+
+    /// Emits an expression in the conversion domain of a fixed-point float.
+    fn emit_expr_as_double(&mut self, expr: &Expr) -> String {
+        let v = self.emit_expr(expr, None, None);
+        let t = self.infer_type(expr);
+        self.emit_coerce(&v, &t, "double")
+    }
+
+    /// Is this expression's Y-level type unsigned?
+    ///
+    /// LLVM has no unsigned integer types -- `U32` and `I32` are both `i32` --
+    /// so `emit_type` erases the one bit that decides between `zext` and
+    /// `sext`. `locals_ast_type` still has it for a binding, which is enough
+    /// for the shapes that matter: a named value, a unary or binary
+    /// expression over named values, and a parenthesised form of either.
+    ///
+    /// Defaults to `false` (signed), which is the previous behaviour, so an
+    /// expression this cannot classify is no worse off than before.
+    fn expr_is_unsigned(&self, e: &Expr) -> bool {
+        match e {
+            Expr::Ident(name, _) => self
+                .locals_ast_type
+                .get(name)
+                .is_some_and(|t| matches!(t.as_str(), "U8" | "U16" | "U32" | "U64" | "usize")),
+            // If either side is unsigned the value is being computed in
+            // unsigned terms; widening it must not invent a sign bit.
+            Expr::BinaryOp { left, right, .. } => {
+                self.expr_is_unsigned(left) || self.expr_is_unsigned(right)
+            }
+            Expr::UnaryOp { operand, .. } => self.expr_is_unsigned(operand),
+            _ => false,
+        }
+    }
+
     fn emit_coerce(&mut self, val: &str, src_ty: &str, dst_ty: &str) -> String {
+        self.emit_coerce_from(val, src_ty, dst_ty, false)
+    }
+
+    fn emit_coerce_from(
+        &mut self,
+        val: &str,
+        src_ty: &str,
+        dst_ty: &str,
+        src_unsigned: bool,
+    ) -> String {
         if src_ty == dst_ty {
             return val.to_string();
         }
@@ -458,10 +840,35 @@ impl LlvmEmitter {
                 )
                 .unwrap();
             } else if src_bits < dst_bits {
+                // **`i1` must ZERO-extend.** A boolean is 0 or 1; sign-extending
+                // it makes `true` into -1, and the comparison operators are the
+                // only producers of `i1` in this backend. So
+                //
+                //     let t: I32 = a > b;   // 5 > 3
+                //
+                // evaluated to **-1**, and `t * 5` to -5. It is invisible in a
+                // condition (`if t` tests non-zero either way) and wrong
+                // wherever a comparison is used as a VALUE. Found by
+                // `tests/backend_differential.rs` on its first run: the native
+                // backend answers 1, and so do the ZK backend (whose condition
+                // carries a booleanity constraint) and `cpu_emitter` (which
+                // emits a Rust `bool`), so LLVM was the only one disagreeing.
+                // `i1` is a boolean and is ALWAYS zero-extended -- see the
+                // comparison bug below. An unsigned Y type is zero-extended
+                // too: `let x: U32 = 3000000000; let y: U64 = x;` used to
+                // emit `sext i32 to i64` and produce 0xFFFFFFFF_B2D05E00.
+                // That is gotcha #7's bug, which CLAUDE.md documents as fixed
+                // in the PTX backend and which was still live here -- the
+                // third backend to have it.
+                let how = if src_ty == "i1" || src_unsigned {
+                    "zext"
+                } else {
+                    "sext"
+                };
                 writeln!(
                     &mut self.output,
-                    "  {} = sext {} {} to {}",
-                    tmp, src_ty, val, dst_ty
+                    "  {} = {} {} {} to {}",
+                    tmp, how, src_ty, val, dst_ty
                 )
                 .unwrap();
             } else {
@@ -560,21 +967,23 @@ impl LlvmEmitter {
         format!("@.str.{}", id)
     }
 
-    fn w(&mut self, s: &str) {
-        write!(&mut self.output, "{}", s).unwrap();
-    }
-
     fn wln(&mut self, s: &str) {
         writeln!(&mut self.output, "{}", s).unwrap();
     }
 
     // ── Type Mapping ────────────────────────────────────────
 
-    fn emit_type(&self, ty: &Type) -> String {
+    fn emit_type(&mut self, ty: &Type) -> String {
         let res: String = match ty {
             Type::Primitive(name, _) => match name.as_str() {
-                "I32" | "u32" | "i32" => "i32".into(),
-                "I64" | "usize" | "i64" => "i64".into(),
+                // `U64`/`u64` were absent and fell to the `_ => "i32"` arm
+                // below, so `let x: U64 = ...` allocated an **i32**. The PTX
+                // backend takes these types seriously (gotcha #7); this one
+                // silently halved their width.
+                "I32" | "U32" | "u32" | "i32" => "i32".into(),
+                "I64" | "U64" | "u64" | "usize" | "isize" | "i64" => "i64".into(),
+                "U8" | "I8" => "i8".into(),
+                "U16" => "i16".into(),
                 "F16" | "f16" => "half".into(),
                 "F32" | "f32" => "float".into(),
                 "F64" | "f64" => "double".into(),
@@ -585,8 +994,10 @@ impl LlvmEmitter {
                 _ => "i32".into(),
             },
             Type::Ident(name, _) => match name.as_str() {
-                "I32" | "u32" | "i32" => "i32".into(),
-                "I64" | "usize" | "i64" => "i64".into(),
+                "I32" | "U32" | "u32" | "i32" => "i32".into(),
+                "I64" | "U64" | "u64" | "usize" | "isize" | "i64" => "i64".into(),
+                "U8" | "I8" => "i8".into(),
+                "U16" => "i16".into(),
                 "F32" | "f32" => "float".into(),
                 "F64" | "f64" => "double".into(),
                 "bool" => "i1".into(),
@@ -602,7 +1013,26 @@ impl LlvmEmitter {
                         } else {
                             "i32".into()
                         }
+                    } else if self.structs.contains_key(other) {
+                        format!("%{}", other)
                     } else {
+                        // Not a primitive, not a registered struct, not an
+                        // enum: there is nothing to lower this to. Emitting
+                        // `%Name` names an LLVM struct type the module never
+                        // defines, and `alloca %Name` on an undefined type is
+                        // "Cannot allocate unsized type" - INVALID IR, written
+                        // out under "Compilation Successful!" and exit 0.
+                        //
+                        // Every instance in the corpus was `U32x4`, the PTX
+                        // backend's 16-byte vector type, reaching the host
+                        // backend: 11 of the 76 programs this backend accepted
+                        // emitted a module clang refuses.
+                        self.emit_errors.push(format!(
+                            "[LLVM host backend] type `{}` has no host lowering - it \
+                             would name an LLVM struct this module never defines. \
+                             GPU-only types such as `U32x4` belong to --emit-ptx.",
+                            other
+                        ));
                         format!("%{}", other)
                     }
                 }
@@ -622,7 +1052,7 @@ impl LlvmEmitter {
         }
     }
 
-    fn emit_field_type(&self, ty: &Type) -> String {
+    fn emit_field_type(&mut self, ty: &Type) -> String {
         match ty {
             Type::Array { element, size, .. } => {
                 let elem_llvm_ty = self.emit_type(element);
@@ -643,6 +1073,19 @@ impl LlvmEmitter {
         prog: &Program,
         profile: &crate::sentinel::HardwareProfile,
     ) -> String {
+        // `@cache_policy` is refused here, not lowered. Its four policies are
+        // NVIDIA L2 eviction priorities and x86 has no instruction that sets
+        // a cache line's eviction priority. This backend used to emit a
+        // mapping, and on x86-64 at clang -O2 it did nothing the directive
+        // names: `L2_EVICT_FIRST`'s `!nontemporal` on a scalar load compiled
+        // to the same `mov` as no policy, `L2_PERSIST`'s `llvm.prefetch` came
+        // out as a `prefetcht0` scheduled AFTER the load of the same address,
+        // and `L2_EVICT_LAST` and `L2_STREAM` were dropped - all four exit 0.
+        for site in crate::ast::cache_policy_sites(prog) {
+            self.emit_errors
+                .push(crate::ast::cache_policy_refusal("LLVM backend", &site));
+        }
+
         // Phase 0: Collect struct layouts and function signatures
         self.functions.insert(
             "ystr_new".into(),
@@ -759,6 +1202,29 @@ impl LlvmEmitter {
         self.functions.insert("File_read_to_string".into(), (vec!["&String".to_string()], "ptr".into()));
         self.functions.insert("File_write".into(), (vec!["&String".to_string(), "&String".to_string()], "void".into()));
 
+        // Phase 0a: register every struct and enum FIRST.
+        //
+        // This used to be one loop that registered structs and resolved
+        // function signatures together, so `emit_type` was asked about a
+        // struct declared later in the file and the struct table did not have
+        // it yet. That was harmless while the fallback silently emitted
+        // `%Name` anyway; the moment that fallback became a refusal, four
+        // corpus programs with a perfectly ordinary `struct` in them were
+        // refused. A name resolver must see all the names before it answers
+        // any question.
+        for item in &prog.items {
+            match item {
+                Item::Enum(e) => {
+                    let has_data = e.variants.iter().any(|v| v.fields.is_some());
+                    self.enums.insert(e.name.clone(), has_data);
+                    for (i, v) in e.variants.iter().enumerate() {
+                        self.enum_variants
+                            .insert(format!("{}_{}", e.name, v.name), i as i32);
+                    }
+                }
+                _ => {}
+            }
+        }
         for item in &prog.items {
             match item {
                 Item::Struct(s) => {
@@ -775,6 +1241,13 @@ impl LlvmEmitter {
                     self.ast_structs.insert(s.name.clone(), ast_fields);
                     self.struct_field_attrs.insert(s.name.clone(), field_attrs);
                 }
+                _ => {}
+            }
+        }
+
+        // Phase 0b: resolve function signatures, with every type name known.
+        for item in &prog.items {
+            match item {
                 Item::Func(f) => {
                     let ret_ty = f
                         .ret_ty
@@ -805,14 +1278,6 @@ impl LlvmEmitter {
                         k.params.iter().map(|p| ast_type_to_string(&p.ty)).collect();
                     self.functions
                         .insert(k.name.clone(), (param_tys, "void".into()));
-                }
-                Item::Enum(e) => {
-                    let has_data = e.variants.iter().any(|v| v.fields.is_some());
-                    self.enums.insert(e.name.clone(), has_data);
-                    for (i, v) in e.variants.iter().enumerate() {
-                        self.enum_variants
-                            .insert(format!("{}_{}", e.name, v.name), i as i32);
-                    }
                 }
                 _ => {}
             }
@@ -887,6 +1352,9 @@ impl LlvmEmitter {
         self.wln("declare void @exit(i32) noreturn");
         self.wln("declare void @println(ptr)");
         self.wln("declare void @print_int(i64)");
+        // No longer called: its one caller was the `L2_PERSIST` mapping,
+        // and `@cache_policy` is refused now. The declaration stays so the
+        // prelude, and so every module this backend emits, is unchanged.
         self.wln("declare void @llvm.prefetch.p0(ptr nocapture readonly, i32, i32, i32)");
         self.wln("declare void @llvm.memset.p0.i64(ptr nocapture writeonly, i8, i64, i1 immarg)");
         self.wln("");
@@ -911,32 +1379,13 @@ impl LlvmEmitter {
         self.output.push_str(&func_output);
 
         // Auto-declare any called functions that are not defined or already declared
-        let runtime_set: std::collections::HashSet<&str> = [
-            "ystr_new",
-            "ystr_push",
-            "ystr_push_str",
-            "ystr_eq_cstr",
-            "ystr_len",
-            "ystr_char_at",
-            "ystr_clone",
-            "yvec_new",
-            "yvec_push",
-            "yvec_get",
-            "yvec_len",
-            "yfile_read_to_string",
-            "yfile_write",
-            "printf",
-            "malloc",
-            "free",
-            "exit",
-            "println",
-            "print_int",
-            "llvm.prefetch.p0",
-            "load",
-        ]
-        .iter()
-        .cloned()
-        .collect();
+        let prelude_set: std::collections::HashSet<&str> =
+            PRELUDE_DECLARED.iter().copied().collect();
+        let runtime_set: std::collections::HashSet<&str> = RUNTIME_SYMBOLS
+            .iter()
+            .chain(LIBC_SYMBOLS.iter())
+            .copied()
+            .collect();
 
         let defined_set: std::collections::HashSet<String> =
             self.defined_functions.iter().cloned().collect();
@@ -944,7 +1393,7 @@ impl LlvmEmitter {
         let mut extern_decls = String::new();
 
         for fname in &self.called_functions {
-            if !runtime_set.contains(fname.as_str())
+            if !prelude_set.contains(fname.as_str())
                 && !defined_set.contains(fname)
                 && !auto_declared.contains(fname)
             {
@@ -967,10 +1416,34 @@ impl LlvmEmitter {
                         .unwrap_or_else(|| "i32".into()),
                 };
 
-                if ret_ty.starts_with('%') {
-                    writeln!(&mut extern_decls, "declare void @{}(...)", fname).unwrap();
+                if runtime_set.contains(fname.as_str()) {
+                    if ret_ty.starts_with('%') {
+                        writeln!(&mut extern_decls, "declare void @{}(...)", fname).unwrap();
+                    } else {
+                        writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname)
+                            .unwrap();
+                    }
                 } else {
-                    writeln!(&mut extern_decls, "declare {} @{}(...)", ret_ty, fname).unwrap();
+                    // Neither declared above, nor defined here, nor present in
+                    // the runtime: this symbol does not exist. Declaring it
+                    // anyway produced a module that ASSEMBLES and then fails at
+                    // link with `undefined reference to 'thread_idx_x'` - which
+                    // reads as a broken toolchain rather than as a program
+                    // using a construct this backend cannot lower. Every such
+                    // name in the corpus was a GPU intrinsic: thread_idx_x,
+                    // block_idx_x/y/z, the carry-chain intrinsics, the v4
+                    // vector loads, mma_sync, ldmatrix, bvh_traverse.
+                    //
+                    // This is the exact check `cpu_emitter` already made
+                    // (`a_gpu_intrinsic_is_refused_rather_than_transcribed`);
+                    // the LLVM backend never got it.
+                    self.emit_errors.push(format!(
+                        "[LLVM host backend] `{}(...)` has no host lowering - it would be \
+                         declared as an external symbol that does not exist, and the link \
+                         would fail. This backend targets host code; GPU intrinsics belong \
+                         to --emit-ptx.",
+                        fname
+                    ));
                 }
                 auto_declared.insert(fname.clone());
             }
@@ -984,10 +1457,65 @@ impl LlvmEmitter {
             }
         }
 
-        // Nontemporal metadata definition
+        if self.needs_gemm_module {
+            self.wln("");
+            let m = crate::cpu_gemm::emit_kernel_module();
+            self.output.push_str(&m);
+        }
+
+        if let Some(flush) = self.needs_exact_gemm_module {
+            self.wln("");
+            let m = crate::cpu_gemm::emit_vnni_gemm_module(flush);
+            self.output.push_str(&m);
+            // The f32 module declares the same libc entry points, and a
+            // duplicate `declare` is an INVALID REDEFINITION in LLVM rather
+            // than a duplicate that gets merged - so they are emitted here only
+            // when that module is absent.
+            let t = crate::cpu_gemm::emit_vnni_threaded_module(!self.needs_gemm_module);
+            self.output.push_str(&t);
+        }
+
+        // Metadata node `!0`, referenced by `!uniform_branch` on loop branches.
+        // It was also the operand of `!nontemporal`, which this backend no
+        // longer emits (see `emit_store_with_attrs`). Kept in every module so
+        // the prelude and the emitted text of every other program are unchanged.
         self.wln("!0 = !{i32 1}");
 
         self.output.clone()
+    }
+
+    /// `(triple, datalayout mangling spec)` for the machine Y is running on.
+    /// Y's LLVM backend compiles for the host, so the host is the target.
+    fn host_triple() -> (&'static str, &'static str) {
+        if cfg!(target_os = "windows") {
+            ("x86_64-pc-windows-msvc", "m:w")
+        } else if cfg!(target_os = "macos") {
+            ("x86_64-apple-darwin", "m:o")
+        } else {
+            ("x86_64-unknown-linux-gnu", "m:e")
+        }
+    }
+
+    /// `(target-cpu, target-features)` for the host.
+    ///
+    /// AVX-512 used to mean `skylake-avx512` unconditionally. On an AMD Zen 4/5
+    /// that is a correct but pessimistic model — wrong port counts, wrong
+    /// latencies, and it hides `avx512_bf16` / `avx512vnni`, which those parts
+    /// have and Skylake-X does not. The vendor comes from CPUID, so this stays
+    /// a probe rather than an assumption.
+    fn host_cpu_attrs(profile: &crate::sentinel::HardwareProfile) -> (String, String) {
+        if !profile.has_avx512 {
+            return if profile.has_avx {
+                ("haswell".into(), "+avx2,+avx,+fma".into())
+            } else {
+                ("x86-64".into(), String::new())
+            };
+        }
+        let base = "+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl,+fma";
+        match crate::sentinel::host_x86_uarch() {
+            Some(uarch) => (uarch, format!("{},+avx512vnni,+avx512bf16", base)),
+            None => ("skylake-avx512".into(), base.into()),
+        }
     }
 
     fn emit_prelude(&mut self, profile: &crate::sentinel::HardwareProfile) {
@@ -999,29 +1527,50 @@ impl LlvmEmitter {
         ));
         self.wln("; ================================================");
         self.wln("");
-        self.wln("target datalayout = \"e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"");
-        self.wln("target triple = \"x86_64-pc-windows-msvc\"");
+        // The triple and datalayout used to be hardcoded to Windows/MSVC
+        // (`m:w` mangling) regardless of host, so every Linux and macOS build
+        // handed clang a module describing a platform it was not compiling for.
+        let (triple, mangling) = Self::host_triple();
+        self.wln(&format!(
+            "target datalayout = \"e-{}-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\"",
+            mangling
+        ));
+        self.wln(&format!("target triple = \"{}\"", triple));
         self.wln("");
 
         // Dynamically inject LLVM function attributes based on Sentinel Probe
-        if profile.has_avx512 {
-            self.wln("attributes #0 = { \"target-cpu\"=\"skylake-avx512\" \"target-features\"=\"+avx512f,+avx512cd,+avx512bw,+avx512dq,+avx512vl\" }");
-        } else if profile.has_avx {
-            self.wln(
-                "attributes #0 = { \"target-cpu\"=\"haswell\" \"target-features\"=\"+avx2,+avx\" }",
-            );
+        let (cpu, features) = Self::host_cpu_attrs(profile);
+        if features.is_empty() {
+            self.wln(&format!("attributes #0 = {{ \"target-cpu\"=\"{}\" }}", cpu));
         } else {
-            self.wln("attributes #0 = { \"target-cpu\"=\"x86-64\" }");
+            self.wln(&format!(
+                "attributes #0 = {{ \"target-cpu\"=\"{}\" \"target-features\"=\"{}\" }}",
+                cpu, features
+            ));
         }
         self.wln("");
     }
 
     // ── Functions ───────────────────────────────────────────
 
-    fn emit_func(&mut self, f: &FuncDecl) {
+    /// Local facts belong to one function (including a kernel). Leaving any
+    /// of these maps populated makes an unrelated binding with the same name
+    /// inherit its predecessor's directive, signedness or pointer element.
+    fn reset_function_state(&mut self) {
         self.tmp_counter = 0;
+        self.label_counter = 0;
         self.locals.clear();
+        self.locals_ast_type.clear();
+        self.pointee_types.clear();
+        self.mem_elem_types.clear();
+        self.zero_drift.clear();
+        self.loop_exit_stack.clear();
         self.block_terminated = false;
+        self.current_load_hint = None;
+    }
+
+    fn emit_func(&mut self, f: &FuncDecl) {
+        self.reset_function_state();
         let prev_ptx = self.in_ptx_emit;
         self.in_ptx_emit = f.is_ptx_emit;
 
@@ -1066,9 +1615,14 @@ impl LlvmEmitter {
             if let Some(pty) = self.get_pointee_type(&p.ty) {
                 self.pointee_types.insert(p.name.clone(), pty);
             }
+            if let Some(ety) = memory_element_llvm_type(&p.ty) {
+                self.mem_elem_types.insert(p.name.clone(), ety);
+            }
             writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
             self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
         }
+
+        writeln!(&mut self.output, "  {} = alloca [8 x i8], align 8", Y_OOB_SINK).unwrap();
 
         // Forward declare all lets in entry block to avoid loop stack growth
         self.emit_alloca_for_block(&f.body);
@@ -1102,6 +1656,75 @@ impl LlvmEmitter {
     fn emit_alloca_for_block(&mut self, block: &Block) {
         for stmt in &block.stmts {
             match stmt {
+                // `@ZeroDrift` accumulators live in an integer register, not a
+                // float one - that is the entire mechanism. The representation
+                // is chosen here, before the alloca, because the alloca's type
+                // is what everything downstream keys off.
+                Stmt::Let { name, ty, zero_drift: Some(_), bounds, span, .. }
+                    if !self.locals.contains_key(name) =>
+                {
+                    let ty_name = match ty {
+                        Some(Type::Primitive(n, _)) | Some(Type::Ident(n, _)) => n.clone(),
+                        _ => "F32".to_string(),
+                    };
+                    let range = bounds.as_ref().and_then(|b| {
+                        match (const_f64_of(&b.min), const_f64_of(&b.max)) {
+                            (Some(lo), Some(hi)) => Some((lo, hi)),
+                            _ => None,
+                        }
+                    });
+                    let req = crate::zero_drift::Requirement::for_type_with_bounds(&ty_name, range);
+                    match crate::zero_drift::select_repr(&req, &self.drift_costs) {
+                        Ok(decision) => {
+                            self.drift_report.push(crate::zero_drift::report_line(
+                                name,
+                                &ty_name,
+                                &decision,
+                                crate::zero_drift::explain_requested(),
+                            ));
+                            self.locals.insert(name.clone(), decision.repr.llvm_type().to_string());
+                            self.locals_ast_type.insert(name.clone(), ty_name.clone());
+                            let integer_domain = decision.repr.frac_bits() == 0
+                                && matches!(
+                                    ty_name.as_str(),
+                                    "I8" | "I16" | "I32" | "I64"
+                                        | "U8" | "U16" | "U32" | "U64"
+                                        | "i8" | "i16" | "i32" | "i64"
+                                        | "u8" | "u16" | "u32" | "u64"
+                                        | "isize" | "usize"
+                                );
+                            self.zero_drift
+                                .insert(name.clone(), (decision.repr, integer_domain));
+                            writeln!(
+                                &mut self.output,
+                                "  %{} = alloca {}",
+                                name,
+                                decision.repr.llvm_type()
+                            )
+                            .unwrap();
+                        }
+                        Err(why) => {
+                            self.emit_errors.push(format!(
+                                "Line {}: @ZeroDrift on `{}: {}` cannot be honoured. No exact \
+representation holds that range at that resolution, and only exact (integer or fixed-point) \
+accumulation is drift-free - f64 is the same non-associative arithmetic with more mantissa. \
+Add @bounds(min, max) to state the accumulator's real range, or declare it as a Q format.\n{}",
+                                span.line,
+                                name,
+                                ty_name,
+                                crate::zero_drift::explain_rejections(&why)
+                            ));
+                            // Fall back to the declared type so the rest of the
+                            // function still emits; the error above fails the build.
+                            let ir_ty = match ty {
+                                Some(t) => self.emit_type(t),
+                                None => "double".into(),
+                            };
+                            self.locals.insert(name.clone(), ir_ty.clone());
+                            writeln!(&mut self.output, "  %{} = alloca {}", name, ir_ty).unwrap();
+                        }
+                    }
+                }
                 Stmt::Let { name, ty, init, .. } => {
                     if !self.locals.contains_key(name) {
                         let ir_ty = match ty {
@@ -1185,9 +1808,7 @@ impl LlvmEmitter {
     }
 
     fn emit_kernel(&mut self, k: &KernelDecl) {
-        self.tmp_counter = 0;
-        self.locals.clear();
-        self.block_terminated = false;
+        self.reset_function_state();
 
         writeln!(&mut self.output, "; @kernel").unwrap();
 
@@ -1218,8 +1839,25 @@ impl LlvmEmitter {
             if let Some(pty) = self.get_pointee_type(&p.ty) {
                 self.pointee_types.insert(p.name.clone(), pty);
             }
+            if let Some(ety) = memory_element_llvm_type(&p.ty) {
+                self.mem_elem_types.insert(p.name.clone(), ety);
+            }
             writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
             self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
+        }
+
+        writeln!(&mut self.output, "  {} = alloca [8 x i8], align 8", Y_OOB_SINK).unwrap();
+
+        // A kernel whose whole body is the canonical matmul nest is replaced by
+        // the packed AVX-512 kernel. The recogniser is strict and the scalar
+        // lowering below is correct, so a near-miss costs speed, not an answer.
+        if let Some(shape) = self.try_emit_gemm_kernel(k) {
+            self.needs_gemm_module = true;
+            writeln!(&mut self.output, "  ; [Y CPU GEMM] {:?}", shape).unwrap();
+            self.wln("  ret void");
+            self.wln("}");
+            self.wln("");
+            return;
         }
 
         self.emit_alloca_for_block(&k.body);
@@ -1230,6 +1868,352 @@ impl LlvmEmitter {
         }
         self.wln("}");
         self.wln("");
+    }
+
+    /// Emit a call to the exact `vpdpwssd` GEMM for a recognised, licensed nest.
+    ///
+    /// The kernel's contract, from `emit_vnni_gemm_module`:
+    ///
+    ///   `__y_gemm_exact_vnni(A: i16*, B: i16*, C: i64*, M, N, K,
+    ///                        lda, ldb, ldc, Ap: i16*, Bp: i16*, Ct: i64*)`
+    ///
+    /// Two parts of it are easy to get wrong and are handled explicitly here.
+    ///
+    /// **`C` is accumulated INTO, not overwritten.** That is deliberate - it is
+    /// what lets a caller split the K range across threads and sum the pieces,
+    /// which is the order-independence the exact path exists to sell. But the
+    /// nest being replaced STORES its sum, so `C` has to be zeroed first or a
+    /// second call over the same buffer would double it.
+    ///
+    /// **The three scratch buffers are the caller's.** Sizes come from the
+    /// packers' layouts: `Ap` is one `i16` per (row-tile, k-pair, MR, 2),
+    /// `Bp` one per (k-pair, NR, 2), and `Ct` is a single `MR x NR` `i64`
+    /// micro-tile. They are heap-allocated rather than `alloca`d because `Ap`
+    /// grows with M*K and a dynamic `alloca` of that size is a stack overflow
+    /// on any real shape.
+    fn emit_exact_gemm_call(
+        &mut self,
+        shape: &crate::cpu_gemm::GemmShape,
+        flush_k_pairs: u32,
+    ) -> Option<()> {
+        use crate::cpu_gemm::{VNNI_MR, VNNI_NR};
+
+        // Extents and strides, widened to i64 exactly as the f32 path does.
+        let mut ext = Vec::new();
+        for name in [
+            &shape.m,
+            &shape.n,
+            &shape.k,
+            &shape.lda,
+            &shape.ldb,
+            &shape.ldc,
+        ] {
+            let ty = self.locals.get(name)?.clone();
+            let tmp = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load {}, ptr %{}", tmp, ty, name).unwrap();
+            ext.push(if ty == "i64" {
+                tmp
+            } else {
+                let w = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = sext {} {} to i64", w, ty, tmp).unwrap();
+                w
+            });
+        }
+
+        let mut ptrs = Vec::new();
+        for name in [&shape.a, &shape.b, &shape.c] {
+            let tmp = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load ptr, ptr %{}", tmp, name).unwrap();
+            ptrs.push(tmp);
+        }
+        let (m, n, k) = (ext[0].clone(), ext[1].clone(), ext[2].clone());
+
+        let mut bin = |op: &str, a: &str, b: &str, out: &mut String| {
+            let t = format!("%_t{}", {
+                self.tmp_counter += 1;
+                self.tmp_counter
+            });
+            writeln!(out, "  {} = {} i64 {}, {}", t, op, a, b).unwrap();
+            t
+        };
+        let mut ir = String::new();
+
+        // kpairs = (K + 1) / 2 - the packers count k-PAIRS, and an odd K leaves
+        // the final high half zero.
+        let k1 = bin("add", &k, "1", &mut ir);
+        let kpairs = bin("sdiv", &k1, "2", &mut ir);
+
+        // Ap: ceil(M / MR) row tiles, each kpairs * MR * 2 i16.
+        let m1 = bin("add", &m, &(VNNI_MR - 1).to_string(), &mut ir);
+        let mtiles = bin("sdiv", &m1, &VNNI_MR.to_string(), &mut ir);
+        let ap_e = bin("mul", &mtiles, &kpairs, &mut ir);
+        let ap_e = bin("mul", &ap_e, &(VNNI_MR * 2).to_string(), &mut ir);
+        let ap_b = bin("mul", &ap_e, "2", &mut ir);
+
+        // Bp: kpairs * NR * 2 i16.
+        let bp_e = bin("mul", &kpairs, &(VNNI_NR * 2).to_string(), &mut ir);
+        let bp_b = bin("mul", &bp_e, "2", &mut ir);
+
+        // C: M * N i64, zeroed because the kernel accumulates into it.
+        let c_e = bin("mul", &m, &n, &mut ir);
+        let c_b = bin("mul", &c_e, "8", &mut ir);
+        self.output.push_str(&ir);
+
+        // The threaded entry owns the scratch, the K-split and the zeroing of
+        // `C`, because all three depend on the thread count it chooses. It
+        // falls back to a single direct call when one thread is enough, so
+        // there is no separate serial path to keep in step.
+        let _ = (&ap_b, &bp_b, &c_b);
+        writeln!(
+            &mut self.output,
+            "  call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
+             i64 {}, i64 {}, i64 {})",
+            crate::cpu_gemm::VNNI_THREADED_NAME,
+            ptrs[0],
+            ptrs[1],
+            ptrs[2],
+            ext[0],
+            ext[1],
+            ext[2],
+            ext[3],
+            ext[4],
+            ext[5]
+        )
+        .unwrap();
+
+        self.needs_exact_gemm_module = Some(flush_k_pairs);
+        Some(())
+    }
+
+    /// If `k`'s body is the canonical `C = A * B` nest over `F32` buffers,
+    /// emit a call to the packed AVX-512 kernel and report the shape.
+    ///
+    /// The element-type check is not a formality: the recogniser matches on
+    /// loop structure, which is identical for `F64` or `F16` buffers, and the
+    /// emitted kernel is `<16 x float>` throughout. Running it over a `F64`
+    /// buffer would reinterpret the data rather than fail.
+    fn try_emit_gemm_kernel(&mut self, k: &KernelDecl) -> Option<crate::cpu_gemm::GemmShape> {
+        // `Y_NO_GEMM_RECOGNISER=1` lowers the nest as written instead of
+        // substituting the packed kernel.
+        //
+        // This exists so the compiler can be asked for BOTH readings of one
+        // source: the optimized kernel, and the naive loop nest it claims to
+        // be equal to. That pair is the differential in
+        // `tests/gemm_substitution_differential.rs`, and it is the cheapest
+        // honest form of the claim `docs/proof_carrying_kernels.md` eventually
+        // wants to PROVE - the spec is the user's own source lowered by the
+        // same compiler, so unlike a reference written inside a test it cannot
+        // drift from the language's semantics.
+        //
+        // Deliberately an escape hatch and not a tuning knob: it makes Y slow,
+        // never wrong.
+        if crate::cpu_gemm::recogniser_disabled() {
+            return None;
+        }
+        let shape = crate::cpu_gemm::recognize_gemm(&k.body)?;
+
+        let elem = |e: &Self, n: &String| e.mem_elem_types.get(n).cloned().unwrap_or_default();
+        let (ea, eb, ec) = (
+            elem(self, &shape.a),
+            elem(self, &shape.b),
+            elem(self, &shape.c),
+        );
+
+        // The EXACT path. `i16` operands accumulating into `i64` is precisely
+        // `__y_gemm_exact_vnni`'s contract, so the source's own types state the
+        // operand domain and there is nothing to convert.
+        //
+        // That is what makes the substitution legal at all. `VnniExact::license`
+        // is stated over "the int16 operand values actually fed to `vpdpwssd`",
+        // and an `F32` nest would need a quantization scale to reach that domain
+        // - at which point the licence would have been granted against the
+        // source's magnitude and not the kernel's. Declaring the operands `I16`
+        // removes the question instead of answering it.
+        if ea == "i16" && eb == "i16" && ec == "i64" {
+            // THE PRODUCT MUST NOT TRUNCATE, and this is the check that makes
+            // the whole substitution legal rather than merely fast.
+            //
+            // `let a_val: I16 = ...` makes `a_val * b_val` an i16 multiply.
+            // 1024 * 1024 is 2^20, so it overflows, and the naive nest
+            // accumulates the TRUNCATED product - the emitted IR is
+            // `mul i16` followed by `sext i16 ... to i64`. `vpdpwssd` widens
+            // internally, so substituting it there replaces a truncating
+            // reduction with a widening one: a different function, computed
+            // faster, under a certificate claiming exactness.
+            //
+            // Declaring the operands `I64` sign-extends at the load and makes
+            // the multiply `i64`, which is what the kernel computes. Verified
+            // by running both: the widened nest is bit-identical to an integer
+            // reference and the truncating one is not.
+            let widened = matches!(shape.operand_ty.as_deref(), Some("I64") | Some("I32"));
+            if !widened {
+                if shape.drift.is_some() {
+                    self.drift_report.push(format!(
+                        "matmul {}x{}: using scalar lowering. The exact vpdpwssd kernel is \
+                         unavailable because the operands are declared `{}`, so `a * b` is a \
+                         {}-bit multiply that truncates before it is accumulated - the kernel \
+                         widens, so substituting it would compute a DIFFERENT function. \
+                         Declare the operand `let`s as `I64` to state the widening.",
+                        shape.m,
+                        shape.n,
+                        shape.operand_ty.as_deref().unwrap_or("?"),
+                        16
+                    ));
+                }
+                return None;
+            }
+            if let Some(drift) = &shape.drift {
+                match crate::cpu_gemm::plan_exact_gemm(drift) {
+                    crate::cpu_gemm::ExactGemmPlan::Vnni {
+                        scheme,
+                        operand_magnitude,
+                    } => {
+                        self.emit_exact_gemm_call(&shape, scheme.flush_k_pairs)?;
+                        // The certificate is recorded HERE, at the one site
+                        // where the substitution actually happens, so it can
+                        // neither be emitted for a nest that stayed on the
+                        // scalar path nor forgotten for one that did not.
+                        self.exact_gemm_certificates.push(
+                            crate::exact_gemm_certificate::Certificate {
+                                operand_magnitude,
+                                flush_k_pairs: scheme.flush_k_pairs,
+                                extent_m: shape.m.clone(),
+                                extent_n: shape.n.clone(),
+                            },
+                        );
+                        self.drift_report.push(format!(
+                            "matmul {}x{}: EXACT vpdpwssd kernel substituted (operands \
+                             |x| <= {}, flush every {} k-pairs). Integer addition is \
+                             associative, so the tiled, K-split result is bit-identical to \
+                             the naive nest rather than merely close to it.",
+                            shape.m, shape.n, operand_magnitude, scheme.flush_k_pairs
+                        ));
+                        return Some(shape);
+                    }
+                    crate::cpu_gemm::ExactGemmPlan::Unavailable(reason) => {
+                        // Still exact, just not fast - the scalar lowering
+                        // honours `@ZeroDrift` on its own. An advisory, not an
+                        // error; see `ExactGemmPlan`.
+                        self.drift_report.push(format!(
+                            "matmul {}x{}: using scalar lowering, which is still EXACT. The \
+                             fast vpdpwssd kernel is unavailable because {}",
+                            shape.m, shape.n, reason
+                        ));
+                        return None;
+                    }
+                }
+            }
+            // Integer buffers with no `@ZeroDrift`: the nest is an ordinary
+            // integer matmul and the f32 kernel below cannot serve it.
+            return None;
+        }
+
+        // The f32 path. The element-type check is not a formality: the
+        // recogniser matches on loop STRUCTURE, which is identical for `F64` or
+        // `F16` buffers, and the emitted kernel is `<16 x float>` throughout.
+        // Running it over an `F64` buffer would reinterpret the data rather
+        // than fail.
+        if ea != "float" || eb != "float" || ec != "float" {
+            return None;
+        }
+
+        // A `@ZeroDrift` accumulator demands an EXACT reduction. The packed
+        // kernel below accumulates in f32, which is not exact, so substituting
+        // it here would hand back a fast kernel that quietly fails the
+        // guarantee the source asked for — the exact failure mode this
+        // repository's design rule exists to prevent.
+        //
+        // `recognize_gemm` used to refuse such a nest outright; it now records
+        // the request so an exact kernel can be selected. Until that kernel
+        // exists, returning None falls through to ordinary scalar lowering,
+        // which honours `@ZeroDrift` correctly (see `Stmt::Let` with
+        // `zero_drift` in `emit_alloca_for_block`). Slow and right, rather than
+        // fast and wrong. See `docs/proof_carrying_kernels.md`, Phase 0, and
+        // `docs/deterministic_inference.md`, M0.
+        //
+        // The licence is consulted and REPORTED even though no exact kernel is
+        // emitted yet, because the two outcomes are already distinguishable and
+        // the user can act on the difference: an unlicensed nest is on the slow
+        // path for a stated reason it can fix (tighter `@bounds` on the
+        // operands), while a licensed one is merely waiting on the kernel. A
+        // silent `return None` tells them neither. Both are `drift_report`
+        // advisories rather than `emit_errors` - see `ExactGemmPlan`, where the
+        // distinction between "cannot be exact" and "cannot be exact AND fast"
+        // is written down.
+        if let Some(drift) = &shape.drift {
+            match crate::cpu_gemm::plan_exact_gemm(drift) {
+                crate::cpu_gemm::ExactGemmPlan::Vnni { scheme, operand_magnitude } => {
+                    self.drift_report.push(format!(
+                        "matmul {}x{}: exact vpdpwssd kernel is LICENSED (operands |x| <= {}, \
+                         flush every {} k-pairs) but not yet implemented - using scalar lowering, \
+                         which is exact and slow",
+                        shape.m, shape.n, operand_magnitude, scheme.flush_k_pairs
+                    ));
+                }
+                crate::cpu_gemm::ExactGemmPlan::Unavailable(reason) => {
+                    self.drift_report.push(format!(
+                        "matmul {}x{}: using scalar lowering, which is still EXACT. The fast \
+                         vpdpwssd kernel is unavailable because {}",
+                        shape.m, shape.n, reason
+                    ));
+                }
+            }
+            return None;
+        }
+
+        // The extents and the three leading dimensions arrive as i32
+        // parameters; the kernel indexes in i64.
+        //
+        // The strides are loaded SEPARATELY even when they name the same
+        // variables as the extents (the packed case, where `lda` is `K`).
+        // Reusing the extent's register would be correct today and would
+        // silently stop being correct the moment the recogniser accepts a
+        // stride the extent does not equal — which is now the whole point.
+        let mut ext = Vec::new();
+        for name in [
+            &shape.m,
+            &shape.n,
+            &shape.k,
+            &shape.lda,
+            &shape.ldb,
+            &shape.ldc,
+        ] {
+            let ty = self.locals.get(name)?.clone();
+            let tmp = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load {}, ptr %{}", tmp, ty, name).unwrap();
+            ext.push(if ty == "i64" {
+                tmp
+            } else {
+                let w = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = sext {} {} to i64", w, ty, tmp).unwrap();
+                w
+            });
+        }
+
+        let mut ptrs = Vec::new();
+        for name in [&shape.a, &shape.b, &shape.c] {
+            let tmp = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load ptr, ptr %{}", tmp, name).unwrap();
+            ptrs.push(tmp);
+        }
+
+        writeln!(
+            &mut self.output,
+            "  call void @{}(ptr {}, ptr {}, ptr {}, i64 {}, i64 {}, i64 {}, \
+             i64 {}, i64 {}, i64 {})",
+            crate::cpu_gemm::KERNEL_NAME,
+            ptrs[0],
+            ptrs[1],
+            ptrs[2],
+            ext[0],
+            ext[1],
+            ext[2],
+            ext[3],
+            ext[4],
+            ext[5]
+        )
+        .unwrap();
+        Some(shape)
     }
 
     fn emit_impl(&mut self, imp: &ImplBlock) {
@@ -1254,16 +2238,17 @@ impl LlvmEmitter {
 
     fn emit_stmt(&mut self, stmt: &Stmt, ret_type: &str) {
         match stmt {
-            Stmt::Let {
-                name,
-                init,
-                cache_policy,
-                ..
-            } => {
-                if let Some(cp) = cache_policy {
-                    self.current_cache_policy = Some(cp.policy.clone());
-                }
-
+            Stmt::Let { name, init, .. } if self.zero_drift.contains_key(name) => {
+                let (repr, integer_domain) = self.zero_drift[name];
+                let fixed = match init {
+                    Some(e) => self.emit_drift_term(e, repr, integer_domain),
+                    None => "0".to_string(),
+                };
+                self.emit_store(&fixed, &format!("%{}", name), repr.llvm_type());
+            }
+            // A `@cache_policy` on this `let` never reaches here: `emit_program`
+            // refuses the whole program first (see the comment there).
+            Stmt::Let { name, init, .. } => {
                 // alloca is already done in entry
                 if let Some(init_expr) = init {
                     // Set load hint so `load()` intrinsic uses the LHS type
@@ -1282,7 +2267,9 @@ impl LlvmEmitter {
                     if matches!(init_expr, Expr::ZeroInit(_)) {
                         // For ZeroInit, the target pointer has already been memset. No further store needed.
                     } else {
-                        let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
+                        let src_unsigned = self.expr_is_unsigned(init_expr);
+                        let coerced =
+                            self.emit_coerce_from(&val, &val_ty, &dst_ty, src_unsigned);
 
                         // ==========================================
                         // ARCHITECTURAL NOTE: Aggregate Memory Handling
@@ -1339,8 +2326,71 @@ impl LlvmEmitter {
                         }
                     }
                 }
-
-                self.current_cache_policy = None;
+            }
+            // `sum = sum + rhs` on a @ZeroDrift accumulator.
+            //
+            // Only `+=` had a drift-aware arm, so this form - the one the GEMM
+            // recogniser matches, and the one every reduction in `tests/` is
+            // written with - fell through to the ordinary assignment path. That
+            // path reads the accumulator through `sitofp`, adds in `double`, and
+            // then emits `store double` into an `alloca i64`. LLVM allows it,
+            // because pointers are untyped, so `clang` says nothing and the
+            // next read interprets the double's BIT PATTERN as an integer:
+            // `sum` came back as -4337501956902952448 where the answer was
+            // 2896931.
+            //
+            // Same shape as the ZK emitter's `x += 5` versus `x = x + 5`,
+            // recorded in the design-rule table - one spelling handled, its
+            // sibling silently wrong - found here in the other direction.
+            //
+            // Routed into the same exact integer path as `+=`: the term is
+            // quantised once and every addition after that is integer, which is
+            // what makes the total independent of the order the terms arrived
+            // in.
+            Stmt::Assign { target, value, span }
+                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n))
+                    && Self::drift_running_sum(target, value).is_some() =>
+            {
+                let name = match target {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let (op, rhs) = Self::drift_running_sum(target, value).unwrap();
+                let (repr, integer_domain) = self.zero_drift[&name];
+                let rhs_fixed = self.emit_drift_term(rhs, repr, integer_domain);
+                let ity = repr.llvm_type();
+                let addr = format!("%{}", name);
+                let loaded = self.emit_load(&addr, ity);
+                let result = self.fresh_tmp();
+                let instr = if matches!(op, BinaryOp::Sub) { "sub" } else { "add" };
+                writeln!(
+                    &mut self.output,
+                    "  {} = {} {} {}, {}",
+                    result, instr, ity, loaded, rhs_fixed
+                )
+                .unwrap();
+                writeln!(&mut self.output, "  store {} {}, ptr {}", ity, result, addr).unwrap();
+                let _ = span;
+            }
+            // Any OTHER assignment to a drift accumulator is refused rather
+            // than converted. `sum = <expr>` that is not a running sum would
+            // have to round `<expr>` into the fixed domain, and whether that is
+            // exact depends on the expression - which is precisely the
+            // judgement the design rule forbids a backend from making silently.
+            Stmt::Assign { target, span, .. }
+                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
+            {
+                let name = match target {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => unreachable!(),
+                };
+                self.emit_errors.push(format!(
+                    "Line {}: `{}` is a @ZeroDrift accumulator, so the only assignments that \
+preserve drift-freedom are `{} = {} + <term>` and `{} = {} - <term>` (or `+=` / `-=`). \
+Assigning anything else would have to round the value into the accumulator's exact \
+representation, and whether that is lossless depends on the expression.",
+                    span.line, name, name, name, name, name
+                ));
             }
             Stmt::Assign { target, value, .. } => {
                 let target_addr = self.emit_lvalue(target);
@@ -1351,7 +2401,8 @@ impl LlvmEmitter {
                 if matches!(value, Expr::ZeroInit(_)) {
                     // ZeroInit handles memset directly into target_addr.
                 } else {
-                    let coerced = self.emit_coerce(&val, &val_ty, &dst_ty);
+                    let src_unsigned = self.expr_is_unsigned(value);
+                    let coerced = self.emit_coerce_from(&val, &val_ty, &dst_ty, src_unsigned);
 
                     // See ARCHITECTURAL NOTE in Stmt::Let for aggregate vs primitive logic.
                     if dst_ty.starts_with('%') || dst_ty.starts_with('[') {
@@ -1399,7 +2450,8 @@ impl LlvmEmitter {
                 if let Some(e) = expr {
                     let val = self.emit_expr(e, None, None);
                     let val_ty = self.infer_type(e);
-                    let coerced = self.emit_coerce(&val, &val_ty, ret_type);
+                    let src_unsigned = self.expr_is_unsigned(e);
+                    let coerced = self.emit_coerce_from(&val, &val_ty, ret_type, src_unsigned);
                     writeln!(&mut self.output, "  ret {} {}", ret_type, coerced).unwrap();
                 } else {
                     self.wln("  ret void");
@@ -1515,7 +2567,6 @@ impl LlvmEmitter {
                 body,
                 is_uniform_branch,
                 tile,
-                prefetch_stride,
                 ..
             } => {
                 let s = self.emit_expr(start, None, None);
@@ -1528,13 +2579,10 @@ impl LlvmEmitter {
                     writeln!(&mut self.output, "  ; [Y TILE OPTIMIZATION] Tiled loop dimensions: M={:?}, N={:?}, K={:?}", t.block_m, t.block_n, t.block_k).unwrap();
                 }
 
-                if let Some(pf) = prefetch_stride {
-                    if let Some(ref stride_expr) = pf.stride {
-                        writeln!(&mut self.output, "  ; [Y PREFETCH] @prefetch_stride({:?}) -- solver-guided cache warming", stride_expr).unwrap();
-                    } else {
-                        writeln!(&mut self.output, "  ; [Y PREFETCH] @prefetch_stride(auto) -- compiler deduces optimal prefetch distance").unwrap();
-                    }
-                }
+                // `@prefetch_stride` never reaches here: the type checker
+                // refuses it, because no backend lowers it. This arm used to
+                // write it into the module as a COMMENT ("solver-guided cache
+                // warming") and emit no prefetch.
 
                 let metadata = if *is_uniform_branch {
                     ", !uniform_branch !0 ; Maps to BRANCH_UNIFORM_CYCLES scheduling baseline"
@@ -1583,6 +2631,42 @@ impl LlvmEmitter {
                 writeln!(&mut self.output, "{}:", end_lbl).unwrap();
                 self.block_terminated = false;
             }
+            Stmt::CompoundAssign { target, op, value, span }
+                if matches!(target, Expr::Ident(n, _) if self.zero_drift.contains_key(n)) =>
+            {
+                let name = match target {
+                    Expr::Ident(n, _) => n.clone(),
+                    _ => unreachable!(),
+                };
+                let (repr, integer_domain) = self.zero_drift[&name];
+                // Only `+=` and `-=` are exact here. Scaling a product or a
+                // quotient would reintroduce rounding into the accumulation
+                // itself, which is the single thing @ZeroDrift exists to
+                // prevent, so it is refused rather than silently approximated.
+                if !matches!(op, BinaryOp::Add | BinaryOp::Sub) {
+                    self.emit_errors.push(format!(
+                        "Line {}: `{:?}=` is not exact on the @ZeroDrift accumulator `{}`. Only \
+`+=` and `-=` preserve drift-freedom.",
+                        span.line, op, name
+                    ));
+                }
+                // Each term is quantised once, deterministically; every
+                // addition after that is exact integer arithmetic, so the total
+                // does not depend on the order the terms arrived in.
+                let rhs_fixed = self.emit_drift_term(value, repr, integer_domain);
+                let ity = repr.llvm_type();
+                let addr = format!("%{}", name);
+                let loaded = self.emit_load(&addr, ity);
+                let result = self.fresh_tmp();
+                let instr = if matches!(op, BinaryOp::Sub) { "sub" } else { "add" };
+                writeln!(
+                    &mut self.output,
+                    "  {} = {} {} {}, {}",
+                    result, instr, ity, loaded, rhs_fixed
+                )
+                .unwrap();
+                self.emit_store(&result, &addr, ity);
+            }
             Stmt::CompoundAssign {
                 target, op, value, ..
             } => {
@@ -1600,23 +2684,34 @@ impl LlvmEmitter {
                 .unwrap();
                 self.emit_store(&result, &addr, &ty);
             }
-            Stmt::Chisel(block, _) => {
+            Stmt::Chisel(block, span) => {
                 if self.in_ptx_emit {
-                    // PTX-targeted: emit chisel string literals as NVPTX inline asm
-                    self.wln("  ; --- CHISEL INLINE PTX (nvptx target) ---");
-                    for stmt in &block.stmts {
-                        if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
-                            // Emit PTX instruction as side-effecting inline asm
-                            // On nvptx backend, constraints differ from x86
-                            self.wln(&format!(
-                                "  call void asm sideeffect \"{}\", \"\"()",
-                                s.replace('\\', "\\\\").replace('"', "\\\"")
-                            ));
-                        } else {
-                            self.emit_stmt(stmt, ret_type);
-                        }
-                    }
-                    self.wln("  ; --- END CHISEL PTX ---");
+                    // This arm emitted the `chisel` lines as inline asm with an
+                    // EMPTY constraint string, on the reading that a module
+                    // retargeted to NVPTX wants different constraints from x86.
+                    // `emit_prelude` writes `Self::host_triple()` and there is
+                    // no path in this backend that emits an `nvptx` triple, so
+                    // the reading never applies: what came out was PTX text
+                    // inside an `x86_64-unknown-linux-gnu` module. Measured -
+                    // the compiler printed "Compilation Successful!", exited 0,
+                    // and the `clang` line it told the user to run answered
+                    // `<inline asm>:1:10: error: invalid register name`.
+                    //
+                    // Both branches failed identically there, so `@ptx_emit`'s
+                    // one live consumer could not change an outcome. Refusing
+                    // by name is what makes that status honest: `--emit-ptx` is
+                    // where PTX `chisel` is lowered, and it resolves `%name`
+                    // against the variables in scope (`resolve_chisel_registers`).
+                    self.emit_errors.push(format!(
+                        "[LLVM] a `chisel` block inside a `@ptx_emit` function (line {}, \
+                         col {}) would put PTX instructions into a `{}` module, which \
+                         `clang` rejects with `invalid register name`. This backend emits \
+                         host code only. Use `--emit-ptx` with a `kernel`, or drop \
+                         `@ptx_emit` and write host assembly.",
+                        span.line,
+                        span.col,
+                        Self::host_triple().0
+                    ));
                 } else {
                     self.wln("  ; --- CHISEL INLINE ASM ---");
                     for stmt in &block.stmts {
@@ -1957,6 +3052,15 @@ impl LlvmEmitter {
                     return tag.to_string();
                 }
 
+                // Integer observations stay exact too. Only a source-level
+                // float needs to be decoded from its fixed-point storage.
+                if let Some((repr, integer_domain)) = self.zero_drift.get(name).copied() {
+                    let raw = self.emit_load(&format!("%{}", name), repr.llvm_type());
+                    if integer_domain {
+                        return raw;
+                    }
+                    return self.emit_from_fixed(&raw, repr);
+                }
                 let ty = self
                     .locals
                     .get(name)
@@ -1981,7 +3085,7 @@ impl LlvmEmitter {
                 let mut l = self.emit_expr(left, None, None);
                 let mut r = self.emit_expr(right, None, None);
                 let mut l_ty = self.infer_type(left);
-                let r_ty = self.infer_type(right);
+                let mut r_ty = self.infer_type(right);
 
                 // ==========================================
                 // ARCHITECTURAL NOTE: BinaryOp Type Promotion
@@ -1995,6 +3099,32 @@ impl LlvmEmitter {
                 // 2. If one is float and the other is int, promote the int to the float type.
                 // 3. If both are ints, promote to the larger integer bitwidth.
                 // ==========================================
+
+                // 4. `i1` is NEVER an operand width. A comparison produces
+                //    `i1`, and the promotion below only runs when the two
+                //    types DIFFER -- so two comparisons combined with a third
+                //    operator were left at `i1`, where LLVM's signed
+                //    interpretation of `1` is **-1**:
+                //
+                //        ((v == v) < (v > v))   ->  icmp slt i1 1, 0  ->  TRUE
+                //
+                //    Arithmetic is no better: `add i1` wraps mod 2, so
+                //    `(a > b) + (c > d)` could only ever be 0 or 1. Both are
+                //    fixed by widening a boolean to a real integer first, and
+                //    zero-extension is what makes `true` 1 rather than -1.
+                //
+                //    Found by `tests/backend_differential.rs` once its
+                //    generator produced NESTED expressions -- flat ones cannot
+                //    put a comparison in an operand position, so 400 programs
+                //    had already passed clean.
+                if l_ty == "i1" {
+                    l = self.emit_coerce_from(&l, "i1", "i32", true);
+                    l_ty = "i32".to_string();
+                }
+                if r_ty == "i1" {
+                    r = self.emit_coerce_from(&r, "i1", "i32", true);
+                    r_ty = "i32".to_string();
+                }
 
                 // Promote types if there's a mismatch
                 if l_ty != r_ty {
@@ -2093,7 +3223,7 @@ impl LlvmEmitter {
                 tmp
             }
             Expr::UnaryOp { op, operand, .. } => {
-                if let UnaryOp::Ref = op {
+                if let UnaryOp::Ref { .. } = op {
                     return self.emit_lvalue(operand);
                 }
 
@@ -2115,13 +3245,7 @@ impl LlvmEmitter {
                     UnaryOp::Deref => {
                         let inner_ty = self.infer_type(operand);
                         let load_ty = if inner_ty == "ptr" {
-                            let ast_ty = self.infer_ast_type(expr);
-                            let resolved = self.ast_type_to_llvm_type(&ast_ty);
-                            if resolved != "i32" && !resolved.is_empty() {
-                                resolved
-                            } else {
-                                "i64".into()
-                            }
+                            self.pointee_llvm_type(expr)
                         } else {
                             inner_ty
                         };
@@ -2132,12 +3256,23 @@ impl LlvmEmitter {
                         )
                         .unwrap();
                     }
-                    UnaryOp::Ref => unreachable!(),
+                    UnaryOp::Ref { .. } => unreachable!(),
                 }
                 tmp
             }
             Expr::Call { func, args, .. } => {
                 let func_name = self.emit_call_target(func);
+
+                // Block-pointer intrinsics lower to native address arithmetic.
+                // Routing them through the generic call path instead declared
+                // them `i32 (...)`, which truncated the 64-bit base pointer and
+                // then `sitofp`'d a float bit pattern — wrong answers, not just
+                // slow ones. It also planted an opaque call in the innermost
+                // loop, which blocks every loop and vector transform LLVM has.
+                if let Some(v) = self.try_emit_block_ptr_intrinsic(&func_name, args) {
+                    return v;
+                }
+
                 self.called_functions.push(func_name.clone());
 
                 if (func_name.starts_with("String_")
@@ -2206,7 +3341,9 @@ impl LlvmEmitter {
                             && arg_ty != "ptr"
                             && llvm_param_ty != "ptr"
                         {
-                            arg_val = self.emit_coerce(&arg_val, &arg_ty, &llvm_param_ty);
+                            let u = self.expr_is_unsigned(arg);
+                            arg_val =
+                                self.emit_coerce_from(&arg_val, &arg_ty, &llvm_param_ty, u);
                         }
 
                         if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
@@ -2348,7 +3485,8 @@ impl LlvmEmitter {
                     };
 
                     if llvm_param_ty != "ptr" && !llvm_param_ty.starts_with('%') {
-                        arg_val = self.emit_coerce(&arg_val, &arg_ty, &llvm_param_ty);
+                        let u = self.expr_is_unsigned(a);
+                        arg_val = self.emit_coerce_from(&arg_val, &arg_ty, &llvm_param_ty, u);
                     }
 
                     if llvm_param_ty.starts_with('%') && arg_ty == "ptr" {
@@ -2383,21 +3521,6 @@ impl LlvmEmitter {
                     "load" => {
                         let ptr_val = self.emit_expr(&args[0], None, None);
                         let tmp = self.fresh_tmp();
-                        let mut metadata = String::new();
-
-                        if let Some(policy) = &self.current_cache_policy.clone() {
-                            if policy == "L2_EVICT_FIRST" {
-                                metadata = ", !nontemporal !0".to_string();
-                            } else if policy == "L2_PERSIST" {
-                                // 0 = Read, 3 = High temporal locality, 1 = Data cache
-                                writeln!(
-                                    &mut self.output,
-                                    "  call void @llvm.prefetch.p0(ptr {}, i32 0, i32 3, i32 1)",
-                                    ptr_val
-                                )
-                                .unwrap();
-                            }
-                        }
 
                         // Infer load type from the LHS variable's alloca type.
                         // The caller (emit_stmt for Let) will coerce if needed.
@@ -2414,8 +3537,8 @@ impl LlvmEmitter {
                         });
                         writeln!(
                             &mut self.output,
-                            "  {} = load {}, ptr {}{}",
-                            tmp, load_ty, ptr_val, metadata
+                            "  {} = load {}, ptr {}",
+                            tmp, load_ty, ptr_val
                         )
                         .unwrap();
                         return tmp;
@@ -2697,6 +3820,200 @@ impl LlvmEmitter {
         }
     }
 
+    /// Element type for the buffer `expr` names, or `None` if it is not a
+    /// `GlobalMemory<T>` / `SharedMemory<T>` binding we tracked.
+    fn block_ptr_elem_ty(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Ident(name, _) => self.mem_elem_types.get(name).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Emit `val` widened to i64, for address arithmetic and bounds tests.
+    ///
+    /// A 32-bit index is sign-extended, so a negative index becomes a large
+    /// unsigned value and fails the `ult` bound test — matching the PTX
+    /// backend's `setp.lt.u32`. Keeping the two backends agreeing on
+    /// out-of-range behaviour is the point; a CPU run that silently accepted
+    /// what the GPU masks off would be a portability trap.
+    fn emit_as_i64(&mut self, e: &Expr) -> String {
+        let v = self.emit_expr(e, None, None);
+        let t = self.infer_type(e);
+        if t == "i64" {
+            v
+        } else {
+            self.emit_coerce(&v, &t, "i64")
+        }
+    }
+
+    /// Lowers the `block_ptr2d_*` / `block_ptr3d_*` family to GEP + typed
+    /// load/store. Returns `None` for anything that is not one of them, so the
+    /// caller falls through to the ordinary call path.
+    fn try_emit_block_ptr_intrinsic(&mut self, name: &str, args: &[Expr]) -> Option<String> {
+        let (is_load, dims) = match name {
+            "block_ptr2d_load" | "make_block_ptr2d" => (true, 2usize),
+            "block_ptr2d_store" => (false, 2),
+            "block_ptr3d_load" => (true, 3),
+            "block_ptr3d_store" => (false, 3),
+            _ => return None,
+        };
+
+        // 2D: (base, row, col, stride, max_r, max_c [, val])
+        // 3D: (base, d0, d1, d2, s0, s1, D0, D1, D2 [, val])
+        let want = if dims == 2 { 6 } else { 9 } + if is_load { 0 } else { 1 };
+        if args.len() != want {
+            self.emit_errors.push(format!(
+                "`{}` takes {} arguments, got {}. Refusing rather than \
+                 guessing an address — a wrong stride here is a silent \
+                 wrong answer, not a crash.",
+                name,
+                want,
+                args.len()
+            ));
+            return Some("0".into());
+        }
+
+        let Some(elem_ty) = self.block_ptr_elem_ty(&args[0]) else {
+            self.emit_errors.push(format!(
+                "`{}` needs its first argument to be a `GlobalMemory<T>` or \
+                 `SharedMemory<T>` binding so the element type is known. \
+                 Refusing rather than assuming F32.",
+                name
+            ));
+            return Some("0".into());
+        };
+
+        let base = self.emit_expr(&args[0], None, None);
+
+        // Linear element offset, and the in-bounds predicate, per dimension.
+        // 2D: off = row*stride + col
+        // 3D: off = d0*s0 + d1*s1 + d2
+        let (idx_lo, idx_hi, stride_lo, stride_hi) = if dims == 2 {
+            (1, 3, 3, 4)
+        } else {
+            (1, 4, 4, 6)
+        };
+        let idxs: Vec<String> = (idx_lo..idx_hi)
+            .map(|i| self.emit_as_i64(&args[i]))
+            .collect();
+        let strides: Vec<String> = (stride_lo..stride_hi)
+            .map(|i| self.emit_as_i64(&args[i]))
+            .collect();
+        let bounds: Vec<String> = (want - dims - usize::from(!is_load)
+            ..want - usize::from(!is_load))
+            .map(|i| self.emit_as_i64(&args[i]))
+            .collect();
+
+        // offset = sum(idx[i] * stride[i]) + idx[last]
+        let mut off = String::new();
+        for (i, s) in strides.iter().enumerate() {
+            let m = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = mul nsw i64 {}, {}", m, idxs[i], s).unwrap();
+            if off.is_empty() {
+                off = m;
+            } else {
+                let a = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = add nsw i64 {}, {}", a, off, m).unwrap();
+                off = a;
+            }
+        }
+        let last = idxs.last().unwrap().clone();
+        let off = if off.is_empty() {
+            last
+        } else {
+            let a = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = add nsw i64 {}, {}", a, off, last).unwrap();
+            a
+        };
+
+        // Bounds predicate: every index unsigned-less-than its extent.
+        let mut ok = String::new();
+        for (i, b) in bounds.iter().enumerate() {
+            let c = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = icmp ult i64 {}, {}", c, idxs[i], b).unwrap();
+            if ok.is_empty() {
+                ok = c;
+            } else {
+                let a = self.fresh_tmp();
+                writeln!(&mut self.output, "  {} = and i1 {}, {}", a, ok, c).unwrap();
+                ok = a;
+            }
+        }
+
+        if is_load {
+            // Redirect an out-of-range load to element 0 so the access is
+            // always defined, then select the masked result. Selecting the
+            // offset rather than branching keeps the loop vectorizable.
+            let soff = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {} = select i1 {}, i64 {}, i64 0",
+                soff, ok, off
+            )
+            .unwrap();
+            let p = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {} = getelementptr inbounds {}, ptr {}, i64 {}",
+                p, elem_ty, base, soff
+            )
+            .unwrap();
+            let raw = self.fresh_tmp();
+            writeln!(&mut self.output, "  {} = load {}, ptr {}", raw, elem_ty, p).unwrap();
+            let zero = if elem_ty.starts_with('f') || elem_ty == "double" || elem_ty == "half" {
+                "0.0"
+            } else {
+                "0"
+            };
+            let out = self.fresh_tmp();
+            writeln!(
+                &mut self.output,
+                "  {} = select i1 {}, {} {}, {} {}",
+                out, ok, elem_ty, raw, elem_ty, zero
+            )
+            .unwrap();
+            return Some(out);
+        }
+
+        // Store: an out-of-range write must not land anywhere real, so the
+        // *pointer* is selected rather than the offset.
+        let val_expr = &args[want - 1];
+        let val = self.emit_expr(val_expr, None, None);
+        let val_ty = self.infer_type(val_expr);
+        let val = if val_ty == elem_ty {
+            val
+        } else {
+            self.emit_coerce(&val, &val_ty, &elem_ty)
+        };
+        let p = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = getelementptr inbounds {}, ptr {}, i64 {}",
+            p, elem_ty, base, off
+        )
+        .unwrap();
+        // An out-of-range write is redirected into a dead stack slot rather
+        // than branched around, so the loop stays vectorizable. The slot's
+        // address never escapes, so LLVM folds both it and the select away
+        // whenever it can prove the index is in range — the common case inside
+        // `for i in 0..M` with `max_r = M`.
+        let sink = Y_OOB_SINK;
+        let dst = self.fresh_tmp();
+        writeln!(
+            &mut self.output,
+            "  {} = select i1 {}, ptr {}, ptr {}",
+            dst, ok, p, sink
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "  store {} {}, ptr {}",
+            elem_ty, val, dst
+        )
+        .unwrap();
+        Some("0".into())
+    }
+
     fn emit_call_target(&self, func: &Expr) -> String {
         match func {
             Expr::Ident(name, _) => {
@@ -2819,12 +4136,12 @@ impl LlvmEmitter {
                 "Unknown".into()
             }
             Expr::UnaryOp {
-                op: UnaryOp::Ref,
+                op: UnaryOp::Ref { mutable },
                 operand,
                 ..
             } => {
                 let inner = self.infer_ast_type(operand);
-                format!("&{}", inner)
+                format!("&{}{}", if *mutable { "mut " } else { "" }, inner)
             }
             Expr::UnaryOp {
                 op: UnaryOp::Deref,
@@ -2878,12 +4195,37 @@ impl LlvmEmitter {
 
     fn infer_type(&self, expr: &Expr) -> String {
         match expr {
-            Expr::IntLit(_, _) => "i32".into(),
+            // **Typed by VALUE, not fixed at i32.** This is the same bug the PTX
+            // backend had and fixed (see CLAUDE.md gotcha #7): a literal above
+            // `i32::MAX` typed as i32 is NEGATIVE, and widening it sign-extends.
+            // Measured before the fix, both compiling cleanly and running:
+            //   `let a: I64 = 4294967296; if a > 0 { 1 } else { 0 }`  ->  0
+            //   `let a: I64 = 3000000000; if a > 0 { 1 } else { 0 }`  ->  0
+            // The first truncates to zero, the second sign-extends to a negative
+            // i64. Nothing in the pipeline rejects `store i32 4294967296` or
+            // `sext i32 4294967296 to i64` - clang accepts both and the program
+            // runs, which is why this survived.
+            Expr::IntLit(v, _) => {
+                if *v > i32::MAX as i64 || *v < i32::MIN as i64 {
+                    "i64".into()
+                } else {
+                    "i32".into()
+                }
+            }
             Expr::FloatLit(_, _) => "double".into(),
             Expr::BoolLit(_, _) => "i1".into(),
             Expr::CharLit(_, _) => "i8".into(),
             Expr::StringLit(_, _) => "ptr".into(),
             Expr::Ident(name, _) => {
+                // Match the value returned by emit_expr, rather than assuming
+                // that every directive denotes a fixed-point float.
+                if let Some((repr, integer_domain)) = self.zero_drift.get(name) {
+                    return if *integer_domain {
+                        repr.llvm_type().into()
+                    } else {
+                        "double".into()
+                    };
+                }
                 if self.enum_variants.contains_key(name) {
                     return "i32".into();
                 }
@@ -2905,6 +4247,23 @@ impl LlvmEmitter {
                 if self.enum_variants.contains_key(&func_name) {
                     let enum_name = func_name.split('_').next().unwrap();
                     return format!("%{}", enum_name);
+                }
+                // A block-pointer load yields the buffer's element type. Falling
+                // through to the `i32` default here is what put a `sitofp` on
+                // an f32 *bit pattern* — an integer conversion of a value that
+                // was already the right type, producing garbage silently.
+                if let Expr::Call { args, .. } = expr {
+                    if matches!(
+                        func_name.as_str(),
+                        "block_ptr2d_load" | "make_block_ptr2d" | "block_ptr3d_load"
+                    ) {
+                        if let Some(t) = args.first().and_then(|a| self.block_ptr_elem_ty(a)) {
+                            return t;
+                        }
+                    }
+                    if matches!(func_name.as_str(), "block_ptr2d_store" | "block_ptr3d_store") {
+                        return "void".into();
+                    }
                 }
                 match func_name.as_str() {
                     "load" => {
@@ -2950,8 +4309,16 @@ impl LlvmEmitter {
                 | BinaryOp::Le
                 | BinaryOp::Ge => "i1".into(),
                 _ => {
-                    let l_ty = self.infer_type(left);
-                    let r_ty = self.infer_type(right);
+                    // `i1` is never an operand width -- see the matching
+                    // promotion in the emission path. This must agree with it
+                    // exactly: the emitter widens the operands and emits
+                    // `add i32`, so reporting `i1` here makes the CALLER emit
+                    // `zext i1 %t` on an i32 register and clang rejects the
+                    // module. `(5 > 3) + (9 > 1)` was the case that caught it,
+                    // and it is the reason the fix is two sites and not one.
+                    let widen = |t: String| if t == "i1" { "i32".to_string() } else { t };
+                    let l_ty = widen(self.infer_type(left));
+                    let r_ty = widen(self.infer_type(right));
                     if l_ty == r_ty {
                         l_ty
                     } else {
@@ -3026,17 +4393,11 @@ impl LlvmEmitter {
                 }
             }
             Expr::UnaryOp { op, operand, .. } => match op {
-                UnaryOp::Ref => "ptr".into(),
+                UnaryOp::Ref { .. } => "ptr".into(),
                 UnaryOp::Deref => {
                     let inner_ty = self.infer_type(operand);
                     if inner_ty == "ptr" {
-                        let ast_ty = self.infer_ast_type(expr);
-                        let resolved = self.ast_type_to_llvm_type(&ast_ty);
-                        if resolved != "i32" && !resolved.is_empty() {
-                            resolved
-                        } else {
-                            "i64".into()
-                        }
+                        self.pointee_llvm_type(expr)
                     } else {
                         inner_ty
                     }
@@ -3046,13 +4407,7 @@ impl LlvmEmitter {
             Expr::Index { base, .. } => {
                 let base_ty = self.infer_type(base);
                 if base_ty == "ptr" {
-                    let ast_ty = self.infer_ast_type(expr);
-                    let resolved = self.ast_type_to_llvm_type(&ast_ty);
-                    if resolved != "i32" && !resolved.is_empty() {
-                        resolved
-                    } else {
-                        "i64".into()
-                    }
+                    self.pointee_llvm_type(expr)
                 } else if base_ty.starts_with('[') {
                     if let Some(pos) = base_ty.find('x') {
                         base_ty[pos + 1..].trim().trim_end_matches(']').to_string()
@@ -3084,6 +4439,45 @@ impl LlvmEmitter {
                 None
             }
             _ => None,
+        }
+    }
+
+    /// The LLVM type that a `ptr`-typed expression points at.
+    ///
+    /// `ast_type_to_llvm_type` answers `"i32"` for FIVE different reasons: a
+    /// genuine `I32`, an `Unknown` ast type, an empty one, an unregistered
+    /// type name, and a data-less enum. So its callers could not tell success
+    /// from failure and used `resolved != "i32"` as a stand-in for "resolution
+    /// succeeded", substituting `i64` whenever it came back `i32`.
+    ///
+    /// That discarded the CORRECT answer for the commonest pointer in the
+    /// language. `fn g(r: &mut I32) { *r = 7; }` emitted
+    ///
+    /// ```text
+    /// %_t2 = sext i32 7 to i64
+    /// store i64 %_t2, ptr %_t1
+    /// ```
+    ///
+    /// an EIGHT-byte store through a pointer to four bytes. That is valid IR,
+    /// so `clang` accepts it without a word and the compiler printed
+    /// "Compilation Successful!"; it overwrites whatever sits next to the
+    /// target. With `struct Pair { a: I32, b: I32 }`, writing through
+    /// `&mut p.a` set `p.b` to zero.
+    ///
+    /// The sentinel belongs on the AST type, which *does* distinguish the
+    /// cases. `i64` is kept as the fallback for a genuinely unresolvable
+    /// pointee - it is what this code has always guessed, and narrowing it is
+    /// a separate question from not discarding a known answer.
+    fn pointee_llvm_type(&self, expr: &Expr) -> String {
+        let ast_ty = self.infer_ast_type(expr);
+        if ast_ty == "Unknown" || ast_ty.is_empty() {
+            return "i64".into();
+        }
+        let resolved = self.ast_type_to_llvm_type(&ast_ty);
+        if resolved.is_empty() {
+            "i64".into()
+        } else {
+            resolved
         }
     }
 
@@ -3216,4 +4610,3 @@ impl LlvmEmitter {
         }
     }
 }
-

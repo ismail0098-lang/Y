@@ -402,10 +402,10 @@ impl BoundsChecker {
                     // For compound add: range shifts by the step value
                     let val_expr: Expr = Vec::get_Expr(&(*arena).exprs, value_idx - 1);
                     if val_expr.tag == Expr_TAG_IntLit {
-                        let step: I64 = val_expr.data.IntLit._0;
+                        let step_val: I64 = val_expr.data.IntLit._0;
                         // Widen range: after N iterations, lo stays, hi grows
                         // We don't widen hi to infinity; the loop condition bounds it
-                        BoundsChecker::set_sym_range(bc, &var_name, sr.lo, sr.hi + step);
+                        BoundsChecker::set_sym_range(bc, &var_name, sr.lo, sr.hi + step_val);
                     }
                 }
             }
@@ -998,8 +998,8 @@ impl BoundsChecker {
                 if has_range {
                     let val_expr: Expr = Vec::get_Expr(&(*arena).exprs, value_idx - 1);
                     if val_expr.tag == Expr_TAG_IntLit {
-                        let step: I64 = val_expr.data.IntLit._0;
-                        BoundsChecker::set_sym_range(bc, &var_name, sr.lo, sr.hi + step);
+                        let step_val: I64 = val_expr.data.IntLit._0;
+                        BoundsChecker::set_sym_range(bc, &var_name, sr.lo, sr.hi + step_val);
                     }
                 }
             }

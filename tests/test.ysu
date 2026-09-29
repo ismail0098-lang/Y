@@ -1,1 +1,1 @@
-fn simple_test() { let x = 5; return x; }
+fn simple_test() -> I32 { let x = 5; return x; }

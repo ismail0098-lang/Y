@@ -1,0 +1,11 @@
+// The control for `tests/let_alias.ysu`: a binding whose initialiser produced
+// a FRESH register owns that register already, so it must be taken directly.
+// "Copy every binding" passes the aliasing test and would emit a redundant
+// `mov` for every `let` in every kernel.
+kernel let_no_alias(Out: GlobalMemory<I32>, N: I32) {
+    let tid: I32 = thread_idx_x();
+    let doubled: I32 = tid + tid;
+    atomic_add(Out, doubled, 1);
+}
+
+fn main() {}

@@ -12,7 +12,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 
-use crate::autotuner::Autotuner;
+use crate::autotuner::{Autotuner, Precision};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::ptx_emitter::PtxEmitter;
@@ -84,11 +84,35 @@ pub unsafe extern "C" fn y_compile_to_ptx(
         hw_profile.sm_version = sm_str.to_string();
     }
     if hw_profile.sm_version.is_empty() {
-        hw_profile.sm_version = "sm_89".to_string();
+        // sm_80, matching `PtxEmitter`'s own fallback. This said sm_89, so a
+        // machine where the probe found nothing emitted PTX that only Ada and
+        // later can load - and a `.target` above the device is a hard load
+        // failure, not a slowdown. Guess DOWN: PTX is forward compatible.
+        hw_profile.sm_version = "sm_80".to_string();
     }
 
     let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
     let ptx_output = emitter.emit_program(&ast, &hw_profile);
+
+    // The emitter's refusals were discarded here, so a program it could not
+    // lower came back to the C caller as a PTX string and a null error.
+    //
+    // `y_interpret_kernel` below has this exact fix, with this exact comment,
+    // and the PTX path never got it - the "a correct guard is worthless where
+    // it is not called" shape, for the third time in this repo. Everything
+    // `PtxEmitter` refuses went out this door silently: `tma_load` and
+    // `wgmma_async` (which assemble to nothing), the intrinsic arity gate, the
+    // unknown-call gate, and now a source with no `kernel` in it, which
+    // returned a three-line `.version`/`.target` header as though it were a
+    // compiled program.
+    if !emitter.emit_errors.is_empty() {
+        if !error_out.is_null() {
+            *error_out = CString::new(emitter.emit_errors.join("\n"))
+                .unwrap()
+                .into_raw();
+        }
+        return ptr::null_mut();
+    }
 
     if !error_out.is_null() {
         *error_out = ptr::null_mut();
@@ -99,18 +123,23 @@ pub unsafe extern "C" fn y_compile_to_ptx(
 
 /// Generates candidate tile configurations in JSON format for dynamic autotuning.
 ///
+/// `is_fp8` must reflect the actual precision of the kernel being tuned for -
+/// it directly drives shared-memory/occupancy math (FP8 loads half the bytes
+/// per element of F16) and cannot be inferred from the tile shapes alone.
+///
 /// # Safety
 /// The returned pointer must be freed using `y_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn y_autotune_search_space_json(m: u32, n: u32, k: u32) -> *mut c_char {
-    let candidates = Autotuner::generate_candidates(m, n, k);
+pub unsafe extern "C" fn y_autotune_search_space_json(m: u32, n: u32, k: u32, is_fp8: bool) -> *mut c_char {
+    let precision = if is_fp8 { Precision::Fp8 } else { Precision::F16 };
+    let candidates = Autotuner::generate_candidates(m, n, k, precision);
 
     let json_items: Vec<String> = candidates
         .iter()
         .map(|c| {
             format!(
-                "{{\"cta_m\":{},\"cta_n\":{},\"cta_k\":{},\"warps_m\":{},\"warps_n\":{},\"num_stages\":{},\"num_warps\":{}}}",
-                c.cta_m, c.cta_n, c.cta_k, c.warps_m, c.warps_n, c.num_stages, c.num_warps
+                "{{\"cta_m\":{},\"cta_n\":{},\"cta_k\":{},\"warps_m\":{},\"warps_n\":{},\"num_stages\":{},\"num_warps\":{},\"is_fp8\":{}}}",
+                c.cta_m, c.cta_n, c.cta_k, c.warps_m, c.warps_n, c.num_stages, c.num_warps, is_fp8
             )
         })
         .collect();
@@ -158,8 +187,29 @@ pub unsafe extern "C" fn y_interpret_kernel(source_ptr: *const c_char, error_out
     let mut type_checker = TypeChecker::new();
     type_checker.check_program(&ast);
 
+    let mut errors = type_checker.errors;
+    errors.extend(type_checker.linear_tracker.errors);
+    if !errors.is_empty() {
+        if !error_out.is_null() {
+            *error_out = CString::new(format!("TypeChecker Error: {}", errors.join("; ")))
+                .unwrap().into_raw();
+        }
+        return -1;
+    }
+
     let mut cpu_emitter = crate::cpu_emitter::CpuEmitter::new();
     let _code = cpu_emitter.emit_program(&ast);
+
+    // The emitter's refusals were discarded here, so a program it could not
+    // lower returned 0 (success) to the C caller.
+    if !cpu_emitter.emit_errors.is_empty() {
+        if !error_out.is_null() {
+            *error_out = CString::new(cpu_emitter.emit_errors.join("\n"))
+                .unwrap()
+                .into_raw();
+        }
+        return -1;
+    }
 
     if !error_out.is_null() {
         *error_out = ptr::null_mut();
@@ -169,12 +219,16 @@ pub unsafe extern "C" fn y_interpret_kernel(source_ptr: *const c_char, error_out
 
 /// Selects optimal autotuner configuration in JSON format.
 ///
+/// `is_fp8` must reflect the actual precision of the kernel being tuned for -
+/// see `y_autotune_search_space_json`.
+///
 /// # Safety
 /// The returned pointer must be freed using `y_free_string`.
 #[no_mangle]
-pub unsafe extern "C" fn y_autotune_select_config_json(m: u32, n: u32, k: u32) -> *mut c_char {
+pub unsafe extern "C" fn y_autotune_select_config_json(m: u32, n: u32, k: u32, is_fp8: bool) -> *mut c_char {
     let hw = crate::sentinel::HardwareProfile::default();
-    let config = Autotuner::autotune(m, n, k, &hw);
+    let precision = if is_fp8 { Precision::Fp8 } else { Precision::F16 };
+    let config = Autotuner::autotune(m, n, k, &hw, precision);
     let json_output = format!(
         "{{\"cta_m\":{},\"cta_n\":{},\"cta_k\":{},\"warps_m\":{},\"warps_n\":{},\"num_stages\":{},\"num_warps\":{}}}",
         config.cta_m, config.cta_n, config.cta_k, config.warps_m, config.warps_n, config.num_stages, config.num_warps
@@ -201,5 +255,4 @@ pub unsafe extern "C" fn y_free_string(s: *mut c_char) {
         drop(CString::from_raw(s));
     }
 }
-
 

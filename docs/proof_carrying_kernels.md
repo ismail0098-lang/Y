@@ -1,0 +1,6348 @@
+# Proof-Carrying Kernels
+
+**A compiler that emits, alongside the binary, a machine-checkable certificate
+that the optimized kernel computes its specification — not a test suite that
+failed to find a counterexample.**
+
+| | |
+|---|---|
+| Horizon | 4–6 years |
+| First publishable result | ~6 months |
+| Status | pre-Phase 0 |
+| Drafted | 2026-08-12 |
+
+> Every claim about this repository below was verified against the source
+> while drafting, not recalled.
+
+---
+
+## 1. The problem: nobody can tell you an optimized kernel is correct
+
+The entire industry validates numerical kernels the same way — run the
+optimized version against a naive reference on random inputs, compare within a
+tolerance, ship it. That is a search for counterexamples, and it is a weak one.
+
+This repository is an unusually well-documented catalogue of it failing. Each
+of these passed a differential test and was wrong anyway:
+
+- A `u32` datapath compiled as `ld.global.f32`. It assembled, launched, and
+  silently rounded every value above 2^24. No `ptxas` gate can see this.
+- `INTT(NTT(a)) == a` passed with the twiddle multiply deleted entirely — the
+  error cancels between the two directions. Checking a fast transform against a
+  fast transform shares the bug.
+- A relative-L2 norm over C cannot see a kernel writing *past* N into padding;
+  every element it was asked to produce is still right.
+- Twelve address computations in the CPU GEMM were correct only because
+  `lda == K` made stride and extent the same number. Mutation testing found two
+  of the new tests vacuous — one never entered the threaded path at all.
+
+The last one happened this week, in a codebase whose author is more careful
+about measurement than almost anyone. That is the point: **testing is not a
+weak methodology being applied lazily. It is the strongest methodology
+available, and it is not sufficient.**
+
+---
+
+## 2. The insight: exact accumulation makes equivalence provable
+
+Kernel verification is considered impractical, and there is one specific
+reason. You cannot prove that a tiled, K-split, multi-threaded reduction equals
+the naive loop, because in floating point *it does not*. Addition is
+non-associative, so every reordering gives a different answer. Every effort in
+this space hits that wall and retreats to "within 1e-5", which is not a proof
+of anything.
+
+> **Integer and fixed-point addition *are* associative and commutative.** Under
+> exact accumulation, any reordering of a reduction produces a bit-identical
+> result.
+>
+> So "the optimized kernel equals the reference" stops being a tolerance and
+> becomes an equality — and equalities are what proof systems are good at.
+
+Y already has both halves of this, built for unrelated reasons and never
+connected:
+
+- `@ZeroDrift` selects an exact fixed-point representation per device and
+  lowers it on **both** backends. `tests/zero_drift_end_to_end.rs` compiles a
+  program, runs it, sums 4001 terms in opposite orders and asserts the results
+  are bit-identical — with a control proving the same sequence genuinely drifts
+  in `f32`.
+- `recognize_gemm` takes a naive matmul nest and substitutes a packed AVX-512
+  kernel.
+
+That substitution is an **unverified rewrite**, and it is exactly the
+obligation to discharge.
+
+---
+
+## 3. Inventory: what exists today, honestly
+
+Six pieces are already in the repository. None was built for this purpose,
+which is why the programme is credible and also why nothing is ready.
+
+| Component | Where | State | What it still needs |
+|---|---|---|---|
+| Exact accumulation | `zero_drift.rs` | **real, tested** | Lowered on LLVM *and* PTX. Verified 2026-08-12. |
+| Kernel rewrite | `cpu_gemm.rs` | **real, tested** | Explicitly *refuses* a `@ZeroDrift` accumulator today. |
+| SMT discharge | `type_checker.rs` | narrow | Z3 wired in, but only for loop invariants over integer scalars. |
+| Linear resource types | `linear_tracker.rs` | **real, tested** | Proves async tokens consumed once. Needed for the GPU pipeline. |
+| Interval arithmetic | `type_checker.rs` | narrow | Basis for Phase 4 error bounds; currently only index bounds. |
+| Empirical validation | `empirical_autotune.rs` | real | Already correctness-checks candidates against a CPU reference. |
+| Certificate format | `exact_gemm_certificate.rs` | **real, emitted, gated** | Was "does not exist / Phase 5". See the 2026-08-30 entry. |
+
+The single most useful fact in this table: `recognize_gemm` contains an
+explicit refusal of exact accumulators (`src/cpu_gemm.rs:289`), with a comment
+explaining that substituting one would silently discard the guarantee. **The
+two halves have never met, and the code declines to introduce them.** That
+refusal is Phase 0.
+
+> **STATUS, 2026-08-31 — this table is the state at the programme's start and
+> is kept as written.** Three of its rows have moved since. The refusal is
+> gone: `recognize_gemm` substitutes the exact `vpdpwssd` kernel, and the
+> "Kernel rewrite" row's *"explicitly refuses"* is history. The certificate
+> format exists, is emitted per compilation, and is gated. And the proofs
+> themselves went from zero to **fourteen files, ~215 theorems, no axioms**.
+> What has NOT moved: the SMT discharge and the interval arithmetic are still
+> narrow, and Phase 4's error bounds have not been started — they are not on
+> the path, because exactness makes them unnecessary for this kernel family.
+>
+> The method is written up separately in
+> [The process: taking a kernel from *fast* to *verified*](verified_kernel_process.md).
+
+Two corrections to `CLAUDE.md` found while drafting:
+
+- It lists `@ZeroDrift` lowering as "4 sites in `llvm_emitter.rs`", which reads
+  as CPU-only. `ptx_emitter.rs` has 24 references including
+  `emit_drift_to_fixed` / `emit_drift_from_fixed`. **The GPU half is real
+  today.**
+
+  > **CORRECTION, 2026-08-25 — it was real for `+=` and WRONG for `acc = acc + e`.**
+  > The PTX backend had a drift arm for `CompoundAssign` and none for `Assign`,
+  > so the running-sum spelling — which is how the recognised GEMM nest is
+  > written — fell through to the ordinary assignment path and accumulated in
+  > **f32**, then wrote back through an unsigned truncating convert, under a
+  > comment reading `accumulated exactly as I64`. Separately,
+  > `emit_drift_from_fixed` narrowed `s64 → f64 → f32` on *every* read, so even
+  > the working `+=` path lost an exact `I64` accumulator above 2^24. Both fixed;
+  > the rule for what counts as an exact accumulation now lives in
+  > `zero_drift::running_sum` and both backends call it, and
+  > `tests/zero_drift_backend_agreement.rs` pins that the two spellings emit
+  > byte-identical PTX. **Found by running every backend over the Phase 0 nest** —
+  > the source did not exist when the empty-artifact sweep ran.
+
+---
+
+## 4. The phases
+
+Ordered by dependency, not preference — each is unreachable until the previous
+lands. Every phase produces something publishable or sellable on its own, so
+the programme can be abandoned at any boundary without the prior work being
+wasted.
+
+### Phase 0 — Make the two halves meet · 3–6 months
+
+Remove the refusal. Let `recognize_gemm` accept a `@ZeroDrift` accumulator and
+emit an exact-accumulation packed GEMM on both backends. Nothing is proven yet
+— this establishes that the object the proof will talk about can exist at all,
+and what it costs.
+
+- **Done when** — the tiled, threaded, K-split GEMM returns bit-identical
+  results to the naive nest across every thread count and both backends. The
+  property that is merely *tested* here becomes the theorem in Phase 1.
+
+#### Phase 0 status, 2026-08-25 — DONE on the LLVM backend
+
+`try_emit_gemm_kernel` substitutes `__y_gemm_exact_vnni_threaded` for a
+recognised `@ZeroDrift` nest over `I16` operands and an `I64` accumulator, and
+`tests/exact_gemm_thread_invariance.rs` pins the claim: byte-identical output
+at 1, 2, 3, 5, 8 and 16 threads over a ragged K, each run also checked against
+an integer reference, with a `--wrap=pthread_create` counter proving the split
+actually forked. Measured 37.7 → 10.2 ms at 8 threads on 256×256×65536, same
+checksum throughout.
+
+**The operand domain is the source's types**, which is the decision that made
+the substitution legal: `VnniExact::license` is stated over the int16 values
+fed to `vpdpwssd`, and an `F32` nest cannot reach that domain without a
+quantization scale — at which point the licence would have been granted against
+the source's magnitude, not the kernel's. `I16`/`I64` *is* the kernel's
+contract, so nothing is converted. An `F32` `@ZeroDrift` nest still falls back
+to scalar exact lowering, permanently.
+
+**The "both backends" clause is DROPPED, and the premise it rested on was
+wrong twice over.** `--emit-cpu` cannot express the recognised nest at all — it
+refuses `block_ptr2d_load` by name, since it targets host code and that is a
+GPU intrinsic — and it has no `@ZeroDrift` path anywhere in the file.
+
+This paragraph used to add that "its GEMM kernels come from a different
+mechanism entirely: a shape dispatcher keyed on literal `M`/`N`/`K` that emits
+hand-written Rust/AVX". **Measured 2026-09-02, both halves of that are false.**
+`emit_specialized_cpu_kernel_dispatch` — the whole five-regime machinery,
+`CpuShapeDispatcher` and all five `emit_*_kernel` methods — has exactly ONE
+caller in the repository and it is a test. No `.ysu` compilation reaches it, so
+`--emit-cpu` has no GEMM kernels at all. And what it does emit is not AVX: 0 of
+46 corpus blobs contain a vector intrinsic, a vector type or a `target_feature`
+attribute, and the crate's only SIMD (`src/avx_wrapper.rs`) was dead and has
+been deleted.
+
+So the clause is not "hard", it is **empty**: there is no second GEMM to be
+exact in. It is dropped rather than left standing as a target, and Phase 0's
+exactness result stands on the LLVM backend alone — which is stated here so
+nobody reads the single-backend result as a shortfall against a clause that
+was measuring nothing.
+- **Exit value** — deterministic GEMM is independently saleable. Reproducible
+  numerics across thread counts and hardware is a real, unmet want in regulated
+  ML and financial model validation.
+
+#### Phase 0 gating measurement — ANSWERED, 2026-08-12
+
+The cost of exact accumulation was the unknown that decided whether any of the
+rest is worth doing. Measured with a standalone micro-kernel probe at equal
+register budget (24 zmm accumulators), single core, best of 7 interleaved
+rounds:
+
+| kernel | tile | G MAC/s | % of f32 FMA peak |
+|---|---|---|---|
+| f32 FMA (Y's shipped shape) | mr=6, nr=64 | **166.9** | 95% |
+| exact Q16.16 → int64 | mr=6, nr=32 | **65.2** | — |
+
+**Exact accumulation costs 2.56x**, and theory agrees within 6%: 2×512-bit FMA
+gives 32 f32 MAC/cycle, while `vpmuldq` issues ~1.5/cycle at 8 lanes for ~12.
+Two separate costs are inside that number, and only one is the instruction mix:
+
+1. **The tile is forced to halve.** An int64 accumulator holds 8 lanes per
+   register where a float holds 16, so covering nr=64 would need 48 zmm against
+   a 32 cap. `nr=64 → nr=32` costs arithmetic intensity independently of the
+   arithmetic itself.
+2. **Two instructions per product** (`vpmuldq` + `vpaddq`) against one FMA.
+
+**First verdict: proceed, 2.56x is a tax the certificate market will bear.**
+That verdict survived about an hour — see the next subsection, which replaces
+it. It is left in because the int64 result is still the right answer for any
+computation whose operands do *not* fit in int16, and because the reasoning
+that produced it was sound and still wrong.
+
+#### …and then AVX512-VNNI inverted it
+
+The `vpdpwssd` follow-up was expected to improve the ratio. It reversed the
+sign of the result. Same box, same protocol, verified **exact against a scalar
+reference** (0 of 384 elements differ):
+
+| kernel | tile | G MAC/s | vs f32 |
+|---|---|---|---|
+| f32 FMA | mr=6, nr=64 | 166.9 | 1.00x |
+| exact int64 (`vpmuldq`) | mr=6, nr=32 | 65.2 | 0.39x |
+| VNNI raw (no flush, overflows) | mr=6, nr=64 | 340.8 | — |
+| **exact VNNI (`vpdpwssd` + int64 flush)** | mr=6, nr=64 | **314.5** | **1.88x** |
+
+**Exact accumulation is 1.88x FASTER than float, not 2.56x slower.** Both of
+the int64 design's costs vanish: `vpdpwssd` accumulates into int32, which holds
+16 lanes like a float, so the tile stays at nr=64; and one instruction does
+32 MACs against an FMA's 16. Flushing int32 into int64 often enough that it can
+never overflow costs 7.7%. The raw kernel hits 97% of the `vpdpwssd` issue
+ceiling and the exact one 89%, so both figures are understood rather than
+merely observed.
+
+> **CORRECTION, 2026-08-17 — the 314.5 / 1.88x row above is WRONG. The real
+> figure is 1.10–1.15x.** Re-measured on a Ryzen 9 9950X while building the
+> emitted kernel (`cpu_gemm::emit_vnni_micro_module`,
+> `tests/cpu_gemm_vnni_micro.rs`): f32 **172.7** (doc: 166.9, reproduces) and
+> VNNI raw **348.0** (doc: 340.8, reproduces), but exact VNNI **146.3** against
+> the 314.5 claimed. Two of three reproduce, so the third is the error.
+>
+> **The flush costs 137.8%, not 7.7%**, and not because of how often it runs —
+> sweeping the interval 64 → 65536 k-pairs moves throughput under 5%. It is the
+> flush *block being inside the k-loop*: touching all 24 accumulators forces
+> them out of registers for the whole loop (24 `vpdpwssd` + 15 spills + 14
+> reloads). Hoisting it into an outer chunk loop gives **1.10–1.15x**, which is
+> the number to quote. The residual gap to raw is register pressure (29 of 32
+> zmm live), i.e. a tiling question.
+>
+> **This does not change the programme's direction**, since exactness was never
+> being sold on speed — but "1.88x faster than float" must not be repeated, and
+> §2's argument should rest on *order-independence*, which is measured and holds
+> (`tests/cpu_gemm_vnni_micro.rs` shows byte-identical results across six k-range
+> splits where the f32 control differs on 39 of 384 elements).
+> See `docs/deterministic_inference.md` §1 for the full account.
+
+**What is actually being traded is RANGE, not speed.** Operands are int16, and
+the flush interval bounds their magnitude — at `FLUSH_T = 64` k-pairs,
+`|a|,|b| <= 1024` keeps every partial sum inside int32. That is far less
+precision than f32's 24-bit mantissa over its enormous dynamic range, so this
+is **not** a drop-in replacement for an f32 GEMM; it is a different numeric
+contract. Quoting 1.88x as though the two computed the same thing would be the
+same error as measuring against a single baseline.
+
+**This makes `@bounds(min, max)` load-bearing rather than advisory.** The
+range claim is exactly the proof obligation that licenses the representation —
+so Phase 1's first theorem is not only "the tiled kernel equals the naive nest"
+but "and no accumulator overflowed", which is a bounds proof over the interval
+arithmetic already in the type checker.
+
+**Strategic consequence worth stating plainly:** `vpdpwssd` is the same
+instruction the quantized-inference world uses for int8/int16. The exact
+kernel this programme needs and the int8 capability the CPU business case
+needed are **the same kernel**. That was not the plan; it is what the
+measurement says.
+
+One follow-up this still does not answer: **the end-to-end penalty in
+memory-bound regimes.** These are compute-bound micro-kernel numbers, while
+large GEMM sits near the DRAM roofline and decode and GEMV are outright
+bandwidth-bound. int16 operands *halve* B's footprint against f32, so
+memory-bound shapes plausibly gain more — but that must be measured, not
+assumed, and it needs the emitter wiring to measure.
+
+> **Two measurement bugs were found and fixed getting to this number, and the
+> second one matters generally.** The first probe read 698 G MAC/s — 4x above
+> hardware peak — because the pure call was hoisted out of the timing loop.
+> With that fixed, the *exact* arm read 540 G MAC/s, ~6x what `vpmuldq` can
+> issue: the loop cycled through 8 A panels, and **integer addition is
+> associative, so the compiler may compute each panel's contribution once and
+> multiply by the repeat count.** It cannot do that to the f32 arm, because
+> float addition is not associative. **The property that makes exact
+> accumulation provable is the same property that lets a compiler eat its own
+> benchmark.** Fixed by putting the kernels in their own translation unit and
+> linking without LTO. Both bugs were caught by comparing against the
+> hardware's issue ceiling, which the probe now prints and shouts about.
+
+#### Phase 0 progress, 2026-08-12
+
+**Landed — the request now reaches the emitter.**
+
+- `recognize_gemm` no longer refuses a `@ZeroDrift` nest. It records the
+  accumulator's declared type and its resolved `@bounds` in
+  `GemmShape::drift`, so a representation can be selected for it.
+- `try_emit_gemm_kernel` **guards the seam this opened.** With the request
+  visible, the obvious next step is to emit the packed kernel — and that would
+  be a silently wrong answer, because the packed kernel accumulates in f32 and
+  is neither exact nor order-independent. It returns `None` for a drifted nest,
+  falling through to scalar lowering, which honours `@ZeroDrift` correctly.
+  Slow and right rather than fast and wrong. The original refusal was correct;
+  it was just in the wrong place.
+- `tests/cpu_gemm_exact_accumulation.rs` pins it, with a control asserting a
+  plain matmul *does* still reach the packed kernel — without which the first
+  test would also pass if the recogniser stopped firing altogether.
+  Mutation-verified: deleting the guard fails the drift test and leaves the
+  control green, which is the split it exists to produce.
+- 43 test binaries pass.
+
+**Next, in order:** an exact micro-kernel behind that guard (`vpdpwssd` +
+periodic int64 flush, per the measurement above), then the packing layout it
+needs, then routing it through the existing threaded driver — at which point
+the Phase 0 "done when" becomes testable: bit-identical results across every
+thread count.
+
+### Phase 1 — Mechanize one rewrite end to end · 6–12 months
+
+Prove — not test — that the packed GEMM computes the naive nest under exact
+accumulation. One transformation, fully discharged: the 2-D partition, the
+K-split reduction, `pack_a`/`pack_b`, the micro-kernel, the masked tails.
+
+- **Done when** — a machine-checked proof, regenerated by CI, that the emitted
+  kernel refines the source nest for all M, N, K and thread counts.
+- **Why now** — the motivating example is already written down and measured:
+  twelve address sites correct only by coincidence, and two vacuous tests found
+  by mutation. That is the paper's first section, already in hand.
+- **Exit value** — the first publication, and the credential that makes the
+  rest fundable.
+
+#### Phase 1 progress, 2026-08-25 — the SCHEDULE is proved
+
+`proofs/ExactGemmKsplit.v` (Rocq 9.1, no axioms, nothing admitted) proves the
+K-split half of the Phase 0 kernel. Three results:
+
+- **`bands_tile`** — the band decomposition the emitted wrapper computes
+  (`base = K/nthr`, `rem = K%nthr`, first `rem` bands one longer) covers
+  `[0, K)` exactly, for every `K` and every positive `nthr`.
+- **`ksplit_exact`** — summing the per-band partials equals the naive sum over
+  the whole of K. No hypothesis that K divides evenly, none that the bands are
+  equal, none about the thread count beyond it being positive.
+- **`any_thread_count_agrees`** — the corollary
+  `tests/exact_gemm_thread_invariance.rs` asserts, *derived*. Note it says
+  nothing about threads: two counts agree because each separately equals the
+  naive nest.
+
+**Section 2's central claim is now machine-checked rather than asserted.**
+`rounding_breaks_the_split` and `exact_survives_the_same_split` are the same
+`f`, the same `K = 201` and the same `nthr = 2`, differing only in the
+accumulate. The rounded one gives **1100 against its own reference's 1000** —
+it does not lose precision, it *disagrees*, and no tolerance makes that a proof
+of anything. The exact one gives 1200 either way. A control asserts the two
+accumulates really do differ on this input, so the exact case is not passing
+because the rounding happens to be inert.
+
+**What is NOT proved, stated because it is most of the kernel.** A band's
+partial is modelled as the exact sum over its indices: packing, the 2-D
+register tile, the masked tails and the int32 → int64 flush are all *assumed*
+to compute that. This file proves the schedule around them. Phase 1's remaining
+work is the micro-kernel, which is the harder half.
+
+**The model-to-code gap is narrowed in one specific place rather than waved
+at.** `cpu_gemm::ksplit_bands` / `ksplit_threads` are the Rust transcription of
+the same definitions; `tests/exact_gemm_ksplit_model.rs` checks the
+transcription against the theorem over 192,000 cases and asserts it *agrees*
+with the emitted module's constants instead of restating them. And
+`the_min_band_floor_is_what_the_model_says` sweeps K across the min-band floor
+with the thread request held fixed, asserting the observed `pthread_create`
+count is the model's answer — the one place the model predicts something the
+shipped code reveals. Drift in either direction fails it, verified by mutating
+each side separately.
+
+**Mutation-verified 8/8**, and one result is worth keeping: making the
+emitter's uneven split even (`icmp slt` → `sle`) is caught by the new floor
+sweep at K=256 and **passes** the pre-existing K=4099 invariance test. A
+correctness test at one shape does not cover a schedule.
+
+#### Phase 1 progress, 2026-08-25 (2) — the OUTPUT tiling is proved, and it found a bug
+
+`proofs/ExactGemmTiling.v` finishes the schedule. Where the K-split is a
+*reduction* (the bands are summed, so the obligation is that they tile the
+range), the output tiling is a *partition* (each tile writes a disjoint
+rectangle of C, so the obligation is that every element is written **exactly
+once**). Different theorem, and the difference matters: a coverage count is
+satisfied by a tiling that writes one element twice and another never.
+
+- **`tiles_cover`** — uniform `MR`/`NR` tiles with a clamped ragged tail
+  account for `[0, extent)` exactly.
+- **`tile_index_injective` / `tile_index_surjective`** — `(tile, offset)` is a
+  bijection onto the axis. This is the "exactly once" obligation.
+- **`c_written_exactly_once`** — the 2-D consequence over the whole `vg.j` /
+  `vg.i` / `vg.fi` / `vg.fj` nest.
+- **`unclamped_tail_writes_out_of_bounds`** turns the emitter's own comment
+  ("Letting it write C directly would run past the last row and column … an
+  out-of-bounds WRITE, not a wrong number") into a machine-checked refutation.
+
+**Writing the theorem surfaced a precondition nobody had written down, and
+testing that precondition found a live out-of-bounds heap write.** The 2-D
+result needs `N <= ldc`; with a shorter row stride two distinct `(row, col)`
+pairs collapse onto one address. Nothing in the compiler states that, because
+every caller passes `ldc = N` — so nothing had ever called the exact kernel
+with a padded C. Doing so found **three sites in `emit_vnni_threaded_module`
+that treat C as contiguous `M*N`, ignoring `ldc`**:
+
+| site | consequence with `ldc > N` |
+|---|---|
+| `memset(C, 0, M*N*8)` | zeroes into early rows' padding and leaves the **last rows' live cells unzeroed** — and the kernel accumulates, so that is a wrong answer |
+| worker's job slot 8 stores the caller's `%ldc` | the worker's private C is a compact `M*N` buffer, so it writes `(M-1)*(ldc-N)` elements past the end — **heap overflow**, observed as `double free or corruption` |
+| the reduction walks source and destination with one flat index | correct only when the two strides are equal |
+
+Fixed: the zeroing is row-wise at the caller's stride, workers are handed
+`ldc = N` for their compact buffer, and the reduction crosses the two strides
+explicitly. Verified at 1, 2, 4 and 8 threads with `lda = K+5`, `ldb = N+9`,
+`ldc = N+7` and both axes ragged.
+
+**This is exactly the class §1 of this document cites** — *"twelve address
+computations in the CPU GEMM were correct only because `lda == K` made stride
+and extent the same number"* — found again, in the exact kernel, by the
+programme that exists because of it. It is not reachable from the compiler
+today; it is reachable from the public symbol that is Phase 0's deliverable.
+
+**The honest causal story: the proof did not find the bug, and it is the more
+interesting version.** Formalising the tiling forced the `N <= ldc` hypothesis
+to be stated; stating it suggested the test; the test found the bug. Mutation-
+verified 8/8 across the three fixed sites, the Rust transcription, the emitter's
+clamp and two hypotheses of the proof.
+
+
+#### Phase 1 progress, 2026-08-25 (3) — the PACKING is proved, and it says less than expected
+
+`proofs/ExactGemmPacking.v` (Rocq 9.1, no axioms, nothing admitted) covers the
+third obligation: `pack_a` and `pack_b` move a live `MR x kc` / `kc x NR` tile
+into a contiguous panel, and the micro-kernel then runs the panel at **full**
+width regardless of how ragged the tile was. Two theorems make that legal:
+
+- `pack_a_slot_bijective` / `pack_b_slot_bijective` (with `_in_panel` and
+  `_onto`): each destination map is a bijection onto its panel, so nothing is
+  written twice and no slot is left holding the previous tile.
+- `padded_product_is_the_live_dot_product`: the full `kpairs * 2` product over
+  the padded panel equals the dot product over the live `kc`. This is THE
+  theorem — it is what licenses running a ragged tile at full width — and it
+  rests entirely on the packers' `select ... i16 0`.
+  `garbage_in_the_pad_changes_the_answer` refutes the zero-fill-free version
+  concretely, so the mask is machine-checked as load-bearing rather than
+  asserted to be.
+
+**The interesting result is negative, and it corrects a claim this repo was
+making.** The emitted `pack_b` destination map is `(j/16)*32 + (j%16)*2 + h`,
+written that way to document the `vpdpwssd` lane layout: group `v = j/16` is one
+`<32 x i16>` vector and lane `l = j%16` inside it consumes int16 elements `2l`
+and `2l+1`. The docstring and an earlier draft of the model test both claimed
+the split was "not a convenience". It is: `16*(j/16) + (j mod 16) = j`, so the
+whole decomposition folds and the map **is** the plain interleave `2*j + h`.
+`slot_b_is_the_plain_interleave` states that as a theorem.
+
+So the gap between what is proved and what is true is wider than the usual
+"bijectivity cannot distinguish two layouts" — there are not two layouts. That
+a hardware lane consumes elements `2l`/`2l+1` of its own vector is an ISA fact
+with no arithmetic content, and it is pinned only by
+`tests/cpu_gemm_vnni_micro.rs` running the real instruction against a scalar
+reference. Writing the proof is what forced that to be said precisely.
+
+**And the behavioural tie is weaker than it looks — measured, not assumed.**
+`tests/exact_gemm_packing_model.rs` poisons the operand padding with
+live-range values (a `calloc` buffer would supply the zeros that are the
+property under test, the same trap as pre-zeroing C one section up) and runs
+five shapes. Removing a packer's mask and sweeping them:
+
+| mask removed | 53x71x301 | 48x128x301 | 53x128x300 | 48x71x300 | 48x128x300 |
+|---|---|---|---|---|---|
+| `pack_a` only | 0 | 0 | 0 | 0 | 0 |
+| `pack_b` only | 0 | 0 | 0 | 0 | 0 |
+| both | 3763 | 6144 | 0 | 0 | 0 |
+
+Two facts, neither visible from reading the code:
+
+1. **The two masks are redundant with each other**, and no driver can separate
+   them: a padding term is `a_pad * b_pad`, so a zero on either side kills it.
+   Removing one leaves the kernel correct and undefended, not wrong. The
+   obligation the test really pins is the conjunction — *the padding
+   contributes nothing* — which is exactly what the theorem states.
+2. **Only the phantom k-half can corrupt an answer.** The ragged M and ragged N
+   shapes report 0 with both masks gone, because those accumulator rows and
+   columns are discarded by the C store mask before anything reads them — the
+   property proved in `ExactGemmTiling.v`, doing double duty. So one of the five
+   shapes is load-bearing and four are controls, and the test says so rather
+   than implying five-fold coverage.
+
+The row and column masks are therefore defence in depth against a future change
+to the store, not correctness today. Recorded rather than deleted.
+
+Mutation-verified 10/10 (three model mutations, three emitter mutations, three
+proof-gate mutations, one kernel mutation), with three further mutations sorted
+as **mis-aimed rather than survivors**: `replace(old, new, 1)` had been landing
+on a docstring occurrence of the slot expression instead of the code. *A
+survivor is a hypothesis about the test; check where the mutation landed before
+recording it as a hole.*
+
+With this, Phase 1's schedule is complete: the K-split reduction, the output
+partition, and the operand packing. What remains unproved in the exact GEMM is
+the micro-kernel itself — the 2-D register tile, the masked tails, and the
+int32 accumulate with its periodic int64 flush, whose no-overflow obligation is
+discharged exhaustively over the finite int16 domain in
+`tests/exact_gemm_licence_obligations.rs` rather than by proof.
+
+#### Phase 1 progress, 2026-08-25 (4) — the FLUSH is proved, and the licence is now known to be necessary
+
+`proofs/ExactGemmMicro.v` (Rocq 9.1, no axioms, nothing admitted) closes the
+last schedule obligation. Two things inside the micro-kernel are provable, and
+the file says plainly which parts are not.
+
+**The flush.** `vpdpwssd` accumulates into int32, which wraps. The kernel runs a
+bounded number of k-pairs into int32 accumulators, then widens them into an
+int64 running sum and re-zeroes them. `flush_exact` proves the chunks
+`[c, min(c+F, kpairs))` sum to the whole range — with no hypothesis that `F`
+divides `kpairs`, since the emitted `select` clamp carries the final partial
+chunk. `flush_exact_in_int32` proves the int32 arithmetic (modelled with an
+explicit `wrap32`) agrees with `Z` exactly when no partial sum leaves the
+range, and `operand_bound_gives_no_overflow` derives that hypothesis from
+`2 * F * m^2 <= i32::MAX` — which is precisely what
+`VnniExact::max_operand_magnitude` computes. `the_licence_makes_the_chunk_exact`
+composes the two.
+
+Note the chunking is the **clamped-tile** shape of `ExactGemmTiling.v`, not the
+uneven-band shape of `ExactGemmKsplit.v`: a flush interval is a fixed overflow
+budget, not a work split. Confusing the two is how a schedule proof gets pointed
+at the wrong theorem.
+
+**The lane round trip, which is a CROSS-FILE obligation and the first of its
+kind here.** `ExactGemmPacking.v` says `pack_b` puts column `j`'s `h`-th
+k-value at panel slot `2j + h`. `vpdpwssd` consumes that slot in vector
+`slot / 32`, lane `(slot mod 32) / 2`; the store writes vector `v` lane `l` to
+column `16v + l`. `the_packed_column_is_the_stored_column` proves the
+composition is the identity. **A mismatch here is a correctly-summed but
+column-PERMUTED tile** — every partial sum right, every value in the wrong
+place, and no bijection or bound in any other file able to see it. The control
+`a_wrong_lane_stride_permutes_the_columns` stops the theorem being satisfied by
+any pair of maps that happen to compose.
+
+**The behavioural half answers a question none of the existing tests asked: is
+the licence necessary, or is it paperwork?** `cpu_gemm_exact_threaded.rs`
+already links three flush intervals into one process and compares them bit for
+bit, so interval *invariance* was covered. Nothing checked the other direction.
+Since `emit_vnni_micro_module` takes the interval directly, the emitted symbols
+can be driven past the bound even though the compiler refuses to:
+
+| operand magnitude | interval sum | exact answer | kernel returns |
+|---|---|---|---|
+| 4095 (licensed) | 2,146,435,200 | 2,146,435,200 | 2,146,435,200 |
+| 4096 (refused) | 2,147,483,648 | 2,147,483,648 | **-2,147,483,648** |
+
+`K = 128` is `kpairs = 64`, exactly one full default interval, with *constant*
+operands because the bound is a worst case that random data never reaches. One
+unit past the licence the int32 accumulator wraps to the negative of the right
+answer. So the one-unit-wide boundary that
+`tests/exact_gemm_licence_obligations.rs` finds by exhausting the int16 domain,
+and that `the_4096_case_exceeds_by_exactly_one` states as arithmetic, is now
+also observable in a running kernel. **A licence nothing can violate is
+indistinguishable from a licence that certifies nothing.**
+
+Mutation-verified 8/8, and the load-bearing one is M6: forcing the emitter to
+flush every k-pair — so no overflow is possible — fails the refutation test.
+Without that mutation, "the bound is real" and "the test cannot tell" look the
+same.
+
+One incidental finding: `malloc`/`free` are declared by `llvm_emitter`'s
+prelude, not by either `cpu_gemm` module, so the modules are not
+self-contained when emitted standalone. Not a bug — nothing in production
+emits them that way — but `emit_vnni_threaded_module`'s `need_libc_decls` flag
+does not cover them, which is worth knowing before writing another standalone
+harness.
+
+**Phase 1's schedule is now complete: K-split reduction, output partition,
+operand packing, and the flush.** What remains unproved in the exact GEMM is
+the 2-D register tile and the masked tails — a lane's contribution is taken as
+given rather than derived from the packed panels, so nothing here says the
+accumulator for row `i` is fed row `i`'s broadcast. That and the `vpdpwssd`
+semantics themselves are ISA facts, pinned by `tests/cpu_gemm_vnni_micro.rs`
+against a scalar reference.
+
+#### Phase 1 progress, 2026-08-25 (5) — the REGISTER TILE's routing, and a compensating pair
+
+`proofs/ExactGemmRegisterTile.v` (Rocq 9.1, 8 `Print Assumptions`, no axioms)
+covers the routing half of the arithmetic core — the piece the previous entry
+listed as remaining.
+
+`the_lane_consumes_its_own_column` proves that the emitted broadcast, the four
+`<32 x i16>` B loads at `Bp + p*NR*2 + v*32` and `vpdpwssd` send panel slot
+`2j + h` to the accumulator lane whose store column is `j`. That is the join
+between `ExactGemmPacking.v` (which says what a slot holds) and the kernel
+(which says which lane reads it); neither is interesting alone, and a mismatch
+between them is a correctly-summed, **column-permuted** tile.
+
+`the_i32_load_is_the_packed_pair` proves the emitter's `getelementptr inbounds
+i32` at element `p*MR + i` aliases exactly the packed int16 slots `2i` and
+`2i+1` of group `p`. Which half is `2p` rather than `2p+1` is little-endianness
+— an ISA fact, taken as a definition — and
+`swapping_the_pair_halves_computes_a_different_function` shows the assumption is
+load-bearing, paired with `a_symmetric_operand_hides_the_swap`, which is why
+the fixture is asymmetric in every axis.
+
+The masked tails are here too, and they explain a measurement from the packing
+entry: `a_padding_column_never_reaches_c` and `a_padding_row_never_reaches_c`
+are *why* the packers' row and column masks turned out redundant, while the
+phantom k-half's mask — which contributes to a live column — did not.
+
+**The behavioural tie drives `__y_gemm_micro_vnni` DIRECTLY with hand-built
+panels, and the reason is demonstrated rather than asserted.** Every other
+exact-GEMM test goes through the full driver, where the packers and the routing
+are composed. A single-site mutation does not expose that: breaking the B
+vector offset alone fails every GEMM test in the repo. A **compensating pair**
+does — XOR the vector index in both `emit_vnni_pack_b` and the flush's store
+column, and the two cancel:
+
+| | packing_model | thread_invariance | cpu_gemm_exact_threaded | register_tile |
+|---|---|---|---|---|
+| compensating pair | ok | ok | ok | **FAILED** |
+
+Building the panel by hand removes the composition, so there is nothing left
+for a packer to compensate with.
+
+**What is still not proved**, and the file says so: `vpdpwssd`'s own semantics
+and the endianness are definitions, pinned empirically by
+`tests/cpu_gemm_vnni_micro.rs` against a scalar reference. What Phase 1 now has
+is the whole schedule plus the tile's routing; what it does not have is a
+machine-checked model of the instruction itself, which no proof over `Z` can
+supply.
+
+#### Phase 1 progress, 2026-08-25 (6) — where the five proofs meet
+
+`proofs/ExactGemmComposition.v` (Rocq 9.1, 8 `Print Assumptions`, no axioms)
+does two things.
+
+**It makes the five files agree.** Each was written self-contained, so three of
+them define the B panel's slot map — `ExactGemmPacking.slot_b` as the emitted
+`(j/16)*32 + (j%16)*2 + h`, `ExactGemmMicro.slot` and
+`ExactGemmRegisterTile.slot_b` as the plain `2j + h` — and `MR`, `NR` and
+`col_of` are each defined twice. Nothing checked that any of those denoted the
+same thing.
+
+**The first draft of that argument overstated the risk, and measuring it is
+what showed so.** The header claimed each file would go on type-checking while
+silently describing a different kernel. Three attempts to produce such a drift
+— `RegisterTile.slot_b` shifted by one, its `NR` set to 32, `Micro.slot` with
+the halves swapped — were all **caught by the file itself**, because each
+definition happens to be pinned by a theorem that file already proves. So the
+agreement theorems do not close a demonstrably open hole; they make an
+incidental pinning explicit and cross-file. That is a smaller claim, and it is
+the true one.
+
+**The composition step is the new content.**
+`the_lane_accumulates_the_source_elements` says one `vpdpwssd` step on the
+packed panels contributes exactly the two k-terms of the *source* matrices' dot
+product for `(row i, column 16v + l)`, masked — so a padding row, column or
+k-half contributes zero. Packing says what a slot holds; the register tile says
+which lane reads it; only together do they say the lane reads the right source
+element. Neither file can state it alone, which is the reason the split was
+worth making in the first place.
+
+**The packers' contract was taken as a HYPOTHESIS, and naming it is what made
+it get fixed.** `ExactGemmPacking.v` proved the slot maps are bijections and
+that the padded product equals the live dot product; it never stated "slot `s`
+holds source element `x`" as one reusable lemma, so the composition assumed
+that explicitly and the file called it the single step of Phase 1 which is
+assumed rather than proved. See the entry below — the assumption turned out to
+be false of the real panel.
+
+**What is still not composed**, also stated in the file: this joins packing to
+routing for *one* `vpdpwssd` step. It does not chain through the k-pair loop
+into the flush, nor through the output partition, nor through the K-split, into
+one "the emitted kernel equals the naive nest" theorem. Each of those is proved
+over its own model. A genuine end-to-end statement needs a single shared model
+of the kernel — which is Phase 2's subject, not a missing lemma here.
+
+#### Phase 1 progress, 2026-08-26 — the assumed step, and why it was wrong
+
+**The seam the last entry named was closed, and trying to violate it first is
+what found a defect in it.** The composition's two hypotheses said panel slot
+`p*(2*MR) + slot_a i h` holds `A[i][2p+h]` masked, for **every** `i` — and no
+real panel satisfies that. At `i = MR` the index named is the FIRST slot of
+k-pair group `p+1`, which holds that group's data rather than a pad, while an
+unbounded contract demands a zero there whenever row `MR` is past `mrows`.
+
+So the composition theorem was true and unusable: applying it meant supplying a
+premise satisfied only by a panel one k-pair group long, never by the panel the
+emitted loop builds. **A hypothesis nothing is shown to satisfy is the
+proof-shaped version of a licence nothing can violate** — a check this repo
+already runs on its licences (`the_add_formula_really_is_incomplete`,
+`garbage_in_the_pad_changes_the_answer`) and had not run on its own premises.
+
+The fix is a bound plus a discharge:
+
+- `ExactGemmPacking.panel` models the panel as a FUNCTION — decode the index
+  into `(group, row-or-column, half)` — and `panel_decodes_its_own_write`
+  proves the contract of it, with `idx < width`.
+- `panel_is_the_only_solution` proves ANY array satisfying the packer's writes
+  agrees with `panel` over the whole panel range. That is what makes the first
+  a claim about the emitted loop rather than about a model chosen to make the
+  composition go through, and it is where the bijection lemmas finally earn
+  their keep at panel scale: injective ⇒ the write specification is consistent,
+  onto ⇒ it is complete.
+- `the_group_bound_is_load_bearing` refutes the unbounded form on concrete
+  numbers, with `inside_the_group_the_same_panel_agrees` as the control.
+- `the_packed_panels_route_to_the_right_source_elements` is the composition
+  with no hypothesis about panel contents at all.
+
+**The behavioural tie runs the real packers** (`tests/exact_gemm_panel_model.rs`):
+`__y_gemm_vnni_pack_a` / `_pack_b` are called on poisoned panels over five
+shapes (full, phantom k-half, ragged M, ragged N, all three) with every stride
+differing from its extent, and **every slot** is compared against
+`panel_slot_decode`. `the_next_group_is_not_padding` refutes the unbounded
+contract against real bytes rather than against the model.
+
+**It also isolates something no end-to-end test can.** The packing entry above
+records that removing `pack_b`'s zero-fill *alone* leaves every answer correct,
+because a padding term is `a_pad * b_pad` and a zero on either side kills it —
+so the two masks could only ever be pinned as a conjunction. Measured, with
+`pack_b`'s mask removed:
+
+| | packing_model | thread_invariance | cpu_gemm_exact_threaded | tiling_model | panel_model |
+|---|---|---|---|---|---|
+| pack_b mask dropped | ok | ok | ok | ok | **FAILED** |
+
+Mutation-verified 8/8: four against the emitted packers and the decode, four
+against the proofs — including reverting the contract to its unbounded form,
+which now fails where the previous commit compiled it happily.
+
+**A gate bug fell out of writing the prose.** `nothing_in_any_proof_is_admitted`
+stripped Coq comments LINE-LOCALLY, so a continuation line inside a multi-line
+comment was scanned as code and the ordinary English word "admit" failed the
+build. Contorting the prose would have left the hole. Probing the fixed gate
+with what it exists to catch then found a second, older one: it tested
+`code == "Admitted."`, `starts_with("admit")` and `contains(" admit.")`, and
+`Proof. Admitted.` on ONE line — the commonest way to stub a Coq lemma — is
+none of the three. It matches the TOKEN now, and covers `Abort.` as well, which
+discards the lemma outright while the file still compiles.
+
+#### Phase 1 progress, 2026-08-26 (2) — the chain closes for one lane
+
+`proofs/ExactGemmChain.v` (Rocq 9.1, 11 `Print Assumptions`, no axioms) joins
+four files into one statement. **`the_emitted_lane_computes_the_source_dot_product`**:
+run the emitted flush schedule, accumulating each chunk in **int32** and adding
+it into an int64 running sum, over the panels the emitted packers produce,
+through the emitted routing — and lane `l` of vector `v` for row `i` holds
+exactly `sum_k A[i][k] * B[k][16v+l]`, the dot product of the **source**
+matrices.
+
+No hypothesis about panel contents, none that the flush interval divides the
+k-pair count, none that the tile is full. The one assumption is the **licence**,
+`2·Fl·m² ≤ i32::MAX`, which is precisely what
+`VnniExact::max_operand_magnitude` computes — and which
+`tests/exact_gemm_licence_obligations.rs` discharges by exhausting the finite
+int16 domain.
+
+**The connective tissue is the new content, and it was not obviously going to
+fit.** `kloop_is_the_padded_product` turns a loop of routing steps into the
+padded product `ExactGemmPacking` already evaluates; `kloop_is_sum_from_step`
+re-presents the same loop in the shape `ExactGemmMicro`'s flush theorem
+quantifies over. Those two models were written independently — `sum_pairs`
+counts k-*pairs* carrying both halves, `sum_from` is a flat range — so the join
+is a small lemma each way rather than a definitional coincidence. That the
+pieces met at all is the first evidence that the file split was the right
+decomposition rather than five unrelated models.
+
+**The licence is load-bearing for the whole chain, refuted symbolically and
+behaviourally at the same numbers.** `violating_the_licence_breaks_the_chain`
+evaluates the chain at operand magnitude 4096 with the shipped interval of 64
+and gets **−2,147,483,648 where the answer is 2,147,483,648**;
+`at_the_licensed_magnitude_the_chain_holds` is the same chain at 4095.
+`tests/exact_gemm_chain_model.rs` reaches the identical pair on the real
+`vpdpwssd` kernel — from **source** matrices through the **real packers**, where
+`exact_gemm_micro_model.rs` reaches it only with hand-built panels.
+
+**The behavioural tie also crosses more than one flush chunk**, which no sibling
+model test does: `kc = 133` is 67 k-pairs against a 64-pair interval, so the
+clamped final chunk is a real case. Mutating the flush to overwrite `C` rather
+than accumulate — a bug invisible with a single chunk — is caught.
+
+**And what it does not catch is recorded beside what it does.** Five emitter
+mutations across every exact-GEMM suite:
+
+| mutation | packing | panel | regtile | micro | thr-inv | exact-thr | chain |
+|---|---|---|---|---|---|---|---|
+| flush OVERWRITES C | FAIL | ok | ok | ok | FAIL | FAIL | **FAIL** |
+| pack_b vector stride 32→16 | FAIL | FAIL | ok | ok | FAIL | FAIL | **FAIL** |
+| pack_b zero-fill dropped | ok | FAIL | ok | ok | ok | ok | **FAIL** |
+| compensating pair (pack_b `v^1` **and** store column `v^1`) | ok | FAIL | FAIL | ok | ok | ok | **ok** |
+
+The last row is the point: **the chain test does not subsume the register-tile
+test and cannot.** It composes packing with routing, so an inverse pair cancels
+here exactly as in a full GEMM. Isolating it needs panels stated by the test, or
+a panel checked slot by slot. *Adding a test does not retire the tests it
+resembles.* (That row also dates the register-tile file's own table, written
+before `exact_gemm_panel_model.rs` existed — the panel model catches the pair
+too, by the other route.)
+
+**What is still not chained**, stated in the file: this is one **lane**, not the
+tile (the tile needs the store, over a different model of C); it does not reach
+`C` through `ExactGemmTiling`'s output partition or `ExactGemmKsplit`'s band
+reduction, both of which sit above it and are proved over their own models; and
+`vpdpwssd`'s semantics plus i32 half-order remain definitions, pinned by
+`tests/cpu_gemm_vnni_micro.rs` on the real instruction. Joining the remaining
+layers still needs one shared model of the kernel — Phase 2's subject.
+
+Mutation-verified 8/8: four against the emitter, four against the proof
+(dropping the licence bound, dropping `0 < Fl`, seeding the accumulator at 1,
+and reading the next k-pair group's base).
+
+#### Phase 1 progress, 2026-08-26 (3) — the tile lift
+
+`the_tile_holds_the_source_dot_products` takes the previous entry's statement
+from one accumulator lane to the whole `MR × NR` tile: for every live `(i, j)`
+
+> `C[i][j] = C0[i][j] + sum over k < kc of A[i][k] · B[k][j]`
+
+and for every dead one `C[i][j] = C0[i][j]` exactly. Note the **accumulate** —
+`C0` is what was there before, which is what lets a caller split K across
+threads and is the property `ExactGemmKsplit.v` rests on.
+
+**The join it needed is the inverse of `col_of`.**
+`ExactGemmRegisterTile.tile_position_surjective` says an inverse exists;
+`the_lane_map_is_a_two_sided_inverse` names it (`vec_of j = j/16`,
+`lane_of j = j mod 16`) and proves it inverts *both* ways, which is what
+licenses `distinct_columns_use_distinct_lanes` — no two tile positions share an
+accumulator lane, so 384 values really do live in 24 registers of 16 lanes with
+nothing aliasing.
+
+**The store predicate turns out to do no work, and that is a theorem.** The
+emitted micro-kernel writes all `MR × NR` positions unconditionally — the
+live-rectangle clamp is the *driver's* — so the tile model was carrying two
+things at once. `the_store_predicate_is_redundant` shows a dead row or column
+accumulates zero by the packers' masks, so adding it to `C0` leaves `C0`. That
+settles the faithfulness question (the tile theorem describes the micro-kernel's
+own effect on C, clamp or no clamp) and it is the proved twin of a redundancy
+`tests/exact_gemm_packing_model.rs` had only **measured** — removing a packer's
+row or column mask leaves every answer correct because the clamp discards it.
+
+**The behavioural gap this exposed is the more useful half.** The tile theorem
+says `C0 + dot`, and the chain driver zeroed `C` — so the *accumulate clause was
+never exercised*. A kernel that ASSIGNS instead of accumulating is
+indistinguishable from a correct one when `C` starts at zero and there is one
+flush chunk. `tests/exact_gemm_chain_model.rs` now runs every shape twice, with
+`C` zeroed and with `C` pre-loaded, and the pre-load is load-bearing: with the
+multi-chunk shapes removed so `kc = 133` cannot do the work, mutating the flush
+to overwrite `C` is caught **only** on the pre-loaded arm, at the very first
+shape. Pre-loading also makes "a dead position is left as it was" testable at
+all — with `C` zeroed, *untouched* and *zeroed* are the same observation.
+
+**What is still missing to reach the whole of C**, named rather than left to be
+discovered: three layers sit above the tile. `ExactGemmTiling.v`'s output
+partition and `ExactGemmKsplit.v`'s band reduction are each proved over their
+own model and are not joined to this one. The third is proved **nowhere** — the
+**kc-panel loop**, which cuts K into panels of `kc` inside a single thread. It
+is the same decomposition shape as `ExactGemmKsplit.bands_tile`, so it is
+probably cheap; "probably cheap" is not "done".
+
+Mutation-verified 4/4 on the proof (`vec_of` at /32, `lane_of` at mod 8,
+dropping the `j < NR` bound, dropping the store predicate) plus the behavioural
+demonstration above. 18 `Print Assumptions`, no axioms.
+
+Also: `proofs/` now gitignores Rocq build artifacts. The gate compiles in a temp
+directory precisely so they never appear, but the proof headers tell a reader to
+run `coqc` by hand, which drops a `.lia.cache` beside the source — as mine did.
+
+#### Phase 1 progress, 2026-08-26 (4) — **all six proofs chained: the whole of C**
+
+`proofs/ExactGemmWhole.v` (Rocq 9.1, 6 `Print Assumptions`, no axioms) states the
+thing the six files were built for.
+**`the_threaded_gemm_holds_the_source_dot_products`**: sum the partials of
+`nthr` threads, each handed a K band, each running the emitted driver — packing,
+the register tile's routing, the k-pair loop, the int32 flush, the scratch tile
+and the fold-back — and for every `(r, c)` inside `M × N` the result is exactly
+
+> `sum over k < K of A[r][k] · B[k][c]`
+
+with **no** hypothesis that `MR` divides `M`, that `NR` divides `N`, that `nthr`
+divides `K`, or that `K` is even. The only assumption is the licence,
+`2·Fl·m² ≤ i32::MAX`, discharged by exhausting int16 in
+`tests/exact_gemm_licence_obligations.rs`.
+
+| file | contributes |
+|---|---|
+| `ExactGemmPacking.v` | what a packed panel slot holds |
+| `ExactGemmRegisterTile.v` | which accumulator lane reads it |
+| `ExactGemmComposition.v` | their join, for one `vpdpwssd` step |
+| `ExactGemmMicro.v` | the int32 flush chunking |
+| `ExactGemmChain.v` | the k-pair loop, and the lift to a tile |
+| `ExactGemmTiling.v` | the output partition — **joined here** |
+| `ExactGemmKsplit.v` | the K-band reduction — **joined here** |
+
+**A correction to what the previous entry recorded as missing.** It named a
+**kc-panel loop** — K cut into panels of `kc` inside one thread — as the layer
+proved nowhere, and guessed it was "probably cheap" because it looked like
+`bands_tile`. **There is no such loop.** `emit_vnni_gemm_driver` passes the full
+`K` to both packers and `kpairs = (K+1)/2` to the micro-kernel; the only cut of
+the K axis is the K-split across threads. So `kc` in every sibling file *is* K,
+and the gap that actually remained was the fold-back into C. *Read the emitter
+before recording a gap* — the guess was wrong in both directions, naming a layer
+that does not exist while missing the one that did.
+
+**No new behavioural test, and that is deliberate.**
+`tests/exact_gemm_thread_invariance.rs` already runs M=53, N=71, K=4099 — all
+three ragged against the `6 × 64` tile — at 1, 2, 3, 5, 8 and 16 threads, each
+checked against an independent integer reference; `cpu_gemm_exact_threaded.rs`
+sweeps flush intervals across the same; `exact_gemm_tiling_model.rs` covers a
+padded `ldc`. That *is* this theorem's behavioural tie. A fourth near-duplicate
+would add coverage of nothing.
+
+**What is still not proved**, stated in the file: `vpdpwssd`'s semantics and the
+little-endian order of an i32's halves remain **definitions** (pinned by
+`tests/cpu_gemm_vnni_micro.rs` on the real instruction); and the loop
+**structure** is modelled, not extracted — `gemm_position` says what `(r, c)`
+receives on the reading that the driver visits tile `(r/MR, c/NR)` at offset
+`(r mod MR, c mod NR)`. `the_position_decomposition_is_the_tilings` ties that to
+`ExactGemmTiling.addr`, so `c_written_exactly_once` applies — but the tie is
+between two models rather than to the emitted LLVM. **That is precisely the gap
+Phase 2 exists to close**, and it is now the only structural one left.
+
+Mutation-verified 4/4 (column offset at `mod MR`, dropping `r < M`, reading band
+`t` rather than `t'`, scaling the row by `NR` in the address tie).
+
+#### Phase 1 progress, 2026-08-26 (5) — narrowing the model-to-code gap
+
+The capstone's one remaining structural gap is that the loop **structure** is
+modelled rather than extracted: `gemm_position` says what `(r, c)` receives *on
+the reading that* the driver visits tile `(r/MR, c/NR)`. Nothing had asked the
+emitted driver how many tiles it runs, or in what order.
+
+`tests/exact_gemm_tile_enumeration.rs` asks. **A correct tiling is invisible in
+the answer** — `c_written_exactly_once` is exactly that statement — so the
+answer cannot arbitrate it, the same bind the K-split was in when the
+`--wrap=pthread_create` spawn count turned out to be the only observable. Here
+the observable is the sequence of micro-kernel invocations.
+
+`--wrap` does not work for it: `__y_gemm_micro_vnni` is called from the driver
+in the *same module*, so the call is resolved at compile time and there is no
+relocation to redirect. Instead the emitted module has that definition
+**excised** and replaced by a `declare`, and the C driver supplies a recording
+stub; the driver under test is byte-identical otherwise. Three things are then
+pinned:
+
+1. the call count is `mn_tiles(M, MR).len() × mn_tiles(N, NR).len()`;
+2. the **order** is column-panel outer, row-panel inner — the row-tile sequence
+   is `0..ntiles_m` repeated `ntiles_n` times, which is what makes "B is packed
+   once per column panel" a checked fact rather than a comment;
+3. every call receives the full `kpairs = (K+1)/2` and `ldc = NR` — the
+   machine-checked form of the fact the previous entry got wrong from
+   structural resemblance.
+
+**What it isolates is less than it first looked, and the table says so.** Five
+driver mutations:
+
+| mutation | tile_enum | tiling_model | thr-inv | exact-thr | packing | chain |
+|---|---|---|---|---|---|---|
+| row loop strides by `MR-1` | caught | caught | caught | caught | – | – |
+| column loop strides by `2·NR` | caught | caught | caught | caught | – | – |
+| micro-kernel handed half the k-pairs | caught | caught | caught | caught | – | – |
+| scratch row stride is `ldc`, not `NR` | caught | caught | caught | caught | – | – |
+| **one extra row panel past M** | **caught** | ok | caught | ok | ok | ok |
+
+The first four are caught by everything — they change the answer, and the
+correctness suites see that. The last row is what the file earns its place on:
+an extra panel is clamped to zero width, so the fold-back writes nothing and
+**the answer is unchanged**; four of six suites miss it. So the honest claim is
+"covers enumeration errors that do not change the answer, and diagnoses the rest
+by name rather than as a bad number" — not "catches what the others cannot".
+
+Also, the shared-temp-dir race, hit for the **fourth** time. It is a property of
+the `build()` helper rather than of any one test, so the per-test tag now lives
+in the signature instead of in a comment asking the next author to remember.
+
+#### Phase 1 progress, 2026-08-26 (6) — the other half of the driver, and an invisible out-of-bounds read
+
+Entry (5) tied the driver's *tile* loop to the model. Its other loop — the one
+that prepares the panels — was still guarded by nothing but a paragraph of
+prose. `emit_vnni_gemm_driver`'s own comment states the schedule as a measured
+fact:
+
+> The first version packed A inside the i-loop and B inside the j-loop nested
+> within it, so B was re-packed once per ROW panel — `M/MR` times over … At
+> MR=6 that is a sixth of the total run spent copying B.
+
+**A re-packing bug is invisible in the answer.** Packing A inside the j-loop, or
+B inside the i-loop, computes exactly the right result — it just does `ntiles_n`
+or `ntiles_m` times the packing work. So no correctness test in this repository
+can fail on it. Same shape as `a_deep_constant_chain_collapses_completely` (a
+convergence property, guarded by a *size* assertion) and the shared-memory
+swizzle (a bank-conflict property, guarded by a measurement).
+
+`tests/exact_gemm_packing_schedule.rs` reuses (5)'s technique on all three
+callees at once — `__y_gemm_vnni_pack_a`, `__y_gemm_vnni_pack_b` and
+`__y_gemm_micro_vnni` are excised and replaced by `declare`s, with recording C
+stubs. Recording all three in **one event stream** is what makes the schedule
+checkable rather than three separate counts; the whole of it is one assertion:
+
+```text
+[A(0) .. A(ntm-1)]  ++  concat over j of ( [B(j)] ++ [K(0) .. K(ntm-1)] )
+```
+
+which says at once that every A pack precedes every B pack, that there are `ntm`
+and `ntn` of them rather than `ntm × ntn`, and that each B panel is **live for
+exactly its own column's tiles** — not merely written the right number of times.
+(The two packers are `internal`, so the excision has to match `define internal
+void @…` as well; a `declare` is never `internal`.)
+
+**Six mutations, each suite run separately.** `cargo test` aborts the remaining
+binaries after one fails, so a run listing several `--test` targets can leave
+the important one unmeasured.
+
+| mutation | pack_sched | tile_enum | tiling_model | thr-inv | exact-thr | packing_model |
+|---|---|---|---|---|---|---|
+| **A packed inside the j-loop** | **caught** | ok | ok | ok | ok | ok |
+| **B packed inside the i-loop** | **caught** | ok | ok | ok | ok | ok |
+| **pack_a's row count unclamped (`MR`)** | **caught** | ok | ok | ok | ok | ok |
+| **pack_b's column count unclamped (`NR`)** | **caught** | ok | ok | ok | ok | ok |
+| A panel offset is the row index, not the tile index | caught | ok | caught | caught | caught | caught |
+| both packers handed `K-1` | caught | ok | caught | caught | caught | caught |
+
+**Four of six are caught by this file and nothing else, and the two I did not
+predict are the more serious pair.** I expected the unclamped-packer mutations
+to be caught by the correctness suites and wrote that into the docstring before
+measuring; they are not. Dropping either packer's clamp *at the call site* makes
+it read up to `MR-1` rows past the end of `A`, or `NR-1` columns past the end of
+`B` — and every answer stays bit-identical, because the fold-back's own `mw`/`nw`
+clamp discards exactly the rows and columns the packer over-read. **The
+observable consequence of a live out-of-bounds read is nothing at all**, until
+the buffer happens to end at a page boundary. That is the redundant-guard
+pattern `exact_gemm_packing_model` already records for the masks *inside* the
+packers, one layer up at the call site — and it is why "the correctness suites
+cover the packers" is false.
+
+`exact_gemm_tile_enumeration` catches **none** of the six, which is the result
+that says the two files are complementary rather than overlapping: it excises the
+micro-kernel only, so what the packers are handed, and in what order, is
+invisible to it. Between them they cover the driver's two loops — that one the
+tiles it visits, this one the panels it prepares.
+
+Also, the shared-temp-dir race, hit for the **fifth** time — and this time in a
+file written two entries ago (`exact_gemm_panel_model.rs`), which had been green
+for two commits before a new test binary changed the scheduling enough to fire
+it. That is the "passed for several runs before failing" signature exactly. The
+rest of `tests/` was then swept for the same defect rather than waiting for a
+sixth: two candidates turned out to be false positives (per-`name` filenames with
+no `remove_dir_all`, and a `main(` inside an embedded Y source string), so the
+suite is now clean.
+
+#### Phase 1 progress, 2026-08-27 — the schedule has ONE source, and a written measurement was wrong
+
+Phase 1 is mathematically complete, and the gap it names about itself is that
+the loop **structure** is modelled rather than extracted — "the tie is between
+two models rather than to the LLVM". That gap has two halves. The extraction
+half is Phase 2. The other half is cheaper and was never stated: the schedule
+existed in **three** places with nothing structurally forcing agreement.
+
+- `src/cpu_gemm.rs`, where the emitter reads it.
+- The proof files, each declaring its own copy — `MR` and `NR` twice, `col_of`
+  twice, the B slot map three times, and `DEFAULT_FLUSH_K_PAIRS` as a bare
+  `64` inside two theorem *statements*.
+- `proofs/ExactGemmComposition.v`, which asserts the copies agree.
+
+That third one is a theorem somebody remembered to write.
+
+**The measurement came first, and it corrected a claim this repo had already
+written down.** `ExactGemmComposition.v`'s header records three attempts —
+`RegisterTile.slot_b` shifted by one, its `NR` set to 32, `Micro.slot` with the
+halves swapped — all caught by the file itself, and concludes that "each
+definition turns out to be pinned by a theorem in its own file". Re-running the
+sweep over *every* duplicated definition confirms those three and adds two more
+(`RegisterTile.NRV` 4→2, `Packing.NR` 64→32) — and finds the exception nobody
+tried:
+
+> **`MR` set to 8, in EITHER `ExactGemmPacking` or `ExactGemmRegisterTile`,
+> leaves that file compiling perfectly.** Both are caught only by
+> `ExactGemmComposition.v` and by the downstream chain.
+
+So the pinning was incidental for five definitions of six and **absent for the
+sixth**. The honest claim for this work is therefore "makes the pinning
+structural instead of incidental, and closes one constant that had none" — not
+"fixes a live drift bug". Nothing had drifted.
+
+**`proofs/ExactGemmSchedule.v` is generated from `cpu_gemm.rs`'s own constants,
+committed, and gated on byte-identity** by `tests/exact_gemm_schedule_proof.rs`.
+Every sibling proof takes its constants and index maps from it. Same shape as
+`tools/extract_poseidon.py` → `src/zk_poseidon_constants.rs`, and as
+`tests/committed_ptx_artifacts.rs` for the `.ptx` corpus.
+
+**The generator LINKS rather than PARSES, and that is the whole design.** A
+`tools/` script would have to recover `VNNI_MR` with a regex over `cpu_gemm.rs`
+— a fourth copy of the value, living in the generator, which is the bug and not
+the fix. `extract_poseidon.py` parses because its input is *foreign*
+(circomlib's `.circom`); this input is our own Rust and can be `use`d. That
+leaves `[[bin]]` or `#[test]`; a fifth `[[bin]]` is a permanent user surface
+(`tests/source_surface.rs` gates those) bought for a file regenerated twice a
+year, so it is a `#[test]` with `Y_REWRITE_SCHEDULE_PROOF=1`. There is no
+`build.rs`.
+
+**The content-control collision was a real design decision, not an obstacle.**
+`tests/proofs_are_checked.rs::every_proof_has_a_content_control` rejects a `.v`
+that names no load-bearing theorem — so a definitions-only generated file fails
+it. It takes **no exemption**. Two of its three theorems are *structural*: they
+constrain the shape of the emitted expressions rather than restating their
+values, so they are not made true merely by being generated alongside what they
+describe.
+
+- `slot_b_is_the_plain_interleave` — the two sides come from different places
+  in `cpu_gemm.rs` (`pack_b_slot`, and the bare `/2` that `panel_slot_decode`
+  inverts it with). The Rust asserts their agreement in a doc comment; this
+  proves it.
+- `the_tile_geometry_is_consistent` — `NR = NRV * LANES`, `VEC_ELEMS = 2*LANES`
+  and no degenerate zero. `LANES` is *derived* in the generator as
+  `VNNI_NR / VNNI_NRV` rather than written down, so it cannot become a fourth
+  copy of 16.
+- `ksplit_threads_is_never_zero` — a genuine cross-file join. Every theorem in
+  `ExactGemmKsplit.v` is stated under `0 < nthr` and `ksplit_bands` asserts the
+  same precondition at runtime; nothing proved the emitted thread count
+  satisfies it. The floor was argued in a comment.
+
+The fourth, `the_schedule_is_the_shipped_one`, is **self-fulfilling under
+generation and the file says so**. Its job is the other direction: it makes the
+values load-bearing inside `coqc`, so a hand-edit fails twice.
+
+**`slot_b` and `slot_b_interleave` are deliberately NOT collapsed.** The
+generated file carries the B map in both the emitted `vpdpwssd` vector-group
+form and the plain interleave. Collapsing them would make
+`slot_b_is_the_plain_interleave` and
+`ExactGemmComposition.the_agreement_is_not_vacuous` true by `reflexivity` and
+worth nothing.
+
+**Two theorem statements changed text, declared rather than slipped through.**
+`ExactGemmMicro.the_default_interval_licenses_4095_and_not_4096` and
+`the_4096_case_exceeds_by_exactly_one` carried the flush interval as a literal
+`64` — the only place in the nine proofs where a schedule constant sat inside a
+*statement*. They now read `ExactGemmSchedule.FLUSH_K_PAIRS`. Same proposition
+at the shipped value; the difference is that a drift in
+`DEFAULT_FLUSH_K_PAIRS` now makes them FALSE and fails `coqc` instead of
+quietly pinning an interval the compiler no longer uses. 4095 and 4096 stay
+literals on purpose — they are the *licence's* answer at that interval
+(`floor(sqrt(i32::MAX / 2Fl))`), not a schedule constant, and stating them is
+what makes the edge one unit wide rather than a tautology. Everything else is
+byte-identical in statement; the sibling files gained only `*_unfold` helper
+lemmas proved by `reflexivity`, which restate a generated definition in the
+shape a tactic script manipulates.
+
+**What it does not close.** The loop **nest** is still hand-written `IrBuilder`
+calls in `cpu_gemm.rs`. This closes constant drift, not extraction.
+
+**The mutation table**, thirteen exact-GEMM suites, each `--test` target run
+separately:
+
+| mutation | schedule gate | `proofs_are_checked` | the other 11 |
+|---|---|---|---|
+| Rust `VNNI_MR` 6→8 | **FAIL** | ok | 6 FAIL |
+| Rust `KSPLIT_MIN_BAND` 128→256 | **FAIL** | ok | all ok |
+| committed `.v` hand-edited, `MR := 8` | **FAIL** | **FAIL** | all ok |
+| `RegisterTile.NR := SCH.MR` | ok | **FAIL** | all ok |
+| `render` echoes the committed file | **FAIL** | ok | all ok |
+| `render` hardcodes `MR := 6` | **FAIL** | ok | all ok |
+
+`KSPLIT_MIN_BAND` **is caught by nothing else** — the clearest single
+justification. A hand-edited `.v` is caught only by the two gates, because every
+model test drives the Rust and never reads the proofs; that is the Coq-side half
+of the drift, previously uncovered. The alias mistake is correctly *not* caught
+by byte-identity — the generated file is untouched — and is what demonstrates
+that the agreement theorems' weakened claim is still a real one.
+
+**One mutation survived and was sorted rather than recorded**, and it was a
+hole in the control written to prevent exactly this. The first version of
+`the_generated_text_actually_depends_on_the_rust_constants` asserted the output
+*contains* `Definition MR : nat := 6.` — and a generator neutered to echo the
+committed file passes that, because the committed file contains that line. The
+gate became a check on a constant string and the whole run stayed green. It now
+renders a **perturbed** schedule and requires the result to differ from the
+committed text, which an echoing generator cannot do.
+`feedback-null-metrics-pass-dead-components`, committed by me, in the control
+written to apply it — for the second time in this file's history.
+
+A second survivor was genuinely mis-aimed: `Schedule::shipped` reading `mr: 6`
+instead of `mr: VNNI_MR` changes nothing observable, since the two are the same
+number. Hardcode `6` *and* move `VNNI_MR` to 8, or read the wrong constant
+outright, and the tie assertion fails in both — a hardcode that agrees today is
+caught the moment it stops agreeing.
+
+#### Phase 1 progress, 2026-08-27 (2) — the mutation row was misattributed, and the register bound was prose
+
+The entry above records `VNNI_MR` 6→8 as caught by "6 model suites". **Diagnosing
+why produced a different answer, and it corrects that row.**
+
+**The kernel is not wrong at MR=8.** `exact_gemm_thread_invariance` — the suite
+that runs the real threaded kernel at ragged shapes against an independent
+integer reference and compares bit-identically across thread counts — **passes**.
+So whatever those six suites were reporting, it was not a wrong answer.
+
+**Seven harnesses carried their own copy of the tile shape.** Each embeds a C
+driver with `#define MR 6` / `#define NR 64` hardcoded, while its Rust half
+reads `VNNI_MR`/`VNNI_NR` from the crate. So moving the constant did not make
+those tests report a schedule mismatch — it made each test **disagree with
+itself**: `exact_gemm_panel_model` compared a 48-element panel against a
+64-element expectation, and `exact_gemm_register_tile_model`'s child process
+simply crashed (empty stdout, no `DONE`) on buffers sized for the wrong tile.
+
+That is the same defect `ExactGemmSchedule.v` was built to remove, one layer
+down and in the half of the harness that allocates the memory the emitted kernel
+writes into. All seven now take the constants from `cpu_gemm.rs`:
+`std::fs::write(&drv, schedule_defines() + DRIVER)`. Prepending rather than
+templating the whole driver, because C source is full of braces and `format!`
+is not the right tool for it.
+
+**With the harnesses fixed, six of the eight pass at MR=8** — confirming the
+original signal was self-disagreement. What still fails is the real constraint:
+
+> `cpu_gemm_vnni_micro::the_hot_loop_does_not_spill_the_accumulators` —
+> *"hot-loop stack traffic regressed to 17 spills + 17 reloads; it was 10 + 10
+> when this bound was set"*.
+
+**The constraint existed, as a comment.** That test's own prose says "24
+accumulators + 4 B vectors + 1 A broadcast is 29 of 32 zmm, so the allocator has
+almost no slack". Nothing stated it as a property of the schedule — not
+`cpu_gemm.rs`, not any of the nine proofs.
+
+**The predicate is measured, not guessed.** Sweeping `VNNI_MR` and reading real
+compiled spill traffic:
+
+| MR | `MR*NRV + NRV + 1` | hot-loop spills + reloads |
+|---|---|---|
+| 5 | 25/32 | within bound |
+| 6 | 29/32 | within bound (10 + 10, the shipped kernel) |
+| 7 | 33/32 | 16 + 16 |
+| 8 | 37/32 | 17 + 17 |
+
+The cliff falls exactly where the inequality flips, so the *form* of the bound
+is the measurement's rather than an invention. It is now
+`ExactGemmSchedule.the_tile_fits_the_register_file`, and it **bites**: with
+`VNNI_MR = 8` the regenerated file fails `coqc` at that theorem's `lia`, so the
+generator cannot emit a schedule that does not fit the register file. Nine
+theorems about an unallocatable tile is not a state this should be able to reach.
+
+`ZMM_REGISTERS = 32` is emitted as an **ISA fact, not a schedule constant** —
+there is no `cpu_gemm.rs` constant for it and no proof over `nat` establishes
+it. It sits at the same TCB boundary as `vpdpwssd`'s semantics, pinned
+empirically by the spill test reading real compiled output.
+
+Note what the theorem does *not* claim: a spilling kernel is **slow, not wrong**.
+Separating those two is what the `thread_invariance` result above is for, and it
+is why the bound is a realizability constraint rather than a correctness one.
+
+**One remaining MR=8 failure was left alone, deliberately.**
+`exact_gemm_tiling_model::the_unclamped_tail_would_write_past_the_end` asserts
+`last_off == 48` against a computed `8 * VNNI_MR`. That looks like an eighth
+hardcode and is not: it mirrors `ExactGemmTiling.unclamped_tail_writes_out_of_bounds`'s
+**concrete counterexample**, which is stated at MR = 6. Parameterising it would
+make the assertion `8*VNNI_MR == 8*VNNI_MR` and worth nothing. Failing when the
+schedule moves is the correct behaviour — it says the proof's concrete
+refutation no longer matches the shipped tile.
+
+#### Phase 1 progress, 2026-08-27 (3) — the first slice of the loop nest is EXTRACTED, not modelled
+
+The gap Phase 1 names about itself is that the loop **structure** is modelled
+rather than extracted, so the tie is between two models. This closes that for
+one slice, using the same move that closed constant drift: **one description,
+two consumers** — not by proving a translator correct, which needs an LLVM
+semantics and would eat the programme, but by removing the second description.
+
+`cpu_gemm::Ix` is a small index expression rendered two ways from one value:
+`Ix::emit` produces the driver's LLVM, `Ix::coq` produces the definitions in
+`proofs/ExactGemmSchedule.v`. Two expressions are covered:
+
+- `tile_width_ix()` = `min(ext - iv, T)` — the clamped live width of a tile,
+  at three sites (pack-A, the j-loop, the i-loop).
+- `panel_index_ix()` = `iv / T` — which packed panel a tile reads, at two.
+
+That is deliberately the arithmetic §1 of this document says the bugs live in:
+*"twelve address computations in the CPU GEMM were correct only because
+`lda == K` made stride and extent the same number"*. Which loops exist, in what
+order, and what they call is still hand-written, and so are the k-split bands
+and the flush chunking.
+
+**The refactor is proved faithful by byte-identity**: all three emitted modules
+(`emit_vnni_gemm_module`, `emit_vnni_threaded_module`, `emit_vnni_micro_module`)
+are byte-for-byte what they were before. The driver used to spell the clamp as
+three separate `IrBuilder` calls; it now renders it from the shared expression
+and emits the same instructions.
+
+Two new theorems are the **join** that was previously implicit. `tw` is stated
+over the tile INDEX and the emitted loop has the induction variable instead:
+
+- `the_emitted_width_is_the_tiling_model_at_the_loop_variable` —
+  `tw ext T t = tile_width ext (toff T t) T`.
+- `the_emitted_panel_index_is_the_tile_index` —
+  `panel_index (toff T t) T = t`, i.e. the emitted `sdiv iv, T` really does
+  recover the tile index, so a tile reads its own panel.
+
+**The gate had to become universal, and mutation is what showed it.** The first
+version searched for the rendered instruction sequence *somewhere* in the
+module. That is satisfied while one site of three diverges — and the
+discriminating mutation proves it: swapping the `min` operands at the i-loop
+computes the **same value** by different instructions, and it passed the gate
+*and* all five correctness suites. Counting the occurrences per site turns the
+existential into a universal, and that mutation is now caught **by this gate
+alone**, because no answer can see it.
+
+The honest limits of the other mutations, measured rather than assumed:
+
+| mutation | schedule gate | correctness suites |
+|---|---|---|
+| shared expression reversed, `.v` stale | **FAIL** | ok |
+| shared expression reversed, `.v` regenerated | **FAIL** (and `coqc` FAILS) | ok |
+| driver bypasses helper, reversed clamp | **FAIL** | 3 FAIL |
+| driver drops one clamp | **FAIL** (after counting) | 1 FAIL |
+| **min operands swapped — same value** | **FAIL** (after counting) | **all ok** |
+| driver bypasses helper, *identical* clamp | ok | ok |
+
+The third and fourth rows are worth reading as limits: the gate does **not**
+extend coverage there — a reversed or missing clamp is a wrong answer and the
+correctness suites catch it too. What the gate adds for those is a diagnosis by
+name instead of a bad number. Its unique coverage is the fifth row.
+
+The last row is a design confirmation, not a gap: a hand-written clamp that is
+*identical* passes, and should — there is no divergence. The gate checks the
+property (the proof's arithmetic is the emitter's arithmetic), not the plumbing
+(that a particular helper was called).
+
+#### Phase 1 progress, 2026-08-27 (4) — the flush and the K-split bands are extracted too
+
+The two slices named as next in the entry above. `ExactGemmSchedule.v` already
+held `cw`/`nchunks` and `blen`/`boff`; the emitter did not consume them. It does
+now, through the same `Ix` layer.
+
+**These sites are emitted as RAW LLVM, not through `IrBuilder`**, with
+hand-chosen register names (`%cend0`, `%base`, `%klen`) — so extracting them
+needed a second renderer, `render_named`, which takes the result names in
+emission order. Supplying the names the emitter already used is what let the
+refactor be checked by byte-identity: all three modules are byte-for-byte
+unchanged, again.
+
+Three expressions, and the split between them is forced by the code rather than
+chosen:
+
+- `chunk_end_ix() = min(iv + T, ext)` — the micro-kernel's flush clamp. Note the
+  emitter computes an **end** where `cw` computes a **width**; they are the same
+  clamp from two sides, and `the_emitted_chunk_end_is_the_flush_model` is that
+  identity.
+- `band_base_ix() = K / nthr` and `band_rem_ix() = K mod nthr` — loop-invariant,
+  so the emitted wrapper hoists both into `many:`.
+- `band_len_ix() = base + (if t < rem then 1 else 0)` — in `spawn.body:`, over
+  the already-hoisted terms.
+
+**An expression split across basic blocks is not one contiguous instruction
+sequence**, and modelling it as one would have changed the emitted code. Hence
+three expressions and a composition theorem rather than a single term:
+`the_emitted_band_length_is_the_ksplit_model` recomposes them and ties the
+result to `blen`. Every theorem in `ExactGemmKsplit.v` is stated about `blen`;
+that is what now says the emitted spawn loop computes it.
+
+The gate for these is **simpler and stronger** than the driver's: those
+emitters choose their own register names, so there is nothing to normalise and
+the rendered text is compared verbatim.
+
+Mutations, each `--test` target run separately:
+
+| mutation | schedule gate | correctness suites |
+|---|---|---|
+| **flush clamp operands swapped — same value** | **FAIL** | **all ok** |
+| band's extra k moved to the last bands | FAIL | `thread_invariance` FAIL |
+| micro-kernel bypasses the helper, *identical* text | ok | ok |
+
+The first row is the one worth having, and it is the second time this session a
+same-value divergence has been caught by this gate and by nothing else. The
+second row was **mislabelled in my own sweep as "same total" and is not**:
+flipping the condition gives `nthr*base + (nthr - rem)`, which equals `K` only
+when `rem = nthr - rem`, so it breaks `bands_tile` and the answer moves. Worth
+recording because the label was a guess and the measurement corrected it. The
+third row is the design confirmation — the gate checks the property, not that a
+particular helper was called.
+
+**Where the extraction now stands.** The schedule's *arithmetic* is extracted:
+the output tiling's width and panel index, the flush chunking, and the K-split
+bands. What is still hand-written is the loop nest's **shape** — which loops
+exist, in what order, which blocks they live in, and what they call. That is a
+larger change than an expression layer and is squarely Phase 2.
+
+#### Phase 1 progress, 2026-08-27 (5) — a sweep for un-extracted arithmetic, and the clearest isolation result yet
+
+Rather than start on the loop nest's shape, the emitted IR was **swept** for
+arithmetic carrying a schedule literal. Three model functions turned out to
+exist in `ExactGemmSchedule.v` and be computed independently by the emitter:
+`kpairs`, `ntiles`, and `a_i32_element`. The first two are now extracted.
+
+**`kpairs` is the one that mattered.** It is spelled at **five** sites — both
+packers, the driver, and twice in the threaded wrapper — and *every packing and
+flush theorem is stated in terms of it*. `ExactGemmPacking.kpairs` is
+`SCH.kpairs`; `padded_product_is_the_live_dot_product` quantifies over
+`kpairs kc`; the micro-kernel's flush decomposes `kpairs`. Nothing said the
+compiler computed the same number. `Definition kpairs` is now rendered from
+`cpu_gemm::kpairs_ix`, and the five sites emit from it.
+
+`tile_count_ix` covers the threaded wrapper's `(M + MR - 1) / MR`. `T - 1` is a
+separate bound name rather than a subterm, because **the emitter folds it at
+compile time into a literal** (`add i64 %M, 5`) — modelling it as `Sub(T, 1)`
+would emit an instruction the compiler does not.
+`the_emitted_tile_count_is_the_tiling_model` states that folding and carries
+`0 < T`, because `nat` subtraction truncates and the two disagree at `T = 0`.
+
+All three modules remain byte-for-byte unchanged.
+
+| mutation | schedule gate | correctness suites |
+|---|---|---|
+| `kpairs` rounds down | FAIL | 4 FAIL |
+| one `kpairs` site bypasses the helper, rounds down | FAIL | 3 FAIL |
+| **`tile_count` uses `T` instead of `T-1`** | **FAIL** | **all ok** |
+
+**The third row is the clearest isolation result in this series, and the reason
+is worth stating exactly.** `%mtiles` feeds *only* `malloc` sizes — `%apn = mul
+%mtiles, %kps`, then a byte count, then `malloc`. Using `T` instead of `T-1`
+computes `(M + 6)/6` where the model says `(M + 5)/6`: never smaller, so the
+buffer is **over-allocated**. An over-allocation produces no wrong answer, no
+crash, and no observable symptom at all. It is precisely a divergence between
+the proof's arithmetic and the emitter's that no test of the *result* can ever
+see — which is the case this whole layer exists for.
+
+That is now the third such case (after the driver's swapped `min` operands and
+the flush clamp's), and together they are the argument for the layer: the
+correctness suites catch everything that changes the answer, and these catch the
+class that does not.
+
+**What is left un-extracted, named rather than left to be rediscovered.**
+`a_i32_element` (`p * MR + i`, the micro-kernel's A load index) is still spelled
+independently — it lives inside a fully unrolled `MR × NRV` emission loop where
+the index is a Rust-side constant per iteration, not an emitted expression, so
+it is a different shape of problem. And the loop nest's **structure** — which
+loops exist, in what order, in which blocks, calling what — remains hand-written.
+That is Phase 2.
+
+#### Phase 1 progress, 2026-08-29 — the last named leftover, and a correction to how it was named
+
+The previous entry closed with `a_i32_element` recorded as un-extracted and
+described it as "a different shape of problem — the index is a Rust-side
+constant per iteration, not an emitted expression". **That description was
+wrong, and reading the emitter is what settled it.** The micro-kernel emits
+
+    %aidx = mul i64 %p, 6
+    %ai0  = add i64 %aidx, 0
+    ...   through %ai5
+
+Both instructions are emitted. What is Rust-side is one *operand* of the `add`
+— exactly as `T` is a Rust-side constant operand of `tile_width_ix`, which was
+extracted three entries ago without difficulty. A constant operand is not a
+reason an expression cannot be extracted.
+
+Extracted as two expressions, `a_row_base_ix` (`p * MR`) and
+`a_i32_element_ix` (`base + i`), for the reason the K-split bands needed the
+same split: the base is loop-invariant across the `MR`-way unroll and the
+emitter **hoists** it, so the two are not one contiguous instruction sequence.
+`Ix` gained a `Mul` variant to express it. All three emitted modules are
+byte-for-byte unchanged.
+
+**Why this one is worth having rather than tidy.**
+`ExactGemmRegisterTile.the_i32_load_is_the_packed_pair` proves the i32 load at
+element `a_i32_element p i` aliases packed slots `2i` and `2i+1` of k-pair
+group `p` — the little-endian half-order being the ISA fact the whole
+register-tile file rests on. That theorem says nothing whatever about the
+compiler. `the_emitted_a_index_is_the_pair_element` is what says the compiler
+computes that element. Same shape as `kpairs`: a theorem stated in terms of a
+number nothing confirmed the emitter produced.
+
+**The join BITES at two independent layers, checked rather than assumed.**
+Byte-identity catches a change to the Rust `Ix`; and hand-editing the committed
+`.v` so `a_base` reads `p * MR + 1` fails `coqc` at the theorem
+(`Unable to unify "a_elem (a_base p MR) i" with "a_i32_element p i"`). A
+`reflexivity` proof is not thereby paperwork — it is the statement that two
+independently-reachable definitions coincide, and it stops holding the moment
+one of them moves.
+
+**MUTATION TABLE**, each `--test` target run separately from a bash script.
+
+| mutation | schedule gate | correctness suites |
+|---|---|---|
+| A row stride is `NR`, not `MR` | FAIL | 6 FAIL |
+| **`%aidx = mul i64 6, %p` — operands swapped by hand** | **FAIL** | **all ok** |
+| hand-written `mul` with IDENTICAL text | ok | ok |
+
+The middle row is the **fourth same-value divergence** in this series caught by
+the schedule gate and by nothing else, and the count is now the argument rather
+than the anecdote: the correctness suites catch every mutation that changes the
+answer, and this layer catches the class that does not. The third row is the
+design control — the gate checks the *property* (the proof's arithmetic is the
+emitter's arithmetic), not the *plumbing* (that a helper was called), so a
+hand-written identical sequence must pass and does.
+
+**Where extraction now stands.** Every schedule *number* the emitter computes
+is rendered from one description: tile width, panel index, tile count, k-pair
+count, flush chunking, K-split bands, and now the packed-A element index. The
+loop nest's **shape** — which loops exist, in what order, in which basic
+blocks, calling what — is still hand-written `IrBuilder` and raw-string
+emission. That is Phase 2, and it is a materially larger change than an
+expression layer: it needs the emitter restructured around a description of the
+nest rather than around the instructions, and nothing above it can be checked
+by byte-identity in the same cheap way.
+
+#### Phase 2's decisive experiment, run early on a kernel that already existed · 2026-08-29
+
+Phase 2's "Done when" is *a second, structurally different kernel verified with
+no new hand-written proof*, and its stated risk is *"if obligations don't
+compose, the thing is a one-off proof rather than a compiler."* That question
+was answerable now, because **`src/cpu_gemm.rs` already emits two GEMMs.**
+Beside the exact `vpdpwssd` one that nine proofs are about sits
+`__y_sgemm_f32_avx512` — the kernel that ships for ordinary Y programs — which
+partitions the same three axes and had **no proofs at all**.
+
+`proofs/GemmBandSplit.v` (Rocq 9.1, 8 `Print Assumptions`, no axioms) and
+`tests/f32_band_split_model.rs` are that experiment. The answer is a split, and
+the split is the deliverable:
+
+| layer | transferred? |
+|---|---|
+| range folding (`acc_range`, `sum_range_split`) | **verbatim** — folding a contiguous range is not a property of any decomposition |
+| the tiling obligation | **composed, proof did not transfer** — ~30 new lines |
+| the exactness obligation | **provably does not hold**, and that is a result |
+
+**The two kernels split K differently, which is why the proof had to be
+redone.** The exact kernel gives the first `rem` bands one extra k; the f32 one
+is proportional, `[t·K/n, (t+1)·K/n)`. Both tile `[0, K)`;
+`the_two_splits_are_different` exhibits `K = 5, n = 3`, where the proportional
+band 0 has one element and the exact one has two. So the *obligation* is the
+same object and its *discharge* is not — which is exactly the distinction a
+transformation IR would have to mechanise, and the first real datum about
+whether it can.
+
+**The exactness half is a result, not a gap.** f32 addition is not associative,
+so per-band partials do not sum to the naive sum.
+`rounding_breaks_the_proportional_split_too` refutes it at the same `f`, `K`
+and thread count where the exact kernel's own refutation lives, with the same
+control showing the failure belongs to the accumulate rather than to the
+decomposition. The repo asserts bit-identity for the exact kernel and nowhere
+for this one; that is now a stated consequence instead of an omission.
+
+##### The finding: a redundant guard that becomes load-bearing exactly when it is needed
+
+Both decompositions clamp their last band — `select (t+1 == n) ext hi` — under a
+comment saying the last thread takes the remainder "so no row of B is dropped".
+**The clamp never fires**: `(n·ext)/n` is already `ext`, and a granule count
+always covers its extent. Measured exhaustively over the reachable domain
+(0 of 192,000 K cases, 0 of 48,000 granule cases) and proved as `pedge_last` /
+`gedge_last`.
+
+The tempting conclusion is "dead code". **The discriminating experiment says
+otherwise**, and it was run rather than reasoned about:
+
+    R1   band edge broken to (ext/n)*t, clamp kept      correctness suites ALL PASS
+    R1b  same break, clamp removed                      cpu_gemm_threaded FAILS
+
+So the clamp is redundant *with the correct arithmetic* and is precisely what
+turns a wrong band edge into a right answer. It stays, and now with a measured
+reason rather than a comment. This is the mirror image of the packers' masks in
+`ExactGemmPacking.v`, which are redundant *with each other* so neither is
+pinned alone; here the redundancy is with an arithmetic identity, and breaking
+the identity makes the guard live.
+
+`every_edge_snaps_to_a_granule_or_the_extent` promotes a second comment to a
+theorem: a band boundary inside a tile would make one thread write a partial
+tile, and nothing had said it cannot happen.
+
+##### MUTATION TABLE
+
+Each `--test` target run separately from a bash script.
+
+| mutation | schedule gate | band model | correctness |
+|---|---|---|---|
+| K edge `(ext/n)*t` — drops the remainder | FAIL | FAIL | **all ok** (the clamp saves it) |
+| ...same, with the clamp removed | FAIL | FAIL | `cpu_gemm_threaded` FAIL |
+| **K edge operands swapped (same value)** | **FAIL** | ok | **all ok** |
+| granule edge loses its `min(·, ext)` | FAIL | FAIL | all ok |
+| K edge hand-written, identical text | ok | ok | ok |
+| proof re-declares `pedge` (not aliasing) | — | — | `coqc` FAIL |
+| proof re-declares `pedge` identically | — | — | ok |
+
+Rows 5 and 7 are the design controls, and they are the same control twice: the
+gates check the *property* — the proof's arithmetic is the emitter's — not the
+*plumbing*. Row 7's re-declaration is safe for the reason already recorded
+about `mr: 6` versus `mr: VNNI_MR`: the generated `ExactGemmSchedule.v` is
+byte-identity-gated against `cpu_gemm.rs`, so a copy that agrees today fails
+`coqc` the moment the schedule moves.
+
+Row 3 is the fifth same-value divergence caught by the schedule gate alone.
+
+##### `Ix::eval`, so the model test is not a third description
+
+The obvious way to write `f32_band_split_model.rs` is to transcribe the
+arithmetic into Rust — which is the exact defect this layer exists to remove,
+one file over. `Ix` gained an evaluator instead, so the test runs the **same**
+expression the emitter renders to LLVM and the generator renders to Coq: one
+description, three consumers. The three agree because every operand is
+non-negative, where `sdiv`'s truncation and `nat` division's floor coincide;
+`eval` asserts that rather than assuming it.
+
+All four emitted modules — including the 4,752-line f32 one — are byte-for-byte
+unchanged by the extraction.
+
+##### What this does not settle
+
+One kernel is not a compiler. Both of these are GEMMs, so the axes are the same
+even though the decompositions are not; a stencil or an attention kernel would
+test something this does not. And nothing here touches the f32 micro-kernel,
+its packing, or its scratch reduction — this is the schedule, and only the
+schedule.
+
+#### The third kernel, and the first that is not a GEMM · 2026-08-30
+
+The previous entry closed by naming its own limit: *"both kernels are GEMMs, so
+the axes coincide even though the decompositions do not."* `src/exact_attention.rs`
+is not a GEMM, and its module header makes a claim of exactly the kind this
+programme exists to discharge — **"the answer does not depend on `blockDim.x`,
+`gridDim.x`, `gridDim.z`, or the order the atomics land."**
+`tests/gpu_attention_invariance.rs` demonstrates it on a real card at nine
+launch geometries. Nine geometries is not every geometry, and *the order the
+atomics land is not a geometry at all*: it is a property of a race.
+
+`proofs/GridStrideSplit.v` (Rocq 9.1, 8 `Print Assumptions`, no axioms) and
+`tests/exact_attention_schedule.rs` close both halves.
+
+##### It needed a property neither GEMM proof did
+
+The decomposition is different in two ways, and the second is the interesting one.
+
+- **It is not an interval split.** Worker `w` of `n` takes
+  `{ i < S : i mod n = w }` — the residue classes, interleaved. Not
+  `ExactGemmKsplit`'s contiguous bands, not `GemmBandSplit`'s proportional
+  edges. An index belongs to its class by arithmetic rather than by an
+  accumulated offset, so `stride_classes_partition` is a third proof of the
+  same obligation.
+- **The partials are combined in ARBITRARY order**, by `red.shared.add.u64`
+  and `red.global.add.u64`. Both GEMM proofs fold their bands in index order,
+  so associativity carried the whole argument. Here the order is whatever the
+  hardware chooses, so the argument needs **commutativity** —
+  `atomics_may_land_in_any_order` quantifies over every permutation of the
+  workers.
+
+That is the first obligation in the programme that is genuinely *new* rather
+than a re-discharge, and it is what a transformation IR would have to know to
+schedule an atomic reduction at all.
+
+Both halves are shown to be about the accumulate, and the second refutation is
+a failure the GEMM kernels **cannot exhibit**:
+`rounding_breaks_the_stride_split` disagrees across worker counts, as a GEMM's
+K-split does; `rounding_is_order_dependent` disagrees at a *fixed* worker count
+purely from the order the partials land — 1000 against 1100 — with
+`exact_is_order_independent` as the control. Two fixtures were needed, because
+the input that makes the worker count matter and the input that makes the order
+matter are not the same one; three plausible single fixtures agreed on both
+readings before this pair.
+
+##### What the gate isolates, measured rather than asserted
+
+The tie reads the emitted PTX and derives the dataflow rather than matching
+text. The property it pins is the **precondition** the partition theorem needs:
+`worker` is a mixed-radix index over `(ctaid.z, ctaid.x, tid.x)`, so `nworkers`
+must be the product of exactly those three indices' extents. Drop `%nctaid.z`
+and the stride is smaller than the worker count — the classes overlap, some
+keys counted twice, others never.
+
+| mutation | schedule gate | device test (GPU) | device test (no GPU) |
+|---|---|---|---|
+| `nworkers` drops `%nctaid.z` | **FAIL** | FAIL | **ok** |
+| instructions reordered, dataflow unchanged | ok | ok | ok |
+| the proof's classes become a block split | — | — | `coqc` FAIL |
+| the proof's accumulator bound drifts | FAIL | — | — |
+| the `[Y SEQUENCE REDUCTION]` marker removed | **FAIL** | ok | ok |
+
+**Row 1 is the result.** With a card present the device test catches it too, so
+the gate is a diagnosis by name. Without one — the ordinary CI case — the device
+test prints `SKIP: no CUDA driver` and reports **ok on a broken kernel**, and
+the gate is the only thing left. Verified by running it under
+`CUDA_VISIBLE_DEVICES=""`, not assumed.
+
+Row 2 is why the check derives the dataflow instead of matching a window, and
+it is load-bearing rather than decorative: the two accumulating entries build
+the *same* decomposition in a *different instruction order* — `attn_accum`
+hoists `%ntid.x` and `%tid.x` above the shared-memory zeroing loop and
+`attn_accum_naive` does not — so a literal sequence matches at most one of them.
+
+##### Two traps in writing the tie, and both are now removed at the source
+
+Both were mine, both are the shape this repo keeps recording, and both were
+first *worked around in the test*. A workaround leaves the hazard in place for
+the next reader, so both were then fixed in `src/exact_attention.rs`.
+
+- **`attn_accum` contains TWO grid-stride loops** of identical shape: the one
+  over the sequence, and one over `d` that zeroes the shared accumulators.
+  Taking the first `add.s32 %i, %i, %s` picks the zeroing loop, whose stride is
+  `%ntid.x` alone — which then reports the decomposition as depending on
+  `tid.x` and nothing else.
+  - *Worked around* by telling the loops apart by their **bound**, so the test
+    only worked because the fixture happened to use `head_dim != seq_len` — the
+    `lda == K` coincidence, one layer over.
+  - *Fixed* by naming the loop in the artifact: `// [Y SEQUENCE REDUCTION]`,
+    the device this backend already uses for `[Y PAGED DECODE ATTENTION]` and
+    `[Y ZERO DRIFT]`. Both entries carry it, the test locates the reduction by
+    it, and nothing depends on the shape chosen any more. The labels could not
+    serve — they are `LOOP_I` in one entry and `NLOOP_I` in the other, so
+    keying on those is a different hardcode, not a fix.
+- **`%r9 = %r9 * %r5` was a real instruction here** — the worker count was
+  built in two steps into one register — so a "last definition wins" walk
+  resolves its own operand to itself.
+  - *Worked around* by resolving operands at the **definition's** position
+    rather than the use, which is ordinary reaching definitions and is correct
+    in general.
+  - *Fixed* by making the computation SSA (`%r20` for the intermediate).
+    Nothing needed the reuse; it was a trap for anything reading the kernel
+    back, human or tool.
+
+**Fixing the kernel removed the only thing exercising the resolver's
+reaching-definition logic, which is precisely when a capability rots.** That
+path is pinned on a synthetic body instead
+(`the_dependency_walk_handles_a_redefined_register`), and the transfer is
+demonstrated rather than assumed: reverting the resolver to "last definition
+wins" now fails **only** that test, with all five real-kernel tests passing.
+Hand-written PTX elsewhere in this repo is full of non-SSA reuse, so the
+capability has to survive its own kernel being cleaned up.
+
+The register change is a pure renaming and was verified where it matters — all
+nine launch geometries on the real card, `two-level == naive == reference`.
+
+Two further mutations, on the fixes themselves: dropping `%nctaid.z` is still
+caught (and still only by the gate without a card), and **removing the marker
+fails the gate loudly** rather than silently selecting the wrong loop, which is
+the difference between a fixed hazard and a hidden one.
+
+##### What is NOT claimed
+
+The accumulator ceiling (`the_bound_is_one_unit_wide`) is stated and tied to
+`MAX_EXACT_SEQ_LEN`, parsed out of the `.v` rather than restated — it needs
+2.7e8 keys to reach, so no device test can ever demonstrate it. The per-thread
+body is not modelled: `f` is an arbitrary function of the index, so the integer
+exp, the Q0.28 weight and the int8 `V` load are outside this. And the tie is
+**weaker than the GEMM kernels'**: those render their schedule from an `Ix`
+shared with the proof generator, so a divergence is a byte-identity failure.
+This kernel is a PTX string template, and making it an `Ix` means routing
+attention through `IrBuilder` — a larger change than this file.
+
+Twelve proofs, no axioms, nothing admitted. 614 / 880 tests, both builds green.
+
+#### The launch contract the other kernel in the same file did not have · 2026-08-30
+
+Continuing the sweep from the schedule work found a live bug, and the tell was
+that the two reductions in `src/exact_attention.rs` were **not the same kind of
+loop**. `attn_accum` is grid-stride and launch-invariant — that is the module's
+headline claim. `attn_scores` was **one thread per key with a bounds guard and
+no loop**, so it silently required `gridDim.x * blockDim.x >= S`.
+
+Measured on the card at `S = 512`, before touching anything:
+
+    grid.x 1 block 128 -> 128 threads:  768 of 1024 score slots stale, max 34647
+    grid.x 1 block  32 ->  32 threads:  960 of 1024 stale,             max 33794
+    grid.x 4 block 128 -> 512 threads:    0 stale,                     max 34752
+
+**The stale scores are the lesser half.** `attn_accum` subtracts the maximum
+from every score, so a wrong maximum moves *every* softmax weight — a silently
+wrong answer for the whole batch row, not a partially-filled buffer.
+
+Two kernels in one file with opposite launch contracts, under a header that
+advertises launch invariance, and nothing stating either. The same class as the
+paged-decode kernel's fixed launch contract that this file already records, and
+worse in one respect: there the contract is at least written down.
+
+**Removed rather than documented.** `attn_scores` is a grid-stride loop now —
+the same residue-class partition `proofs/GridStrideSplit.v` already proves, so
+the theorem covers it with no new proof and the contract across the family is
+uniform. `&Q[b][0]` moved inside the loop because the inner dot-product walks
+that pointer.
+
+##### What caught it, and what could not
+
+| | before the fix |
+|---|---|
+| `gpu_attention_invariance` (new test) | **FAIL** |
+| `exact_attention_schedule` | **FAIL** |
+| `exact_attention_bounds` | ok |
+| `ptx_portability` (assembles at every arch) | ok |
+
+The portability gate runs real `ptxas` at five architectures and is untroubled,
+which is this repo's own recorded limit — *an assemble gate cannot see a missing
+instruction*, and here the missing instruction is a whole loop.
+
+The existing invariance test could not see it either, and the reason is worth
+keeping: it sweeps the geometry of `attn_accum` while launching `attn_scores`
+at **one fixed, correct** geometry. **A test that sweeps one kernel's launch
+geometry is not testing the other kernel's.** The new test poisons `Scores`
+with `0xAB` rather than zeroing it — zeroing would hide a skipped key behind a
+plausible value — and asserts every short geometry agrees with a covering one.
+
+##### The gate had to stop hardcoding a rule that held for two of three kernels
+
+Adding `attn_scores` to the schedule gate broke it, correctly. The check
+asserted that `nworkers` is the product of **three** extents; `attn_scores`
+mixes only two hardware dimensions. The rule is now *derived from each kernel*:
+take the hardware indices `worker` actually depends on, map each to its extent
+(`%ctaid.x` → `%nctaid.x`), and require `nworkers` to be the product of exactly
+those — no fewer, or the classes overlap; no more, or they stop covering.
+
+**And a structural pattern matched more than one thing for the third time in
+this file.** "The stride update is `add.s32 %X, %X, %rY` after the marker" also
+matches `add.s32 %r12, %r12, %r4` — an ordinary `b * S + i` flat-index
+computation — so the counter came out as address arithmetic. It anchors on the
+loop's **back-edge** now: the increment is the last such instruction before the
+branch that closes the loop, which is a property of loops rather than a shape
+that happens to be unique today. First the marker, now the back-edge: both
+times the fix was to anchor on something the kernel actually *says*.
+
+##### The last precondition is removed rather than documented, and the test that
+##### should have covered it was annihilated by a shared constant
+
+`red.global.max` needs no order argument — max is associative, commutative and
+idempotent, so `GridStrideSplit.v` covers the order. Its **identity** is a
+different question, and it used to come from the host: a signed max wants
+`i32::MIN`, which is not a uniform byte pattern, so `M` could not take the
+`memset(0)` that L, O and P all take. A caller who used one anyway got a wrong
+answer **only when a row's scores were all negative** — with `max(0, s) = 0` the
+softmax subtracts a maximum no key attains, and in Q0.28 the weights quantise
+toward zero instead of cancelling as they would in exact arithmetic.
+
+**That is the worst shape a precondition can have: it cannot fire on random
+int8 data**, where the max over hundreds of keys is positive with overwhelming
+probability. Every test in the file passed either way.
+
+`x ^ 0x80000000` is the order-preserving signed→unsigned bijection, so a max
+over the biased values is the max over the originals and **unsigned max has
+identity 0** — a zeroed buffer now *means* `i32::MIN`, and the module's contract
+is uniform: everything it writes starts at zero. The two accumulating entries
+undo the bias when they load `M[b]`.
+
+**The interesting half is the mutation that survived.** Deleting the undo from
+*one* of the two accumulating entries passed everything, including the
+accum-vs-naive differential on `p` — which is precisely the comparison that
+should catch a one-sided change. The cause is arithmetic and worth stating: the
+exp argument is `((m - s) * KFix + 2^15) >> 16` computed in 64 bits and then
+**truncated to u32**, so a missing undo shifts it by `2^15 * KFix`, and every
+test passed `KFix = 8 << 16 = 2^19`, for which that shift is exactly `2^34` —
+**zero modulo 2^32**. The truncation annihilated the bug at the one temperature
+every arm of the differential shared. `feedback-differential-arms-share-constants`,
+in a place nobody thought to look: not a scale factor both sides multiply by,
+but a constant that makes a *wrong* value truncate to the right one.
+
+A real model's softmax scale is `q_scale * k_scale / sqrt(d)` and does not
+oblige. `the_accumulating_entries_undo_the_bias` uses `2^19 + 1` — the same
+temperature to within 2e-6, odd, so the shift is `2^15` and a missing undo
+drives almost every weight to zero — and checks `p` against
+`fixed_exp::exp2_neg_q16_16` on the host over the device's own scores. That is
+the oracle `p` never had: the existing test says `p` is "a per-element function
+of `s`, so it is not what is in question here", true of the *reduction* claim,
+and the undo lives exactly there. **When a docstring explains why something is
+out of scope, check what has since moved into it.**
+
+Six mutations, all caught, `gpu_attention_invariance` the only suite that fires
+for any of them: full revert to a signed max; drop the bias in `attn_scores`
+only; drop the undo in each accumulating entry separately (the survivor, now
+caught); bias with `0x40000000`, which is not order-preserving; and keep the
+bias but reduce with a *signed* max, which puts the identity back where it was.
+
+##### And the sweep for the same class found the saturate
+
+The lesson generalises to "what other constant here can make a wrong value land
+back on a right one", and the answer was one line down:
+
+```text
+shr.s64      %rd50, %rd50, 16;
+min.s64      %rd50, %rd50, 1073741824;   // <- this
+cvt.u32.u64  %r16,  %rd50;
+```
+
+Without the `min`, a large score delta wraps modulo `2^32` at the narrowing and
+a **far** key comes back with a **small** argument — a weight near `2^28`, the
+weight of the best key. Not precision loss: attention paid to the wrong token.
+
+**Deleting it from the emitter passes `gpu_attention_invariance` on a real
+card.** At `head_dim = 32` and `C = 2^-13` the argument never approaches `2^32`,
+so no device fixture can reach it. The parameters that *do* reach it are ones
+this repo already sweeps — `C = 3.0e-2` is the largest scale in
+`the_temperature_multiplier_carries_two_to_the_thirty_two`'s own list, and
+`head_dim = 128` is a shape `the_shapes_a_model_uses_still_generate` generates.
+At those, a key `2,184,534` below the maximum comes back at `0.986 × 2^28`.
+
+What was missing was the **necessity**, not the presence. The literal was pinned
+by a substring assertion, so removing or moving it already failed — but a check
+that a line exists says nothing about what happens without it, and the host
+replica in the temperature test is `((ds * kfix + 32768) >> 16) as f64`, with no
+clamp and **no narrowing**. Both conventions it exists to separate live above
+the point where the guard acts, so it is right about the multiplier and silent
+about everything else. *Nothing anywhere modelled the u32.*
+
+`the_saturate_is_what_stops_a_far_key_wrapping_into_a_large_weight` models the
+kernel's arithmetic once with the guard as a **parameter**, so the two readings
+cannot drift; *searches* for the wrapping delta rather than hardcoding it;
+carries the control that stops `min(t, 0)` passing (in range the guard must be a
+no-op); shows the value is the exp's own saturation point; and ties the model to
+the emitter. Four mutations, all caught — remove the guard, clamp at `2^31`,
+clamp after the narrowing, and drop the clamp from *both* arms of the model,
+which is the vacuous-necessity case.
+
+#### Phase 2's research question, answered from what was already here
+
+Phase 2's stated risk is *"if obligations don't compose, the thing is a one-off
+proof rather than a compiler."* Three files were proving the same theorem three
+times — `ExactGemmKsplit` (contiguous uneven bands), `GemmBandSplit`
+(proportional edges, plus a granule-snapped family), `GridStrideSplit`
+(interleaved residue classes) — each with its own edge facts, prefix lemma,
+tiling theorem, rounding refutation and control. That question is answerable
+with no new kernel, no IR and no hardware.
+
+`proofs/Decomposition.v` is the schema. Every existing theorem keeps its exact
+statement; its *proof* becomes an instantiation.
+
+**It is TWO theorems, and which one a kernel gets is decided by whether its
+parts are contiguous.** `contiguous_exact` takes an edge function with three
+properties and spends **associativity only** — consecutive parts are a
+re-bracketing, not a reordering. `decomposition_exact` takes an arbitrary
+`owner` map, so the terms genuinely change order, and needs **commutativity**.
+Neither is derived from the other: the general form would give the contiguous
+one only by inverting the edge function, and would then demand commutativity
+the contiguous case does not need — a *weaker* result presented as a simpler
+one. `the_interleaved_split_is_not_contiguous` stops "just use the general one
+everywhere" from looking free. That distinction was prose scattered across two
+files and is now two theorems.
+
+**The honest headline is that it does not save lines — the total went up.**
+Across the *five* files now instantiating it:
+
+| file | before | after | |
+|---|---|---|---|
+| `ExactGemmKsplit` | 30 | 32 | gained a bridge |
+| `GemmBandSplit` | 47 | 52 | gained a bridge **and a theorem that did not exist** |
+| `GridStrideSplit` | 36 | 36 | two bridges in, three inductions out |
+| `ExactGemmMicro` | 71 | **68** | the clamped-edge prefix was the most expensive of the five |
+| kernels | **184** | **188** | plus 42 in `Decomposition.v` |
+
+Each kernel gains a *bridge* saying its own fold IS the schema's fold — the
+price of leaving every statement unchanged — and the burden was already thin
+because the informal reuse was already happening: `GemmBandSplit` reused
+`acc_range` and `sum_range_split` by name and copied the *shape* of the rest.
+
+**(An earlier version of this section published 255 → 269 plus 76. Those were
+wrong: my line counter treated `Proof. … Qed.` written on one line as an
+unterminated proof and counted the rest of the file. Instantiating the schema
+introduces exactly that idiom, so the bug was created by the change it was
+measuring. The conclusion — the total goes up — survives; the numbers did not.)**
+
+What it buys instead:
+
+- **A theorem that did not exist.** The f32 kernel's M/N granule split had four
+  theorems about its *edges* and no exactness theorem, because writing the
+  reduction out a third time was not worth it for a family used to cut rows and
+  columns. Under the schema it costs one application and the three edge facts
+  already proved. Measured against a straw-man written the old way, in the same
+  file, both compiling and proving the same thing: **10 tactic lines standalone,
+  6 through the schema** — so the marginal cost of a *new* decomposition is a
+  bridge plus three facts, with **no new induction and no new reasoning about
+  ranges**.
+- **The reuse becomes a checked dependency instead of a convention.** Same move
+  as `ExactGemmSchedule.v` made for constants, with the same honest caveat that
+  file's header carries: nothing had actually drifted. Six mutations, all caught
+  by `proofs_are_checked` — drop either theorem's key hypothesis, declare the
+  interleaved split contiguous, make `part` ignore its owner, instantiate the
+  granule family with the *proportional* edge function.
+- **A fifth instantiation whose purpose is not dividing work.** The flush
+  chunking in `ExactGemmMicro` cuts the k-pair range into intervals of `Fl`
+  because `vpdpwssd` accumulates in int32 and must be widened before it wraps —
+  an *overflow budget*, not a work split, and this file's own notes say so while
+  warning against confusing the two. The schema does not care: a decomposition
+  of a range is a decomposition of a range, whatever it was chosen for. Its
+  edges are **clamped** (`t ↦ min(t·Fl, n)`), which is why its bridge is a case
+  split rather than `reflexivity` — `cw` clamps only its right end, so a chunk
+  entirely past `n` has width `min(coff (S t), n) − coff t`, truncating to 0 in
+  `nat`, where the schema's is `n − n`. Both zero; saying so is the work. It is
+  the only one of the five that got **smaller**.
+- **The finding: two obligations turned out to be one decomposition.** The
+  int32 flush interval is an *overflow budget*; the output tiling is a *memory
+  partition*; this document's own notes warn against confusing them. They are
+  right about the purpose and wrong about the shape — **both are
+  `t ↦ min(t·X, ext)`**, and each proof file developed the three-regime case
+  split from scratch. The emitter hides it by computing them differently:
+  `chunk_end_ix` emits `min(iv + T, ext)` — an END — and `tile_width_ix` emits
+  `min(ext - iv, T)` — a WIDTH. Two instruction sequences, one function.
+  `Decomposition.clamped` is the family; `clamped_width` reconciles the two
+  spellings once; and
+  `the_flush_interval_and_the_output_tile_are_the_same_family` states the
+  agreement in the file whose job is cross-file agreement. That is a claim
+  about the *schedule*, not the code generator — the emitter still emits two
+  sequences, and should, since one site has the offset in hand and the other
+  has the end.
+- **A second obligation family now shares the schema.** `acc_parts` folds
+  *values* over `Z`; an output tiling has nothing to fold and asks only that
+  the part *widths* add up with no gap and no double count. `width_sum` over
+  `nat` is that, and it needs no algebra at all — the sum telescopes. Same
+  decomposition, different consequence. `ExactGemmTiling`'s 16-line
+  three-regime `covered_closed` is **3 lines**, and the file is 6 smaller.
+  `ExactGemmMicro` went 3 *bigger*, because `cw` clamps only its right end and
+  so needs a width reconciliation *and* an offset one.
+- **The standing limit, stated rather than gated:** nothing *forces* a kernel to
+  instantiate the schema. The straw-man above compiles perfectly. What is
+  guaranteed is that the seven files which do instantiate it cannot drift from
+  each other — a change to `contiguous_exact` or `clamped_width` breaks all of
+  them at once.
+- **One mutation of five survived, in a control written minutes earlier.** The
+  non-vacuity companion to the agreement theorem evaluated both spellings at a
+  ragged piece — and moving it to a *full* piece, where the agreement is
+  trivial, left everything green. It states the raggedness as a proposition now
+  (`tw 5 3 1 < 3`), which the move makes false. **A control that merely
+  exhibits the interesting case has not said the case is interesting.**
+
+#### The second schema: positional indices
+
+`quot_rem_unique` had **two independent copies** — `ExactGemmTiling` and
+`ExactGemmPacking`, neither file requiring the other. `ExactGemmPacking`'s
+carried a comment defending it:
+
+> Proved locally rather than imported: it is six lines, and a lemma cannot
+> drift into being wrong the way a duplicated CONSTANT can — it is re-proved
+> wherever it is stated.
+
+**That argument is right, and it is right about the wrong thing.** A duplicated
+*lemma* is checked by `coqc` at every copy, unlike a duplicated constant, which
+is exactly why `ExactGemmSchedule.v` is generated. What it does not cover is the
+package around it: uniqueness is six lines, but **onto** was eleven lines in
+`ExactGemmTiling`, seven in `ExactGemmRegisterTile` and four in
+`ExactGemmPacking` — the same argument three times — and the two-digit peel in
+`pack_b_slot_bijective` was sixteen. *The thing that recurs is the bijection,
+not the lemma inside it.*
+
+`proofs/MixedRadix.v` is `pack B q r = q·B + r` with its two legs, its
+two-sided inverse, in-range, onto, and a two-digit form. Every index in this
+compiler is one of these at a different radix: a tile offset `t·T + f`, a packed
+A slot `2i + h`, an accumulator column `16v + l`, a linear address `r·ldc + c`,
+and the packed B slot `(j/16)·32 + (j mod 16)·2 + h` — three digits, radix 4,
+16, 2.
+
+**This is the first factoring where the kernel files got smaller in aggregate**:
+222 → 200 tactic lines, plus 30 in the shared file.
+
+| | before | after |
+|---|---|---|
+| `Tiling.quot_rem_unique` | 7 | **1** |
+| `Packing.quot_rem_unique` | 7 | **1** |
+| `Tiling.tile_index_surjective` | 11 | 6 |
+| `Packing.pack_b_slot_bijective` | 16 | 13 |
+| `RegisterTile.tile_position_surjective` | 7 | 5 |
+
+**Six mutations, four caught, two survivors of different kinds** — and sorting
+them is the point. Restoring `ExactGemmPacking`'s *identical* hand-written copy
+passes, and should: the gate checks the property, not the plumbing, exactly as
+the `Ix` gate's design control does. The other survivor was a **real hole in a
+control written minutes earlier**, and it is the same shape as the previous
+increment's: `without_the_digit_bound_it_is_not_injective` exhibited a collision
+(`0·2 + 2 = 1·2 + 0`), and moving the fixture to a *legal* digit pair left the
+statement true, provable and green. It refutes the **weakened theorem** now —
+`~ (forall …, q₁·B + r₁ = q₂·B + r₂ → q₁ = q₂ ∧ r₁ = r₂)` — which no choice of
+witness can satisfy vacuously. **Twice in two increments: a control has to state
+what makes the case interesting as a proposition, not merely exhibit it.**
+
+#### Phase 2's first slice: a loop's ITERATION SPACE, not just an expression
+
+The `Ix` layer removed the second description of a schedule *number*. The loop
+nest's *shape* was still hand-written — so `ExactGemmTiling.toff` and `ntiles`
+were a **model** of what the driver's row-panel loop does, with nothing saying
+the loop does it.
+
+`IrBuilder::loop_begin(tag, start, end, step)` was already a counted loop, so
+the skeleton was factored; what was not was the tie to the proofs.
+`cpu_gemm::CountedLoop` names those three as `Ix` values and renders them **to
+LLVM and to Coq**, exactly as the expression layer does. All three emitted
+modules are byte-for-byte unchanged.
+
+```coq
+Definition row_panel_visit (M k : nat) : nat := (0 + (k * 6)).
+Definition row_panel_trips (M : nat) : nat := (((M - 0) + (6 - 1)) / 6).
+```
+
+and in `ExactGemmTiling`, the payoff — the first tie in this development
+between a proof and the **shape** of an emitted loop rather than the value of an
+emitted expression:
+
+```coq
+the_emitted_row_loop_enumerates_the_tiles  : row_panel_visit M k = toff MR k
+the_emitted_row_loop_runs_once_per_tile    : row_panel_trips M   = ntiles M MR
+```
+
+**`trips_ix` is rendered to Coq only, and that asymmetry is deliberate.** The
+emitter never computes a trip count — the loop tests `iv < end` — so it is a
+fact *about* the loop rather than an expression it emits. Which is why
+**mutating it to round down is caught by the schedule gate and by nothing
+else**: every correctness suite passes, because the emitted code is unchanged
+and only the proof's account of it moved. That is the divergence class this
+whole layer exists for.
+
+**My own gate had a gap, and the mutation sweep found it.** Handing the
+*column* loop the row description reaches Coq unchanged — the `.v` still renders
+both loops correctly — so the first version of the gate passed while the driver
+opened a 6-step loop over `%M` where the description says 64 over `%N`. Three
+correctness suites caught it; the schedule did not, which is the weaker
+guarantee. `the_driver_opens_the_loop_it_was_described_with` now recovers
+`(start, end, step)` from the emitted LLVM per tag by following the loop's own
+dataflow — the store that seeds the induction variable, the `icmp slt` in its
+`.cond` block, and the `add` written back to the same slot — and compares them
+against the description. **A description that reaches the proof is only half a
+tie; something has to check the emitter uses it at the right site.**
+
+| mutation | schedule gate | 3 correctness suites |
+|---|---|---|
+| row loop steps by `MR-1` | caught | caught |
+| **column loop given the row description** | **caught** *(was missed)* | caught |
+| row loop starts at 1 | caught | caught |
+| `trips_ix` rounds down | **caught** | **all ok** |
+| A-pack loop hand-written *identically* | ok | ok — the design control |
+
+**What is still hand-written:** which loops exist, in what order, in which
+blocks, and what they call. And only loops whose bounds are *operands* can be
+described this way — the fold-back loops walk builder-computed registers, and
+describing those means emitting their bounds through `Ix`, which changes the
+instruction stream. Both stated in the code rather than left to be rediscovered.
+
+619 / 885 tests, both builds green. **Fourteen proofs, no axioms.**
+
+### Phase 2 — Turn the proof into a mechanism · 1–2 years
+
+Phase 1 proves one kernel by hand. This makes it structural: a transformation
+IR in which tiling, packing, vectorization, loop reordering and thread
+partitioning are each *individually* obligation-carrying, composed
+automatically. Adding an optimization means discharging its obligation, not
+reproving the kernel.
+
+- **Done when** — a second, structurally different kernel (attention, or a
+  stencil) is verified with no new hand-written proof.
+- **Hard part** — this is the research risk of the whole programme. If
+  obligations don't compose, the thing is a one-off proof rather than a
+  compiler.
+- **Exit value** — a verified kernel compiler for CPU. Narrow, but complete and
+  defensible.
+
+### Phase 3 — Extend to the GPU pipeline · 2–3 years
+
+The transformations that make GPU kernels fast are the ones most likely to be
+silently wrong: `cp.async` staging, `ldmatrix`, `mma.sync`, XOR bank swizzling,
+and the mbarrier discipline. Fold in `linear_tracker`, which already proves
+async tokens are consumed exactly once — a property this backend was
+*discarding* at the emitter until it was caught.
+
+- **Done when** — a tensor-core GEMM carries a proof covering its memory
+  pipeline and its swizzle, not only its arithmetic.
+- **Trust boundary** — Y emits PTX; `ptxas` produces SASS and is closed source.
+  The proof covers source-to-PTX, and `ptxas` is trusted or validated
+  per-translation. **This must be stated in the certificate, never papered
+  over.**
+
+**The per-translation option now exists, and it started before Phase 3 · 2026-09-04.**
+`tools/ptxas_tval/` symbolically executes a kernel's PTX and the SASS `ptxas`
+emitted from that exact file, and discharges the difference in z3. Six kernels
+are validated — 282 obligations, one across a loop, one using shared memory and
+a barrier — against a negative control that is *refuted*, because `ptxas`
+contracts `mul.f32`+`add.f32` into an `FFMA` unless the program says `.rn`.
+
+> Those two figures are what this entry measured on 2026-09-04 and are kept as
+> written. The standing results have since grown to **seventeen rows, 392
+> obligations, fourteen validated and three refuted** — one of them a corpus
+> kernel storing sub-word values after a load that can read them back — and one
+> of them is a shipped GEMM: the emitter was taught to say `fma.rn.f32`, which is
+> byte-identical in SASS, so the artifact now names the rounding the machine
+> performs. See `docs/ptxas_translation_validation.md`, which `regress.sh`
+> asserts row by row.
+
+Two things it establishes that change this phase's plan rather than confirming
+it. **The binding constraint is the solver, not opcode coverage**: a kernel with
+29 multiplies validates in 24 s and one with 65 is unproved after 9,705 s, and
+asking what could be closed *if every opcode were modelled* puts 52 of 67 under
+that wall using barriers as cut points. And the ranking **inverts** — the 23
+tensor-core GEMMs this phase is about look like the deepest bucket and are the
+tractable one (39–61 multiplies per barrier region), while the field kernels
+look shallow and run 244–717. The bullet above is right that the boundary must
+be stated; what it did not anticipate is that stating it would be the cheap part.
+Write-up: [Translation validation for `ptxas`](ptxas_translation_validation.md).
+
+> The "unproved after 9,705 s" in this entry does NOT reproduce, re-measured
+> 2026-09-19: at default budgets the first sweep alone takes 16,237 s and closes 17
+> of 276 partial sums, and the validator of the commit that published the figure
+> is still in its first sweep at 9,810 s. The verdict stands (UNPROVED, no `sat`);
+> the time and the 261-of-276 do not. See the tval write-up.
+
+**Inventory correction, measured 2026-08-31.** "XOR bank swizzling" reads as a
+transformation that exists and needs a proof. It does not exist in any path a
+kernel can take. `src/bank_conflict.rs` is real — the type checker searches for
+a conflict-free swizzle when a program declares an `SmemLayout` and prints
+`[Optimization] Auto-swizzling SharedMemoryTile RxC ...` — and **that result
+reaches no backend**, because every way of getting an indexable tile is either
+a syntax error, refused, or (until it was fixed) emitted PTX `ptxas` rejects.
+`docs/y_language_documentation.md` §21 documents the type as an API; the
+section now opens with a status note saying otherwise.
+
+The shared-memory surface that ships is `shared_alloc_u32` / `shared_load_v4` /
+`shared_store_v4` / `barrier_sync`, and **it has no swizzle at all** — the
+BN254 kernels apply one in generated source
+(`tools/gen_bn254_kernels.py::swizzle`), where it is a bijection because bits 3
+and up pass through unchanged, argued in a comment and checked by nothing.
+
+So Phase 3's swizzle obligation is not "prove the existing pass correct". It is
+"there is a hand-written swizzle in a generator whose bijectivity is prose, and
+a compiler pass that computes swizzles nothing applies". Naming which of those
+to build on is the first decision, and it was not visible before this.
+
+#### Phase 3 progress, 2026-09-05 — the GPU kernel carries a certificate now, and it states the `ptxas` boundary
+
+This phase's trust-boundary bullet says the `ptxas` step "is trusted or
+validated per-translation" and that **this must be stated in the certificate,
+never papered over**. Measured: there was no certificate.
+`--emit-attention-ptx` wrote a `.ptx` to stdout and nothing else, while
+`AttentionSchedule.v` → `GridStrideSplit.v` → `SoftmaxErrorBound.v` — 96
+theorems — described that exact kernel. Same shape as the finding recorded for
+the exact GEMM before its certificate landed: **proof-carrying described the
+repository, not the output.**
+
+`src/exact_attention_certificate.rs` emits one `.v` per emitted kernel.
+`Y_NO_CERTIFICATE=1` suppresses it, loudly, the same switch as the CPU path.
+
+**The capstone is the dependency ROOT and it was measured rather than guessed.**
+The rule already established here is that only a root can truthfully state a
+global negative, so the capstone is the file whose exclusion list is the
+aggregate one. `AttentionSchedule` ← `GridStrideSplit` ← `SoftmaxErrorBound`,
+and nothing requires the last — so the GPU capstone is **`SoftmaxErrorBound.v`**,
+not `GridStrideSplit.v`, which is what it looks like from the kernel's side.
+
+**The obligation bites, which is what stops it being paperwork.** The kernel
+reduces into a 64-bit accumulator, so exactness needs
+`S * (2^28 - 1) * 127 < 2^63`. Y decides that in `usize`
+(`exact_attention::MAX_EXACT_SEQ_LEN`); the certificate states it over `Z` and
+hands it to `coqc`, which has no `usize`. Two tools, no shared code, no shared
+representation, and a boundary **one unit wide** — verified before anything was
+wired in:
+
+```
+seq_len = 270,549,122   emitter: emits    coqc: accepted
+seq_len = 270,549,123   emitter: refuses  coqc: "Cannot find witness"
+```
+
+That is the same structure as the exact-GEMM certificate's licence check, which
+is where the design came from.
+
+**What the certificate says about `ptxas` is the point of the exercise.** It is
+a `Check::Unchecked` item naming its own route: *"validating THIS kernel
+per-translation with `tools/ptxas_tval/`, which exists and currently covers six
+kernels; this is not one of them, so for this kernel `ptxas` is TRUSTED and not
+validated."* Measured, not assumed — no committed `.ptx` contains `attn_accum`,
+so the attention kernel is not in that corpus. The item also carries *why* it
+cannot be assumed away: the same validator **refutes** a float kernel because
+`ptxas` contracts `mul.f32`+`add.f32` into an `FFMA` that rounds once where the
+PTX rounds twice.
+
+> **SUPERSEDED · 2026-09-08 — the count in that quotation was already wrong when
+> it was published, and it was ungated.** `regress.sh` asserts **sixteen**
+> standing rows over **thirteen** distinct subjects, and had for three
+> increments; the gate asserted the item's *route* and never its arithmetic, and
+> the error is in the safe direction, so nothing noticed. The same sentence was
+> quoted verbatim here and in `README.md`, so one ungated number was published
+> three times. The count is gone rather than refreshed — it is not what the
+> claim rests on, and *rows* versus *subjects* is exactly the ambiguity that had
+> already bitten the README. The item now states the ABSENCE and the gate
+> CHECKS it, reading the entry names out of the PTX the compiler just emitted
+> and the subjects out of `regress.sh`. The quotation above is kept as the text
+> that shipped on 2026-09-05.
+
+**A `nat` literal is unary, and at a production length that is a landmine.**
+`Definition seq_len : nat := 270549122` is 270 million constructors, and every
+normalising tactic would try to evaluate it. The certificate emits
+`Z.to_nat seq_len_Z` and proves `Z.of_nat seq_len = seq_len_Z` by `Z2Nat.id` —
+the pattern this repository already recorded from `SoftmaxErrorBound.v`'s own
+`ring` blow-up, applied at generation time.
+
+**The bijection gate was generalised rather than copied.** `TrustItem`, `Check`
+and the renderer are now shared between the two certificates, and
+`tests/certificate_states_its_trust_boundary.rs` runs the same bijection over
+both capstones: every bullet of the capstone's exclusion list claimed by exactly
+one trust item, and every attributed item finding exactly one bullet. A second
+copy of that reasoning is precisely the drift the gate exists to prevent — the
+recorded instance is a hand-copied subset that dropped a bullet while adding one
+of its own, both lists three long so a count called them equal.
+
+**What this does NOT do.** It does not extend the proofs; every theorem it
+instantiates already existed. It does not put the attention kernel in the
+translation validator, so `ptxas` is trusted for it — which the certificate now
+says out loud instead of leaving to a reader to work out. And it covers the
+exact-attention kernel only: the tensor-core GEMMs this phase is really about
+have no proofs to carry yet, and `loopgap.py` says 32 of the 48 loop kernels in
+the validator's corpus are behind one structural gate before any of that
+becomes reachable.
+
+#### Phase 3 progress, 2026-09-05 — the first GPU GEMM theorem, and the guard it found was compiled out
+
+Asked when the tensor-core GEMMs get done, the answer came from a measurement
+rather than a plan, and the measurement moved the plan twice.
+
+**The blocker nobody had named: 950 of the 952 `mma.sync` instructions this
+repository emits are FLOATING POINT.** Counted across every committed `.ptx`:
+854 `f32.f16.f16.f32`, 96 `f32.e4m3.e4m3.f32`, and **2** `s32.s8.s8.s32`. So
+§2's premise — exact accumulation restores associativity, which is what makes
+the kernel-vs-spec relationship an *equality* — **does not apply to them at
+all.** An f16 tensor-core GEMM is not equal to the naive nest, and proving it
+so is not available; the honest options are an error bound (weak over large K)
+or the schedule alone.
+
+**And the one kernel that CAN carry the argument is a stub.** `int8_gemm.ptx`
+is 89 lines with 2 `mma` and **zero** `cp.async`, `ldmatrix` or `bar.sync`,
+against `gemm_f16_4096.ptx`'s 964 lines / 65 / 22 / 24 / 7. It has no
+shared-memory staging, no pipeline and no barriers — a single-tile
+demonstration, not a GEMM. **The same missing kernel blocks the product**:
+`tools/batch_invariance_demo.py` falls back to torch f32/f64 for exactly one
+stated reason, "torch has no batched CUDA integer matmul."
+
+So "do the tensor-core GEMMs" is not one task. The half that is available now
+is the SCHEDULE, and it is available because
+`proofs/ExactGemmTiling.v` mentions `f16`, `f32`, `float`, `vpdpwssd`, `int16`
+and `i32` **zero times** — it is `nat` index reasoning and is
+precision-agnostic. That half is what this increment does.
+
+**Starting there found a live defect, which is why the schedule half was worth
+doing first.** Every tensor-core GEMM derives its warp geometry by TRUNCATING
+integer division:
+
+```text
+per_warp = cta / warps ;   num = per_warp / frag
+```
+
+so a warp's base advances by `per_warp` while a warp *writes* `num * frag`.
+Those agree exactly when `frag * warps` divides `cta`. The precondition was
+three `debug_assert_eq!`s at each of three emitters — and **`Cargo.toml`
+declares no `[profile.release]`, so rustc's default `debug-assertions = false`
+applies and none of them is in the shipping binary.** The same gates-nothing
+shape as `@require`.
+
+Measured on `tests/gemm_f16_1024.ysu` with `Y_CTA_OVERRIDE=96,128,32,4,2,3`:
+stride 24, `num = 1`, so each CTA advances 96 rows and **writes 64** — gaps at
+rows 16-23, 40-47, 64-71, 88-95 — under "Compilation Successful!", exit 0, and
+`ptxas` exit 0. That is `ExactGemmTiling.c_written_exactly_once` failing, the
+theorem the CPU chain has had since the tiling increment, on the GPU where
+there was no equivalent.
+
+- **Two producers reach it, both demonstrated.** `Y_CTA_OVERRIDE`, and a
+  persisted `AUTOTUNE_*` line in `.ysu_hw_profile` — state on disk, written by
+  `--autotune`, keyed by GPU, needing no environment variable at all. Both
+  parse sites validate nothing beyond the field count. All 23 built-in
+  candidates satisfy the constraint, which is why the default path was never
+  wrong.
+- **The first cache probe was MIS-AIMED**, and saying so is part of the
+  result: it injected a line for a shape with no cached entry, so the analytic
+  model answered and the tile never reached the emitter. Re-aimed at a shape
+  the cache holds, it reproduces — `exit=1`, no artifact.
+- **`Y_SWIGLU_TILE` ALREADY VALIDATED THIS EXACT CONSTRAINT** and rejected with
+  a notice. So the same rule was written correctly at one override site and not
+  the other: `feedback-guards-consulted-at-one-site`, sixth occurrence in this
+  file, and the most legible instance yet because the correct code is nine
+  hundred lines from the missing code and does the same thing.
+- **The FP8 site's guard is DEFENSIVE AND UNREACHABLE** — its tile comes from
+  compile-time constants only, no autotuner and no override. Recorded rather
+  than claimed as coverage. Its fragment shape is m16n8k32, not m16n16k16,
+  which is why `validate_warp_tiling` takes the fragment extents as parameters:
+  hardcoding 16 would pass an FP8 tile that does not tile.
+
+**`proofs/GpuWarpTiling.v`** states the partition — `rows_in_range`,
+`rows_injective`, `rows_onto`, `cta_rows_written_exactly_once` — and refutes
+the compiled instance (`the_measured_gap`, `the_measured_hole_count`). Nine
+`Print Assumptions`, no axioms, nothing admitted. Injectivity is
+`MixedRadix.two_digit_unique` and nothing else: a warp row is a two-digit
+positional index, so this is the **fourth consumer** of that schema and the
+first reached from a GPU warp geometry — no new reasoning.
+
+**What is deliberately NOT claimed.** One axis at a time (M and N are
+independent instances; K is a reduction and is `ExactGemmKsplit`'s shape).
+Nothing about the VALUE written — these GEMMs are f16 or fp8 and their
+accumulation is not associative, so this is a claim about the SCHEDULE, which
+is the half that does not depend on precision and is the half the defect was
+in. And the tie is the emitter's arithmetic transcribed and gated by
+`tests/gemm_tile_partition.rs`, **not** the exact GEMM's byte-identity:
+`src/ptx_emitter.rs` does not go through the `Ix` extraction layer, where
+`src/exact_attention.rs` does (`Ix::`/`render_ptx`/`PtxEnv` appear 18 times
+there and **0** times in the PTX GEMM emitter). Routing the GEMM through `Ix`
+is what would upgrade this to the strong tie.
+
+#### Phase 3 progress, 2026-09-05 — the int8 GEMM was called a stub from a grep, and its launch contract was unstated
+
+The tensor-core GEMMs are Phase 3's real subject, and the previous increment
+recorded a blocker: **950 of the 952 `mma.sync` instructions this compiler
+emits are floating point** (854 `f32.f16.f16.f32`, 96 `f32.e4m3.e4m3.f32`, 2
+`s32.s8.s8.s32`), so §2's premise — exact accumulation restores associativity,
+which is what makes the kernel-vs-spec relationship an *equality* — applies to
+exactly one of them. That note went on to call the int8 kernel "a stub" on the
+strength of counting `cp.async` / `ldmatrix` / `bar.sync` occurrences, and to
+rank bringing it up as "the long pole, kernel engineering not proof work".
+
+**Running it says otherwise, and the grep was the wrong instrument.** Measured
+on an RTX 4070 Ti SUPER, clock-ramped, correctness-checked on every timed
+configuration:
+
+> **CORRECTED 2026-09-05 — both figures in the original table were wrong, by
+> different mechanisms, and they partly cancelled.** The row is kept because the
+> conclusion it drew survives and the errors are worth reading. Re-measured
+> same-session, interleaved, ramped, every arm correctness-checked:
+>
+> | 4096³ | G MAC/s | of cuBLASLt | of ISA ceiling | published |
+> |---|---|---|---|---|
+> | Y int8 (16×8) | 14,571 | **0.09x** | 8.0% | 15,439 / 0.41x / 4.1% |
+> | cuBLASLt (`torch._int_mm`) | 144,196 | 1.00x | 80.2% | 38,090 |
+>
+> **The baseline was 3.8x too low because `.contiguous()` sat inside the timed
+> loop**, materialising a 16 MB copy per call. Measured directly:
+> `_int_mm(A, B.t())` is 144,803 G MAC/s and `_int_mm(A, B.t().contiguous())`
+> is **31,452** — which is essentially the 38,090 that was published. The
+> baseline kernel is `cutlass_80_tensorop_i16832gemm_s8_256x128_64x3_tn_align16`,
+> read out of the profiler rather than assumed.
+>
+> **The ISA ceiling was 2.1x too high** — see the correction in the next
+> subsection. The two errors moved the "% of ISA ceiling" column in opposite
+> directions, which is why 4.1% looked plausible where the truth is 8.0%.
+>
+> **The Y arm reproduces** (15,439 → 14,571, within 6%), and the corrected
+> baseline itself reads 144–154k across runs — so every ratio quoted here is
+> taken *within* one interleaved run, never across two. *A ratio whose two
+> arms move by different factors between sessions has a contaminated arm, not a
+> noisy one* — this repository's own OpenBLAS lesson, and it applied here to a
+> figure I had published two days earlier.
+
+| 4096³ | G MAC/s | of cuBLASLt | of ISA ceiling |
+|---|---|---|---|
+| Y int8 | 15,439 | **0.41x** | 4.1% |
+| cuBLASLt (`torch._int_mm`) | 38,090 | 1.00x | 10.2% |
+
+A 0.41x kernel is not a stub. **The first timing run was 4x slow across the
+board and reported nothing wrong** — this card idles far below its boost clock
+and the repository's own recorded window effect ("absolute timings moved 4-5x
+between windows") applies; a ramp phase is what makes the numbers reproduce.
+
+##### The ISA ceiling, and the arm that validates it
+
+> **CORRECTED 2026-09-05: this number was 2.08x too high, and the paragraph
+> below contains its own bug report.** The real ceiling is **179,761 G MAC/s**.
+>
+> The probe kept eight accumulator sets and **stored only one**, so `ptxas`
+> deleted the mma chains feeding the other seven. **The doubling control did not
+> catch it, and could not: a constant dead fraction divides out of the ratio.**
+> Storing every accumulator gives 179,761 with the control still at 1.989 —
+> and that figure is **102% of `66 SM × 2.61 GHz × 1024 MAC/SM/cycle`**, where
+> 374,027 was 2.1x above anything the hardware can do.
+>
+> **The tell was written down and filed as a curiosity.** The paragraph below
+> records int8 at 4.04x the f16 rate where a spec sheet predicts 2x, and calls
+> that "measured and unreconciled rather than adjusted". The corrected ceiling
+> is **1.94x f16** — exactly the 2x — so everything reconciles. *A measurement
+> that disagrees with a spec sheet by 2x is a bug report, not a curiosity;
+> "unreconciled" is a note to come back, and I did not.*
+>
+> The control paragraph's reasoning was sound and the control was run on the
+> arm where the bug did not bite. **An accounting method validated on one arm
+> does not validate a different arm's dead-code elimination.**
+
+`374,027 G MAC/s` for `mma.sync.m16n8k32.s8`, doubling-verified (ratio 2.000)
+with 32 live `IMMA.16832.S8.S8` in the disassembly. That is **4x** the f16
+rate, where a spec-sheet reading predicts 2x, so the number is only worth
+quoting because of the control: **the identical probe in f16 reads 92,482
+G MAC/s = 185 TFLOPS against this card's ~176 spec.** The accounting method is
+validated by the arm whose answer is independently known; the int8 arm uses it
+unchanged. The 4x is recorded as measured and unreconciled with the marketing
+figure, rather than adjusted to match it.
+
+##### Where the 0.41x actually goes, established by a prediction that came true
+
+Neither kernel is compute bound — both are under 11% of the ceiling. Y's is
+**L2-bandwidth bound**, because it has no shared-memory staging: one warp owns
+a 16×8 output tile and reads its 16 A rows and 8 B columns straight from
+global, i.e. **0.1875 bytes per MAC**.
+
+| shape | A+B | warp-level read traffic | G MAC/s |
+|---|---|---|---|
+| 2048³ | 8 MB | 2,821 GB/s | 15,048 |
+| 4096³ | 32 MB | 2,887 GB/s | 15,399 |
+| 6144³ | 72 MB | 2,905 GB/s | 15,496 |
+| 8192³ | 128 MB | **789 GB/s** | **4,209** |
+
+Flat at ~2,890 GB/s while the working set is L2-resident, then a **3.7x
+collapse** at 8192 with traffic falling to DRAM levels. A 128×128 staged tile
+moves 2/128 bytes per MAC — **12x less** — which is what the bring-up is worth,
+and it removes the cliff entirely. That is a performance project with a number
+on it now, rather than an open-ended one.
+
+##### The finding: an unstated launch contract, and a wrong answer
+
+The schedule gives one output tile to one **warp**, so a CTA has exactly 32
+threads of work however many it is launched with. The emitted kernel contained
+**one predicate** — the K-loop bound — and never mentioned `%ntid.x`.
+
+At M=64 N=32 K=128 with every element of A = 3 and of B = 5, so every element
+of C must be exactly K·15 = 1920:
+
+| block | result |
+|---|---|
+| (32,1,1) | correct |
+| (64,1,1) | 1344 of 2048 wrong, `C[256] = 3840` |
+| (128,1,1) | same, and it reads row 79 of a 64-row A |
+
+**3840 is exactly double**, which is the mechanism: warp 1's lane index gives
+`g = tid/4` in 8..15 instead of 0..7, so its two A-row reads land at `cy·16+g`
+and `cy·16+g+8` — the second of which is the *next* tile's rows — and
+`red.global.add.s32` sums that second product into the same output.
+
+That matters more here than in an ordinary kernel. **This kernel's entire
+advertised claim is a bit-identical answer at every launch geometry**
+(`tests/gpu_batch_invariance.rs`), and a wrong block size falsified it
+silently. Fixed with a warp-uniform guard — the predicate is `tid >= 32`,
+constant across any warp, so `mma.sync.aligned` still sees all 32 lanes of
+warp 0 converged. Every block size is correct now, and the fix costs nothing
+measurable (15,061 vs 15,072 G MAC/s at 2048³, inside the ~4% band).
+
+##### `proofs/Int8GemmSchedule.v` — 20 `Print Assumptions`, no axioms
+
+No proof covered this kernel at all; every prior mention of "int8" in `proofs/`
+is the attention kernel's int8 `V` load. Three claims, and two of the three
+schemas are instantiated rather than re-derived:
+
+- **The launch guard**, `the_guard_is_what_confines_a_warp_to_its_own_tile`:
+  both A rows a lane reads lie inside its own 16-row tile exactly when `g < 8`,
+  which `tid < 32` gives. Its dual, `without_the_guard_a_second_warp_lands_in_
+  the_next_tile`, states the measured failure as arithmetic at `g = 8`.
+- **The split-K**, striped over `%ctaid.z`. That is residue classes, so
+  `GridStrideSplit`'s `grid_stride_exact` and `atomics_may_land_in_any_order`
+  apply verbatim — **the second is the whole demonstration**, since the
+  partials combine through `red.global.add.s32` in whatever order the scheduler
+  produces. The emitter states exactly this in a prose comment
+  ("order-independent by construction — the same result for every grid, every
+  launch, every scheduling accident") and nothing had checked it;
+  `gpu_batch_invariance` sweeps seven split factors, which is seven points
+  rather than a property.
+- **The output tiling and the lane decomposition** are positional indices, so
+  `MixedRadix` discharges them with no new reasoning — the fifth and sixth
+  consumers of that schema.
+
+##### A framing correction: batch invariance does not favour Y here
+
+Measured against `torch._int_mm`: at every shape it accepts, cuBLASLt's int8
+GEMM is **also** batch-invariant, while the f16 control **DIFFERS at 5 of 6
+batch sizes**. That is not a coincidence and it is not a gap in cuBLASLt —
+**integer accumulation is associative, so *any* int8 GEMM has the property for
+free.** The differentiator is not having it; it is having it *proved and
+stated*, which is what this file adds. (What cuBLASLt does not do is accept the
+shapes: `_int_mm` refuses M<16 outright.)
+
+##### Mutation table, 9 probes, nine suites, each `--test` target run separately
+
+**M0 CONTROL, two independent `mov`s reordered, un-applied AND applied rows:
+green everywhere** — read first. **RESTORED BASELINE green** — read second.
+
+- **M1 the guard removed (the original bug) / M3 the guard's label emitted
+  before the reduction, so it skips nothing / M5 the confinement theorem
+  weakened / M7 the proof's `MMA_N` set to 16 / M8 the emitter's shape refusal
+  drops the N axis: `int8_gemm_launch_contract` ONLY**, all five.
+- M2 the guard reads `%ntid.x` (not warp-uniform) and M4 the predicate inverted
+  (over-refusal): four suites each — the control that stops "guard everything"
+  and "guard nothing" from passing.
+- M6 the landing-order refutation deleted with its `Print Assumptions`:
+  **`proofs_are_checked` ONLY**.
+
+**M1 is the row that matters: the original defect was invisible to all eight
+other suites — `gpu_batch_invariance` included**, which is the suite whose
+entire claim it falsifies. It sweeps `gridDim.z` at one fixed, correct block
+size, and a test that sweeps one axis is not testing the other.
+
+**M5 SURVIVED THE FIRST SWEEP AND IT WAS A REAL HOLE IN THE NEW GATE.**
+Weakening `the_guard_is_what_confines_a_warp_to_its_own_tile` to its lower
+bound alone — `cy·16 <= row`, true for every `g` whatsoever — left everything
+green: the theorem still compiles, still reports "Closed under the global
+context", and still satisfies `proofs_are_checked`'s content control, which
+asks that the theorem *name* appear under a `Print Assumptions` and not that it
+say anything. That is the `Theorem the_certificate_is_not_vacuous : True.`
+shape this repository already records, and the fix is the one already written
+down: **the guard belongs on the statement's text.** The gate now requires the
+confinement theorem to carry its upper bound and the refutation to negate the
+same bound, so the pair cannot drift apart. Re-run, M5 is caught by that gate
+alone — 9/9.
+
+##### What this does not close
+
+- **One kernel, and the smallest one.** The 23 f16 GEMMs still cannot carry an
+  exactness argument at all, and nothing here changes that.
+- **The staging.** Y's int8 GEMM is still at 0.09x cuBLASLt for the traffic
+  reason above, and still falls 3.7x off the L2 cliff. *(Half of that is closed
+  by the warp tiling in the next section, which needs no staging at all.)*
+- **The tie is transcription-plus-gate**, as in `GpuWarpTiling`: `ptx_emitter`
+  does not go through the `Ix` extraction layer, so the proof is checked
+  against emitted text rather than rendered with it. Routing the GEMM path
+  through `Ix` remains the named upgrade to a byte-identity tie.
+- **`mma.sync`'s own semantics and the per-lane fragment layout** are ISA facts
+  in the trusted base, pinned empirically by `tests/ptx_int8_mma_layout.rs`,
+  which runs the instruction on the device against a plain integer matmul.
+
+#### The warp tile: 4.29x with no shared memory, and two published numbers that were wrong
+
+Taken from the previous increment's own residue, which named the shared-memory
+staging as the next item and — per the standing discipline — said to measure
+what the bring-up costs before writing any of it. **The measurement moved the
+plan twice and corrected two figures this document had published two days
+earlier.**
+
+##### Measure first: there is a cheaper lever pointing the same way
+
+The staging argument is a traffic argument: one warp owns a 16×8 output tile
+and reads its 16 A rows and 8 B columns straight from global, so it moves
+`16*32 + 8*32 = 768` bytes per 32-wide K step to retire 4096 MACs — **0.1875
+bytes per MAC**, against a 128×128 staged CTA tile's `2/128`, a 12x gap.
+
+That framing hides a cheaper lever. Issuing `mt*nt` mma per K step **from the
+same A and B fragments** amortises both halves with no shared memory, no
+barrier and no instruction this backend does not already emit:
+
+| warp tile | mma | B/MAC | vs 16×8 | accumulator + fragment regs |
+|---|---|---|---|---|
+| 16×8 | 1 | 0.1875 | 1.00x | 10 |
+| 32×16 | 4 | 0.0938 | 2.00x | 28 |
+| 64×32 | 16 | 0.0469 | 4.00x | 88 |
+| **64×64** | **32** | **0.0312** | **6.00x** | **160** |
+| *128×128 staged (for reference)* | | *0.0156* | *12.0x* | |
+
+**Register tiling is half the staged pipeline's lever for none of its
+machinery**, which is why it comes first. Measured, same session, interleaved,
+ramped, every configuration correctness-checked against `torch._int_mm`:
+
+| | 16×8 | 64×64 | speedup | vs cuBLASLt |
+|---|---|---|---|---|
+| 4096³ | 14,571 | **61,374** | **4.21x** | 0.09x → 0.40x |
+| 8192³ | 4,912 | **38,897** | **7.92x** | 0.03x → 0.24x |
+
+and through the real compiler end to end at 4096³, old emitter against new in
+one process: **14,322 → 61,441 G MAC/s, 4.29x**. 199 registers with
+`STACK:0 LOCAL:0` — **zero spill** — which is what makes the 4×8 cap right
+rather than chosen.
+
+##### Both baselines were wrong, by different mechanisms, and they cancelled
+
+Re-measuring the two numbers this section already published is what the
+"cross-session numbers do not compose" rule asks for, and both moved:
+
+| | published | measured | mechanism |
+|---|---|---|---|
+| cuBLASLt @ 4096³ | 38,090 | **144,196** | `.contiguous()` inside the timed loop |
+| int8 mma ISA ceiling | 374,027 | **179,761** | unstored accumulators deleted by `ptxas` |
+
+The first is a harness bias this repository has recorded before, identified
+rather than guessed: `_int_mm(A, B.t().contiguous())` measures **31,452**,
+essentially the published figure, because the transpose materialises a 16 MB
+copy per call. The real baseline kernel is
+`cutlass_80_tensorop_i16832gemm_s8_256x128_64x3_tn_align16`, read out of the
+profiler.
+
+**The second is the more interesting failure, because its control passed.** The
+ceiling probe kept eight accumulator sets and stored one, so seven mma chains
+were dead code — and the doubling control reported a clean 2.000 anyway,
+because *a constant dead fraction divides out of a ratio*. What caught it was
+arithmetic: 374,027 is 2.1x above `66 SM × 2.61 GHz × 1024 MAC/SM/cycle`. With
+every accumulator stored the probe reads 179,761 — **102% of that bound**, and
+**1.94x the f16 ceiling, exactly the 2x a spec sheet predicts.**
+
+That reconciliation is the point. The original note recorded int8 at **4.04x**
+f16 and called it "measured and unreconciled with the marketing figure, rather
+than adjusted to match it". Refusing to fudge a number was right; **filing the
+discrepancy as a curiosity instead of a bug report was not.** A doubling control
+proves work scales with the loop body, not that the loop body is live; the
+liveness control is that every result is stored.
+
+##### The largest tile is a 7x LOSS at a small shape, and only sweeping found it
+
+Taking the biggest tile the shape admits is the obvious rule and it is wrong. **A
+tile is one WARP**, so a 64×64 tile on a 64×64 matrix is one warp for the whole
+GEMM. Measured against the 16×8 schedule that shipped, three runs agreeing to
+within 1%:
+
+| shape | max tile | vs shipped |
+|---|---|---|
+| 64×64 | 64×64 | **0.14x** |
+| 128×128 | 64×64 | 0.18x |
+| 256×256 | 64×64 | 0.42x |
+| 512×256 | 64×64 | 0.74x |
+| 512×512 | 64×64 | 1.62x |
+| 1024×1024 | 64×64 | 3.13x |
+
+So the tile is taken only when it leaves at least 64 output tiles — roughly one
+warp per SM — and otherwise the schedule stays at one mma per warp. **The
+fallback is to 16×8 outright rather than to the next size down**, because the
+intermediate tiles do not win either: at 256×256 the largest tile leaving 64
+tiles is 32×32, and it measures 0.89x.
+
+Validated on 14 shapes, 8 of them not used to derive the rule and including
+rectangular and decode-shaped ones: **worst case 1.00x — it never regresses** —
+while keeping 1.57x–3.62x wherever the win exists. The 16×8 path itself is
+unchanged in cost by the tile loop (0.99x, within noise), which matters because
+the floor sends every small shape there.
+
+The floor is a **performance fallback, not a correctness one** — every tile the
+selector can return computes the same matrix — which is why it is a fixed
+constant rather than something probed from the local device. It leaves ~1.3x on
+the table at 512×512, where 64×32 measures 2.10x against 64×64's 1.62x.
+
+##### The conclusion the corrected numbers changed
+
+Under the published baseline, a 4.21x speedup on 0.41x reads as **1.56x
+cuBLASLt — "we beat the vendor library with no shared memory"**. That is false.
+Under the real baseline it is 0.09x → 0.40x: a large, cheap, real win that
+**does not close the gap**, and the staged pipeline is still needed. Re-measuring
+the baseline is what kept a wrong headline out of this document.
+
+##### The schedule change forced a stronger property than it needed
+
+The warp tile is a compile-time function of M and N, so it is **invisible at the
+call site** — and a host that kept launching the pre-tiling `(N/8, M/16, z)`
+grid would start `mt*nt` times too many CTAs, each computing a base row
+`ty*(mt*16)` at or past the end of the matrix, with `red.global.add.s32`
+writing it. That is the previous increment's defect exactly, one axis over.
+
+So the output tiles are **grid-strided in x and y**, the way K already was in z.
+Every grid of at least (1,1,1) is now correct, an over-large grid idles its
+extra CTAs, and **the pre-tiling host launch still computes the right matrix** —
+verified on the real compiler's 4096³ output, where it is not merely correct but
+marginally faster (67,568 vs 61,441 G MAC/s). The kernel is now invariant to
+block size, to grid, and to split factor.
+
+##### The proof cost nothing new
+
+An output row became a three-digit index — tile, mma within the tile, row within
+the mma — which is `MixedRadix.two_digit_unique` verbatim. `warp_row` is the
+**seventh consumer** of that schema and the composition needed no new reasoning:
+`warp_row_is_a_tile_row` shows the warp tile *factors through* the single-mma
+tiling, so everything already proved about `tile_row` still describes the
+emitted kernel. The tile loop is `owner` again, so it inherits
+`GridStrideSplit`'s coverage — the third axis of this one kernel to do so.
+
+`without_the_tile_guard_a_cta_addresses_past_the_matrix` is what makes the
+stride guard load-bearing rather than an optimisation: the overrun is *past the
+matrix*, not a duplicate write.
+
+#### Phase 3 progress, 2026-09-06 — the int8 GEMM computes the source dot products, and the theorem was false until the compiler learned its licence
+
+`Int8GemmSchedule.v` proves this kernel's **schedule**: which lane owns which
+element of C, that the split-K classes tile the contraction, that the atomic
+reduction is order-independent. It says nothing whatever about the **value**
+that lands at `C[r][c]`. `proofs/Int8GemmExact.v` closes that — the GPU twin of
+`ExactGemmWhole.the_threaded_gemm_holds_the_source_dot_products`, which the CPU
+side has had since the whole-kernel increment.
+
+It is available for this kernel and no other GEMM here: **950 of the 952
+`mma.sync` instructions Y emits are floating point**, and an f16 tensor-core
+GEMM is simply not equal to the naive nest.
+
+##### Measure first, and the measurement found the theorem was false
+
+Writing the capstone forces its hypotheses to be stated. One of them did not
+exist anywhere in the compiler.
+
+`mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32` accumulates into **int32**,
+this kernel has **no flush**, and there is nowhere to widen to because the
+*output* is int32 as well — where the CPU's exact GEMM widens to int64 every
+`Fl` k-pairs. So the bound is on the whole contraction:
+
+```text
+  | sum over k < K of A[r][k] * B[c][k] |  <=  K * 127^2  <=  i32::MAX
+```
+
+`floor(i32::MAX / 127²)` is 133 144, and `K % 32 == 0` is already the kernel's
+shape precondition, so the largest admissible K is **133 120**.
+
+**Nothing checked it.** Not `emit_int8_gemm_kernel`, whose only refusal was on
+`M % 16` / `N % 8` / `K % 32`; not `proofs/`; not any test. Measured on the
+device before the guard was written — M=16, N=8, every element of A and B set to
+127, one warp, grid (1,1,1):
+
+| K | exact | device | |
+|---|---|---|---|
+| 133 088 | 2 146 576 352 | 2 146 576 352 | ok |
+| **133 120** | 2 147 092 480 | 2 147 092 480 | **ok** |
+| **133 152** | 2 147 608 608 | **−2 147 358 688** | **wrapped** |
+| 133 184 | 2 148 124 736 | −2 146 842 560 | wrapped |
+
+One K step wide. The one GPU GEMM in this repository whose entire claim is an
+exact answer returned a **negative number** under a green banner, with
+`red.global.add.s32` summing it.
+
+**Latent rather than live** — the largest K in the corpus is 16 384, four orders
+below the bound. That is the argument for doing it now, not against: this
+repository's own rule is to *find these while the path is still dead*.
+
+Note the asymmetry with the attention kernel, which is the tell that should have
+been read earlier: `GridStrideSplit.MAX_EXACT_SEQ_LEN` states that kernel's
+accumulator bound in a proof, and the GEMM's — four orders *tighter*, on an
+output type half as wide — was stated nowhere.
+
+##### The refutation is refereed against the silicon
+
+`the_measured_overflow_is_two_s_complement` reproduces the third row of that
+table from `wrap32` alone:
+
+```coq
+Theorem the_measured_overflow_is_two_s_complement :
+  133152 * (127 * 127) = 2147608608
+  /\ MC.wrap32 2147608608 = -2147358688.
+```
+
+The model was not fitted to the device: `wrap32` is `ExactGemmMicro`'s, written
+for the CPU chain months earlier, and it lands on the exact value the card
+returned. **A model that merely said "it overflows" would agree with any wrong
+answer.**
+
+##### What the proof establishes
+
+- **`the_lanes_cover_the_a_fragment` / `_b_fragment`** — the 32 lanes' register
+  bytes are a *bijection* onto the 16×32 and 32×8 fragments, so every element is
+  loaded, once, and no fragment position keeps a value from the previous K step.
+  Both are `MixedRadix` — its **eighth and ninth** consumers.
+- **`the_emitted_a_address_is_its_fragment_element` / `_b_`** — the emitted byte
+  offsets (base `(brow + 16·mi + g)·K + 4t`, register steps `8K` and `16`, byte
+  `b`) address exactly the source element that bijection names. This is where a
+  stride/extent confusion would live; A is packed, so its row stride *is* K and
+  there is no `lda` to disagree with the extent.
+- **`the_k_loop_is_the_contraction`** — 32 products per step over `K/32` steps
+  re-index to the flat `sum over k < K`.
+- **`bounded_products_accumulate_exactly`** — under the licence the int32
+  accumulator (`wsum`, wrapping at *every* step) equals the `Z` sum. This is
+  where the licence is load-bearing rather than paperwork.
+- **`the_emitted_int8_gemm_holds_the_source_dot_products`** — the capstone, at
+  every split factor, with no hypothesis that `nz` divides `K/32`.
+
+22 `Print Assumptions`, no axioms, nothing admitted.
+
+##### Two tools deriving one obligation
+
+The compiler decides the licence in `u32`; the proof states it over `Z` and
+hands it to `coqc`, which has no `u32`. `the_emitter_and_the_proof_agree_on_the_bound`
+asserts the proof *derives* `MAX_EXACT_K` from `I32MAX / 127²` rather than
+stating a numeral, and that the emitter's constant is the proof's
+`MAX_EXACT_K_STEPS`. Same structure as the exact-GEMM certificate's floating-point
+licence checked against a `Z` obligation.
+
+**The prover caught a transcription error of mine on the first run**: I had
+written 133 143 where `⌊2147483647/16129⌋` is 133 144. The step-granular bound
+is unaffected, which is precisely why the theorem states both numbers.
+
+##### A `nat` literal is unary, and it cost the whole afternoon
+
+`sum_k_blocks` — 32 products per step re-indexing to a flat range — was proved
+at the literal 32 first. **Every tactic succeeded, the goal closed to something
+syntactically identical on both sides, and `Qed` did not return.** A `nat`
+literal is thirty-two nested `S`, inside a fold that is itself 32 deep, and the
+proof term carries it through every conversion check.
+
+Stated for an **abstract block size `B`** and instantiated by a single `apply`,
+the same proof takes **0.27 s**. Nothing can unfold, because there is nothing to
+unfold.
+
+This is `SoftmaxErrorBound`'s `ring`-on-a-large-power landmine wearing a
+different hat, and the diagnosis differs from the obvious one: it is not the
+tactics and not `reflexivity`, it is `Qed` type-checking a term that carries the
+literal. **Keep every literal out of anything that normalises.** (Also worth
+recording: `f_equal` on two folds of a 32-deep literal does not terminate
+either; every step of that proof is a *directed* rewrite for that reason.)
+
+##### Mutation table — 11 rows, all resolved
+
+Each `--test` target run separately over seven suites.
+
+| row | mutation | caught by |
+|---|---|---|
+| **X0 CONTROL** | two independent `mov`s reordered | **green everywhere** |
+| **BASE** | restored baseline | **green everywhere** |
+| **X1** | licence check removed (the original bug) | **`int8_gemm_exactness` ONLY** |
+| **X2** | bound one K step too large (admits a K that wraps) | **`int8_gemm_exactness` ONLY** |
+| **X3** | bound one K step too small (refuses an exact K) | **`int8_gemm_exactness` ONLY** |
+| **X4** | refusal message drops its derivation | **`int8_gemm_exactness` ONLY** |
+| **X5** | over-refusal: every K refused | exactness + 4 suites |
+| **X6** | proof derives the bound from 127, not 127² | exactness + `proofs_are_checked` |
+| **X7** | proof states a wrong wrapped value | exactness + `proofs_are_checked` |
+| **X8** | capstone drops the licence hypothesis | **`proofs_are_checked` ONLY** |
+| **X9** | proof's A fragment row map is wrong | **`proofs_are_checked` ONLY** |
+
+**X1 is the row that matters.** The original defect — a GEMM returning a
+negative number for an exact integer product — was invisible to all six other
+suites, `gpu_batch_invariance` and `ptx_int8_mma_layout` included. The first
+sweeps launch geometries and the second runs the real instruction on the device;
+both use K ≤ 4096, and **a suite that sweeps one axis is not testing another**.
+
+X5 is the control that stops "refuse every int8 GEMM" from passing: it correctly
+takes out five suites. X8 and X9 isolate to the proof gate because they change
+no emitted code — the taxonomy working.
+
+##### What this does not close
+
+- **The int32 conjunct is stated for the flat accumulation** (`nz = 1`, the
+  default grid and the case the device measurement was taken in). At `nz > 1`
+  each class accumulates in int32 and the atomics combine in int32; that is
+  covered in `Z` plus the fact that the licence bounds the sum of *absolute*
+  values, which dominates every partial sum of every class in every bracketing —
+  but it is not one theorem over a wrapping class fold. A wrapping twin of
+  `GridStrideSplit.combine` is the named next step.
+- **The licence is conservative**, exactly as `VnniExact::license` is: it is a
+  worst case over the declared operand type, and real data rarely reaches it.
+  Narrowing it with a declared operand range is a feature this backend does not
+  have, and the refusal says so rather than pretending otherwise.
+- **`mma.sync`'s semantics and the per-lane fragment layout** remain a
+  `Definition` — the trusted base, exactly where `vpdpwssd`'s semantics sit for
+  the CPU chain, pinned empirically by `tests/ptx_int8_mma_layout.rs`.
+- **The tie is transcription-plus-gate.** `ptx_emitter` still does not go
+  through `Ix`, so the proof is checked against emitted text rather than
+  rendered with it.
+- The 23 f16 GEMMs still cannot carry an exactness argument at all, and the
+  staging is still unbuilt.
+
+#### Phase 3 progress, 2026-09-06 — the fused epilogue had the opposite launch contract, and a suite that sweeps one kernel is not testing its sibling
+
+Taken from the previous increment's own residue, which named a wrapping twin of
+`GridStrideSplit.combine` as the next item. **Measuring what it would cost
+found a live, non-deterministic wrong answer one function over**, so the plan
+moved before anything was written.
+
+##### The measurement
+
+`emit_int8_gemm_kernel` has two epilogues. The plain one accumulates with
+`red.global.add.s32`; the fused one (`epi.is_some()`) dequantises the int32
+accumulator to f32 — per-row activation scale, per-column weight scale, bias —
+and writes it with `st.global.f32`. **Both walked the same striped split over
+`%ctaid.z`.** A store combines nothing, so under a split every z-CTA wrote its
+own residue class's *partial* to the same address and the last writer won.
+
+Measured on the device before the guard existed, M=64 N=32 K=128, `Sa = Sb = 1`
+and `Bias = 0` so the f32 output is the integer accumulation exactly
+(`|product| <= 125·125·128 = 2 000 000`, well inside f32's exactly-representable
+integers, so a mismatch cannot be a rounding difference), three launches per
+geometry:
+
+| `gridDim.z` | wrong of 2048 | `C[0]` across three launches |
+|---|---|---|
+| 1 | **0** | −63740, −63740, −63740 |
+| 2 | 2048 | **−3016, −60724, −3016** |
+| 3 | 2048 | −23368, −23368, −23368 |
+| 4 | 2048 | 12575, 12575, 12575 |
+| 8 | 2048 | **−15591, −7777, −15591** |
+
+The answer is −63740. Not a rounding difference and not even a stable wrong
+answer: **a different matrix between launches of the same kernel on the same
+inputs**, from the kernel whose own source header reads *"the reduction is
+associative and the answer does not depend on how K was walked"*. That sentence
+is true of the accumulation and was read as a launch contract.
+
+This is the shape the w8a8 inference path is meant to use — the fixture's own
+header calls it "the census's largest single item: `_w8a8_gemm` is 145 launches
+and 38.7% of a decode step".
+
+##### What could not see it
+
+`tests/gpu_batch_invariance.rs` sweeps `gridDim.z ∈ {1,2,3,5,8,16,32}` and
+compares bit-identically against a CPU reference — **on `int8_gemm` only**. It
+never loads `int8_gemm_scaled`. So the suite whose entire subject is this
+kernel family's launch invariance was structurally incapable of seeing it.
+
+That is the third instance of one shape in this kernel's short history, and the
+sentence generalises one step further each time:
+
+- *a suite that sweeps one axis is not testing another* — `gpu_batch_invariance`
+  swept `gridDim.z` at one fixed block size, and the block size was wrong;
+- *a suite that sweeps one kernel's launch geometry is not testing the other
+  kernel* — `gpu_attention_invariance` swept `attn_accum` while launching
+  `attn_scores` at a fixed correct geometry;
+- **a suite that sweeps one kernel is not testing its sibling** — here.
+
+The comment in the emitter said it plainly and nobody read it that way:
+*"`red.global.add.s32` ... being an INTEGER add it is associative, so this
+atomic is order-independent by construction"*. **That is an argument about an
+ADD**, sitting in a function whose other branch stores. The storing branch had
+no comment about split-K at all.
+
+##### The repair is to make the contract not matter
+
+Not an atomic float add: that is exactly the non-reproducibility this family
+exists to avoid, and the bias would land once per z. Not a runtime refusal
+either — `gridDim.z` is a launch parameter and a kernel cannot fail.
+
+A storing epilogue **walks the whole contraction and ignores `%ctaid.z`**. Then
+every z-CTA computes the identical value and writes identical bytes; the race
+becomes benign, the answer is right at every grid, and a caller who passes
+`z > 1` buys redundant work rather than a wrong matrix. That is the same move
+`attn_scores` needed, in the other direction: there the fix was to make a kernel
+grid-stride so the theorem covered it, here it is to make one stop.
+
+The emitted diff is two `mov`s and a comment:
+
+```text
+-    mov.u32 %r18, %ctaid.z;
+-    mov.u32 %r19, %nctaid.z;
++    // [Y INT8 GEMM] the fused epilogue STORES, so this kernel walks the whole
++    // contraction and ignores %ctaid.z: a store combines no partials.
++    mov.u32 %r18, 0;
++    mov.u32 %r19, 1;
+```
+
+`tests/int8_gemm.ptx` is byte-identical, which is the confirmation that the
+reducing path is untouched. After the fix: 0 of 2048 wrong at every
+`z ∈ {1,2,3,4,8,16}`, three launches each.
+
+##### The proof
+
+`proofs/Int8GemmSchedule.v` gains the storing schedule as five theorems, 30
+`Print Assumptions`, no axioms. `emitted_class` / `emitted_workers` record the
+emitter's choice as a function of the epilogue rather than describing it in
+prose; `a_storing_cta_computes_the_whole_contraction` is
+`GS.class_sum Z.add f 0 1 S = GS.sum_upto Z.add f S`, i.e. the degenerate
+instance of the same `GridStrideSplit` decomposition every other theorem in the
+file uses — **no new reasoning**, which is the point of having the schema.
+
+`every_storing_cta_writes_the_same_value` is the launch-invariance statement:
+`cz` and `nz` are not free in the answer.
+
+The two refutations are what make those worth stating, and they are the measured
+defect rather than a symmetry:
+
+- `a_split_cta_holds_only_part_of_the_contraction` — under the stripe a CTA's
+  partial is not the contraction, so a store writes part of the answer;
+- `two_split_ctas_would_store_different_values` — **the partials disagree with
+  each other**, which is why the observed answer moved between launches rather
+  than being merely wrong. Which store lands last is a scheduling accident with
+  a visible value.
+
+And `the_reducing_epilogue_still_splits`, without which "walk the whole
+contraction everywhere" satisfies every theorem in the file and deletes the
+split the batch-invariance harness exists to sweep.
+
+##### The gate
+
+Three tests in `tests/int8_gemm_launch_contract.rs`, the file that already owns
+this kernel's launch-contract claims.
+
+The device test sweeps `gridDim.z` for the fused shape against a host
+reference — **three launches per geometry, because the failure was
+non-deterministic**: a single launch can miss it, and a single launch that
+catches it cannot say it is a race. It asserts every geometry is *correct*, not
+that the geometries agree; a kernel that writes nothing agrees with itself
+perfectly.
+
+It SKIPs with no CUDA driver, so it cannot be the only cover. The source-level
+test is a **biconditional** and has to be: "never read `%ctaid.z`" satisfies
+every assertion about the storing kernel while deleting the reducing kernel's
+split. So it asserts the reducing one *does* stripe and the storing one does
+not, having first checked which epilogue each fixture actually has — without
+that, both halves could hold of two kernels that are the same kernel.
+**Verified: with the fix reverted and `CUDA_VISIBLE_DEVICES=""`, the device test
+reports `ok` and the two source-level tests fail.**
+
+**The gate found a bug in itself on its first run.** A raw substring search for
+`%ctaid.z` matched the storing kernel's own comment — the line explaining *why
+it does not read it* — and reported the opposite of the truth. Comments are
+stripped before anything is looked for. That is the self-reference trap this
+document already records for `src.find("fn reference_bins")`, in a new place.
+
+##### Mutation table
+
+Seven probes over seven suites, each `--test` target run separately. **M0
+CONTROL, two independent `mov`s emitted in the other order: green everywhere** —
+read first. **BASE restored, before and after: green** — read second.
+
+| probe | suites that failed |
+|---|---|
+| **M0 CONTROL** — two independent `mov`s reordered | *(none)* |
+| **BASE_PRE / BASE_POST** | *(none)* |
+| **M1 — the storing epilogue splits K again (the original bug)** | **`int8_gemm_launch_contract` ONLY** |
+| M2 — over-refusal: nothing splits K | launch_contract + `gpu_batch_invariance` |
+| M3 — the proof says a storing CTA is one of `nz` workers | launch_contract + `proofs_are_checked` |
+| M4 — the refutation deleted with its `Print Assumptions` | launch_contract + `proofs_are_checked` |
+| M5 — the gate stops stripping comments | launch_contract ONLY |
+| M6 — the split decided by `K` instead of the epilogue | launch_contract + `gpu_batch_invariance` |
+
+**M1 is the row that matters: the original defect was invisible to all six
+other suites** — `gpu_batch_invariance`, `int8_gemm_exactness`,
+`ptx_int8_mma_layout`, `committed_ptx_artifacts`, `ptx_portability` and
+`proofs_are_checked`. That is how it survived being committed, measured,
+proved about and written up three times.
+
+**M2 is the control that stops the obvious over-fix**, and the mechanism is
+worth stating: with `red.global.add.s32` and every z-CTA computing the whole
+contraction, `C = z × answer`. So "walk the whole contraction everywhere" is
+not merely wasteful, it is wrong for the reducing kernel.
+
+##### What this does not close
+
+- The wrapping twin of `GridStrideSplit.combine` is **still not written**. The
+  int32 conjunct of `Int8GemmExact`'s capstone is stated for the flat
+  accumulation; multi-class int32 accumulation is covered in `Z` plus the fact
+  that the licence bounds a sum of absolute values, and not as one theorem over
+  a wrapping class fold. This increment made that item *smaller* rather than
+  closing it — the storing epilogue no longer has a multi-class case at all.
+- Nothing here is about the f32 GEMMs, which cannot carry an exactness argument.
+- The tie is transcription-plus-gate, as in the rest of this kernel's proofs.
+
+#### Phase 3 progress, 2026-09-06 — the split-K accumulation is exact in int32, and the licence turned out to be about a zeroed destination
+
+The item this file's previous entry named as still open. `Int8GemmExact`'s
+int32 conjunct was stated for the FLAT accumulation only — the emitted order at
+`gridDim.z = 1`, which is the default grid and the case the device measurement
+was taken in. The caveat said the multi-class case needed "a wrapping twin of
+`GridStrideSplit.combine`" and was recorded rather than done.
+
+##### It is done, and measuring it first is what made it worth more than bookkeeping
+
+The kernel performs **two** wrapping folds at `gridDim.z > 1`, not one:
+
+- each CTA accumulates its own residue class in an int32 register, one `mma`
+  per K step, in ascending visit order — `wclass`;
+- `red.global.add.s32` then combines the CTAs' partials **in int32 in memory**,
+  in whatever order they land — `wcombine`.
+
+`the_split_k_accumulation_is_exact_in_int32` covers both, at every split factor
+and every landing order. Nothing new was needed about the *partition* —
+`GridStrideSplit` has had that since the attention kernel, and this file already
+instantiates it — and **one licence hypothesis serves both folds**, because it
+bounds the sum of *absolute* values and every partial of either fold is a sum
+over a subset of the products.
+
+Measured at the licensed maximum K, where every partial of both folds is at its
+worst, M=16 N=8, every operand 127:
+
+| `gridDim.z` | 1 | 2 | 3 | 8 | 17 | 64 |
+|---|---|---|---|---|---|---|
+| wrong of 128 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+17 is in that sweep deliberately: the theorem has no divisibility precondition
+and a sweep of powers of two would not say so.
+
+##### What writing the theorem forced into the open
+
+`wcombine 0` — the combine starts from the destination's initial value, and
+writing the theorem means choosing what that is. **The licence
+`K · 127² ≤ i32::MAX` is sufficient only when `C` starts at zero, and that is
+stated nowhere in the compiler.**
+
+The emitter's own comment says a caller must zero `C`; every test does; nothing
+connects it to the licence. And it is not academic, because **this kernel
+accumulates into `C`** — which is exactly what lets `gridDim.z` split the
+contraction — so a caller who splits K across *launches* into the same int32
+buffer is doing the obvious thing with that property.
+
+Measured, K = 66,560 per launch (half the licensed maximum, so **the compiler
+accepts every one of these launches**), `C` zeroed once before the first:
+
+| launch | `C[0]` | exact | |
+|---|---|---|---|
+| 1 | 1,073,546,240 | 1,073,546,240 | ok |
+| 2 | 2,147,092,480 | 2,147,092,480 | ok |
+| 3 | **−1,074,328,576** | 3,220,638,720 | **wrapped** |
+
+Every launch individually licensed; the accumulation not. Same severity class
+as the accumulator bound itself — latent rather than live, because nothing in
+the corpus does it, which is the argument for stating it now.
+
+The proof states it as a hypothesis rather than assuming it silently:
+`each_launch_is_licensed_and_three_of_them_wrap` and
+`the_combine_needs_a_zeroed_destination`, with
+`from_zero_the_same_partial_is_exact` as the control that stops the refutation
+reading as "the combine is broken". `LICENSED_HALF` is **derived** from
+`MAX_EXACT_K_STEPS` rather than written as a numeral, so a change to the bound
+cannot leave a stale fixture behind.
+
+The refusal message named the wrong repair by omission — "accumulate the
+partials in a wider type on the host" is right and does not warn against the
+reading that fails. It now says so explicitly.
+
+##### Two proof lessons, both about literals and normalisation
+
+**`unfold` leaves a beta-redex that `lia` cannot see through.** `afun f S`
+unfolds to `(fun i => Z.abs (f i)) S`, and `lia` treats that as an opaque atom
+distinct from `Z.abs (f S)`. One `assert ... by reflexivity` and a rewrite fixes
+it; without that the arithmetic goal is unprovable for a reason that looks like
+a missing hypothesis.
+
+**`remember`, not `destruct ... eqn:`, when the scrutinee occurs in hypotheses
+as well as the goal.** `destruct` abstracts the goal only, so the subsequent
+`rewrite E in H` fails with *"Found no subterm matching"* — which reads as a
+malformed hypothesis rather than as the wrong tactic.
+
+A third, smaller: `Z.le_abs_self` has moved between releases. Proving
+`z <= Z.abs z` inline from `Z.abs_spec` costs two lines and does not depend on
+which release the reader has.
+
+##### Mutation table
+
+Seven probes over six suites, each `--test` target run separately. **N0
+CONTROL, two independent `Print Assumptions` lines swapped: green everywhere** —
+read first. **BASE restored, before and after: green** — read second.
+
+| probe | suites that failed |
+|---|---|
+| **N0 CONTROL** — two `Print Assumptions` swapped | *(none)* |
+| **BASE_PRE / BASE_POST** | *(none)* |
+| N1 — the licence hypothesis dropped from the split-K theorem | **`proofs_are_checked` ONLY** |
+| N2 — the combine starts from a non-zero destination | exactness + proofs |
+| N3 — the refutation deleted with its `Print Assumptions` | exactness + proofs |
+| **N4 — the refusal message stops naming the precondition** | **`int8_gemm_exactness` ONLY** |
+| **N5 — the proof's magnitude hardcoded instead of derived** | **`int8_gemm_exactness` ONLY** |
+| N6 — a CTA's own accumulator stops wrapping | exactness + proofs |
+| N7 — the atomic combine stops wrapping | exactness + proofs |
+
+**N6 and N7 are the interesting rows and they were expected to survive.**
+Removing the wrap turns both definitions into ordinary integer folds; every
+theorem above still holds, and the file would still report *"Closed under the
+global context"* — a proof about int32 that says nothing about int32. They are
+caught by `coqc` as it happens, because `wclass_exact`'s script applies
+`wrap32_id` and that step no longer typechecks — but that is a **proof-script
+detail**, exactly the incidental pinning this document already records as too
+weak to rely on. The deliberate guard is an assertion on the definitions' text,
+added before the sweep for that reason.
+
+Two probes printed a spurious "NOT APPLIED" from my own `grep`: the theorem
+name and the phrase `C_initial + sum` both occur in prose as well as in code,
+so a whole-file search finds them after the code is gone. *Guard a mutation
+check on the code, not on a word that also appears in the paragraph explaining
+it* — recorded here before, hit again.
+
+##### The temp-dir race, seventh occurrence, caused by me
+
+`emit(tag, ..)` puts a per-test tag in its **signature** precisely so the next
+author cannot forget it. Two tests in one file then both passed `"over"`, and
+the run failed with `Failed to write profile: NotFound` — one test's
+`remove_dir_all` landing while the other was writing.
+
+**A per-test tag in the signature makes the requirement visible; it does not
+make tags unique.** The helper now appends an atomic counter, so the tag is for
+legibility when a run leaves a directory behind and the counter is what
+guarantees the path.
+
+##### What this closes and what it does not
+
+The flat-accumulation caveat is **closed**, and the file's header says so with
+a pointer to what replaced it rather than silently dropping the paragraph.
+
+Still open: the licence remains **conservative** — a worst case over the
+declared operand type, exactly as `VnniExact::license` is, and narrowing it
+needs an operand-range declaration this backend does not have. `mma.sync`'s own
+semantics and the per-lane fragment layout stay definitions in the trusted base,
+pinned by `tests/ptx_int8_mma_layout.rs` running the instruction. The tie is
+transcription-plus-gate; routing `ptx_emitter` through `Ix` is still the upgrade
+to byte-identity. And the 23 f16 GEMMs still cannot carry the argument at all.
+
+### Phase 4 — Bounded error where exactness is impossible · 3–4 years
+
+Exact accumulation covers reductions and fixed-point pipelines. It does not
+cover transcendentals, division, or normalization — and real kernels have all
+three. For those, prove the implementation is within a *stated, machine-checked
+bound* of the ideal real-number result, building on the interval arithmetic
+already in the type checker.
+
+- **Done when** — a softmax or a normalization layer carries a proven error
+  bound rather than an empirical one.
+- **Why it matters** — without this the addressable set is "kernels that are
+  pure reductions", which is too narrow to build a company on.
+
+**FIRST THEOREM LANDED, 2026-09-01.** `proofs/SoftmaxErrorBound.v` bounds the
+exact-attention kernel's fixed-point softmax against the ideal one — `7/100`
+on a `+-127` output range at 65,536 keys, with the argument reduction's
+*multiplicative* error and the exp table's *additive* ulp composed, and the max
+subtraction carried through as the floor that makes the second negligible. See
+the dated entry at the foot of this document. The generalisable result is that
+**the `Decomposition` schema needed no approximate variant, because the error
+is introduced BEFORE the decomposition rather than by it** — which is exactly
+the property that does *not* hold for an f32 softmax, and therefore the shape
+of the addressable set: pipelines whose approximation is per-element.
+
+**Extended the same day**: the softmax's *temperature* is itself quantized
+(`KFix = round(C * 2^32)`), which the first pass named as unpriced. Priced now,
+and it is a head_dim question rather than a `KFix` one — under `1/2048` on any
+weight at head_dim 128. Two multipliers are refused rather than bounded, and
+both preconditions had lived only as a bare `continue` in a Python script.
+
+### Phase 5 — Emit the certification packet · 4–6 years
+
+A proof is not evidence until it is in the form an auditor accepts. Generate
+the artifact set: the machine-checkable proof, traceability from source
+requirement to emitted instruction, a statement of the trusted computing base,
+and the tool-qualification material the standards require of the compiler
+itself.
+
+- **Done when** — one real certification effort accepts the packet as evidence.
+- **Note** — tool qualification is itself a substantial programme; DO-330
+  exists for exactly this. Budget it as a phase, not a formality.
+
+---
+
+#### The certificate is EMITTED now, and that is what the programme is named after · 2026-08-30
+
+`proofs/` is checked once, at build time, against the shipped schedule
+constants. Its theorems are universally quantified over `M`, `N`, `K` and
+`nthr`, so every shape is covered — and a user who compiled their own
+`@ZeroDrift` nest still got a fast kernel and **no artifact**. "Proof-carrying"
+described the repository, not the output. That was the largest gap between what
+exists and what the programme is called, and it was mostly plumbing, because
+the generator already existed.
+
+`src/exact_gemm_certificate.rs` renders a `.v` beside the `.ll` whenever the
+exact `vpdpwssd` kernel is substituted. It **instantiates**
+`ExactGemmWhole.the_threaded_gemm_holds_the_source_dot_products` at this
+compilation's flush interval and operand bound rather than re-proving anything:
+
+```coq
+Definition Fl : nat := 64.
+Definition m  : Z   := 1024.
+
+Theorem the_licence_holds :
+  2 * Z.of_nat Fl * m * m <= ExactGemmMicro.I32MAX.
+
+Theorem this_kernel_computes_the_source_dot_products :
+  forall A B M N K nthr r c,
+    (forall i k, Z.abs (A i k) <= m) -> (forall k j, Z.abs (B k j) <= m) ->
+    (0 < nthr)%nat -> (r < M)%nat -> (c < N)%nat ->
+    W.thread_sum A B M N K Fl nthr r c nthr = PK.sum_k (fun k => A r k * B k c) K.
+```
+
+`--emit-llvm` writes it, names it in the report, and prints the command that
+checks it. `Y_NO_CERTIFICATE=1` suppresses it, loudly.
+
+##### Why this is not paperwork: two derivations of one obligation, by two tools
+
+The only hypothesis that depends on the program is the LICENCE. Y decides it in
+**floating point** — a `sqrt` and a `floor` on `f64` in
+`VnniExact::max_operand_magnitude`. The certificate states it over `Z` and
+hands it to `coqc`, which has no floats. **So emitting the certificate makes the
+compiler's own floating-point reasoning checkable by an independent integer
+tool.**
+
+Verified at the edge before anything was wired in: at the default interval the
+certificate is **accepted at `m = 4095` and refused at `m = 4096`** — the same
+one-unit boundary `tests/exact_gemm_licence_obligations.rs` finds by exhausting
+the int16 domain, reproduced by a different tool from a different derivation.
+`the_certificate_refuses_exactly_the_bounds_the_compiler_refuses` runs that
+comparison at four intervals, at the limit and one above it, and asserts the two
+answers agree.
+
+The rounding direction is the other place the two could diverge, and the
+argument is short enough to write down. `m` plays two roles at once — the
+licence gets **harder** as `m` grows, the data hypothesis `|A[i,k]| <= m` gets
+**easier** — so `ceil` is conservative for both, and `floor` would be wrong
+twice. It cannot break a licence Y granted: Y licenses exactly when `m <= L` for
+an integer `L`, and `m <= L` gives `ceil(m) <= L`. Checked over every interval
+the scheme admits rather than argued.
+
+##### TWO SURVIVORS, AND BOTH ARE THE SAME LESSON ABOUT PROOF ARTIFACTS
+
+Eight mutations. Six caught immediately; two survived a fresh, all-green test
+file, and they have a common cause worth more than the fixes.
+
+| mutation | outcome |
+|---|---|
+| `integer_bound` floors instead of ceiling | caught (unit + the fractional-bound fixture) |
+| renderer hardcodes `m = 1024` | caught |
+| renderer hardcodes `Fl = 64` | caught (the licence sweep renders at four intervals) |
+| **licence statement drops one factor of `m`** | **SURVIVED** |
+| certificate never recorded at the substitution site | caught (4 tests) |
+| `Y_NO_CERTIFICATE` ignored | caught |
+| file name not sanitised to a Coq identifier | caught |
+| **non-vacuity theorem replaced by `True`** | **SURVIVED** |
+
+**Coq compares propositions up to CONVERSION.** At a licensed numeral,
+`2*Fl*m <= I32MAX` and `2*Fl*m*m <= I32MAX` both reduce to `Lt <> Gt`, so a
+certificate stating the wrong obligation type-checks, and its use site — which
+still demands the real hypothesis — accepts it by conversion as well. The
+mutated certificate therefore refuses **exactly** the magnitudes the correct one
+refuses, and no `coqc` run can tell them apart. What it changes is the claim a
+human auditing the artifact reads, which for a certificate is the entire point
+of the artifact.
+
+`Theorem the_certificate_is_not_vacuous : True.` is the same shape: it compiles,
+it reports `Closed under the global context`, and it passes a count of how many
+such reports appeared.
+
+So **`coqc` accepting a generated proof is necessary and not sufficient**, and
+the guard has to be on the statement's TEXT. That is
+`every_proof_has_a_content_control` in `tests/proofs_are_checked.rs` — which
+guards the *committed* proofs against precisely this and had no counterpart for
+the *generated* one. Both survivors are closed by asserting the certificate
+states the obligation it is about and evaluates the model it claims to.
+
+The sanitiser row is small and worth stating because it is the one place the
+artifact could be self-inconsistent: `coqc` derives the module's logical name
+from the FILE name, so sanitising inside the renderer alone would leave a
+certificate whose own "check with" line names a module that does not exist.
+`4-bit gemm.ysu` is an ordinary source name and an illegal Coq identifier.
+
+##### The controls, because "always write a certificate" would pass the rest
+
+A nest with no operand `@bounds` is still **exact** — scalar lowering honours
+`@ZeroDrift` — it is simply not licensed for the fast kernel, and then there is
+nothing to certify: the emitted code *is* the naive nest. No certificate is
+written for it, nor for `Y_NO_GEMM_RECOGNISER=1`, and both are asserted.
+
+##### What the certificate does not claim
+
+Exactly what the library files exclude, repeated in the artifact's own header
+because a certificate that overstates its scope is worse than none: `vpdpwssd`'s
+semantics and the little-endian i32 half-order are **definitions** pinned on
+hardware by `tests/cpu_gemm_vnni_micro.rs`; the loop nest is partly extracted
+and partly modelled; and nothing here is a statement about LLVM, `clang`, or the
+machine code either produces.
+
+
+#### The other kind of loop: a bound that is not an operand · 2026-08-31
+
+The previous slice extracted three counted loops and named its own limit:
+*only loops whose bounds are OPERANDS can be described this way; the fold-back
+loops walk builder-computed registers.* That limit is now removed, and the loops
+it excluded turn out to be the ones where the bound carries the obligation.
+
+The micro-kernel writes a full `MR x NR` tile into scratch whatever the extents
+are. The fold-back copies only the **live rectangle** into C — so its trip count
+is the clamped tile width, and a fold-back over `MR` is an out-of-bounds
+**write**. That is what `ExactGemmTiling.unclamped_tail_writes_out_of_bounds`
+refutes about the model, and it is the same class as the three `ldc` sites in
+`emit_vnni_threaded_module` that writing that file found in the first place.
+
+`IrBuilder::loop_begin_over` takes the register the driver has **already**
+computed plus the `Ix` that produced it. It deliberately does not re-emit the
+expression: the driver computes the tile width once and uses it for several
+things, and emitting it again at the loop would add instructions the compiler
+does not have. **All four emitted modules are byte-for-byte unchanged**, which
+is the evidence the description is faithful.
+
+```coq
+Definition fold_row_trips (ext iv T : nat) : nat := (((Nat.min (ext - iv) T - 0) + (1 - 1)) / 1).
+
+Theorem the_emitted_fold_back_runs_the_tile_width : forall ext T t,
+  SCH.fold_row_trips ext (toff T t) T = tw ext T t.
+
+Theorem the_fold_back_stays_inside_the_live_rectangle : forall ext T t k,
+  (k < SCH.fold_row_trips ext (toff T t) T)%nat ->
+  (toff T t + SCH.fold_row_visit ext (toff T t) T k < ext)%nat.
+```
+
+The second is the join — `tile_index_in_range`, which was a property of the
+model only, now applied to the loop that actually performs the copy.
+
+##### Naming the register is not enough; the gate checks it was PRODUCED by the expression
+
+A loop opening on *some* register says nothing. The gate recovers the bound
+register from the emitted LLVM, finds its **reaching definition** — searching
+backwards from the loop's own `cond` block, because register names are
+per-function and this module has three — and requires the instructions defining
+it to be the rendered `tile_width_ix`. Taking the first textual match instead
+compared the driver's fold-back against `pack_a`'s address arithmetic, which is
+how that was found.
+
+##### MUTATION TABLE — and F1 is the row that matters
+
+| mutation | schedule gate | `proofs_are_checked` | `tiling_model` | `thread_invariance` | `exact_threaded` |
+|---|---|---|---|---|---|
+| **F1 fold-back bound unclamped (`MR`)** | **FAIL** | ok | **ok** | **ok** | FAIL |
+| F2 row fold-back given the *column* description | **FAIL** | ok | ok | ok | ok |
+| F3 description claims the bound is `M` | **FAIL** | ok | ok | ok | ok |
+| F5 same-value `min` swap, `.v` regenerated | **FAIL** | FAIL | ok | ok | ok |
+
+**F1 is a live out-of-bounds write, and two of the four correctness suites do
+not observe it** — including `exact_gemm_thread_invariance`, which runs
+`M = 53` against the 6-row tile and is the most ragged shape in the repo. The
+overrun lands in memory the process owns and the answer stays correct. That is
+the same "invisible out-of-bounds" signature this document already records for
+the `ldc` sites, and it is the strongest single argument for a gate that reads
+the loop rather than the answer.
+
+F2 and F3 are caught by the schedule gate **alone** — the emitted instructions
+are unchanged in both, so there is nothing for a correctness suite to see. F5 is
+the same-value divergence this layer keeps producing: identical value, different
+instructions, and this time it also breaks `coqc`, because `lia` does not know
+`Nat.min` commutes.
+
+##### What is still hand-written
+
+Which loops exist, in what order, in which blocks, and what they call. Every
+loop in the exact-GEMM driver is now described; the *nest* is not.
+
+
+#### The scratch tile starts at zero, and nothing had said so · 2026-08-31
+
+`ExactGemmWhole.gemm_position` models the driver as accumulating into
+`fun _ _ => 0` — a scratch tile that starts at zero — because the emitted
+micro-kernel **accumulates** rather than assigns. That is a hypothesis about the
+emitter hidden inside a definition, and nothing connected it to anything the
+compiler does. It is exactly the shape of the `N <= ldc` hypothesis whose
+absence turned out to be a live heap overflow: a precondition the theorem needs,
+stated nowhere.
+
+It is not decorative. `%Ctile` is allocated once and reused for every `(i, j)`
+tile, so a zeroing loop one trip short carries the **previous tile's**
+accumulator into this one.
+
+`vg.z` is now a described `CountedLoop`, and the tie is an **equality**:
+
+```coq
+Theorem the_zeroing_loop_covers_exactly_the_tile :
+  SCH.zero_tile_trips = (RT.MR * RT.NR)%nat.
+
+Theorem the_scratch_is_zeroed_wherever_the_fold_back_reads :
+  forall fi fj, (fi < RT.MR)%nat -> (fj < RT.NR)%nat ->
+    (fi * RT.NR + fj < SCH.zero_tile_trips)%nat.
+```
+
+The inequality alone would be satisfied by any bound at least as large, and "at
+least as large" is unsafe in **both** directions here — one trip short leaves a
+stale slot, one trip long writes past a buffer sized `MR * NR`. The mutation
+table is what established that the equality is doing work rather than tidying.
+
+##### MUTATION TABLE — Z2 is the row that matters
+
+| mutation | schedule gate | `proofs_are_checked` | `packing_schedule` | `thread_inv` | `exact_thr` |
+|---|---|---|---|---|---|
+| Z1 zeroing one trip **short** (description + emitter) | ok | **FAIL** | ok | FAIL | FAIL |
+| **Z2 zeroing one trip long** (description + emitter) | ok | **FAIL** | **ok** | **ok** | **ok** |
+| Z3 emitter diverges from the description | **FAIL** | ok | ok | FAIL | FAIL |
+| N1 A packed inside the column loop | **FAIL** | ok | FAIL | ok | ok |
+
+**Z2 is a write past the end of the scratch buffer that no correctness suite
+observes, caught only by the Coq equality.** That is the second invisible
+out-of-bounds write this week, and it is the case that justifies stating the
+theorem as `=` rather than `<=`.
+
+Z1 and Z2 also show the standing limit of "one description, two consumers"
+honestly: when the description itself moves, both consumers move with it and the
+byte-identity gate is silent. **What catches a coherent-but-wrong description is
+a theorem tying it to something else** — here, the tile geometry `MR * NR` the
+register-tile file independently fixes.
+
+##### The nest, as a gate rather than an extraction
+
+`the_driver_nests_its_loops_the_way_it_claims_to` reads the emitted LLVM and
+checks each described loop lies inside the loop it is supposed to: `vg.i` inside
+`vg.j`, `vg.z` and `vg.fi` inside `vg.i`, `vg.fj` inside `vg.fi`, and the
+A-packing sweep inside **nothing** — packing A once for the whole matrix rather
+than once per column panel is what makes packing asymptotically free, and
+nesting it would be correct and `N/NR` times slower.
+
+It is a gate and not an extraction, deliberately. The nest's shape lives in the
+imperative order of `loop_begin`/`loop_end` calls, and there is no second
+description to remove; writing one down in Rust and asserting the emitter agrees
+would *create* the duplication this layer exists to delete. So it checks the
+property.
+
+**It diagnoses rather than isolates, and the table says so:** N1 is caught by
+`exact_gemm_packing_schedule` as well, which excises the callees and records the
+call order. What the nest gate adds is a name for the failure instead of a call
+sequence that is off by a factor of `N/NR`.
+
+
+#### The fourth kernel, and the first whose parts do not FOLD · 2026-08-31
+
+`Decomposition.v` states its own limit and this document repeats it: five
+files instantiate the schema and every one of them is a **reduction**. The
+parts fold into a value, the theorem is "the partials combine to the naive
+fold", and the two schema theorems differ only in whether that fold spends
+associativity or commutativity as well. Two of the kernels are GEMMs and the
+third is a softmax, so the axes coincide. Phase 2's stated risk — *if
+obligations don't compose, the thing is a one-off proof rather than a
+compiler* — is only half answered by five members of one family.
+
+The test did not need a new kernel either. **The MSM binning is a parallel
+counting sort**, and its parts do not fold: they TILE a destination array.
+Per-chunk histograms, an exclusive prefix over buckets, and an unsynchronised
+scatter through a private cursor per (writer, bucket). Real, shipped,
+performance-critical code — `bin` is still the largest host phase of the GPU
+MSM — and pure host arithmetic, so unlike `GridStrideSplit` the tie needs no
+GPU and never skips.
+
+`proofs/CountingSort.v`, 24 `Print Assumptions`, no axioms, nothing admitted.
+15 proofs; 638 default / 904 zk tests, both builds green. No `src/` change, so
+the emitted modules are byte-identical by construction.
+
+##### The result is POSITIVE and the honest form of it is narrow
+
+Three things could have gone wrong and none did:
+
+- **The edges are DATA-DEPENDENT.** Every edge function instantiated before
+  this — `blen`/`boff`, the proportional and granule-snapped families, residue
+  classes, `Decomposition.clamped` — is a static function of the extents.
+  These come out of a histogram of the input. The schema's `edge : nat -> nat`
+  turns out to be general enough, and `the_bucket_edges_are_a_decomposition_
+  edge_function` hands its three hypotheses over unchanged.
+- **The direction is inverted.** Every decomposition so far supplies an `edge`
+  and derives its widths; a counting sort *measures* its widths and derives
+  the edges. That is one four-line `Fixpoint` and a bridge
+  (`widths_of_an_edge_recover_it`) through `Decomposition.width_sum_closed`.
+- **`the_reduction_theorem_still_applies`.** The same edges that place the
+  entries reproduce a naive fold over them. Nothing in the MSM uses this — a
+  counting sort has no values to add — and it is in the file because the
+  alternative claim, *a placement decomposition is a different family*, would
+  be wrong.
+
+**What the schema did not have is the CONSEQUENCE.**
+`Decomposition.widths_cover_the_extent` says the part widths add up, with no
+gap and no double count *in aggregate*. That is strictly weaker than
+exactly-once placement: a decomposition that writes one slot twice and another
+never has exactly the right total width. What is needed is a bijection —
+`slot_injective`, `slot_onto`, `slot_in_range` — and it is not derivable from
+the fold theorems. About 90 lines.
+
+**Composing two levels then costs one hypothesis.** `Idx` is cut by bucket and
+each bucket's slice is cut again by scatter group; `dest_injective` is two
+applications of the one-level bijection and nothing else. The single
+hypothesis is `groups_exhaust_the_buckets`, and that is not an assumption
+invented for the proof — see below.
+
+##### `MixedRadix` does not cover it, and that is a property of the decomposition
+
+The obvious reading of a two-level index is `MixedRadix.pack B q r`. It does
+not apply: a positional index needs one radix per digit, and here the inner
+extent is the bucket's own width, which differs between buckets *because it
+counts data*. Refuted over a bucket set of widths 1 and 2
+(`no_uniform_radix_describes_this`) rather than asserted.
+
+##### The finding: `scatter`'s three `assert_eq!` are the proof's hypotheses
+
+Two of them turn out to be exactly what the theorems need, which was not
+arranged:
+
+| runtime assertion | proof |
+|---|---|
+| `"scatter grouping does not tile the input"` | `the_group_widths_exhaust_every_bucket` |
+| `"bucket offsets disagree with the entry total"` | `edge tot nb = total` |
+| `"scatter group {} of bucket {} wrote {} entries too {}"` | **`the_chained_runs_tile_the_bucket`** |
+
+The third is the one worth reading. Its comment says
+
+> Post-condition, and it is a PROOF rather than a spot check. … If every group
+> stopped exactly where the next one STARTED — and the last stopped at
+> `off[b+1]` — then the groups' runs tile `off[b]..off[b+1]` exactly: every
+> slot of `idx` was written, by exactly one thread, in bounds.
+
+That is a **sufficiency claim about an observable**, argued in a comment and
+checked by nothing. It is now three theorems. The route is that the observed
+starts ARE the prefix edges of the (unknown) written counts
+(`chained_starts_are_prefix_edges`), at which point the bijection applies —
+and crucially it assumes **nothing about the histogram**, which is what makes
+running the check on every call worth its 0.2–1.0 ms. Both directions of
+dropping it are refuted as weakened theorems, not exhibited as witnesses:
+`without_the_chaining_a_slot_can_go_unwritten` (a hole, which in `Idx` reads
+back as the perfectly legitimate point index 0) and
+`without_the_chaining_two_groups_can_write_one_slot`.
+
+The empty-group case is stated separately (`an_empty_group_still_chains`)
+because it is the case that check got wrong the first time it was written —
+for an empty group, "where the next one started" and "where the next one
+stopped" differ.
+
+##### A third member of `clamped`, arrived at from a counting sort
+
+A scatter group is a contiguous run of `grp` histogram chunks, clamped at
+`nchunk`. That is `Decomposition.clamped`, whose two previous members are the
+int32 flush interval (an overflow budget) and the output tile width (a memory
+partition) — obligations this document already records as looking different
+and being one family. This is the third, and it was reached from a different
+kernel entirely.
+
+##### The tie, and the oracle that did not exist
+
+`zk_gpu_msm.rs`'s `binning_does_not_depend_on_the_thread_count` compares the
+binner **against itself at one writer**. That is a strong check on the grouping
+arithmetic and blind by construction to anything wrong at every thread count.
+The MSM tests above it check the final curve *sum*, and this document already
+records that an entry in the wrong bucket still yields a valid curve point.
+**Nothing compared `Idx` against an independent placement.**
+
+`tests/msm_counting_sort_model.rs` does, in two ways. A plain sequential
+stable counting sort is the specification — the same relationship the naive
+triple loop has to the tiled GEMM — and it deliberately shares `window_digit`
+and the `base[w] + d` numbering, which decide which bucket an entry belongs to
+rather than where it is placed and are checked against arkworks elsewhere.
+Then `the_destination_map_is_the_one_the_proof_describes` evaluates
+`CountingSort.dest` on real data: it recomputes both levels of edges from the
+histogram and asserts every entry sits at the slot the map names. That is
+stronger than the sequence comparison, which would accept two different cursor
+tables that happen to yield the same order.
+
+`scatter` records `(ngroup, span)` rather than the test recomputing them —
+re-deriving `ceil(nchunk / group)` in the harness is a second copy of the
+schedule, which is the defect `ExactGemmSchedule.v` exists to remove, in the
+harness instead of the emitter.
+
+##### MUTATION TABLE
+
+| mutation | `counting_sort_model` | `zk_gpu_msm` | `proofs_are_checked` |
+|---|---|---|---|
+| **C1 `scatter_threads` always 1** | **FAIL** | ok | ok |
+| C2 bucket numbering off by one, histogram AND scatter | FAIL | FAIL | ok |
+| C3 post-condition deleted **and** all groups seeded at `off[b]` | FAIL | FAIL | ok |
+| C4 post-condition deleted only | ok | ok | ok |
+| C5 group base index `gi*chunk` not `gi*chunk*group` | FAIL | FAIL | ok |
+| **C6 recorded `ngroup` wrong** | **FAIL** | ok | ok |
+| P1 rank bound relaxed to `r <= w t` | ok | ok | FAIL |
+| P2 `groups_exhaust_the_buckets` relaxed to `<=` | ok | ok | FAIL |
+| P3 `dest` reads bucket 0's inner edges | ok | ok | FAIL |
+| P4 span hypothesis dropped | ok | ok | FAIL |
+| P5 `edge`'s base case `S O` | ok | ok | FAIL |
+| P6 empty-group control moved to a non-empty group | ok | ok | FAIL |
+| **T1 the oracle replaced by the implementation** | **FAIL** (after the fix below) | ok | ok |
+
+**C1 is the row that matters.** With `ngroup` forced to 1 the second level of
+the decomposition silently collapses, the scatter stops being parallel, the
+runtime post-condition passes, and
+`binning_does_not_depend_on_the_thread_count` passes *trivially* — every arm
+becomes identical to its own one-writer reference.
+`feedback-null-metrics-pass-dead-components`, in the one place a
+self-comparison cannot help. C6 is the same shape aimed at the harness.
+
+C2, C3 and C5 are caught by both suites: what the new file adds there is a
+diagnosis by name (*"entry (point 13750, bucket 5881) is not at
+dest = off[5881] + edge(gw[5881])[1] + 0"*) instead of a wrong curve point.
+**Run the obvious mutations against the other suites before claiming
+isolation** — three of six do not isolate.
+
+C4 is a **confirmation**: deleting a redundant runtime check changes no
+answer, and nothing should catch it. A "did you call my function" gate was
+considered and rejected for the reason the `Ix` gate records.
+
+##### The survivor was a real hole, and the fix had to be structural
+
+**T1 replaces `reference_bins`' body with a call to `bin_by_digit`.** Every
+comparison in the file then compares the binner against itself, and every
+control still passes — they are computed from the (now identical) output.
+
+It is not fixable by testing harder, and that generalises to every
+differential in this repo. **A specification and a correct implementation
+agree exactly**, so no behavioural check can distinguish "the oracle is right"
+from "the oracle IS the implementation" — precisely when the implementation is
+right, which is the property under test. What separates them is structural, so
+`the_reference_does_not_call_the_implementation_it_is_the_oracle_for` reads
+this test's own source and requires the reference not to reach into the
+parallel binner.
+
+**Writing that gate produced its own bug, twice.** Anchoring on
+`src.find("fn reference_bins")` matched the **string literal on the gate's own
+line**, so the extraction returned the gate's body and it then failed for the
+wrong reason. Anchored on `"\nfn reference_bins("` — the definition at column
+0 — it fires with the right diagnosis, verified by three probes: the function
+renamed out from under it, the body no longer placing into buckets, and T1
+itself. Two of my first three probes were *mis-aimed* rather than
+informative: a global `sed` rename is a consistent rename and correctly passes,
+and `inline_entries(scalars, g)` contains the substring `entries(scalars, g)`.
+
+##### Found on the way: the shipped crate has a stale fork of the binner
+
+`crates/y-gpu/src/msm.rs` — the consumer-facing library, where arkworks is a
+real dependency — carries its own `bin_by_digit`, and it is the
+**pre-optimisation** one: a serial `O(nchunk * nb)` cursor build (the 23.6 ms
+phase this document records being cut to 3.3), one cursor row per histogram
+chunk with no scatter grouping (the 2.2x this document records at nw = 20),
+`cur0.to_vec()` per thread per call (the 1.34 ms this document records
+deleting), and **no post-condition at all**. The measured binning work landed
+in `tests/common/msm.rs` and never reached the crate that ships.
+
+The theorems cover it regardless, and that is worth stating: it is the same
+two-level map at `group = 1`, so `CountingSort.v` describes both. **A
+decomposition is not a loop.** What it does not have is the runtime check or
+any tie. Unifying the two is a refactor of a shipped crate and is recorded
+here rather than done.
+
+##### Found by running the suite: the `.ptx` race, in three more binaries
+
+Verifying this increment made the zk suite fail once, in
+`ptx_expression_coverage::a_v4_lane_is_still_a_member_access_that_works`, with
+*"the v4 kernel emitted no loads"* — after many clean runs, which is this
+repository's documented signature for the `.ptx` race. It did not reproduce in
+three runs at HEAD or in three with the change, so it is **latent and
+pre-existing**, not caused by the new work; adding a test binary shifts the
+scheduling that makes it fire.
+
+The mechanism is unambiguous. `--emit-ptx` writes next to its source, and
+**three test binaries compile `tests/bn254_fr_mul_fast.ysu` in place** —
+`ptx_expression_coverage`, `zk_gpu_field`, and `zk_gpu_groth16` through
+`common/qap.rs`. `cargo test` runs them in parallel, so one truncates the file
+while another reads it. The `ptx_for` helpers hold a mutex, and **a mutex is
+per process**; there are five independent copies of that helper and none of
+them can see the other binaries.
+
+Fixed the way `committed_ptx_artifacts.rs` already does it: compile a copy in a
+per-process temp directory, keeping `current_dir` at the repo so
+`.ysu_hw_profile` is still found. Enumerating the cross-binary collisions first
+showed there was exactly one — `bn254_fr_mul_fast` — so the fix is three sites
+rather than the whole surface. Four consecutive zk runs and two default runs
+clean afterwards, and no committed artifact is rewritten by a test run any
+more.
+
+CLAUDE.md already recorded the general rule — *"a gate that emits must run on a
+COPY, and mine did not"* — and only the two artifact gates were fixed then. The
+same defect was sitting in the kernel harnesses.
+
+##### What is NOT claimed
+
+`CountingSort.v` is facts about `nat`. Nothing in it is about memory, a `u32`
+or a thread — the u32 width obligation is `scatter`'s own
+`n * nw < u32::MAX` assertion, discharged there. Nothing says the histogram is
+*right*, only that whatever it counted is placed exactly once; the bucket
+numbering is checked against arkworks by the MSM tests. And the tie is by
+running the real binner and comparing, not by byte-identity through `Ix`: this
+is host Rust, not emitted code, so it is the `GridStrideSplit` grade of tie
+rather than the exact GEMM's.
+
+
+#### Pulling the same thread: the library ships kernels the repository never tested · 2026-08-31
+
+The counting-sort work ended with a note that `crates/y-gpu` — the
+consumer-facing crate, the one that ships — carries a stale fork of the host
+binner. Following that led somewhere worse: **`cargo test -p y-gpu` was red,
+and nothing in the documented build commands runs it.**
+
+`cargo test` at a workspace root with a root package builds *that package
+only*. The crate's own `ptx_is_not_stale.rs` needs `-p y-gpu` or `--workspace`,
+and neither appears in CLAUDE.md's build section. So the gate that exists
+precisely to stop the embedded kernels going stale had been failing, unseen.
+
+**Four of the five embedded kernels were stale by the whole carry-flag
+intrinsic series.** `bn254_fr_mul_fast` shipped at 2,112 lines with **zero**
+`add.cc`, against 1,255 now; `bn254_msm_bucket` at 34,343 against 18,222. The
+GPU ZK library — the MSM, the NTT, the Groth16 QAP — was running the
+pre-carry-chain kernels, which this document measures at 1.06x slower and 48
+registers instead of 36.
+
+##### The gate could not have passed anyway, and that is the more interesting half
+
+It compared the embedded copy against a compile **on the build machine**. The
+whole point of these artifacts is portability: they are committed at
+`.target sm_80`, and a fresh compile here probes an sm_89 card and says so.
+Those are contradictory requirements, and freshness is the one that has to
+give — *a compiler that probes the local machine bakes that machine into its
+output* is the finding the sm_80 regeneration existed to fix. It also produced
+a **false positive**: `bn254_permute` was reported stale and was not, its body
+being byte-identical.
+
+So the replacement does not choose a target. It **asks the artifact which
+target it claims** and pins a `.ysu_hw_profile` to that before recompiling,
+the way `ptx_portability::emitted_module_for` already does. Whether the claimed
+target is legitimate is a different question, and a different gate answers it.
+
+##### Three gates, and each of six mutations is caught by exactly one
+
+| mutation | freshness (root) | portability (root) | wiring (crate) |
+|---|---|---|---|
+| **Y1 one kernel reverted to the stale version** | **FAIL** | ok | ok |
+| **Y2 header re-targeted at the build machine's card** | ok | **FAIL** | ok |
+| **Y3 `include_str!` mis-wired to another kernel** | ok | ok | **FAIL** |
+| Y4 the `ALL` pairing swapped (right name, wrong module) | ok | — | **FAIL** |
+| Y5 the freshness gate compiles in the repo, not the pinned dir | **FAIL** | — | — |
+| Y6 the sweep finds nothing | **FAIL** | — | — |
+
+Y1 is the failure that was live for a week. Y5 is the one that matters for the
+design: compiling in the repo makes the gate fail *here*, which is exactly the
+state the crate's version was in — so the pin is load-bearing rather than
+tidy. Y2 passing the freshness gate is deliberate and not a hole: the gate
+reproduces the target the artifact names, so re-targeting changes both sides.
+Portability owns that question.
+
+Freshness now lives in `tests/committed_ptx_artifacts.rs`, under the plain
+`cargo test`. The crate keeps what only it can see — that the strings compiled
+into the binary really are those files, filed under entry names the driver will
+be asked for. A mis-wired `include_str!` embeds a kernel that is fresh,
+portable, assembles, and is the wrong one.
+
+##### The regeneration is confirmed by the prover, not by the diff
+
+The sm_80 and sm_89 bodies are **byte-identical** — only the two header lines
+differ — so what the GPU tests exercise at sm_89 is instruction-for-instruction
+what ships at sm_80. And `cargo test -p y-gpu` now runs
+`gpu_proof_matches_arkworks_sparse` and `_dense` on the newly embedded kernels:
+real Groth16 proofs, checked against arkworks, plus a tampered-statement
+rejection.
+
+639 default / 905 zk / 8 y-gpu tests, all green. The stale *binner* fork is
+still there; it is a refactor of a shipped crate and remains recorded rather
+than done.
+
+
+#### The fork itself, and the tests that dispatch had disarmed · 2026-08-31
+
+The previous two entries fixed what the library *embeds*. This one fixes what
+it *runs*, and the finding underneath it is worse than a stale copy.
+
+`crates/y-gpu/src/msm.rs` and `tests/common/msm.rs` were a **whole-module
+fork**, not a stale binner: 15 items byte-identical, 10 diverged, and the crate
+had nothing the tests did not. Every measured MSM improvement had landed in the
+test copy and none had reached the crate that ships — the parallel prefix
+(23.6 → 3.3 ms), the grouped scatter and its thread count (2.2x at nw = 20),
+the removal of a per-thread `to_vec` (1.34 ms), the exactly-once
+post-condition, and the 128-thread block.
+
+**That last one is a live performance regression in the shipped path**, and it
+is measured here rather than quoted: `crates/y-gpu` launched the bucket kernel
+through a generic helper with a hardcoded 256-thread block, and on the merged
+code at n = 2^20, kernel time, 256 → 128 gives nw=20 **42.25 → 29.46 ms
+(1.43x)**, nw=22 48.80 → 32.73 (1.49x), nw=25 53.86 → 40.80 (1.32x).
+
+##### It also made `CountingSort.v` a proof about code that does not ship
+
+`tests/msm_counting_sort_model.rs` tied the counting-sort theorems to the test
+copy. The library ran something else. That is the same gap as "proof-carrying
+described the repository, not the output", one layer further out, and it is the
+reason unifying is proof work rather than tidying.
+
+So there is one implementation now and it is the shipped one:
+`tests/common/msm.rs` went 966 → 466 lines and re-exports the host layer from
+`y_gpu::msm`. What stays behind is the harness a library must not have —
+locating and running the `Y` binary, compiling a `.ysu` to PTX, and the device
+layer's panic-on-error contract. The root package gains a **dev-dependency
+cycle** on `y-gpu`, which cargo supports because the cycle is only through
+dev-dependencies.
+
+##### The decisive experiment, and it is the one that justifies the whole change
+
+Put a cursor bug in the *shipped* binner — every scatter group seeded at
+`off[b]`, so the groups write over each other and `Idx` is corrupted — and run
+everything:
+
+| | `zk_gpu_msm` | `counting_sort_model` | `zk_gpu_groth16` | `cargo test -p y-gpu` |
+|---|---|---|---|---|
+| **before unification** | ok | ok | ok | **ok** |
+| **after unification** | FAIL | FAIL | — | FAIL |
+
+Before, that bug was invisible to **every test in the repository**. Two
+independent reasons, and the second was a surprise: the root's tests used the
+other copy, *and* the crate's own prover tests never reach the GPU at all.
+
+##### Dispatch had silently disarmed the crate's tests
+
+`crates/y-gpu/tests/prove.rs` runs 2,048 and 4,096 constraints. Both are far
+below `MSM_GPU_MIN_STAGED = 40,000`, so `gpu_is_worth_it` sends every MSM to
+the CPU and **the tests would have passed with the entire GPU MSM path
+deleted**. This document already records that exact trap for the root suite —
+*"at 4,096 constraints everything routed to the CPU and the GPU tests would
+have kept passing with the kernel deleted. They pass `force_gpu` and assert
+they got it"* — and the root suite was fixed for it while the crate was not.
+
+`prepare_forcing_gpu` is the same fix, and it is load-bearing rather than
+tidy: with it, the cursor bug fails both prover tests; revert it alone, leaving
+the bug in place, and `cargo test -p y-gpu` is **completely green**. The test
+also asserts at least three of the four queries actually went to the device, so
+it cannot quietly become a CPU test again.
+
+##### A performance property needs a performance guard
+
+Reverting the launch to 256 threads is caught by nothing — it computes the
+right answer, slowly. So the launch decision is extracted as a pure function,
+`bucket_launch_geometry`, and `the_bucket_kernel_is_launched_at_the_tuned_block`
+asserts it without needing a device: one thread per bucket, blocks of
+`bucket_block()`, grid × block exactly `nb`. Its control pins that the default
+is still the measured 128 and that the override still reaches the launch —
+without which a `bucket_block()` that had drifted back to 256 would satisfy
+every other assertion in the test.
+
+640 default / 906 zk / 8 y-gpu tests, all green.
+
+
+### The weakest tie, and the mutation that survived it · 2026-08-31
+
+`GridStrideSplit.v` proves that the exact-attention kernel's grid-stride
+reduction visits every key exactly once, in any order, at any worker count.
+It proves it for an **abstract** worker count — and nothing said the kernel's
+count was one of them. The two expressions it rests on, which thread is which
+worker and how many workers there are, were hand-written in a PTX template;
+the proof quoted them in a **comment**; and `tests/exact_attention_schedule.rs`
+matched the two back up by parsing emitted PTX with a reaching-definition
+walker. This file said so in as many words: *"this tie is weaker than the GEMM
+kernels' and is named as such"*.
+
+The quoted comment had already gone stale. It showed
+`mul.lo.s32 %r9, %r9, %r5` — the two-writes-to-one-register form the kernel
+stopped using when that reuse was found to be a trap for anything reading the
+PTX back. A proof's account of the code drifted from the code, silently, which
+is the whole argument for not keeping accounts in prose.
+
+**`Ix` now serves two backends, and that is the increment rather than a side
+effect.** The schedule is `sched_scores` / `sched_accum` in
+`src/exact_attention.rs`, rendered to PTX by `Ix::render_ptx` and to Coq by the
+generator in the test file. An extraction layer that reaches exactly one code
+generator is a one-off; pointing it at a target with a different instruction
+set, a different register discipline (special registers must be `mov`'d before
+use) and a fused multiply-add is what answers "does this generalise".
+
+- **The extraction reproduced all three hand-written sequences instruction for
+  instruction** — register numbering, `mad` fusion and lazy `mov` placement
+  included. Only comments moved. That was not arranged: a renderer that
+  materialises a special register at first use and fuses `a*b + c` produces
+  exactly what someone writing PTX by hand produces, which is why the refactor
+  is checked by the artifact instead of by reading it.
+- **What it buys is the theorem `GridStrideSplit.v` could not state.**
+  `proofs/AttentionSchedule.v` is the emitter's own `nworkers`, and
+  `the_emitted_launch_geometry_visits_every_key_exactly_once` instantiates the
+  partition at it. The obligation is the **pairing**: `worker` mixes three
+  hardware indices with two radices and `nworkers` must be the product of
+  exactly those three indices' extents. Drop a factor and two threads share a
+  residue class, so their keys are accumulated twice; add one and some class is
+  claimed by nobody, so its keys are dropped. Neither is a crash and neither is
+  reliably a wrong-looking number on random data.
+- That statement is a **bijection** from the launch geometry's coordinate box
+  onto `[0, nworkers)` — a mixed-radix positional index, so `MixedRadix.v`
+  discharges the injectivity with no new reasoning. **Third consumer of that
+  schema, and the first reached from a GPU launch geometry rather than a GEMM
+  tile.**
+
+**THE SURVIVING MUTATION IS THE FINDING, AND IT IS A HOLE IN THE GENERATOR'S
+OWN DESIGN.** Swap two radices in the emitter *and regenerate* — so the
+byte-identity gate passes because both sides moved — and the whole sweep stayed
+green. The cause: the generated parameter list is **derived** from the
+expression's free names, so a swap renames the parameters in step, and every
+theorem applies `worker_accum` **positionally**. The definition remains the
+same function under different labels, and no proof can see a relabelling.
+
+- Deriving the list is right and stays: a schedule that gains or loses an index
+  must change the signature. What was missing is anything that pins **which
+  index plays which role**.
+- The fix is a theorem whose **binders are generated and whose right-hand side
+  is fixed text**: `worker_accum <derived binders> = ctaid_z * (nctaid_x *
+  ntid_x) + ctaid_x * ntid_x + tid_x`. Swap the radices and the binder list
+  moves while the equation does not, so `ring` fails and `coqc` rejects the
+  file. Drop an extent and it is caught harder: the binder disappears while the
+  right-hand side still names it, so the reference is unbound.
+- **That mutation is then caught by `coqc` and by nothing else** — the
+  byte-identity gate correctly passes, because the description and the proof
+  agree with each other perfectly. It is the two-layer property demonstrated
+  rather than asserted, and it is the same standing limit already recorded for
+  the exact-GEMM schedule: *when the description moves, both consumers move
+  with it and byte-identity is silent.*
+
+**The dataflow walker is KEPT, and a mutation says why.** Swapping the last two
+result registers of `attn_accum`'s worker count leaves the loop striding by the
+**partial** product `nctaid.z * nctaid.x`. The rendered block is still correct
+and still present; what is wrong is which register the loop reads. Caught by
+`the_worker_index_and_the_worker_count_use_paired_registers` and by nothing
+else. Rendering says what the kernel computes; the walker says the loop
+actually reads it, which is the decorative-codegen question one layer over.
+
+**Eleven mutations, all caught, and the split is the useful part.** A radix
+swap with the instruction count unchanged (**schedule gate alone**); the same
+swap regenerated (**`coqc` alone**); the stride-register swap (**walker
+alone**); a generator neutered to echo the committed file (**the
+function-of-its-argument control alone**); the join corollary deleted from
+`GridStrideSplit.v` (**content control alone**). Dropping `nctaid.z`, removing
+`mad` fusion, giving the naive entry a different schedule and hand-editing the
+committed proof are each caught by two to four suites — diagnosis by name
+rather than isolation, and the entry says which is which.
+
+643 default / 909 zk / 8 y-gpu tests, all green.
+
+
+#### PHASE 4'S FIRST THEOREM: a PROVED error bound for the fixed-point softmax · 2026-09-01
+
+Phase 4's Done-when is "a softmax or a normalization layer carries a proven
+error bound rather than an empirical one", and it is the phase that decides
+whether the addressable set is wider than pure reductions. **Every theorem in
+`proofs/` before this one is an EXACTNESS or a COVERAGE claim** — which is not
+a stylistic preference, it is §0 of the process doc, the precondition that
+makes the relationship between kernel and specification an equality.
+
+`proofs/SoftmaxErrorBound.v`, 15 `Print Assumptions`, no axioms, nothing
+admitted. **653 default / 940 zk / 8 y-gpu, all green** (up 6, the new tie
+file). No `src/` behaviour change, so every emitted module is byte-identical.
+
+##### The ingredients all shipped, and the COMPOSITION was bounded by nothing
+
+Each piece was pinned individually and well:
+
+- `fixed_exp::exp2_neg_q16_16` — `it_is_sub_ulp_accurate_everywhere` is
+  EXHAUSTIVE over `0 .. 31<<16` against `f64::exp2`, worst 0.908 ulp.
+- `MAX_EXACT_SEQ_LEN` is *derived* (`2^63 / ((2^28-1)*127)`), so the int64
+  accumulator provably cannot wrap.
+- the `min.s64 ..., 1073741824` saturate has its own necessity test.
+
+What existed for the OUTPUT was `tests/attention_quantization_error.rs`, whose
+own stated bar is comparative and empirical — *"is it more wrong than the f32
+online softmax that production flash attention already ships?"* — on synthetic
+score distributions. That sentence is what this replaces.
+
+**The interesting part is not the exp.** Exhaustion over a finite domain is
+stronger than a proof about the table and the series would be, so the exp
+enters as a HYPOTHESIS. The chain around it is what nothing covered:
+
+    m - s -> ((m - s)*KFix + 2^15) >> 16 -> min(.., 2^30) -> Q0.28 -> exact
+             int64 accumulate -> divide
+
+##### Three joints, and the second is the one that existed nowhere
+
+- **The argument reduction rounds an EXPONENT**, so its error is
+  *multiplicative* in the weight while the exp's ulp is *additive*. They
+  compose as `EPS*w + 1`, not as a single number, and that shape is what makes
+  the max subtraction load-bearing below.
+- **The saturate is outside the swept domain.** The exhaustive sweep stops at
+  `31<<16 = 2,031,616`; the emitted `min.s64` admits arguments to `2^30`, **528
+  times further out**. `the_swept_domain_covers_the_admitted_one` is the
+  two-line argument that closes it — above the table the implementation returns
+  0 and the ideal weight is below a quarter of an ulp, because `31*2^32` is
+  past thirty halvings of `2^28`. So the "0.908 ulp everywhere" headline does
+  hold on the whole domain the kernel can reach; it simply had never been
+  established. *A number in a comment is not a check*, in the one place the
+  number was not even in a comment.
+- **The max subtraction had to be carried through.** It is usually described as
+  an overflow guard. It is also what makes the table's ABSOLUTE error
+  relatively negligible: `delta` is zero at the argmax, so one weight is
+  exactly `2^28` and `Wtot >= 2^28` — the additive term is `n` ulps against a
+  total of at least `2^28` of them.
+  `a_total_weight_below_one_ulp_admits_a_zero_denominator` is the refutation,
+  and it is not hypothetical: it is the F=16 attention-sink failure
+  `attention_quantization_error.rs` already records, one layer up — every
+  non-sink weight rounded to zero and the whole tail disappeared.
+
+##### THE ANSWER TO THE PHASE 2 QUESTION: bounds compose here for a stateable reason
+
+The question was whether the `Decomposition` schema extends to approximate
+arithmetic. **It does, and narrowly: the error is introduced BEFORE the
+decomposition, not by it.** `L` and `O` are exact integer reductions, so
+`GridStrideSplit.grid_stride_exact` applies verbatim and the per-element error
+enters the fold as *data*.
+`the_bound_holds_at_every_launch_geometry` is that join — the bound is a
+property of the kernel rather than of one launch.
+
+An f32 softmax has no such split: its error is produced BY the reduction, so
+the bound would have to be re-derived per decomposition. **That contrast is the
+actual content of "bounds compose differently", and it says the addressable set
+widens to pipelines whose approximation is PER-ELEMENT, not to approximate
+reductions in general.**
+
+##### The bound as a number, and how tight it is
+
+`2*VMAX*(EPS*Wtot + n) / L`, with `EPS = 2^-16` the argument reduction's
+relative term and `n` the exp table's absolute one. At **65,536 keys** with
+int8 `V` the expression evaluates to `4318/65519 = 0.0659`, so the corollary
+states `7/100` — the round number above it, not a fitted constant. At `n = 2^20`
+the same expression is `0.99998`, i.e. still under one unit of `V` but only
+just, which is a real statement about where Q0.28 runs out.
+
+Measured tightness, from the tie: the **per-element** bracket is tight — worst
+observed error is **0.49 of the allowance** over 3,540 points. The end-to-end
+output bound is 180–10,000x loose on random data, because per-element errors
+cancel in the sum. Both numbers are reported; a bound quoted without its
+slack is half a claim.
+
+##### No Reals, and that forced a real design decision
+
+`tests/proofs_are_checked.rs` requires every `Print Assumptions` to report
+`Closed under the global context`. Coq's `R` is axiomatized, so one
+`Require Import Reals` puts seventeen axioms under the file. Everything is `Z`
+and `Q`.
+
+**The obvious interface for the ideal weight is INCONSISTENT over Q.** Exact
+homogeneity `W(u+v)*2^28 = W(u)*W(v)` plus one exact halving forces
+`W(2^31)^2 = 2^55`, and no rational squares to it —
+`exact_homogeneity_is_unsatisfiable_over_Q`, on top of a from-scratch
+`no_rational_squares_to_two` (prime 2 divides both numerator and denominator of
+a fraction in lowest terms). An inconsistent hypothesis set proves everything,
+so this is not pedantry: the file would have been worthless.
+
+So the interface is a two-sided rational **bracket**, and both directions of
+*check your premise is satisfiable* are run: `the_interface_is_satisfiable`
+exhibits the model `2^28 * (1 - 2^-32)^u`, and
+`the_per_unit_factor_is_what_one_unit_of_log2_costs` proves the rational
+inequality `(1 - 2^-32)^(2^32) <= 1/2` that fixes the constant — the
+real-analytic fact `2^(-2^-32) >= 1 - 2^-32`, made checkable without ever
+mentioning a real.
+
+##### A mechanical trap worth carrying: `ring` NORMALISES, and a big power is a landmine
+
+`ring` (and `auto`) on a goal mentioning `qpow BETA (Z.to_nat 4294967296)` asks
+for four billion multiplications: **`Stack overflow`, after 85 seconds, at
+`Qed` rather than at the tactic**. `remember` does not help — it leaves a
+let-binding `ring` zeta-reduces through. The fix is to prove the algebra over
+ABSTRACT rationals and `apply` it, so the big term only ever meets first-order
+unification. `lra`/`nra` are safe (they abstract atoms) and so is the kernel:
+the theorem that STATES the big term checks in milliseconds. Diagnosed by
+bisection, not guessed.
+
+##### MUTATION TABLE — nine mutations, each `--test` target run separately
+
+| mutation | `proofs_are_checked` | `softmax_error_bound` | `exact_attention_bounds` | `attention_quantization_error` | `__lib__` |
+|---|---|---|---|---|---|
+| M1 proof's `HALF` halved | **FAIL** | **FAIL** | ok | ok | ok |
+| M2 twenty halvings, not thirty | **FAIL** | ok | ok | ok | ok |
+| M3 `EPS` too tight for `ALPHA` | **FAIL** | ok | ok | ok | ok |
+| M4 `VMAXQ` dropped from the bound | **FAIL** | ok | ok | ok | ok |
+| M5 emitter loses the saturate | ok | **FAIL** | **FAIL** | ok | ok |
+| M6 emitter loses round-to-nearest | ok | **FAIL** | **ok** | ok | ok |
+| M7 the swept domain narrows | ok | **FAIL** | ok | ok | **FAIL** |
+| M8 exp loses its early return | ok | **FAIL** | ok | **FAIL** | **FAIL** |
+| M9 the zero-denominator refutation deleted | **ok → FAIL** | ok | ok | ok | ok |
+
+**M2, M3 and M4 are caught by `coqc` alone**, which is the taxonomy working:
+the emitted code is unchanged, so there is nothing for a behavioural suite to
+see. **M6 is caught by the new file alone** — `exact_attention_bounds` pins the
+`>> 16` and the `min.s64` and *not* the `+ 32768`, so the round-to-nearest
+addend was covered by nothing until the proof's `HALF` had to equal it.
+
+##### M9 WAS A REAL SURVIVOR, AND THE HOLE WAS IN THE GATE THAT GUARDS ALL 17 PROOFS
+
+`each_proof_still_proves_the_thing_it_exists_for` was a bare
+`src.contains(needle)`. **Every proof file names its own theorems in its header
+doc comment** (`[the_name]`), so deleting a theorem *together with its
+`Print Assumptions` line* — the line has to go too, or `coqc` catches the
+dangling reference — left the whole gate green. Measured, not reasoned about:
+all four tests passed on a `SoftmaxErrorBound.v` with the refutation removed.
+
+`names_something_real` requires a declaration site now (`Theorem`/`Lemma`/… at
+the start of a line, name ending there), or the literal `Print Assumptions`.
+All 17 files pass unchanged, so no existing entry was relying on the hole, and
+the fix was confirmed to generalise by deleting a header-mentioned theorem from
+`GridStrideSplit.v` and watching it fire.
+
+**It is a pre-existing hole found by mutating a new file.** That is the
+argument for running the mutation sweep against the *gate* and not only against
+the subject.
+
+##### What this does NOT claim
+
+- **It is not a statement about `f64::exp2` or the real exponential.** `W` is
+  abstract, constrained by four properties the true function has; nothing here
+  proves it has them. That is a TCB item and it sits beside `vpdpwssd`'s
+  semantics rather than above them.
+- **The exp's accuracy is a hypothesis**, discharged by exhaustion in Rust over
+  the *swept* domain. The extension to the admitted domain is proved here.
+- **`KFix` is itself a rounded temperature** and this file does not price that;
+  it is a uniform reparameterisation of the exponent, and
+  `the_temperature_multiplier_carries_two_to_the_thirty_two` is where it lives.
+- **Nothing here is about int8 quantization of Q, K or V.**
+- **The tie is the `GridStrideSplit` grade** — `tests/softmax_error_bound.rs`
+  runs the real `exp2_neg_q16_16` and the real emitted arithmetic and reads the
+  proof's constants out of the `.v` — not the exact GEMM's byte-identity.
+- **`exp2_neg_q16_16` has FOUR transcriptions** (this Rust one, the PTX in
+  `ptx_device_function`, and two Python ones). A theorem about one of them is a
+  theorem about all four **only** because `EXP2_DOMAIN_DIGEST` pins them
+  together over the whole domain. Said here because it is easy to assume and
+  wrong if the digest ever goes.
+
+653 default / 940 zk / 8 y-gpu tests, all green.
+
+
+#### The temperature was quantized too, and its two preconditions lived in a Python script · 2026-09-01
+
+`proofs/SoftmaxErrorBound.v` landed earlier the same day with a **"what this
+does NOT claim"** section, and one of its four items was reachable:
+
+> **`KFix` is itself a rounded temperature** and this file does not price
+> that. `KFix = round(C * 2^32)` for a real `C = q_scale*k_scale/sqrt(d)`, so
+> the kernel computes the exact-for-KFix softmax of a slightly different
+> temperature.
+
+It is priced now — Part 6b, seven new theorems, still no axioms and nothing
+admitted — and the increment is worth reading for what pricing it *turned up*
+rather than for the bound.
+
+##### The shape of the answer is a head_dim question, not a KFix one
+
+Rounding the multiplier moves the exponent by `delta * |KFix - C*2^32|`, so at
+most `(delta + 1)/2` in units of `2^-32` log2. That error is proportional to
+the **score delta** and **independent of `KFix`** — which is not what you would
+guess, and it means a bound on the delta is the whole bound. The delta is
+bounded by the head_dim: `|s| <= 127^2 * hd` for an int8 pipeline, so
+`delta = m - s_i <= 2 * 127^2 * hd`, a compile-time function of one parameter.
+
+At head_dim 128 that is a factor under **1/2048** on any ideal weight
+(`at_head_dim_128_the_temperature_moves_a_weight_by_under_a_two_thousandth`).
+Measured: the exponent bound is attained **exactly** — 1.000 of its half-delta
+allowance — and the weight bound is **1.47x** slack, the slack coming from
+Bernoulli's linearisation of `BETA^n` and from rounding `n` up to `(d+1)/2`.
+Report the slack, not just the bound.
+
+##### THE FINDING: `round(C * 2^32)` had SEVEN transcriptions and was CHECKED IN ONE
+
+Every test that needed a multiplier wrote `(c * 2f64.powi(32)).round()` itself
+— four sites in `tests/softmax_error_bound.rs`, two in
+`tests/exact_attention_bounds.rs` — and `src/` had none. The only place the
+result was validated at all was `tools/ptx_bridge.py`:
+
+```python
+kfix = int(round(c * 2.0 ** 32))
+if kfix <= 0 or kfix >= 2 ** 31:
+    continue
+```
+
+A bare `continue`, so a temperature outside the representable range **silently
+removed a case from a measurement** instead of failing it —
+`feedback-conditional-gates-skip-silently`, in the script whose whole job is to
+validate the kernel against a real model. Skips are counted and printed now.
+
+Both bounds are real, and neither was derived anywhere:
+
+* **`KFix == 0`**, reachable whenever `C < 2^-33`. Then `t = (0 + 2^15) >> 16`
+  is `0` for **every** key, so every weight is exactly `2^28` and the softmax
+  is **uniform** — it carries no information about the scores at all. That is
+  the same symptom `ptx_bridge.py`'s own finding 06 records from the opposite
+  cause (the bridge passed `C * 2^16`, a multiplier `2^16` too small), and its
+  differential could not see it because both arms replicate the kernel's
+  formula and agree bit for bit on a uniform answer.
+* **`KFix >= 2^31`**. The parameter is declared `.param .u32 q6` and consumed
+  by `mul.wide.s32` — a **signed** wide multiply. The two readings are
+  different numbers, and not by a rounding: at `KFix = 2^31` and one unit of
+  delta the unsigned reading gives argument `32768`, a weight of
+  `2^28 * 2^(-1/2)`, while the signed one gives `-32768`, which the
+  `cvt.u32.u64` below the saturate wraps to `4294934528` — far above the
+  table, so the weight is **zero**. The key vanishes. Note the saturate cannot
+  help: `min.s64` bounds from *above* and the product is negative.
+
+Both are `exact_attention::temperature_fixed_point` now, which refuses them by
+name and says why, and both are theorems
+(`a_zero_multiplier_gives_every_key_the_same_weight`,
+`the_two_readings_of_the_multiplier_disagree_above_two_to_the_thirty_one`,
+`the_signed_reading_zeroes_a_weight_the_unsigned_one_keeps` — the last
+discharged from the exp's own early-return hypothesis, so it is the *proof* that
+says the key vanishes, not an observation).
+
+**The quantization error itself is NOT refused**, and saying so is the point of
+having the bound: it is bounded rather than catastrophic, so a compiler that
+refused it would be refusing every temperature.
+
+##### A `nat` literal is UNARY, and that is the same landmine as the `ring` one
+
+`at_head_dim_128_...` needs `n = 2,064,513`. Writing that as a `nat` literal
+builds **two million constructors**, and the first version of the proof hung —
+`simpl`, `Z.of_nat` and `lia` all normalise through it. `Z.to_nat 2064513` is a
+*term*, and `Z2Nat.id` recovers the integer; the file goes from not finishing
+to **13.9 s**.
+
+This is the second instance of one lesson in two sessions. The first was `ring`
+reflexively normalising `qpow BETA (Z.to_nat 4294967296)`. The rule to carry:
+**in a proof about fixed-point arithmetic, the constants are large, and any
+tactic that normalises will try to evaluate them.** Keep every large number in
+`Z`, and let `nat` see only `Z.to_nat` of it.
+
+##### Mutation table — 10 mutations, each `--test` target run separately
+
+| mutation | proofs_are_checked | softmax_error_bound | exact_attention_bounds |
+|---|---|---|---|
+| T1 exponent bound loses its `+1` | **FAIL** | ok | ok |
+| T2 the proof's score span coefficient | **FAIL** | **FAIL** | ok |
+| T3 the head_dim-128 corollary claims 1/8192 | **FAIL** | ok | ok |
+| T4 the bracket lemma's hypothesis weakened | **FAIL** | ok | ok |
+| T5 compiler stops refusing `KFix = 0` | ok | **FAIL** | ok |
+| T6 compiler stops refusing the signed limit | ok | **FAIL** | ok |
+| T7 `score_delta_span` drops its factor of two | ok | **FAIL** | **FAIL** |
+| T8 compiler's signed limit disagrees with the proof's | ok | **FAIL** | ok |
+| T9 *control* — refuse every temperature | ok | **FAIL** | **FAIL** |
+| T10 the worst-case temperature leaves the sweep | ok | **FAIL** (after the fix below) | ok |
+
+`attention_quantization_error`, `exact_attention_schedule` and the lib/bin unit
+tests are `ok` for all ten, which is the taxonomy working: T1–T4 change no
+emitted code, so no behavioural suite can see them.
+
+**T10 SURVIVED, and the hole it exposed is one this repository already has a
+name for.** The sweep's non-vacuity floor asserted the worst *weight* factor
+reached a quarter of the allowance — and the realistic temperatures alone reach
+**57%** of it, so removing the deliberately-worst-case `C` left the floor
+passing. What the worst case actually buys is the **exponent** bound being
+*attained*, and that number was `println!`ed rather than asserted. Both this
+document and the proof's header claim the bound is tight; *a number in a
+comment is not a check*, and a number in a `println!` is not either. The test
+now asserts `worst_exp > 0.99`, and T10 fails with the right diagnosis (`worst
+was 0.837 of it`). 10/10.
+
+##### Where this leaves the "what this does not claim" list
+
+Three of the four items stand and are structural rather than reachable: the
+exp's accuracy is a hypothesis discharged by exhaustion in Rust (which is
+*stronger* than a proof about the table would be); nothing here is about int8
+quantization of Q, K or V; and the tie is the `GridStrideSplit` grade — the
+proof is read against the running code, not rendered with it from one `Ix`.
+The fourth is gone.
+
+`657 / 944 / 8` tests, both builds, no committed artifact changed.
+
+#### Nine compiler warnings, and two of them were the soundness core · 2026-09-01
+
+Both builds carried warnings — 9 in the default configuration and 11 under
+`--features zk` — and had done for long enough that nobody read them. They are
+zero now, and the sweep is worth recording because the class this repository
+already tracks is exactly what a `never used` warning reports: **dead code is
+where the bugs hide**, which is why `run_all_optimization_passes`,
+`c_emitter.rs` and the `SmemLayout` surface each turned out to be findings
+rather than tidying.
+
+Seven were mechanical, and two carried a claim.
+
+##### `VnniExact::licenses` was a SECOND, WEAKER licence predicate
+
+Phase 0's soundness core is `VnniExact::license` — the rule that says a tiled,
+threaded, K-split GEMM may use `vpdpwssd` and still be bit-identical to the
+naive nest. A `bool`-returning twin sat beside it, `pub`, reading as the cheap
+form of the same question:
+
+```rust
+pub fn licenses(&self, m: f64) -> bool {
+    m.is_finite() && m >= 0.0 && m <= self.max_operand_magnitude()
+}
+```
+
+That is `license` **without the `m < 1` refusal** — the fix for the
+unsoundness this document records one entry above, where `@bounds(-0.001,
+0.001)` was licensed at magnitude 0.001 and every such operand stages to int16
+*zero*, so the kernel computes the zero matrix under a certificate claiming
+exactness. Measured before deleting it:
+
+```
+m=0.001  licenses()=true   license()=Err(not representable as int16)
+m=0.5    licenses()=true   license()=Err(not representable as int16)
+m=4095   licenses()=true   license()=Ok
+m=4096   licenses()=false  license()=Err(can overflow the int32 accumulator)
+```
+
+It had no *callers* — but it had **unit tests**, four of them, asserting its
+behaviour. So it read as maintained code, and the only thing saying otherwise
+was a warning nobody looked at. Deleted; its tests now drive `license`, which
+strengthens them, since one of the four is the tie between the licence and
+`ExactGemmMicro`'s proof hypothesis and it now compares the *shipping*
+predicate against the proof.
+
+**The gate is `the_magnitude_rule_lives_in_exactly_one_place_and_gives_a_reason`,
+and its first version was wrong in an instructive way.** It asserted there was
+exactly ONE licence-named function and failed immediately on
+`license_vnni_exact` — which is legitimate: it is the free function
+`cpu_gemm` calls, and it *delegates* the magnitude question rather than
+re-deciding it. A wrapper is not a second implementation. So the property is
+"delegates, or is the original", not "is unique" — **the gate's statement was
+wrong, not the code**, and running it is what said so. It also requires the
+signature to return `Result<_, String>`: a caller handed `false` cannot tell an
+unrepresentable magnitude from an overflowing one, and those have different
+repairs.
+
+##### The refusal computed its reasons and threw them away
+
+`select_repr` walks the four candidate representations and records why each
+lost — "not exact: floating-point addition is not associative", "insufficient
+range or resolution (holds |x| < 3.277e4 at 16 fractional bits)". On success it
+returned them in `Decision::rejected`; on failure it returned `None` and
+**dropped the list three lines after building it**. So a user hitting
+
+> `@ZeroDrift on 'acc: F32' cannot be honoured. No exact representation holds
+> that range at that resolution`
+
+could not be told which four things were tried or why each failed. The struct's
+own doc comment said the field existed "so the compiler can report a real
+reason rather than an advisory", and no backend read it — `rejected` and
+`measured` were both reported as never-read by `cargo build`.
+
+`select_repr` returns `Result<Decision, Vec<(DriftRepr, String)>>` now, both
+backends print the reasons on refusal, and the success path names how many
+candidates lost (`Y_DRIFT_EXPLAIN=1` for the list). `measured` was a `bool`
+field set in lockstep with `cost_ps` — two fields encoding one fact, which is
+how "two fallbacks disagreeing, with the exposed one unsafe" starts — and is a
+derived method. The advisory line itself is one shared function, because the
+two backends each carried their own copy of the phrasing.
+
+##### The mechanical seven, and why each was correct to be a warning
+
+Two are *confirmations that a fix is in place*, which is worth knowing before
+reaching for `#[allow]`: `ptx_emitter`'s barrier-hoisting scan no longer needs
+`let mut j`, because the fix was to **stop** at the first statement it cannot
+hoist rather than `j += 1` past it — the warning is that unsoundness being
+visible from outside. `zk_emitter`'s `Stmt::While` arm binds `condition`,
+`body` and `max_iterations` and uses none of them, because the
+`@max_iterations` masked-unroll lowering was **withdrawn** for computing the
+wrong function. Likewise `cpu_emitter`'s `@ZeroDrift` arm, which refuses. Those
+are `..` patterns now, with the reason beside them. The rest: `DriftRepr::c_type`
+was a leftover of the deleted C backend; `sentinel`'s two `unsafe` blocks around
+`__cpuid` are redundant in this Rust; `cpu_gemm`'s `take` closure no longer
+mutates; and `main`'s `counts()` is genuinely unreachable in a default build
+because every caller is on the `--features zk` timing path — the one case that
+takes an `#[allow]`, with that sentence next to it.
+
+##### AND MY OWN SWEEP HARNESS HAD THE NULL-METRIC BUG
+
+Fixing the last `licenses` caller left `tests/exact_gemm_micro_model.rs`
+**failing to compile** — and the per-target sweep script reported a completely
+green run, twice. A target that does not build emits no `test result` line at
+all, and the script's `[ -z "$LINE" ] && LINE="test result: NONE"` did not match
+its `*FAILED*` case. *Null metrics pass dead components*, in the harness written
+to apply that rule. It counts a missing result line as a failure now, and the
+aggregate `cargo test` is what caught it.
+
+##### Mutation table — 5 mutations, each `--test` target run separately
+
+| mutation | licence gate | micro_model | backend_agreement | lib unit |
+|---|---|---|---|---|
+| L1 the `bool` twin returns verbatim | **FAIL** | ok | ok | ok |
+| L2 a `Result` twin that does not delegate | **FAIL** | ok | ok | ok |
+| L3 the refusal drops the reasons again | ok | ok | **FAIL** | ok |
+| L4 the report stops naming what lost | ok | ok | ok | **FAIL** |
+| L5 *control* — a legitimate delegating wrapper | ok | ok | ok | ok |
+
+Each isolated to exactly one gate, and the control is what stops the licence
+gate degenerating into "no wrappers allowed".
+
+`661 / 948 / 8` tests, both builds **warning-free**, no committed artifact
+changed. (Those first two counts are INFLATED — the entry below shows 134 and 170
+unit tests were being run twice, because `main.rs` compiled the whole compiler
+a second time. The real figures at this commit are `527 / 778 / 8`.)
+
+#### The dead-code census was 90% noise, because the compiler was compiled twice · 2026-09-01
+
+The previous increment read the build's nine warnings and found two of them
+were the soundness core. Twenty-six modules opt out of that census entirely
+with a crate-level `#![allow(dead_code)]` — every emitter, `type_checker.rs`,
+`zk_emitter.rs`, `cpu_gemm.rs`, `parser.rs`, `ast.rs` — and `src/zero_drift.rs`,
+where the finding surfaced, is one of the few soundness-critical files without
+one. Stripping all twenty-six surfaces **69 warnings** in the default build and
+**85** under `--features zk`.
+
+**Almost none of them mean what they appear to mean, and that is the increment.**
+
+##### `src/main.rs` re-declared thirty modules, so the compiler was compiled twice
+
+```
+warning: `Y-compiler` (lib) generated  6 warnings
+warning: `Y-compiler` (bin "Y") generated 62 warnings
+warning: `Y-compiler` (bin "ysu_gpu_probe") generated 1 warning
+```
+
+`src/lib.rs` declares the modules `pub mod`; `src/main.rs` declared the same
+thirty files again as **private** `mod`s of the `Y` binary. Two crates from one
+set of sources. In the lib a `pub` item is reachable from outside and is not
+flagged; in the bin it is dead unless `main.rs` itself calls it. So 62 of the
+69 warnings said *"main.rs does not call this"* — a far weaker claim than
+*"nothing uses this"* — and they are what made the blanket allows look
+necessary. `CpuShapeDispatcher`, `OperatorFusionPass`, the fusion enum's four
+variants, `pack_a_slot`, `ksplit_bands`, `CountedLoop::coq`, `render_ptx`: all
+of them are used, by the lib's other modules or by the integration tests, and
+every one appeared in that list.
+
+`main.rs` uses `use y::{..}` now. The bin's dead-code count went **62 → 0**, and
+its import list shrank from thirty modules to fourteen plus five under `zk` —
+the other eleven had never been named by `main.rs` at all; they existed only so
+that *other* modules of the duplicate crate could reach each other. The two
+module lists had already drifted (`lib.rs` carries `fixed_exp`,
+`exact_attention`, `c_api` and `zk_fuzz`; `main.rs` did not), which is the
+ordinary end state of two descriptions of one thing.
+
+**`PtxEnv is never constructed` was listed as a question rather than a finding,
+and chasing it is what explains the rest.** `exact_attention::render_sched`
+visibly calls `PtxEnv::default()`. rustc's note says why: *"has a derived impl
+for the trait `Default`, but this is intentionally ignored during dead code
+analysis."* A derived-trait construction does not count. Two of the 69 are that.
+
+##### What the real census contains: nine items
+
+With the duplicate compilation gone and all twenty-six allows removed, the two
+builds report **8 warnings each, 9 distinct items** across both feature sets.
+Sorted by last session's taxonomy:
+
+| item | kind |
+|---|---|
+| `lexer::Lexer::matches_next` | 1 — leftover; every call site spells `peek()` + `advance()` |
+| `LlvmEmitter::w` | 1 — the no-newline twin of `wln`; nothing emits a partial line |
+| `cpu_gemm::b_sub1` | 1 — `x - 1` as raw IR, superseded by `IrBuilder::sub`, which is what `Ix::Sub` renders through |
+| `circom_lower::resolve_signal_wire` | 1 — an unused wrapper over `resolve_signal_slot` |
+| `QuantizationPass::{reg_f16, alloc_f16}` | 1 — a *scalar* f16 register class the packed form replaced |
+| `bank_conflict::ThreadAccess::{thread_id, linear_byte_address}` | 1 — and evidence of a doc-vs-code gap, below |
+| `ysu_gpu_probe`'s `cuMemcpyDtoH` | 1 — bound, never called; and the thread that led to the category-4 find |
+| `PtxEmitter::unsupported_witness_op` | **3** — every caller is in `#[cfg(feature = "zk")] emit_witness_generator_ptx` |
+| the probe's driver binding | **4** — a rule that already had one implementation |
+
+`unsupported_witness_op` takes `#[cfg(feature = "zk")]` rather than
+`#[allow(dead_code)]`: a `WitnessOp` does not exist without the ZK front end, so
+the cfg is the truer statement *and* it stops the default build compiling code
+no default build can reach.
+
+##### Category 4: a second binding of the CUDA driver, following the opposite convention
+
+The probe's unused `cuMemcpyDtoH` is one field of a **complete second copy of
+the CUDA Driver API binding**, separate from `src/cuda_runtime.rs`. The two do
+not agree. `cuda_runtime.rs` resolves the `_v2` symbol for `cuCtxCreate`,
+`cuCtxDestroy`, `cuMemAlloc`, `cuMemFree`, `cuMemcpyHtoD`, `cuMemcpyDtoH` and
+`cuEventDestroy`, with the reason written beside the macro:
+
+> the unsuffixed `cuMemAlloc` symbol is the *legacy* 32-bit-size form, and
+> calling it with a `usize` byte count silently truncates above 4GB
+
+`ysu_gpu_probe.rs` resolved the **legacy** names for all six it uses. Confirmed
+rather than assumed: `nm -D /usr/lib/libcuda.so.1` shows `cuMemAlloc` at
+`0x39afb0` and `cuMemAlloc_v2` at `0x36a240` — two different functions. C code
+never meets this because `cuda.h` `#define`s the plain names to the `_v2` ones;
+a hand-written `dlsym` binding does.
+
+It has never produced a wrong answer: the largest thing the probe allocates is
+a 64MB array, four orders of magnitude below where the truncation begins. So
+this is the `VnniExact::licenses` shape exactly — **a rule with one written-down
+implementation, implemented differently a second time, latent because the live
+inputs never reach the boundary** — and it surfaced from the same place, a
+`never used` warning a blanket allow was hiding.
+
+Both bindings now use the same `resolve_v2!`. `tests/cuda_driver_abi_versions.rs`
+asserts they AGREE rather than re-deriving the table (a third copy is the bug,
+not the fix), with the limit of an agreement assertion stated: flattening *both*
+to the legacy form satisfies it, which is why a per-file floor sits beside it.
+
+##### The bank-conflict prover's doc comment claimed a check it does not perform
+
+`ThreadAccess` recorded `thread_id` and `linear_byte_address` and read neither.
+That is not tidiness — the address is exactly what separates a hardware bank
+**conflict** (two threads, one bank, *different* addresses — serialised) from a
+**broadcast** (same address — free), and nothing looked at it. Measured on the
+unswizzled F16 tile the pass is handed:
+
+| `cols` | max threads/bank | distinct addresses in that bank | verdict |
+|---|---|---|---|
+| 16 | 4 | **4** | `Ok` |
+| 32 | 8 | 8 | `Err` |
+| 64 | 16 | 16 | `Err` |
+| 128 | 16 | 16 | `Err` |
+
+So at `cols = 16` a genuine 4-way serialisation is returned as proved
+conflict-free, by a function whose doc comment said it "checks if any two
+threads within the warp hit the same bank simultaneously". A second gap in the
+same twenty lines: one thread is charged ONE bank where an `ldmatrix` row-fetch
+is 16 bytes spanning FOUR — which the sibling `prove_ldmatrix_m8n8_x4` and
+`ptx_emitter::max_bank_hits` both model and this one does not.
+
+**Recorded, not repaired.** Its only consumer is the type checker's auto-swizzle
+advisory, and every backend refuses the `SmemLayout` surface that advisory is
+about, so tightening the predicate would change a message nothing acts on;
+`ptx_emitter`'s own copy is the one that runs. What was fixed is the comment,
+which now states what is decided and what is not.
+
+##### The gate, and what it can and cannot see
+
+`cargo build`'s warnings are not observable from inside a test binary, so
+`tests/build_is_warning_free.rs` shells out — three configurations (default,
+`--features zk`, and `-p y-gpu`, which the documented `cargo test` does not
+build), each with **its own** `CARGO_TARGET_DIR` under `target/warning-gate`.
+Separate directories are not tidiness: two feature sets of one package sharing a
+target dir invalidate each other's units, which turns every run into two full
+rebuilds — **12.3s against 0.11s** measured. A gate that is expensive gets
+`#[ignore]`d and then never runs, which this repository has already paid for.
+Cold cost is 18s; warm is 0.11s.
+
+It sees every warning rustc emits for the root package's lib and four binaries,
+in both feature sets, plus `crates/y-gpu`. It does **not** see warnings in
+`tests/*.rs` (those targets are not built here — deliberate; a harness is
+allowed scaffolding), anything under an item-level `#[allow]`, or a lint that is
+off by default. Two source-level gates sit beside it for the parts it cannot
+reach: no crate-level `#![allow(dead_code)]` anywhere in `src/`, and `main.rs`
+may not re-declare a module `lib.rs` owns. Item-level `#[allow(dead_code)]`
+stays legal — category 3 needs it, and `main`'s `counts()` is one.
+
+##### The test count was inflated too, by exactly the same mechanism
+
+`661 / 948` was the recorded headline. It is now `532 / 783`, and **nothing was
+lost**: every module carrying a `#[cfg(test)] mod tests` was compiled into two
+crates, so its unit tests were built and executed **twice** — once from the lib
+and once from the `Y` binary. Measured against a `git worktree` at HEAD:
+
+```
+HEAD   lib 141 passed  +  bin "Y" 134 passed        (default)
+HEAD   lib 177 passed  +  bin "Y" 170 passed        (--features zk)
+now    lib 141 passed  +  bin "Y"   0 passed
+now    lib 177 passed  +  bin "Y"   0 passed
+```
+
+and the arithmetic closes exactly: `532 - 5 (new gates) + 134 = 661`, and
+`783 - 5 + 170 = 948`. A duplicated test run is not coverage.
+
+(The worktree's own run **aborted at target 24** on `cargo test` — it had no
+`target/release/Y`, and `cpu_gemm_end_to_end` says so by name. A reminder of why
+the per-target sweep exists beside the aggregate, delivered by the baseline
+measurement rather than by the subject.)
+
+##### Mutation table — 8 probes, each `--test` target run separately
+
+| probe | warning-free | census | binary-uses-lib | cuda-abi |
+|---|---|---|---|---|
+| G1 a crate-level `#![allow(dead_code)]` returns | ok | **FAIL** | ok | ok |
+| G2 `main.rs` reverted to `mod` declarations | **FAIL** | ok | **FAIL** | ok |
+| G3 a dead private `fn` added to the lib | **FAIL** | ok | ok | ok |
+| G4a a build configuration that cannot run | **FAIL** (by name) | ok | ok | ok |
+| G4b the same, with the non-vacuity controls removed | **ok** — the hazard | ok | ok | ok |
+| G5 `unsupported_witness_op`'s `#[cfg]` removed | **FAIL** | ok | ok | ok |
+| G6 the probe reverted to the legacy symbols | ok | ok | ok | **FAIL** (both) |
+| G7 *control* — both bindings flattened to `resolve!` | ok | ok | ok | **FAIL** (floor only) |
+
+**G7 is the standing limit of an agreement assertion, demonstrated rather than
+asserted:** flattened together, the two bindings agree, and
+`the_two_driver_bindings_agree...` passes. Only the per-file floor fails. A
+consistent wrong choice for one symbol in both files remains uncaught, and
+closing that needs a third copy of the table — which is the bug, not the fix.
+
+**G1 is the most informative row, and it is a confirmation rather than a
+catch.** Putting an allow back in `type_checker.rs` no longer resurrects a
+single warning — because the module it silenced is no longer compiled a second
+time. The twenty-six attributes were load-bearing only against noise that the
+`main.rs` fix deleted.
+
+**G4b is the null-metric hazard demonstrated.** With the `status.success()` and
+`Finished`-line assertions removed, a configuration that never runs passes the
+gate perfectly: a metric that counts bad things is passed by a component that
+does nothing.
+
+**Two probes were mis-aimed, and both misattributions were instructive.** G3
+first used `fn __probe_dead_helper`, which produced no warning at all —
+rustc's `dead_code` lint deliberately exempts identifiers beginning with `_`, so
+an underscore-prefixed name is invisible to the census and the probe looked like
+a survivor. And G6/G7 first failed the *warning* gate as well as the ABI one,
+which read as coverage it does not have: the regex that reverted the calls left
+an unused `macro_rules! resolve_v2` behind, and that has its own warning.
+Removing the macro too gives the isolated rows above. **A mutation's side effects
+are not the mutation.**
+
+##### And the restore left cargo replaying the mutation
+
+`tar xzf` restores the archive's **mtimes**, which are older than the mutation's,
+so cargo decided nothing had changed and replayed the mutated build's
+diagnostics — one probe appeared to fail for the right reason when it was
+reading a stale unit. The stale-binary trap this repository already records,
+wearing a timestamp instead of a build product. `touch` after every restore, and
+the standing rule holds in both directions: verify the mutation is in the built
+artifact, *and* that the restore is.
+
+##### A separate observation, not acted on
+
+The GPU probe's own output moved 22.66 → 4.29 cycles for FMA latency across the
+change, which reads exactly like a regression. It is not: five consecutive runs
+of the **same** binary gave 4.29, 43.89, 4.30, 4.09, 4.11 — a 10x run-to-run
+spread with no warm-up discipline, and `.ysu_hw_profile` caches whatever the
+first run happened to say. The clock-ramp lesson this repository already
+records, in the tool that measures the machine. These numbers feed the analytic
+cost-model fallback, so a wrong one is a suboptimal tile rather than an error.
+
+**532 / 783 / 8** tests, zero failures across 123 per-target binaries in both
+feature sets plus the aggregate; both builds warning-free; all four emitted LLVM
+modules and every emitted attention PTX byte-for-byte unchanged; no committed
+artifact touched.
+
+#### The work queue itself had rotted: seven false items on the programme's own "not proved" lists · 2026-09-01
+
+Step 12 of the checklist says to read each proof's "what this does NOT prove"
+section back as the next increment's queue. It has produced two increments —
+the temperature quantization came off the softmax bound's list, and the licence
+predicate off the warning census. So the lists are load-bearing. **Audited all
+seventeen: seven items were false, across four files, and every one of them
+understated what is proved.**
+
+| file | claim | why it is false |
+|---|---|---|
+| `ExactGemmChain.v` | "The third is not proved anywhere: the **kc-panel loop**" | **No such loop exists.** `emit_vnni_gemm_driver` passes the full `K` to both packers and `kpairs = (K+1)/2` to the micro-kernel; the only cut of the K axis is the thread K-split, so `kc` in every file of the series *is* K |
+| `ExactGemmChain.v` | the tiling and band layers "are not joined to this one" | `ExactGemmWhole.the_threaded_gemm_holds_the_source_dot_products` joins them |
+| `ExactGemmKsplit.v` | "THE MICRO-KERNEL IS NOT VERIFIED. Packing, the 2-D register tile, the masked tails and the periodic int32 → int64 flush are all assumed" | all four are proved — `ExactGemmPacking.v`, `ExactGemmRegisterTile.v`, `ExactGemmMicro.v`, composed in `ExactGemmChain.v` |
+| `ExactGemmKsplit.v` | "The M and N partitioning … is not modelled" | `ExactGemmTiling.c_written_exactly_once` |
+| `ExactGemmMicro.v` | the register tile and the masked tails are "ISA facts pinned by `tests/cpu_gemm_vnni_micro.rs`" | they are **proved**; only `vpdpwssd`'s semantics and the i32 half-order are TCB. This one overstates the trusted base by three proof files |
+| `GridStrideSplit.v` | "this one's schedule is a PTX string template rather than an emitted expression … weaker than the byte-identity the `Ix` layer gives" | the schedule is an `Ix` (`sched_scores` / `sched_accum`), rendered to PTX and to Coq — contradicted by the file's own `Require AttentionSchedule` |
+| `GridStrideSplit.v` | "The per-thread body — the integer exp, the Q0.28 weight, the int8 `V` load — is not modelled" | `SoftmaxErrorBound.v` sits **above** this file and bounds the first two |
+
+**The kc-panel item had already been diagnosed and the diagnosis filed
+elsewhere.** The session that wrote `ExactGemmWhole.v` read the emitter,
+established there is no such loop, and recorded it in *that* file's header —
+leaving this copy of the claim intact. So the queue has already cost one
+session the time to re-derive a phantom.
+
+##### The cause is structural, and the fix is derived rather than chosen
+
+Each file states a **global** negative — a claim about what the programme
+leaves open — and nothing updates a sibling's prose when a later file
+discharges what it names.
+
+The files whose lists stayed true are exactly the **dependency roots**:
+`ExactGemmWhole.v`, `SoftmaxErrorBound.v`, `CountingSort.v`, `GemmBandSplit.v`,
+`ZkControlFlow.v` — the five proofs nothing else `Require`s. That is not a
+coincidence and it is not a choice: a capstone is rewritten every time the
+chain below it closes, and a file with something above it *cannot* know what
+the programme leaves open, because the file above it may have closed it.
+`SoftmaxErrorBound.v`'s own list even carries "It was NOT priced when this file
+was first written, and it is now."
+
+So `only_the_capstone_states_a_global_negative` **derives** the capstones from
+the `Require` graph rather than listing them — a hardcoded list would be a
+third copy of the dependency graph, which is the mistake `ExactGemmSchedule.v`
+exists to avoid. Outside a root, a negative must carry a scoping marker
+("not modelled **HERE**; `X.v` proves it"), which makes the claim owned by the
+file making it.
+
+##### The gate found the seventh item, and I had dismissed it
+
+`GridStrideSplit.v`'s per-thread-body claim was in the gate's first offender
+list and I classified it a false positive — it reads like an honest global
+statement about something no file covers. It is not: `SoftmaxErrorBound.v`
+`Require`s that file and bounds the integer exp and the Q0.28 weight. Only the
+int8 `V` load is genuinely unmodelled. **Checking before dismissing is the
+whole of that finding**, and it is the same move as the licence gate's first
+version, where the gate's *statement* was wrong and running it said so — here
+the gate was right and my reading was wrong. Both directions happen; the
+measurement settles it either way.
+
+##### `"anywhere"` contains `"here"`
+
+The first version of the gate exempted any line containing `here`, as a scoping
+marker. `"not proved anywhere"` contains it. So the gate exempted **the exact
+phrase it exists to catch**, and the mutation that restored the kc-panel
+paragraph came back green — a survivor that was a real hole in a gate written
+minutes earlier. The markers are delimited now (`" here "`, `" here,"`,
+`" here."`, `"HERE"`), and P5 in the table below pins it. *A scoping word that
+occurs inside the global claim is not a scoping word.*
+
+##### The second gate, and the one live find it had
+
+`every_path_a_proof_or_a_gate_cites_exists` resolves every repo-relative path
+named in `proofs/*.v`, `tests/*.rs` and `src/*.rs` — **327 citations, one
+stale**: `tests/zk_integer_ops.rs` pointed at `zk_divmod_soundness.rs`, renamed
+to `zk_gadget_soundness.rs` when it grew past division. Cheap, and the class has
+three prior instances here (three verification scripts named in `docs/` that were
+never in the tree; `self_hosted/` rotting because it was named only in a doc; a
+`zk_fuzz.rs` docstring citing a test file that did not exist).
+
+**Anchor the start of the path.** The first sweep did not, so
+`crates/y-gpu/tests/ptx_is_not_stale.rs` matched as `tests/ptx_is_not_stale.rs`
+and was reported missing while existing — two of that sweep's three findings
+were that. And the gate then fired on its own docstring, which cited the two
+stale paths as examples: the self-reference trap already recorded for
+`src.find("fn reference_bins")`, hit again the same afternoon.
+
+##### Mutation table — 8 probes, each run against the whole gate file
+
+| probe | capstone gate | path gate | the four pre-existing checks |
+|---|---|---|---|
+| P1 `ExactGemmChain.v`'s kc-panel claim restored | **FAIL** | ok | ok |
+| P2 `GridStrideSplit.v`'s per-thread-body claim restored | **FAIL** | ok | ok |
+| P3 `ExactGemmKsplit.v`'s "NOT VERIFIED" restored | **FAIL** | ok | ok |
+| P4 the `Require` parse broken, so every file looks like a capstone | **FAIL** (the derived-capstone floor) | ok | ok |
+| P5 the scoping markers un-delimited, with P1's claim restored | **ok** — the substring hole | ok | ok |
+| P6 a citation to a file that does not exist | ok | **FAIL** | ok |
+| P7 the path sweep resolves nothing | ok | **FAIL** (the floor) | ok |
+| P8 *control* — `ExactGemmTiling.v`'s legitimate "not modelled **here**" | ok | ok | ok |
+
+`coqc` stays green throughout, correctly: every edit is inside a comment.
+
+##### What these gates cannot see
+
+They catch the **form** of the failure — a proof with something above it making
+a claim about the whole programme, and a citation to a file that no longer
+exists. They cannot see a wrong claim phrased in words they do not know. Prose
+staleness is not mechanically decidable, which is precisely why
+`ExactGemmSchedule.v` is *generated* rather than checked; this is the reachable
+part, and the unreachable part is stated in the gate rather than implied.
+
+##### And I deleted nineteen tracked files
+
+The mutation harness needed a `restore2.sh` and a `state2.tgz`. The shell here
+is fish, and defining a function named `g` collided with an alias — a **parse**
+error, which aborts the whole block before executing anything, so neither the
+tarball nor the restore script was created. The next command then ran
+`rm -rf proofs tests/proofs_are_checked.rs tests/zk_integer_ops.rs` and
+extracted a backup that did not exist.
+
+Recovered with `git checkout` — all nineteen were tracked and clean at HEAD, so
+only the day's uncommitted edits were lost and they were re-applied from the
+transcript. The restore script **verifies the archive before deleting anything**
+now, and the check is a real one: the failed `tar czf` had left a 45-byte empty
+archive behind, so a size or entry-count check catches exactly this. Two
+process rules, both already in this file in other forms, and both violated
+within an hour of each other: *verify the restore took effect*, and now *verify
+the backup exists before you rely on it*.
+
+**534 / 785 / 8** tests, zero failures across 122 per-target binaries in both
+feature sets plus the aggregates; both builds warning-free; `coqc` clean over
+all seventeen proofs with no axioms and nothing admitted; no `src/` change, so
+every emitted module is byte-identical by construction.
+
+#### The certificate did not state its own trust boundary, and the list it copied had dropped the item with teeth · 2026-09-01
+
+Three turns of conversation about *"can this ever be 100% proven, or does SASS
+mean never"* produced the right answer — **no proof has a zero trusted
+computing base, and the bar is whether the TCB is stated, small, and each item
+independently checked** — and then the obvious question: does the certificate
+this compiler actually ships say what its TCB is?
+
+It said something. **It was a hand-copy of `ExactGemmWhole.v`'s exclusion list,
+and it had dropped one of the capstone's three bullets while adding one of its
+own.** Both lists were three bullets long, so a count called them equal:
+
+| | `ExactGemmWhole.v` | emitted certificate |
+|---|---|---|
+| `vpdpwssd` + i32 half-order are definitions | yes | yes |
+| loop structure modelled, not extracted | yes | yes |
+| **`pthread` mechanics, panel buffer sizes, scratch allocation not modelled** | yes | **no** |
+| nothing about LLVM / `clang` | — | yes (correctly added) |
+
+**The dropped item is where both of this repository's documented out-of-bounds
+writes were** — the three `ldc` sites in `emit_vnni_threaded_module`, observed
+as `double free or corruption` and found only by writing `ExactGemmTiling.v`,
+and the tile-count over-allocation that is *caught by the schedule gate and by
+nothing else because it changes no answer*. So the certificate was silent about
+exactly the class of defect this kernel has actually shipped, while its own
+module doc said "a certificate that overstates its scope is worse than none".
+
+**The fix is the one this repository already knows: derive, do not check.**
+`exact_gemm_certificate::TRUST_BOUNDARY` is one list rendered into every
+certificate, the same move `proofs/ExactGemmSchedule.v` made for the schedule
+constants. Six items, and each carries a field the prose never had:
+
+```rust
+pub enum Check {
+    Pinned(&'static str),      // something here can FAIL on it - the file
+    Unchecked(&'static str),   // nothing can - what closing it would take
+}
+```
+
+**A caveat list says what is not proved; a trust boundary says what would
+notice.** Only the second is worth handing to someone deciding whether to rely
+on the kernel, and the difference is one struct field. Three items are
+`Pinned` (`cpu_gemm_vnni_micro.rs` for the ISA facts, `exact_gemm_schedule_proof.rs`
+for the extracted half of the nest, `proofs_are_checked.rs` for the checker
+itself); three are `Unchecked` (the buffer sizing, everything below the emitted
+IR, and the processor executing its own ISA). Naming the last one is what makes
+the list **finite** rather than trailing off.
+
+**Two grades, not three, and the missing one is deliberate.** "A test exercises
+it" is not a grade between `Pinned` and `Unchecked` unless the test can *fail*
+on the thing. `exact_gemm_thread_invariance.rs` runs this kernel at ragged
+shapes with every stride differing from its extent — and compares **answers**,
+which a buffer sized wrongly in the safe direction does not change. That is not
+a hypothetical: it is how the over-allocation survived.
+
+**The gate is a BIJECTION and that is the whole design, because a count is
+exactly what would have passed.** Every bullet of the capstone's exclusion list
+must be claimed by exactly one `TrustItem`, and every item attributed to the
+capstone must find exactly one bullet. It cannot see a bullet reworded around
+its locator phrase into a different claim — prose staleness is not mechanically
+decidable, which is the same limit that makes `ExactGemmSchedule.v` generated
+rather than checked, and it is stated in the file rather than implied.
+
+**Which file the certificate must mirror is DERIVED from last increment's
+result, not chosen.** Only a dependency root can truthfully state a global
+negative, because a proof with something above it cannot know what the
+programme still leaves open. The capstone is therefore exactly the file whose
+exclusion list is the aggregate one — and exactly the file a certificate
+instantiating it may not understate. The two increments fit; that was not
+planned.
+
+**A fourth test exists because the bijection can never require the items below
+the model.** A proof over `Z` has no opinion about `clang`, so the capstone
+correctly does not mention a toolchain — which means deleting every
+`stated_in: None` item leaves the bijection green while the certificate stops
+saying it makes no claim about machine code. Confirmed by mutation (M8), not
+assumed.
+
+Verified end to end: the regenerated certificate compiles under `coqc` against
+the real proof chain, three `Print Assumptions`, all `Closed under the global
+context`. No committed `.ptx` or `.ll` changed — certificates are generated per
+compilation and none is committed.
+
+#### The trust boundary's top item, half discharged - and the half that is left is a real gap · 2026-09-01
+
+The list built the same day is a work queue, and its first `Unchecked` item
+named its own route: *"the panel buffers' sizes and the scratch tile's
+allocation are not modelled at all - closing it means modelling the allocations
+and tying them to the emitted `malloc` the way `Ix` already ties the index
+arithmetic."* Done. `proofs/ExactGemmAllocation.v`, 13 `Print Assumptions`, no
+axioms, nothing admitted.
+
+**What no test can replace, in BOTH directions.** An allocation that is too
+large is invisible - every write lands in memory the process owns, every answer
+is right, and the only symptom is bytes. An allocation that is too small
+corrupts the heap, which surfaces as a crash somewhere else, on some shapes,
+sometimes. Neither is a property of the ANSWER, and the answer is what every
+exact-GEMM suite in this repository compares. The over-allocation half is not
+hypothetical: one of exactly that shape is in this repository's history, caught
+by the schedule gate and by nothing else.
+
+So the file proves both halves:
+
+- `pack_a_write_is_inside_the_allocation` / `pack_b_write_is_inside_the_allocation`
+  / `the_scratch_store_is_inside_the_tile` - every live write lands below the
+  element count the driver allocated.
+- `the_a_allocation_is_exactly_the_write_set` and its two siblings - **the last
+  slot written is the last slot allocated.** This is the half no answer reveals.
+- Three refutations, so the bounds are known tight rather than merely
+  sufficient.
+
+**The join is what stops it being an arithmetic exercise.**
+`the_stride_is_the_packing_proofs_panel_extent` proves the emitted A-panel
+stride IS the `kp * (2 * width)` that `ExactGemmPacking.panel_is_the_only_solution`
+quantifies over, and one B panel is that extent at `width = NR`. Before it, the
+panel geometry existed **three** times - `2*MR` and `2*NR` spelled into the
+emitter's `malloc` arithmetic, `kp * (2 * width)` in the packing proof, and the
+driver's own separate `panel_stride` multiply - with nothing saying they agreed.
+All three now render from `cpu_gemm::panel_a_stride_ix` / `panel_a_bytes_ix` /
+`panel_b_bytes_ix`, and **the emitted module is byte-for-byte what it was**,
+which is the evidence the refactor is faithful.
+
+**THE FINDING: nine `malloc` calls in the exact path, zero null checks - and
+the f32 kernel in the same emitter has a static fallback for exactly that.**
+`@__y_gemm_fallback` is a 2.5M-float reserve with `icmp ne ptr %g5, null`
+guarding its use; the exact driver `memset`s straight through every pointer it
+gets back. On out-of-memory that is a null dereference, not an error return.
+
+Recorded rather than fixed, deliberately: the entry point returns `void`, so
+"what should it do on failure" is a design question with a real answer to
+choose, not a missing line. It is now a **named** trust-boundary item carrying
+its own route to closing, which is what `Check::Unchecked` is for and is more
+honest than a half-fix.
+
+**The bijection gate from the same morning did its job, and that was the test
+of it.** Discharging half an item means SPLITTING it, and the split had to
+happen in `ExactGemmWhole.v` and in `TRUST_BOUNDARY` together - change one and
+the gate fails, because a bullet would be claimed by no item or an item would
+find no bullet. A prose list in two files cannot be kept in step by intention;
+this one is kept in step by a test.
+
+The chain was also **re-rooted**: `ExactGemmWhole.v` now `Require`s the
+allocation proof and re-exports its bound as a corollary, so there is exactly
+one capstone. Two roots would be two exclusion lists with nothing reconciling
+them - and `tests/proofs_are_checked.rs` derives which files may state a global
+negative from that same `Require` graph, so the structure has to be right for
+two gates rather than one.
+
+**A correction to a recorded process rule.** This repository's constraints say
+multi-target sweeps must run from a script file because "the shell is fish and
+`for S in $SUITES` passes the whole list as one word". The symptom is real and
+has bitten four times; the cause is wrong. The shell here reports **zsh**, which
+also does not word-split unquoted expansions - so the remedy (a `#!/bin/bash`
+script file, or an explicit list) is right and the reason given for it is not.
+Caught by a backup verification refusing to proceed on a 0-entry archive, which
+is the check added after the last time this went wrong.
+
+#### The out-of-memory path, from undefined to defined - and a mutation that removed the bug instead of the check · 2026-09-02
+
+The entry above found nine `malloc` calls in the exact path with zero null
+checks, and **recorded it rather than fixing it** on the grounds that "what
+should a void-returning entry point do on failure" is a design choice. Coming
+back to it is the queue discipline working; the design choice had an answer.
+
+**It is now one checked allocator.** `@__y_gemm_exact_alloc` prints the byte
+count and exits 1; all nine sites call it. The emitted diff is exactly those
+nine lines plus the helper.
+
+**Exit, not fallback, and the reason is a property of this kernel.** The f32
+kernel in the same emitter falls back to `@__y_gemm_fallback`, a static panel
+guarded by `icmp ne ptr %g5, null` - it can, because it blocks by `kc`/`mc`/`nc`
+so a fixed reserve covers every shape. **The exact kernel packs the whole of A
+at once**, which is exactly the property that makes its packing asymptotically
+free, so its panel size is unbounded in M and K and no fixed reserve exists. A
+blocked fallback variant is a feature to build, not a branch to add. Until it
+exists the choice is between a defined failure and an undefined one, and §0's
+rule settles it: a wrong answer under a certificate claiming exactness is the
+failure this programme exists to prevent.
+
+**The hazard was not remote.** The per-thread private C copy is `M * N * 8`
+bytes **per thread** - a 4096x4096 GEMM on 16 threads asks for 2.1 GB in that
+one allocation, and it was `memset` through unchecked.
+
+**The test injects the failure rather than waiting for it.**
+`-Wl,--wrap=malloc` returns NULL on the n-th call, and every n is swept in both
+arms. The assertion is `status.code() == Some(1)`: **a process killed by
+SIGSEGV has no exit code at all**, so this distinguishes the defined failure
+from the undefined one it replaced, rather than merely observing that the run
+did not succeed. The control - `fail_at = 0` must produce the right answer AND
+report a non-zero wrapped count - is what stops the file passing against a
+kernel that allocates nothing.
+
+**THE MIS-AIMED MUTATION IS THE FINDING.** Reverting one site (`%cpt`) to a
+raw `malloc` left the sweep green, which reads as a test hole. It is not:
+`clang -O2` **promotes an unchecked `malloc`/`free` pair whose pointer does not
+escape into an `alloca`**, so wrapped allocations went 14 -> 10 and that site
+stopped being a runtime allocation at all. The mutation removed the bug rather
+than the check. Re-aimed at `%jobs`, which is handed to `pthread_create` and
+therefore escapes, it is caught.
+
+Two consequences worth carrying. The sweep is over the allocations that
+**survive to runtime**, not over the ones in the IR - 2 and 14 rather than 3
+and 18 - and the file says so. And *verify a mutation created the condition it
+names*: this repository already records "confirm a mutation changes the program
+before recording a survivor", and this is the same rule one level down, where
+the mutation changed the program in a way that deleted the hazard.
+
+**A pre-existing failure was hiding, and the CONTROL ROW is what exposed it.**
+`exact_gemm_micro_model` failed on all six mutations *including the control* -
+which means it was already failing in the clean state. Adding `printf`/`exit`
+calls to the threaded module broke the one harness that emits it standalone
+with its own `declare` list; I had predicted exactly that, written it down, and
+then not done it. A mutation table where every row fails the same suite is
+reporting the state of the tree, not the mutation. **Read the control row
+first.**
+
+**The trust boundary moved, and the bijection gate forced both halves.** The
+item went from `Check::Unchecked` to `Check::Pinned("tests/exact_gemm_allocation_failure.rs")`,
+its claim changed from "uses every `malloc` result without checking it" to
+"there is no FALLBACK when an allocation fails: the kernel exits", and
+`ExactGemmWhole.v`'s bullet had to change in the same commit or the gate fails.
+Second increment running, second time it has held two files together.
+
+#### The threading layer splits into an arithmetic half that is provable and a concurrency half that is not · 2026-09-02
+
+Reading the trust boundary back as a work queue for the third time. Its
+remaining software-side `Unchecked` items were the `pthread` mechanics, the
+toolchain below the IR, and the hardware. **The first one is not one item.**
+
+Three of the four things it named - the job record's layout, the `pthread_t`
+array, and the per-thread private C buffer - are **positional indices**, so
+`MixedRadix.pack` carries their disjointness with no new reasoning: the fourth
+consumer of that schema, and the first reached from a concurrency layout rather
+than a GEMM tile. The fourth thing - the happens-before edge `pthread_join`
+establishes between a worker's last store and the reducer's first load - is not
+arithmetic at any level, and needs a memory model. `proofs/ExactGemmThreading.v`
+proves the first three (19 `Print Assumptions`, no axioms); the item splits,
+and the concurrency half stays `Unchecked` with the route named.
+
+**The join is the part that is not bookkeeping.** `ExactGemmKsplit.ksplit_exact`
+proves the band partials sum to the naive sum, and the capstone's `thread_sum`
+is a MODEL of how they are combined. Nothing said the emitted `reduce.head`
+loop combines them that way. `the_reduction_is_acc_bands` says the loop IS
+`acc_bands`, and `thread_sum_is_the_emitted_reduction` - in the capstone, so
+the `Require` is real - says the capstone's fold is that loop started from what
+the separate zeroing loop left. Two models meeting became a model tied to a
+loop.
+
+**`a_destination_that_is_not_zeroed_is_wrong` makes the zeroing loop
+load-bearing rather than defensive.** This kernel ACCUMULATES into C - which is
+what lets the bands be summed at all - so a destination carrying anything but
+zero adds it to the answer.
+
+**`96` was a bare literal that was the record's SIZE and its STRIDE at once.**
+It is `JOB_SLOTS * 8` now, rendered into `ExactGemmSchedule.v` alongside the
+other three threading sizes, with the emitted module byte-for-byte unchanged.
+`a_thirteenth_field_is_the_next_threads_first` is the sharp form of why the two
+roles have to move together: `job_slot t JOB_SLOTS = job_slot (S t) 0`, so a
+field added at one role and not the other does not run into slack - it runs
+into a live neighbour whose worker may already be executing, and off the
+allocation entirely for the last thread.
+
+**THE NEW CLASS OF CHECK IS THE `memset`, AND ITS HAZARD IS THE SHARPEST HERE.**
+`every_zeroed_buffer_is_zeroed_for_its_whole_allocation` asserts each allocation
+that is zeroed is zeroed for exactly the byte count it was allocated with. **A
+large `malloc` comes from a fresh `mmap` and is already zero**, so a buffer
+zeroed one byte short is right on the first call of a process and wrong on a
+later one, once the allocator has recycled the block the previous band freed -
+and the per-thread buffers here are freed and re-allocated every call. No
+answer-comparing test can be relied on to see that, and none in this repository
+runs two GEMMs in one process at a size that would. The same gate names the two
+allocations that are deliberately NOT zeroed (`%jobs`, `%tids`) with the reason
+- every slot of each is written before anything reads it - so "stop zeroing
+something" cannot pass by being reclassified.
+
+**The offsets are the test's claim, not the proof's, and the split is
+principled.** Which OFFSET a field is written and read at is a property of the
+emitted text rather than of any number, so `tests/exact_gemm_threading_layout.rs`
+recovers the writer's stores, the worker's loads and the reducer's loads from
+three distinct base registers (`%j`, `%arg`, `%rj`) and asserts the three
+readers agree with the one writer. **The two consistent-renaming cases are
+deliberately not claimed** - shifting every offset by a slot, or permuting
+writer and reader together, is a relabelling, and `AttentionSchedule.v` already
+records that a prover cannot see one either. What is claimed is agreement, and
+that the record is exactly `JOB_SLOTS` slots wide with no gap and no overhang.
+
+**One line of emitted text is asserted directly**, because its other reading is
+this repository's documented heap overflow: the worker's output-stride slot
+must store `%N` and not `%ldc`. The private buffer is sized `M * N * 8`, so the
+caller's stride there wrote `(M-1)*(ldc-N)` elements past the end - invisible
+at every call site in the compiler, because they all pass `ldc == N`.
+
+#### An assumption deleted rather than proved, and a probe that had to be redesigned twice · 2026-09-02
+
+The item split off yesterday listed, among the things it does not prove, "that
+a successfully created thread never gets `pthread_t = 0`. The join loop uses
+`0` as its 'never started' sentinel, which is an assumption about the C
+library's representation, not about this arithmetic." Reading one's own
+not-proved list back is step 12; this is the first time it pointed at something
+that could be **removed** instead of established, which is strictly better -
+an assumption that is gone needs no check at all.
+
+**MEASURE FIRST, AND THE FIRST MEASUREMENT WAS A CONFIRMATION.** `-Wl,--wrap=
+pthread_create` returning `EAGAIN` exercises the wrapper's inline-fallback arm,
+which ships and which nothing in this repository had ever run - `pthread_create`
+does not fail on a test machine. It is correct: bit-identical answers at every
+failure mask. Worth having, and worth recording as a confirmation rather than a
+finding.
+
+**THE SECOND MEASUREMENT WAS NOT.** With `pthread_create` handing out a zero id
+for a thread that really runs, at `M=53 N=71 K=4099` on four threads: the join
+count fell **4 -> 3 -> 2** as more workers were aliased, and with all four
+aliased the process **segfaulted on six runs out of six**. Skipping a join does
+not lose a band quietly - the reduction reads that worker's private buffer and
+then `free`s the four buffers it is still writing into.
+
+**THE PROBE HAD TO BE REDESIGNED TWICE, AND THAT IS THE PROCESS LESSON.** The
+first version ran the worker body synchronously on the calling thread, so the
+work was already done and the answer was right whatever the join did - a
+simulation too kind to observe anything. The second created a real thread and
+hid its id, which broke the FIXED code instead: the kernel now joins whatever
+id it was given, and joining a fabricated `0` is undefined. That version was
+measuring the simulation, not the kernel. The third aliases the real id so a
+join of `0` still reaches the right thread - so the only difference between the
+two versions of the kernel is **whether it joins at all**. *When a fix changes
+what the code does with an injected value, the injection has to be redesigned
+so that both arms remain measurable.*
+
+**THE ASSERTION IS THE JOIN COUNT, NOT THE ANSWER.** At one or two aliased
+workers the answer came back right every time; only at four did anything
+crash. A race that does not fire is not a test - the same lesson this
+repository already records about a missing `bar.sync`. The join count is
+deterministic and is `creates - failed` in every arm.
+
+**The fix is an explicit started-flag**: one zeroed byte per thread, set on the
+success arm of `pthread_create` and read by the join loop. `%tids` is then read
+only where the flag says the id was written, which is exactly when POSIX says
+it was. `the_flag_joins_exactly_the_threads_that_started` needs **no hypothesis
+at all**; `the_sentinel_agrees_only_if_no_live_thread_has_id_zero` needs one
+about the C library, and `a_live_thread_with_id_zero_is_not_joined` refutes it.
+
+**The residue got sharper, which is what a good split does.** The `Unchecked`
+item is no longer "the concurrency those records are dispatched with" - WHICH
+threads are joined is proved and gated now. What is left is purely an ORDERING
+claim: that the `pthread_join` the loop performs is what makes a worker's
+stores visible to the reduction. That needs a memory model and nothing else
+will do.
+
+#### A sanitizer that was not looking, and the race it found once it was · 2026-09-02
+
+The trust boundary's remaining software-side entry after the last two
+increments was the ORDER: that a worker's stores are visible to the reduction
+that reads and then frees its buffers. `ExactGemmThreading.v` proves WHICH
+threads are joined; the ordering a join imposes is not arithmetic and no proof
+here speaks about it. **ThreadSanitizer does** - it reasons about
+happens-before rather than about observed interleavings, so a single execution
+finds a missing edge.
+
+**THE TRAP, AND IT IS THE MOST DANGEROUS SHAPE OF NULL METRIC IN THIS
+REPOSITORY SO FAR.** `clang -fsanitize=thread` over an emitted `.ll`
+instruments almost nothing. TSan's memory-access checks are gated on the
+`sanitize_thread` FUNCTION attribute, which the C frontend adds and a
+hand-written module does not carry. Measured on the exact kernel:
+`__y_gemm_exact_vnni_threaded` carries **zero** `__tsan_read`/`__tsan_write`
+checks under the flag alone and **33** once the attribute is added; the worker
+0 against 12.
+
+What it *does* carry either way is `__tsan_func_entry`/`_exit` and, since the
+fix below, `__tsan_atomic64_*` - atomics go through a different lowering. And
+the malloc/free and pthread INTERCEPTORS live in the runtime and fire
+regardless. So the first probe run against an uninstrumented kernel with the
+join loop deleted **did** report `data race ... in free` plus a thread leak,
+which reads exactly like working coverage. **A partially-live tool is worse
+than a dead one**: it produces enough signal to be believed.
+
+Three things make the gate mean something, and each was arrived at by being
+wrong first. It counts only `__tsan_read`/`__tsan_write` and not the `func_`
+or `atomic` families - counting `@__tsan_` wholesale made the un-rewritten
+module look instrumented. It asserts per function, having first walked back
+from the first *mention* of a name and landed in whichever function called it.
+And it carries a runtime canary: a deliberate unsynchronised global in the
+driver that TSan must report, or the silence everywhere else means nothing.
+
+**THE FINDING.** `@__y_gemm_exact_nthreads`, the memoised thread count, was a
+plain load/store on a mutable global. Two application threads entering the
+exact GEMM at once both find it unset and both write it - **measured at 4 to 8
+of 8 concurrent callers taking that path on every run**, by counting entries to
+the `getenv` inside it. Every writer stores the same value and an aligned `i64`
+cannot tear on x86, so it has never produced a wrong answer. It is undefined
+behaviour all the same, in a kernel that ships a certificate claiming
+exactness, and the fix is `monotonic` on two lines - a plain `mov`.
+
+**The answer could not have found it and neither could the eight callers'
+agreement**, which is `same 1` either way. What found it was asking TSan, and
+what let TSan answer was noticing it had not been.
+
+**The item moved `Unchecked` -> `Pinned`, and the `because` says what a dynamic
+check does not give**: these runs cover the schedules they explore, at these
+shapes, and that is not every schedule. Two `Unchecked` items are left on the
+whole boundary - everything below the LLVM IR, and the hardware.
+
+**RECORDED, NOT FIXED: the emitted module defines `attributes #0` TWICE and the
+second one wins.** Found while adding the attribute group. `llvm-as` accepts it
+silently and `llvm-dis` shows the result: every function in the module,
+including the entire f32 GEMM the first group was written for, ends up with
+`"target-features"="+avx512f,+avx512bw,+avx512vnni"` and **loses
+`target-cpu="znver5"`, `+fma`, `+avx512cd`, `+avx512dq`, `+avx512vl` and
+`+avx512bf16`**. Nothing is wrong - both groups carry `+avx512vnni`, which is
+what the exact kernel needs - and it is a silent performance regression in the
+f32 path plus a collision waiting for the next feature. It wants its own
+increment with its own before/after measurement, and mixing an unrelated
+emitter change into this one would make the mutation table ambiguous.
+
+### 2026-09-02 - the duplicate attribute group was not a performance bug, and the first two measurements of it were of dead code
+
+The entry above deferred this and **got its severity wrong in both
+directions**. It is not a performance regression; it is an **illegal
+instruction on any host without AVX-512**. Fixed in `src/cpu_gemm.rs`, gated by
+`tests/emitted_attribute_groups.rs`. **562 / 813 / 8 tests, zero failures
+across 128 per-target binaries in both feature sets plus all three aggregates;
+both builds warning-free; no committed `.ptx`/`.ll` changed.**
+
+**THE FIRST TWO MEASUREMENTS WERE OF A FUNCTION THAT IS NOT IN THE OUTPUT.**
+The obvious fixture - the exact `@ZeroDrift` nest alone - emits
+`__y_sgemm_f32_avx512` as `internal` with no caller, so `-O2` deletes it. Both
+arms then reported **zero `zmm` outside the VNNI kernels** and the generated
+assembly came back **byte-identical**, which reads exactly like "the f32 path
+is unaffected" and would have retired the question. A fixture declaring BOTH
+kernels shows four f32 functions changing. `feedback-null-metrics-pass-dead-components`,
+in the measurement written to check the claim.
+
+**WITH THE f32 PATH LIVE, THE BUG IS A SIGILL.** Rewrite the prelude group to
+`target-cpu="haswell" target-features="+avx2,+avx,+fma"` - a machine with no
+AVX-512 - and compile. Before: `f32_matmul` **464** `zmm`, `__y_gemm_run`
+**721**, `__y_gemm_small_m` **450**, `__y_pool_worker` **2**. That is 1,637
+AVX-512 register references the target cannot execute, in code that has nothing
+to do with the exact kernel. After: zero outside the two VNNI functions, which
+legitimately need it. Same class as the recorded `cpu_emitter` AVX-512 default
+("AVX2 runs everywhere AVX-512 does; the reverse crashes"), found again in the
+LLVM backend, from an attribute-group collision instead of a bad default.
+
+**PERFORMANCE IS A GENUINE WASH, MEASURED TWICE.** 512x512x2048, interleaved,
+best of 40 reps x 8 rounds: f32 **0.727 ms before, 0.729 after**; the exact
+kernel 6.99 both, its codegen unchanged by construction. `target-cpu="znver5"`
+buys `f32_matmul` **+395 lines of assembly** and nothing measurable. Both
+checksums are identical in every run, float sum included.
+
+**THE GROUP CANNOT BE DELETED, WHICH IS WHY THIS IS A RENUMBERING.** With the
+VNNI kernels left on a host group lacking `+avx512vnni`, `clang` does not emit
+worse code - it aborts: `fatal error: Do not know how to split the result of
+this operator!` in `__y_gemm_micro_vnni`. So the second group was load-bearing
+all along and the defect is only that it reused `#0`. `#1` now, with
+`finish_in` naming the group explicitly; `finish` keeps `#0`.
+
+**A SECOND INSTANCE OF THE SAME SLOPPINESS WAS UNDERNEATH IT**:
+`__y_gemm_exact_vnni` carried `#0 #0` - the driver's signature wrote one and
+`IrBuilder::finish` stamped another. `llvm-as` accepts that silently too.
+
+**THE GATE IS THE DEFECT'S SIGNATURE, NOT ITS SITE**, so the next collision is
+caught without anyone guessing which emitter introduces it: no group defined
+twice, no group named but undefined, no signature naming one group twice, the
+declared `target-cpu` survives an `llvm-as`/`llvm-dis` round trip, and - the
+bug itself rather than its shape - on a non-AVX-512 target only the VNNI
+kernels may use `zmm`. **S8 confirms the symmetry**: introducing the collision
+from the *prelude* side instead is caught identically.
+
+**MUTATION TABLE, 9 probes, each `--test` target run separately over nine
+suites.** S1 group back to `#0` (the original bug) / S2b the same group twice /
+S5 `finish_in` ignores its argument / S8 the collision introduced from the
+prelude: **`emitted_attribute_groups` ONLY**, all four. S3 the group definition
+deleted / S7 `+avx512vnni` dropped from it: six suites each, because `clang`
+aborts - the confirmation that the group is required. S6 CONTROL, `#7` instead
+of `#1`: green everywhere, so the gate checks distinctness rather than a
+number. S4 probes the gate itself - stop stripping the `# @name` comment from
+an assembly label and its **non-vacuity floor fires** rather than reporting "no
+offenders" while parsing nothing.
+
+**S2 WAS MIS-AIMED AND THE RE-AIM IS THE INTERESTING PART.** Restoring the
+driver's trailing `#0` on top of the fix emits `#0 #1`, which is not a
+duplicate at all - LLVM **unions** two distinct groups, so that is legal and
+arguably better code. It reproduced no defect. Re-aimed at ` #1`, the shape the
+bug actually had at the new number, it is caught. *Confirm a mutation
+reproduces the defect before recording a survivor.*
+
+**RECORDED, NOT FIXED - `plan_exact_gemm` consults no hardware at all.** It
+licenses the exact `vpdpwssd` kernel on operand magnitudes alone, so Y emits
+`vpdpwssd` on a machine that has none; after this fix the f32 path is safe
+there and the exact kernel would still fault if called. This repository's own
+rule is that *the one genuine hardware requirement must REFUSE, not emit* - the
+`require_fp8_hardware` shape. It is a separate increment with its own gate and
+its own mutation table, and folding it in here would make the table above
+ambiguous.
+
+### 2026-09-02 - the exact GEMM licensed hardware it never asked about, and the biconditional's guard was the function under test
+
+The item recorded one entry up. `plan_exact_gemm` consulted no hardware at all,
+so Y emitted `vpdpwssd` on a machine that has none. This repository's rule is
+that **the one genuine hardware requirement must REFUSE, not emit** -
+`require_fp8_hardware` for `e4m3` tensor cores - and there was no counterpart on
+the CPU side. Gated by `tests/exact_gemm_requires_its_hardware.rs`. **568 / 819
+/ 8 tests, zero failures across 129 per-target binaries in both feature sets
+plus all three aggregates; both builds warning-free; no committed
+`.ptx`/`.ll`/`.v` changed.**
+
+**THE REFUSAL IS CHEAPER THAN THE FP8 ONE AND THE REASON MATTERS.**
+`require_fp8_hardware` must refuse the whole kernel: the instruction is absent
+and nothing else computes it. This refuses only the FAST path - the scalar
+lowering still honours `@ZeroDrift` and is still bit-for-bit exact. So the cost
+of refusing is time, and `the_refusal_does_not_change_the_answer` turns that
+from a claim into a measurement: compile both arms, run both, compare a 64-bit
+checksum *and* a position-weighted sum (a plain sum can agree by cancellation).
+At 512x512x2048 the substituted kernel is **7.5 ms** and the scalar path **510
+ms** - 68x - with **identical** integer results.
+
+**THE GATE BELONGS IN `plan_exact_gemm`, NOT IN THE LICENCE, AND THAT IS A
+CONSTRAINT FROM THE PROOFS.** `VnniExact::license` is a statement about operand
+magnitudes and int32 overflow; `tests/exact_gemm_licence_obligations.rs`
+exhausts it over the whole int16 domain and `exact_gemm_certificate`
+instantiates it in the emitted Coq. A licence that consulted the host would make
+the **certificate** consult the host. `the_licence_does_not_consult_the_host`
+pins that `zero_drift.rs` never reaches for the machine - and T4b shows that
+gate has unique coverage: making the licence host-dependent is **invisible to
+the exhaustive licence test**, because on a machine that has the feature the
+added check simply passes.
+
+**`is_x86_feature_detected!`, NOT RAW CPUID, AND THAT IS NOT A CONVENIENCE.** A
+CPU can report an AVX-512 feature in CPUID while the OS has not enabled the
+register state in `XCR0` - under a hypervisor that masks it, or a kernel booted
+with the state off - and the instruction then faults exactly as if the silicon
+lacked it. The std macro does the `XGETBV` check. **Recorded, not fixed:
+`probe_cpu_features` reads leaf 7 EBX bit 16 directly and has that gap**, so
+`HardwareProfile::has_avx512` can answer `true` on a machine where AVX-512
+faults; correcting it moves a value cached in `.ysu_hw_profile` that also feeds
+the analytic cost model, so it wants its own measurement.
+
+**THE ESCAPE HATCH CAN ONLY GO DOWN.** `Y_NO_AVX512_VNNI=1` forces the refusal;
+there is deliberately no variable that CLAIMS hardware, because that one could
+produce a binary that faults.
+`the_override_cannot_claim_hardware_the_machine_lacks` reads the source and pins
+that the predicate's only override-guarded return is `false`.
+
+**THE HOLE IN MY OWN GATE: THE BICONDITIONAL'S SKIP GUARD WAS THE FUNCTION
+UNDER TEST.** "Refuse always" satisfies every assertion about a refusal while
+silently deleting a working path, so the file carries
+`the_fast_path_is_still_taken_on_hardware_that_has_it`. Its first version
+skipped when `sentinel::host_has_avx512_vnni()` was false - **so T2, an
+over-refusal making exactly that function answer `false`, made the test SKIP
+ITSELF and report ok** while four other suites went red.
+`feedback-conditional-gates-skip-silently`, inside the test written to prevent
+it. The guard reads `/proc/cpuinfo` now - a different mechanism entirely - and a
+non-skippable `the_predicate_agrees_with_the_machine` compares the two readings
+directly. With that, T2 is caught.
+
+**MUTATION TABLE, 8 probes, each `--test` target run separately over nine
+suites.** T1 the gate removed (the original bug) / T3 the override able to
+return `true` / T4b the licence itself consulting the host / T5 the advisory
+naming neither the hardware nor the exactness: **`exact_gemm_requires_its_hardware`
+ONLY**, all four - so the original bug was invisible to every other suite. T2
+over-refusal: the new gate plus four others, after the fix above. T7 the
+substituted kernel off by one per element: the new gate plus four others, which
+is what settles that its 0.20s really does compile and run two binaries rather
+than skipping. T6 CONTROL, the hardware checked *after* the licence instead of
+before: green everywhere, so the gate checks the outcome and not the ordering.
+T4 was mis-aimed - a `use` inserted before the module doc comment, which is a
+build failure rather than a result.
+
+**A PROCESS NOTE THAT COST TWENTY MINUTES: the aggregate and a per-target sweep
+must not run concurrently.** `cargo test --features zk` launched detached while
+a per-target sweep was running reported **275 passed, 7 failed, 21 result
+lines** - an aborted run that reads exactly like a real regression. Re-run
+serially it is **819 passed, 0 failed, 135 lines**. They contend on `target/`,
+on shared temp directories, and on `.ysu_hw_profile`. *Re-run a surprising
+result serially before believing it.*
+
+### 2026-09-02 - three answers to "does this machine have AVX-512", and the wrong one fed the emitter
+
+`sentinel::probe_cpu_features` reads CPUID leaf 7 EBX bit 16 and performs no
+`XGETBV` check. Its answer becomes `HardwareProfile::has_avx512`, which
+`llvm_emitter::host_cpu_attrs` turns into the prelude's `attributes #0` - the
+group the previous increment established is applied to **every function in the
+module**. Two other readings existed and both did the check the emitter's did
+not: `avx_wrapper::has_avx512f` and `sentinel::host_has_avx512`, the latter
+added one increment ago and unused. Nothing asserted they agreed.
+
+This is the `VnniExact::licenses` / CUDA driver-binding shape the repository
+already tracks: a rule with one written-down implementation, implemented
+differently a second time. **573 / 824 / 8 tests, zero failures across 130
+per-target binaries in both feature sets plus all three aggregates; both builds
+warning-free; all 55 emitted LLVM modules byte-for-byte unchanged.**
+
+#### There were FOUR producers, not three, and the fourth is the one that ships
+
+Counting sites rather than names - the discipline this file records as
+*enumerate the SITES, not the variants* - the census is:
+
+| site | input | XCR0 checked | consumer | wrong-high consequence |
+|---|---|---|---|---|
+| `check_or_probe_hardware`, fresh probe | CPUID.7.0:EBX[16] | **no** | `HardwareProfile::has_avx512` -> `attributes #0` | **SIGILL** |
+| `check_or_probe_hardware`, **cached** | **the profile file** | **no probe at all** | the same | **SIGILL** |
+| `probe_cpu_hardware_profile` | CPUID.7.0:EBX[16] | **no** | `CpuShapeDispatcher` -> `--emit-cpu` regime | a worse kernel |
+| `host_has_avx512_vnni` | `is_x86_feature_detected!` | yes | the exact GEMM gate | - |
+
+The cached row is the one that had never been counted. It is not a probe with a
+gap in it; it is **no probe at all**, and it is the row that ships, because
+`check_or_probe_hardware` skips the probe whenever `.ysu_hw_profile` merely
+exists.
+
+#### Measure first: can they disagree, and is it latent?
+
+**Route A - XCR0 - is LATENT ON THIS MACHINE, and the mechanism is confirmed.**
+A CPU reports a vector feature in CPUID whether or not the OS has enabled the
+register state in `XCR0`; under a hypervisor masking the state, or a kernel
+booted without it, the CPUID bit stays set and the instruction faults exactly as
+if the silicon lacked it. Measured here: `CPUID.7.0:EBX[16] = true`,
+`XCR0 = 0x2e7` with SSE, YMM, opmask, ZMM_Hi256 and Hi16_ZMM all set, and every
+reading answers `true`. So all four agree, **by luck of this machine's
+configuration and not by construction**. That the two readings consume different
+inputs was verified rather than assumed: the std macro's detection path compiles
+to code containing `xgetbv` and a raw leaf-7 read cannot.
+
+**Route B - the cached profile - is REACHABLE RIGHT NOW and needs no exotic
+machine.** Measured, one machine, one unchanged binary, the file the only thing
+varied:
+
+```
+profile AVX512=true  -> attributes #0 = { "target-cpu"="znver5"  "target-features"="+avx512f,+avx512cd,..." }
+profile AVX512=false -> attributes #0 = { "target-cpu"="haswell" "target-features"="+avx2,+avx,+fma" }
+```
+
+A profile copied from a better machine - or committed, which **has happened in
+this repository** with `SM_VERSION=8.9` - put AVX-512 into every function of the
+module on a machine that may not have it. So the answer to "is this latent" is
+**no, on the route nobody was looking at**.
+
+There is an incoherence inside Route B worth naming on its own: `host_x86_uarch()`
+IS probed live, from CPUID vendor and family, while `has_avx512` came from the
+file. The two halves of `attributes #0` were therefore describing two different
+machines.
+
+##### The cache reasoning was right about the GPU and was silently extended
+
+The comment justifying the skip says nothing here queries the driver "because
+that would cost every CPU-only compile". That is **correct for the GPU**:
+validating `SM_VERSION` costs `cuInit`, which this file records as more than the
+compiler's entire ZK front end. It does not transfer to CPUID, which is one
+instruction, no syscall, no library load. *Cache the expensive measurement;
+re-probe the cheap fact.* The rule that made the GPU decision right is the rule
+that makes the CPU decision wrong, and nobody re-derived it at the second site.
+
+#### The blast radius was NARROWER than the brief assumed, and saying so is part of the work
+
+The caution carried into this increment was that `has_avx512` "also feeds the
+analytic cost model". **It does not.** Exhaustively, outside `sentinel.rs`:
+
+- `llvm_emitter.rs:1457` - `host_cpu_attrs`, the SIGILL path.
+- `llvm_emitter.rs:1476` - the prelude's comment banner, cosmetic.
+- `main.rs:733-734` - `--portable`, which lowers both flags after the probe
+  returns and is left exactly as it was.
+
+And `avx512_throughput_cycles`, the only thing `has_avx512` gates inside the
+probe, **is read by nothing**: it is measured, serialized, parsed back, printed,
+and reaches no cost model in `src/`. Re-derive a blast radius rather than
+inheriting one - the same correction this file already records for the phantom
+"kc-panel loop".
+
+#### Two findings that fell out of counting the sites
+
+**The probe itself was the one place that EXECUTES an AVX-512 instruction, and
+it was guarded by the reading that does not answer the question.**
+`measure_avx512_throughput` runs a `vpaddd zmm` chain under `if !has_avx512 {
+return 0.0 }`, with `has_avx512` the raw CPUID bit. On a machine where CPUID
+says yes and XCR0 says no, the hardware prober **faults** rather than reporting -
+a SIGILL inside the compiler, on exactly the machines it exists to characterise.
+
+**`has_avx` had the identical defect and one extra.** It is CPUID leaf 1 ECX bit
+28, the **AVX** bit, and `host_cpu_attrs` turns it into `target-cpu=haswell` with
+`+avx2`. A Sandy Bridge has AVX and not AVX2. Fixing `has_avx512` alone would
+have been `feedback-guards-consulted-at-one-site`, so both move together and the
+new predicate requires `avx2 && avx` - what the emitter actually claims.
+
+`--emit-cpu` was checked before ranking its site: it emits **no** SIMD intrinsic
+at all today (`_mm512` and `_mm256` both appear zero times), and every regime
+`CpuShapeDispatcher` can select emits scalar Rust. So that site is a
+**performance** fallback, not a correctness one - and it is corrected anyway,
+because that is a property of the emitter rather than of the decision, and
+`CpuHardwareProfile::default()` guessing AVX-512 is precisely how `--emit-cpu`
+came to emit AVX-512 dispatch on every machine the first time.
+
+#### The fix: one authority, and the cache may not raise the answer
+
+`sentinel::host_has_avx512` is promoted from unused to **the** authority and
+`host_has_avx` is added beside it; all four sites take their answer from them.
+On the cached path the CPU features are **re-probed rather than loaded**, and a
+disagreement is *reported* rather than silently corrected - the same principle as
+naming the assumed card, so a stale profile is visible:
+
+```
+-> NOTE: .ysu_hw_profile says AVX=true AVX512=false, this machine reports
+   AVX=true AVX512=true. Using the machine. Delete the file to re-probe.
+```
+
+The live machine is the authority in **both** directions. An AND against the
+cached value would still let a stale `false` suppress a legitimate `true`, which
+is a performance regression nothing can see. `--portable` and
+`Y_NO_AVX512_VNNI` remain the down-only overrides and are untouched; there is
+deliberately no override that can CLAIM hardware.
+
+**All 55 emitted LLVM modules are byte-for-byte unchanged**, which on a machine
+where the four readings agree is exactly the expected result and is the evidence
+the change is behaviour-preserving here.
+
+#### AGREEMENT IS NECESSARY AND NOT SUFFICIENT, AND THAT IS THE GENERALISABLE PART
+
+The written precedent is *assert the producers AGREE rather than re-deriving a
+table*. Followed alone here it would have produced a **silent** gate: on this
+machine all four readings agree, so `the_producers_agree` passes with the bug
+fully restored. The mutation table proves it - A1 and A3 revert a site to raw
+CPUID and are caught only by the SOURCE-level test.
+
+What distinguishes the readings is not their output but **which input they
+consume**, and on a machine where the inputs happen to coincide that is only
+checkable at the source. So `the_authority_checks_the_register_state` requires
+`is_x86_feature_detected!` and forbids `__cpuid` in the authority, and forbids
+the two raw bit-tests from reappearing anywhere in `sentinel.rs`. Same device as
+pinning the absence of an env override, for the same reason: *the property
+cannot be observed by running the compiler on a machine where it holds.*
+
+#### Mutation table - 10 probes, each `--test` target run separately over nine suites
+
+| probe | defect the mutated program has | caught by |
+|---|---|---|
+| **A1** fresh probe back to raw CPUID | emitter claims AVX-512 where XCR0 masks it | **`avx512_probes_agree` ONLY** |
+| **A2** cached path back to the file deciding | a copied profile puts AVX-512 in every function | **`avx512_probes_agree` ONLY** |
+| **A3** `probe_cpu_hardware_profile` back to raw CPUID | `--emit-cpu` regime from the wrong reading | **`avx512_probes_agree` ONLY** |
+| **A4** the AUTHORITY stops checking XCR0 | all four sites wrong together | `avx512_probes_agree` + `build_is_warning_free`\* |
+| **A5** authority always `false` (over-refusal) | every module drops to the `haswell` fallback | `avx512_probes_agree` (2 assertions) |
+| **A6** SIMD width decoupled from the flag | width and masking flag can disagree | *survivor -> closed, see below* |
+| **A8** the gate stops doctoring the profile | Route B test compares two identical runs | **`avx512_probes_agree` ONLY** |
+| **A9** the control's skip guard computed by the authority | the control goes tautological | *no-op alone, see below* |
+| **A5+A9** over-refusal WITH the guard neutered | the over-refusal is invisible to the control | **`avx512_probes_agree` ONLY** |
+| **A7 CONTROL** no-op statement reorder | none | green everywhere |
+
+Read the control row first: **A7 is green in all nine suites**, so the table is
+reporting the mutations and not the state of the tree.
+
+**A1, A2 and A3 are the result that matters: the original defect was invisible
+to all eight other suites**, which is why it survived. `emitted_attribute_groups`
+- the gate written one increment ago about that very attribute group - passes
+under every one of them, correctly: it checks that the group is coherent and
+unique, not that the machine can execute what it names.
+
+\* **A4's second failure is my own mutation's side effect, not coverage.** The
+`__cpuid_count` call I substituted carries an unnecessary `unsafe` block, and
+that is what `build_is_warning_free` reports. *A mutation's side effects are not
+the mutation.*
+
+##### Sorting the two survivors
+
+**A6 was a real hole in my own gate.** `simd_w` is used at exactly one place, and
+that place is `&& supports_avx512_masking` - so on a machine WITHOUT AVX-512 the
+width is dead, and on a machine WITH it the correct and the hardcoded value are
+both 16. The mutation is a **no-op here**, and the behavioural assertion pairing
+the width with the flag is therefore **vacuous on this machine**. Closed by
+pinning the coupling at the source as well, the same move the reading needed and
+for the same reason. Re-run as A6r: caught, `avx512_probes_agree` only.
+
+**A9 alone is mis-aimed and the compound is the real probe.** Neutering the skip
+guard changes nothing while the authority is correct. Composed with A5 it is the
+`feedback-conditional-gates-skip-silently` failure exactly: measured,
+`the_fast_path_is_still_taken_on_hardware_that_has_it` reports **ok** - it has
+become a tautology. The compound is still caught, by
+`the_producers_agree`'s VNNI implication, which reads `host_has_avx512_vnni`'s
+own independent macro and so survives the guard being subverted. **A control
+wants a second leg on a different mechanism**, not only a guard on one.
+
+The suite reports `finished in 0.00s`, which this file records as looking exactly
+like a silent skip. Settled by mutation rather than by reading: A2 and A8 both
+fail on the emitted-artifact comparison, which runs the real compiler four times.
+
+#### What this does NOT establish
+
+Nothing here has been run on a machine where the readings disagree. Route A is
+argued from the mechanism - confirmed at the instruction level, not merely read
+off a manual - and from the fact that the two readings consume different inputs;
+it is not demonstrated end to end, because doing so needs a hypervisor masking
+`XSAVE` state or a kernel booted with `clearcpuid`. Route B **is** demonstrated
+end to end. The source-level gate is what covers Route A, and it covers the
+reading rather than the consequence.
+
+### 2026-09-02 - the gate certified an artifact the compiler does not emit, because it edited it first
+
+Found by reading the previous increment's own census back as a work queue. It
+named `avx_wrapper::has_avx512f` as one of the readings of "does this machine
+have AVX-512" and then dropped it from the gate; checking why turned up that it
+has **zero callers**, which led to the module around it, which led here.
+
+`--emit-cpu` is described in the README as printing "Rust/AVX source **for you
+to paste** - Y never compiles it", and as being "gated on `rustc` accepting what
+it prints". The first half is true. **The second was false, and the gate is what
+made that invisible.** **576 / 827 / 8 tests, zero failures across 130
+per-target binaries in both feature sets plus all three aggregates; both builds
+warning-free; corpus unchanged at 46 accept / 39 refuse; no committed
+`.ptx`/`.ll`/`.v` changed.**
+
+#### The measurement
+
+`CpuEmitter::new` wrote `use crate::avx_wrapper::*;` into every blob
+unconditionally. Swept over the corpus:
+
+```
+blobs emitted: 46   carrying the import: 46   referencing a symbol from it: 0
+```
+
+`crate::` names the Y compiler's own crate. The reader is pasting into theirs.
+So the artifact this backend exists to produce failed, as delivered, for every
+program, with `error[E0432]: unresolved import crate::avx_wrapper` - for a
+module none of the 46 used.
+
+**Both harnesses that compile the blob deleted that line before compiling it.**
+`cpu_emitter_output_compiles` filtered it with the comment *"the blob is written
+to be pasted INTO this crate"* - which contradicts the README one file away, and
+the strip is precisely what stopped anyone noticing the contradiction.
+`cpu_emitter_lowering` did the same.
+
+**Stripping does not rescue it; it moves the failure.** Measured on the one
+construct that needs the import:
+
+```
+as the user receives it   -> error[E0432]: unresolved import `crate::avx_wrapper`
+as the gate checked it    -> error[E0433]: cannot find type `Y256f32` in this scope
+```
+
+The blob did not compile either way. The gate passed only because **no corpus
+program reaches the construct that references `Y256f32`** - so the strip was
+harmless for the 46 programs the gate happens to see, and blind for the one that
+needed it. The working path masking the broken one, again.
+
+#### `Fragment::zero` is the fifth member of a family the sweep left at four
+
+`Expr::Path { namespace: "Fragment", member: "zero" }` lowered to
+`Y256f32::zero`. The docstring immediately above that match arm lists four
+substitutions refused for *computing something different* - including
+`ldmatrix(p) -> Y256f32::load_aligned_ptr(p)`, described there as "a
+warp-cooperative f16 matrix-fragment load rendered as an 8-wide f32 load".
+
+`Fragment::zero -> Y256f32::zero` is that same substitution, on the same operand
+type, **one match arm away**, and it survived the sweep that refused the other
+four. It was also the blob's only reason to import `crate::avx_wrapper` at all.
+It is refused by name now, through the same `unsupported_gpu_intrinsic` whose
+message states the principle exactly: this backend "prints Rust for you to
+paste, so a plausible-looking substitution would reach your source with no
+compiler between it and you."
+
+#### Severity, stated honestly
+
+This is **fail-loud**, not silent: the reader pastes the blob and rustc rejects
+it immediately. Nobody ships a wrong answer. What was wrong is a *claim* - the
+README's "gated on `rustc` accepting what it prints", which was true of a
+modified artifact and false of the emitted one. That claim is true now.
+
+#### The fix, and what it lets the gate do
+
+Drop the import; refuse `Fragment::zero`; and then **both harnesses use the blob
+verbatim**, which is only possible because the blob became self-contained. The
+corpus is unchanged in both directions - 46 accept / 39 refuse before and after -
+because no corpus program used the refused construct, so the refusal is purely
+additive.
+
+The durable part is a gate on the **defect's signature** rather than on the one
+instance: no emitted blob may contain `use crate::…`, whatever it names, because
+`crate` is the pasting crate and that is never this one.
+
+##### The signature gate must not read the extractor's output
+
+Written the obvious way it reads `emit_cpu(..).blob` - and the extractor is *in
+the same file* and is exactly what hid the defect. A re-added strip would filter
+the offending line out on its way past and the gate would report a clean sweep.
+It scans the raw compiler output instead. Confirmed by mutation rather than
+reasoning: **B1+B4** - the import restored *and* the strip restored - defeats a
+gate that reads `e.blob`, and is caught by one that reads the raw text.
+
+#### Mutation table - 8 probes, each `--test` target run separately over nine suites
+
+| probe | defect the mutated program has | caught by |
+|---|---|---|
+| **B1** the import restored | every blob unresolvable for its reader | `cpu_emitter_output_compiles` + `cpu_emitter_lowering` |
+| **B2** `Fragment::zero -> Y256f32::zero` restored | a blob referencing an undefined type | **`a_matrix_fragment_has_no_host_equivalent` ONLY** |
+| **B3** both restored (the state at HEAD) | the original defect | both cpu_emitter suites |
+| **B1+B4** import restored AND the gate strips again | the gate hides the defect it exists to catch | both cpu_emitter suites |
+| **B6** the sweep neutered, floor left in place | a gate that scans nothing reports no offenders | **the floor ONLY** |
+| **B7** over-refusal: refuse every program | the backend deleted | 3 suites, incl. the control |
+| **B4** the gate strips again, alone | *none - nothing left to strip* | mis-aimed, green |
+| **B5 CONTROL** two banner `writeln!`s reordered | none | green everywhere |
+
+Read the control row first: **B5 is green in all nine suites.**
+
+**B2 is the isolation result.** `no_emitted_blob_is_invalid_rust` - the sweep
+that compiles all 46 blobs - **passes** under it, verified by name rather than
+inferred. No corpus program uses `Fragment::zero`, so the broad sweep is
+structurally incapable of seeing it; only the named refusal test can.
+
+**B4 alone is mis-aimed and that is the honest reading**: after the fix there is
+no import for a strip to remove, so re-adding the strip reproduces no defect.
+The compound B1+B4 is the probe that means something, and it is what justified
+reading the raw text.
+
+#### Recorded, not fixed: `src/avx_wrapper.rs` is now referenced by nothing
+
+556 lines, four `#[test]`s, and after this change the only mention of it anywhere
+is its own `pub mod` line in `lib.rs`. That is the `VnniExact::licenses` shape
+exactly - **a dead module with tests, which is worse than a dead module, because
+the tests are what make it look alive**. It is left in place deliberately:
+deleting a SIMD abstraction layer is its own increment with its own measurement,
+and `tests/source_surface.rs`'s rule is satisfied either way since it is a
+declared module. Named here so the next reader does not have to rediscover it.
+
+### 2026-09-02 - `--emit-cpu` claimed AVX in six places and emits no SIMD anywhere
+
+The residue recorded one entry down was `src/avx_wrapper.rs`: referenced by
+nothing, 556 lines, four passing tests. Pulling on it produced the increment,
+because the module was not merely dead - it was **the thing that made the word
+"AVX" look backed** everywhere it appeared.
+
+**576 / 827 / 8 tests, zero failures across 131 per-target binaries in both
+feature sets plus all three aggregates; both builds warning-free; corpus
+unchanged at 46 accept / 39 refuse; no committed `.ptx`/`.ll`/`.v` changed.**
+The totals are unchanged from the previous increment and the arithmetic closes
+exactly: **+4 integration tests, -4 deleted `avx_wrapper` unit tests.**
+
+#### The census, and the measurement that settles it
+
+| site | claim |
+|---|---|
+| `main.rs` CLI banner | `Emitting CPU AVX-512 Host Code...` |
+| `main.rs` blob marker | `======= GENERATED RUST/AVX BLOB =======` |
+| `README.md` flag table | "prints **Rust/AVX** source" |
+| `docs/y_language_documentation.md` flag table | "Host **Rust/AVX** source" |
+| `docs/y_language_documentation.md` §9.7 | documents an `@avx_emit` directive |
+| `docs/proof_carrying_kernels.md` §Phase 0 | "a shape dispatcher ... that emits hand-written **Rust/AVX**" |
+
+Measured against the shipping binary, over the whole corpus:
+
+```
+blobs emitted: 46   containing a vector intrinsic, vector type,
+                    `x86_64::` path or `target_feature`:  0
+```
+
+`_mm256` and `_mm512` appear **zero** times in `cpu_emitter.rs`. This is the
+`@zk_target(scheme = "plonkish")` shape - an artifact naming a capability it did
+not use - and unlike most entries here it is fail-loud in **no** direction: it
+misleads quietly, which is why nothing caught it.
+
+#### Two things underneath the census were worse than the naming
+
+**The shape dispatcher the roadmap cited is unreachable.**
+`emit_specialized_cpu_kernel_dispatch` - `CpuShapeDispatcher`, `classify_shape`,
+all five `CpuMatrixRegime` variants and all five `emit_*_kernel` methods - has
+exactly ONE caller in the repository and **it is a test**. No `.ysu`
+compilation reaches it. So `--emit-cpu` does not have GEMM kernels that are
+scalar; it has **no GEMM kernels at all**. Same shape as
+`run_all_optimization_passes`.
+
+*This also corrects the previous increment*, which described
+`probe_cpu_hardware_profile`'s consumer as "a performance fallback, not a
+correctness one". True, and understated: the consumer is not reached by any
+compilation.
+
+**And the dead module contained real defects**, which is the whole reason a
+dead-code census is worth running rather than a deletion being worth doing:
+
+- `Y256f32::load_aligned_ptr(src: *const f32)` and `store_aligned_ptr` are
+  **safe `pub fn`s that dereference a raw pointer**. They assert non-null and
+  32-byte alignment; neither establishes that the pointer is valid or that
+  eight floats are readable. A safe function must not permit UB.
+- The **entire AVX2 surface** calls `_mm256_*` with no `#[target_feature]` and
+  no runtime guard. `require_avx2()`, whose doc comment says *"Call once at
+  start-up. Panics if AVX2 is unavailable"*, has **zero callers** - so the
+  module's documented safety protocol was never enforced. Exactly the shape of
+  `Y512f32`'s "Only constructed if `has_avx512f()` returns true", where
+  `has_avx512f()` also had zero callers.
+
+Four passing tests made all of that look maintained. **A dead module with tests
+is worse than a dead module.**
+
+#### The fix
+
+Delete the module; correct all six claims. The blob marker is parsed by two
+harnesses, so it moves with them (`======= GENERATED RUST BLOB =======`).
+§9.7 now states what was measured rather than what was intended: **`@avx_emit`
+is a hard syntax error** (`Line 1: Error: Unexpected top-level item`), while
+`@ptx_emit` and `@hdl_emit` **parse, are ignored, and exit 0** - the worse
+direction, since a user selecting a backend gets a clean compile and no
+indication the annotation was discarded.
+
+##### The Phase 0 "both backends" clause is DROPPED, not deferred
+
+That clause instructed a future reader to *"re-scope it deliberately or drop
+it"*. It is dropped, and on evidence rather than fatigue: the premise it rested
+on was false twice over. There is no second GEMM in `--emit-cpu` to be exact in -
+the dispatcher is unreachable and what is emitted is scalar - so the clause was
+not hard, it was **empty**. Phase 0's exactness result stands on the LLVM
+backend alone, stated so nobody reads the single-backend result as a shortfall
+against a clause that was measuring nothing.
+
+#### What could NOT be measured, stated rather than glossed
+
+Whether a reader's `rustc` auto-vectorizes the emitted scalar loops is **not
+claimed here**. Two attempts to measure it produced nulls - once because the
+crate-type emitted no code for an unused function, once because the symbol was
+eliminated - and the honest framing is that this is a property of the reader's
+compiler, not of what Y emits. "Rust source that some compiler may vectorize"
+describes all Rust. The claim gated here is the static one: **the emitted text
+contains no SIMD**, which is what "AVX source" asserted and what is false.
+
+#### Mutation table - 8 probes, each `--test` target run separately over nine suites
+
+| probe | caught by |
+|---|---|
+| **C1** the banner claims AVX-512 again | **`emit_cpu_claims_no_simd` ONLY** |
+| **C3** the README row claims Rust/AVX again | **`emit_cpu_claims_no_simd` ONLY** |
+| **C4** §9.7 drops "NOT IMPLEMENTED" | **`emit_cpu_claims_no_simd` ONLY** |
+| **C6** the blob sweep neutered, floor kept | **the floor ONLY** |
+| **C5** the emitter emits `_mm256_…` | `emit_cpu_claims_no_simd`, two of its tests |
+| **C2** the marker claims RUST/AVX again | the new gate + both blob harnesses |
+| **C8** the backend emits a header and nothing else | the new control + both harnesses |
+| **C7 CONTROL** two entries of the marker list reordered | green everywhere |
+
+Read the control first: **C7 is green in all nine suites.**
+
+**C1, C3, C4 and C6 are the result: four of the claim sites were invisible to
+every other suite**, which is why six of them accumulated. C2 and C8 are
+diagnosis-by-name rather than isolation - the harnesses already fail on them,
+just less legibly.
+
+**C8 was mis-aimed on the first pass** (`self.buffer` is not a field) and
+BUILD FAILED. Re-aimed at a return that yields only the header, it is caught.
+*Confirm a mutation compiles and reproduces the defect before recording
+anything about it.*
+
+#### The citation gate caught me, on a live case
+
+`every_path_a_proof_or_a_gate_cites_exists` failed on the first run of the new
+suite: its module docstring cited `src/avx_wrapper.rs`, which this increment
+deletes. That is the gate doing precisely its job - *"a docstring pointing at a
+renamed or deleted file is how a claim about what pins something becomes
+unfalsifiable"*. The fix is to name the deleted module **without a resolvable
+path**, and to say in the docstring why it is named that way, so the next reader
+does not "helpfully" restore the citation.
+
+### 2026-09-03 — `chisel {}` documented a register naming convention that did not exist
+
+The previous increment closed with `@ptx_emit`/`@hdl_emit` recorded as
+parse-and-ignore. Chasing `@ptx_emit`'s consumers found a bigger surface
+underneath: **§16 of the language reference is a full user manual for
+`chisel {}` blocks, and §16.2's central claim was false.**
+
+#### Measurement
+
+§16.2 said: *"Y variables declared before the `chisel` block are accessible
+using their PTX register names"*, with a table giving `let x: F32` -> `%x`.
+Compiling §16.2's own worked example:
+
+```
+    // --- CHISEL INLINE PTX ---
+    mul.f32 %result, %val, %val;
+```
+
+`Compilation Successful!`, exit 0 — and
+
+```
+ptxas probe.ptx, line 22; error   : Unknown symbol '%result'
+ptxas probe.ptx, line 22; error   : Unknown symbol '%val'
+```
+
+The line went to the module **verbatim**. This backend's allocator names
+registers `%f0`/`%r0`/`%rd0`, never after the source variable, so `val` and
+`result` were `%f0` and `%f1` and the documented names referred to nothing.
+Every worked example in §16.4 has the same defect; §16.4's clock example
+(`mov.u64 %t, %globaltimer;`) fails on `%t` while `%globaltimer` is accepted,
+which is what isolated the rule: **PTX special registers resolve, Y variables
+do not.** A `chisel` block naming no register at all (`bar.sync 0;`) assembles
+cleanly, so the surface was half-working, which is why nothing looked wrong.
+
+**No `.ysu` in this repository uses `chisel`.** The `SmemLayout` profile
+exactly: a documented API that no test exercises. It is also the `Expr::Ident`
+hole one layer over — an unbound name spliced into instruction text — reached
+through a *string* rather than through the AST, which is why the fix there did
+not cover it. **Enumerate the SITES, not the variants**, for the sixth time in
+this file; here the site is a different data type, not a different match arm.
+
+#### The fix, and why it is a resolver rather than a refusal
+
+Refusing every `chisel` block would have been sound and would have deleted a
+working path — `bar.sync 0;` is legitimate and §16.4 documents it. So
+`resolve_chisel_registers` gives three outcomes:
+
+* a Y variable in scope -> **substituted**, making §16.2 a true statement about
+  the compiler;
+* a PTX special register (`%tid.x`, `%globaltimer`) or one of this backend's
+  own allocator names -> passed through;
+* anything else -> **refused** with a line and column.
+
+The allowlist of special registers is deliberately generous and fail-closed if
+short: a missing entry refuses a legitimate program (five minutes), where
+passing an unrecognised `%name` through is the bug being closed. A `U32x4` is
+refused rather than substituted — it names FOUR registers in `vec_vars` and
+picking one would be a silent choice, the design rule's shape.
+
+The emitter now also writes a closing `// --- END CHISEL PTX ---` marker. It
+had an opening marker and no closing one, so nothing reading the artifact could
+say where the block ended; the LLVM backend's `chisel` arm has written both
+since it was added.
+
+#### The LLVM backend put PTX into an x86 module, and that was `@ptx_emit`'s only consumer
+
+`@ptx_emit` is not quite parse-and-ignore: `llvm_emitter` reads it in exactly
+one place, `Stmt::Chisel`, where it emits the lines as inline asm with an
+**empty constraint string** on the reading that an NVPTX-retargeted module
+wants different constraints from x86. `emit_prelude` writes
+`Self::host_triple()` and no path in that backend emits an `nvptx` triple, so
+the reading never applies. Measured: exit 0, and the `clang` line the compiler
+itself prints answers
+
+```
+<inline asm>:1:10: error: invalid register name
+```
+
+**Both branches fail identically**, so the directive's one live consumer could
+not change an outcome. Refused by name now, which is what makes its status
+honest: `--emit-ptx` is where PTX `chisel` is lowered. The ordinary host
+`chisel` arm (x86 clobbers) is untouched and still emits inline asm — the
+control that stops "refuse all `chisel` in this backend" passing.
+
+#### Two documentation defects found on the way
+
+§16.5 claimed invalid PTX surfaces as `CUDA_ERROR_INVALID_PTX` at JIT load
+time. An unresolvable `%name` is now a compile-time error; the rest of the
+claim stands and is scoped.
+
+§17's FAQ listed five backend flags. **Three of them (`--llvm`, `--cpu`,
+`--ptx`) are not options at all** — unrecognised options are a hard error, so
+each exited 1 — and it named a C backend that was removed. My first correction
+overstated this ("all five were wrong"): `--emit-r1cs` is valid, and `--emit-c`
+is recognised and reports the removal. **Corrected on measurement rather than
+on the first reading.** The gate asks the compiler for its own
+`Known options:` line rather than carrying a second copy of the list.
+
+#### Mutation table — 11 probes, nine suites, each `--test` target run separately
+
+| probe | caught by |
+|---|---|
+| **D1** chisel line emitted verbatim (the original bug) | **`chisel_register_scope` ONLY** (4 of 8 fail) |
+| **D2** resolver substitutes but never refuses | **`chisel_register_scope` ONLY** |
+| **D3** special-register allowlist emptied (over-refusal) | **`chisel_register_scope` ONLY** |
+| **D4** `is_emitter_register_name` accepts everything | **`chisel_register_scope` ONLY** |
+| **D5** vector-name refusal removed | **`chisel_register_scope` ONLY** |
+| **D6** LLVM `@ptx_emit` chisel arm restored | **`chisel_register_scope` ONLY** |
+| **D7** FAQ reverted to the unrecognised spellings | **`chisel_register_scope` ONLY** |
+| **D8** §16.2 drops the refusal paragraph | **`chisel_register_scope` ONLY** |
+| **D10b** distinct variables collapsed onto one register | **`chisel_register_scope` ONLY**, via the strengthened assertion |
+| **D11** FAQ flag scan finds nothing | **its non-vacuity floor** |
+| **D9 CONTROL** two allowlist entries reordered | **green everywhere** |
+
+**D1 is the row that matters: the original defect was invisible to all eight
+other suites**, including `ptx_portability` (which runs real `ptxas` at five
+architectures) and `committed_ptx_artifacts`. Neither can see it, correctly —
+no committed artifact contains a `chisel` block, so an assemble gate has
+nothing to assemble. *An assemble gate cannot see a construct no fixture uses*,
+which is the standing limit read one step further out than usual.
+
+##### D10 was caught for the wrong reason, and that is the finding about my own gate
+
+D10 made every `%name` resolve to the first variable's register. It failed —
+but only because `variables` also holds the kernel PARAMETER `Out` -> `%rd0`,
+which sorts first, so the line came out `mul.f32 %rd0, %rd0, %rd0` and tripped
+a `starts_with("mul.f32 %f")` prefix check. Restricted to f32 variables
+(**D10b**) the same collapse produced `mul.f32 %f1, %f1, %f1` — which satisfies
+"no `%val` survives" and "the operands are f32 registers" perfectly.
+
+The assertion now pins the property instead of a prefix: the two sources must
+be **one** register (both are `val`) and the destination must **differ** from
+them (`result` is a different variable). That is what says the map
+distinguishes its inputs. **A substitution gate that only checks the old names
+are gone cannot tell a map from a constant function.**
+
+Note also that D10b's second failing test was my mutation's own
+index-out-of-bounds panic on a fixture with no f32 variables — a side effect of
+the mutation, not coverage.
+
+#### Verification
+
+**584 / 835 / 8** tests, zero failures across 132 per-target binaries in both
+feature sets (132/132 result lines each) plus both aggregates (138 lines each)
+and `cargo test -p y-gpu`. Both builds warning-free. Corpus unchanged in both
+directions — `--emit-ptx` **60 accept / 25 refuse**, `--emit-cpu` **46 / 39** — and **no committed `.ptx`, `.ll` or `.v` changed**, which is the
+evidence the refusals are purely additive: no corpus program uses `chisel`.
+Totals are +8 on the previous increment, exactly the new suite's 8 tests.
+
+#### Recorded, not fixed
+
+`@hdl_emit` is read by **nothing** — `is_hdl_emit` is written by the parser
+into `FuncDecl` and has zero consumers anywhere. It names an HDL backend that
+does not exist, and §9.15 documents `@clock_domain` as applying to "function
+blocks compiled with `@hdl_emit`". That is the `scheme = "plonkish"` shape and
+wants its own increment with its own measurement: the honest end state is
+probably a refusal by name, and deciding that is not a drive-by.
+
+
+### 2026-09-03 — the exact GEMM cut the one axis that needs a reduction, while the axis that needs none was already proved
+
+Asking what the verified kernels cost against industry baselines produced a
+measurement rather than a number: the exact GEMM's threading **anti-scaled**.
+At 1024x1024x1024, eight threads ran SLOWER than one.
+
+#### The decomposition
+
+`__y_gemm_exact_vnni` is externally visible, so the shipped path can be taken
+apart by calling the unthreaded kernel directly with the same bands, the same
+private buffers and the same reduction, minus the threads:
+
+| 1024x1024x1024, 8 threads | ms |
+|---|---|
+| pure compute, one core, whole K | **7.344** |
+| K-split buffer + reduce overhead (serial) | **9.311** |
+| — buffer memset | 4.804 |
+| — the reduction | 2.393 |
+| — malloc/free | ~2.1 |
+| shipped threaded path | 10.774 |
+| ideal if it parallelised | 0.918 |
+
+**The bookkeeping cost more than the entire GEMM.** Each thread was given a
+private C of the full `M x N`, zeroed before and summed after, so the overhead
+is `O(T * M * N)` against `O(M * N * K)` of work - a share of `T / K` that is
+independent of M and N.
+
+**A predicted-then-measured check separated the two candidate explanations.**
+Holding `M * N` fixed and growing K, the 8-thread speedup rises monotonically
+(0.49x at K=2048 -> 1.44x -> 2.11x -> 3.00x at K=131072). I also predicted it
+would worsen as `M * N` grew; the sweep says it does not, and the algebra
+agrees - the ratio is `T / K` and `M * N` cancels. **The wrong half of the
+prediction is recorded because the sweep is what corrected it.**
+
+#### The fix is the split AXIS, and the proof for it already existed
+
+An M-split gives each thread a disjoint ROW BAND of C. No private buffer, no
+zero-fill, nothing to reduce. And `ExactGemmTiling.c_written_exactly_once`
+already proves the output tiling is a partition - it was the K-split that
+needed `ksplit_exact`, because a reduction is what requires associativity.
+
+So the kernel was cutting the one axis that needs an arithmetic property, while
+the axis that needs none was already covered.
+
+Measured, **bit-identical output at every row**, 32 threads:
+
+| shape | K-split | M-split | |
+|---|---|---|---|
+| 512^3 | 2.418 ms | 0.587 ms | **4.12x** |
+| 1024^3 | 10.619 ms | 1.823 ms | **5.83x** |
+| 2048^3 | 83.970 ms | 8.864 ms | **9.47x** |
+
+The exact kernel's own column is what this table is about, and it goes from 101
+to 589 G MAC/s at 1024^3 and from 102 to 969 at 2048^3.
+
+> **CORRECTION, 2026-09-03 - the OpenBLAS comparison taken in the same session
+> did NOT reproduce, and "at parity with OpenBLAS f32" was wrong.** It read
+> OpenBLAS at 621 and 932 G MAC/s, i.e. 0.95x and 1.04x. Re-measured through a
+> dedicated harness (`tools/exact_gemm_bench/run.py`, one shape per process per
+> arm, arms interleaved), **Y's column reproduces** - 619 and 1083 at 32 threads
+> against the 589 and 969 recorded - while **OpenBLAS reads 1376 and 1478**,
+> about twice what was recorded. Two candidate explanations were tested and
+> rejected: numpy's per-call output allocation costs 26% at 1024^3 and nothing
+> at 2048^3, and the library dispatches to its `SkylakeX` AVX-512 kernel in both
+> harnesses. What remains is that the original figure was taken while test
+> sweeps were running on the same machine, which is the hazard this project has
+> already recorded once. **The measured standing is 0.54x at 1024^3, 0.65x at
+> 2048^3 and 0.95x at 4096^3**, against an f32 datapath whose MAC ceiling is
+> *half* the exact one - so the exact kernel is at ~30% of its own ISA ceiling
+> where OpenBLAS is at ~63% of its. See README, "What the verified kernel
+> costs". The scheduling claim below is untouched: the M-split column is Y
+> against Y and reproduces.
+
+#### `ExactGemmMSplit.v`, and the theorem that is about the programme
+
+`owner_unique` / `owner_exists` say the row bands are a PARTITION: every row in
+exactly one band. That is the obligation a partition carries and a reduction
+does not - two overlapping K-bands double-count and the coverage theorem alone
+would not notice, where two overlapping row bands are two threads writing one
+element of C.
+
+The headline is **`msplit_needs_no_algebra`**: the M-split is exact for an
+arbitrary accumulate. Not associative, not commutative, not exact. A row's
+accumulator is never split, so there is no re-bracketing to justify.
+
+That qualifies section 2 of this document. Exact accumulation is what makes a
+**reduction-shaped** parallelisation provable; a partition-shaped one is
+provable without it. **Exactness buys the axes you could not otherwise cut - it
+is not the price of cutting anything.**
+
+The refutation that stops it being vacuous needed care. The obvious
+non-associativity witness for the rounding accumulate is FALSE - `rnd` is the
+identity on multiples of 100, so `fadd (fadd 1000 1) 1` and `fadd 1000 2` are
+both 1000. A real witness needs two terms that cross a rounding boundary
+together but not separately: 50 and 60. **Checked by computation rather than
+assumed, and the file records that the first attempt was wrong.**
+
+11 `Print Assumptions`, no axioms, nothing admitted. The capstone `Require`s it
+and re-exports both partition results, which is what makes the `Require` real -
+mutation E7 confirms it.
+
+#### The schedule is rendered, not re-derived
+
+The row bands come from the SAME `band_base_ix` / `band_rem_ix` /
+`band_len_ix` the K-split uses, bound to `M` and `mthr` instead of `K` and
+`nthr`; the panel sizes from the same `panel_a_bytes_ix` / `panel_b_bytes_ix`
+at this band's row count and the full K. A second transcription would be the
+drift `ExactGemmSchedule.v` exists to remove.
+
+The one place the two axes deliberately disagree is job slot 8, the worker's
+output stride. The K path stores `%N` because its destination is a compact
+private buffer - storing `ldc` there was a heap overflow this repository has
+already had - and the M path stores `%ldc` because its destination is the
+caller's own C, where storing `N` is a wrong answer on a padded C. **Opposite
+values, for opposite reasons, asserted separately.**
+
+#### The rule is saturation, not availability
+
+M is taken only when the row bands can fill the requested thread count
+(`msplit_threads == request`), because the M axis runs out of rows before the K
+axis runs out of contraction. Measured at T=16, K=16384 where the K-split's own
+overhead share is smallest: M=96 gives 8 M-threads and **loses** 0.61x, M=128
+gives 10 and loses 0.88x, M=192 gives 16 and wins 1.10x. 192/16 is exactly
+`2 * VNNI_MR` - two register tiles - so `MSPLIT_MIN_ROWS` is derived from the
+micro-kernel rather than chosen.
+
+#### Mutation table — 9 probes, nine suites, each `--test` target run separately
+
+| probe | caught by |
+|---|---|
+| **E1** dispatch always takes K (the state before this change) | **`exact_gemm_msplit` ONLY** |
+| **E2** M band stores `%N` as its output stride | `exact_gemm_msplit` + `exact_gemm_tiling_model` |
+| **E3** M band's A offset drops `lda` | msplit + thread_invariance + tiling_model |
+| **E4** M taken whenever it gives >1 thread (over-eager), both sides moved | msplit (its control) + thread_invariance |
+| **E5** emitted floor 6 against the model's 12 | **MISSED by my gate** — see below |
+| **E5b** the same, after the boundary shapes were added | msplit + thread_invariance |
+| **E6** M path skips every join | msplit + thread_invariance + tiling_model |
+| **E7** `owner_unique` weakened to a tautology, name kept | **`proofs_are_checked` + `exact_gemm_certificate`** |
+| **E8** `msplit_needs_no_algebra` deleted with its `Print Assumptions` | **`proofs_are_checked` ONLY** |
+| **E9 CONTROL** two job-record stores reordered at unchanged offsets | **green everywhere** |
+
+**E1 is the row that matters: the original schedule was invisible to all eight
+other suites.** They compare answers, and the K-split's answer is correct - it
+is merely 6.4x slower.
+
+##### E5 was a real hole in my own gate
+
+The model tie asserted `split_axis`'s prediction against the observed
+`pthread_create` count at two shapes - and at both of them a floor of 6 and a
+floor of 12 give the same answer, so halving the emitted floor while leaving
+`MSPLIT_MIN_ROWS` alone **passed**. `exact_gemm_thread_invariance` caught it
+instead. The gate now carries the boundary: `M = MSPLIT_MIN_ROWS * 16` takes
+the row axis on 16 threads and `M = MSPLIT_MIN_ROWS * 16 - 1` falls back to the
+contraction axis on 8 - one row wide, both sides asserted. **A model tie needs
+a shape whose answer MOVES when the constant does.**
+
+##### The control caught a race in the file I had just written
+
+E9 came back RED the first time, on `exact_gemm_msplit` alone. The mutation was
+a no-op; what failed was my own `emitted_ir()` helper, which had a pid-only
+temp directory and **two callers**. That is the race this repository has now
+hit six times, in the increment whose standing rule names it. The tag is in the
+signature now. **A control row is not only there to prove the table means
+something - it is the cheapest detector of nondeterminism in the harness.**
+
+#### Verification
+
+**589 / 840 / 8** tests, zero failures across 133 per-target binaries in both
+feature sets (133/133 result lines each) plus both aggregates (139 lines each)
+and `cargo test -p y-gpu`. Both builds warning-free. `coqc` clean over all
+twenty proofs, no axioms, nothing admitted. Corpus unchanged at `--emit-llvm`
+55/30 and `--emit-ptx` 60/25, and no committed `.ptx` or `.ll` changed. Totals
+are +5 on the previous increment, exactly the new suite.
+
+#### Recorded, not fixed
+
+The K-split remains the right axis for a short M and a long K, and that arm
+still pays its full `O(T * M * N)` bookkeeping. A hybrid - split M first, then
+K within each row band - would cover the shapes where neither axis alone
+saturates (M=96 at 16 threads uses 8 M-threads or 8 K-threads, never 16). Both
+component theorems exist; composing them is an increment, not a branch.
+
+
+## 5. End goal
+
+> **STATUS, 2026-09-02.** The end goal below is reached for **one kernel on one
+> backend**: `Y gemm.ysu --emit-llvm` substitutes the exact `vpdpwssd` GEMM and
+> writes a `.v` beside the `.ll` that an auditor can check with `coqc` and the
+> proofs, without trusting the compiler. What is *not* reached is the scope —
+> one kernel family, one backend, and the **eight** items the certificate now
+> enumerates as its trusted computing base, each with the check that would fail
+> if it were false or an explicit statement that nothing would:
+> `exact_gemm_certificate::TRUST_BOUNDARY`. This paragraph said *three* until
+> 2026-09-01, which was the certificate's own count, and that count was wrong —
+> see the dated entry on the trust boundary. The repeatable method is in
+> [The process](verified_kernel_process.md).
+
+You write the naive loop nest — the specification, readable and obviously
+correct. The compiler emits a tiled, swizzled, async-pipelined AVX-512 or PTX
+kernel, **and a certificate that the two compute the same thing.** Not a
+benchmark. Not a test report. A proof an auditor can check without trusting you
+or the compiler.
+
+**Who buys it.** Safety-critical avionics, automotive and medical software
+cannot currently certify GPU compute at all — which is why that hardware sits
+idle in systems that would benefit from it enormously. The blocker is evidence,
+not performance. Regulated finance and auditable ML have the same shape: the
+deliverable is the argument, not the speed.
+
+This is the one direction where the question that killed every other candidate
+in this repository — *who gives this away free?* — has the answer **nobody**.
+cuBLAS is free and irrelevant here, because it ships no certification artifact
+and never will.
+
+---
+
+## 6. What could kill it
+
+**Obligations may not compose.** Phase 2 is the real research risk. If each
+optimization's proof cannot be discharged independently and composed, you have
+one proof of one kernel and no compiler. This is where the programme most
+plausibly stops.
+
+**The trusted computing base never reaches zero.** `ptxas` is closed source;
+LLVM is enormous. CompCert solved this for C by verifying the whole chain over
+many years with a full team. You will be certifying source-to-IR and declaring
+the rest trusted — honest and standard, but less than the pitch implies, and it
+must be said plainly every time.
+
+**Exact arithmetic is a real constraint.** Until Phase 4 lands, the addressable
+set is reductions and fixed-point pipelines. If Phase 4 proves harder than
+expected, the programme's ceiling is much lower than section 5 claims.
+
+**Certification markets are slow and conservative.** They buy from established
+vendors with track records, on multi-year cycles. A single-developer research
+compiler is not a credible supplier to them, whatever the proof says. The
+realistic path is partnering with or being acquired by an existing supplier —
+plan for that rather than discovering it in year five.
+
+**It is one person.** Four to six years is long enough that funding,
+collaborators or an institutional home stop being optional. Phase 1's
+publication is the instrument for getting them, which is why it should not
+slip.
+
+---
+
+## 7. The first move — DONE, 2026-08-12
+
+> **This section is kept as written because the measurement it asked for is the
+> reason everything after it exists.** The four lines are deleted, the packed
+> kernel accumulates exactly, and the number that "decides whether any of the
+> rest is worth doing" came back **1.88x in favour of exactness** — the exact
+> `vpdpwssd` GEMM is faster than the f32 one it replaces, so exactness trades
+> range rather than speed. Read the rest of this section as the question, and
+> §"Phase 0 status" above as the answer.
+
+Delete four lines and find out what happens.
+
+`src/cpu_gemm.rs:289` refuses a `@ZeroDrift` accumulator on the grounds that
+substituting the packed kernel would discard the exactness guarantee. That
+reasoning is correct *today*, because the packed kernel accumulates in `f32`.
+
+Make the packed kernel accumulate exactly instead, and the refusal becomes
+unnecessary. Then measure what it costs — **that number decides whether any of
+the rest is worth doing.**

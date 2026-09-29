@@ -1,0 +1,828 @@
+"""Symbolic executor for a straight-line, predicated SASS basic block.
+
+Every opcode form implemented here is one whose semantics was validated
+against silicon in Phase A, EXCEPT the forms named in ASSUMED below.  An
+opcode or operand form that is not implemented is a hard error -- never a
+no-op and never a guess.  (Design rule: an unhandled node in a pass whose
+output is a correctness claim must reject.)
+"""
+import re, sys
+from z3 import *
+import smem
+import memorder, divest
+
+W = 32
+def bv(n): return BitVecVal(n, W)
+ZERO = bv(0)
+
+# param base for sm_89; the driver ABI puts the kernel's parameters here.
+CBANK = {0x160:'A_lo', 0x164:'A_hi', 0x168:'B_lo', 0x16c:'B_hi',
+         0x170:'O_lo', 0x174:'O_hi', 0x178:'N',
+         0x28:'stackptr', 0x118:'gridc_lo', 0x11c:'gridc_hi'}
+
+ASSUMED = set()   # forms whose semantics is not device-validated
+
+INSN = re.compile(r'^\s*/\*([0-9a-f]+)\*/\s+(.*?);\s*$')
+LABEL = re.compile(r'^(\.L_\w+):')
+
+def u64(hi, lo): return Concat(hi, lo)
+
+class Sass:
+    def __init__(self, sym):
+        self.R = {}; self.P = {}; self.UR = {}
+        self.sym = sym                    # shared symbol table with the PTX side
+        self.alive = BoolVal(True)
+        memorder.install(self)  # order-recording `loads`/`stores` -- see memorder.py
+        self.defs = []          # (pc, name, expr) for every register definition
+        self.wide = []          # (pc, 33-bit value:carry) for accumulating insns
+        self.pc = 0
+        self.undef = 0
+        self.assume = []      # measured facts every obligation may use -- see divest.py
+        self.nest = 0
+        self.ests = {}        # id of a fresh estimate -> (e, d)
+        self.count = 0
+        self.forms = set()
+        self.smem = sym.get('smem')       # see smem.py
+        self.bar = sym.get('bar')
+        self.smem_ops = []
+        self.smem_snaps = []      # array contents ENTERING each barrier
+        self.align_obs = []
+
+    def gload(self, addr, i, k, off=None, nbytes=4):
+        """THE ONLY PATH TO GLOBAL MEMORY, pinned at import -- the twin of
+        `ptxexec.Ptx.gload`, and the two must build a load's term the same way
+        or nothing downstream means anything.  See that docstring."""
+        if 'abstract' in self.sym:
+            base = self.sym['abstract'](i, k)
+            if not self.stores:
+                return base
+            # see ptxexec.Ptx.gload for the address hook
+            hook = self.sym.get('abstract_addr')
+            at_ = hook('L', i) if hook else addr
+            sts = ([(hook('S', j), v, gg) for j, (_a, v, gg) in enumerate(self.stores)]
+                   if hook else list(self.stores))
+            return memorder.read_through(sts, at_ if off is None else at_ + BitVecVal(off, 64),
+                                         base, nbytes)
+        a = addr if off is None else addr + BitVecVal(off, 64)
+        return memorder.read_through(self.stores, a, Select(self.sym['mem'], a), nbytes)
+
+    # ---- operand readers -------------------------------------------------
+    def rd(self, o):
+        o = o.strip().replace('.reuse','')
+        if o.startswith('-') and not o.startswith('-0x'): return -self.rd(o[1:])
+        if o.startswith('~'): return ~self.rd(o[1:])
+        if o in ('RZ','URZ'): return ZERO
+        m = re.fullmatch(r'R(\d+)(\.64)?', o)
+        if m:
+            i = int(m.group(1))
+            if i not in self.R:
+                self.undef += 1
+                self.R[i] = BitVec(f'sass_undef_R{i}', W)
+            if isinstance(self.R[i], divest.Tagged):
+                raise Exception(f'R{i} holds {self.R[i]!r} and is read outside the '
+                                f'estimate chain the device facts were measured for  '
+                                f'(refusing, not guessing)')
+            return self.R[i]
+        m = re.fullmatch(r'c\[0x0\]\[0x([0-9a-f]+)\]', o)
+        if m:
+            a = int(m.group(1), 16)
+            cb = self.sym.get('cbank', CBANK)
+            if a not in cb: raise Exception(f'unmodelled const bank slot 0x{a:x}')
+            v = cb[a]
+            return self.sym[v if isinstance(v,str) else f'{v[0]}_{v[1]}']
+        m = re.fullmatch(r'UR(\d+)', o)
+        if m: return self.UR[int(m.group(1))]
+        m = re.fullmatch(r'(-?)0x([0-9a-f]+)', o)
+        if m:
+            v = int(m.group(2), 16)
+            return bv(-v if m.group(1) else v)
+        raise Exception(f'unmodelled operand {o!r}')
+
+
+    def frd(self, o):
+        """A FLOAT source operand.  `rd` is the INTEGER reader and reading a
+        float source with it is a guess, not a refusal.
+
+        `-R3` on an FADD is a sign-bit flip; `rd` returns the TWO'S COMPLEMENT
+        of the bit pattern, which is a different 32-bit value for every input
+        that is not zero or the sign bit alone.  Nothing said so -- the negation
+        was handled once, generically, at the top of `rd`, and every float arm
+        inherited it.  `-RZ` was worse in the same place: it collapses to `+0.0`
+        where the operand is `-0.0`, and `FADD Rd, -Rx, -RZ` is exactly how
+        ptxas lowers an un-foldable `neg.f32`, so the one construct that needs
+        it is the one that got it wrong.
+
+        It was LATENT rather than live -- no standing result has a negated float
+        source in its SASS, checked rather than assumed -- and its observed
+        direction on the one case measured was a false UNPROVED.  That is the
+        safe direction and it is not a licence: nothing says the guess is safe
+        in general, and under the concretising rungs of the ladder two wrong
+        values can agree.  Reach is ELEVEN corpus kernels (3 rope, 4 gemm_fp8,
+        4 paged-decode attention), because a plain `sub.f32` lowers to a negated
+        source.
+
+        FNEG is an uninterpreted unary on both sides, and `fpsem_abi.py`
+        measures on the device that the modifier is a bit-exact sign flip.
+        """
+        o = o.strip().replace('.reuse','')
+        if o.startswith('-') and not o.startswith('-0x'):
+            return self.sym['fp']('FNEG', self.frd(o[1:]), side='sass')
+        if o.startswith('|') or o.endswith('|'):
+            raise Exception(f'unmodelled float operand modifier {o!r}  '
+                            f'(refusing, not guessing) -- |R| is an absolute '
+                            f'value, which is a second bit operation and has '
+                            f'not been refereed')
+        return self.rd(o)
+    def gaddr(self, o):
+        """A 64-bit GLOBAL address operand: `[Rn.64]` or `[Rn.64+0xNN]`.
+
+        Five arms parsed this inline and FOUR OF THEM DID NOT CHECK THE MATCH,
+        so an addressing form the model does not know crashed with
+        `'NoneType' object has no attribute 'group'` instead of refusing by
+        name -- which in a corpus census is indistinguishable from a bug in the
+        harness, and told nobody that `[Rn.64+0xNN]` was simply unsupported.
+        The constant-offset form is ordinary (37 plain and 5 offset in
+        `bn254_ntt4_fused` alone); it was never rejected on purpose, it was
+        never reached.
+        """
+        m = re.fullmatch(r'\[R(\d+)\.64(?:\s*\+\s*(-?0x[0-9a-f]+|-?\d+))?\]', o.strip())
+        if not m:
+            raise Exception(f'unmodelled global addressing {o!r}  (refusing, not guessing)')
+        ab = int(m.group(1))
+        # THROUGH `rd`, not `self.R[...]`.  A register never written in the
+        # region is a LIVE-IN, and `rd` materialises it as `sass_undef_R<n>` like
+        # every other read; indexing the dict raised `KeyError` instead, so a
+        # region whose address pair is computed OUTSIDE it (a load hoisted into
+        # the prologue) crashed the validator rather than being validated or
+        # refuted.  Where both halves are defined `rd` returns them unchanged, so
+        # no term any validator already builds is touched.
+        addr = u64(self.rd(f'R{ab+1}'), self.rd(f'R{ab}'))
+        if m.group(2):
+            addr = addr + BitVecVal(int(m.group(2), 0), 64)
+        return simplify(addr)
+
+    def saddr(self, o):
+        """A SHARED address operand: `[R2.X16]`, `[R0.X16+0x400]`, `[R2]`, `[UR4]`.
+
+        `.XN` is an address-SCALING modifier -- `[R2.X16]` is `R2 * 16`, not
+        `R2`.  The PTX side reaches the same address by an explicit `shl.b64
+        %rd, %rd, 4`, so dropping the scale does not fail loudly: it produces a
+        DIFFERENT address that is still well-formed, and the validator would
+        report a real kernel as a mismatch.  Refuse an unknown form instead.
+        """
+        m = re.fullmatch(r'\[(.*)\]', o.strip())
+        if not m: raise Exception(f'unmodelled shared address {o!r}  (refusing, not guessing)')
+        body = m.group(1).strip()
+        off = BitVecVal(0, W)
+        m2 = re.fullmatch(r'(.*?)\s*\+\s*(-?0x[0-9a-f]+|-?\d+)', body)
+        if m2:
+            body = m2.group(1).strip()
+            off = bv(int(m2.group(2), 0))
+        m3 = re.fullmatch(r'(R\d+|UR\d+|RZ|URZ)(?:\.X(\d+))?', body)
+        if not m3: raise Exception(f'unmodelled shared address form {o!r}  (refusing, not guessing)')
+        base = self.rd(m3.group(1))
+        if m3.group(2):
+            base = base * bv(int(m3.group(2)))
+        return simplify(base + off)
+
+    def pr(self, o):
+        o = o.strip()
+        neg = o.startswith('!')
+        if neg: o = o[1:]
+        if o == 'PT': v = BoolVal(True)
+        else:
+            i = int(o[1:])
+            if i not in self.P:
+                self.undef += 1
+                self.P[i] = Bool(f'sass_undef_P{i}')
+            v = self.P[i]
+        return Not(v) if neg else v
+
+    # ---- writers (predicated) -------------------------------------------
+    def wr(self, o, val, g):
+        o = o.strip()
+        if o == 'RZ': return
+        i = int(o[1:])
+        old = self.R.get(i)
+        if old is None:
+            self.undef += 1
+            old = BitVec(f'sass_undef_R{i}', W)
+        self.R[i] = simplify(val if is_true(g) else If(g, val, old))
+        self.defs.append((self.pc, o, self.R[i]))
+
+    def est_link(self, opc, ops, g):
+        """One link of the u32 division estimate (divest.py), or False.
+
+        I2F.U32.RP -> MUFU.RCP -> IADD3 +0x0ffffffe -> F2I.FTZ.U32.TRUNC.NTZ,
+        each consuming the previous link's tagged result.  The last link yields a
+        FRESH estimate and records the measured facts about it."""
+        def src(o):
+            m = re.fullmatch(r'R(\d+)', o.replace('.reuse', ''))
+            return self.R.get(int(m.group(1))) if m else None
+        chain = {'MUFU.RCP': 'i2f', 'IADD3': 'rcp', 'F2I.FTZ.U32.TRUNC.NTZ': 'bias'}
+        if opc == 'I2F.U32.RP':
+            v = divest.Tagged('i2f', self.rd(ops[1]))
+        elif opc in chain:
+            t = src(ops[1])
+            if not isinstance(t, divest.Tagged):
+                if opc == 'IADD3':
+                    return False          # an ordinary add
+                raise Exception(f'UNMODELLED SASS OPCODE {opc!r} outside the division '
+                                f'estimate chain  (refusing, not guessing)')
+            if t.stage != chain[opc]:
+                raise Exception(f'{opc} consumes {t!r}, not the link it follows  '
+                                f'(refusing, not guessing)')
+            if opc == 'IADD3' and (len(ops) != 4 or ops[2] != hex(divest.BIAS)
+                                   or ops[3] != 'RZ'):
+                raise Exception(f'IADD3 {ops} on the estimate is not the measured '
+                                f'bias +0x{divest.BIAS:x}  (refusing, not guessing)')
+            if opc == 'F2I.FTZ.U32.TRUNC.NTZ':
+                if not is_true(g):
+                    raise Exception('a predicated division estimate  (refusing, not guessing)')
+                e = BitVec(f'div_est_{self.nest}', W); self.nest += 1
+                self.ests[e.get_id()] = (e, t.d)
+                ASSUMED.add('u32 division estimate: window + Lemma A (divlow_abi.py, exhaustive)')
+                self.wr(ops[0], e, g)
+                return True
+            v = divest.Tagged({'MUFU.RCP': 'rcp', 'IADD3': 'bias'}[opc], t.d)
+        else:
+            return False
+        if not is_true(g):
+            raise Exception('a predicated division estimate link  (refusing, not guessing)')
+        self.R[int(ops[0][1:])] = v
+        return True
+
+    def est_transfer(self, a, dst, g):
+        """Lemma A is a fact about newton(e, d); the SASS computes that value its
+        own way (a 65-bit sum with the pair {e:0}, `-d` as an IMAD.MOV).  If the
+        register just written is PROVED equal to newton(e, d), the fact is
+        restated about THAT node -- a proved transfer, not an assumption -- so
+        the obligation and the fact share one term and, over Int, one variable.
+        With the fact stated only on its own spelling the division store was
+        `unknown` at 120 s over Int."""
+        if a.get_id() not in self.ests or not is_true(g):
+            return
+        e, d = self.ests[a.get_id()]
+        v = self.R[int(dst[1:])]
+        s = Solver(); s.set('timeout', 10000); s.add(v != divest.newton(e, d))
+        if str(s.check()) == 'unsat':
+            self.assume.append(divest.lemma_a(v, d))
+
+    def widen(self, val, carry):
+        self.wide.append((self.pc,
+                          simplify(Concat(If(carry, BitVecVal(1,1), BitVecVal(0,1)), val)),
+                          val, carry))
+
+    def wp(self, o, val, g):
+        o = o.strip()
+        if o in ('PT','!PT'): return
+        i = int(o[1:])
+        old = self.P.get(i)
+        if old is None:
+            self.undef += 1
+            old = Bool(f'sass_undef_P{i}')
+        self.P[i] = simplify(val if is_true(g) else If(g, val, old))
+
+    # ---- primitives ------------------------------------------------------
+    def add3(self, a, b, c, cin1=None, cin2=None, ones=0):
+        """three-input 32-bit add with up to two carry-ins; returns (sum, carry-out).
+        `ones` counts source operands written as `-R`, each of which was passed
+        in already inverted and contributes one to the carry chain."""
+        w = W + 3
+        e = lambda x: ZeroExt(3, x)
+        s = e(a) + e(b) + e(c)
+        if ones: s = s + BitVecVal(ones, w)
+        for ci in (cin1, cin2):
+            if ci is not None: s = s + If(ci, BitVecVal(1, w), BitVecVal(0, w))
+        return Extract(W-1, 0, s), (LShR(s, W) != 0)
+
+    def src3(self, o):
+        """an adder source: returns (value, extra ones for the carry chain)"""
+        o = o.strip().replace('.reuse','')
+        if o.startswith('-') and not o.startswith('-0x'): return ~self.rd(o[1:]), 1
+        return self.rd(o), 0
+
+    def mul_lo(self, a, b):
+        f = self.sym.get('mul')
+        return f('lo', a, b) if f else a * b
+    def mul_hi(self, a, b):
+        f = self.sym.get('mul')
+        return f('hi', a, b) if f else Extract(2*W-1, W, ZeroExt(W, a) * ZeroExt(W, b))
+
+    def pair(self, o):
+        """a 64-bit operand held in the register pair starting at o (RZ is 0)"""
+        o = o.strip().replace('.reuse','')
+        if o == 'RZ': return BitVecVal(0, 64)
+        m = re.fullmatch(r'R(\d+)', o)
+        if not m: raise Exception(f'unmodelled wide operand {o!r}')
+        i = int(m.group(1))
+        return Concat(self.rd(f'R{i+1}'), self.rd(f'R{i}'))
+
+    def mul_hi_wide(self, a, b, caddr):
+        """high word of a*b + {Rc,Rc+1}, and the carry out of that 64-bit add"""
+        prod = ZeroExt(1, ZeroExt(W, a) * ZeroExt(W, b))
+        s = prod + ZeroExt(1, self.pair(caddr))
+        return Extract(2*W-1, W, Extract(2*W-1, 0, s)), (Extract(2*W, 2*W, s) == BitVecVal(1,1))
+
+    def lop3(self, a, b, c, lut):
+        r = ZERO
+        for i in range(8):
+            if (lut >> i) & 1:
+                ma = a if (i >> 2) & 1 else ~a
+                mb = b if (i >> 1) & 1 else ~b
+                mc = c if (i >> 0) & 1 else ~c
+                r = r | (ma & mb & mc)
+        return r
+
+    # ---- the interpreter -------------------------------------------------
+    def arrive(self, addr):
+        """Re-merge the path condition at a branch target.
+
+        A forward branch splits the path; the instructions it skips already
+        executed under `alive AND NOT taken`, so every write they made is
+        guarded and the registers merge themselves.  What has to be restored
+        is the path condition: at the join it is the disjunction of the two
+        incoming edges.  Stating it that way (rather than restoring the saved
+        value) keeps it correct when the skipped region contains an EXIT.
+        """
+        while self.joins and self.joins[-1][0] == addr:
+            _, taken = self.joins.pop()
+            self.alive = simplify(Or(taken, self.alive))
+
+    def step(self, body, addr=None):
+        """Dispatch one instruction.
+
+        AN ARITY MISTAKE MUST NAME ITSELF.  Arms index `ops[k]` at fixed
+        positions, so an instruction with fewer operands than its arm expects
+        raised a bare `IndexError: list index out of range` -- fail-closed, and
+        useless: in a corpus census that is indistinguishable from a bug in the
+        harness, and it told nobody that a second `LEA` arity existed.  Wrapping
+        the dispatch closes the whole class at one point rather than adding a
+        length check to forty arms, for the same reason `gaddr` replaced five
+        inline address parsers."""
+        try:
+            return self._step(body, addr)
+        except IndexError:
+            t = body.split(';')[0].strip()
+            raise Exception(f'UNMODELLED SASS OPERAND COUNT in {t!r}  '
+                            f'(an arm indexed past the operand list; refusing, not guessing)')
+
+    def _step(self, body, addr=None):
+        pred = None
+        m = re.match(r'^(@!?U?P\w+)\s+(.*)$', body)
+        if m:
+            pred, body = m.group(1), m.group(2)
+        self.pc += 1
+        parts = body.split(None, 1)
+        opc = parts[0]
+        ops = [o.strip() for o in parts[1].split(',')] if len(parts) > 1 else []
+        g = self.alive if pred is None else And(self.alive, self.pr(pred[1:]))
+        self.count += 1
+        self.forms.add(opc)
+        R, rd = self.rd, self.rd
+
+        if self.est_link(opc, ops, g):
+            return
+        if opc in ('NOP',):
+            pass
+        elif opc == 'UMOV':
+            self.UR[int(ops[0][2:])] = rd(ops[1])
+        elif opc in ('MOV', 'MOV32I'):
+            self.wr(ops[0], rd(ops[1]), g)
+        elif opc == 'EXIT':
+            # execution stops where the guard holds
+            self.alive = And(self.alive, Not(g))
+        elif opc == 'BRA':
+            # THE WHOLE OPERAND LIST, not just the label.  `re.search` for a
+            # label accepts `BRA P1, `(.L_x)` and silently DROPS the `P1`, so a
+            # branch governed by a second predicate was taken to be governed by
+            # its `@` guard alone -- a guess, in the one place this file is
+            # otherwise scrupulous about refusing.  Latent when found (13 in the
+            # corpus, all forward, all in kernels refused earlier for an opcode),
+            # which is the reason to close it now rather than after.
+            m = bra_target(ops)
+            if not m: raise Exception(f'unmodelled BRA form {body!r}  (refusing, not guessing)')
+            tgt = self.labels.get(m.group(1))
+            if tgt is None: raise Exception(f'BRA to unknown label {m.group(1)!r}')
+            if tgt == addr:
+                # nvcc emits `.L: BRA .L` after EXIT as a trap.  It is dead
+                # code -- but only if it is genuinely unreachable, so check
+                # rather than assume: a reachable self-branch is a loop.
+                if not is_false(simplify(self.alive)):
+                    raise Exception('self-branch reached under a satisfiable path condition '
+                                    '-- that is a loop, not the trailing trap  (refusing, not guessing)')
+            elif tgt < addr:
+                raise Exception('backward BRA -- this kernel has a loop, which needs an '
+                                'invariant rather than path merging  (refusing, not guessing)')
+            else:
+                self.joins.append((tgt, g))
+                self.alive = simplify(And(self.alive, Not(g)))
+        elif opc in ('FMUL','FADD','FFMA','FSUB'):
+            n = 3 if opc == 'FFMA' else 2
+            self.wr(ops[0], self.sym['fp'](opc, *[self.frd(o) for o in ops[1:1+n]], side='sass'), g)
+        elif opc == 'SHF.L.U32':
+            # The LOW word of the funnel {Rc:Ra} << n.  For n < 32 that is Ra << n
+            # on any reading of the funnel; what the hardware does at n >= 32
+            # (clamp, or take the amount mod 32) has NOT been refereed, so there
+            # the value is a fresh unknown -- sound, and complete exactly where the
+            # amount is provably below 32, as it is after the `& 0x1f` ptxas
+            # emits for `shl.b32`.
+            n = rd(ops[2])
+            lo = Extract(W-1, 0, Concat(rd(ops[3]), rd(ops[1])) << ZeroExt(32, n))
+            self.nshf = getattr(self, 'nshf', 0) + 1
+            self.wr(ops[0], If(ULT(n, BitVecVal(32, W)), lo,
+                               BitVec(f'shf_l_wide_{self.nshf}', W)), g)
+            ASSUMED.add('SHF.L.U32 (no .HI) = low word of the funnel, amount < 32 only')
+        elif opc.startswith('SHF.'):
+            # funnel shift: {Rc:Ra} shifted, .HI takes the upper word.
+            f = opc.split('.')
+            if len(f) != 4 or f[3] != 'HI' or f[1] not in ('L','R') or f[2] not in ('U32','S32'):
+                raise Exception(f'UNMODELLED SASS OPCODE {opc!r}  (refusing, not guessing)')
+            wide = Concat(rd(ops[3]), rd(ops[1]))
+            n64  = ZeroExt(32, rd(ops[2]))
+            v = (wide << n64) if f[1] == 'L' else (
+                 LShR(wide, n64) if f[2] == 'U32' else (wide >> n64))
+            self.wr(ops[0], Extract(63, 32, v), g)
+        elif opc in ('BSSY', 'BSYNC'):
+            # Warp reconvergence.  These manage the divergence stack; they move
+            # no value into any register this model reads.  That is only sound
+            # while the kernel cannot observe which lanes are converged, so
+            # run_sass REFUSES a kernel containing any cross-thread operation
+            # rather than letting this arm quietly cover one.
+            ASSUMED.add(f'{opc} = no-op on the value domain (checked: kernel has no cross-thread op)')
+        elif opc == 'S2R':
+            src = ops[1]
+            key = src[3:].lower().replace('.','_') if src.startswith('SR_') else None
+            if key not in self.sym: raise Exception(f'unmodelled special register {src}')
+            self.wr(ops[0], self.sym[key], g)
+        elif opc == 'ULDC':
+            m = re.fullmatch(r'c\[0x0\]\[0x([0-9a-f]+)\]', ops[1])
+            if not m: raise Exception(f'unmodelled ULDC source {ops[1]!r}  (refusing, not guessing)')
+            self.UR[int(ops[0][2:])] = rd(ops[1])
+        elif opc.startswith('USHF.'):
+            # the uniform-datapath funnel shift; identical semantics to SHF,
+            # different register file.  Shares the SHF code rather than copying
+            # it -- two spellings of one operation drift.
+            f = opc.split('.')
+            if len(f) != 3 or f[1] not in ('L','R') or f[2] not in ('U32','S32'):
+                raise Exception(f'UNMODELLED SASS OPCODE {opc!r}  (refusing, not guessing)')
+            wide = Concat(rd(ops[3]), rd(ops[1]))
+            n64  = ZeroExt(32, rd(ops[2]))
+            v = (wide << n64) if f[1] == 'L' else (
+                 LShR(wide, n64) if f[2] == 'U32' else (wide >> n64))
+            self.UR[int(ops[0][2:])] = simplify(Extract(31, 0, v))
+        elif opc.startswith('STS'):
+            n = {'STS': 1, 'STS.64': 2, 'STS.128': 4}.get(opc)
+            if n is None: smem.refuse_subword(opc)
+            addr = self.saddr(ops[0])
+            self.align_obs.append(smem.require_aligned(addr))
+            self.smem_ops.append(('st', addr, g))
+            vb = int(ops[1][1:])
+            for k in range(n):
+                idx = smem.word(addr + bv(4*k))
+                nxt = Store(self.smem, idx, rd(f'R{vb+k}'))
+                self.smem = simplify(If(g, nxt, self.smem) if not is_true(g) else nxt)
+        elif opc.startswith('LDS'):
+            n = {'LDS': 1, 'LDS.64': 2, 'LDS.128': 4}.get(opc)
+            if n is None: smem.refuse_subword(opc)
+            addr = self.saddr(ops[1])
+            self.align_obs.append(smem.require_aligned(addr))
+            self.smem_ops.append(('ld', addr, g))
+            db = int(ops[0][1:])
+            for k in range(n):
+                self.wr(f'R{db+k}', Select(self.smem, smem.word(addr + bv(4*k))), g)
+        elif opc.startswith('BAR.SYNC'):
+            # NOT a no-op -- see smem.py.  A predicated barrier is a program the
+            # hardware does not admit either (a partial arrival hangs).
+            if not is_true(g):
+                raise Exception('BAR.SYNC under a predicate  (refusing, not guessing)')
+            self.smem_snaps.append(self.smem)
+            self.smem = self.bar.apply(self.smem, 'sass')
+        elif opc == 'ULDC.64':
+            m = re.fullmatch(r'c\[0x0\]\[0x([0-9a-f]+)\]', ops[1])
+            if not m: raise Exception(f'unmodelled ULDC.64 source {ops[1]!r}  (refusing, not guessing)')
+            a = int(m.group(1), 16)
+            i = int(ops[0][2:])
+            cb = self.sym.get('cbank', CBANK)
+            def g2(x):
+                v = cb.get(x)
+                return self.sym[v if isinstance(v,str) else f'{v[0]}_{v[1]}'] if v is not None else BitVecVal(0,W)
+            self.UR[i] = g2(a); self.UR[i+1] = g2(a+4)
+        elif opc in ('IMAD', 'IMAD.MOV.U32', 'IMAD.MOV', 'IMAD.SHL.U32', 'IMAD.U32', 'IMAD.IADD'):
+            if opc == 'IMAD.SHL.U32': ASSUMED.add('IMAD.SHL.U32 = IMAD (multiply pipe shift)')
+            self.wr(ops[0], self.mul_lo(rd(ops[1]), rd(ops[2])) + rd(ops[3]), g)
+        elif opc == 'IMAD.X':
+            # d = lo(a*b) + c + P
+            s, _ = self.add3(self.mul_lo(rd(ops[1]), rd(ops[2])), rd(ops[3]), ZERO, self.pr(ops[4]))
+            self.wr(ops[0], s, g)
+        elif opc == 'IMAD.HI.U32':
+            # The addend is a 64-BIT REGISTER PAIR {Rc, Rc+1} and the result is
+            # the HIGH word of a*b + that pair; the predicate is the carry out
+            # of the 64-bit addition.  Reading it as a 32-bit addend gives the
+            # right answer only when the upper half happens to be zero -- and
+            # ptxas puts PTX's `mad.hi.cc.u32` addend in the UPPER half, with
+            # zero below, so the 32-bit reading is wrong on every such kernel.
+            if len(ops) == 4:      # d, a, b, c
+                a1 = rd(ops[1])   # BEFORE the write: `IMAD.HI.U32 R9, R9, ...` overwrites it
+                s, _ = self.mul_hi_wide(a1, rd(ops[2]), ops[3])
+                self.wr(ops[0], s, g)
+                self.est_transfer(a1, ops[0], g)
+            elif len(ops) == 5:    # d, Pout, a, b, c
+                s, co = self.mul_hi_wide(rd(ops[2]), rd(ops[3]), ops[4])
+                self.wr(ops[0], s, g); self.wp(ops[1], co, g); self.widen(s, co)
+            else: raise Exception(f'unmodelled IMAD.HI.U32 arity {len(ops)}')
+        elif opc in ('IMAD.WIDE.U32','IMAD.WIDE'):
+            # {Rd+1,Rd} = a*b + {Rc+1,Rc}.  The full-width sibling of
+            # IMAD.HI.U32, and the addend is a 64-bit REGISTER PAIR for the same
+            # reason -- that correction is what made the partial sums correspond.
+            # The product is built from the SHARED multiply primitive so that
+            # under the `wide` posing both halves are extracts of one MUL64 node
+            # and the concat folds back to it.
+            sgn = '.U32' not in opc
+            if sgn: ASSUMED.add('IMAD.WIDE (signed) = 64-bit signed product + pair')
+            a, b = rd(ops[1]), rd(ops[2])
+            prod = Concat(self.mul_hi(a, b), self.mul_lo(a, b))
+            res = simplify(prod + self.pair(ops[3]))
+            d = int(ops[0][1:])
+            self.wr(f'R{d}',   Extract(W-1, 0, res), g)
+            self.wr(f'R{d+1}', Extract(2*W-1, W, res), g)
+        elif opc == 'IADD3':
+            if len(ops) == 5:      # d, Pout, a, b, c
+                (x,n1),(y,n2),(z,n3) = (self.src3(ops[2]), self.src3(ops[3]), self.src3(ops[4]))
+                s, co = self.add3(x, y, z, ones=n1+n2+n3)
+                self.wr(ops[0], s, g); self.wp(ops[1], co, g); self.widen(s, co)
+            elif len(ops) == 4:    # d, a, b, c   (carry-out discarded)
+                (x,n1),(y,n2),(z,n3) = (self.src3(ops[1]), self.src3(ops[2]), self.src3(ops[3]))
+                s, _ = self.add3(x, y, z, ones=n1+n2+n3)
+                self.wr(ops[0], s, g)
+            else: raise Exception(f'unmodelled IADD3 arity {len(ops)}')
+        elif opc == 'IADD3.X':
+            if len(ops) == 7:      # d, Pout, a, b, c, Pin1, Pin2
+                (x,n1),(y,n2),(z,n3) = (self.src3(ops[2]), self.src3(ops[3]), self.src3(ops[4]))
+                s, co = self.add3(x, y, z, self.pr(ops[5]), self.pr(ops[6]), ones=n1+n2+n3)
+                self.wr(ops[0], s, g); self.wp(ops[1], co, g); self.widen(s, co)
+            elif len(ops) == 6:    # d, a, b, c, Pin1, Pin2   (no carry-out slot)
+                (x,n1),(y,n2),(z,n3) = (self.src3(ops[1]), self.src3(ops[2]), self.src3(ops[3]))
+                s, _ = self.add3(x, y, z, self.pr(ops[4]), self.pr(ops[5]), ones=n1+n2+n3)
+                self.wr(ops[0], s, g)
+            else: raise Exception(f'unmodelled IADD3.X arity {len(ops)}')
+        elif opc == 'SEL':
+            self.wr(ops[0], If(self.pr(ops[3]), rd(ops[1]), rd(ops[2])), g)
+        elif opc == 'FSEL':
+            # A SELECT, not a float operation -- so it moves a 32-bit pattern
+            # and is modelled exactly, with no appeal to `sym['fp']`.
+            #
+            # That is a MEASUREMENT, not a reading of the mnemonic.  An
+            # arithmetic instruction is entitled to flush a denormal,
+            # canonicalise a NaN payload or normalise a signed zero; a select
+            # is not, and modelling a flushing instruction as a pure select
+            # would be exactly the guess this executor refuses to make -- and
+            # would be invisible on ordinary data.  `fpsem_abi.py` runs FSEL on
+            # the device over denormals at both ends of the range, +0.0 against
+            # -0.0, a quiet NaN carrying a payload, a signalling NaN and both
+            # infinities, with a control asserting the load/store path is
+            # itself bit-preserving, and gets `p ? s0 : s1` bit for bit.
+            # ...and its SOURCES are float sources: `FSEL Rd, -Ra, Rb, P` is
+            # what ptxas emits for a `neg.f32` feeding a `selp.f32`, and it is
+            # the probe `fpsem_abi.py` uses to observe the `-R` modifier with
+            # nothing arithmetic in the way.
+            self.wr(ops[0], If(self.pr(ops[3]), self.frd(ops[1]), self.frd(ops[2])), g)
+        elif opc == 'FMNMX':
+            # ONE instruction for both min and max, with the polarity in the
+            # fourth operand: TRUE selects the min.  Measured on sm_89 --
+            # `max.f32` lowers to `FMNMX d, a, b, !PT` and `min.f32` to
+            # `FMNMX d, a, b, PT`.
+            #
+            # Modelled as a select between the two functions rather than by
+            # branching on the operand's TEXT, so a real predicate register in
+            # that slot ( `P ? min : max` ) is handled rather than guessed at --
+            # `self.pr` already refuses nothing and yields a Bool, and where the
+            # operand is the constant PT/!PT Z3 folds the select away.
+            #
+            # The sources are FLOAT sources, so they go through `frd`: ptxas is
+            # free to put a `-R` modifier here exactly as it does on FADD.
+            self.wr(ops[0], If(self.pr(ops[3]),
+                               self.sym['fp']('FMIN', self.frd(ops[1]), self.frd(ops[2]), side='sass'),
+                               self.sym['fp']('FMAX', self.frd(ops[1]), self.frd(ops[2]), side='sass')), g)
+        elif opc == 'LOP3.LUT':
+            # A SIXTH OPERAND, READ BY NOTHING until now.  Every one of the corpus's
+            # LOP3.LUT carries `!PT` there, so its meaning has never been exercised
+            # -- which is exactly when a dropped operand is invisible.  Refuse any
+            # other value by name rather than read the three sources as if it were
+            # absent (the `BRA P1, label` shape, one opcode over).
+            if len(ops) != 6 or ops[5] != '!PT':
+                raise Exception(f'unmodelled LOP3.LUT form {body!r}: the sixth operand is '
+                                f'not `!PT`  (refusing, not guessing)')
+            lut = int(ops[4], 16)
+            self.wr(ops[0], self.lop3(rd(ops[1]), rd(ops[2]), rd(ops[3]), lut), g)
+        elif opc == 'LEA':
+            # TWO ARITIES, and only one was modelled:
+            #   d, Pout, a, C, shift   lo(C) + (a << shift), carry out
+            #   d,       a, C, shift   the same sum with no carry consumer
+            # The 4-operand form indexed ops[4] and crashed with IndexError
+            # rather than refusing -- see the `step` wrapper for why that class
+            # is now closed at one point instead of arm by arm.
+            if len(ops) == 5:
+                sh = int(ops[4], 16)
+                v, co = self.add3(rd(ops[3]), rd(ops[2]) << bv(sh), ZERO)
+                self.wr(ops[0], v, g); self.wp(ops[1], co, g)
+            elif len(ops) == 4:
+                sh = int(ops[3], 16)
+                v, _ = self.add3(rd(ops[2]), rd(ops[1]) << bv(sh), ZERO)
+                self.wr(ops[0], v, g)
+            else:
+                raise Exception(f'unmodelled LEA arity {len(ops)}  (refusing, not guessing)')
+        elif opc == 'LEA.HI.X':
+            # d, a, C, RZ, shift, Pin :  hi(C) + (a >> (32-shift)) + Pin
+            sh = int(ops[4], 16)
+            hi = LShR(rd(ops[1]), bv(W - sh))
+            s, _ = self.add3(rd(ops[2]), hi, rd(ops[3]), self.pr(ops[5]))
+            self.wr(ops[0], s, g)
+        elif opc.startswith('ISETP.'):
+            # ISETP.<cmp>[.U32].<comb>  Pd, Pd2, Ra, Rb, Pin
+            # Pd2 is a second predicate output this model does not track, so a
+            # use of it is refused rather than dropped; every kernel here writes
+            # PT (discard) there.
+            f = opc.split('.')
+            comb = f[-1]
+            cmp_ = f[1]
+            uns  = 'U32' in f
+            CMPS = {'LT': (ULT, lambda x,y: x<y), 'LE': (ULE, lambda x,y: x<=y),
+                    'GT': (UGT, lambda x,y: x>y), 'GE': (UGE, lambda x,y: x>=y),
+                    'EQ': (lambda x,y: x==y, lambda x,y: x==y),
+                    'NE': (lambda x,y: x!=y, lambda x,y: x!=y)}
+            COMBS = {'AND': And, 'OR': Or, 'XOR': Xor}
+            if cmp_ not in CMPS or comb not in COMBS:
+                raise Exception(f'UNMODELLED SASS OPCODE {opc!r}  (refusing, not guessing)')
+            if len(f) > 4 or (len(f)==4 and not uns):
+                raise Exception(f'unmodelled ISETP qualifier in {opc!r}  (refusing, not guessing)')
+            if ops[1] != 'PT':
+                raise Exception(f'ISETP writes a second predicate {ops[1]!r}, which this model '
+                                f'does not track  (refusing, not guessing)')
+            rel = CMPS[cmp_][0 if uns else 1](rd(ops[2]), rd(ops[3]))
+            self.wp(ops[0], COMBS[comb](rel, self.pr(ops[4])), g)
+        elif opc == 'LDG.E.128':
+            base = int(ops[0][1:])
+            addr = self.gaddr(ops[1])
+            i = len(self.loads); self.loads.append((addr, g))
+            for k in range(4):
+                self.wr(f'R{base+k}', self.gload(addr, i, k, 4*k), g)
+        elif opc in ('LDG.E','LDG.E.U32','LDG.E.128.CONSTANT','LDG.E.CONSTANT'):
+            addr = self.gaddr(ops[1])
+            i = len(self.loads); self.loads.append((addr, g))
+            nw = 4 if '128' in opc else 1
+            base = int(ops[0][1:])
+            for k in range(nw):
+                self.wr(f'R{base+k}', self.gload(addr, i, k, 4*k), g)
+        elif opc in ('LDG.E.S8','LDG.E.U8','LDG.E.S16','LDG.E.U16'):
+            # same word-per-byte-address convention as ptxexec's ld.global.s8;
+            # the two must agree or nothing downstream means anything
+            addr = self.gaddr(ops[1])
+            i = len(self.loads); self.loads.append((addr, g))
+            nb = 8 if opc.endswith('8') else 16
+            w = self.gload(addr, i, 0, None, nb // 8)
+            byte = Extract(nb-1, 0, w)
+            self.wr(ops[0], (SignExt(W-nb, byte) if '.S' in opc else ZeroExt(W-nb, byte)), g)
+        elif opc == 'STG.E.64':
+            addr = self.gaddr(ops[0]); vb = int(ops[1][1:])
+            # split exactly as ptxexec's st.global.u64 does: lo at addr, hi at +4
+            self.stores.append((addr, self.rd(f'R{vb}'), g))
+            self.stores.append((addr + BitVecVal(4, 64), self.rd(f'R{vb+1}'), g))
+        elif opc in ('STG.E.U8','STG.E.S8','STG.E.U16','STG.E.S16'):
+            # the SASS half of ptxexec's sub-word store; `subword_abi.py` measures it
+            addr = self.gaddr(ops[0])
+            nb = 8 if opc.endswith('8') else 16
+            self.stores.append((addr, Extract(nb - 1, 0, self.rd(ops[1])), g))
+        elif opc in ('STG.E',):
+            addr = self.gaddr(ops[0])
+            self.stores.append((addr, self.rd(ops[1]), g))
+        elif opc == 'STG.E.128':
+            addr = self.gaddr(ops[0]); vb = int(ops[1][1:])
+            for k in range(4):
+                self.stores.append((addr + BitVecVal(4*k, 64), self.rd(f'R{vb+k}'), g))
+        else:
+            raise Exception(f'UNMODELLED SASS OPCODE {opc!r}  (refusing, not guessing)')
+
+def bra_target(ops):
+    """The label of a plain `BRA`, or None if this is not one.
+
+    ONE operand, and it is the label.  `re.search` for a label anywhere in the
+    instruction accepts `BRA P1, `(.L_x)` and silently DROPS the `P1`, taking a
+    branch governed by a second predicate to be governed by its `@` guard alone
+    -- a guess, in the file that is otherwise scrupulous about refusing.
+
+    Latent when found: 13 in the corpus, all forward, every one in a kernel
+    refused earlier for an opcode, so none has ever executed.  That is why it is
+    factored out and self-checked at import rather than left to a behavioural
+    gate: there is no kernel whose answer it changes, so nothing else can see it.
+    """
+    if len(ops) != 1:
+        return None
+    return re.fullmatch(r'`\(\.L_(\w+)\)', ops[0])
+
+
+memorder.pin_one_memory_path(Sass)
+
+
+def _self_check():
+    """Both halves, at import.  A parse that accepts everything, or nothing, is
+    what a missing refusal and an over-refusal look like respectively."""
+    if not bra_target(['`(.L_x_0)']):
+        raise Exception('sassexec: the plain BRA form is refused  (over-refusal)')
+    for bad in (['P1', '`(.L_x_0)'], ['!P2', '`(.L_x_0)'], ['~URZ', '`(.L_x_3)']):
+        if bra_target(bad):
+            raise Exception(f'sassexec: BRA operands {bad} accepted -- a second '
+                            'operand is being dropped  (guessing, not refusing)')
+    if bra_target(['R4']):
+        raise Exception('sassexec: a non-label BRA operand is accepted')
+    # LOP3.LUT's sixth operand: every corpus instance is `!PT`, so no fixture can
+    # see the refusal of any other value removed.  Both halves, here.
+    from z3 import Array, BitVecSort
+    sym = {'mem': Array('sassexec_lop3_mem', BitVecSort(64), BitVecSort(32))}
+    st = Sass(sym); st.labels = {}; st.joins = []
+    st.step('LOP3.LUT R0, R1, R2, R3, 0xc0, !PT', 0)
+    try:
+        st.step('LOP3.LUT R0, R1, R2, R3, 0xc0, P1', 0x10)
+        raise AssertionError('sassexec: a LOP3.LUT with a non-`!PT` sixth operand was '
+                             'read as if it were absent  (guessing, not refusing)')
+    except AssertionError:
+        raise
+    except Exception:
+        pass
+
+
+_self_check()
+
+
+CROSS_THREAD = re.compile(r'\b(BAR\.|MEMBAR|SHFL|VOTE|LDS|STS|LDSM|ATOM|RED|MATCH)')
+
+def run_insns(insns, sym, name='region', seed=None):
+    """Run an explicit list of (address, text) SASS instructions.
+
+    Same purpose as ptxexec.run_lines: execute ONE REGION in a fresh state so
+    that its live-ins materialise as `sass_undef_RN` / `sass_undef_PN`.
+
+    Forward branches WITHIN the region still merge through arrive(); a branch
+    whose target is outside the region is a region exit and is the caller's
+    business, so it is refused here rather than silently dropped."""
+    st = Sass(sym)
+    st.labels = {}
+    st.joins = []
+    # SEEDING.  A region's live-ins are normally fresh `sass_undef_*` symbols.
+    # Seeding lets the caller run this region in ANOTHER program's vocabulary --
+    # which the loop validator needs, because rewriting the result afterwards
+    # cannot undo a decision taken while it was being built: the multiply
+    # primitive canonicalises its operands by z3 node id AT CONSTRUCTION, so two
+    # terms that only become equal after substitution can already have their
+    # operands in opposite orders, and congruence closure will not relate them.
+    if seed:
+        for k, v in seed.items():
+            (st.P if isinstance(k, str) else st.R)[int(str(k).lstrip('P')) if isinstance(k, str) else k] = v
+    lo = min(a for a, _ in insns); hi = max(a for a, _ in insns)
+    for a, t in insns:
+        m = re.search(r'BRA\s+`\((\.L_\w+)\)', t)
+        if m:
+            raise Exception(f'{name}: branch at 0x{a:x} inside a region  '
+                            f'(refusing, not guessing)')
+        st.arrive(a)
+        st.step(t, a)
+    if st.joins:
+        raise Exception(f'{name}: {len(st.joins)} unreached branch target(s)')
+    return st
+
+
+def run_sass(path, sym):
+    text = open(path).read()
+    st = Sass(sym); looks = 0
+    st.labels = {m.group(1): int(m.group(2), 16)
+                 for m in re.finditer(r'\.L_(\w+):\s*\n\s*/\*([0-9a-f]+)\*/', text)}
+    st.joins = []
+    if re.search(r'\bBSSY\b|\bBSYNC\b', text) and CROSS_THREAD.search(text):
+        raise Exception('kernel has both warp reconvergence and a cross-thread operation; '
+                        'the no-op reading of BSSY/BSYNC is not sound here  (refusing, not guessing)')
+    for line in text.splitlines():
+        if '/*' in line and '*/' in line and line.strip().endswith(';'): looks += 1
+        m = INSN.match(line)
+        if not m: continue
+        addr = int(m.group(1), 16)
+        st.arrive(addr)
+        st.step(m.group(2).strip(), addr)
+    if st.joins:
+        raise Exception(f'{len(st.joins)} branch target(s) never reached -- the CFG is not '
+                        f'what the linear scan assumed  (refusing, not guessing)')
+    # A parser that silently drops instructions produces a wrong model that
+    # still runs.  (The address field was matched at a fixed four hex digits,
+    # which truncates every kernel larger than 64 KB of code.)
+    if st.count != looks:
+        raise Exception(f'parsed {st.count} of {looks} instruction lines -- parser is dropping instructions')
+    return st
+
+if __name__ == '__main__':
+    sym = {k: BitVec(k, W) for k in
+           ('A_lo','A_hi','B_lo','B_hi','O_lo','O_hi','N','stackptr',
+            'gridc_lo','gridc_hi','ctaid_x','tid_x')}
+    sym['mem'] = Array('mem', BitVecSort(64), BitVecSort(32))
+    st = run_sass(sys.argv[1], sym)
+    print(f'executed {st.count} instructions, {len(st.forms)} opcodes')
+    print(f'stores: {len(st.stores)}   undefined reads materialised: {st.undef}')
+    print(f'assumed semantics: {sorted(ASSUMED) or "none"}')

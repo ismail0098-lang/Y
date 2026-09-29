@@ -1,129 +1,54 @@
+//! Coverage-guided driver for the generative differential fuzzer.
+//!
+//! The generator, the reference interpreter and the oracles live in
+//! `src/zk_fuzz.rs`, shared with `tests/zk_fuzz_differential.rs`. One
+//! implementation, two harnesses — the same arrangement `zk_witness` has, and
+//! for the same reason: two that disagreed would make both results meaningless.
+//!
+//! # What this file used to be
+//!
+//! It was named `fuzz_differential` and was **not differential**. It built a
+//! single `ConstDecl` from a random arithmetic expression — no function, no
+//! control flow, no branches — ran it through the CPU and ZK emitters, and then
+//! compared *nothing*: it asserted the CPU output string was non-empty and
+//! `eprintln!`d any ZK error. It could not have caught any of the six bugs the
+//! real differential has now found, because it never asked whether the two
+//! backends agreed about a value.
+//!
+//! The bytes libFuzzer supplies drive generator *choices* directly rather than
+//! seeding a PRNG, so mutating one byte perturbs one decision and coverage
+//! feedback still has a gradient.
+//!
+//! Run with:
+//!     cargo +nightly fuzz run fuzz_differential
+
 #![no_main]
-use arbitrary::{Arbitrary, Unstructured};
+
 use libfuzzer_sys::fuzz_target;
-use y::ast::*;
-use y::cpu_emitter::CpuEmitter;
-use y::type_checker::TypeChecker;
-use y::zk_emitter::ZkEmitter;
-
-#[derive(Debug)]
-pub enum FuzzExpr {
-    IntLit(i64),
-    BoolLit(bool),
-    Var(String),
-    Add(Box<FuzzExpr>, Box<FuzzExpr>),
-    Sub(Box<FuzzExpr>, Box<FuzzExpr>),
-    Mul(Box<FuzzExpr>, Box<FuzzExpr>),
-}
-
-impl<'a> Arbitrary<'a> for FuzzExpr {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Self::arbitrary_depth(u, 0)
-    }
-}
-
-impl FuzzExpr {
-    fn arbitrary_depth(u: &mut Unstructured, depth: usize) -> arbitrary::Result<Self> {
-        // Enforce maximum AST depth of 8 to avoid mutator stack overflow
-        if depth >= 8 {
-            return match u.choose_index(3)? {
-                0 => Ok(FuzzExpr::IntLit(u.arbitrary()?)),
-                1 => Ok(FuzzExpr::BoolLit(u.arbitrary()?)),
-                _ => Ok(FuzzExpr::Var(u.arbitrary()?)),
-            };
-        }
-
-        let choice: u8 = u.int_in_range(0..=5)?;
-        match choice {
-            0 => Ok(FuzzExpr::IntLit(u.arbitrary()?)),
-            1 => Ok(FuzzExpr::BoolLit(u.arbitrary()?)),
-            2 => Ok(FuzzExpr::Var(u.arbitrary()?)),
-            3 => Ok(FuzzExpr::Add(
-                Box::new(Self::arbitrary_depth(u, depth + 1)?),
-                Box::new(Self::arbitrary_depth(u, depth + 1)?),
-            )),
-            4 => Ok(FuzzExpr::Sub(
-                Box::new(Self::arbitrary_depth(u, depth + 1)?),
-                Box::new(Self::arbitrary_depth(u, depth + 1)?),
-            )),
-            _ => Ok(FuzzExpr::Mul(
-                Box::new(Self::arbitrary_depth(u, depth + 1)?),
-                Box::new(Self::arbitrary_depth(u, depth + 1)?),
-            )),
-        }
-    }
-}
-
-fn build_ast_expr(fuzz: &FuzzExpr) -> Expr {
-    let dummy_span = Span { line: 1, col: 1 };
-    match fuzz {
-        FuzzExpr::IntLit(n) => Expr::IntLit(*n, dummy_span),
-        FuzzExpr::BoolLit(b) => Expr::BoolLit(*b, dummy_span),
-        FuzzExpr::Var(name) => {
-            let clean_name = if name.is_empty() { "x".to_string() } else { name.clone() };
-            Expr::Ident(clean_name, dummy_span)
-        }
-        FuzzExpr::Add(l, r) => Expr::BinaryOp {
-            op: BinaryOp::Add,
-            left: Box::new(build_ast_expr(l)),
-            right: Box::new(build_ast_expr(r)),
-            span: dummy_span,
-        },
-        FuzzExpr::Sub(l, r) => Expr::BinaryOp {
-            op: BinaryOp::Sub,
-            left: Box::new(build_ast_expr(l)),
-            right: Box::new(build_ast_expr(r)),
-            span: dummy_span,
-        },
-        FuzzExpr::Mul(l, r) => Expr::BinaryOp {
-            op: BinaryOp::Mul,
-            left: Box::new(build_ast_expr(l)),
-            right: Box::new(build_ast_expr(r)),
-            span: dummy_span,
-        },
-    }
-}
+use y::zk_fuzz::check_bytes;
 
 fuzz_target!(|data: &[u8]| {
-    let mut u = Unstructured::new(data);
-    let fuzz_expr = match FuzzExpr::arbitrary(&mut u) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-
-    let dummy_span = Span { line: 1, col: 1 };
-    let expr = build_ast_expr(&fuzz_expr);
-
-    let const_decl = ConstDecl {
-        name: "DIFF_CONST".to_string(),
-        ty: Type::Primitive("i32".to_string(), dummy_span.clone()),
-        value: expr,
-        span: dummy_span,
-    };
-
-    let program = Program {
-        items: vec![Item::Const(const_decl)],
-    };
-
-    // 1. Semantic verification
-    let mut tc = TypeChecker::new();
-    tc.check_program(&program);
-
-    // 2. Differential backend codegen execution
-    let mut cpu_emitter = CpuEmitter::new();
-    let cpu_code = cpu_emitter.emit_program(&program);
-
-    let mut zk_emitter = ZkEmitter::new();
-    let zk_result = zk_emitter.emit_program(&program);
-
-    // Explicit non-aborting equivalence diagnostics logging
-    if cpu_code.is_empty() {
-        eprintln!("[DIFFERENTIAL FAILURE] CpuEmitter produced empty output for AST: {:?}", fuzz_expr);
-        panic!("CpuEmitter output is empty");
+    // Very short inputs generate a degenerate program; skip rather than spend
+    // the corpus on them.
+    if data.len() < 16 {
+        return;
     }
 
-    if let Err(e) = zk_result {
-        // Log ZK constraint failure context without aborting mutator loop silently
-        eprintln!("[DIFFERENTIAL INFO] ZkEmitter returned error: {} for AST: {:?}", e, fuzz_expr);
+    let findings = check_bytes(data);
+    if findings.is_empty() {
+        return;
     }
+
+    // Panic, rather than log. A fuzz target that reports findings on stderr and
+    // returns cannot fail, so libFuzzer keeps going and the run exits 0 — which
+    // is exactly how the previous soundness target could have run for a week
+    // over a backend computing the wrong function.
+    let mut report = String::new();
+    for f in &findings {
+        report.push_str(&format!(
+            "\n=== {:?} ===\ninputs: {:?}\n{}\n--- program ---\n{}",
+            f.severity, f.inputs, f.detail, f.source
+        ));
+    }
+    panic!("{}", report);
 });

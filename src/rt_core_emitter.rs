@@ -15,7 +15,6 @@
 //  exploit the hardware for general mathematical workloads.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ir_grapher::*;
 use crate::sentinel::HardwareProfile;

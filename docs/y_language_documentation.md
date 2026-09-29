@@ -94,7 +94,8 @@ The first time you compile any `.ysu` file, Y automatically runs the hardware pr
 You can also trigger the probe explicitly (e.g. after upgrading hardware, or on a new machine):
 
 ```bash
-./target/release/Y --probe
+# The Hardware Sentinel runs automatically on the first compile; there is no --probe flag.
+./target/release/Y tests/hello.ysu
 ```
 
 Either way, you'll see output like:
@@ -154,26 +155,50 @@ cargo run -- countdown.ysu
 
 ### Step 5: Write a GPU Kernel (PTX backend)
 
-Y compiles directly to NVIDIA PTX for GPU execution. Here is a simple F32 accumulation kernel:
+Y compiles directly to NVIDIA PTX for GPU execution. This is
+`tests/train_spec.ysu` as it actually stands — the snippet shown here used to
+be a different kernel entirely, under this filename, and neither of the two
+commands below it worked:
 
 ```ysu
-// train_spec.ysu — GPU kernel: accumulate 1024 F32 values
-kernel accumulate(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32) {
-    let mut acc: F32 = 0.0;
-    for i in 0..N {
-        acc += data[i];
+// tests/train_spec.ysu
+kernel train_step_gpu(weights: GlobalMemory<F32>, size: I32) {
+    let w_val: F32 = GlobalMemory::load(weights);
+
+    @safe {
+        // Zero Numerical Drift accumulator, lowered to exact Q32.32
+        @ZeroDrift
+        @bounds(-1048576, 1048576)
+        let acc: F32 = 0.0;
+
+        @invariant(i >= 0)
+        @divergence(uniform)
+        @tile(16, 16, 8)
+        for i in 0..1024 step 1 {
+            @bounds(0, 1024)
+            let idx: I32 = i;
+
+            acc = acc + w_val;
+        }
     }
-    result[0] = acc;
 }
 ```
 
 ```bash
-# Compile to native binary via LLVM backend:
-cargo run -- tests/train_spec.ysu --llvm
-
-# Or emit raw PTX directly:
-cargo run -- tests/train_spec.ysu --ptx
+# Emit PTX:
+./target/release/Y tests/train_spec.ysu --emit-ptx
 ```
+
+**`@bounds` on the accumulator is required, not decorative.** Without it the
+compiler refuses: no exact representation holds `F32`'s full range at its
+resolution, and only exact accumulation is drift-free. Stating the real range
+is what makes the directive satisfiable — see §on `@ZeroDrift`. The emitted
+kernel carries `// [Y ZERO DRIFT] acc: F32 accumulated exactly as Q32.32`.
+
+There is deliberately no `--emit-llvm` line here. This is a GPU kernel, and the
+LLVM host backend **refuses** `GlobalMemory::load` by name rather than declaring
+an external symbol that does not exist and failing at link. GPU intrinsics
+belong to `--emit-ptx`.
 
 Benchmarked against PyTorch on RTX 4070 Ti SUPER:
 
@@ -224,14 +249,32 @@ See [§11 — Hardware-Sentient Dual-Accelerator Co-Processing Pipeline](#11-har
 
 ### Quick Reference: Compiler Flags
 
+Taken from `src/main.rs`. **`--llvm`, `--ptx` and `--probe` were listed here
+and are not options** — until this was corrected they were *silently ignored*,
+so `Y foo.ysu --ptx` ran the LLVM backend and reported "Compiled successfully"
+over a native ELF. Unrecognised options are a hard error now.
+
 | Flag | Effect |
 | :--- | :--- |
-| *(none)* | Compile with LLVM backend → native binary via clang |
-| `--llvm` | Explicit LLVM IR emission |
-| `--c` | Emit portable C |
-| `--ptx` | Emit raw NVIDIA PTX |
-| `--emit-coprocessor` | Fused RT Core + Tensor Core co-processor PTX |
-| `--probe` | Run Hardware Sentinel Probe and save `.ysu_hw_profile` |
+| *(none)* | Compile with the LLVM backend → native binary via clang |
+| `--emit-llvm` / `--target=llvm` | LLVM IR |
+| `--emit-ptx` / `--target=ptx` | NVIDIA PTX |
+| `--emit-cpu` / `--target=cpu` | **Scalar** host Rust source, **printed for you to paste** — Y never compiles it. It emits no SIMD; see 9.7 |
+| `--emit-native` / `--target=native` | Direct x86-64 ELF. A straight-line integer subset; anything outside it is refused with a line number |
+| `--emit-coprocessor` / `--target=coprocessor` | Fused RT Core + Tensor Core co-processor PTX |
+| `--emit-attention-ptx` | Paged decode attention PTX |
+| `--emit-r1cs` / `--target=r1cs` | R1CS circuit (**requires `--features zk`**; without it the binary says so and exits 0) |
+| `--emit-zk-ptx` / `--target=zk-ptx` | GPU witness-generation PTX |
+| `--emit-verifier <vkey.json>` | Solidity Groth16 verifier (`--name N` to name the contract) |
+| `--witness <input.json>` | Also solve and write `.wtns` (with `--target=r1cs`) |
+| `--autotune` / `--autotune-force` / `--no-autotune` | Empirical GEMM tile selection; see the autotuner notes |
+| `-o <path>` / `--output <path>` / `--output=<path>` | Output path |
+| `-I <dir>` / `--lib-path=<dir>` | Include path |
+| `--link`, `--portable` | Linking options |
+| `--c` / `--emit-c` / `--target=c` | **Removed.** Reports that the C backend is gone and exits 1 |
+
+There is no `--probe`: the Hardware Sentinel runs automatically on the first
+compile and caches to `.ysu_hw_profile`. Delete that file to force a re-probe.
 
 ### Where to Go Next
 
@@ -280,7 +323,7 @@ graph TD
 1. **Lexical Analysis (`lexer.rs`)**: Tokenizes the raw source input into a flat token stream. Identifies keywords, datatypes, operators, and metadata decorators.
 2. **Syntax Parsing (`parser.rs`)**: Consumes tokens and constructs an Abstract Syntax Tree (AST). Resolves module dependencies (`import`) recursively.
 3. **Semantic Type Checking (`type_checker.rs`)**: Validates type safety, verifies structural alignments, ensures bank-conflict-free access patterns, and tracks linear memory obligations.
-4. **Hardware Sentinel Resolver (`sentinel.rs`)**: Matches hardware constraints specified by `@require` decorators against physical microarchitectural capabilities.
+4. **Hardware Sentinel Resolver (`sentinel.rs`)**: Probes the host (CPU cache latencies and vector support, GPU warp/tensor timings) and caches the result in `.ysu_hw_profile`. It does **not** know about `@require`; that condition is evaluated in `src/require.rs`, which consults `sentinel`'s live feature predicates for CPU features and the profile for GPU facts. (This line used to claim `sentinel.rs` matched `@require` decorators against microarchitectural capabilities. It contained the string `require` zero times.)
 5. **Backend Emission**: Translates verified code to native backends:
    * `llvm_emitter.rs`: Outputs target-specific LLVM IR with cache hints and atomic constraints.
    * `ptx_emitter.rs`: Emits highly optimized GPU PTX assembly.
@@ -358,11 +401,12 @@ Attr            = "@require" , "(" , Expr , ")"
                 | "@bounds" , "(" , Expr , ")"
                 | "@invariant" , "(" , Expr , ")"
                 | "@tile" | "@ghost" | "@divergence"
-                | "@prefetch_stride" | "@clock_domain" , [ "(" , Expr , ")" ]
+                | "@clock_domain" , [ "(" , Expr , ")" ]
+                (* "@prefetch_stride" is lexed and REFUSED -- see 9.14. *)
                 | "@zk_target" , "(" , KeyValList , ")"
                 | "@zk_safe" | "@zk_allow_unconstrained"
                 | "@max_iterations" , "(" , IntLiteral , ")"
-                | "@max_depth" , "(" , IntLiteral , ")" ;
+                (* "@max_depth" was listed here and is NOT lexed -- see the annotation table. *) ;
 
 Expr            = BinaryExpr | UnaryExpr | PrimaryExpr ;
 BinaryExpr      = Expr , BinaryOp , Expr ;
@@ -395,7 +439,7 @@ Y supports parametric polymorphism (generics) for structs, implementations, and 
 Y divides data types into two main categories: primitive scalar types and hardware-aware layout types.
 
 ### 5.1 Scalar and Compound Types
-* **Floating-Point**: `F16` (half precision), `BF16` (bfloat16), `TF32` (TensorFloat-32), `F32` (single float), `F64` (double float).
+* **Floating-Point**: `F16` (half precision), `BF16` (bfloat16), `TF32` (TensorFloat-32), `F32` (single float), `F64` (double float). What each one means inside a PTX kernel - `F64` is a full value type there, `F16` is a buffer element type only - is in §20.5.
 * **Integers**: `I8` through `I64` (signed), `U8` through `U64` (unsigned) (e.g., standard sizing from 8-bit to 64-bit).
 * **Fixed-Point**: `QFixed` types represent values using fixed fractional scaling. For example, `Q32.32` reserves 32 bits for the integer part and 32 bits for the fraction.
 * **References**: `&T` represents an immutable reference; `&mut T` represents a mutable reference.
@@ -419,7 +463,12 @@ let cache_ptr: L2Memory<I32> = ...;
 #### 3. SharedMemory
 GPU-resident Local SRAM. Shared across threads in a warp or block. Subject to bank conflicts.
 ```ysu
-let smem_buffer = SharedMemory::alloc<SmemLayout<F32, rows=8, cols=32, swizzle=0>>();
+// NOT IMPLEMENTED - this spelling is a syntax error and the `SmemLayout` type
+// is refused by every backend. See the status note at the head of section 21.
+// The surface that works:
+let smem = shared_alloc_u32(1024);      // 1024 x 16 bytes, module-scope .shared
+let v: U32x4 = shared_load_v4(smem, 3); // indexed in 16-byte units
+barrier_sync();
 ```
 
 #### 4. RegisterFile
@@ -438,17 +487,17 @@ Y utilizes structural type equivalence for layouts and complex variables. Types 
 **Example — type mismatch caught at compile time:**
 ```ysu
 fn add(a: I32, b: F32) -> I32 {
-    return a + b;  // error: cannot add I32 and F32 without explicit cast
+    return a + b;  // refused: the operands' types differ
 }
 ```
 ```
-error[E0308]: mismatched types
-  --> add.ysu:2:14
-   |
- 2 |     return a + b;
-   |              ^ expected `I32`, found `F32`
-hint: use `b as I32` or promote `a` to `F32` before the operation
+[!] The Type-Checker caught 1 semantic errors:
+    [Error] Line 2: binary operands mismatch: expected I32, got F32.
 ```
+
+There is no cast to write instead: `as` is not a keyword (§20.4). This section
+used to show a rustc-style `error[E0308]` block recommending `b as I32`; Y
+prints neither.
 
 ### 6.2 Linear Memory Obligations
 Linear tracking enforces that resources (like asynchronous memory transfers) cannot be left in indeterminate states:
@@ -558,7 +607,7 @@ The following table details how high-level Y structures map directly to target L
 | `@atomic` (Field Load) | `%val = load atomic i32, ptr %ptr seq_cst, align 4` |
 | `@atomic` (Field Store) | `store atomic i32 %val, ptr %ptr seq_cst, align 4` |
 | `@align(N)` | `load i32, ptr %ptr, align N` or `store i32 %val, ptr %ptr, align N` |
-| `@gpu_uncached` | `%val = load volatile i32, ptr %ptr, !nontemporal !0` |
+| `@gpu_uncached` | `%val = load volatile i32, ptr %ptr` (no `!nontemporal`: see §9.5) |
 | Zero Initialization `{}` | `call void @llvm.memset.p0.i64(ptr %var, i8 0, i64 %size, i1 false)` |
 | Array Indexing `arr[idx]` | `%ptr = getelementptr i32, ptr %arr, i32 %idx` |
 | `@inline` | `attributes #0 = { alwaysinline }` |
@@ -606,35 +655,108 @@ Y provides a built-in runtime library for environment interaction, system alloca
 Decorators instruct the parser, type-checker, and backend emitters on how to handle specific variables, functions, and memory structures.
 
 ### 9.1 `@require`
-* **Syntax**: `@require(hardware_feature_condition)`
-* **Usage**: Placed above `kernel` or `fn` definitions.
-* **Function**: Checks the user's `.ysu_hw_profile` at compile time. If the system does not support the requested features, compilation terminates with an error:
+* **Syntax**: `@require(feature <op> integer)` — operators `>=`, `>`, `<=`, `<`, `==`, `!=`
+* **Usage**: Placed above a **`kernel`**. Any other item is a compile error (see below).
+* **Function**: Evaluated at compile time. If the condition is not satisfied, compilation
+  terminates:
 ```
-error[R0001]: hardware requirement unsatisfied: `avx512 >= 1` required, but not supported by host hardware profile
+error[R0001]: hardware requirement unsatisfied: `avx512 >= 999` required, but this host reports `avx512 = 1`
 ```
+
+**The features it can answer for, and where each answer comes from:**
+
+| feature | source | note |
+|---|---|---|
+| `avx`, `avx2` | the **running machine** | `is_x86_feature_detected!`, i.e. CPUID **plus** the `XGETBV` check |
+| `avx512`, `avx512f` | the running machine | same |
+| `avx512_vnni` | the running machine | same |
+| `sm` | `.ysu_hw_profile` | two-digit form: `SM_VERSION=8.9` answers `89` |
+| `sm_count` | `.ysu_hw_profile` | |
+
+CPU features are read from the machine rather than the cached profile because a
+profile can be stale or copied from a better box, and a wrong-high answer there
+is an illegal instruction rather than a slow kernel. GPU facts come from the
+profile because the profile is what selects the PTX target, so a GPU `@require`
+is a claim about the compilation *target* while a CPU one is a claim about
+*this machine*.
+
+**Everything it cannot answer is refused, never assumed satisfied.** A
+requirement the compiler quietly ignores is worse than no requirement.
+
+| code | meaning |
+|---|---|
+| `R0001` | the condition is false on this host |
+| `R0002` | unknown feature name — lists the supported set |
+| `R0003` | the condition is not `feature <op> integer` |
+| `R0004` | the feature is supported but has no probed value here (e.g. `sm` with no `.ysu_hw_profile`) |
+
+`R0002` and `R0004` are deliberately distinct: "check your spelling" and "run
+the probe" are different repairs, and a single "cannot evaluate" would send a
+user with a perfectly valid `@require(sm >= 89)` to look for a typo.
+
+**This used to do nothing at all.** `error[R0001]` appeared nowhere in the
+compiler; `sentinel.rs` — which §2 of this document still described as matching
+`@require` against microarchitectural capabilities — contained the string
+`require` zero times; `@require(1 == 0)` compiled and emitted PTX with exit 0;
+and the attribute's sole reader scanned the condition for an identifier
+containing `avx512` to set a local that was **written and never read**.
+
+**On a `fn` or an `impl` it was silently discarded** — `KernelDecl` is the only
+node with a field for it — so the example this section used to give, a
+`@require` above a `fn`, recorded nothing. That is refused now rather than
+dropped. Storing and enforcing it on functions is a real feature and is not yet
+implemented.
+
 * **Example**:
 ```ysu
-@require(avx512 >= 1)
-fn vector_add_avx512(A: &mut [F32; 16], B: &[F32; 16]) {
-    // LLVM backend lowers this to AVX-512 register instructions
+@require(sm >= 89)
+kernel drift_demo() {
+    // refused on a card below sm_89 instead of failing at load time
 }
 ```
 
 ### 9.2 `@cache_policy`
 * **Syntax**: `@cache_policy(PolicyType, [options])`
-* **Usage**: Decorator for let-bindings that load from memory.
+* **Usage**: Decorator for a `let` whose initialiser loads from global memory.
 * **Function**: Tells the compiler which memory load instructions to emit to optimize cache usage.
-* **Policies**:
-  * `L2_PERSIST`: Flags memory pages to remain resident in L2 cache.
-  * `L2_EVICT_FIRST`: Evicts the loaded cache line as soon as possible to free up cache space.
-  * `L2_EVICT_LAST`: Prevents early eviction of this data.
-  * `L2_STREAM`: Streams data directly to registers, bypassing the cache entirely.
-* **Example**:
+* **Policies**, and what the PTX backend emits for each (PTX ISA wording quoted):
+  * `L2_PERSIST`, `L2_EVICT_LAST`: keep the line resident -
+    `createpolicy.fractional.L2::evict_last` + `ld.global.L2::cache_hint`
+    ("suitable for data that should remain persistent in cache").
+  * `L2_EVICT_FIRST`: evict the line first -
+    `createpolicy.fractional.L2::evict_first` + `ld.global.L2::cache_hint`.
+  * `L2_STREAM`: read once - `ld.global.cs`, which "allocates global lines with
+    evict-first policy in L1 and L2". No global load bypasses L2 entirely.
+  * The three L2 priorities need `createpolicy`: sm_80 and later, PTX ISA 7.4
+    (the module declares 7.4 when it uses one). Below sm_80 they are refused.
+* **Honoured by** an element read `A[i]`, `GlobalMemory::load` and
+  `ld_global_v4_f32`. A policy on any other statement - a store, a `let` whose
+  load is `block_ptr2d_load` or another load that ignores it, or a `let` that
+  loads nothing - is **refused** rather than parsed and dropped.
+* **Only `--emit-ptx` lowers it.** Every other backend - the default LLVM
+  backend, `--emit-cpu`, `--emit-native`, `--target=r1cs`, `--emit-zk-ptx` and
+  `--emit-coprocessor` - refuses a program that carries one, because none of
+  those targets has an instruction that sets a cache line's eviction priority.
+  The LLVM backend used to emit a mapping, and on x86-64 it did nothing the
+  policies name: `L2_EVICT_FIRST`'s `!nontemporal` on a scalar load compiled to
+  the same `mov` as no policy, `L2_PERSIST` became a `prefetcht0` scheduled
+  after the load of the same address, and the other two were dropped - all four
+  compiled and exited 0.
+* `reuse_count=N` is parsed and not lowered by any backend.
+* **Example** (a kernel, compiled with `--emit-ptx`):
 ```ysu
-// Keep weights in L2 Cache for reuse
-@cache_policy(L2_PERSIST, reuse_count=16)
-let weight_val: F32 = load(global_weights);
+// Keep weights in L2 for reuse
+kernel scale(global_weights: GlobalMemory<F32>, Out: GlobalMemory<F32>, i: I32) {
+    @cache_policy(L2_PERSIST, reuse_count=16)
+    let weight_val: F32 = global_weights[i];
+    Out[i] = weight_val;
+}
 ```
+
+This example used to read `let weight_val: F32 = load(global_weights);`, which
+compiled on no backend that honours the policy: the PTX backend refuses it (the
+host `load` reads nothing from global memory), and the LLVM backend accepted it
+and dropped the policy.
 
 ### 9.3 `@atomic`
 * **Syntax**: `@atomic`
@@ -672,16 +794,32 @@ struct ThreadState {
 
 ### 9.5 `@gpu_uncached`
 * **Syntax**: `@gpu_uncached`
-* **Usage**: Applied to memory buffers or struct fields.
-* **Function**: Bypasses GPU caches entirely. Useful for ring buffers, shared state, and GPU-to-CPU status flags.
-  * **C Backend**: Lowers to `volatile` qualifier.
-  * **LLVM Backend**: Emits `volatile` loads/stores along with `!nontemporal !0` metadata to instruct clang to bypass the cache hierarchy.
+* **Usage**: Applied to struct fields.
+* **Function**: Every load and store of the field is `volatile` on the LLVM
+  backend: each access is performed, in program order with the other volatile
+  accesses, and a polling loop cannot hoist the load out of the loop. It does
+  **not** bypass a cache, and does not need to for this use: on x86 a cached,
+  coherent store is what another core, or a device reading pinned host memory
+  over PCIe, observes.
+  * **LLVM backend**: `load volatile` / `store volatile`. It used to add
+    `!nontemporal` as well, which x86-64 lowers to `movnti` for the store - a
+    non-temporal store, the one kind of ordinary store the x86 memory model lets
+    become visible before an earlier store. So `c.data = v; c.status = 1;` could
+    publish the flag ahead of the data it guards. On the load side
+    `!nontemporal` compiled to the same `mov` as without it.
+  * **Other backends**: only the LLVM backend reads it. `--emit-cpu`,
+    `--emit-native` and `--target=r1cs` read no struct-field attribute - this
+    one, `@atomic` or `@align` - and currently emit an ordinary field. That is
+    recorded, not yet refused. The PTX backend has no struct field access.
 * **Example**:
 ```ysu
 struct IPCChannel {
-    @gpu_uncached status: I32, // Bypasses cache to guarantee immediate visibility
+    data: I32,
+    @gpu_uncached status: I32, // every access volatile; write `data` first, then `status`
 }
 ```
+This section also described a C backend, which has been removed: `--emit-c`
+reports that and exits 1.
 
 ### 9.6 `@ZeroDrift`
 * **Syntax**: `@ZeroDrift`
@@ -696,17 +834,36 @@ for i in 0..1000000 {
 }
 ```
 
-### 9.7 `@ptx_emit`, `@avx_emit`, and `@hdl_emit`
-* **Syntax**: `@ptx_emit`, `@avx_emit`, `@hdl_emit`
-* **Usage**: Annotations on functions or kernels.
-* **Function**: Forces the compiler to lower the decorated function to a specific backend assembly format (NVIDIA PTX, CPU AVX, or Verilog/HDL).
-* **Example**:
-```ysu
-@ptx_emit
-fn gpu_special_op(a: F32) -> F32 {
-    // Lowers directly to PTX instructions
-}
-```
+### 9.7 `@ptx_emit`, `@avx_emit`, and `@hdl_emit` — NOT IMPLEMENTED
+
+**None of these three does anything, and they do not even fail the same way.**
+Measured against the shipping binary:
+
+| directive | what actually happens |
+|---|---|
+| `@avx_emit` | **hard syntax error** — `Line 1: Error: Unexpected top-level item` |
+| `@ptx_emit` | parses, is ignored, exits 0 |
+| `@hdl_emit` | **refused by name** — see below |
+
+`@avx_emit` is lexed (it has its own `TokenKind`) and matched by no parser arm,
+so it is fail-closed with an unhelpful message.
+
+**`@hdl_emit` is refused by name now.** It reached `FuncDecl` and was read by
+nothing anywhere in the compiler, and there is no HDL backend for it to lower
+to, so the artifact was byte-identical to the undecorated program. That is the
+`@zk_target(scheme = "plonkish")` shape and it gets the same treatment.
+
+**`@ptx_emit` is deliberately still accepted**, and the distinction is the
+point rather than an oversight: it names a backend that EXISTS (`--emit-ptx`)
+and it has one consumer — the LLVM backend refuses a `chisel` block inside it,
+because that would put PTX text into an x86 module. It is inert for an
+ordinary program (measured byte-identical), which is recorded rather than
+fixed.
+
+**There is no "CPU AVX" backend for anything to lower to.** `--emit-cpu` emits
+scalar Rust and contains no vector intrinsic at all. Select a backend with the
+CLI flag (`--emit-ptx`, `--emit-llvm`, `--emit-cpu`) rather than with an
+annotation.
 
 ### 9.8 `@inline` and `@noinline`
 * **Syntax**: `@inline`, `@noinline`
@@ -722,25 +879,37 @@ fn complex_slow_path() {
 
 ### 9.9 `@safe` and `@unsafe`
 * **Syntax**: `@safe`, `@unsafe`
-* **Usage**: Blocks or function annotations.
+* **Usage**: `@safe` on a block or a function; `@unsafe` on a function only.
 * **Function**: Toggles compile-time memory safety checks (e.g. pointer arithmetic and out-of-bounds array indexing).
 * **Example**:
 ```ysu
-@unsafe {
-    let raw_addr: ptr = malloc(1024);
-    // Arbitrary pointer arithmetic allowed
+@unsafe
+fn read_through(p: &mut I32) -> I32 {
+    return *p;    // refused without `@unsafe`: a raw dereference
 }
 ```
 
+`@unsafe { ... }` as a block does not parse (`Expected expression, found
+AtUnsafe`, checked 2026-09-28); this section used to show one.
+
 ### 9.10 `@bounds`
-* **Syntax**: `@bounds(condition)`
+* **Syntax**: `@bounds(min, max)`: two numbers, both inclusive.
 * **Usage**: Variable declarations or loops.
-* **Function**: Asserts index limits to skip runtime bounds checks.
+* **Function**: Asserts a value's range, which is what lets safe code index an array with a value the checker cannot bound on its own (§6.5).
 * **Example**:
 ```ysu
-@bounds(0 <= index < 256)
-let element: I32 = my_array[index]; // Skips safety bounds checks
+@bounds(0, 255)
+let index: I32 = raw & 255;
+let element: I32 = my_array[index];    // my_array: [I32; 256]
 ```
+
+**The compiler takes the range on trust.** It is not checked against the value:
+`@bounds(0, 255) let index: I32 = raw;` compiles for any `raw`, and with
+`--emit-llvm` the load it feeds is unguarded (checked 2026-09-28). A wrong
+annotation is therefore an out-of-bounds access in code the checker calls safe.
+`max` is inclusive: `@bounds(0, 256)` on an index into a 256-element array is
+refused. The condition form this section used to show, `@bounds(0 <= index <
+256)`, does not parse (`Expected ',' in @bounds but found RParen`).
 
 ### 9.11 `@invariant`
 * **Syntax**: `@invariant(condition)`
@@ -766,35 +935,85 @@ for i in 0..1024 {
 }
 ```
 
-### 9.13 `@ghost`
-* **Syntax**: `@ghost`
-* **Usage**: Variable declarations or code scopes.
-* **Function**: Declares variables that only exist for static compile-time constraint validation and assertions. These are completely stripped out by codegen and cost zero execution cycles.
-* **Example**:
+### 9.13 `@ghost` — **emitted, NOT stripped; block form only**
+
+`@ghost` has three spellings in circulation and **only one of them works.**
+Measured against the shipping binary:
+
+| spelling | what actually happens |
+|---|---|
+| `@ghost { .. }` (a block) | parses, and is **lowered like any other block** |
+| `@ghost let ..` (a variable) | **syntax error** — `Expected '{' to begin block but found Let` |
+| `@ghost fn ..` (a function) | **refused by name** (it parsed and was read by nothing) |
+
+* **Syntax**: `@ghost { .. }`
+* **Usage**: Code scopes only.
+* **Function**: Marks a block as existing for verification rather than for its
+  value. It is an annotation on intent; **the compiler does not act on it.**
+
+**A `@ghost` block is not stripped.** This section previously claimed such code
+was removed by codegen at zero execution cost. That is false and measurably so
+— compiled, linked and run:
+
 ```ysu
-@ghost let mut verification_step: I32 = 0;
-for i in 0..10 {
-    @ghost {
-        verification_step = verification_step + 1;
+fn main() -> I32 {
+    let mut acc: I32 = 0;
+    @ghost { acc = acc + 7; }      // returns 7; a stripped block would give 0
+    return acc;
+}
+```
+
+The emitted LLVM carries the load, the add and the store under a
+`; --- @ghost speculative block ---` comment, and `tests/ghost_test.ysu` calls
+`print_int` inside a `@ghost` block — so ghost code performs I/O. Six backends
+lower the block form and none of them removes it.
+
+Removing it is a **feature, not a correction**: a ghost block that writes
+non-ghost state cannot be deleted without changing the answer, which is exactly
+what the program above does, so an implementation would first have to refuse
+that program. Until then, put nothing in a `@ghost` block whose cost or effect
+you are not willing to pay for.
+
+**The variable form does not parse.** The example this section used to give was
+`@ghost let mut verification_step: I32 = 0;`, and it is a syntax error: the
+parser's `@ghost` arm expects a block. Declare the variable normally and mark
+the code that maintains it.
+
+**The function form is refused.** `@ghost fn` parsed, was stored on the
+`FuncDecl`, and was read by nothing — so the function was emitted in full,
+which is the opposite of what the annotation says. It was never documented
+here either.
+
+* **Example** (verified to compile — a loop outside `@unsafe` also needs an
+  `@invariant`, so the old example failed on that too once the `let` was fixed):
+```ysu
+@unsafe
+fn main() -> I32 {
+    let mut verification_step: I32 = 0;
+    for i in 0..10 {
+        @ghost {
+            verification_step = verification_step + 1;
+        }
     }
+    return verification_step;    // 10 — the block is emitted, not stripped
 }
 ```
 
 ### 9.14 `@prefetch_stride`
-* **Syntax**: `@prefetch_stride(byte_width)`
-* **Usage**: Loop structures.
-* **Function**: Inserts cache lines prefetch instructions (`_mm_prefetch` in AVX, `prefetch` in PTX) targeting memory boundaries offset by the stride width.
-* **Example**:
-```ysu
-for i in 0..512 {
-    @prefetch_stride(64) // Prefetch next cache line (64 bytes ahead)
-    process(data[i]);
-}
-```
+* **Status: NOT IMPLEMENTED, and refused.** Writing it anywhere is a compile
+  error (`` `@prefetch_stride` is not implemented ``). No backend emits a
+  prefetch for it.
+* **What it used to do**: nothing, silently. Written above a `for`, it was stored
+  on the loop and read by one consumer - the LLVM backend, which wrote it into
+  the module as a comment ("solver-guided cache warming") and emitted no
+  prefetch; the PTX backend never read it. Written above any other statement,
+  as this section's own example and three example programs below did, the
+  parser dropped it outright. This section used to say it "inserts cache line
+  prefetch instructions (`_mm_prefetch` in AVX, `prefetch` in PTX)".
 
 ### 9.15 `@clock_domain`
 * **Syntax**: `@clock_domain(name_string)`
-* **Usage**: Fields, variables, or function blocks compiled with `@hdl_emit`.
+* **Usage**: Fields, variables, or function blocks. (This line used to say "compiled with `@hdl_emit`"; `@hdl_emit` is refused — see §9.7 — and `@clock_domain` does not depend on it. Every backend that lowers a `@clock_domain` block lowers it as an ordinary block; `--emit-cpu` and `--target=r1cs` refuse it by name.)
 * **Function**: Assigns signal registers to specific hardware clock domains, forcing the synthesis engine to insert synchronizers at crosses.
 * **Example**:
 ```ysu
@@ -818,19 +1037,36 @@ if global_thread_id < warp_limit {
 ```
 
 ### 9.17 `@static_assert`
-* **Syntax**: `@static_assert(Expr);`
-* **Usage**: Top-level item declaration or block statement.
-* **Function**: Evaluates a boolean constant expression at compile time. If the expression evaluates to `false`, compilation aborts immediately with a static assertion failure.
+* **Syntax**: `@static_assert(Expr, "message");` at item scope, or `compile_time::assert!(Expr, "message");` inside a function or kernel.
+* **Function**: Evaluates a boolean constant expression before code generation. False assertions, invalid arithmetic, and expressions the evaluator cannot establish all stop compilation. Only a proved true assertion is erased.
+* **Supported constants**: Boolean and signed 64-bit integer literals, parentheses, checked `+ - * / %`, integer `& | ^`, comparisons, boolean `&& || !`, and unary minus. Runtime variables, calls, floating-point expressions, and shifts are currently refused. Overflow and division by zero are errors.
 * **Example**:
 ```ysu
-@static_assert(1024 % 32 == 0);
+@static_assert(1024 % 32 == 0, "whole warps");
+fn main() {
+    compile_time::assert!(2 * (3 + 4) == 14, "constant arithmetic");
+}
 ```
 
 ---
 
 ## 10. Complete Code Examples
 
+Most of these examples are sketches of an intended surface, not programs this
+compiler accepts. Every one that does not compile says so at its head, with the
+first diagnostic it produces; an example with no status note compiles verbatim,
+with `--emit-ptx` if it declares a `kernel` and with `--emit-llvm` otherwise.
+`tests/manual_examples.rs` holds that in both directions: an example that fails
+without a note fails the test, and so does a note on an example that compiles.
+
 ### Example 1: Lock-Free Single-Producer Single-Consumer (SPSC) Ring Buffer
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the type checker refuses it before any backend runs. The
+indices into `rb.buffer` on lines 19 and 36 of the listing have no provable
+bounds, and line 36 dereferences a raw pointer (`Raw pointer dereferencing is
+forbidden in safe blocks`). It is kept as a sketch of the intended surface.
+
 ```ysu
 // Lock-Free Single-Producer Single-Consumer Ring Buffer
 struct RingBuffer {
@@ -888,6 +1124,15 @@ fn main() -> I32 {
 ---
 
 ### Example 2: Matrix Multiplication (GEMM) Kernel
+
+**Status: this example does not compile** (checked 2026-09-27, verbatim, with
+`--emit-ptx`): the type checker refuses it before any backend runs (`Pipeline`
+is not a known generic type; the loop has no `@invariant`), and past that the
+fragment surface it uses (`Fragment::zero`, `ldmatrix`, `mma_sync`, a fragment
+store) has no PTX lowering in this backend. The tensor-core GEMM that works is
+the `@tile`-dispatched kernel in `tests/gemm_f16_*.ysu`. It is kept as a sketch
+of the intended surface.
+
 ```ysu
 @require(avx512 >= 1)
 kernel matmul(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
@@ -936,7 +1181,10 @@ kernel matmul(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) 
     }
 
     // Write final output register fragments back to global memory
-    store(acc, C);
+    // NOT IMPLEMENTED: there is no fragment store. This line used to read
+    // `store(acc, C);` - the arguments reversed, and `store` writes ONE scalar:
+    // `store(place, value)`, e.g. `store(C[i], v)` (see §20.6). The working
+    // tensor-core GEMM is the `@tile`-dispatched kernel in tests/gemm_f16_*.ysu.
 }
 ```
 
@@ -945,19 +1193,25 @@ kernel matmul(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) 
 ### Example 3: Stream Vector Addition with L2 Bypass
 ```ysu
 kernel stream_vector_add(A: GlobalMemory<F32>, B: GlobalMemory<F32>, C: GlobalMemory<F32>, N: I32) {
+    @invariant(i >= 0)
     for i in 0..N {
-        // Stream data to bypass L1/L2 caches
+        // Read once: `ld.global.cs` (evict-first in L1 and L2)
         @cache_policy(L2_STREAM)
         let a_val: F32 = A[i];
 
         @cache_policy(L2_STREAM)
         let b_val: F32 = B[i];
 
-        @cache_policy(L2_STREAM)
         C[i] = a_val + b_val;
     }
 }
 ```
+
+This example used to put `@cache_policy(L2_STREAM)` on the store `C[i] = ...`
+too, where it was parsed and dropped - no store takes a cache policy, and a
+policy on anything but a `let` is refused now. It also lacked the `@invariant`
+a loop needs, so it did not compile; and until 2026-09-27 reading `A[i]` gave
+the element's ADDRESS (§20.6), so once it did compile it added two addresses.
 
 ---
 
@@ -990,6 +1244,13 @@ fn main() -> I32 {
 ---
 
 ### Example 5: Multi-Stage Pipeline Overlapping
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-ptx`): the parser stops at the first line: a top-level `type` alias is
+not an item it accepts (`Unexpected top-level item`). Past that, `SmemLayout`
+has no lowering in any backend (§21.1). It is kept as a sketch of the intended
+surface.
+
 ```ysu
 type BufferLayout = SmemLayout<F32, rows=8, cols=32, swizzle=0>;
 
@@ -1032,6 +1293,12 @@ fn process_data(buf: &mut BufferLayout) {
 ---
 
 ### Example 6: Compiler Verification & Safety Asserts
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser refuses `@bounds(0 <= i < 100)` on line 7 of the
+listing. `@bounds` takes two numbers, `@bounds(min, max)` (§9.10). It is kept
+as a sketch of the intended surface.
+
 ```ysu
 @safe
 fn verify_computation(data: &mut [I32; 100]) -> I32 {
@@ -1060,6 +1327,12 @@ fn main() -> I32 {
 ---
 
 ### Example 7: Custom Memory Vector Allocation
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser refuses the loop header `for i in 0..v.size` on line
+24 of the listing: a range bound cannot be a field access (`Expected '{' to
+begin block but found Dot`). It is kept as a sketch of the intended surface.
+
 ```ysu
 struct FloatVector {
     data: &mut F32,
@@ -1118,12 +1391,17 @@ fn main() -> I32 {
 ---
 
 ### Example 8: Multi-Threaded Cache Warming & Prefetching
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): `@require` precedes a `fn`, and it is refused by name: it is
+supported on a `kernel` only (§9.1). It is kept as a sketch of the intended
+surface.
+
 ```ysu
 @require(avx512 >= 1)
 fn cache_warm_process(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32) {
     // Warm L2 lines via structured stride prefetching
     for i in 0..N step 16 {
-        @prefetch_stride(64)
         @cache_policy(L2_PERSIST)
         let block: VecTy<F32, 16> = data[i];
 
@@ -1140,6 +1418,11 @@ fn cache_warm_process(data: GlobalMemory<F32>, result: GlobalMemory<F32>, N: I32
 ---
 
 ### Example 9: Multi-Clock Domain Signal Crosser
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept `@clock_domain` on a struct field
+(line 2 of the listing). It is kept as a sketch of the intended surface.
+
 ```ysu
 struct CrossDomainRegister {
     @clock_domain("clk_fast") fast_val: I32,
@@ -1168,6 +1451,12 @@ fn cross_signal(cdr: &mut CrossDomainRegister) {
 ---
 
 ### Example 10: Metastability Verification Ghost State
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept `@ghost` on a struct field (line 4
+of the listing); `@ghost` is a block (§9.13). It is kept as a sketch of the
+intended surface.
+
 ```ysu
 struct SyncState {
     value: I32,
@@ -1193,6 +1482,12 @@ fn step_synchronization(state: &mut SyncState, signal: I32) {
 ---
 
 ### Example 11: Real-Time Audio DSP Biquad Filter
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept `@cache_policy` on a struct field
+(line 3 of the listing); the directive applies to a `let` (§9.2). It is kept as
+a sketch of the intended surface.
+
 ```ysu
 struct BiquadFilter {
     // Coeffs aligned to L2 cache lines to prevent eviction during DSP loops
@@ -1211,7 +1506,6 @@ struct BiquadFilter {
 
 fn process_audio_frame(filter: &mut BiquadFilter, input: GlobalMemory<F32>, output: GlobalMemory<F32>, len: I32) {
     for i in 0..len {
-        @prefetch_stride(64)
         let sample: F32 = input[i];
         
         // Biquad difference equation
@@ -1236,6 +1530,11 @@ fn process_audio_frame(filter: &mut BiquadFilter, input: GlobalMemory<F32>, outp
 ---
 
 ### Example 12: Lock-Free Hazard Pointers
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser stops at `0 as ptr` on line 26 of the listing: Y has
+no `as` cast (§20.4). It is kept as a sketch of the intended surface.
+
 ```ysu
 struct HazardPointer {
     @atomic active_ptr: ptr,
@@ -1272,6 +1571,12 @@ fn release_hazard_ptr(registry: &mut HazardRegistry, thread_id: I32) {
 ---
 
 ### Example 13: Zero-Copy CUDA IPC Inter-Process Shared State
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser refuses `@bounds(0 <= size <= 512)` on line 14 of
+the listing. `@bounds` takes two numbers, `@bounds(min, max)` (§9.10). It is
+kept as a sketch of the intended surface.
+
 ```ysu
 struct SharedIPCChannel {
     @align(64) @atomic head: U64,
@@ -1301,12 +1606,17 @@ fn send_ipc_payload(channel: &mut SharedIPCChannel, src: ptr, size: I32) -> bool
 ---
 
 ### Example 14: Parallel Monte Carlo Option Pricer
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): `@require` precedes a `fn`, and it is refused by name: it is
+supported on a `kernel` only (§9.1). It is kept as a sketch of the intended
+surface.
+
 ```ysu
 @require(avx512 >= 1)
 fn monte_carlo_step(paths: GlobalMemory<F32>, strikes: GlobalMemory<F32>, results: GlobalMemory<F32>, size: I32) {
     // Processes 16 elements simultaneously using AVX-512 vector lanes
     for i in 0..size step 16 {
-        @prefetch_stride(64)
         let path_vector: VecTy<F32, 16> = paths[i];
         let strike_vector: VecTy<F32, 16> = strikes[i];
         
@@ -1329,6 +1639,12 @@ fn monte_carlo_step(paths: GlobalMemory<F32>, strikes: GlobalMemory<F32>, result
 ---
 
 ### Example 15: Multi-Producer Multi-Consumer (MPMC) Queue
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept a generic function: `fn
+try_enqueue_mpmc<T>(...)` on line 12 of the listing is `Expected '(' but found
+Lt`. It is kept as a sketch of the intended surface.
+
 ```ysu
 struct QueueNode<T> {
     @atomic sequence: U64,
@@ -1380,6 +1696,13 @@ fn try_dequeue_mpmc<T>(q: &mut MpmcQueue<T>, out_item: &mut T) -> bool {
 ---
 
 ### Example 16: Fast Fourier Transform (FFT) Shared Memory Butterfly
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-ptx`): the parser stops at the first line: a top-level `type` alias is
+not an item it accepts (`Unexpected top-level item`). Past that, `SmemLayout`
+has no lowering in any backend (§21.1). It is kept as a sketch of the intended
+surface.
+
 ```ysu
 type FFTLayout = SmemLayout<F32, rows=8, cols=32, swizzle=330>;
 
@@ -1448,6 +1771,12 @@ fn adjust_execution_profile(state: &mut DeviceState) {
 ---
 
 ### Example 18: Concurrent Hopscotch Hash Map
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept a generic function: `fn
+insert_map<K, V>(...)` on line 12 of the listing is `Expected '(' but found
+Lt`. It is kept as a sketch of the intended surface.
+
 ```ysu
 struct HashBucket<K, V> {
     @atomic hop_info: U32,
@@ -1479,6 +1808,13 @@ fn insert_map<K, V>(map: &mut HopscotchMap<K, V>, key: K, value: V) -> bool {
 ---
 
 ### Example 19: Bounding Volume Hierarchy (BVH) Traverse Kernel
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-ptx`): the type checker refuses it before any backend runs: the `while`
+loop on line 13 of the listing has no `@invariant`, several indices have no
+provable bounds, `ray_intersects_box` is not defined anywhere, and line 24
+dereferences a raw pointer. It is kept as a sketch of the intended surface.
+
 ```ysu
 struct BvhNode {
     min_bounds: [F32; 3],
@@ -1519,6 +1855,12 @@ kernel traverse_bvh(nodes: GlobalMemory<BvhNode>, ray_origin: [F32; 3], ray_dir:
 ---
 
 ### Example 20: Half-Precision Deep Learning Adam Optimizer Kernel
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-ptx`): the parser does not accept `TF32` as a type (line 2 of the
+listing); the floating-point types are listed in §20.2. It is kept as a sketch
+of the intended surface.
+
 ```ysu
 kernel adam_optimizer(
     weights: GlobalMemory<TF32>,
@@ -1555,6 +1897,13 @@ kernel adam_optimizer(
 ---
 
 ### Example 21: Block-Level `@safe` and `@unsafe` Safety Scope Boundaries
+
+**Status: this example does not compile** (checked 2026-09-28, verbatim, with
+`--emit-llvm`): the parser does not accept an `@unsafe { ... }` block inside a
+function body (line 8 of the listing: `Expected expression, found AtUnsafe`).
+`@unsafe` annotates a function; `@safe { ... }` is the only block form (§9.9).
+It is kept as a sketch of the intended surface.
+
 ```ysu
 struct RawBuffer {
     data_ptr: ptr,
@@ -1993,8 +2342,8 @@ Y supports configurable prime fields defined via the `@zk_target` module directi
 | `@safe` | Function | Enables safe ZK circuit compilation with SSA wire versioning, bounds checking, and invariant verification. |
 | `@zk_safe` | Module / Block | Enables static soundness analysis (lattice-based taint checking) flagging unconstrained host signals (`error[Z0042]`). |
 | `@unsafe` | Function / Block | Explicitly opts out of static constraint safety checks for unconstrained experimental logic. |
-| `@max_iterations(N)` | `while` Loop | Enforces compile-time finite unrolling bound $N$ for dynamic or static `while` loops. |
-| `@max_depth(N)` | Function | Enforces compile-time recursion depth bound $N$ for monomorphized recursive function calls. |
+| `@max_iterations(N)` | `while` Loop | **Withdrawn — `while` is refused in ZK circuit mode.** The unrolling it enabled computed the wrong function; see §12.4. Parsed and accepted by other backends. |
+| `@max_depth(N)` | Function | **Does not exist.** The lexer has no such token, so writing it is a syntax error. Recursion itself works and is unbounded. |
 | `@bounds(min, max)` | Parameter / Var | Emits active range-check constraints (bit-decomposition) verifying $w_i \in [\text{min}, \text{max}]$. |
 | `@invariant(expr)` | Loop / Block | Verifies logic assertions statically or generates equality constraints inside loops. |
 
@@ -2017,9 +2366,32 @@ Y eliminates post-processing optimization penalties by performing **single-pass 
 
 ---
 
-### 12.4 Bounded `while` Loops & SSA Active-Mask State Multiplexing
+### 12.4 Bounded `while` Loops — **WITHDRAWN, `while` is refused in ZK mode**
 
-To support control flow without incurring dynamic unrolling security vulnerabilities, Y requires all `while` loops in ZK target mode to specify an explicit `@max_iterations(N)` decorator:
+> **`while` does not compile to a circuit, with or without `@max_iterations(N)`.**
+> The active-mask lowering described in the rest of this section was withdrawn
+> because it computed the wrong function. Measured on
+> `while i < p0 { acc = acc + 3; i = i + 1; }`, solved for `p0 = 0, 1, 2, 3`:
+>
+> | bound | result | correct |
+> |---|---|---|
+> | `@max_iterations(1)` | 3, 3, 3, 3 | **0**, 3, 3, 3 |
+> | `@max_iterations(2)` | 0, 3, 6, 6 | correct |
+> | `@max_iterations(4)` | 0, then unsatisfiable | 0, 3, 6, 9 |
+>
+> The first row is the dangerous one: the body ran although the condition was
+> false on entry, the circuit is **satisfiable**, and Groth16 proves that
+> arithmetic as readily as the right kind. That the middle row is correct is
+> how it survived — `N = 2` is what anyone probes first.
+>
+> **Use a `for` loop**, which is fully unrolled, correct, and checked against
+> the LLVM backend on generated programs by `tests/zk_llvm_differential.rs`.
+> The refusal is pinned by `tests/zk_while_is_refused.rs`.
+>
+> The text below describes the withdrawn design and is kept as the starting
+> point for a correct implementation.
+
+To support control flow without incurring dynamic unrolling security vulnerabilities, Y ~~requires~~ *required* all `while` loops in ZK target mode to specify an explicit `@max_iterations(N)` decorator:
 
 ```ysu
 @max_iterations(100)
@@ -2049,7 +2421,6 @@ When loop conditions depend on dynamic witness inputs (`val < witness`), Y emits
 Y supports compile-time finite recursion for ZK targets via monomorphization:
 
 ```ysu
-@max_depth(100)
 fn recursive_pow(x: Field, n: u32) -> Field {
     if n == 0 {
         return 1;
@@ -2058,7 +2429,11 @@ fn recursive_pow(x: Field, n: u32) -> Field {
 }
 ```
 
-* **Call Stack Depth Verification**: The compiler tracks call stack depth during monomorphization. If recursion exceeds `@max_depth(N)`, compilation aborts with a static error (`error[Z0011]: recursion depth limit exceeded`).
+> **`@max_depth(N)` is not part of the language.** The lexer has no such token,
+> so writing the line this example used to carry is a syntax error
+> (`Unexpected top-level item`). The example above is the working form.
+
+* **Call Stack Depth Verification**: The compiler tracks call stack depth during monomorphization and aborts with `error[Z0011]` past a **hardcoded 256** (`self.active_calls.len() > 256` in `src/zk_emitter.rs`). The limit is not settable per function; a deeper recursion is refused rather than truncated, which is the fail-closed direction.
 * **Unrolled Call Graph**: Recursive calls are expanded into flat call graphs with zero runtime stack overhead.
 * **Performance**: Compiles a 100-depth recursion tree in **`0.005s`** (**2.0x faster than Circom**, **22x faster than Noir**).
 
@@ -2094,6 +2469,16 @@ Every benchmark compiler was evaluated in its fastest official optimization mode
 | `heavy_31m` (31M) | **31,000,000 R1CS** | N/A (Terminated ~2h Timeout) | N/A (OOM / Crash) | N/A (OOM) |
 
 #### 2. Compiler Compilation Speed Comparison (BN254 Field)
+
+> **Y's own timings in this table are stale as of 2026-08-10 and now understate
+> it.** The emitter was rewritten (`[u64; 4]` Montgomery field, allocation
+> removal, a linear-substitution pass), and a quadratic rescan in
+> `LinearCombination::simplify` was removed. Re-measured on the same box:
+> `heavy_circuit` (1M) **0.895 s / 0.37 GB** (was 1.706 s), `heavy_31m`
+> **36.1 s / 11.4 GB** (was 113.0 s), `dot_product` (100k) **0.122 s** (was
+> 0.285 s here, then 3.19 s once the quadratic was exposed at scale, now 0.122 s
+> — the `0.285 s` figure was never reproducible and should not be read as the
+> one that was restored). Current dated figures and methodology: `README.md`.
 
 | Benchmark Circuit | Y Time (s) | Circom (`--O2`) Time (s) | Noir (Aggressive) Time (s) | Leo (BLS12-377)* Time (s) | Y Speedup vs Circom / Peer |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -2175,7 +2560,8 @@ module BoundedWhileDynamic {
 ```ysu
 @zk_target(field = "bn254", scheme = "r1cs", opt_level = 1)
 module StaticRec {
-    @max_depth(100)
+    // `@max_depth(100)` used to appear here and is not a real annotation --
+    // the depth bound is a hardcoded 256 in `zk_emitter`. See section 12.5.
     fn fib(n: Field) -> Field {
         if n == 0 {
             return 0;
@@ -2196,12 +2582,62 @@ module StaticRec {
 
 ### 12.9 Verifying Generated Circuits
 
-Verification scripts are included:
+This section used to list three "included" scripts — `verify_r1cs.py`,
+`verify_heavy.py` and `verify_benchmarks.js` — **none of which exist anywhere
+in the repository**, and the last of which was a `.js` file invoked with
+`python`. What follows is what actually runs.
+
+**In-repo, no external tooling.** Groth16 over BN254 through arkworks, used as
+an independent oracle:
+
 ```bash
-python verify_r1cs.py      # dot_product circuit
-python verify_heavy.py     # heavy_circuit (1M constraints)
-python verify_benchmarks.js  # snarkjs-based verification
+cargo test --release --features zk --test zk_groth16_end_to_end
 ```
+
+It asserts an honest proof verifies, a tampered public input is rejected, a
+perturbed witness fails satisfiability, and that Y's modulus equals the true
+BN254 one. String-matching an emitted `.r1cs` cannot catch a wrong field or a
+mis-numbered wire; this can.
+
+**A runnable example, on a fixture in this repository.** Every other ZK command
+in this document names a placeholder (`circuit.ysu`, `foo.circom`), so none of
+them could be copy-pasted. This one can — it needs a `--features zk` build:
+
+```bash
+./target/release/Y tests/circom/multiplier.circom --target=r1cs
+```
+
+That writes `.r1cs`, `.sym` and `.r1cs.txt` **next to the input**, which matters
+if the input lives somewhere you did not intend to litter. Counts match circom
+2.2.3 exactly on this circuit: 1 non-linear constraint, 0 linear, 4 wires, 2
+private inputs, 1 public output.
+
+Add `--witness` to solve and emit a `.wtns` as well:
+
+```bash
+./target/release/Y tests/circom/multiplier.circom --target=r1cs \
+    --witness tests/circom/multiplier_input.json
+```
+
+That input file holds `{"a": "3", "b": "5"}`. Inputs are matched **by name**
+against the circuit's signals — a file in the wrong order would otherwise prove
+a different statement — and both spellings are accepted, the source name `a` and
+the fully-qualified `main.a` from the `.sym`. The resulting `.wtns` is
+**byte-for-byte identical** to the one circom's own wasm witness calculator
+produces from the same input.
+
+**Against the external toolchain.** Y's `.r1cs` and `.wtns` are iden3-format,
+so the whole snarkjs pipeline consumes them directly — see the
+`snarkjs r1cs info` / `groth16 setup` / `prove` / `verify` sequence in
+`README.md`. Emit both files with:
+
+```bash
+./target/release/Y circuit.ysu --target=r1cs --witness input.json
+```
+
+Note `snarkjs wtns check` is the load-bearing step of that sequence: it is the
+only check that sees the wire *ordering*, which Y permutes on write and which
+every internal check is blind to, because they all use Y's own numbering.
 
 ### 12.10 Benchmark Methodology & Transparency
 
@@ -2292,7 +2728,7 @@ This section maps common CUDA C++ and standard C++ patterns directly to their Y 
 | `__global__ float* ptr` | `data: GlobalMemory<F32>` | Global memory is a first-class type |
 | `__device__ float val;` | `let val: F32 = ...;` | Regular variable in kernel scope |
 | `alignas(128) float x;` | `@align(128) let x: F32 = ...;` | `alignas` sets allocation alignment; `@align(N)` in Y sets LLVM `align N` on load/store instructions (access alignment hint), not allocation alignment. Effect is equivalent for most GPU memory patterns. |
-| `volatile float* ptr;` | `@gpu_uncached let ptr: F32 = ...;` | Non-temporal / bypass cache |
+| `volatile float* ptr;` | a struct field `@gpu_uncached status: I32,` | `volatile` loads and stores on the LLVM backend; it bypasses no cache (§9.5). A struct-field attribute only: `@gpu_uncached let ...` is a syntax error. This row used to say "Non-temporal / bypass cache" and show the `let` form. |
 
 ### 13.2 Synchronization
 
@@ -2313,7 +2749,7 @@ This section maps common CUDA C++ and standard C++ patterns directly to their Y 
 | `wmma::fill_fragment(frag_c, 0.0f);` | `Fragment::zero()` |
 | `wmma::load_matrix_sync(frag_a, ptr, stride);` | `ldmatrix(smem_buf)` — stride and swizzle computed automatically |
 | `wmma::mma_sync(frag_c, frag_a, frag_b, frag_c);` | `acc = mma_sync(frag_A, frag_B, frag_C);` |
-| `wmma::store_matrix_sync(ptr, frag_c, stride, layout);` | `store(acc, C);` |
+| `wmma::store_matrix_sync(ptr, frag_c, stride, layout);` | **No equivalent** - there is no fragment store. `store(place, value)` writes one scalar (§20.6); an earlier version of this row wrote `store(acc, C)`, with the arguments reversed. |
 
 ### 13.4 Async Memory Transfers (cp.async)
 
@@ -2338,8 +2774,8 @@ The Y version enforces at compile time that `pipe.wait(tx)` is called before `sm
 | CUDA C++ | Y Equivalent | Difference |
 | :--- | :--- | :--- |
 | No equivalent | `@safe { }` | Enforces initialization, bounds, invariants at compile time |
-| No equivalent | `@unsafe { }` | Explicit opt-out of safety checks, required for raw pointer math |
-| `assert(cond)` (runtime) | `@bounds(min <= i < max)` | Static for constant indices, runtime assertion for dynamic |
+| No equivalent | `@unsafe fn` | Explicit opt-out of safety checks, required for raw pointer math. A function annotation: `@unsafe { }` as a block does not parse (§9.9) |
+| `assert(cond)` (runtime) | `@bounds(min, max)` | Asserts a range the compiler takes on trust, without checking it against the value (§9.10) |
 | No equivalent | `@invariant(expr)` | Loop invariant verified at every iteration by type checker |
 
 ### 13.6 Cache Policies
@@ -2347,10 +2783,16 @@ The Y version enforces at compile time that `pipe.wait(tx)` is called before `sm
 | CUDA C++ | Y Equivalent |
 | :--- | :--- |
 | `ld.global.ca` (L1/L2 cache) | Default load (no decorator) |
-| `ld.global.cg` (L2 only) | `@cache_policy(L2_EVICT_FIRST)` |
 | `ld.global.cs` (streaming, evict-first) | `@cache_policy(L2_STREAM)` |
-| `ld.global.lu` (last-use, invalidate) | `@cache_policy(L2_EVICT_LAST)` |
-| `ld.global.nc` (non-coherent / read-only) | `@cache_policy(L2_PERSIST)` |
+| `createpolicy ... L2::evict_first` + `ld.global.L2::cache_hint` | `@cache_policy(L2_EVICT_FIRST)` |
+| `createpolicy ... L2::evict_last` + `ld.global.L2::cache_hint` | `@cache_policy(L2_EVICT_LAST)` or `@cache_policy(L2_PERSIST)` |
+| `ld.global.cg`, `ld.global.nc` | No equivalent |
+
+This table used to map `L2_EVICT_FIRST` to `.cg`, `L2_EVICT_LAST` to `.lu` and
+`L2_PERSIST` to `.nc`, and the compiler emitted a fourth set: `.lu` for
+`L2_PERSIST` (on a global address `ld.lu` "performs a load cached streaming
+operation", i.e. evict first), a qualifier `ptxas` rejects for `L2_EVICT_FIRST`,
+and nothing for the other two. See §9.2.
 
 ### 13.7 Inline PTX
 
@@ -2515,32 +2957,24 @@ fn clamp_val<T>(val: T, min_v: T, max_v: T) -> T {
 }
 ```
 
-### 13.13 SIMD Intrinsics vs. Y Vector Types (`@avx_emit`)
+### 13.13 SIMD Intrinsics vs. Y Vector Types (`@avx_emit`) — NOT AVAILABLE
 
-Instead of writing compiler-specific C++ AVX intrinsics (`_mm256_loadu_ps`, `_mm256_fmadd_ps`), Y provides native vector types (`VecTy<T, N>`) coupled with `@avx_emit` decorators that lower directly to 256-bit AVX-256 / 512-bit AVX-512 ISA instructions.
+This section used to show a `vector_fma` written with `@avx_emit`,
+`VecTy<F32, 8>` locals, a bare `load(a)` and `store(c, vc)`, as Y's answer to
+`_mm256_loadu_ps` / `_mm256_fmadd_ps`. None of it compiles:
 
-```cpp
-// C++ AVX-256 Intrinsics
-#include <immintrin.h>
+* `@avx_emit` is a **hard syntax error** (`Unexpected top-level item`) - see §9.7.
+* No backend lowers a `VecTy<F32, 8>` value to AVX. `--emit-cpu` prints
+  scalar Rust for you to paste and contains no SIMD at all.
+* There is no bare `load`; the PTX loads are `block_ptr2d_load` and
+  `GlobalMemory::load(A[i])`.
+* `store(c, vc)` had `store`'s argument order right - `(place, value)` - but
+  `store` writes ONE scalar, and in `--emit-cpu` it is refused as a GPU
+  intrinsic (§20.6).
 
-void vector_fma(const float* a, const float* b, float* c) {
-    __m256 va = _mm256_loadu_ps(a);
-    __m256 vb = _mm256_loadu_ps(b);
-    __m256 vc = _mm256_fmadd_ps(va, vb, _mm256_setzero_ps());
-    _mm256_storeu_ps(c, vc);
-}
-```
-
-```ysu
-// Y Hardware-Sentient AVX Vectorization
-@avx_emit
-fn vector_fma(a: GlobalMemory<F32>, b: GlobalMemory<F32>, c: GlobalMemory<F32>) {
-    let va: VecTy<F32, 8> = load(a);
-    let vb: VecTy<F32, 8> = load(b);
-    let vc: VecTy<F32, 8> = va * vb;
-    store(c, vc);
-}
-```
+There is therefore no Y equivalent of hand-written AVX intrinsics today. For the
+CPU GEMM the LLVM backend's substituted kernels are where SIMD happens (see
+`docs/cpu_gemm_tuning.md`).
 
 ### 13.14 Concurrency, Atomics & Thread Synchronization
 
@@ -2615,25 +3049,28 @@ After the Sentinel probe runs, `.ysu_hw_profile` contains cycle-accurate measure
 
 ```ysu
 // Use L2_PERSIST for data accessed repeatedly across loop iterations
-// (e.g. weight matrices in attention, BVH node data in deep traversals)
+// (e.g. weight matrices in attention, BVH node data in deep traversals).
+// W is a GlobalMemory<F16>: the load widens the half to F32 exactly.
 @cache_policy(L2_PERSIST, reuse_count=8)
-let weights: F16 = load(W);
+let weights: F32 = GlobalMemory::load(W[i]);      // createpolicy + ld.global.L2::cache_hint.b16 + cvt.f32.f16
 
-// Use L2_STREAM for data written once and never re-read
-// (e.g. output tiles, streaming reductions)
-@cache_policy(L2_STREAM)
-output[i] = result;
-
-// Use L2_EVICT_FIRST for inputs that should not pollute L2
-// (e.g. large activation tensors in single-pass inference)
-@cache_policy(L2_EVICT_FIRST)
-let act: F16 = load(A);
+output[i] = weights;                              // no store takes a cache policy
 ```
+
+This snippet used to read `let weights: F16 = load(W);`, `@cache_policy(L2_STREAM)
+output[i] = result;` and `let act: F16 = load(A);`. There is no bare `load`; an
+`F16` local is refused in a PTX kernel (§20.5); and `output[i] = result` used to
+compile and silently drop the store - it stores now (§20.6), but no store honours
+a cache policy.
+
+`L2_EVICT_FIRST` on a load used to emit `ld.global.L2::evict_first.f32`, which
+`ptxas` rejects (`ld` takes that qualifier only for 256-bit vector loads on
+sm_100), after a clean compile. It is an L2 cache hint now (§9.2).
 
 **Rule of thumb:**
 - Weights / BVH nodes repeatedly accessed → `L2_PERSIST`
-- Large one-shot reads → `L2_EVICT_FIRST`
-- Write-only outputs → `L2_STREAM`
+- Large one-shot reads → `L2_STREAM` or `L2_EVICT_FIRST`
+- Stores take no cache policy.
 
 ### 14.3 Eliminating Shared Memory Bank Conflicts
 
@@ -2657,8 +3094,8 @@ The swizzle value `330` is a Y-specific compact integer encoding representing th
 | Scenario | Use |
 | :--- | :--- |
 | You have RT Core traversal feeding Tensor Core MMA | `--emit-coprocessor` |
-| Pure Tensor Core kernel (no BVH/ray queries) | `--llvm` or `--ptx` |
-| Pure compute kernel (reductions, FFTs, sorting) | `--llvm` |
+| Pure Tensor Core kernel (no BVH/ray queries) | `--emit-llvm` or `--emit-ptx` |
+| Pure compute kernel (reductions, FFTs, sorting) | `--emit-llvm` |
 | ZK circuit generation | `--emit-r1cs` |
 | CPU-side lock-free data structures | `--llvm` (uses AVX-512 backend) |
 
@@ -2722,7 +3159,7 @@ Each `Fragment<MMA_m16n8k16, ...>` occupies a fixed number of 32-bit registers:
 
 The RTX 4070 Ti SUPER has **255 registers per thread**. If you chain more than ~20 MMA operations without storing intermediate accumulators, you will exhaust the register file and spill to local memory (measured at ~125 cycles/access vs ~4 cycles for registers).
 
-**Rule:** Keep the number of live `Fragment` variables below 30 at any given point in the kernel. Interleave `store(acc, C)` calls to free registers between MMA pipeline stages.
+**Rule:** Keep the number of live `Fragment` variables below 30 at any given point in the kernel. (This used to say to interleave `store(acc, C)` calls; there is no fragment store - `store(place, value)` writes one scalar, see §20.6.)
 
 ### 14.8 ZeroDrift Fixed-Point Accumulation
 
@@ -2803,15 +3240,16 @@ The `ldmatrix(src)` intrinsic selects the correct PTX `ldmatrix` variant based o
 | B (2 registers) | `ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {r0,r1}, [ptr];` |
 | C / D (F32, 4 regs) | Loaded via standard `ld.shared.f32` sequence — no `ldmatrix` |
 
-### 15.5 Accumulator Initialization & Store
+### 15.5 Accumulator Initialization & Store — NOT IMPLEMENTED in `--emit-ptx`
 
 ```ysu
-// Initialize to zero (emits mov.f32 %rN, 0f00000000 for each register)
+// Refused by --emit-ptx: `Fragment::zero()` has no PTX lowering there.
 let mut acc: Fragment<MMA_m16n8k16, D, F32> = Fragment::zero();
 
-// Store result back to global memory
-store(acc, C);
-// Emits: wmma-equivalent store or direct st.global.f32 per accumulator register
+// There is no fragment store. This block used to show `store(acc, C);`,
+// with the arguments reversed and a fragment as the value; `store` is
+// `store(place, value)` and writes ONE scalar (§20.6). The tensor-core
+// GEMMs that work are the `@tile`-dispatched kernels in tests/gemm_f16_*.ysu.
 ```
 
 ### 15.6 Full MMA Example (F16 → F32 accumulation)
@@ -2846,7 +3284,10 @@ kernel matmul_mma(
         acc = mma_sync(frag_A, frag_B, frag_C);
     }
 
-    store(acc, C);
+    // NOT IMPLEMENTED: there is no fragment store. This line used to read
+    // `store(acc, C);` - the arguments reversed, and `store` writes ONE scalar:
+    // `store(place, value)`, e.g. `store(C[i], v)` (see §20.6). The working
+    // tensor-core GEMM is the `@tile`-dispatched kernel in tests/gemm_f16_*.ysu.
 }
 ```
 
@@ -2869,7 +3310,7 @@ Each line is a string literal containing a single PTX statement, terminated with
 
 ### 16.2 Variable Scoping Inside `chisel`
 
-Y variables declared before the `chisel` block are accessible using their PTX register names. The naming convention follows the Y compiler's register allocator:
+Y variables declared before the `chisel` block are accessible **by their Y name**, written with a `%` prefix. The compiler rewrites each such reference to the register it allocated:
 
 | Y Declaration | PTX Register Name |
 | :--- | :--- |
@@ -2877,6 +3318,14 @@ Y variables declared before the `chisel` block are accessible using their PTX re
 | `let v: I32 = ...;` | `%v` (I32 scalar) |
 | `let ptr: ptr = ...;` | `%ptr` (u64 address register) |
 | Struct fields | Not directly accessible — load to a local variable first |
+| `let v: U32x4 = ...;` | **Refused** — a `U32x4` is four registers, not one; read the lane into a scalar `let` first |
+
+A `%name` that is neither a variable in scope nor a PTX special register
+(`%tid.x`, `%ctaid.y`, `%globaltimer`, …) is **refused at compile time**, with
+the line and column of the `chisel` block. Before this was enforced the line
+went out verbatim, so every example in this section produced PTX that `ptxas`
+answers with `Unknown symbol` — under a success banner. Gated by
+`tests/chisel_register_scope.rs`.
 
 ```ysu
 let val: F32 = 1.0;
@@ -2938,7 +3387,8 @@ chisel {
 
 ### 16.5 Restrictions
 
-- PTX must be valid for the target `sm_XX` architecture. Invalid PTX will cause `CUDA_ERROR_INVALID_PTX` at JIT load time.
+- An unresolvable `%name` is caught at **compile time** (see 16.2). Everything else about the instruction is not: PTX must be valid for the target `sm_XX` architecture, and an invalid opcode or operand shape surfaces as a `ptxas` error, or as `CUDA_ERROR_INVALID_PTX` at JIT load time.
+- `chisel` is lowered by `--emit-ptx`. In a `@ptx_emit` function the LLVM backend **refuses** it: `--emit-llvm` emits a host (`x86_64-…`) module, so PTX text there cannot assemble.
 - Do not declare new `.reg` or `.shared` variables inside `chisel` — all registers must come from Y declarations. New PTX declarations will conflict with the compiler's symbol table.
 - `chisel {}` cannot span multiple Y scopes (no jumping into or out of `if`/`for`/`while` blocks).
 
@@ -2947,7 +3397,7 @@ chisel {
 ## 17. Frequently Asked Questions
 
 **Do I need CUDA drivers and a GPU to use Y?**
-No — not for all backends. The LLVM (`--llvm`), C (`--c`), x86-64 (`--cpu`), and ZK (`--emit-r1cs`) backends work entirely on the CPU with no GPU required. The PTX (`--ptx`) and co-processor (`--emit-coprocessor`) backends require an NVIDIA GPU and CUDA toolkit. The hardware Sentinel probe also requires CUDA for GPU measurements, but will gracefully skip GPU probing and detect CPU-only capabilities if no GPU is present.
+No — not for all backends. The LLVM (`--emit-llvm`), host Rust source (`--emit-cpu`), x86-64 ELF (`--emit-native`), and ZK (`--target=r1cs`, in a build with the `zk` feature) backends work entirely on the CPU with no GPU required. **There is no C backend** — the previous version of this answer listed one; `--emit-c` is still a recognised flag but reports that the backend was removed and exits 1. The PTX (`--emit-ptx`) and co-processor (`--emit-coprocessor`) backends emit for an NVIDIA GPU; emitting needs no device, running the result does. Three of the flag spellings this answer used (`--llvm`, `--cpu`, `--ptx`) are not options at all — unrecognised options are a hard error, so each exited 1 with `unrecognised option`. Run `Y <file> --nonsense` to see the authoritative list. The hardware Sentinel probe also requires CUDA for GPU measurements, but will gracefully skip GPU probing and detect CPU-only capabilities if no GPU is present.
 
 ---
 
@@ -3014,37 +3464,57 @@ The limit is read from the hardware profile and varies by SM generation (48 KB o
 
 ## 19. `ypm` — Y Package Manager
 
-`ypm` is Y's built-in package manager for managing Y library dependencies and distributing reusable `.ysu` modules.
+`ypm` is Y's package manager for organizing multi-file Y projects and sharing
+reusable `.ysu` modules.
+
+**`ypm` is its OWN binary, not a `Y` subcommand.** `Cargo.toml` declares it as a
+`[[bin]]` target, so `cargo build --release` produces `target/release/ypm`
+alongside `target/release/Y`. Every command below used to be written
+`./target/release/Y ypm ...`, which runs the compiler with `ypm` as a source
+filename and reports `Failed to read file`.
 
 ### 19.1 Basic Commands
 
 ```bash
-# Initialize a new Y package in the current directory
-./target/release/Y ypm init
+# Create a new project directory from a template
+./target/release/ypm new <project_name>
 
-# Add a dependency
-./target/release/Y ypm add <package-name>
+# Initialize a project in the current directory
+./target/release/ypm init
 
-# Install all dependencies listed in Y.toml
-./target/release/Y ypm install
+# Build the current project and its dependencies
+./target/release/ypm build
 
-# Build the current package
-./target/release/Y ypm build
+# Build and run the current project
+./target/release/ypm run
 
-# Run the package entry point
-./target/release/Y ypm run
+# Run the test modules under tests/
+./target/release/ypm test
+
+# Clear the build target directory
+./target/release/ypm clean
 ```
 
-### 19.2 Package Manifest (`Y.toml`)
+That is the complete command set. **`ypm add` and `ypm install` were documented
+here and do not exist** — both answer `Unknown command`. Dependencies are
+declared in `Ysu.toml` and resolved by `ypm build`; there is no separate install
+step and no registry to add from (see §19.4).
 
-Each Y package is described by a `Y.toml` manifest:
+### 19.2 Package Manifest (`Ysu.toml`)
+
+Each Y package is described by an `Ysu.toml` manifest. **The file is
+`Ysu.toml`, not `Y.toml`** — this section named the latter in four places, and
+`ypm build` reports the directory is not a Y project if the manifest is not
+found under its real name.
+
+This is exactly what `ypm new` writes, and the `[build]` section is where the
+entry point lives — not under `[package]`, where it used to be documented:
 
 ```toml
 [package]
-name    = "my_kernel"
+name = "my_kernel"
 version = "0.1.0"
-author  = "YSU"
-entry   = "src/main.ysu"
+description = "A high-performance Y project"
 
 [dependencies]
 # Local path dependency
@@ -3052,15 +3522,22 @@ y_dsp = { path = "../y_dsp" }
 
 # Future: registry-based dependency (planned)
 # y_linalg = "0.2.1"
+
+[build]
+target = "native"
+entry = "src/main.ysu"
+ld_flags = []
 ```
 
 ### 19.3 Package Structure
 
-A standard `ypm` package layout:
+The layout `ypm new <name>` creates, plus the `tests/` directory `ypm test`
+looks in:
 
 ```
 my_kernel/
-  Y.toml          Package manifest
+  Ysu.toml        Package manifest
+  libs/           Local dependency checkouts
   src/
     main.ysu      Entry point (fn main)
     kernels.ysu   GPU kernel definitions
@@ -3125,24 +3602,34 @@ Y supports the following primitive numeric types. GPU types are only valid in ke
 | `Q32.32` | 64 | 32 | 32 | CPU only |
 | `Q16.48` | 64 | 16 | 48 | CPU only |
 
-Fixed-point types are used with `@ZeroDrift` for verified drift-free accumulation. They are not supported in GPU kernels.
+Fixed-point types are used with `@ZeroDrift` for verified drift-free accumulation, which the PTX backend honours (an accumulator declared `F32` with `@bounds` is lowered as `Q32.32`). Outside `@ZeroDrift` a Q-format value, parameter or buffer element is **refused** in a PTX kernel: the backend has no fixed-point arithmetic, and it used to hold the value in an f32 register (or write a `GlobalMemory<Q16.16>` element as a raw `u32`) without saying so.
 
 ### 20.4 Type Casting
 
-Explicit casts use the `as` keyword:
+**There is no cast syntax.** `as` is not a keyword, and the parser stops at it
+(checked 2026-09-28):
 
 ```ysu
 let x: I32 = 42;
-let y: F32 = x as F32;    // I32 -> F32 widening
-let z: I16 = x as I16;    // I32 -> I16 narrowing (may truncate)
-let h: F16 = y as F16;    // F32 -> F16 (precision loss, no error)
+let y: F32 = x as F32;    // Expected ';' at end of let statement but found Ident("as")
 ```
 
-Implicit coercion **does not happen** in Y. Mixing types in expressions is a compile error:
+What a typed `let` converts, measured with `--emit-llvm` and run:
 
-```
-error[E0308]: mismatched types — use explicit `as` cast
-```
+- **between integer widths**: `let z: I16 = x;` truncates (`x = 70000` keeps
+  only its low 16 bits), and `let back: I32 = z;` sign-extends a signed value;
+- **not between integers and floats**: `let y: F32 = x;` is
+  `Type mismatch in let assignment`, and so is the reverse. No built-in
+  converts between them either.
+
+Mixing types inside an expression is refused (`binary operands mismatch:
+expected I32, got F32`, §6.1). In a **PTX kernel** an `F16` value is refused
+(§20.5): declare it `F32` and store it into a `GlobalMemory<F16>`, which rounds
+it to nearest-even.
+
+This section used to document `x as F32`, `x as I16` and `y as F16`, and an
+error message recommending an explicit `as` cast. None of those casts parses,
+and Y prints no such message.
 
 ### 20.5 GPU Type Usage Rules
 
@@ -3152,14 +3639,107 @@ error[E0308]: mismatched types — use explicit `as` cast
 | Fragment C / D (Tensor Core accumulator) | `F32`, `F16` |
 | RT Core outputs (`rt_nearest_neighbor`) | `I32` (neighbor indices) + implicit `F32` distances in SMEM |
 | `@ZeroDrift` accumulator | `Q32.32`, `Q16.48` |
-| General kernel variables | `F32`, `I32`, `U32`, `F64`, `I64`, `U64` |
+| Kernel values - `let`, scalar parameters (PTX) | `F32`, `F64`, `I32`, `U32`, `I64`, `U64`, `bool` (a 0/1 `U32`) |
+| Buffer element types - `GlobalMemory<T>` (PTX) | `F16`, `F32`, `F64`, `I8`, `I16`, `I32`, `I64`, `U8`, `U16`, `U32`, `U64` |
 | `@atomic` fields | `I32`, `U32`, `U64`, `bool` |
+
+**`F64` is a full value type in a PTX kernel**: `%fd` registers, `.f64`
+arithmetic (division is `div.rn.f64`; a source-level `a*b + c` is one
+`fma.rn.f64`, which is what `ptxas` would contract it to anyway), an eight-byte
+`.param` slot, and an eight-byte buffer stride. A float literal in an F64
+context is the exact double: `let x: F64 = 0.1` is 0.1, not the widened f32
+0.1, and `1.0 / 3.0` there is a double division.
+
+**`F16` is a buffer element type only**, like `I8`/`U16`: a load widens it to
+`F32` exactly (`cvt.f32.f16`) and a store rounds any value to nearest-even
+(`cvt.rn.f16.*`, directly from an F64 so it is rounded once). An `F16` **local
+or parameter is refused**, because an F16 value would be an f32 register whose
+declared type promises rounding to f16 after every operation - which the LLVM
+backend's `half` performs and the PTX backend would not.
+
+**Measured before this was true (2026-09-26):** `F64` and `F16` were silently
+compiled as `f32`. `let x: F64 = 3.0; store(Out, x + x);` wrote four bytes into
+an eight-byte slot, which read back as -2.53e-98; the `F16` version wrote four
+bytes into a two-byte slot and overwrote the element beside it. Both exited 0
+and `ptxas` accepted both. `tests/ptx_float_widths.rs` checks the bytes on the
+card.
+
+Refused by name in a PTX kernel: an `F16` or sub-word integer value, a Q format
+outside `@ZeroDrift`, `String`/`char`, and a buffer whose element is none of the
+types above (`GlobalMemory<Q16.16>`, `GlobalMemory<bool>`). The f32-only
+intrinsics (`block_tile_*`, `BlockTile::*`, the 3-D block pointers, the v4
+forms, `vec_add_v4`, `rmsnorm_v4`, `swiglu_v4`) refuse any buffer that is not
+`F32`.
+
+### 20.6 Storing and Loading in a PTX Kernel
+
+| Operation | Spelling | Width |
+| :--- | :--- | :--- |
+| Store one element | `Out[i] = v`, or `store(place, value)` - exactly two arguments | the buffer's element type |
+| Load one element | `A[i]` as a value, `GlobalMemory::load(A[i])`, or `block_ptr2d_load(A, row, col, stride, max_r, max_c)` | the buffer's element type |
+| Masked 2-D store | `block_ptr2d_store(A, row, col, stride, max_r, max_c, value)` | the buffer's element type |
+
+`place` is an **address**: `Out[i]` (element `i`, at the element's stride, with
+a bounds trap where the index is not proven safe) or a bare buffer `Out`
+(element 0). The value is converted to the buffer's element type - an `I32`
+into a `GlobalMemory<F32>` is a numeric conversion, not a reinterpretation of
+the bits, and an F16 slot gets the value rounded to nearest-even.
+
+**`store(Out, i, v)` is refused**, as is every built-in called with more
+arguments than it takes. It used to be silently truncated to `store(Out, i)`,
+which stored the INDEX: `store(Out, 0, 7)` wrote 0. Write `store(Out[i], v)`.
+
+**`Out[i] = v` is the same store as `store(Out[i], v)`.** It used to compute
+`v` and silently DROP the store, under a clean compile. `Out[i] += v` (and
+`-=`, `*=`, ...) loads the element, applies the operator and stores it back,
+evaluating the index once.
+
+**Reading `A[i]` as a value loads element `i`**, exactly as
+`GlobalMemory::load(A[i])` does - the two emit the same instructions. In an
+ADDRESS position - `store`'s place, `GlobalMemory::load`'s argument, the buffer
+operand of every memory built-in (`block_ptr2d_*`, `block_ptr3d_*`,
+`block_tile_*`, `BlockTile::*`, the v4 forms, `cp_async`, `atomic_add`,
+`atomic_max`) - `A[i]` is the element's address, and a built-in handed one
+follows the element type of the buffer it points into. Until 2026-09-27
+`A[i]` was an address in every position, so `let v: F32 = A[1];` converted
+the ADDRESS of `A[1]` to a float under a clean compile.
+
+**Memory does not move across `barrier_sync()`.** The backend hides barrier
+latency by moving arithmetic that reads only registers from after a barrier to
+before it. An element read, an element store and a `GlobalMemory::load` are not
+moved - reading `A[j]` after the barrier sees what other threads wrote before
+it.
 
 ---
 
 ## 21. `SmemLayout` & `Pipeline` API Reference
 
 ### 21.1 `SmemLayout<T, rows, cols, swizzle>`
+
+> **STATUS: NOT IMPLEMENTED. No backend can lower this type, and the section
+> below describes a design rather than a shipping API.** Measured 2026-08-31,
+> against the release binary:
+>
+> | form | result |
+> | :--- | :--- |
+> | `SharedMemory::alloc<SmemLayout<F32, rows=8, cols=32, swizzle=0>>()` (the inline form used elsewhere in this document) | **syntax error** — it does not parse |
+> | `type T = SmemLayout<...>; SharedMemory::alloc<T>()` | parses, prints `[Optimization] ... bank conflicts`, then **refused by `--emit-ptx`, `--emit-llvm`, `--emit-native` and `--emit-cpu`** |
+> | `kernel k(T: SmemLayout<...>)` | compiled clean and emitted PTX that `ptxas` **rejects** (`Arguments mismatch for instruction 'add'`), under "Compilation Successful!" and exit 0. **Refused by name now.** |
+>
+> The bank-conflict prover in `src/bank_conflict.rs` is real and does run — the
+> type checker searches for a conflict-free swizzle and prints
+> `[Optimization] Auto-swizzling SharedMemoryTile RxC ...`. **That result
+> reaches no backend**, because no reachable path can index the tile it
+> describes. Treat the swizzle tables below as reference material about GPU
+> bank conflicts, not as a description of what the compiler emits.
+>
+> **The shared-memory surface that works** is `shared_alloc_u32(n)` with
+> `shared_load_v4` / `shared_store_v4` and `barrier_sync()` — indexed in
+> 16-byte units, 48 KB static cap, gated by `tests/ptx_shared_memory.rs`, which
+> assembles the result *and* runs a cross-thread exchange on the device. It has
+> no swizzle; a kernel that needs one applies it in source, as
+> `tools/gen_bn254_kernels.py` does.
+
 
 `SmemLayout` defines the physical layout of a tile in GPU shared memory, including optional bank-conflict-eliminating swizzle.
 
@@ -3298,7 +3878,7 @@ Operators are listed from **highest** (evaluated first) to **lowest** (evaluated
 | :---: | :--- | :--- | :---: |
 | 1 (highest) | `()` `[]` `::` `.` | Grouping, indexing, path, field access | Left |
 | 2 | `-` `!` `~` `*` `&` | Unary negation, logical NOT, bitwise NOT, deref, address-of | Right |
-| 3 | `as` | Type cast | Left |
+| 3 | `as` | Type cast: **not implemented**, the parser stops at `as` (§20.4) | Left |
 | 4 | `*` `/` `%` | Multiply, divide, modulo | Left |
 | 5 | `+` `-` | Add, subtract | Left |
 | 6 | `<<` `>>` | Bitwise left/right shift | Left |
@@ -3322,8 +3902,8 @@ let b: I32 = 1 & 3 << 2;     // = 1 & 12 = 0   (not 4)
 // Use parentheses to override:
 let c: I32 = (2 + 3) * 4;    // = 20
 
-// as (precedence 3) binds tighter than arithmetic:
-let d: F32 = 1 + x as F32;   // = 1 + (x as F32), not (1 + x) as F32
+// `as` (precedence 3) is not implemented: this line does not parse (§20.4).
+let d: F32 = 1 + x as F32;
 ```
 
 > **Note:** The `*`, `-`, and `&` symbols each perform dual roles across different precedence tiers: `*` (unary dereference at level 2 vs binary multiply at level 4), `-` (unary negation at level 2 vs binary subtraction at level 5), and `&` (unary address-of at level 2 vs binary bitwise AND at level 7). The parser distinguishes unary vs binary forms by syntactic context.
@@ -3366,7 +3946,7 @@ All compiler error codes, their meanings, and the section where they are demonst
 | :--- | :--- | :--- |
 | `B0001` | Bank conflict detected (warning, not error) | Add `swizzle=330` to `SmemLayout` or restructure access pattern |
 | `W0001` | `chisel {}` block detected inside `@safe` scope | Review inline PTX manually — safety guarantees do not apply |
-| `W0002` | Fragment register count exceeds 30 live variables | Interleave `store()` calls to reduce register pressure |
+| `W0002` | Fragment register count exceeds 30 live variables | **Not implemented** - nothing in `src/` emits this code. Reduce live `Fragment` variables; there is no fragment `store()` to interleave (§20.6). |
 
 ---
 
@@ -4262,28 +4842,43 @@ This section documents the major high-performance compiler optimizations added t
 
 ### 33.2 In-Register Warp Butterfly Shuffle Reductions (`shfl.sync.bfly.b32`)
 * **Overview**: Performs parallel reductions across 32 threads inside register space without writing to shared memory or global memory.
-* **Implementation**: Implemented `emit_warp_butterfly_shuffle`, `emit_warp_reduce_sum`, `emit_warp_reduce_max`, and `emit_warp_reduce_var` in `src/ptx_emitter.rs`.
+* **Implementation**: Implemented `emit_warp_butterfly_shuffle`, `emit_warp_reduce_sum` and `emit_warp_reduce_max` in `src/ptx_emitter.rs`. (`emit_warp_reduce_var` was listed here and has never existed; there is no warp variance reduction.)
 * **Impact**: Reduces a 32-element warp vector in **5 GPU cycles** (1.02 cycles per shuffle stage).
 
-### 33.3 Hopper Tensor Memory Accelerator (TMA) Descriptor Generation (`sm_90a`)
-* **Overview**: Generates compile-time 2D/3D TMA global descriptors for Hopper hardware bulk memory copies.
-* **Implementation**: Added `emit_tma_descriptor_gen` (`.global .align 64 .b8 tma_desc[128];`) and lowered `cp.async.bulk.tensor.2d.global.shared::cta.bulk_group` in `src/ptx_emitter.rs`.
-* **Impact**: Enables hardware-driven 2D/3D tensor tile streaming from VRAM to shared memory with **0 register consumption**.
+### 33.3 – 33.5 Hopper TMA, `mbarrier` pipelining and WGMMA — **REMOVED, never worked**
 
-### 33.4 3+ Stage Asynchronous `mbarrier` Pipelining
-* **Overview**: Upgrades software-pipelined loops to 3+ asynchronous stages backed by Hopper hardware transaction counters.
-* **Implementation**: Emits `mbarrier.init.shared.b64`, `mbarrier.arrive.expect_tx.shared.b64`, and `mbarrier.try_wait.parity.shared.b64` in `src/ptx_emitter.rs`.
-* **Impact**: Completely hides VRAM latency by overlapping memory reads with Tensor Core matrix calculations.
+> These three sections described `emit_tma_descriptor_gen`,
+> `mbarrier.init/arrive.expect_tx/try_wait.parity`, and
+> `wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16` as implemented features
+> of `src/ptx_emitter.rs`. **The entire surface has been deleted.**
+>
+> Extending the assemble gate to the intrinsic surface
+> (`tests/ptx_intrinsics_assemble.rs`) found that **16 of 19 `emit_*` methods
+> in that family produced PTX `ptxas` rejects at their own target arch** — all
+> four WGMMA variants, the TMA descriptor and bulk/multicast loads, the
+> 3-stage mbarrier pipeline, the warp-specialised producer/consumer pipeline,
+> 2:4 sparse MMA, and more. Every one was reachable from no backend path and
+> covered only by substring tests, one of which pinned a `wgmma...s4` that
+> exists on no hardware as a regression guard.
+>
+> A working TMA path needs host-built `cuTensorMapEncodeTiled` descriptors
+> plumbed in as `.grid_constant` params, mbarrier completion, and shared-memory
+> matrix descriptors — a feature to design, not a typo to correct. The
+> reachable `mma.sync` path (`emit_fp8_gemm_kernel`,
+> `emit_tensor_core_gemm_kernel`, and `coprocessor_scheduler`'s own
+> `emit_mma_sync`) was never affected and still works.
+>
+> **Do not re-add any of it without a `ptxas` gate and hardware to run it on.**
+> A second copy of the WGMMA emission survived in
+> `src/coprocessor_scheduler.rs` — behind a `TensorCoreMapping::Wgmma` variant
+> that nothing ever constructed — and was found while auditing this section.
+> It is gone too.
 
-### 33.5 Hopper 128-Thread Warp-Group Matrix Multiply (WGMMA)
-* **Overview**: Implements Hopper 128-thread Warp-Group Matrix Multiply-Accumulate (`wgmma`) instructions.
-* **Implementation**: Emits `wgmma.fence.sync.aligned`, `wgmma.mma_async.sync.aligned.m64n64k16.f32.f16.f16`, `wgmma.commit_group`, and `wgmma.wait_group 0` in `src/ptx_emitter.rs`.
-* **Impact**: Delivers peak Hopper Tensor Core throughput for large matrix operations.
+### 33.6 Automated Operator Fusion Pass (`OperatorFusionPass`) — **not wired in**
 
-### 33.6 Automated Operator Fusion Pass (`OperatorFusionPass`)
 * **Overview**: Topologically scans the DAG IR to detect sequential patterns (MatMul $\rightarrow$ RMSNorm $\rightarrow$ SwiGLU) and merges them into unified fused IR nodes.
-* **Implementation**: Implemented `OperatorFusionPass` in `src/ir_grapher.rs` and added fused PTX emitter generator `emit_fused_matmul_rmsnorm_swiglu` in `src/ptx_emitter.rs`.
-* **Impact**: Eliminates global memory writebacks between back-to-back neural network operators.
+* **Status**: `OperatorFusionPass` exists in `src/ir_grapher.rs` and its **only caller is its own unit test** — no compilation path runs it. The `emit_fused_matmul_rmsnorm_swiglu` this section used to name **does not exist**; a fused node is lowered by `coprocessor_scheduler`'s ordinary `emit_mma_sync`, which is real. So the pass is dead rather than broken, and the elementwise half of the fusion is not emitted at all.
+* **Impact**: none today. Read `feedback-fusion-value-measured` before reviving it: in this repo epilogue fusions win and mainloop fusions that add accumulator pressure measure 1.00x against the same compiler's own unfused path.
 
 ### 33.7 2D Tensor Block Pointers (`make_block_ptr2d` / `BlockPtr2D`)
 * **Overview**: Implements Triton 3.0-style 2D Block Pointers for strided multi-dimensional matrix tiling.
@@ -4324,10 +4919,31 @@ test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 This section documents the Python GPU engine extensions, PyTorch Inductor compiler backend, zero-allocation launch runtime, and high-level block primitives added to Y to achieve full feature parity and performance superiority over **OpenAI Triton 3.7.0**.
 
-### 34.1 Native PyTorch Inductor Compiler Target (`y_inductor`)
-* **Overview**: Implements a native compiler backend target for PyTorch Inductor.
-* **Usage**: Allows compiling any PyTorch neural network module directly into Y GPU kernels via `torch.compile(model, backend=y_inductor)`.
-* **Implementation**: Located in `python/y_lang/inductor.py`. Lowers PyTorch FX GraphModule operators (pointwise, activations, reductions) into Y JIT kernels.
+### 34.1 `torch.compile` backend (`y_inductor`)
+* **Usage**: `torch.compile(model, backend=y_inductor)`, or `y_inductor(module, example_inputs)` directly.
+  Implemented in `python/y_lang/inductor.py`; the result carries `.y_report`.
+* **What is lowered**: connected groups of `add`, `sub`, `mul` and `relu` whose
+  every tensor operand and result is a contiguous float32 CUDA tensor of one
+  static shape (no broadcasting). A tensor-scalar `add`/`sub`/`mul` carries the
+  scalar in the kernel. Each group becomes one Y kernel, compiled through the Y
+  compiler and launched on the current CUDA stream.
+* **Everything else runs as PyTorch runs it**: `linear`, `matmul`, `silu` and
+  other activations, division, negation, reductions, broadcasting, other dtypes,
+  CPU tensors, and any call that needs autograd (so training through the
+  backend works, and runs eagerly). `.y_report` lists what was lowered, why
+  each other node was not, and per kernel how many calls launched it and how
+  many fell back.
+* **Every lowered result is bit-for-bit eager PyTorch's**, and that decides the
+  op set. A multiply is never fused with the add or subtract it feeds (ptxas
+  contracts the pair into one FMA, rounding once where eager rounds twice:
+  245,999 of 1,048,576 results differed when fused). Negation is not lowered
+  (eager canonicalises a NaN; a negation folded into a select keeps its payload).
+  Division is not lowered (Y's F32 `/` is `div.approx.f32`). A multiply by 1.0
+  is not lowered (ptxas deletes it, so a NaN keeps its payload).
+* **History**: this section used to say the backend lowered "pointwise,
+  activations, reductions" into Y kernels. It lowered nothing: it returned the
+  original graph wrapped in `torch.no_grad()`, which also broke training
+  (outputs had `requires_grad=False`, and `backward()` raised).
 
 ### 34.2 High-Level Parallel Block Primitives (`y_lang.ops.block`)
 * **Overview**: Provides parallel block-level operations exposed directly in the Y Python package:
@@ -4385,7 +5001,7 @@ This section provides a formal technical architectural comparison between **Open
 
 ### 35.1 PyTorch Compiler & Native Framework Integration
 * **OpenAI Triton**: Serves as the primary default compiler backend for `torch.compile` via PyTorch Inductor. FX GraphModule nodes are automatically lowered directly into Triton IR dialects without requiring dynamic library loading or explicit C-ABI binding code.
-* **Y Language**: Integrates with PyTorch via a Python JIT module bridge (`y_lang.inductor` and `TorchKernel`). While `y_lang` allows JIT wrapping and FX module compilation via `torch.compile(model, backend=y_inductor)`, it functions as an external runtime target rather than PyTorch's internal default backend.
+* **Y Language**: Integrates with PyTorch through `TorchKernel` (launch a compiled Y kernel on tensors) and `y_inductor`, a `torch.compile` backend that lowers only elementwise `add`/`sub`/`mul`/`relu` subgraphs over float32 CUDA tensors to Y kernels and runs everything else eagerly (§34.1). It is an external backend, not PyTorch's default, and not a general graph compiler. (This bullet used to describe "FX module compilation" by a backend that compiled nothing.)
 
 ### 35.2 High-Level Block Abstraction vs. Low-Level PTX Control
 * **OpenAI Triton**: Operates on a high-level block-centric model (`tl.tensor`). Threads, warps, shared memory allocation, and register layout conversions (`BlockedLayout` $\leftrightarrow$ `SharedLayout`) are abstracted away from the programmer and managed automatically by Triton's MLIR compiler passes.
@@ -4393,7 +5009,7 @@ This section provides a formal technical architectural comparison between **Open
 
 ### 35.3 Dynamic Runtime Autotuning (`@triton.autotune`) vs. Hardware Sentinel Probing
 * **OpenAI Triton**: Built-in `@triton.autotune` dynamically evaluates grid parameter configurations (`BLOCK_SIZE_M`, `num_warps`, `num_stages`) at runtime across input tensor shape variations, caching optimal parameter tuples per shape key.
-* **Y Language**: Relies on compile-time static hardware probing (`--probe` via `Hardware Sentinel`). The sentinel analyzes execution hardware (L1/L2/L3 cycles, SMEM size, FMA latencies) to configure default compiler passes. Runtime autotuning in Y is handled via the Python decorator [`autotune`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/python/y_lang/autotune_decorator.py) (`python/y_lang/autotune_decorator.py`), which benchmarks tile configurations (`AutotuneConfig`).
+* **Y Language**: Relies on compile-time static hardware probing (the `Hardware Sentinel`, run automatically on the first compile and cached in `.ysu_hw_profile`). The sentinel analyzes execution hardware (L1/L2/L3 cycles, SMEM size, FMA latencies) to configure default compiler passes. Runtime autotuning in Y is handled via the Python decorator [`autotune`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/python/y_lang/autotune_decorator.py) (`python/y_lang/autotune_decorator.py`), which benchmarks tile configurations (`AutotuneConfig`).
 
 ### 35.4 Multi-Vendor GPU Compiler Dialects
 * **OpenAI Triton**: Uses an MLIR dialect lowering pipeline (`triton` $\rightarrow$ `triton-gpu` $\rightarrow$ `nvvm` / `hip` / `spirv`), targeting NVIDIA CUDA, AMD ROCm (HIP), and Intel XPU GPUs natively.
@@ -4410,12 +5026,12 @@ This section provides a formal technical architectural comparison between **Open
 | Technical Capability | OpenAI Triton (v3.7.0) | Y Language (v1.2.0) |
 | :--- | :--- | :--- |
 | **Primary Design Focus** | High-level GPU deep learning block compiler | Hardware-sentient systems language (GPU + CPU SIMD + ZK R1CS) |
-| **PyTorch `torch.compile` Backend** | Native default Inductor backend | Custom backend target (`y_lang.inductor`) |
-| **Hardware Targets** | NVIDIA GPUs, AMD ROCm, Intel XPU | NVIDIA PTX (`sm_80`/`sm_90a`), Native x86 CPU, R1CS Circuits |
+| **PyTorch `torch.compile` Backend** | Native default Inductor backend | `y_inductor`: elementwise `add`/`sub`/`mul`/`relu` on float32 CUDA tensors only (§34.1) |
+| **Hardware Targets** | NVIDIA GPUs, AMD ROCm, Intel XPU | NVIDIA PTX (`sm_80`–`sm_89`; **Hopper `sm_90a` features were removed**, §33.3–33.5), Native x86 CPU, R1CS Circuits |
 | **Compiler Framework** | LLVM / MLIR Dialect Pipeline | Rust-based IR Grapher & Native PTX Emitter |
 | **Block Masking** | Automatic elementwise tensor predicate masking | 2D & 3D Block Pointer predicates (`BlockPtr2D` & `BlockPtr3D`) |
 | **Autotuning Infrastructure** | Built-in MLIR-level `@triton.autotune` | Static Sentinel Probe + Python `autotune` decorator |
-| **Warp & PTX Granularity** | Abstracted via Block Layout IR | Direct PTX intrinsics (`shfl`, `wgmma`, `mbarrier`) |
+| **Warp & PTX Granularity** | Abstracted via Block Layout IR | Direct PTX intrinsics (`shfl`, `ldmatrix`, `mma.sync`, `cp.async`). **No `wgmma` or `mbarrier`** — see §33.3–33.5. |
 | **Zero-Knowledge (ZK) Backend** | ❌ None | ✅ Built-in R1CS & GPU PTX Witness Generator |
 | **CPU SIMD Execution** | ❌ GPU Only | ✅ LLVM AVX-512 Native Lowering |
 | **Cold JIT Compilation Latency** | ~200 – 500 ms | **0.055 ms (55 $\mu$s)** |
@@ -4463,29 +5079,42 @@ ptr3d = make_block_ptr3d(
 
 ---
 
-## §37 — 5 Advanced Compiler Optimization Passes Pipeline
+## §37 — Optimization passes: **all five described here were dead, and are removed**
 
-Y Language incorporates 5 domain-specific optimization passes executed prior to PTX emission via `run_all_optimization_passes(&mut Program)` ([`src/lib.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/lib.rs#L27-L40)):
+This section listed five passes "executed prior to PTX emission via
+`run_all_optimization_passes(&mut Program)`". Audited against the source:
 
-1. **`AsyncPipeliningPass`** ([`src/ptx_emitter.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/ptx_emitter.rs#L2334-L2355)):
-   Emits 3-stage asynchronous global-to-shared memory DMA copies (`cp.async.ca.shared.global`, `cp.async.commit_group`, `cp.async.wait_group`) to overlap VRAM fetch latency with SM Tensor Core execution.
+| claimed pass | what it actually was |
+|---|---|
+| `AsyncPipeliningPass` | a string helper emitting `cp.async` → `commit_group` → `wait_group 0` on three consecutive lines, i.e. a **blocking** copy with no overlap at all. No callers. |
+| `SmemBankSwizzlePass` | renamed `load_shared` → `load_shared_swizzled_xor`. **Neither name exists in any backend**, and it emitted no XOR anywhere. No callers. |
+| `EpilogueFusionPass` | `run_fusion` incremented a counter and returned it. Fused nothing. No callers. |
+| `RegisterPressurePass` | emitted `.pragma "option nvcc -maxrregcount=N"`, which **ptxas silently overrides** with the `.maxnreg` this emitter writes into the module. Never emitted `.maxnreg` at all. No callers. |
+| `UnrollAndJamPass` | counted loops. A liveness probe confirms it changes nothing. No callers. |
 
-2. **`SmemBankSwizzlePass`** ([`src/layout_pass.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/layout_pass.rs#L94-L145)):
-   Applies bitwise XOR swizzling ($\text{row} \oplus (\text{col} \gg 2)$) to 2D shared memory fragments, eliminating 32-bank conflict stalls during matrix tile transfers.
+`run_all_optimization_passes` itself had **zero callers** — not `main.rs`, not
+`lib.rs`, not a test — and the five it ran were not the five listed above; only
+two names overlapped. All of it is deleted.
 
-3. **`EpilogueFusionPass`** ([`src/quantization_pass.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/quantization_pass.rs#L797-L818)):
-   Fuses quantization scale factors and non-linear activation functions (SiLU, GELU, ReLU) inline within Tensor Core accumulator registers prior to global memory writeback.
+**What actually optimises the emitted code**, all of it reachable and measured:
 
-4. **`RegisterPressurePass`** ([`src/ptx_emitter.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/ptx_emitter.rs#L2356-L2378)):
-   Analyzes live warp register pressure and emits dynamic PTX `.maxnreg 64` launch bounds to guarantee max SM active CTA occupancy.
-
-5. **`UnrollAndJamPass`** ([`src/auto_vectorize.rs`](file:///home/yumin/NVME%20files/YSU-engine-main/YSU-engine-main/src/Y_lang/src/auto_vectorize.rs#L88-L118)):
-   Unrolls inner reduction loops 4x with register accumulation jamming to maximize Instruction Level Parallelism (ILP).
+* `bank_conflict.rs` — the real XOR swizzle solver (`Xor128B` / `Xor64B`),
+  coupled to `ldmatrix` and `cp.async` address generation in `ptx_emitter.rs`.
+* `autotuner.rs` + `empirical_autotune.rs` — CTA tile / warp split / pipeline
+  depth, preferring an on-device measurement over the analytic model.
+* `QuantizationPass::emit_epilogue_fusion` — the real bias + ReLU/GELU/SiLU
+  epilogue, in registers before writeback. (`bias+ReLU` measures 1.06x against
+  cuDNN; the *mainloop* SwiGLU fusion measures 1.00x against Y's own unfused
+  path, which is why fusion is chosen per-case rather than by a pass.)
+* `coprocessor_scheduler.rs` + `ir_grapher.rs` — RT/Tensor overlap scheduling
+  and the cross-pipeline barriers.
+* Real `cp.async` pipelining lives in the GEMM emitters, where the commit and
+  the wait are separated by the mainloop — which is the whole point, and what
+  the deleted "pipelining pass" did not do.
 
 ---
 
 *Y Compiler Engine — Research by YSU-SSS*
-
 
 
 

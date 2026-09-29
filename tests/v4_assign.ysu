@@ -1,0 +1,17 @@
+// A `U32x4` lives in `vec_vars` (four registers) and never in `variables`, and
+// `Stmt::Assign` resolved its target through `variables` alone with no `else`.
+// So this assignment was DROPPED: the value was computed into a register
+// nothing reads (`mov.u32 %r20, 7;`) and the write never happened, under
+// "Compilation Successful!", exit 0, and a module `ptxas` accepts.
+//
+// Nothing in the corpus mutates a v4, so the instance was latent -- which is
+// the argument for closing it now rather than after a kernel needs it.
+kernel v4_assign(Src: GlobalMemory<U32>, Dst: GlobalMemory<U32>, NElem: I32) {
+    let j: I32 = block_idx_x() * block_dim_x() + thread_idx_x();
+    let a: U32x4 = block_ptr2d_load_v4(Src, 0, (j) * 4, 4 * NElem, 2, 4 * NElem);
+    let v: U32 = a.x;
+    a = 7;
+    block_ptr2d_store_v4(Dst, 0, (j) * 4, 4 * NElem, 2, 4 * NElem, v, v, v, v);
+}
+
+fn main() {}

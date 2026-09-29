@@ -1,0 +1,236 @@
+.version 7.8
+.target sm_89
+.address_size 64
+
+.visible .entry rmsnorm_residual_4096(
+    .param .u64 X_0,
+    .param .u64 Residual_1,
+    .param .u64 Weight_2,
+    .param .u64 Out_3,
+    .param .u64 NewResidual_4
+)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated registers per thread: 204
+    // [ADVANCED WARP REGISTER ALLOCATOR] Selected register limit: 255 (to maximize SM occupancy)
+    // [ADVANCED WARP REGISTER ALLOCATOR] Estimated occupancy: 16.67% (1 active blocks per SM)
+.maxnreg 255
+{
+    .reg .b32 %r<90>;
+    .reg .f32 %f<78>;
+    .reg .b64 %rd<18>;
+    .reg .pred %p<3>;
+
+    ld.param.u64 %rd0, [X_0];
+    ld.param.u64 %rd1, [Residual_1];
+    ld.param.u64 %rd2, [Weight_2];
+    ld.param.u64 %rd3, [Out_3];
+    ld.param.u64 %rd4, [NewResidual_4];
+    // ========================================================
+    // [Y FUSED ADD+RMSNORM] hidden_dim=4096 | 8 warps (256 threads) per row | 8-wide vectorized f16 | shared-mem h staging
+    // ========================================================
+    .shared .align 16 .b8 smem_h[16384];
+    mov.u32 %r0, smem_h;
+    .shared .align 4 .b8 smem_reduce[32];
+    mov.u32 %r1, smem_reduce;
+    cvta.to.global.u64 %rd5, %rd0;
+    cvta.to.global.u64 %rd6, %rd1;
+    cvta.to.global.u64 %rd7, %rd2;
+    cvta.to.global.u64 %rd8, %rd3;
+    cvta.to.global.u64 %rd9, %rd4;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %tid.x;
+    mul.lo.u32 %r4, %r2, 4096;
+    mov.u32 %r5, %r3;
+    mov.f32 %f0, 0f00000000;
+    $RMSNORM_SUMSQ_0:
+    setp.ge.u32 %p0, %r5, 512;
+    @%p0 bra $RMSNORM_SUMSQ_DONE_1;
+    mad.lo.u32 %r6, %r5, 8, %r4;
+    mul.wide.u32 %rd10, %r6, 2;
+    add.s64 %rd11, %rd5, %rd10;
+    ld.global.v4.u32 {%r7,%r8,%r9,%r10}, [%rd11];
+    cvt.f32.f16 %f1, %r7;
+    shr.b32 %r11, %r7, 16;
+    cvt.f32.f16 %f2, %r11;
+    cvt.f32.f16 %f3, %r8;
+    shr.b32 %r12, %r8, 16;
+    cvt.f32.f16 %f4, %r12;
+    cvt.f32.f16 %f5, %r9;
+    shr.b32 %r13, %r9, 16;
+    cvt.f32.f16 %f6, %r13;
+    cvt.f32.f16 %f7, %r10;
+    shr.b32 %r14, %r10, 16;
+    cvt.f32.f16 %f8, %r14;
+    add.s64 %rd12, %rd6, %rd10;
+    ld.global.v4.u32 {%r15,%r16,%r17,%r18}, [%rd12];
+    cvt.f32.f16 %f9, %r15;
+    shr.b32 %r19, %r15, 16;
+    cvt.f32.f16 %f10, %r19;
+    cvt.f32.f16 %f11, %r16;
+    shr.b32 %r20, %r16, 16;
+    cvt.f32.f16 %f12, %r20;
+    cvt.f32.f16 %f13, %r17;
+    shr.b32 %r21, %r17, 16;
+    cvt.f32.f16 %f14, %r21;
+    cvt.f32.f16 %f15, %r18;
+    shr.b32 %r22, %r18, 16;
+    cvt.f32.f16 %f16, %r22;
+    add.f32 %f17, %f1, %f9;
+    fma.rn.f32 %f0, %f17, %f17, %f0;
+    add.f32 %f18, %f2, %f10;
+    fma.rn.f32 %f0, %f18, %f18, %f0;
+    add.f32 %f19, %f3, %f11;
+    fma.rn.f32 %f0, %f19, %f19, %f0;
+    add.f32 %f20, %f4, %f12;
+    fma.rn.f32 %f0, %f20, %f20, %f0;
+    add.f32 %f21, %f5, %f13;
+    fma.rn.f32 %f0, %f21, %f21, %f0;
+    add.f32 %f22, %f6, %f14;
+    fma.rn.f32 %f0, %f22, %f22, %f0;
+    add.f32 %f23, %f7, %f15;
+    fma.rn.f32 %f0, %f23, %f23, %f0;
+    add.f32 %f24, %f8, %f16;
+    fma.rn.f32 %f0, %f24, %f24, %f0;
+    mul.lo.u32 %r23, %r5, 32;
+    add.u32 %r24, %r0, %r23;
+    st.shared.v4.f32 [%r24], {%f17, %f18, %f19, %f20};
+    add.u32 %r25, %r24, 16;
+    st.shared.v4.f32 [%r25], {%f21, %f22, %f23, %f24};
+    add.u32 %r5, %r5, 256;
+    bra $RMSNORM_SUMSQ_0;
+    $RMSNORM_SUMSQ_DONE_1:
+    // [WARP-LEVEL SHUFFLE REDUCTION SUM - shfl.sync.bfly.b32]
+    shfl.sync.bfly.b32 %f25, %f0, 16, 0x1f, 0xffffffff;
+    add.f32 %f26, %f0, %f25;
+    shfl.sync.bfly.b32 %f27, %f26, 8, 0x1f, 0xffffffff;
+    add.f32 %f28, %f26, %f27;
+    shfl.sync.bfly.b32 %f29, %f28, 4, 0x1f, 0xffffffff;
+    add.f32 %f30, %f28, %f29;
+    shfl.sync.bfly.b32 %f31, %f30, 2, 0x1f, 0xffffffff;
+    add.f32 %f32, %f30, %f31;
+    shfl.sync.bfly.b32 %f33, %f32, 1, 0x1f, 0xffffffff;
+    add.f32 %f34, %f32, %f33;
+    shr.u32 %r26, %r3, 5;
+    and.b32 %r27, %r3, 31;
+    setp.eq.u32 %p1, %r27, 0;
+    mul.lo.u32 %r28, %r26, 4;
+    add.u32 %r29, %r1, %r28;
+    @%p1 st.shared.f32 [%r29], %f34;
+    bar.sync 0;
+    mov.f32 %f35, 0f00000000;
+    add.u32 %r30, %r1, 0;
+    ld.shared.f32 %f36, [%r30];
+    add.f32 %f35, %f35, %f36;
+    add.u32 %r31, %r1, 4;
+    ld.shared.f32 %f37, [%r31];
+    add.f32 %f35, %f35, %f37;
+    add.u32 %r32, %r1, 8;
+    ld.shared.f32 %f38, [%r32];
+    add.f32 %f35, %f35, %f38;
+    add.u32 %r33, %r1, 12;
+    ld.shared.f32 %f39, [%r33];
+    add.f32 %f35, %f35, %f39;
+    add.u32 %r34, %r1, 16;
+    ld.shared.f32 %f40, [%r34];
+    add.f32 %f35, %f35, %f40;
+    add.u32 %r35, %r1, 20;
+    ld.shared.f32 %f41, [%r35];
+    add.f32 %f35, %f35, %f41;
+    add.u32 %r36, %r1, 24;
+    ld.shared.f32 %f42, [%r36];
+    add.f32 %f35, %f35, %f42;
+    add.u32 %r37, %r1, 28;
+    ld.shared.f32 %f43, [%r37];
+    add.f32 %f35, %f35, %f43;
+    fma.rn.f32 %f44, %f35, 0f39800000, 0f3727C5AC;
+    rsqrt.approx.f32 %f45, %f44;
+    mov.u32 %r5, %r3;
+    $RMSNORM_WRITE_2:
+    setp.ge.u32 %p2, %r5, 512;
+    @%p2 bra $RMSNORM_WRITE_DONE_3;
+    mad.lo.u32 %r38, %r5, 8, %r4;
+    mul.wide.u32 %rd13, %r38, 2;
+    mul.lo.u32 %r39, %r5, 32;
+    add.u32 %r40, %r0, %r39;
+    ld.shared.v4.f32 {%f46, %f47, %f48, %f49}, [%r40];
+    add.u32 %r41, %r40, 16;
+    ld.shared.v4.f32 {%f50, %f51, %f52, %f53}, [%r41];
+    mul.wide.u32 %rd14, %r5, 16;
+    add.s64 %rd15, %rd7, %rd14;
+    ld.global.v4.u32 {%r42,%r43,%r44,%r45}, [%rd15];
+    cvt.f32.f16 %f54, %r42;
+    shr.b32 %r46, %r42, 16;
+    cvt.f32.f16 %f55, %r46;
+    cvt.f32.f16 %f56, %r43;
+    shr.b32 %r47, %r43, 16;
+    cvt.f32.f16 %f57, %r47;
+    cvt.f32.f16 %f58, %r44;
+    shr.b32 %r48, %r44, 16;
+    cvt.f32.f16 %f59, %r48;
+    cvt.f32.f16 %f60, %r45;
+    shr.b32 %r49, %r45, 16;
+    cvt.f32.f16 %f61, %r49;
+    mul.f32 %f62, %f46, %f45;
+    mul.f32 %f63, %f62, %f54;
+    mul.f32 %f64, %f47, %f45;
+    mul.f32 %f65, %f64, %f55;
+    mul.f32 %f66, %f48, %f45;
+    mul.f32 %f67, %f66, %f56;
+    mul.f32 %f68, %f49, %f45;
+    mul.f32 %f69, %f68, %f57;
+    mul.f32 %f70, %f50, %f45;
+    mul.f32 %f71, %f70, %f58;
+    mul.f32 %f72, %f51, %f45;
+    mul.f32 %f73, %f72, %f59;
+    mul.f32 %f74, %f52, %f45;
+    mul.f32 %f75, %f74, %f60;
+    mul.f32 %f76, %f53, %f45;
+    mul.f32 %f77, %f76, %f61;
+    cvt.rn.f16.f32 %r50, %f63;
+    and.b32 %r51, %r50, 0xFFFF;
+    cvt.rn.f16.f32 %r52, %f65;
+    shl.b32 %r53, %r52, 16;
+    or.b32 %r54, %r51, %r53;
+    cvt.rn.f16.f32 %r55, %f67;
+    and.b32 %r56, %r55, 0xFFFF;
+    cvt.rn.f16.f32 %r57, %f69;
+    shl.b32 %r58, %r57, 16;
+    or.b32 %r59, %r56, %r58;
+    cvt.rn.f16.f32 %r60, %f71;
+    and.b32 %r61, %r60, 0xFFFF;
+    cvt.rn.f16.f32 %r62, %f73;
+    shl.b32 %r63, %r62, 16;
+    or.b32 %r64, %r61, %r63;
+    cvt.rn.f16.f32 %r65, %f75;
+    and.b32 %r66, %r65, 0xFFFF;
+    cvt.rn.f16.f32 %r67, %f77;
+    shl.b32 %r68, %r67, 16;
+    or.b32 %r69, %r66, %r68;
+    add.s64 %rd16, %rd8, %rd13;
+    st.global.v4.u32 [%rd16], {%r54,%r59,%r64,%r69};
+    cvt.rn.f16.f32 %r70, %f46;
+    and.b32 %r71, %r70, 0xFFFF;
+    cvt.rn.f16.f32 %r72, %f47;
+    shl.b32 %r73, %r72, 16;
+    or.b32 %r74, %r71, %r73;
+    cvt.rn.f16.f32 %r75, %f48;
+    and.b32 %r76, %r75, 0xFFFF;
+    cvt.rn.f16.f32 %r77, %f49;
+    shl.b32 %r78, %r77, 16;
+    or.b32 %r79, %r76, %r78;
+    cvt.rn.f16.f32 %r80, %f50;
+    and.b32 %r81, %r80, 0xFFFF;
+    cvt.rn.f16.f32 %r82, %f51;
+    shl.b32 %r83, %r82, 16;
+    or.b32 %r84, %r81, %r83;
+    cvt.rn.f16.f32 %r85, %f52;
+    and.b32 %r86, %r85, 0xFFFF;
+    cvt.rn.f16.f32 %r87, %f53;
+    shl.b32 %r88, %r87, 16;
+    or.b32 %r89, %r86, %r88;
+    add.s64 %rd17, %rd9, %rd13;
+    st.global.v4.u32 [%rd17], {%r74,%r79,%r84,%r89};
+    add.u32 %r5, %r5, 256;
+    bra $RMSNORM_WRITE_2;
+    $RMSNORM_WRITE_DONE_3:
+    // ========================================================
+}

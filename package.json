@@ -1,0 +1,8 @@
+{
+  "name": "y-compiler-test-tooling",
+  "private": true,
+  "description": "solc, for tests/zk_solidity_verifier.rs. Without it that gate SKIPS and reports ok - see README, Building. Install with `npm ci`.",
+  "dependencies": {
+    "solc": "^0.8.36"
+  }
+}
