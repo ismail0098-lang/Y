@@ -1,0 +1,27 @@
+// The WIDTH case. `tests/let_alias.ysu` is 32-bit throughout, so it cannot see
+// a copy emitted at the wrong register width -- and `mov.u32 %rd16, %rd12;` is
+// not a subtly wrong value, it is a module `ptxas` REFUSES.
+//
+// This is the shape `tests/deterministic_reduce.ysu` is written in: the grid
+// and block extents are widened to I64 before multiplication, because the
+// permitted X/Z grid dimensions can produce more workers than a signed 32-bit
+// index holds. So the aliased binding is 64-bit in every grid-stride reduction
+// this repository ships.
+kernel let_alias_wide(Out: GlobalMemory<I64>, N: I64) {
+    let block_x: I64 = block_idx_x();
+    let grid_x: I64 = grid_dim_x();
+    let block_size: I64 = block_dim_x();
+    let thread_x: I64 = thread_idx_x();
+    let worker: I64 = block_x * block_size + thread_x;
+    let nworkers: I64 = grid_x * block_size;
+
+    let mut i: I64 = worker;
+    @invariant(i >= 0)
+    while i < N {
+        i = i + nworkers;
+    }
+
+    atomic_add(Out, worker, 1);
+}
+
+fn main() {}

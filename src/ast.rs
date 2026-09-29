@@ -8,7 +8,6 @@
 //  to support Ada Lovelace, Hopper, and CPU fallbacks.
 // ============================================================
 
-#![allow(dead_code)]
 
 /// Represents a source code location.
 #[derive(Debug, Clone, PartialEq)]
@@ -152,6 +151,17 @@ pub struct KernelDecl {
     pub name: String,
     pub params: Vec<Param>,
     pub body: Block,
+    /// `@tile(M, N, K)` at kernel scope (as opposed to the loop-scoped use of
+    /// the same attribute, see `Stmt::For::tile`): declares this kernel as a
+    /// GEMM specialized for the exact compile-time problem dimensions M, N, K
+    /// (`block_m`/`block_n`/`block_k` hold those, not CTA tile sizes - the
+    /// field is shared with the loop-level meaning to keep the grammar/AST
+    /// surface minimal). Requires exactly 3 params in declaration order:
+    /// A, B as `GlobalMemory<F16>` (Tensor Core operands) and C as
+    /// `GlobalMemory<F32>` (accumulator/output, matching wmma's f16-in/
+    /// f32-out contract); see `ptx_emitter::PtxEmitter::emit_kernel` for the
+    /// dispatch and validation that consumes this.
+    pub tile: Option<TileAttr>,
     pub span: Span,
 }
 
@@ -474,8 +484,15 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Neg,   // -
     Not,   // !
-    Ref,   // &
-    Deref, // *
+    /// `&expr` / `&mut expr`.
+    ///
+    /// `mutable` used to not exist: the parser matched the `mut` token into a
+    /// binding named `_mutable` and dropped it, so `&mut x` and `&x` were the
+    /// same node. `cpu_emitter` then emitted `(&x)` for both and rustc
+    /// rejected the call whenever the callee wanted `&mut i32`, and
+    /// `type_checker` typed every `&mut x` as an immutable `&x`.
+    Ref { mutable: bool }, // & / &mut
+    Deref,                 // *
 }
 
 /// Generic arguments can be Types (`F16`), Values (`3`), or Named (`rows=16`)
@@ -565,3 +582,222 @@ pub struct ModuleDecl {
     pub span: Span,
 }
 
+
+// ── Whole-program queries ───────────────────────────────────
+
+/// Calls `f` on every statement in `program`: kernel, function and method
+/// bodies, nested modules, and every block a statement or an expression holds.
+///
+/// Exhaustive over `Item`, `Stmt` and `Expr` with no `_ =>` arm, so a variant
+/// added later is a compile error here rather than a place a statement can hide
+/// from every query built on this walk. Types are not walked: the expressions a
+/// type holds are compile-time sizes and generic arguments, and no statement
+/// can occur in one.
+pub fn for_each_stmt(program: &Program, f: &mut dyn FnMut(&Stmt)) {
+    for item in &program.items {
+        walk_item(item, f);
+    }
+}
+
+fn walk_item(item: &Item, f: &mut dyn FnMut(&Stmt)) {
+    match item {
+        Item::Kernel(k) => walk_block(&k.body, f),
+        Item::Func(func) => walk_block(&func.body, f),
+        Item::Impl(imp) => {
+            for method in &imp.methods {
+                walk_block(&method.body, f);
+            }
+        }
+        Item::Module(m) => {
+            for inner in &m.items {
+                walk_item(inner, f);
+            }
+        }
+        Item::Const(c) => walk_expr(&c.value, f),
+        Item::StaticAssert(s) => walk_expr(&s.condition, f),
+        Item::Struct(s) => {
+            for field in &s.fields {
+                for attr in &field.attrs {
+                    match &attr.kind {
+                        FieldAttrKind::Align(e) => walk_expr(e, f),
+                        FieldAttrKind::GpuUncached | FieldAttrKind::Atomic(_) => {}
+                    }
+                }
+            }
+        }
+        Item::Enum(_) | Item::Import(_) => {}
+    }
+}
+
+fn walk_block(block: &Block, f: &mut dyn FnMut(&Stmt)) {
+    for stmt in &block.stmts {
+        walk_stmt(stmt, f);
+    }
+}
+
+fn walk_stmt(stmt: &Stmt, f: &mut dyn FnMut(&Stmt)) {
+    f(stmt);
+    match stmt {
+        Stmt::Let { init, bounds, .. } => {
+            if let Some(e) = init {
+                walk_expr(e, f);
+            }
+            if let Some(b) = bounds {
+                walk_expr(&b.min, f);
+                walk_expr(&b.max, f);
+            }
+        }
+        Stmt::For { start, end, step, body, invariant, tile, prefetch_stride, .. } => {
+            walk_expr(start, f);
+            walk_expr(end, f);
+            if let Some(s) = step {
+                walk_expr(s, f);
+            }
+            if let Some(inv) = invariant {
+                walk_expr(inv, f);
+            }
+            if let Some(t) = tile {
+                walk_expr(&t.block_m, f);
+                walk_expr(&t.block_n, f);
+                if let Some(k) = &t.block_k {
+                    walk_expr(k, f);
+                }
+            }
+            if let Some(pf) = prefetch_stride {
+                if let Some(s) = &pf.stride {
+                    walk_expr(s, f);
+                }
+            }
+            walk_block(body, f);
+        }
+        Stmt::Assign { target, value, .. } | Stmt::CompoundAssign { target, value, .. } => {
+            walk_expr(target, f);
+            walk_expr(value, f);
+        }
+        Stmt::Expr(e) => walk_expr(e, f),
+        Stmt::Return(e, _) => {
+            if let Some(e) = e {
+                walk_expr(e, f);
+            }
+        }
+        Stmt::Chisel(block, _) | Stmt::SafeBlock(block, _) | Stmt::GhostBlock(block, _) => {
+            walk_block(block, f)
+        }
+        Stmt::If { condition, then_block, else_block, .. } => {
+            walk_expr(condition, f);
+            walk_block(then_block, f);
+            if let Some(b) = else_block {
+                walk_block(b, f);
+            }
+        }
+        Stmt::While { condition, body, invariant, .. } => {
+            walk_expr(condition, f);
+            if let Some(inv) = invariant {
+                walk_expr(inv, f);
+            }
+            walk_block(body, f);
+        }
+        Stmt::Match { scrutinee, arms, .. } => {
+            walk_expr(scrutinee, f);
+            for arm in arms {
+                match &arm.pattern {
+                    MatchPattern::Literal(e) => walk_expr(e, f),
+                    MatchPattern::Ident(..)
+                    | MatchPattern::EnumVariant { .. }
+                    | MatchPattern::Wildcard(_) => {}
+                }
+                walk_expr(&arm.body, f);
+            }
+        }
+        Stmt::ClockDomainBlock { clock, body, .. } => {
+            walk_expr(clock, f);
+            walk_block(body, f);
+        }
+        Stmt::CompileTimeAssert { condition, .. } => walk_expr(condition, f),
+        Stmt::HintBlock { body, .. } => walk_block(body, f),
+        Stmt::TypeAlias { .. } | Stmt::Break { .. } => {}
+    }
+}
+
+fn walk_expr(expr: &Expr, f: &mut dyn FnMut(&Stmt)) {
+    match expr {
+        Expr::Ident(..)
+        | Expr::IntLit(..)
+        | Expr::FloatLit(..)
+        | Expr::StringLit(..)
+        | Expr::CharLit(..)
+        | Expr::Path { .. }
+        | Expr::BoolLit(..)
+        | Expr::SelfLit(_)
+        | Expr::ZeroInit(_) => {}
+        Expr::Call { func, args, .. } | Expr::GenericCall { func, args, .. } => {
+            walk_expr(func, f);
+            for a in args {
+                walk_expr(a, f);
+            }
+        }
+        Expr::Index { base, index, .. } => {
+            walk_expr(base, f);
+            walk_expr(index, f);
+        }
+        Expr::MemberAccess { base, .. } => walk_expr(base, f),
+        Expr::BinaryOp { left, right, .. } => {
+            walk_expr(left, f);
+            walk_expr(right, f);
+        }
+        Expr::UnaryOp { operand, .. } => walk_expr(operand, f),
+        Expr::BlockExpr(block, _) => walk_block(block, f),
+        Expr::StructLit { fields, .. } => {
+            for (_, e) in fields {
+                walk_expr(e, f);
+            }
+        }
+    }
+}
+
+/// A `let` that carries `@cache_policy`: the binding, the policy, and the line
+/// of the directive.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachePolicySite {
+    pub binding: String,
+    pub policy: String,
+    pub line: usize,
+}
+
+/// Every `@cache_policy` in `program`.
+///
+/// Only the PTX backend lowers the directive: each policy is an NVIDIA L2
+/// eviction priority or a streaming load (§9.2 of the language reference). Every
+/// other backend refuses a program that carries one, through this one query, so
+/// no backend can disagree with another about WHERE a policy can occur.
+pub fn cache_policy_sites(program: &Program) -> Vec<CachePolicySite> {
+    let mut sites = Vec::new();
+    for_each_stmt(program, &mut |stmt| {
+        if let Stmt::Let { name, cache_policy: Some(cp), .. } = stmt {
+            sites.push(CachePolicySite {
+                binding: name.clone(),
+                policy: cp.policy.clone(),
+                line: cp.span.line,
+            });
+        }
+    });
+    sites
+}
+
+/// The refusal a backend other than PTX gives for a `@cache_policy` site.
+///
+/// One message for every such backend: the reason is the same everywhere (no
+/// instruction on the target sets a cache line's eviction priority), and a
+/// second copy of the wording is how two backends come to describe one refusal
+/// differently.
+pub fn cache_policy_refusal(backend: &str, site: &CachePolicySite) -> String {
+    format!(
+        "[{}] `@cache_policy({})` on `{}` (line {}) has no lowering on this target. \
+         The policies are NVIDIA L2 eviction priorities: --emit-ptx emits them as \
+         `createpolicy` + `ld.global.L2::cache_hint`, or `ld.global.cs` for L2_STREAM, and \
+         this target has no instruction that sets a cache line's eviction priority, so the \
+         load would be compiled without the policy and nothing would say so. Compile the \
+         kernel with --emit-ptx, or remove the directive from code built for this target.",
+        backend, site.policy, site.binding, site.line
+    )
+}

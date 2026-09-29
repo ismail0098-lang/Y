@@ -1,0 +1,23 @@
+// THE CONTROL for the compound-assignment desugaring.
+//
+// A `@ZeroDrift` accumulator has its OWN `Stmt::CompoundAssign` arm, which
+// converts each term into the accumulator's integer domain and adds exactly.
+// The general arm beside it desugars `x += e` into `x = x + e`.
+//
+// MEASURED: putting the general arm ABOVE the guarded one emits a
+// byte-identical kernel, because the desugared `sum = sum + v` lands on the
+// drift `Stmt::Assign` arm -- which exists because this repository had already
+// been bitten by those two spellings computing different functions. So the
+// ordering is not what protects this kernel; the earlier fix is. This fixture
+// pins that the accumulation stays an exact 64-bit integer add either way.
+kernel compound_assign_drift(Src: GlobalMemory<F32>, Dst: GlobalMemory<I64>, N: I32) {
+    let j: I32 = block_idx_x() * block_dim_x() + thread_idx_x();
+    @ZeroDrift
+    @bounds(-1024.0, 1024.0)
+    let mut sum: F32 = 0.0;
+    let v: F32 = block_ptr2d_load(Src, 0, j, N, 1, N);
+    sum += v;
+    block_ptr2d_store(Dst, 0, j, N, 1, N, sum);
+}
+
+fn main() {}

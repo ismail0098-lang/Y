@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/y-gpu"]
+
 [package]
 name = "Y-compiler"
 version = "1.0.0"
@@ -21,11 +24,58 @@ path = "src/ysu_gpu_probe.rs"
 name = "ypm"
 path = "src/ypm.rs"
 
+[[bin]]
+name = "autotune_verify"
+path = "src/bin/autotune_verify.rs"
+
 
 
 [dependencies]
 
+# Deliberately empty: the Y compiler itself has no external dependencies, and
+# the arkworks crates below are DEV-only. They exist so `cargo test` can take
+# the R1CS this compiler emits, run a real Groth16 setup/prove/verify over
+# BN254, and assert both that an honest proof verifies and that a tampered one
+# does not. Nothing in the shipping `Y` binary links them - keeping the
+# emitter's own BN254 field arithmetic the single source of truth for codegen,
+# with arkworks used only as an INDEPENDENT oracle to check it against.
+[dev-dependencies]
+ark-bn254 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-groth16 = "0.5"
+# Only for `GeneralEvaluationDomain`, which `R1CSToQAP::witness_map` needs.
+# Already in the tree as an ark-groth16 dependency; naming it here lets
+# tests/zk_gpu_groth16.rs reproduce the prover's QAP step around a GPU MSM.
+ark-poly = "0.5"
+ark-relations = "0.5"
+# Only so `zk_wire_compaction.rs` can report the PROVING KEY SIZE. Groth16
+# stores a G1 element per wire, so the key is the one part of what compaction
+# buys that is exact rather than a timing ratio. Already in the tree as an
+# ark-groth16 dependency.
+ark-serialize = "0.5"
+ark-snark = "0.5"
+ark-std = "0.5"
+revm = "42.0.1"
+# The GPU MSM/NTT/Groth16 host code lives in `crates/y-gpu` because that is the
+# crate a caller links, and arkworks is a real dependency there rather than a
+# dev-only one. `tests/common/msm.rs` used to hold a SECOND copy of it, and the
+# copy in `tests/` was the one that received every measured improvement while
+# the shipped one kept the version from before all of them - the exact defect
+# this repository exists to remove, one layer out from the emitter. The tests
+# re-export from the crate now, so there is one implementation and it is the
+# one that ships.
+#
+# This is a dev-dependency CYCLE (y-gpu depends on Y-compiler), which cargo
+# supports: the cycle is only through dev-dependencies, so the library graph is
+# still acyclic.
+y-gpu = { path = "crates/y-gpu" }
+
 [features]
 default = []
 zk = []
+# Counting global allocator, reported by `Y_ZK_TIMING=1`. Costs ~3.4 ns per
+# allocation, which on an allocation-bound path is ~14% -- so it is opt-in and
+# must not be used to quote absolute timings, only ratios.
+alloc-stats = []
 

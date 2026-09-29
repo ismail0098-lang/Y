@@ -1,0 +1,16 @@
+// Reading a `U32x4` where a single register is wanted. This is REFUSED, and
+// always was -- `Expr::Ident` consults `zero_drift` then `variables`, and a v4
+// is in neither. What was wrong is the DIAGNOSIS: it reported `a` as "the
+// undefined name", for a name declared on the line above, and the cascade
+// turned one mistake into eight error lines.
+//
+// `resolve_chisel_registers` has said the right thing at its own site since it
+// was written. This is the same guard at the other one.
+kernel v4_read_as_scalar(Src: GlobalMemory<U32>, Dst: GlobalMemory<U32>, NElem: I32) {
+    let j: I32 = block_idx_x() * block_dim_x() + thread_idx_x();
+    let a: U32x4 = block_ptr2d_load_v4(Src, 0, (j) * 4, 4 * NElem, 2, 4 * NElem);
+    let s: U32 = a;
+    block_ptr2d_store_v4(Dst, 0, (j) * 4, 4 * NElem, 2, 4 * NElem, s, s, s, s);
+}
+
+fn main() {}

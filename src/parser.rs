@@ -6,7 +6,6 @@
 //  hierarchical AST defined in ast.rs.
 // ============================================================
 
-#![allow(dead_code)]
 
 use crate::ast::*;
 use crate::lexer::{Token, TokenKind};
@@ -14,11 +13,88 @@ use crate::lexer::{Token, TokenKind};
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Suppresses struct-literal parsing, for expressions immediately followed
+    /// by a block.
+    ///
+    /// `if p0 { }` is ambiguous: `p0 { }` is a well-formed empty struct
+    /// literal, and taking it as one leaves the `if` with no block, so the
+    /// parser reported `Line 4: Expected '{' to begin block but found Return` —
+    /// pointing at the statement AFTER the `if`, which is not where the problem
+    /// is. Rust resolves this the same way, by forbidding struct literals in
+    /// condition position.
+    ///
+    /// Only the empty-body case was reachable: the other arm of the
+    /// `is_struct` test requires `ident :` after the brace, which no statement
+    /// in Y begins with. `while p0 { }` and `match p0 { }` have the same shape
+    /// and are covered here too.
+    ///
+    /// Found by `tests/zk_fuzz_differential.rs`, which reduced a 40-line
+    /// generated program to `if p0 { } return 59;`. Nothing in the ZK backend
+    /// was involved — a generative fuzzer over the surface syntax reaches the
+    /// front end as well.
+    no_struct_literal: bool,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            no_struct_literal: false,
+        }
+    }
+
+    /// Parse an expression that is immediately followed by a block, so a `{`
+    /// belongs to the block rather than to a struct literal.
+    fn parse_block_header_expr(&mut self) -> Result<Expr, String> {
+        let saved = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let r = self.parse_expr();
+        self.no_struct_literal = saved;
+        r
+    }
+
+    /// A `for` header's `start`, `end` and `step`, for the same reason.
+    ///
+    /// This site was missed when the `if`/`while`/`match` ambiguity was fixed,
+    /// and the symptom was identical: `for i in 0..n { }` swallowed the empty
+    /// body as an empty struct literal `n { }` and then reported
+    /// `Expected '{' to begin block` pointing at the token AFTER the loop.
+    /// Only `end` and `step` can actually reach a `{` - `start` is always
+    /// followed by `..` - but the flag is set across the whole header because
+    /// a struct literal is not a meaningful loop bound at any of the three.
+    fn parse_loop_bound_expr(&mut self) -> Result<Expr, String> {
+        let saved = self.no_struct_literal;
+        self.no_struct_literal = true;
+        let r = self.parse_primary_expr();
+        self.no_struct_literal = saved;
+        r
+    }
+
+    /// Parse an expression inside a bracketing construct, where a `{` is
+    /// unambiguous again. Without this, `if f(P { }) { }` would refuse the
+    /// struct literal in the argument.
+    fn parse_expr_unrestricted(&mut self) -> Result<Expr, String> {
+        let saved = self.no_struct_literal;
+        self.no_struct_literal = false;
+        let r = self.parse_expr();
+        self.no_struct_literal = saved;
+        r
+    }
+
+    /// A token as a user would name it, for diagnostics.
+    ///
+    /// `{:?}` on a `TokenKind` prints the Rust variant (`Step`, `In`, `Loop`),
+    /// which is close enough to be confusing and never the spelling the user
+    /// typed.
+    fn describe_token(kind: &TokenKind) -> String {
+        match kind {
+            TokenKind::Ident(s) => format!("the identifier `{}`", s),
+            TokenKind::IntLit(v) => format!("the number `{}`", v),
+            TokenKind::InvalidNumber(message) => message.clone(),
+            TokenKind::StringLit(s) => format!("the string \"{}\"", s),
+            other => format!("the reserved word `{}`", format!("{:?}", other).to_lowercase()),
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -73,6 +149,21 @@ impl Parser {
     // ── Entry Point ─────────────────────────────────────────
 
     pub fn parse_program(&mut self) -> Result<Program, String> {
+        // Report lexical failures even in attribute/type positions that do not
+        // pass through the expression parser. The one extra signed magnitude
+        // is deferred to unary-minus parsing, where I64::MIN is representable.
+        for (index, token) in self.tokens.iter().enumerate() {
+            if let TokenKind::InvalidNumber(message) = &token.kind {
+                let may_be_signed_min = Self::is_signed_min_magnitude(token)
+                    && index > 0
+                    && matches!(self.tokens[index - 1].kind, TokenKind::Minus);
+                if !may_be_signed_min {
+                    return Err(format!(
+                        "Line {}, column {}: {}", token.line, token.col, message
+                    ));
+                }
+            }
+        }
         let mut items = Vec::new();
 
         while !self.check(TokenKind::Eof) {
@@ -80,6 +171,11 @@ impl Parser {
         }
 
         Ok(Program { items })
+    }
+
+    fn is_signed_min_magnitude(token: &Token) -> bool {
+        matches!(token.kind, TokenKind::InvalidNumber(_))
+            && token.lexeme.trim_start_matches('0') == "9223372036854775808"
     }
 
     fn parse_item(&mut self) -> Result<Item, String> {
@@ -132,9 +228,46 @@ impl Parser {
             });
         }
 
+        // `@tile(M, N, K)` may also precede `kernel` (kernel-scoped meaning:
+        // see `KernelDecl::tile`'s doc comment), distinct from the existing
+        // `@tile` recognized further below as a `fn`-attribute. Since both
+        // share the same token, speculatively parse it here and only keep it
+        // if `kernel` actually follows; otherwise rewind so the unchanged
+        // fn-attribute path below parses it exactly as it did before.
+        let mut kernel_tile = None;
+        if self.check(TokenKind::AtTile) {
+            let save_pos = self.pos;
+            self.advance(); // consume '@tile'
+            let parsed_tile = self.parse_tile_attr()?;
+            if self.check(TokenKind::Kernel) {
+                kernel_tile = Some(parsed_tile);
+            } else {
+                self.pos = save_pos;
+            }
+        }
+
         if self.match_token(TokenKind::Kernel) {
-            let kernel = self.parse_kernel(requires)?;
+            let kernel = self.parse_kernel(requires, kernel_tile)?;
             Ok(Item::Kernel(kernel))
+        } else if !requires.is_empty() {
+            // `requires` is threaded into `parse_kernel` and NOWHERE ELSE:
+            // `KernelDecl` is the only AST node with a field for it. So on any
+            // other item the attribute parsed and was **dropped on the floor**
+            // - measured on a `fn` (which is the form §9.1's own example uses)
+            // and on an `impl` (the form `self_hosted/lib.ysu` used three
+            // times): clean compile, exit 0, requirement never recorded, let
+            // alone checked.
+            //
+            // Refused rather than silently discarded. Storing and enforcing it
+            // on functions is a real feature - `FuncDecl` needs the field and
+            // `parse_func_decl` already takes seven attribute parameters - and
+            // is recorded as the next slice rather than half-done here. A
+            // named gap costs a user five minutes; a dropped hardware
+            // requirement costs them a machine that cannot run the binary.
+            let line = requires[0].span.line;
+            Err(format!(
+                "Line {line}: `@require(...)` is only supported on a `kernel`. Here it precedes an item that has nowhere to store it, so it would be discarded silently.\n  hint: move the requirement onto the `kernel` it constrains, or delete it.\n  note: this previously parsed and was dropped - the condition was never checked on any item, and on a `kernel` it is checked now."
+            ))
         } else if self.match_token(TokenKind::Struct) {
             let s = self.parse_struct_decl()?;
             Ok(Item::Struct(s))
@@ -673,7 +806,32 @@ impl Parser {
 
     // ── Kernel ──────────────────────────────────────────────
 
-    fn parse_kernel(&mut self, requires: Vec<RequireAttr>) -> Result<KernelDecl, String> {
+    /// Parses `(M, N[, K])` after an already-consumed `@tile` token. Shared
+    /// by the kernel-scoped call site above and can be reused wherever else
+    /// `@tile(...)`'s argument list needs parsing.
+    fn parse_tile_attr(&mut self) -> Result<TileAttr, String> {
+        let start_tok = self.peek().clone();
+        self.expect(TokenKind::LParen, "'(' after @tile")?;
+        let block_m = Box::new(self.parse_expr()?);
+        self.expect(TokenKind::Comma, "',' in @tile")?;
+        let block_n = Box::new(self.parse_expr()?);
+        let mut block_k = None;
+        if self.match_token(TokenKind::Comma) {
+            block_k = Some(Box::new(self.parse_expr()?));
+        }
+        self.expect(TokenKind::RParen, "')' after @tile")?;
+        Ok(TileAttr {
+            block_m,
+            block_n,
+            block_k,
+            span: Span {
+                line: start_tok.line,
+                col: start_tok.col,
+            },
+        })
+    }
+
+    fn parse_kernel(&mut self, requires: Vec<RequireAttr>, tile: Option<TileAttr>) -> Result<KernelDecl, String> {
         let name_tok = self.peek().clone();
         let name = match &name_tok.kind {
             TokenKind::Ident(s) => {
@@ -746,6 +904,7 @@ impl Parser {
             name,
             params,
             body,
+            tile,
             span,
         })
     }
@@ -782,7 +941,9 @@ impl Parser {
         let mut invariant = None;
         let mut is_uniform_branch = false;
         let mut tile = None;
-        let mut prefetch_stride = None;
+        // Always `None`: `@prefetch_stride` is refused in the attribute loop
+        // below. The AST keeps the field, so this is what fills it.
+        let prefetch_stride: Option<PrefetchStrideAttr> = None;
         let mut max_iterations = None;
 
         loop {
@@ -891,22 +1052,23 @@ impl Parser {
                         col: start_tok.col,
                     },
                 });
-            } else if self.match_token(TokenKind::AtPrefetchStride) {
-                let ps_tok = self.peek().clone();
-                let mut stride_val = None;
-                if self.match_token(TokenKind::LParen) {
-                    if !self.check(TokenKind::RParen) {
-                        stride_val = Some(Box::new(self.parse_expr()?));
-                    }
-                    self.expect(TokenKind::RParen, "')' after @prefetch_stride")?;
-                }
-                prefetch_stride = Some(PrefetchStrideAttr {
-                    stride: stride_val,
-                    span: Span {
-                        line: ps_tok.line,
-                        col: ps_tok.col,
-                    },
-                });
+            } else if self.check(TokenKind::AtPrefetchStride) {
+                // No backend lowers `@prefetch_stride`, so it is refused here,
+                // the one place that sees every statement it can precede. It
+                // used to be stored on a `for` and DROPPED before anything
+                // else - which is how the language reference's own examples
+                // wrote it, above a `let`. On a `for`, its one reader was the
+                // LLVM backend, which wrote it into the module as a COMMENT
+                // ("solver-guided cache warming") and emitted no prefetch; the
+                // PTX backend never read it. A reader is not proof the reader
+                // does anything.
+                return Err(format!(
+                    "Line {}: `@prefetch_stride` is not implemented. No backend emits a prefetch \
+                     for it: it used to parse and change nothing - dropped outright unless it \
+                     preceded a `for` - so the program compiled as if it were absent.\n  \
+                     hint: remove the attribute.",
+                    self.peek().line
+                ));
             } else if self.match_token(TokenKind::AtMaxIterations) {
                 self.expect(TokenKind::LParen, "'(' after @max_iterations")?;
                 let n_expr = self.parse_expr()?;
@@ -924,6 +1086,20 @@ impl Parser {
             }
         }
 
+        // `@cache_policy` is stored on a `let` and nowhere else, so on any
+        // other statement it was parsed and dropped: the language reference's
+        // own `@cache_policy(L2_STREAM) C[i] = a + b;` compiled clean with the
+        // directive gone. No store honours a cache policy.
+        if let Some(cp) = &cache_policy {
+            if !self.check(TokenKind::Let) {
+                return Err(format!(
+                    "Line {}: `@cache_policy({})` applies to a `let` that loads (`let v: F32 = A[i];`); \
+                     on this statement it would be silently ignored - no store honours a cache policy.",
+                    cp.span.line, cp.policy
+                ));
+            }
+        }
+
         if self.match_token(TokenKind::Let) {
             let _mutable = self.match_token(TokenKind::Mut);
             let ident_tok = self.peek().clone();
@@ -932,10 +1108,22 @@ impl Parser {
                     self.advance();
                     s.clone()
                 }
-                _ => {
+                // Naming the collision is the whole value of this arm. `step`
+                // is a reserved word (the `for i in a..b step N` syntax), so
+                // `let step: I64 = ...;` reported "Expected identifier after
+                // let" and nothing else - a message that points at `let` and
+                // says nothing about which word is the problem. Y's own
+                // self-hosted type checker used `step` as a variable and had
+                // been unparseable ever since. Same shape as the generated
+                // BN254 temporaries colliding with `U16`, recorded in
+                // CLAUDE.md, and found the same way: by a name that reads as
+                // perfectly ordinary.
+                other => {
                     return Err(format!(
-                        "Line {}: Expected identifier after let",
-                        ident_tok.line
+                        "Line {}: expected a variable name after `let`, found {}. \
+                         Reserved words cannot be used as variable names; rename it.",
+                        ident_tok.line,
+                        Self::describe_token(other)
                     ))
                 }
             };
@@ -993,13 +1181,13 @@ impl Parser {
             };
             self.expect(TokenKind::In, "'in'")?;
 
-            let start = self.parse_primary_expr()?;
+            let start = self.parse_loop_bound_expr()?;
             self.expect(TokenKind::DotDot, "'..'")?;
-            let end = self.parse_primary_expr()?;
+            let end = self.parse_loop_bound_expr()?;
 
             let mut step = None;
             if self.match_token(TokenKind::Step) {
-                step = Some(self.parse_primary_expr()?);
+                step = Some(self.parse_loop_bound_expr()?);
             }
 
             let body = self.parse_block()?;
@@ -1066,7 +1254,7 @@ impl Parser {
             let body = self.parse_block()?;
             Ok(Stmt::ClockDomainBlock { clock, body, span })
         } else if self.match_token(TokenKind::If) {
-            let condition = Box::new(self.parse_expr()?);
+            let condition = Box::new(self.parse_block_header_expr()?);
             let then_block = self.parse_block()?;
             let else_block = if self.match_token(TokenKind::Else) {
                 if self.check(TokenKind::If) {
@@ -1091,7 +1279,7 @@ impl Parser {
                 span,
             })
         } else if self.match_token(TokenKind::While) {
-            let condition = Box::new(self.parse_expr()?);
+            let condition = Box::new(self.parse_block_header_expr()?);
             let body = self.parse_block()?;
             Ok(Stmt::While {
                 condition,
@@ -1102,7 +1290,7 @@ impl Parser {
                 span,
             })
         } else if self.match_token(TokenKind::Match) {
-            let scrutinee = Box::new(self.parse_expr()?);
+            let scrutinee = Box::new(self.parse_block_header_expr()?);
             self.expect(TokenKind::LBrace, "'{' to begin match body")?;
             let mut arms = Vec::new();
             while !self.check(TokenKind::RBrace) && !self.check(TokenKind::Eof) {
@@ -1635,7 +1823,7 @@ impl Parser {
             // Function call
             let mut args = Vec::new();
             while !self.check(TokenKind::RParen) {
-                args.push(self.parse_expr()?);
+                args.push(self.parse_expr_unrestricted()?);
                 if !self.match_token(TokenKind::Comma) {
                     break;
                 }
@@ -1769,6 +1957,10 @@ impl Parser {
 
         // Unary minus: -expr
         if self.match_token(TokenKind::Minus) {
+            if Self::is_signed_min_magnitude(self.peek()) {
+                self.advance();
+                return Ok(Expr::IntLit(i64::MIN, span));
+            }
             let operand = self.parse_expr_bp(19)?; // higher than any binary op
             return Ok(Expr::UnaryOp {
                 op: UnaryOp::Neg,
@@ -1802,10 +1994,10 @@ impl Parser {
 
         // Address-of: &expr or &mut expr
         if self.match_token(TokenKind::Ampersand) {
-            let _mutable = self.match_token(TokenKind::Mut);
+            let mutable = self.match_token(TokenKind::Mut);
             let operand = self.parse_expr_bp(19)?;
             return Ok(Expr::UnaryOp {
-                op: UnaryOp::Ref,
+                op: UnaryOp::Ref { mutable },
                 operand: Box::new(operand),
                 span,
             });
@@ -1813,7 +2005,9 @@ impl Parser {
 
         // Parenthesized expression: (expr)
         if self.match_token(TokenKind::LParen) {
-            let inner = self.parse_expr()?;
+            // Inside brackets a `{` cannot be a block header, so struct
+            // literals are unambiguous again.
+            let inner = self.parse_expr_unrestricted()?;
             self.expect(TokenKind::RParen, "')' to close parenthesized expression")?;
             return Ok(inner);
         }
@@ -1830,6 +2024,9 @@ impl Parser {
 
         match &tok.kind {
             // Literals
+            TokenKind::InvalidNumber(message) => Err(format!(
+                "Line {}, column {}: {}", tok.line, tok.col, message
+            )),
             TokenKind::IntLit(v) => {
                 self.advance();
                 Ok(Expr::IntLit(*v, span))
@@ -1890,9 +2087,10 @@ impl Parser {
                             .map(|t| &t.kind)
                             .unwrap_or(&TokenKind::Eof);
 
-                        let is_struct = matches!(look1, TokenKind::RBrace)
-                            || (matches!(look1, TokenKind::Ident(_))
-                                && matches!(look2, TokenKind::Colon));
+                        let is_struct = !self.no_struct_literal
+                            && (matches!(look1, TokenKind::RBrace)
+                                || (matches!(look1, TokenKind::Ident(_))
+                                    && matches!(look2, TokenKind::Colon)));
 
                         if is_struct {
                             self.advance(); // consume '{'
@@ -2217,10 +2415,94 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_kernel_level_tile_directive() {
+        let src = "
+            @tile(4096, 4096, 4096)
+            kernel gemm(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+                let x: I32 = 0;
+            }
+        ";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        assert_eq!(prog.items.len(), 1);
+        match &prog.items[0] {
+            Item::Kernel(k) => {
+                assert_eq!(k.name, "gemm");
+                assert_eq!(k.params.len(), 3);
+                let t = k.tile.as_ref().expect("expected kernel-level @tile to be captured");
+                assert!(matches!(*t.block_m, Expr::IntLit(4096, _)));
+                assert!(matches!(*t.block_n, Expr::IntLit(4096, _)));
+                assert!(matches!(t.block_k.as_deref(), Some(Expr::IntLit(4096, _))));
+            }
+            _ => panic!("Expected Kernel item"),
+        }
+    }
+
+    #[test]
+    fn test_parse_kernel_without_tile_leaves_tile_none() {
+        let src = "kernel plain(A: GlobalMemory<F32>) { let x: I32 = 0; }";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        match &prog.items[0] {
+            Item::Kernel(k) => assert!(k.tile.is_none()),
+            _ => panic!("Expected Kernel item"),
+        }
+    }
+
+    #[test]
+    fn test_parse_fn_level_tile_directive_still_works() {
+        // Regression guard: kernel-level @tile speculative parse+rewind must
+        // not disturb the pre-existing fn-level @tile path (tests/tile_test.ysu).
+        let src = "
+            @tile(16, 16)
+            fn tiled_matmul() {
+                let mut sum: F32 = 0.0;
+            }
+        ";
+        let res = parse(src);
+        assert!(res.is_ok(), "Failed to parse: {:?}", res.err());
+        let prog = res.unwrap();
+        match &prog.items[0] {
+            Item::Func(f) => {
+                assert!(f.tile.is_some());
+            }
+            _ => panic!("Expected Func item"),
+        }
+    }
+
+    /// `@prefetch_stride` is refused before ANY statement. Refusing it only on
+    /// a `for` would leave the form the language reference used - above a
+    /// `let` - where the parser used to drop it without a word.
+    #[test]
+    fn prefetch_stride_is_refused_wherever_it_is_written() {
+        for stmt in [
+            "for i in 0..10 { let mut d = 0; }",
+            "let x: I32 = 1;",
+            "x = 2;",
+        ] {
+            let src = format!(
+                "fn f() {{\n    let mut x: I32 = 0;\n    @prefetch_stride(64)\n    {stmt}\n}}\n"
+            );
+            let err = parse(&src).expect_err(&format!("`@prefetch_stride` accepted before `{stmt}`"));
+            assert!(
+                err.contains("`@prefetch_stride` is not implemented") && err.contains("Line 3"),
+                "the refusal before `{stmt}` must name the directive and its line, got: {err}"
+            );
+        }
+        // Control: the same statements parse without it.
+        assert!(parse("fn f() {\n    let mut x: I32 = 0;\n    x = 2;\n}\n").is_ok());
+    }
+
+    #[test]
     fn test_parse_experimental_features() {
+        // `@prefetch_stride` used to be the first statement here, with an
+        // assertion that it parsed and was stored on the loop - which pinned a
+        // directive no backend lowered as a working feature. It is refused now:
+        // see `prefetch_stride_is_refused_wherever_it_is_written`.
         let src = "
             fn test_loop() {
-                @prefetch_stride(8)
                 for i in 0..10 {
                     let mut data = 0;
                 }
@@ -2238,11 +2520,8 @@ mod tests {
         assert_eq!(prog.items.len(), 1);
         if let Item::Func(f) = &prog.items[0] {
             assert_eq!(f.body.stmts.len(), 3);
-            
-            // Check prefetch_stride on For loop
-            if let Stmt::For { prefetch_stride, .. } = &f.body.stmts[0] {
-                assert!(prefetch_stride.is_some());
-                assert!(prefetch_stride.as_ref().unwrap().stride.is_some());
+
+            if let Stmt::For { .. } = &f.body.stmts[0] {
             } else {
                 panic!("Expected For loop stmt");
             }

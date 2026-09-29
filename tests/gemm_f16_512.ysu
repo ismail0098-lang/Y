@@ -1,0 +1,8 @@
+// Auto-generated tile-adaptive Tensor Core GEMM test at M=N=K=512,
+// matching tests/benchmark_y_vs_cudnn_cublas.py Suite 1's size table.
+@tile(512, 512, 512)
+kernel gemm_f16_512(A: GlobalMemory<F16>, B: GlobalMemory<F16>, C: GlobalMemory<F32>) {
+}
+
+fn main() {
+}

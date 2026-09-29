@@ -1,0 +1,11 @@
+// Fused Rotary Position Embedding (RoPE): rotates each token's head_dim=128
+// query/key vector by a position-dependent angle, computed entirely
+// on-device (no precomputed cos/sin table input) - see ptx_emitter's
+// rope_operands / emit_rope_kernel for the exact (interleaved-pairs)
+// convention. One warp per row. No @tile: row count is a pure runtime
+// grid dimension for this kernel.
+kernel rope_128(X: GlobalMemory<F16>, Positions: GlobalMemory<I32>, Out: GlobalMemory<F16>) {
+}
+
+fn main() {
+}

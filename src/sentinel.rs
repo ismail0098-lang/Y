@@ -48,6 +48,146 @@ fn probe_cpu_features(out_buffer: &mut [u32; 4]) {
     }
 }
 
+/// Can THIS machine execute `vpdpwssd`?
+///
+/// Gates the exact `vpdpwssd` GEMM substitution. It is a question about the
+/// running machine and deliberately NOT part of `VnniExact::license`: that
+/// licence is a statement about operand magnitudes and int32 overflow, it is
+/// exhausted over the whole int16 domain by
+/// `tests/exact_gemm_licence_obligations.rs`, and the emitted certificate
+/// instantiates it. Making it depend on the host would make the certificate
+/// depend on the host, which is the one thing it must not do.
+///
+/// **`is_x86_feature_detected!` rather than raw CPUID, and that is not a
+/// convenience.** A CPU can report an AVX-512 feature in CPUID while the OS has
+/// not enabled the register state in `XCR0` - under a hypervisor that masks it,
+/// or a kernel booted with the state off - and then the instruction faults
+/// exactly as if the silicon lacked it. The std macro does the `XGETBV` check;
+/// `probe_cpu_features` reads leaf 7 directly and does not. See
+/// `host_has_avx512` for the same gap left standing.
+///
+/// `Y_NO_AVX512_VNNI=1` forces this to `false`. There is deliberately no
+/// override in the other direction: an escape hatch that let a caller CLAIM
+/// hardware would let it produce a binary that faults, so this one can only
+/// make the compiler more conservative.
+pub fn host_has_avx512_vnni() -> bool {
+    if std::env::var("Y_NO_AVX512_VNNI").is_ok_and(|v| v != "0") {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx512vnni")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether the host can execute AVX-512. **This is the authority.**
+///
+/// Every answer to "does this machine have AVX-512" comes from here:
+/// `HardwareProfile::has_avx512` on both the fresh and the cached path,
+/// `CpuHardwareProfile::supports_avx512_masking`, and the guard on the
+/// `vpaddd zmm` throughput probe. There used to be three readings and the
+/// wrong one fed the emitter - see [`host_has_avx`] for why the reading
+/// matters, and `tests/avx512_probes_agree.rs` for the gate that keeps them
+/// down to one.
+///
+/// There is deliberately no override in either direction. `--portable` lowers
+/// `HardwareProfile` after the probe returns, which is the right layer for a
+/// user preference; this function answers a question about the silicon and the
+/// OS, and nothing should be able to talk it into a different answer.
+pub fn host_has_avx512() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx512f")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether the host can execute AVX/AVX2, checked the way [`host_has_avx512`]
+/// is.
+///
+/// **The reading is the whole point, and raw CPUID is the wrong one.** A CPU
+/// reports a vector feature in CPUID whether or not the OS has enabled the
+/// register state in `XCR0`; a hypervisor masking the state, or a kernel
+/// booted without it, leaves the CPUID bit set while the instruction faults
+/// exactly as if the silicon lacked it. `is_x86_feature_detected!` performs
+/// the `XGETBV` check, `__cpuid` cannot. Verified rather than assumed: the
+/// std macro's detection path compiles to code containing `xgetbv` and a raw
+/// leaf-7 read does not.
+///
+/// `has_avx` had the identical defect as `has_avx512` and is fixed with it -
+/// it selects the `haswell` / `+avx2` fallback in
+/// `llvm_emitter::host_cpu_attrs`, so a wrong-high answer there is the same
+/// illegal instruction one feature level down. Fixing one and not the other
+/// would be `feedback-guards-consulted-at-one-site`.
+pub fn host_has_avx() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("avx")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// LLVM `target-cpu` name for the host microarchitecture, or `None` when it is
+/// not one we can name confidently.
+///
+/// Only AVX-512-capable parts are distinguished, because that is the only place
+/// the choice currently changes anything: naming an AMD Zen part instead of
+/// `skylake-avx512` gets the right port model and unlocks `avx512_bf16` /
+/// `avx512vnni`, which Skylake-X does not have.
+///
+/// Returning `None` rather than guessing matters — an unknown CPU named as a
+/// specific one would have LLVM schedule for the wrong machine, and on a part
+/// that lacked an assumed feature it would emit instructions that fault.
+pub fn host_x86_uarch() -> Option<String> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::__cpuid;
+
+        // Vendor string from CPUID leaf 0, as EBX:EDX:ECX.
+        let v = __cpuid(0);
+        let mut vendor = [0u8; 12];
+        vendor[0..4].copy_from_slice(&v.ebx.to_le_bytes());
+        vendor[4..8].copy_from_slice(&v.edx.to_le_bytes());
+        vendor[8..12].copy_from_slice(&v.ecx.to_le_bytes());
+        if &vendor != b"AuthenticAMD" {
+            return None;
+        }
+
+        // Family = base + extended, per AMD's encoding.
+        let f = __cpuid(1);
+        let base_family = (f.eax >> 8) & 0xF;
+        let ext_family = (f.eax >> 20) & 0xFF;
+        let family = if base_family == 0xF {
+            base_family + ext_family
+        } else {
+            base_family
+        };
+
+        // Zen 4 is family 0x19, Zen 5 family 0x1A; both have full AVX-512.
+        // Anything newer is named as the newest we know rather than guessed at.
+        match family {
+            0x19 => Some("znver4".to_string()),
+            f if f >= 0x1A => Some("znver5".to_string()),
+            _ => None,
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        None
+    }
+}
+
 fn measure_cache_latency(size_bytes: usize) -> u64 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -147,6 +287,20 @@ fn measure_avx2_throughput(has_avx2: bool) -> f64 {
     }
 }
 
+/// Times a `vpaddd zmm` chain. `has_avx512` MUST come from
+/// [`host_has_avx512`], not from a raw CPUID bit.
+///
+/// This is the one place in the compiler that EXECUTES an AVX-512 instruction,
+/// so guarding it on "the silicon reports the feature" rather than "the
+/// instruction will execute" made the hardware prober fault on exactly the
+/// machines it exists to characterise - a SIGILL inside the probe, rather than
+/// a wrong answer out of it.
+///
+/// Its result is stored in `.ysu_hw_profile` as `AVX512_THROUGHPUT`, printed,
+/// and read by nothing: there is no consumer of
+/// `HardwareProfile::avx512_throughput_cycles` anywhere in `src/`. Left in
+/// place because the profile format is what it is; recorded here so nobody
+/// re-derives a cost model from it believing it was ever consulted.
 fn measure_avx512_throughput(has_avx512: bool) -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
@@ -311,6 +465,10 @@ pub struct HardwareProfile {
     pub warp_size: u32,
     pub max_threads_per_sm: u32,
     pub max_warps_per_sm: u32,
+    // Max shared memory available per SM, in bytes (e.g. 102400 = 100KB on sm_89 Ada).
+    // Distinct from the classic 48KB (49152B) static/default-opt-in per-block limit
+    // that predates Volta's per-SM opt-in shared memory carveout.
+    pub max_smem_per_sm_bytes: u32,
     pub total_global_mem_mb: u64,
 
     // e.g. "Q32.32", "FP64"
@@ -403,11 +561,22 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let profile_path = ".ysu_hw_profile";
 
     if Path::new(profile_path).exists() {
-        println!(
-            "[*] Found existing {}, skipping Sentinel Probe.",
-            profile_path
-        );
         let contents = fs::read_to_string(profile_path).unwrap_or_default();
+        // Name the CARD, not just the file. The profile fixes the `.target` of
+        // every kernel emitted from here, and a `.target` above the device that
+        // is actually installed is a hard load failure, not a slowdown - so a
+        // stale profile from a previous card is invisible until a kernel
+        // refuses to launch. This line is what makes it visible; nothing here
+        // queries the driver, because that would cost every CPU-only compile.
+        // If it names a card you are not on, delete the file.
+        println!(
+            "[*] Found existing {}, skipping Sentinel Probe (assuming {} / {}).",
+            profile_path,
+            parse_profile_value(&contents, "GPU_NAME").unwrap_or("unknown GPU"),
+            parse_profile_value(&contents, "SM_VERSION")
+                .map(|v| if v.starts_with("sm_") { v.to_string() } else { format!("sm_{}", v.replace('.', "")) })
+                .unwrap_or_else(|| "unknown arch".to_string()),
+        );
 
         // Parse drift free types list (comma separated)
         let drift_types_str = parse_profile_value(&contents, "DRIFT_FREE_TYPES").unwrap_or("");
@@ -417,9 +586,34 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             .filter(|s| !s.is_empty())
             .collect();
 
+        // CPU FEATURES ARE RE-PROBED, NOT LOADED. The reasoning above - that
+        // nothing here queries the device, because that would cost every
+        // CPU-only compile - is right about the GPU, where validating the
+        // profile costs `cuInit`. It does not transfer to CPUID, which is one
+        // instruction and no syscall. Left cached, `AVX512=true` in a profile
+        // copied from another machine reached `attributes #0` unchallenged and
+        // put AVX-512 into every function of the module; measured, the file
+        // alone decided between `target-cpu=znver5 +avx512f...` and
+        // `target-cpu=haswell +avx2`.
+        //
+        // A disagreement is REPORTED rather than silently corrected, on the
+        // same principle as naming the assumed card above: a stale profile
+        // should be visible.
+        let cached_avx = parse_bool_field(&contents, "AVX").unwrap_or(false);
+        let cached_avx512 = parse_bool_field(&contents, "AVX512").unwrap_or(false);
+        let live_avx = host_has_avx();
+        let live_avx512 = host_has_avx512();
+        if cached_avx != live_avx || cached_avx512 != live_avx512 {
+            println!(
+                "    -> NOTE: {} says AVX={} AVX512={}, this machine reports AVX={} AVX512={}. \
+                 Using the machine. Delete the file to re-probe.",
+                profile_path, cached_avx, cached_avx512, live_avx, live_avx512
+            );
+        }
+
         let profile = HardwareProfile {
-            has_avx: parse_bool_field(&contents, "AVX").unwrap_or(false),
-            has_avx512: parse_bool_field(&contents, "AVX512").unwrap_or(false),
+            has_avx: live_avx,
+            has_avx512: live_avx512,
             l2_line_size: parse_u32_field(&contents, "L2_LINE").unwrap_or(64),
             l1_latency_cycles: parse_u64_field(&contents, "L1_CYCLES").unwrap_or(4),
             l2_latency_cycles: parse_u64_field(&contents, "L2_CYCLES").unwrap_or(12),
@@ -491,6 +685,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             warp_size: parse_u32_field(&contents, "WARP_SIZE").unwrap_or(32),
             max_threads_per_sm: parse_u32_field(&contents, "MAX_THREADS_PER_SM").unwrap_or(1536),
             max_warps_per_sm: parse_u32_field(&contents, "MAX_WARPS_PER_SM").unwrap_or(48),
+            max_smem_per_sm_bytes: parse_u32_field(&contents, "MAX_SMEM_PER_SM_BYTES").unwrap_or(49152),
             total_global_mem_mb: parse_u64_field(&contents, "TOTAL_GLOBAL_MEM_MB").unwrap_or(0),
             drift_free_types,
             zero_drift_penalty_cycles: parse_u64_field(&contents, "ZERO_DRIFT_PENALTY")
@@ -541,6 +736,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         println!("    -> Loaded GPU Name: {}", profile.gpu_name);
         println!("    -> Loaded GPU Vendor: {}", profile.gpu_vendor);
         println!("    -> Loaded SM Version / Compute Capability: {} / {}", profile.sm_version, profile.compute_capability);
+        println!("    -> Loaded SM (Multiprocessor) Count: {}", profile.sm_count);
         println!(
             "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
             profile.fma_latency_cycles,
@@ -600,10 +796,11 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             profile.ldc_latency_cycles
         );
         println!(
-            "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}MB VRAM",
+            "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}KB smem/SM, {}MB VRAM",
             profile.max_regs_per_thread,
             profile.max_regs_per_sm,
             profile.warp_size,
+            profile.max_smem_per_sm_bytes / 1024,
             profile.total_global_mem_mb
         );
         println!("    -> Zero Drift Types: {:?}", profile.drift_free_types);
@@ -616,8 +813,18 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let mut features = [0u32; 4];
 
     probe_cpu_features(&mut features);
-    let has_avx = (features[0] & (1 << 28)) != 0;
-    let has_avx512 = (features[2] & (1 << 16)) != 0;
+    // The FEATURE bits come from `host_has_avx`/`host_has_avx512`, not from
+    // `features`. Leaf 1 ECX[28] and leaf 7 EBX[16] answer "is the silicon
+    // capable", and the question the emitter is really asking is "will this
+    // instruction execute", which additionally needs the OS to have enabled
+    // the register state in XCR0. `probe_cpu_features` still supplies the L2
+    // line size, which is not gated on any OS state.
+    //
+    // The old leaf 1 ECX[28] reading was wrong a second way: it is the AVX
+    // bit, and `llvm_emitter::host_cpu_attrs` turns it into `target-cpu=haswell`
+    // with `+avx2`. A Sandy Bridge has AVX and not AVX2.
+    let has_avx = host_has_avx();
+    let has_avx512 = host_has_avx512();
     let l2_line_size = features[3] & 0xFF;
 
     println!("      -> CPU Features: AVX={}, AVX-512={}, L2 Cache Line Size={}", has_avx, has_avx512, l2_line_size);
@@ -659,6 +866,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let mut gpu_vendor = "Unknown".to_string();
     let mut sm_version = "0.0".to_string();
     let mut compute_capability = "0.0".to_string();
+    let mut sm_count = 108u32;
     let mut fma_latency_cycles = 4.0;
     let mut imad_latency_cycles = 4.0;
     let mut thermal_latency_40c = 4.0;
@@ -699,6 +907,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     let mut warp_size = 32u32;
     let mut max_threads_per_sm = 1536u32;
     let mut max_warps_per_sm = 48u32;
+    let mut max_smem_per_sm_bytes = 49152u32;
     let mut total_global_mem_mb = 0u64;
 
     let mut drift_free_types = Vec::new();
@@ -723,6 +932,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             compute_capability = parse_profile_value(&stdout, "COMPUTE_CAPABILITY")
                 .unwrap_or("0.0")
                 .to_string();
+            sm_count = parse_u32_field(&stdout, "SM_COUNT").unwrap_or(108);
             zero_drift_penalty_cycles = parse_u64_field(&stdout, "ZERO_DRIFT_PENALTY").unwrap_or(0);
 
             fma_latency_cycles = parse_f64_field(&stdout, "FMA_LATENCY_CYCLES").unwrap_or(4.0);
@@ -783,6 +993,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             warp_size = parse_u32_field(&stdout, "WARP_SIZE").unwrap_or(32);
             max_threads_per_sm = parse_u32_field(&stdout, "MAX_THREADS_PER_SM").unwrap_or(1536);
             max_warps_per_sm = parse_u32_field(&stdout, "MAX_WARPS_PER_SM").unwrap_or(48);
+            max_smem_per_sm_bytes = parse_u32_field(&stdout, "MAX_SMEM_PER_SM_BYTES").unwrap_or(49152);
             total_global_mem_mb = parse_u64_field(&stdout, "TOTAL_GLOBAL_MEM_MB").unwrap_or(0);
 
             let drift_types_str = parse_profile_value(&stdout, "DRIFT_FREE_TYPES").unwrap_or("");
@@ -813,7 +1024,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         gpu_vendor,
         sm_version,
         compute_capability,
-        sm_count: 108,
+        sm_count,
         fma_latency_cycles,
         imad_latency_cycles,
         thermal_latency_40c,
@@ -854,6 +1065,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         warp_size,
         max_threads_per_sm,
         max_warps_per_sm,
+        max_smem_per_sm_bytes,
         total_global_mem_mb,
         drift_free_types,
         zero_drift_penalty_cycles,
@@ -898,6 +1110,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     println!("    -> CPU AVX-512 Instruction Throughput: {:.2} cycles per op", profile.avx512_throughput_cycles);
     println!("    -> CPU Thread Scheduling/Context Switch Handoff Cost: {} cycles", profile.thread_scheduling_cost_cycles);
     println!("    -> Detected GPU: {}", profile.gpu_name);
+    println!("    -> Detected SM (Multiprocessor) Count: {}", profile.sm_count);
     println!(
         "    -> GPU FMA/IMAD/MUFU Latencies: {} / {} / {}",
         profile.fma_latency_cycles, profile.imad_latency_cycles, profile.mufu_rcp_latency_cycles
@@ -957,10 +1170,11 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         profile.ldc_latency_cycles
     );
     println!(
-        "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}MB VRAM",
+        "    -> HW Limits: {} regs/thread, {} regs/SM, warp={}, {}KB smem/SM, {}MB VRAM",
         profile.max_regs_per_thread,
         profile.max_regs_per_sm,
         profile.warp_size,
+        profile.max_smem_per_sm_bytes / 1024,
         profile.total_global_mem_mb
     );
     println!(
@@ -971,7 +1185,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
     println!("[*] Saving hardware topology to {}...", profile_path);
     let serialized = format!(
         "AVX={}\nAVX512={}\nL2_LINE={}\nL1_CYCLES={}\nL2_CYCLES={}\nL3_CYCLES={}\nMEM_CYCLES={}\nAVX512_THROUGHPUT={}\nTHREAD_SCHEDULING_COST={}\nGPU_NAME={}\n\
-         GPU_VENDOR={}\nSM_VERSION={}\nCOMPUTE_CAPABILITY={}\n\
+         GPU_VENDOR={}\nSM_VERSION={}\nCOMPUTE_CAPABILITY={}\nSM_COUNT={}\n\
          FMA_LATENCY={}\nIMAD_LATENCY={}\nTHERMAL_LATENCY_40C={}\n\
          THERMAL_LATENCY_60C={}\nTHERMAL_LATENCY_80C={}\n\
          MUFU_RCP_LATENCY={}\nDFMA_LATENCY={}\nSMEM_LATENCY={}\n\
@@ -985,7 +1199,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
          HFMA2_LATENCY={}\nBF16X2_FMA_LATENCY={}\nLOP3_LUT_LATENCY={}\n\
          DADD_LATENCY={}\nREDUX_SUM_LATENCY={}\nMEMBAR_GPU_LATENCY={}\nLDC_LATENCY={}\n\
          MAX_REGS_PER_THREAD={}\nMAX_REGS_PER_SM={}\nWARP_SIZE={}\n\
-         MAX_THREADS_PER_SM={}\nMAX_WARPS_PER_SM={}\nTOTAL_GLOBAL_MEM_MB={}\n\
+         MAX_THREADS_PER_SM={}\nMAX_WARPS_PER_SM={}\nMAX_SMEM_PER_SM_BYTES={}\nTOTAL_GLOBAL_MEM_MB={}\n\
          DRIFT_FREE_TYPES={}\nZERO_DRIFT_PENALTY={}\n\
          SMEM_NOCONFLICT_CYCLES={}\nSMEM_2WAY_CONFLICT_CYCLES={}\n\
          SMEM_4WAY_CONFLICT_CYCLES={}\nSMEM_BROADCAST_CYCLES={}\n\
@@ -1005,7 +1219,7 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         profile.has_avx, profile.has_avx512, profile.l2_line_size, profile.l1_latency_cycles,
         profile.l2_latency_cycles, profile.l3_latency_cycles, profile.mem_latency_cycles,
         profile.avx512_throughput_cycles, profile.thread_scheduling_cost_cycles,
-        profile.gpu_name, profile.gpu_vendor, profile.sm_version, profile.compute_capability,
+        profile.gpu_name, profile.gpu_vendor, profile.sm_version, profile.compute_capability, profile.sm_count,
         profile.fma_latency_cycles, profile.imad_latency_cycles,
         profile.thermal_latency_40c, profile.thermal_latency_60c, profile.thermal_latency_80c,
         profile.mufu_rcp_latency_cycles, profile.dfma_latency_cycles, profile.smem_latency_cycles,
@@ -1021,7 +1235,8 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         profile.dadd_latency_cycles, profile.redux_sum_latency_cycles,
         profile.membar_gpu_latency_cycles, profile.ldc_latency_cycles,
         profile.max_regs_per_thread, profile.max_regs_per_sm, profile.warp_size,
-        profile.max_threads_per_sm, profile.max_warps_per_sm, profile.total_global_mem_mb,
+        profile.max_threads_per_sm, profile.max_warps_per_sm, profile.max_smem_per_sm_bytes,
+        profile.total_global_mem_mb,
         profile.drift_free_types.join(","), profile.zero_drift_penalty_cycles,
         profile.smem_noconflict_cycles, profile.smem_2way_conflict_cycles,
         profile.smem_4way_conflict_cycles, profile.smem_broadcast_cycles,
@@ -1043,3 +1258,26 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
 
     profile
 }
+
+/// Probes host CPU cache capacities and ISA vector widths to produce a CpuHardwareProfile.
+pub fn probe_cpu_hardware_profile() -> crate::cpu_specializer::CpuHardwareProfile {
+    // Same authority as `check_or_probe_hardware`, for the same reason: this
+    // feeds `CpuShapeDispatcher`, which picks the `--emit-cpu` kernel regime.
+    // Today every regime it can pick emits scalar Rust, so a wrong-high answer
+    // here is a suboptimal kernel rather than a fault - but that is a property
+    // of the emitter, not of this decision, and the emitter is one intrinsic
+    // away from changing it. `CpuHardwareProfile::default()` guessing AVX-512
+    // is how `--emit-cpu` came to emit AVX-512 dispatch on every machine.
+    let has_avx512 = host_has_avx512();
+    let simd_w = if has_avx512 { 16 } else { 8 };
+
+    crate::cpu_specializer::CpuHardwareProfile {
+        l1d_bytes: 32 * 1024,
+        l2_bytes: 512 * 1024,
+        l3_bytes: 16 * 1024 * 1024,
+        simd_vector_width_floats: simd_w,
+        supports_avx512_masking: has_avx512,
+        logical_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8),
+    }
+}
+

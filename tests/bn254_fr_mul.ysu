@@ -1,0 +1,118 @@
+// BN254 Fr Montgomery multiplication, written in Y.
+//
+// CIOS (Coarsely Integrated Operand Scanning, Koc et al.) over eight 32-bit
+// limbs. Given `a` and `b` as plain little-endian 256-bit integers below the
+// modulus, this computes `a * b * R^-1 mod p` with `R = 2^256` - so feeding it
+// the Montgomery form of x and the canonical form of y returns the canonical
+// `x * y mod p`. That is the identity `tests/zk_gpu_field.rs` checks against
+// `zk_field.rs`.
+//
+// Every operation here rests on the integer datapath: `mul_wide_u32` for the
+// 64-bit product whose high half IS the carry, 64-bit accumulation so that
+// `a[j]*b[i] + t[j] + c` cannot overflow (its maximum is exactly 2^64 - 1),
+// unsigned comparison for the final conditional subtract. None of it was
+// expressible before that datapath existed - a `GlobalMemory<U32>` was loaded
+// with `ld.global.f32`, which destroys a limb outright.
+//
+// PERFORMANCE: the eight-limb accumulator lives in a per-thread slice of
+// global memory, because this backend has no local arrays and `let` binds a
+// name to a single register. Correct, and far slower than it should be - a
+// register-resident version needs indexable local storage, which is the next
+// piece of compiler work rather than a rewrite of this file.
+//
+// Scratch layout, 18 words per thread: [0..9] the CIOS accumulator (s+2
+// words), [10..17] the difference `t - p` computed for the final subtract.
+kernel bn254_fr_mul(
+    A: GlobalMemory<U32>,
+    B: GlobalMemory<U32>,
+    P: GlobalMemory<U32>,
+    T: GlobalMemory<U32>,
+    Out: GlobalMemory<U32>,
+    NP: U32,
+    N: I32
+) {
+    let tid: I32 = block_idx_x() * 256 + thread_idx_x();
+
+    @invariant(z >= 0)
+    for z in 0..18 {
+        block_ptr2d_store(T, tid, z, 18, N, 18, 0);
+    }
+
+    @invariant(i >= 0)
+    for i in 0..8 {
+        let bi: U32 = block_ptr2d_load(B, tid, i, 8, N, 8);
+
+        // t += a * b[i]
+        let c: U32 = 0;
+        @invariant(j >= 0)
+        for j in 0..8 {
+            let aj: U32 = block_ptr2d_load(A, tid, j, 8, N, 8);
+            let tj: U32 = block_ptr2d_load(T, tid, j, 18, N, 18);
+            let pr: U64 = mul_wide_u32(aj, bi) + tj + c;
+            block_ptr2d_store(T, tid, j, 18, N, 18, u64_lo32(pr));
+            c = u64_hi32(pr);
+        }
+        let t8: U32 = block_ptr2d_load(T, tid, 8, 18, N, 18);
+        let w8: U64 = t8;
+        let s8: U64 = w8 + c;
+        block_ptr2d_store(T, tid, 8, 18, N, 18, u64_lo32(s8));
+        block_ptr2d_store(T, tid, 9, 18, N, 18, u64_hi32(s8));
+
+        // m is chosen so that t + m*p is divisible by 2^32; the shift by one
+        // limb is what the `j - 1` store index below performs.
+        let t0: U32 = block_ptr2d_load(T, tid, 0, 18, N, 18);
+        let m: U32 = t0 * NP;
+
+        let p0: U32 = block_ptr2d_load(P, 0, 0, 8, 1, 8);
+        let pr0: U64 = mul_wide_u32(m, p0) + t0;
+        let c2: U32 = u64_hi32(pr0);
+        @invariant(j >= 1)
+        for j in 1..8 {
+            let pj: U32 = block_ptr2d_load(P, 0, j, 8, 1, 8);
+            let tj2: U32 = block_ptr2d_load(T, tid, j, 18, N, 18);
+            let pr2: U64 = mul_wide_u32(m, pj) + tj2 + c2;
+            block_ptr2d_store(T, tid, j - 1, 18, N, 18, u64_lo32(pr2));
+            c2 = u64_hi32(pr2);
+        }
+        let t8b: U32 = block_ptr2d_load(T, tid, 8, 18, N, 18);
+        let w8b: U64 = t8b;
+        let s8b: U64 = w8b + c2;
+        block_ptr2d_store(T, tid, 7, 18, N, 18, u64_lo32(s8b));
+        let t9: U32 = block_ptr2d_load(T, tid, 9, 18, N, 18);
+        block_ptr2d_store(T, tid, 8, 18, N, 18, t9 + u64_hi32(s8b));
+    }
+
+    // t < 2p at this point and 2p < 2^255, so limb 8 is zero and the whole
+    // result is in [0..7]. One conditional subtract brings it below p.
+    //
+    // Computed with a borrow rather than branched on: `wt - wp - wb` in 64
+    // bits wraps when it goes negative, and the high half is then all ones,
+    // which is exactly the borrow out.
+    let borrow: U32 = 0;
+    @invariant(j >= 0)
+    for j in 0..8 {
+        let tj3: U32 = block_ptr2d_load(T, tid, j, 18, N, 18);
+        let pj2: U32 = block_ptr2d_load(P, 0, j, 8, 1, 8);
+        let wt: U64 = tj3;
+        let wp: U64 = pj2;
+        let wb: U64 = borrow;
+        let d: U64 = wt - wp - wb;
+        block_ptr2d_store(T, tid, 10 + j, 18, N, 18, u64_lo32(d));
+        borrow = u64_hi32(d) & 1;
+    }
+
+    // Select without diverging: borrow == 0 means t >= p, so take the
+    // difference. The two masks are complements by construction.
+    let use_d: U32 = 1 - borrow;
+    let mask: U32 = 0 - use_d;
+    let nmask: U32 = 0 - borrow;
+    @invariant(j >= 0)
+    for j in 0..8 {
+        let dj: U32 = block_ptr2d_load(T, tid, 10 + j, 18, N, 18);
+        let tj4: U32 = block_ptr2d_load(T, tid, j, 18, N, 18);
+        let v: U32 = (dj & mask) | (tj4 & nmask);
+        block_ptr2d_store(Out, tid, j, 8, N, 8, v);
+    }
+}
+
+fn main() {}

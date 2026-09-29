@@ -28,15 +28,35 @@ def wrap_ptx(ptx_file, name="y_coprocessor_db_index", param_count=2):
         content = f.read()
 
     try:
-        device_id = cp.cuda.Device(0).id
-        major = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMajor, device_id)
-        minor = cp.cuda.runtime.deviceGetAttribute(cp.cuda.runtime.cudaDevAttrComputeCapabilityMinor, device_id)
+        # NOTE: cp.cuda.runtime.deviceGetAttribute(cudaDevAttrComputeCapabilityMajor, ...)
+        # doesn't exist in newer cupy versions and silently raised AttributeError here,
+        # which the bare except below swallowed - falling back to a hardcoded sm_90a
+        # regardless of the actual GPU. On an sm_89 card that produces a PTX .target
+        # mismatch that ptxas/the driver rejects at load time.
+        cc = cp.cuda.Device(0).compute_capability
+        major, minor = int(cc[:-1]), int(cc[-1])
         target_sm = f"sm_{major}{minor}a" if major == 9 else f"sm_{major}{minor}"
     except Exception:
         target_sm = "sm_90a"
 
-    version_str = ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
+    version_str = src_version or (
+        ".version 7.5" if target_sm in ["sm_86", "sm_80", "sm_75"] else ".version 8.0"
+    )
     
+    # The compiler now emits a COMPLETE module with a correct header, so the
+    # header it wrote is what gets reused here. Substituting a literal
+    # discarded the measured `.version` floor (gotcha 8b) and re-introduced the
+    # bug in the harness: `.version 8.0` over-states the driver requirement on
+    # sm_80/86/89 and is REJECTED outright on Blackwell.
+    src_version = next(
+        (l.strip() for l in content.splitlines() if l.strip().startswith(".version")),
+        None,
+    )
+    src_target = next(
+        (l.strip() for l in content.splitlines() if l.strip().startswith(".target")),
+        None,
+    )
+
     # Extract module-level shared memory declarations
     shared_decls = []
     body_lines = []
