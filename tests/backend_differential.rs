@@ -97,6 +97,16 @@ fn expr(r: &mut Rng, upto: u64, depth: u32) -> String {
 /// disagreements that say nothing about the operator.
 fn program(seed: u64) -> (String, u32) {
     let mut r = Rng(seed);
+    // A SECOND stream places early `return`s, so the base program for a seed
+    // is exactly the one this generator always wrote and the overlay is the
+    // only thing that changed. The generator used to emit one `return`, as
+    // the last statement of each body - so it could not write the program
+    // that showed `--emit-native` treating `return` as an ordinary expression
+    // statement: `return 7; return 9;` exited 9, and a `return` inside
+    // `@safe { }` was overridden by whatever followed the block. That is the
+    // bug this file's header quotes from the ZK backend, and the differential
+    // built to catch its kind was structurally unable to.
+    let mut q = Rng(seed ^ 0xea71_7e70);
 
     // Zero to two helper functions, each taking up to the six integer
     // parameters System V passes in registers. `native_emitter`'s recorded bug
@@ -116,10 +126,27 @@ fn program(seed: u64) -> (String, u32) {
             .join(", ");
         // The body sees its parameters as `p0..`, which `expr` names `v0..`.
         let body = expr(&mut r, arity as u64, 2).replace('v', "p");
-        prelude.push_str(&format!("fn f{f}({params}) -> I32 {{\n    return {body};\n}}\n\n"));
+        // One helper in three gets a second, dead `return` after the first.
+        let dead = if q.below(3) == 0 {
+            format!("\n    return {};", expr(&mut q, arity as u64, 1).replace('v', "p"))
+        } else {
+            String::new()
+        };
+        prelude.push_str(&format!(
+            "fn f{f}({params}) -> I32 {{\n    return {body};{dead}\n}}\n\n"
+        ));
     }
 
     let nlocals = 2 + r.below(3) as usize;
+    // One `main` in three returns early, after some local, half of those from
+    // inside a `@safe { }` block; everything after it is dead.
+    let early_at = if q.below(3) == 0 {
+        Some(q.below(nlocals as u64) as usize)
+    } else {
+        None
+    };
+    let early_in_block = q.below(2) == 0;
+    let early_shift = [0u32, 8, 16, 24][q.below(4) as usize];
     let mut body = String::new();
     for i in 0..nlocals {
         if i == 0 {
@@ -133,6 +160,14 @@ fn program(seed: u64) -> (String, u32) {
             body.push_str(&format!("    let v{i}: I32 = f{f}({args});\n"));
         } else {
             body.push_str(&format!("    let v{i}: I32 = {};\n", expr(&mut r, i as u64, 2)));
+        }
+        if early_at == Some(i) {
+            let ret = format!("return (v{i} >> {early_shift}) & 255;");
+            if early_in_block {
+                body.push_str(&format!("    @safe {{\n        {ret}\n    }}\n"));
+            } else {
+                body.push_str(&format!("    {ret}\n"));
+            }
         }
     }
 
@@ -305,5 +340,30 @@ fn the_corpus_is_not_all_skips() {
          --emit-native), so the differential is mostly comparing nothing",
         t.compared,
         t.native_refused
+    );
+}
+
+/// The early-return overlay has to FIRE, or the differential silently stops
+/// covering what it was extended for - a generator restriction is a deleted
+/// bug class, and an overlay that never triggers is the same restriction.
+/// Counted over the exact seeds the sweep above uses.
+#[test]
+fn the_generator_writes_early_returns() {
+    let (mut early, mut in_block) = (0, 0);
+    for seed in 0..40 {
+        let (src, _) = program(seed ^ 0x5eed);
+        // One `return` per function is the old shape; any more is an early one.
+        if src.matches("return").count() > src.matches("fn ").count() {
+            early += 1;
+        }
+        if src.contains("@safe {") {
+            in_block += 1;
+        }
+    }
+    assert!(
+        early >= 8 && in_block >= 3,
+        "of the 40 programs the sweep compiles, {early} carry an early `return` and \
+         {in_block} return from inside `@safe {{ }}` - too few for the sweep to \
+         exercise `return` as a terminator"
     );
 }

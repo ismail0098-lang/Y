@@ -68,6 +68,10 @@ pub struct NativeEmitter {
     /// a silent gap here is a runnable artifact that computes the wrong thing -
     /// the most severe form of the failure this repo's design rule describes.
     pub emit_errors: Vec<String>,
+    /// Every `fn` the program defines, collected before any code is emitted so
+    /// a call can be checked against a definition that comes later in the
+    /// file. A call is lowered only to one of these.
+    defined: HashMap<String, Span>,
 }
 
 /// The prologue reserves 64 bytes, and the `disp8` addressing this emitter uses
@@ -84,6 +88,7 @@ impl NativeEmitter {
             base_addr: 0x400000,
             locals: HashMap::new(),
             emit_errors: Vec::new(),
+            defined: HashMap::new(),
         }
     }
 
@@ -96,6 +101,28 @@ impl NativeEmitter {
                 "Native x86-64 Backend",
                 &site,
             ));
+        }
+
+        // The functions a call may target, known before any body is emitted so
+        // a forward call resolves. A second definition of one name is refused:
+        // the symbol table keeps one address per name, so the ELF called
+        // whichever definition came LAST, silently. (The LLVM backend fails the
+        // same program at clang with "invalid redefinition"; the type checker
+        // keeps one signature per name and does not say so either.)
+        self.defined.clear();
+        for item in &prog.items {
+            if let Item::Func(f) = item {
+                if let Some(first) = self.defined.get(&f.name) {
+                    self.emit_errors.push(format!(
+                        "[Native x86-64 Backend] `fn {}` is defined twice (line {}, and again at \
+                         line {}). An ELF symbol names one address, so every call would have \
+                         reached whichever definition came last.",
+                        f.name, first.line, f.span.line
+                    ));
+                } else {
+                    self.defined.insert(f.name.clone(), f.span.clone());
+                }
+            }
         }
 
         self.emit_elf_header();
@@ -157,7 +184,13 @@ impl NativeEmitter {
             }
         }
 
-        self.emit_syscall_wrappers();
+        // A `sys_write`/`write` syscall stub used to be appended here and
+        // registered under both names AFTER every function - so it silently
+        // REPLACED a program's own `fn write`. `fn write(a: I32) -> I32 {
+        // return a * 2; }` called as `write(21)` ran `write(21, ?, ?)` against
+        // file descriptor 21 and exited 247 (-EBADF) where the answer is 42.
+        // No program could reach the stub any other way: the type checker
+        // refuses a call to either name unless the program defines it. Deleted.
 
         self.patch_relocs();
         self.code.bytes.clone()
@@ -249,7 +282,7 @@ impl NativeEmitter {
             &[0x44, 0x89, 0x4D], // mov [rbp-N], r9d
         ];
         if let Some(rt) = &f.ret_ty {
-            self.check_type_width(rt, "a return type", &f.body.span);
+            self.check_declared_type(rt, "a return value", &f.body.span);
         }
         for (i, param) in f.params.iter().enumerate() {
             if i >= ARG_STORE.len() {
@@ -258,7 +291,7 @@ impl NativeEmitter {
                 self.unsupported("a function with more than six parameters", &sp);
                 break;
             }
-            self.check_type_width(&param.ty, "a parameter", &param.span);
+            self.check_declared_type(&param.ty, "a parameter", &param.span);
             let Some(off) = self.alloc_local(&param.name, &f.body.span) else {
                 break;
             };
@@ -272,6 +305,20 @@ impl NativeEmitter {
             self.emit_stmt(stmt);
         }
 
+        // Reaching the end of a body returns 0. This used to return whatever
+        // the last expression left in `eax`: a `fn main()` with no return type
+        // whose body was `let x: I32 = f();` exited with f's value (5, where the
+        // LLVM backend exits 0), and a `-> I32` function that fell off its end
+        // returned its last `let` (5, where LLVM emits `ret i32 0`). The type
+        // checker accepts both programs, so the backends must agree on them.
+        self.emit_bytes(&[0x31, 0xC0]); // xor eax, eax
+        self.emit_epilogue();
+    }
+
+    /// `add rsp, 64 ; pop rbp ; ret`. Emitted at the end of every body AND at
+    /// every `return`: pushes made while evaluating an expression are popped
+    /// within it, so at a statement boundary `rsp` is always `rbp - 64`.
+    fn emit_epilogue(&mut self) {
         // add rsp, 64
         self.code.emit8(0x48);
         self.code.emit8(0x81);
@@ -331,34 +378,101 @@ impl NativeEmitter {
     /// This is the `ptx_emitter` integer-width gotcha found in a THIRD
     /// backend, after `llvm_emitter`. When a gotcha is written for one
     /// backend, grep the others for its shape.
-    fn check_type_width(&mut self, ty: &Type, what: &str, span: &Span) {
-        let name = match ty {
-            Type::Primitive(n, _) | Type::Ident(n, _) => n.as_str(),
-            _ => return,
+    ///
+    /// **The 64-bit refusal was one row of a table, and the rest of the table
+    /// compiled.** The datapath is not merely 32 bits, it is 32-bit SIGNED -
+    /// `idiv`, `sar` and the signed `setcc` forms - and every value lives in a
+    /// full register. So an unsigned or sub-word declared type is the same lie
+    /// as a 64-bit one, and each of these ran to a wrong answer:
+    ///
+    /// ```text
+    /// let a: U32 = 2147483647; let b: U32 = a + a;  b > a   -> 0, want 1
+    ///                                               b >> 31 -> 255 (-1), want 1
+    /// let a: I8 = 100; let b: I8 = a + a;           b > 0   -> 1, want 0 (b wraps to -56)
+    /// ```
+    ///
+    /// Floats compiled to integer instructions on the float's bits. So the
+    /// rule is a whitelist, not a list of what is known to be wrong: `I32` and
+    /// `bool` (comparisons already produce 0/1) are what this datapath
+    /// computes, and every other declared type is refused by name. The parser
+    /// normalises spellings (`i32` is `I32`), and `Bool` is not a keyword - it
+    /// reaches here as an unknown type name, and the LLVM backend refuses it
+    /// too.
+    fn check_declared_type(&mut self, ty: &Type, what: &str, span: &Span) {
+        let reason = match ty {
+            Type::Primitive(n, _) => match n.as_str() {
+                "I32" | "bool" => return,
+                "I64" | "U64" => {
+                    format!("{} of 64-bit type `{}` (this backend's datapath is 32 bits)", what, n)
+                }
+                "U8" | "U16" | "U32" => format!(
+                    "{} of unsigned type `{}` (this backend's comparisons, division, remainder \
+                     and right shift are all signed)",
+                    what, n
+                ),
+                "I8" | "I16" => format!(
+                    "{} of sub-word type `{}` (values are held in 32-bit registers and never \
+                     wrapped to their declared width)",
+                    what, n
+                ),
+                other => format!(
+                    "{} of type `{}` (this backend computes only `I32` and `bool` values)",
+                    what, other
+                ),
+            },
+            Type::Ident(n, _) => format!(
+                "{} of type `{}` (this backend computes only `I32` and `bool` values)",
+                what, n
+            ),
+            Type::Generic { base, .. } => format!(
+                "{} of generic type `{}<..>` (this backend computes only `I32` and `bool` values)",
+                what, base
+            ),
+            Type::Array { .. } => format!("{} of array type (this backend has no arrays)", what),
+            Type::Reference { .. } => {
+                format!("{} of reference type (this backend has no references)", what)
+            }
+            Type::BlockTile { .. } => format!("{} of a GPU `BlockTile` type", what),
         };
-        if matches!(name, "I64" | "U64" | "i64" | "u64" | "isize" | "usize") {
-            self.unsupported(
-                &format!("{} of 64-bit type `{}` (this backend's datapath is 32 bits)", what, name),
-                span,
-            );
-        }
+        self.unsupported(&reason, span);
     }
 
     fn emit_stmt(&mut self, stmt: &Stmt) {
         match stmt {
+            // `return` evaluated its value into `eax` and then carried on: it
+            // was not a terminator. So `return 7; return 9;` exited 9, a
+            // `return` inside `@safe { }` was overridden by the statement after
+            // the block, and `return r; return 99;` returned 99 - each compiled
+            // to a runnable ELF under a success banner, while the LLVM backend
+            // answers 7, 5 and 4. The same defect the ZK emitter's `emit_block`
+            // had ("the LAST return wins"). This backend has no branches, but a
+            // return needs none: it is the epilogue, emitted in place.
             Stmt::Return(expr_opt, _) => {
-                if let Some(expr) = expr_opt {
-                    self.emit_expr(expr);
+                match expr_opt {
+                    Some(expr) => self.emit_expr(expr),
+                    None => self.emit_bytes(&[0x31, 0xC0]), // xor eax, eax
                 }
+                self.emit_epilogue();
             }
             Stmt::Let {
                 name, ty, init, span, ..
             } => {
                 if let Some(t) = ty {
-                    self.check_type_width(t, "a `let`", span);
+                    self.check_declared_type(t, "a `let`", span);
                 }
-                if let Some(expr) = init {
-                    self.emit_expr(expr);
+                match init {
+                    Some(expr) => self.emit_expr(expr),
+                    // The store below would write whatever the previous
+                    // expression left in `eax`: under `@unsafe`, where the front
+                    // end allows an uninitialised `let`, `let q: I32 = 77; let
+                    // a: I32; return a;` exited 77 - another variable's value.
+                    // This backend has no assignment, so such a local could
+                    // never be given a value at all.
+                    None => self.unsupported(
+                        "a `let` without an initializer (this backend has no assignment, so \
+                         the local could never be given a value)",
+                        span,
+                    ),
                 }
                 if let Some(off) = self.alloc_local(name, span) {
                     // mov [rbp - off], eax
@@ -530,8 +644,27 @@ impl NativeEmitter {
                     self.code.emit8(0x5F);
                 }
 
-                if let Expr::Ident(name, _) = &**func {
-                    self.emit_call_rel32(name);
+                if let Expr::Ident(name, span) = &**func {
+                    // The type checker refuses a name it does not know, so what
+                    // arrives here undefined is a name it DOES know: a built-in
+                    // or GPU intrinsic (`ldmatrix`, `mma_sync`, ...). There is
+                    // no definition to call, and `patch_relocs` used to skip an
+                    // unresolved target, leaving `e8 00 00 00 00` - a call to
+                    // the NEXT INSTRUCTION. `tests/coprocessor_large.ysu`
+                    // compiled to a runnable ELF that segfaulted, under
+                    // "Compiled to native ELF executable!".
+                    if self.defined.contains_key(name) {
+                        self.emit_call_rel32(name);
+                    } else {
+                        let what = format!(
+                            "a call to `{}`, which this program does not define (built-ins and GPU \
+                             intrinsics have no native lowering; this backend calls only the \
+                             program's own functions)",
+                            name
+                        );
+                        let span = span.clone();
+                        self.unsupported(&what, &span);
+                    }
                 } else {
                     // The argument setup was emitted and then no CALL, so the
                     // callee's return value was whatever was already in eax.
@@ -606,23 +739,25 @@ impl NativeEmitter {
                 let call_next = reloc.offset + 4;
                 let rel = (target_offset as isize) - (call_next as isize);
                 self.code.patch32(reloc.offset, rel as u32);
+            } else {
+                // There was no `else`: an unresolved target kept its zero
+                // displacement, a call to the next instruction. Every call site
+                // now checks its callee against `defined`, so what can still
+                // arrive here is the entry point's call to `main` in a program
+                // that has none - which ran straight into the exit syscall and
+                // exited 0 having done nothing.
+                let why = if reloc.target_name == "main" {
+                    "the ELF entry point calls `main`, and this program defines no `main`"
+                        .to_string()
+                } else {
+                    format!("`{}` is called but has no definition", reloc.target_name)
+                };
+                self.emit_errors.push(format!(
+                    "[Native x86-64 Backend] {}. An unresolved call would jump to the next \
+                     instruction.",
+                    why
+                ));
             }
         }
-    }
-
-    fn emit_syscall_wrappers(&mut self) {
-        let offset = self.code.len();
-        self.symbols.insert("sys_write".to_string(), offset);
-        self.symbols.insert("write".to_string(), offset);
-
-        // sys_write:
-        // mov eax, 1 (sys_write syscall number)
-        self.code.emit8(0xB8);
-        self.code.emit32(1);
-        // syscall
-        self.code.emit8(0x0F);
-        self.code.emit8(0x05);
-        // ret
-        self.code.emit8(0xC3);
     }
 }

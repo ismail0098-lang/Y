@@ -260,7 +260,7 @@ over a native ELF. Unrecognised options are a hard error now.
 | `--emit-llvm` / `--target=llvm` | LLVM IR |
 | `--emit-ptx` / `--target=ptx` | NVIDIA PTX |
 | `--emit-cpu` / `--target=cpu` | **Scalar** host Rust source, **printed for you to paste** — Y never compiles it. It emits no SIMD; see 9.7 |
-| `--emit-native` / `--target=native` | Direct x86-64 ELF. A straight-line integer subset; anything outside it is refused with a line number |
+| `--emit-native` / `--target=native` | Direct x86-64 ELF. A straight-line subset over `I32` and `bool` that calls only the program's own functions (no built-ins or intrinsics); anything outside it is refused with a line number |
 | `--emit-coprocessor` / `--target=coprocessor` | Fused RT Core + Tensor Core co-processor PTX |
 | `--emit-attention-ptx` | Paged decode attention PTX |
 | `--emit-r1cs` / `--target=r1cs` | R1CS circuit (**requires `--features zk`**; without it the binary says so and exits 0) |

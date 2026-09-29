@@ -127,15 +127,17 @@ repository's own investigation documents contradict.
 - **There are not five working backends.** LLVM IR (the default) and NVIDIA PTX
   are the two real ones. The C transpiler was removed — `--emit-c` says so and
   exits. `--emit-native` writes a runnable x86-64 ELF but covers only a
-  **straight-line integer subset**: `let`, `return`, calls of up to six integer
-  arguments, and the sixteen integer binary operators. It has no branches, so
+  **straight-line subset over `I32` and `bool`**: `let` with an initializer,
+  `return`, calls of up to six arguments to the program's own functions, and the
+  sixteen integer binary operators. It has no branches, so
   `if`/`while`/`for`/assignment, floats, strings, indexing and field access are
-  refused by name with a line number, as are 64-bit types. Before that it
-  emitted an ELF for all of them and computed the wrong answer under a success
-  banner — `9 / 2` returned **9**. **One gap of that kind is still open:** a call
-  to a function the program does not define compiles to a call to the next
-  instruction, so `tests/coprocessor_large.ysu` builds a binary that segfaults
-  after "Compiled to native ELF executable!".
+  refused by name with a line number, as is every other declared type (64-bit,
+  unsigned — its arithmetic is signed — and sub-word, which it never wraps) and
+  every call to a built-in or GPU intrinsic. Before that it emitted an ELF for
+  all of them and computed the wrong answer under a success banner: `9 / 2`
+  returned **9**; `print_int(5)` became a call to the next instruction and
+  segfaulted; `return 7; return 9;` exited 9, because `return` did not end the
+  function; and a program's own `fn write` was replaced by a syscall stub.
 - **Leo did not compile the ZK benchmark circuits.** Earlier tables reported
   timings for Leo at 100k and 1M constraints. Leo 4.2.0 refuses both: the
   compiled program exceeds its 512,000-byte limit (`leo build` on
@@ -2406,7 +2408,7 @@ throughout.
 | *(none)* | LLVM IR → native binary via `clang` | the default backend |
 | `--emit-llvm` | LLVM IR | real |
 | `--emit-ptx` | NVIDIA PTX | real |
-| `--emit-native` | standalone x86-64 ELF | **straight-line integer subset only**; refuses the rest by name |
+| `--emit-native` | standalone x86-64 ELF | **straight-line subset over `I32` and `bool` only**, calling only the program's own functions; refuses the rest by name |
 | `--emit-cpu` | prints **scalar host Rust** source **for you to paste** — Y never compiles it | real, but not a build step; gated on `rustc` accepting what it prints, verbatim. **It emits no SIMD**: measured, 0 of 46 corpus blobs contain a vector intrinsic, vector type or `target_feature` |
 | `--emit-attention-ptx <head_dim> <seq_len>` | the exact-attention kernel, to stdout | real; both positional arguments are required and refused by name if absent |
 | `--emit-coprocessor` | RT + Tensor Core fused schedule | **a scheduling simulation** — see "What is real". It writes a complete module whose `.version`/`.target` are gated against the PTX backend's |

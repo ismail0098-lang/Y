@@ -293,3 +293,296 @@ fn thirty_two_bit_programs_still_compile_and_run() {
         }
     }
 }
+
+// ── Calls, returns and declared types: the second round ─────────────────
+//
+// Measured on 9a61d81, each compiling to a runnable ELF under "Compiled to
+// native ELF executable!" and exit 0, with the LLVM backend's answer beside it:
+//
+//     print_int(5); return 0;                    segfault        LLVM: prints 5, exits 0
+//     fn write(a) -> a * 2 ... return write(21)  exit 247        LLVM: 42
+//     return 7; return 9;                        exit 9          LLVM: 7
+//     @safe { return 5; } return 9;              exit 9          LLVM: 5
+//     fn main() { let x: I32 = f(); }  (f = 5)   exit 5          LLVM: 0
+//     U32: (2^32 - 2) > (2^31 - 1)               0               want 1
+//     I8:  (100 + 100) > 0                       1               LLVM: 0 (it wraps to -56)
+//     no `fn main` at all                        exit 0          LLVM: link error
+//     `fn f` defined twice                       the last one    LLVM: clang redefinition
+//
+// Each case that runs is compared against a constant; each refusal asserts
+// the native backend's own phrase, so a fixture stopped by an earlier pass
+// fails instead of passing for the wrong reason.
+
+/// The native backend refused `src` for `phrase`, and `build_native` has
+/// already checked that no binary was written.
+fn assert_native_refuses(name: &str, src: &str, phrase: &str) {
+    match build_native(name, src) {
+        Ok(code) => panic!(
+            "`{}` produced a RUNNABLE binary (exit {}) where the native backend must \
+             refuse it for {:?}",
+            name, code, phrase
+        ),
+        Err(diag) => assert!(
+            diag.contains("[Native x86-64 Backend]") && diag.contains(phrase),
+            "`{}` was refused, but not by the native backend for {:?} - so this case \
+             is not testing what it claims:\n{}",
+            name,
+            phrase,
+            diag
+        ),
+    }
+}
+
+/// A call to a built-in or GPU intrinsic was emitted as `call +0`.
+///
+/// The type checker refuses a name it does not know, so what reaches this
+/// backend undefined is a name it DOES know - and `patch_relocs` skipped any
+/// target it could not resolve, leaving `e8 00 00 00 00`: a call to the NEXT
+/// INSTRUCTION. The stack unbalances and the final `ret` jumps to garbage.
+#[test]
+fn a_call_to_a_function_the_program_does_not_define_is_refused() {
+    // The smallest reproducer: a runtime function the DEFAULT backend links.
+    // It segfaulted here.
+    assert_native_refuses(
+        "undef_print_int",
+        "fn main() -> I32 {\n    print_int(5);\n    return 0;\n}\n",
+        "a call to `print_int`",
+    );
+    // The corpus program that exposed it, read from the repository so the
+    // fixture cannot drift from the file.
+    let corpus = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/coprocessor_large.ysu"),
+    )
+    .expect("read tests/coprocessor_large.ysu");
+    assert_native_refuses(
+        "undef_coprocessor_large",
+        &corpus,
+        "a call to `rt_nearest_neighbor`",
+    );
+}
+
+/// The emitter's own check, through the library API. The front end stops an
+/// undefined USER name first ("Unknown function"), so the CLI cannot reach
+/// this path with one; the emitter must not depend on that.
+#[test]
+fn the_emitter_itself_refuses_an_undefined_callee() {
+    let src = "fn main() -> I32 {\n    return helper(3);\n}\n";
+    let ast = y::parser::Parser::new(y::lexer::Lexer::new(src).tokenize())
+        .parse_program()
+        .expect("parse a call to an undefined function");
+    let mut emitter = y::native_emitter::NativeEmitter::new();
+    emitter.emit_program(&ast);
+    assert!(
+        emitter
+            .emit_errors
+            .iter()
+            .any(|e| e.contains("[Native x86-64 Backend]") && e.contains("a call to `helper`")),
+        "the native emitter lowered a call to an undefined function: {:?}",
+        emitter.emit_errors
+    );
+}
+
+/// The control that stops "refuse every call": a function defined LATER in
+/// the file must still be callable, because the set of definitions is
+/// collected before any body is emitted.
+#[test]
+fn a_forward_call_still_resolves() {
+    let src = "fn main() -> I32 {\n    return later(4);\n}\n\n\
+               fn later(x: I32) -> I32 {\n    return x * 10;\n}\n";
+    assert_eq!(build_native("forward_call", src), Ok(40));
+}
+
+/// With no `main`, the entry point's `call main` stayed unresolved, fell
+/// into the exit syscall, and the ELF exited 0 having done nothing. The LLVM
+/// backend fails the same program at link time.
+#[test]
+fn a_program_without_main_is_refused() {
+    assert_native_refuses(
+        "no_main",
+        "fn helper() -> I32 {\n    return 1;\n}\n",
+        "defines no `main`",
+    );
+}
+
+/// A syscall stub was registered as `write` and `sys_write` AFTER every
+/// function, so it replaced the program's own definition of either name:
+/// `write(21)` ran the `write` syscall on file descriptor 21 and exited 247
+/// (-EBADF). The answer, and the LLVM backend's, is 42.
+#[test]
+fn a_function_named_write_is_the_programs_own() {
+    for name in ["write", "sys_write"] {
+        let src = format!(
+            "fn {name}(a: I32) -> I32 {{\n    return a * 2;\n}}\n\n\
+             fn main() -> I32 {{\n    return {name}(21);\n}}\n"
+        );
+        assert_eq!(build_native(&format!("own_{name}"), &src), Ok(42), "`{name}(21)`");
+    }
+}
+
+/// `return` evaluated its value and carried on, so the LAST return won - the
+/// ZK emitter's old `emit_block` bug, in this backend. Every case answers
+/// differently under that bug, and each want is the LLVM backend's answer.
+/// `ret_in_callee` matters most: the epilogue must hand control back to the
+/// CALLER with the stack intact, not merely end the process.
+#[test]
+fn return_is_a_terminator() {
+    let cases: &[(&str, &str, i32)] = &[
+        ("ret_twice", "fn main() -> I32 {\n    return 7;\n    return 9;\n}\n", 7),
+        (
+            "ret_then_let",
+            "fn main() -> I32 {\n    return 7;\n    let a: I32 = 9;\n}\n",
+            7,
+        ),
+        (
+            "ret_in_safe_block",
+            "fn main() -> I32 {\n    @safe {\n        return 5;\n    }\n    return 9;\n}\n",
+            5,
+        ),
+        (
+            "ret_after_call",
+            "fn id(x: I32) -> I32 {\n    return x;\n}\n\n\
+             fn main() -> I32 {\n    let r: I32 = id(4);\n    return r;\n    return 99;\n}\n",
+            4,
+        ),
+        (
+            "ret_in_callee",
+            "fn f() -> I32 {\n    return 3;\n    return 8;\n}\n\n\
+             fn main() -> I32 {\n    let a: I32 = f();\n    return a + 30;\n}\n",
+            33,
+        ),
+    ];
+    for (name, src, want) in cases {
+        assert_eq!(build_native(name, src), Ok(*want), "`{}`", name);
+    }
+}
+
+/// Reaching the end of a body returned whatever the last expression left in
+/// `eax`. The type checker accepts all four programs, and the LLVM backend
+/// answers 0 for the first three (a deliberate `ret i32 0` / `return 0`).
+#[test]
+fn falling_off_the_end_returns_zero() {
+    let cases: &[(&str, &str, i32)] = &[
+        (
+            "void_main",
+            "fn f() -> I32 {\n    return 5;\n}\n\nfn main() {\n    let x: I32 = f();\n}\n",
+            0,
+        ),
+        (
+            "void_main_bare_return",
+            "fn main() {\n    let x: I32 = 5;\n    return;\n}\n",
+            0,
+        ),
+        (
+            "nonvoid_fall_off",
+            "fn f() -> I32 {\n    let a: I32 = 5;\n}\n\nfn main() -> I32 {\n    return f();\n}\n",
+            0,
+        ),
+        (
+            "bare_return_in_callee",
+            "fn g() {\n    let z: I32 = 3;\n    return;\n}\n\n\
+             fn main() -> I32 {\n    g();\n    return 6;\n}\n",
+            6,
+        ),
+    ];
+    for (name, src, want) in cases {
+        assert_eq!(build_native(name, src), Ok(*want), "`{}`", name);
+    }
+}
+
+/// The datapath is 32-bit SIGNED (`idiv`, `sar`, signed `setcc`) and every
+/// value lives in a full register, so an unsigned or sub-word declared type
+/// computed a different function, and a float computed integer instructions
+/// on its bits. The 64-bit refusal above was one row of this table.
+#[test]
+fn declared_types_other_than_i32_and_bool_are_refused() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "ty_u32_compare",
+            // (2^32 - 2) > (2^31 - 1) is true; the signed compare said 0.
+            "fn main() -> I32 {\n    let a: U32 = 2147483647;\n    let b: U32 = a + a;\n    \
+             let c: I32 = b > a;\n    return c;\n}\n",
+            "unsigned type `U32`",
+        ),
+        (
+            "ty_u32_shift",
+            // (2^32 - 2) >> 31 is 1; `sar` gave -1.
+            "fn half(x: U32) -> U32 {\n    return x >> 31;\n}\n\n\
+             fn main() -> I32 {\n    return 0;\n}\n",
+            "unsigned type `U32`",
+        ),
+        ("ty_u8", "fn main() -> I32 {\n    let a: U8 = 200;\n    return 0;\n}\n", "unsigned type `U8`"),
+        ("ty_u16", "fn main() -> I32 {\n    let a: U16 = 60000;\n    return 0;\n}\n", "unsigned type `U16`"),
+        (
+            "ty_i8_wrap",
+            // 100 + 100 wraps to -56 in I8, so `b > 0` is false; this said 1.
+            "fn main() -> I32 {\n    let a: I8 = 100;\n    let b: I8 = a + a;\n    \
+             let c: I32 = b > 0;\n    return c;\n}\n",
+            "sub-word type `I8`",
+        ),
+        ("ty_i16", "fn main() -> I32 {\n    let a: I16 = 1000;\n    return 0;\n}\n", "sub-word type `I16`"),
+        (
+            "ty_f32_param",
+            "fn sq(x: F32) -> F32 {\n    return x * x;\n}\n\nfn main() -> I32 {\n    return 0;\n}\n",
+            "type `F32`",
+        ),
+        // `Bool` is not a keyword: it reaches here as an unknown type name, and
+        // the LLVM backend refuses it as well. The keyword is `bool`.
+        ("ty_capital_bool", "fn main() -> Bool {\n    return 3 > 2;\n}\n", "type `Bool`"),
+    ];
+    for (name, src, phrase) in cases {
+        assert_native_refuses(name, src, phrase);
+    }
+}
+
+/// The control, and it carries the weight: refusing every declared type
+/// satisfies the test above and deletes the backend. `bool` - the keyword -
+/// must still compile and run, as a return value, a parameter and a `let`.
+#[test]
+fn bool_still_compiles_and_runs() {
+    let cases: &[(&str, &str, i32)] = &[
+        ("bool_main", "fn main() -> bool {\n    return 3 > 2;\n}\n", 1),
+        (
+            "bool_param",
+            "fn pick(t: bool) -> bool {\n    return t;\n}\n\n\
+             fn main() -> bool {\n    return pick(9 > 5);\n}\n",
+            1,
+        ),
+        (
+            "bool_let",
+            "fn main() -> bool {\n    let t: bool = 4 < 3;\n    return t;\n}\n",
+            0,
+        ),
+    ];
+    for (name, src, want) in cases {
+        match build_native(name, src) {
+            Ok(code) => assert_eq!(code, *want, "`{}`", name),
+            Err(d) => panic!("`{}` uses only `bool` and must still compile:\n{}", name, d),
+        }
+    }
+}
+
+/// The symbol table keeps one address per name, so with two definitions
+/// every call reached whichever came LAST. The type checker keeps one
+/// signature per name and does not say so either.
+#[test]
+fn a_second_definition_of_a_function_is_refused() {
+    assert_native_refuses(
+        "dup_fn",
+        "fn f() -> I32 {\n    return 1;\n}\n\nfn f() -> I32 {\n    return 2;\n}\n\n\
+         fn main() -> I32 {\n    return f();\n}\n",
+        "`fn f` is defined twice",
+    );
+}
+
+/// Under `@unsafe` the front end allows a `let` with no initializer, and this
+/// backend stored whatever `eax` held: `let q: I32 = 77; let a: I32; return
+/// a;` exited 77 - another variable's value. With no assignment here, such a
+/// local can never be given a value of its own.
+#[test]
+fn an_uninitialized_let_is_refused() {
+    assert_native_refuses(
+        "uninit_let",
+        "@unsafe\nfn main() -> I32 {\n    let q: I32 = 77;\n    let a: I32;\n    return a;\n}\n",
+        "a `let` without an initializer",
+    );
+}
