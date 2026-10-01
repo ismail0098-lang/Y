@@ -47,12 +47,10 @@ fn compile(tag: &str, src: &str) -> (bool, String) {
     let file = dir.join("probe.ysu");
     std::fs::write(&file, src).expect("write probe");
 
-    let exe = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/release/Y");
-    let exe = if exe.exists() {
-        exe
-    } else {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug/Y")
-    };
+    // `CARGO_BIN_EXE_Y`, the binary `cargo test` builds from THIS source. This
+    // PREFERRED `target/release/Y` whenever it existed - a build `cargo test`
+    // never refreshes - over the fresh debug one, so a stale release binary won.
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_Y"));
     let out = Command::new(&exe)
         .arg(&file)
         .arg("--emit-llvm")

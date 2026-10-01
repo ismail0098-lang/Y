@@ -101,7 +101,11 @@ fn emit_with_profile(tag: &str, avx512_in_profile: bool) -> (PathBuf, String) {
     let src = dir.join("probe.ysu");
     std::fs::write(&src, "fn main() {\n    return;\n}\n").expect("write source");
 
-    let out = Command::new(repo().join("target/release/Y"))
+    // `CARGO_BIN_EXE_Y`, the binary `cargo test` builds from THIS source. This ran
+    // `target/release/Y`, which `cargo test` never rebuilds, so after an edit it
+    // tested whatever release build was lying around - see
+    // `suite_is_machine_independent.rs`.
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src)
         .arg("--emit-llvm")
         .current_dir(&dir)
