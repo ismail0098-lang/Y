@@ -1,0 +1,89 @@
+*.exe
+*.pdb
+*.rlib
+*.obj
+*.o
+target/
+build_check/
+build_artifacts/
+
+__pycache__/
+*.pyc
+
+# Compiled benchmark drivers and Y build outputs (rebuild with the commands in
+# docs/cpu_gemm_tuning.md; committing them would ship a machine-specific ELF)
+tests/benchmark_cpu_gemm
+tests/benchmark_cpu_gemm_avx512
+tests/benchmark_cpu_vs_cblas
+tests/benchmark_real_y_vs_openblas
+tests/hello
+output_bin
+
+# Assistant working notes - not for publication
+NEXT_SESSION.md
+
+# Rocq/Coq build artifacts
+proofs/*.vo
+proofs/*.vok
+proofs/*.vos
+proofs/*.glob
+proofs/.*.aux
+
+# Machine-specific hardware probe cache. NEVER commit this: it carries one
+# card's GPU_NAME, SM_VERSION and SM_COUNT, and `check_or_probe_hardware`
+# skips the probe whenever the file exists -- so a committed profile makes a
+# fresh clone on a DIFFERENT card emit PTX targeting the committer's card.
+# That is a hard load failure on anything older ("SM version specified by
+# .target is higher than default SM version assumed").
+.ysu_hw_profile
+
+# The Solidity verifier gate needs `solc`. package.json/package-lock.json are
+# tracked so `npm ci` reproduces the exact compiler; node_modules is not.
+node_modules/
+
+# Rocq/Coq build artifacts. `tests/proofs_are_checked.rs` compiles in a temp
+# directory precisely so these never appear here, but running `coqc` by hand -
+# which the proof headers tell you to do - drops them beside the source.
+proofs/*.vo
+proofs/*.vok
+proofs/*.vos
+proofs/*.glob
+proofs/.*.aux
+proofs/.lia.cache
+proofs/.nra.cache
+proofs/.nia.cache
+
+# ptxas translation validator: everything it can regenerate.
+# `tools/ptxas_tval/build_corpus.sh` rebuilds corpus/ and o1/ from the repo's
+# own committed tests/*.ptx via ptxas + nvdisasm -- all 67 byte-identically to
+# the ones the published results were measured on. A .cubin is a
+# machine-specific ELF and a .sass is a disassembly of one; committing either
+# is the same mistake as committing .ysu_hw_profile. The *_base.tgz files are
+# per-run baselines the mutation harnesses snapshot with mkbase.sh.
+tools/ptxas_tval/corpus/
+tools/ptxas_tval/o1/
+tools/ptxas_tval/idiv/
+tools/ptxas_tval/*.tgz
+# `frontier.py`'s census cache. Minutes to build, DERIVED from the corpus and
+# the executor sources, and keyed on a digest of both so it refuses to answer
+# for a tree it was not taken on -- but a committed one would still be a
+# measurement checked in as a fact, which is what .ysu_hw_profile taught.
+tools/ptxas_tval/.frontier_cache*.json
+# a hand-built fixture's .ptx and .sass are tracked (see fma/); the .cubin it
+# passes through is machine-specific and derived, like every other one here.
+tools/ptxas_tval/**/*.cubin
+
+# Emitted certificates. One `.v` per compilation that substitutes an exact
+# kernel, written beside the artifact it certifies. They are GENERATED and must
+# never be committed: a checked-in certificate is the third staleness class this
+# repository already names -- an artifact no run of the compiler need reproduce,
+# which then reads as a claim about code that has moved underneath it.
+*_certificate.v
+*_certificate_[0-9]*.v
+
+# The Python JIT's disk cache. `y_lang.compiler.get_cache_dir` puts it in
+# `.ysu/cache/` under the CURRENT directory, and since `python/` moved inside
+# the cargo project the documented test commands run from the repo root - so
+# that is where it now appears. It is keyed on source text only, so a committed
+# one would serve PTX from a compiler that no longer exists.
+.ysu/

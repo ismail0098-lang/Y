@@ -21,6 +21,10 @@ def _find_liby() -> str:
     #
     # Cargo's own root is therefore searched FIRST, and when both exist the
     # newer one wins so an old artifact cannot shadow a fresh build.
+    #
+    # Since the merge 37651fb `python/` lives inside the cargo project, so
+    # `pkg_root` IS the cargo root and it is the second candidate that
+    # resolves; `pkg_root / "Y"` is the old outer checkout's layout.
     curr_dir = Path(__file__).resolve().parent
     pkg_root = curr_dir.parent.parent
 
