@@ -41,8 +41,53 @@
 //! requirement the compiler silently treats as satisfied is worse than no
 //! requirement at all, which is precisely the state this replaces.
 
-use crate::ast::Expr;
+use crate::ast::{Expr, Item, Program};
 use crate::sentinel::{self, HardwareProfile};
+
+/// Every `@require` in `program`, evaluated against `hw`: how many were
+/// checked, and the refusal for each one that does not hold.
+///
+/// One implementation for every entry point. The CLI evaluated `@require`
+/// before its backend dispatch, with a comment saying that position "refuses
+/// uniformly" because "every backend is reached through the dispatch below" -
+/// and the C API's `y_compile_to_ptx`, which the Python JIT calls, is not
+/// reached through it. Measured over ctypes: a kernel declaring
+/// `@require(sm >= 89)` compiled to `.target sm_80` PTX and came back to the
+/// caller with no error. A guard consulted at one of two entries.
+///
+/// Kernels inside a `module` are visited too. The PTX backend emits none of
+/// them today, so nothing reachable depended on it - a requirement is a
+/// requirement wherever it is written, and that should not rest on what a
+/// backend happens not to lower.
+pub fn check_program(program: &Program, hw: &HardwareProfile) -> (usize, Vec<String>) {
+    fn walk(items: &[Item], hw: &HardwareProfile, checked: &mut usize, errors: &mut Vec<String>) {
+        for item in items {
+            match item {
+                Item::Kernel(k) => {
+                    for req in &k.requires {
+                        *checked += 1;
+                        if let Err(e) = check(&req.condition, hw, req.span.line) {
+                            errors.push(e);
+                        }
+                    }
+                }
+                Item::Module(m) => walk(&m.items, hw, checked, errors),
+                // `@require` is refused by the parser on every other item.
+                Item::Func(_)
+                | Item::Struct(_)
+                | Item::Enum(_)
+                | Item::Import(_)
+                | Item::StaticAssert(_)
+                | Item::Impl(_)
+                | Item::Const(_) => {}
+            }
+        }
+    }
+    let mut checked = 0;
+    let mut errors = Vec::new();
+    walk(&program.items, hw, &mut checked, &mut errors);
+    (checked, errors)
+}
 
 /// The features `@require` can answer for, and where each answer comes from.
 ///
@@ -55,14 +100,18 @@ pub const KNOWN_FEATURES: &[&str] = &[
 /// `8.9` -> `89`, `12.0` -> `120`. The corpus and the docs both write the
 /// two-digit form (`@require(sm >= 89)` in `tests/test_drift.ysu`), while the
 /// profile stores `SM_VERSION=8.9`.
+///
+/// Decided by `ptx_target_for`, the function that also decides the `.target`,
+/// so a requirement and the module it guards can never disagree about which
+/// architecture this is. It parsed the string itself, and read a GPU-less
+/// machine's `0.0` as architecture **0** - so `@require(sm >= 89)` was "not
+/// satisfied" there, a confident answer about a card nobody has, where the
+/// truth is that no architecture is known. An ASSUMED target is `None`.
 fn sm_as_two_digits(sm: &str) -> Option<i64> {
-    let s = sm.trim().trim_start_matches("sm_");
-    if let Some((maj, min)) = s.split_once('.') {
-        let maj: i64 = maj.trim().parse().ok()?;
-        let min: i64 = min.trim().parse().ok()?;
-        Some(maj * 10 + min)
-    } else {
-        s.parse().ok()
+    let t = crate::ptx_emitter::ptx_target_for(sm);
+    match t.assumed {
+        None => Some(t.level as i64),
+        Some(_) => None,
     }
 }
 
@@ -162,11 +211,19 @@ pub fn check(cond: &Expr, hw: &HardwareProfile, line: usize) -> Result<(), Strin
     }
 
     let Some(have) = feature_value(&name, hw) else {
+        // On a machine with no NVIDIA GPU, re-probing records "no GPU" again,
+        // so for `sm` the repair that works is to NAME the target.
+        let pin = if name == "sm" {
+            " To compile for a card this machine does not have, write \
+             `SM_VERSION=<major>.<minor>` (e.g. `SM_VERSION=8.9`) into `.ysu_hw_profile`."
+        } else {
+            ""
+        };
         return Err(format!(
             "Line {line}: error[R0004]: `@require({})` names `{name}`, which this compiler \
              supports but cannot determine here - there is no probed value for it.\n  \
              hint: `{name}` comes from `.ysu_hw_profile`; delete that file to force a \
-             re-probe, or run the hardware probe on a machine with the device present.\n  \
+             re-probe, or run the hardware probe on a machine with the device present.{pin}\n  \
              note: refused rather than assumed satisfied. This is NOT an unknown feature \
              (that is R0002) - the name is right and the value is missing.",
             render(cond)
@@ -180,9 +237,12 @@ pub fn check(cond: &Expr, hw: &HardwareProfile, line: usize) -> Result<(), Strin
     if ok {
         Ok(())
     } else {
+        // A GPU fact is a property of the compilation TARGET, which the C API's
+        // caller may have named explicitly - "this host" was wrong for it.
+        let who = if name.starts_with("sm") { "the compilation target" } else { "this host" };
         Err(format!(
             "Line {line}: error[R0001]: hardware requirement unsatisfied: `{}` required, \
-             but this host reports `{name} = {have}`.\n  \
+             but {who} reports `{name} = {have}`.\n  \
              note: CPU features are read from the running machine (CPUID plus the XGETBV \
              check), GPU facts from `.ysu_hw_profile`; delete the profile to re-probe.",
             render(cond)
@@ -212,6 +272,11 @@ mod tests {
         assert_eq!(sm_as_two_digits("sm_90"), Some(90));
         assert_eq!(sm_as_two_digits("89"), Some(89));
         assert_eq!(sm_as_two_digits("not a version"), None);
+        // A GPU-less machine's profile: compute capability 0.0 is not an
+        // architecture, and reading it as one answered `@require(sm >= 89)`
+        // "not satisfied" about a card that does not exist.
+        assert_eq!(sm_as_two_digits("0.0"), None);
+        assert_eq!(sm_as_two_digits(""), None);
     }
 
     #[test]

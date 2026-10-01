@@ -685,14 +685,27 @@ requirement the compiler quietly ignores is worse than no requirement.
 
 | code | meaning |
 |---|---|
-| `R0001` | the condition is false on this host |
+| `R0001` | the condition is false on this host (a CPU feature) or for the compilation target (`sm`, `sm_count`) |
 | `R0002` | unknown feature name — lists the supported set |
 | `R0003` | the condition is not `feature <op> integer` |
-| `R0004` | the feature is supported but has no probed value here (e.g. `sm` with no `.ysu_hw_profile`) |
+| `R0004` | the feature is supported but has no probed value here (e.g. `sm` with no `.ysu_hw_profile`, or on a machine with no NVIDIA GPU) |
 
 `R0002` and `R0004` are deliberately distinct: "check your spelling" and "run
 the probe" are different repairs, and a single "cannot evaluate" would send a
 user with a perfectly valid `@require(sm >= 89)` to look for a typo.
+
+**On a machine with no NVIDIA GPU** the probe records compute capability `0.0`.
+That names no architecture: PTX for a kernel with no `@require(sm ...)` is
+emitted for `sm_80` - the lowest architecture this backend's instructions need,
+and forward compatible to every later card - and the compiler says the target
+was ASSUMED; a kernel that does require `sm` is refused with `R0004`, because
+an assumption is not an answer. To compile for a card the machine does not have,
+name it: write `SM_VERSION=8.9` (or the card's own compute capability) into
+`.ysu_hw_profile`. Before this was fixed, `0.0` became `.target sm_00`, which
+`ptxas` rejects, under "Compilation Successful!"; and `@require(sm >= 89)` was
+reported unsatisfied, as though the machine had an architecture-0 card. The C
+API (`y_compile_to_ptx`, which the Python JIT calls) evaluates `@require` too;
+it used to skip it entirely.
 
 **This used to do nothing at all.** `error[R0001]` appeared nowhere in the
 compiler; `sentinel.rs` — which §2 of this document still described as matching
