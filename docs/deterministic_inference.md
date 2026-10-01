@@ -286,12 +286,18 @@ outer additions; integer addition absorbs the regroup and f32 does not.
 
 Four findings:
 
-1. **The intrinsic signature is not the obvious one.** It is
-   `@llvm.x86.avx512.vpdpwssd.512(<16 x i32>, <32 x i16>, <32 x i16>)` — the
-   accumulator is `<16 x i32>` but the *multiplicands are `<32 x i16>`*. Writing
-   `<16 x i32>` for the operands, which is what `_mm512_dpwssd_epi32`'s C
-   signature suggests, produces IR that fails to verify. Derived by compiling
-   `tests/probes/vnni_kernels.c` with clang and reading the `declare`.
+1. **The intrinsic signature depends on the LLVM release.** This said it is
+   `@llvm.x86.avx512.vpdpwssd.512(<16 x i32>, <32 x i16>, <32 x i16>)` and that
+   writing `<16 x i32>` for the operands "produces IR that fails to verify",
+   derived by compiling `tests/probes/vnni_kernels.c` and reading the
+   `declare`. That is a derivation from one clang. Re-run on LLVM 18 (Ubuntu
+   24.04's default), the same probe gives `(<16 x i32>, <16 x i32>, <16 x i32>)`,
+   and LLVM 18 **rejects** the i16 form ("Intrinsic has incorrect argument
+   type!") - so the emitted module was invalid IR there, compiled only because
+   release clang skips the verifier. The i32 form is valid on LLVM 18 and is
+   auto-upgraded to the i16 signature by LLVM 22, with byte-identical clang-18
+   assembly, so it is what the compiler emits now (`cpu_gemm::VPDPWSSD`, gated
+   by `cpu_gemm_vnni_micro::the_intrinsic_is_declared_in_a_form_every_llvm_accepts`).
 2. **The first control was vacuous and said so.** It summed f32 in p-ascending
    order and chunked the loop — which reorders nothing, so it did not drift, so
    the order-independence result proved nothing. The reassociation is between

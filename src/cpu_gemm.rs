@@ -356,15 +356,35 @@ pub const VNNI_NRV: usize = 4;
 /// Columns of C the micro-kernel covers.
 pub const VNNI_NR: usize = VNNI_NRV * 16;
 
-/// The LLVM intrinsic, with the signature **derived from clang**, not assumed.
+/// The LLVM intrinsic, in the form EVERY LLVM this repo meets accepts.
 ///
-/// Note the operand types: the accumulator is `<16 x i32>` but the multiplicands
-/// are `<32 x i16>`. Writing `<16 x i32>` for the operands — the obvious guess,
-/// since that is what `_mm512_dpwssd_epi32` takes in C — produces IR that fails
-/// to verify. Established by compiling `tests/probes/vnni_kernels.c` with
-/// `clang -mavx512vnni -emit-llvm` and reading the `declare` it generated.
+/// **The operand types changed between LLVM releases, and this was copied from
+/// one of them.** It said `(<16 x i32>, <32 x i16>, <32 x i16>)` was "derived
+/// from clang, not assumed", by compiling `tests/probes/vnni_kernels.c` and
+/// reading the `declare`. That is a derivation from ONE clang. Re-run, the same
+/// probe gives:
+///
+/// | toolchain | `declare` clang generates | `(i32, i16, i16)` | `(i32, i32, i32)` |
+/// |---|---|---|---|
+/// | LLVM 18 (Ubuntu 24.04's default) | `(<16 x i32>, <16 x i32>, <16 x i32>)` | **rejected** by the verifier | valid |
+/// | LLVM 22 (`llvmlite` 0.50) | `(<16 x i32>, <32 x i16>, <32 x i16>)` | valid | valid - auto-upgraded to `(i32, i16, i16)` |
+///
+/// So the module this backend emitted was INVALID IR on the most common Linux
+/// toolchain: `llvm-as` 18 answers "Intrinsic has incorrect argument type!" 24
+/// times. Release `clang` 18 compiled it anyway, only because it runs with the
+/// IR verifier disabled, and happened to select the right instruction - every
+/// exact-GEMM result stayed bit-identical, which is why nothing failed. The
+/// old form is what LLVM 18 generates itself, and newer LLVM's `AutoUpgrade`
+/// rewrites it to the new signature on parse (measured: LLVM 22 reads it back
+/// as `(<16 x i32>, <32 x i16>, <32 x i16>)`), so it is valid on both.
+///
+/// The bits are the same either way: each i32 lane IS a pair of i16, which is
+/// what `vpdpwssd` multiplies, and `tests/cpu_gemm_vnni_micro.rs` runs the
+/// instruction to pin that. (The previous claim that this form "produces IR
+/// that fails to verify" was false on both toolchains measured; the likeliest
+/// reading is that an attempt passed `<32 x i16>` values to it unconverted.)
 const VPDPWSSD: &str =
-    "declare <16 x i32> @llvm.x86.avx512.vpdpwssd.512(<16 x i32>, <32 x i16>, <32 x i16>)";
+    "declare <16 x i32> @llvm.x86.avx512.vpdpwssd.512(<16 x i32>, <16 x i32>, <16 x i32>)";
 
 /// Emit the flush: widen every int32 accumulator to int64, add it into `C`, and
 /// zero it.
@@ -547,6 +567,9 @@ pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
         )
         .unwrap();
         writeln!(out, "  %b{v} = load <32 x i16>, ptr %bp{v}, align 2").unwrap();
+        // Viewed as 16 i32 lanes for the intrinsic's portable signature (see
+        // `VPDPWSSD`); a bitcast moves no bits.
+        writeln!(out, "  %bi{v} = bitcast <32 x i16> %b{v} to <16 x i32>").unwrap();
     }
     // A: one i32 per row, broadcast across all 16 lanes then reinterpreted as
     // 32 int16 - the pattern clang generates for `_mm512_set1_epi32`.
@@ -591,7 +614,6 @@ pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
              <16 x i32> zeroinitializer"
         )
         .unwrap();
-        writeln!(out, "  %ab{i} = bitcast <16 x i32> %as{i} to <32 x i16>").unwrap();
         for v in 0..VNNI_NRV {
             writeln!(
                 out,
@@ -601,7 +623,7 @@ pub fn emit_vnni_micro_module(flush_k_pairs: u32) -> String {
             writeln!(
                 out,
                 "  %new{i}_{v} = call <16 x i32> @llvm.x86.avx512.vpdpwssd.512(\
-                 <16 x i32> %old{i}_{v}, <32 x i16> %ab{i}, <32 x i16> %b{v})"
+                 <16 x i32> %old{i}_{v}, <16 x i32> %as{i}, <16 x i32> %bi{v})"
             )
             .unwrap();
             writeln!(

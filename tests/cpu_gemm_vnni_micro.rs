@@ -478,3 +478,84 @@ fn the_hot_loop_does_not_spill_the_accumulators() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The intrinsic is declared in the form EVERY LLVM this repo meets accepts,
+/// and every emitted VNNI module verifies.
+///
+/// **The emitted module was invalid IR on LLVM 18.** `cpu_gemm.rs` declared
+/// `vpdpwssd.512(<16 x i32>, <32 x i16>, <32 x i16>)`, read off the developer's
+/// clang - the signature LLVM changed to in a later release. LLVM 18, Ubuntu
+/// 24.04's default, generates `(<16 x i32>, <16 x i32>, <16 x i32>)` for the
+/// same probe and rejects the newer one: `llvm-as` reports "Intrinsic has
+/// incorrect argument type!" 24 times. Release `clang` 18 compiled it anyway,
+/// because it runs with the IR verifier disabled, and selected the right
+/// instruction - every result in this file stayed bit-identical, which is why
+/// nothing failed and why the answer-checking tests cannot be the gate.
+///
+/// Measured: the i32 form is valid on LLVM 18 and is auto-upgraded to the new
+/// signature by LLVM 22 (`llvmlite` 0.50 parses it, verifies it, and prints it
+/// back as `(<16 x i32>, <32 x i16>, <32 x i16>)`), and clang 18's assembly is
+/// byte-identical either way. So the source-level half pins the portable form
+/// - it holds on every machine, including those whose LLVM would accept both -
+/// and the behavioural half asks whichever `llvm-as` is installed.
+#[test]
+fn the_intrinsic_is_declared_in_a_form_every_llvm_accepts() {
+    let portable =
+        "declare <16 x i32> @llvm.x86.avx512.vpdpwssd.512(<16 x i32>, <16 x i32>, <16 x i32>)";
+    let modules = [
+        ("micro", y::cpu_gemm::emit_vnni_micro_module(64)),
+        ("gemm", y::cpu_gemm::emit_vnni_gemm_module(64)),
+    ];
+    for (name, ir) in &modules {
+        let calls: Vec<&str> = ir
+            .lines()
+            .filter(|l| l.contains("call") && l.contains("@llvm.x86.avx512.vpdpwssd.512("))
+            .collect();
+        assert!(
+            ir.contains(portable),
+            "[{name}] the VNNI intrinsic is not declared in the i32 form LLVM 18 accepts \
+             natively and newer LLVM auto-upgrades"
+        );
+        assert_eq!(calls.len(), VNNI_MR * (VNNI_NR / 16), "[{name}] one call per (row, group)");
+        for c in &calls {
+            assert!(
+                !c.contains("x i16>"),
+                "[{name}] a call passes an i16 vector to the i32-typed declaration:\n{c}"
+            );
+        }
+    }
+
+    if !have("llvm-as") {
+        eprintln!("SKIP (verifier half): llvm-as not found; the declared form was checked");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("y_vnni_verify_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for (name, ir) in &modules {
+        // `emit_vnni_gemm_module` expects the prelude's libc declarations; the
+        // micro module is self-contained. Both must verify as written.
+        let path = dir.join(format!("{name}.ll"));
+        let text = if *name == "gemm" {
+            format!(
+                "declare ptr @malloc(i64)\ndeclare void @free(ptr)\n\
+                 declare ptr @memset(ptr, i32, i64)\n{ir}"
+            )
+        } else {
+            ir.clone()
+        };
+        std::fs::write(&path, text).expect("write IR");
+        let out = Command::new("llvm-as")
+            .arg(&path)
+            .arg("-o")
+            .arg(path.with_extension("bc"))
+            .output()
+            .expect("run llvm-as");
+        assert!(
+            out.status.success(),
+            "[{name}] the emitted module does not verify under this machine's LLVM:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
