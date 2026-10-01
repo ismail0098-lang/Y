@@ -46,8 +46,12 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// `CARGO_BIN_EXE_Y`, the binary `cargo test` builds from THIS source. This was
+/// `target/release/Y`, which `cargo test` never rebuilds: with §16.2's original
+/// defect restored in `resolve_chisel_registers`, this whole file passed 8/8
+/// against the release build made before the edit.
 fn compiler() -> PathBuf {
-    repo_root().join("target/release/Y")
+    PathBuf::from(env!("CARGO_BIN_EXE_Y"))
 }
 
 /// A per-test scratch directory. The tag is in the SIGNATURE rather than left

@@ -233,11 +233,11 @@ fn run_with_threads(threads: &str) {
     let src = dir.join("mm_ld.ysu");
     std::fs::write(&src, Y_SOURCE).expect("write Y source");
 
-    let y_bin = repo_root().join("target/release/Y");
-    assert!(
-        y_bin.exists(),
-        "build the compiler first: cargo build --release"
-    );
+    // `CARGO_BIN_EXE_Y`, the binary `cargo test` builds from THIS source. This ran
+    // `target/release/Y`, which `cargo test` never rebuilds, so after an edit it
+    // tested whatever release build was lying around - see
+    // `suite_is_machine_independent.rs`.
+    let y_bin = PathBuf::from(env!("CARGO_BIN_EXE_Y"));
 
     let out = Command::new(&y_bin)
         .arg(&src)

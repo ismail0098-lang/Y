@@ -118,8 +118,10 @@ fn proof_dir() -> &'static PathBuf {
     })
 }
 
+/// `CARGO_BIN_EXE_Y`, the binary `cargo test` builds from THIS source; it was
+/// `target/release/Y`, which `cargo test` never rebuilds.
 fn bin() -> PathBuf {
-    repo().join("target/release/Y")
+    PathBuf::from(env!("CARGO_BIN_EXE_Y"))
 }
 
 /// Run the real compiler and return `(stdout, stderr, wrote_certificate)`.
