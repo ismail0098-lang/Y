@@ -24,7 +24,11 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
-C_API = REPO / "Y" / "src" / "c_api.rs"
+# `python/` lives INSIDE the cargo project since the merge 37651fb, so the Rust
+# source is `<repo>/src/c_api.rs`. This said `<repo>/Y/src/c_api.rs` - the
+# layout of the old outer checkout, where `python/` was a sibling of the cargo
+# project `Y/` - and `test_c_api_source_is_readable` below is what reported it.
+C_API = REPO / "src" / "c_api.rs"
 
 SIGNATURE = re.compile(
     r'pub\s+(?:unsafe\s+)?extern\s+"C"\s+fn\s+(y_\w+)\s*\(', re.MULTILINE
