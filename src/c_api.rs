@@ -81,14 +81,40 @@ pub unsafe extern "C" fn y_compile_to_ptx(
     // Step 4: Hardware-Sentient Probe & Target Selection
     let mut hw_profile = crate::sentinel::check_or_probe_hardware();
     if !sm_str.is_empty() && sm_str != "auto" {
+        // The caller NAMED a target. One that names no architecture is the
+        // caller's error, and is refused rather than quietly replaced by the
+        // floor - the floor is for "nothing is known", not for "something
+        // invalid was asked for".
+        if crate::ptx_emitter::ptx_target_for(sm_str).assumed.is_some() {
+            if !error_out.is_null() {
+                *error_out = CString::new(format!(
+                    "target_sm `{}` does not name a GPU architecture; pass e.g. \
+                     \"sm_80\" or \"sm_89\", or \"auto\" to use this machine's profile",
+                    sm_str
+                ))
+                .unwrap()
+                .into_raw();
+            }
+            return ptr::null_mut();
+        }
         hw_profile.sm_version = sm_str.to_string();
     }
-    if hw_profile.sm_version.is_empty() {
-        // sm_80, matching `PtxEmitter`'s own fallback. This said sm_89, so a
-        // machine where the probe found nothing emitted PTX that only Ada and
-        // later can load - and a `.target` above the device is a hard load
-        // failure, not a slowdown. Guess DOWN: PTX is forward compatible.
-        hw_profile.sm_version = "sm_80".to_string();
+    // No "empty means sm_80" here any more. It turned "no architecture is
+    // known" into a probed-looking sm_80, which `@require(sm >= 80)` would
+    // then read as a fact; and it did not cover a GPU-less machine's `0.0`,
+    // which went to `PtxEmitter` as `.target sm_00`. `ptx_target_for` decides
+    // both, once, and marks the floor as ASSUMED.
+
+    // `@require` is evaluated against the target actually being compiled for.
+    // This entry point bypasses the CLI's dispatch, which is the only place it
+    // used to be checked - so a kernel declaring `@require(sm >= 89)` compiled
+    // to sm_80 PTX here and returned with no error.
+    let (_, require_errors) = crate::require::check_program(&ast, &hw_profile);
+    if !require_errors.is_empty() {
+        if !error_out.is_null() {
+            *error_out = CString::new(require_errors.join("\n")).unwrap().into_raw();
+        }
+        return ptr::null_mut();
     }
 
     let mut emitter = PtxEmitter::new_with_profile(&hw_profile);

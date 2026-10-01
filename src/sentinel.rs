@@ -569,13 +569,23 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
         // refuses to launch. This line is what makes it visible; nothing here
         // queries the driver, because that would cost every CPU-only compile.
         // If it names a card you are not on, delete the file.
+        //
+        // The architecture comes from `ptx_target_for`, the same function every
+        // PTX consumer uses. This line formatted it itself, and on a machine
+        // with no NVIDIA GPU it announced "assuming Unknown GPU / sm_00" -
+        // faithfully naming the `.target` that `ptxas` then refused.
+        let decided = crate::ptx_emitter::ptx_target_for(
+            parse_profile_value(&contents, "SM_VERSION").unwrap_or(""),
+        );
+        let arch = match &decided.assumed {
+            None => decided.arch.clone(),
+            Some(_) => format!("no GPU architecture recorded; PTX targets {}", decided.arch),
+        };
         println!(
             "[*] Found existing {}, skipping Sentinel Probe (assuming {} / {}).",
             profile_path,
             parse_profile_value(&contents, "GPU_NAME").unwrap_or("unknown GPU"),
-            parse_profile_value(&contents, "SM_VERSION")
-                .map(|v| if v.starts_with("sm_") { v.to_string() } else { format!("sm_{}", v.replace('.', "")) })
-                .unwrap_or_else(|| "unknown arch".to_string()),
+            arch,
         );
 
         // Parse drift free types list (comma separated)
@@ -627,8 +637,13 @@ pub fn check_or_probe_hardware() -> HardwareProfile {
             gpu_vendor: parse_profile_value(&contents, "GPU_VENDOR")
                 .unwrap_or("Unknown")
                 .to_string(),
+            // A profile with no SM_VERSION line records no architecture, and it
+            // stays unrecorded: defaulting it to "sm_80" here made a missing
+            // line indistinguishable from a probed Ampere card, so a kernel's
+            // requirement on `sm` was answered by a default. The emitter still
+            // targets sm_80 for it - via `ptx_target_for`, marked ASSUMED.
             sm_version: parse_profile_value(&contents, "SM_VERSION")
-                .unwrap_or("sm_80")
+                .unwrap_or("")
                 .to_string(),
             compute_capability: parse_profile_value(&contents, "COMPUTE_CAPABILITY")
                 .unwrap_or("8.0")
