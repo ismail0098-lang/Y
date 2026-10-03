@@ -24,11 +24,14 @@
 // the whole default test run has been failing to build.
 #![cfg(feature = "zk")]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use y::cuda_runtime::CudaContext;
 use y::zk_field::Fr;
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 fn bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
@@ -37,10 +40,6 @@ fn bin() -> PathBuf {
         p.pop();
     }
     p.join("Y")
-}
-
-fn repo() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// BN254's Fr modulus, little-endian 32-bit limbs.
@@ -124,18 +123,15 @@ fn ptx_for(entry: &str) -> String {
     // one repo path at once. Observed as
     // `the_v4_kernel_emitted_no_loads` after several clean runs, which is the
     // documented signature of this race. Same fix `committed_ptx_artifacts.rs`
-    // already uses; `current_dir` stays the repo so `.ysu_hw_profile` is still
-    // found.
-    let dir = std::env::temp_dir().join(format!("y_ptx_{}_{}", std::process::id(), entry));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp dir for the emitted PTX");
-    let src = dir.join(format!("{}.ysu", entry));
-    std::fs::copy(repo().join(format!("tests/{}.ysu", entry)), &src)
-        .expect("copy the kernel source");
+    // already uses. And the profile is PINNED (the floor, which loads on any
+    // card) rather than read from the repository, which compiled for this
+    // machine's card.
+    let dir = pinned::pinned_scratch(entry, pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, &format!("tests/{}.ysu", entry));
     let out = Command::new(bin())
         .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("failed to run the Y binary");
     assert!(
@@ -209,20 +205,10 @@ fn gpu_montgomery_multiply_agrees_with_the_cpu_field() {
         return;
     };
 
-    let out = Command::new(bin())
-        .arg(repo().join("tests/bn254_fr_mul.ysu"))
-        .arg("--emit-ptx")
-        .current_dir(repo())
-        .output()
-        .expect("failed to run the Y binary");
-    assert!(
-        out.status.success(),
-        "bn254_fr_mul.ysu did not compile:\n{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let ptx = std::fs::read_to_string(repo().join("tests/bn254_fr_mul.ptx"))
-        .expect("no .ptx written");
+    // Through `ptx_for`, which compiles a COPY: this compiled the fixture IN
+    // PLACE - rewriting the committed `tests/bn254_fr_mul.ptx` - and read that
+    // committed path back.
+    let ptx = ptx_for("bn254_fr_mul");
     // If a single float instruction survives in a field kernel, some path is
     // still hardcoded and the limbs are being rounded.
     assert!(
@@ -396,14 +382,7 @@ fn what_the_gpu_field_multiply_costs() {
         eprintln!("SKIP: no CUDA driver.");
         return;
     };
-    let out = Command::new(bin())
-        .arg(repo().join("tests/bn254_fr_mul.ysu"))
-        .arg("--emit-ptx")
-        .current_dir(repo())
-        .output()
-        .unwrap();
-    assert!(out.status.success());
-    let ptx = std::fs::read_to_string(repo().join("tests/bn254_fr_mul.ptx")).unwrap();
+    let ptx = ptx_for("bn254_fr_mul");
     let module = ctx.load_ptx(&ptx, "bn254_fr_mul").unwrap();
 
     const N: usize = 1 << 20;

@@ -24,6 +24,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 /// One large term followed by many tiny ones.
 ///
 /// Summed largest-first in `f32`, each tiny term is smaller than an ulp of the
@@ -220,9 +223,12 @@ fn annotation_changes_the_generated_ir() {
 /// the gate that caught it was running `ptxas`. Skipped when `ptxas` is absent.
 #[test]
 fn ptx_zero_drift_lowers_and_assembles() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = std::env::temp_dir().join(format!("y_zdptx_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    // An Ada target PINNED in the scratch directory: the kernel requires
+    // `sm >= 89`. With the repository as working directory this compiled for
+    // whatever card the machine has - R0004 on a GPU-less one, and a
+    // `.target sm_90` module the `-arch=sm_89` assembly below refuses on an
+    // sm_90 one.
+    let dir = pinned::pinned_scratch("zdptx", pinned::SM_FP8);
     let ysu = dir.join("acc.ysu");
     std::fs::write(
         &ysu,
@@ -235,7 +241,7 @@ fn ptx_zero_drift_lowers_and_assembles() {
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&ysu)
         .arg("--emit-ptx")
-        .current_dir(&repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let log = format!(

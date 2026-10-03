@@ -25,6 +25,9 @@ use std::process::Command;
 use y::cuda_runtime::{CudaContext, DeviceBuffer, KernelModule};
 use y::zk_field::Fr;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
@@ -50,10 +53,16 @@ fn ptx_for(entry: &str) -> String {
     if let Some(p) = guard.get(entry) {
         return p.clone();
     }
+    // A COPY, against a PINNED profile (the floor, which loads on any card).
+    // This compiled `tests/<entry>.ysu` IN PLACE with the repository as working
+    // directory - rewriting a committed artifact for this machine's card, and
+    // racing every other binary reading it - and read that committed path back.
+    let dir = pinned::pinned_scratch(entry, pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, &format!("tests/{}.ysu", entry));
     let out = Command::new(bin())
-        .arg(repo().join(format!("tests/{}.ysu", entry)))
+        .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("failed to run the Y binary");
     assert!(
@@ -63,8 +72,7 @@ fn ptx_for(entry: &str) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let ptx = std::fs::read_to_string(repo().join(format!("tests/{}.ptx", entry)))
-        .expect("no .ptx written");
+    let ptx = std::fs::read_to_string(src.with_extension("ptx")).expect("no .ptx written");
     guard.insert(entry.to_string(), ptx.clone());
     ptx
 }

@@ -40,6 +40,9 @@
 //! the result is a legal module.
 
 use std::path::{Path, PathBuf};
+
+#[path = "common/pinned.rs"]
+mod pinned;
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
@@ -81,12 +84,15 @@ fn emit_ptx(tag: &str, source: &str) -> Emitted {
     let dir = scratch(tag);
     let src = dir.join("probe.ysu");
     std::fs::write(&src, source).unwrap();
+    // The profile is PINNED in the scratch directory, not read from the repo:
+    // `ptxas_accepts` assembles at a fixed sm_89, so compiling for this
+    // machine's card failed this file on any machine whose profile names a
+    // newer one (measured with an sm_90 profile: 3 of its 8 tests).
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(compiler())
         .arg(&src)
         .arg("--emit-ptx")
-        // `current_dir` stays the repo so `.ysu_hw_profile` is found; the
-        // artifact still lands beside the source, in the scratch directory.
-        .current_dir(repo_root())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let ptx_path = dir.join("probe.ptx");
@@ -352,10 +358,11 @@ fn emit_llvm(tag: &str, source: &str) -> (bool, String, Option<String>) {
     let dir = scratch(tag);
     let src = dir.join("probe.ysu");
     std::fs::write(&src, source).unwrap();
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(compiler())
         .arg(&src)
         .arg("--emit-llvm")
-        .current_dir(repo_root())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     (

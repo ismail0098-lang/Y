@@ -40,6 +40,9 @@
 //!
 //! Run with:  cargo test --release --test ptx_int8_mma_layout -- --nocapture
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 /// One warp, one `m16n8k32` tile. Hand-written so the layout under test is
 /// visible rather than generated.
 const PROBE: &str = r#"
@@ -212,33 +215,13 @@ fn the_int8_mma_fragment_layout_is_what_the_isa_says() {
 /// several tiles in both dimensions and several K steps.
 #[test]
 fn the_emitted_int8_gemm_matches_a_cpu_reference() {
-    use std::path::Path;
-    use std::process::Command;
     use y::cuda_runtime::CudaContext;
 
     let Some(ctx) = CudaContext::new() else {
         eprintln!("SKIP: no CUDA driver — the int8 GEMM was emitted but not executed.");
         return;
     };
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut bin = std::env::current_exe().unwrap();
-    bin.pop();
-    if bin.ends_with("deps") {
-        bin.pop();
-    }
-    let out = Command::new(bin.join("Y"))
-        .arg(repo.join("tests/int8_gemm.ysu"))
-        .arg("--emit-ptx")
-        .current_dir(repo)
-        .output()
-        .expect("run Y");
-    assert!(
-        out.status.success(),
-        "int8_gemm.ysu did not compile:\n{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let ptx = std::fs::read_to_string(repo.join("tests/int8_gemm.ptx")).expect("no .ptx");
+    let ptx = int8_gemm_ptx();
     let module = ctx.load_ptx(&ptx, "int8_gemm").expect("PTX failed to load");
 
     // Must match the @tile in the fixture.
@@ -307,4 +290,33 @@ fn the_emitted_int8_gemm_matches_a_cpu_reference() {
         MM * NN,
         first.unwrap_or_default()
     );
+}
+
+/// Compile a COPY of `tests/int8_gemm.ysu` against a PINNED profile (the floor,
+/// which loads on any card) and return its PTX. The device test compiled the
+/// fixture IN PLACE with the repository as working directory - rewriting the
+/// committed `tests/int8_gemm.ptx` for this machine's card - and then read that
+/// committed path back.
+fn int8_gemm_ptx() -> String {
+    use std::process::Command;
+    let mut bin = std::env::current_exe().unwrap();
+    bin.pop();
+    if bin.ends_with("deps") {
+        bin.pop();
+    }
+    let dir = pinned::pinned_scratch("int8_mma", pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, "tests/int8_gemm.ysu");
+    let out = Command::new(bin.join("Y"))
+        .arg(&src)
+        .arg("--emit-ptx")
+        .current_dir(&dir)
+        .output()
+        .expect("run Y");
+    assert!(
+        out.status.success(),
+        "int8_gemm.ysu did not compile:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read_to_string(src.with_extension("ptx")).expect("no .ptx")
 }

@@ -16,10 +16,13 @@
 //!
 //! Run with:  cargo test --release --test ptx_carry_chain
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use y::cuda_runtime::CudaContext;
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 fn bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
@@ -30,9 +33,6 @@ fn bin() -> PathBuf {
     p.join("Y")
 }
 
-fn repo() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-}
 
 fn compile(entry: &str) -> String {
     use std::sync::{Mutex, OnceLock};
@@ -42,10 +42,16 @@ fn compile(entry: &str) -> String {
     if let Some(p) = guard.get(entry) {
         return p.clone();
     }
+    // A COPY, against a PINNED profile (the floor, which the device test can
+    // launch on any card). This compiled `tests/<entry>.ysu` IN PLACE with the
+    // repository as working directory, rewriting the committed artifact for
+    // this machine's card, and read that committed path back.
+    let dir = pinned::pinned_scratch(entry, pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, &format!("tests/{}.ysu", entry));
     let out = Command::new(bin())
-        .arg(repo().join(format!("tests/{}.ysu", entry)))
+        .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("failed to run the Y binary");
     assert!(
@@ -55,8 +61,7 @@ fn compile(entry: &str) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let ptx = std::fs::read_to_string(repo().join(format!("tests/{}.ptx", entry)))
-        .expect("no .ptx written");
+    let ptx = std::fs::read_to_string(src.with_extension("ptx")).expect("no .ptx written");
     guard.insert(entry.to_string(), ptx.clone());
     ptx
 }

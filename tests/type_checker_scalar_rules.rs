@@ -24,9 +24,11 @@
 //!
 //! Run with:  cargo test --test type_checker_scalar_rules
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 static SALT: AtomicUsize = AtomicUsize::new(0);
 
@@ -35,10 +37,9 @@ fn compile(src: &str) -> (bool, String) {
     let dir = std::env::temp_dir().join(format!("y_tcs_{}_{}", std::process::id(), n));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let profile = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".ysu_hw_profile");
-    if profile.exists() {
-        let _ = std::fs::copy(&profile, dir.join(".ysu_hw_profile"));
-    }
+    // A PINNED profile, not the repository's: that one holds this machine's card
+    // and measurements, so copying it made the verdict depend on the machine.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let path = dir.join("case.ysu");
     std::fs::write(&path, src).unwrap();
 

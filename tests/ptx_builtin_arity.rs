@@ -28,6 +28,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 const HEADER: &str = "kernel k(A: GlobalMemory<F32>, B: GlobalMemory<F32>, N: I32)";
 
 /// The PTX backend alone: (refusals, PTX if there were none).
@@ -49,7 +52,6 @@ fn backend(body: &str) -> (String, Option<String>) {
 /// The real binary, on a copy in its own directory.
 fn binary(src: &str) -> (bool, String, Option<String>) {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dir = std::env::temp_dir().join(format!(
         "y_builtin_arity_{}_{}",
         std::process::id(),
@@ -59,10 +61,13 @@ fn binary(src: &str) -> (bool, String, Option<String>) {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("k.ysu");
     std::fs::write(&file, format!("{}\nfn main() {{}}\n", src)).unwrap();
+    // A PINNED profile in the scratch directory, which is the working
+    // directory: `current_dir(repo)` compiled for this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&file)
         .arg("--emit-ptx")
-        .current_dir(repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let log = format!(
@@ -314,7 +319,6 @@ fn the_accepted_spellings_write_what_they_name() {
 #[test]
 fn the_host_backend_refuses_store_instead_of_crashing() {
     for body in ["store(Out[1], 7);", "store(Out, 0, 7);", "store(Out);"] {
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
             "y_builtin_arity_cpu_{}_{}",
@@ -329,10 +333,13 @@ fn the_host_backend_refuses_store_instead_of_crashing() {
             format!("kernel k(Out: GlobalMemory<I32>) {{\n    {}\n}}\nfn main() {{}}\n", body),
         )
         .unwrap();
+        // A PINNED profile in the scratch directory, which is the working
+        // directory: `current_dir(repo)` compiled for this machine's card.
+        pinned::pin(&dir, pinned::SM_PINNED);
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
             .arg(&file)
             .arg("--emit-cpu")
-            .current_dir(repo)
+            .current_dir(&dir)
             .output()
             .expect("run Y");
         let log = format!(

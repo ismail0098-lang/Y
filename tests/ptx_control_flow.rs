@@ -33,6 +33,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
@@ -52,8 +55,11 @@ fn emit(name: &str, src: &str) -> Result<String, String> {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join(format!("{}.ysu", name));
     std::fs::write(&path, src).expect("write source");
+    // A PINNED profile in the scratch directory, which is the working
+    // directory: `current_dir(repo)` compiled for this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let mut cmd = Command::new(bin());
-    cmd.arg(&path).arg("--emit-ptx").current_dir(repo());
+    cmd.arg(&path).arg("--emit-ptx").current_dir(&dir);
     // Keep a solver in reach: every loop here carries an `@invariant`, and a
     // missing z3 would fail these for a reason that is not what they test.
     if let Some(z3) = ["venv/bin/z3", ".venv/bin/z3", "z3/build/z3"]

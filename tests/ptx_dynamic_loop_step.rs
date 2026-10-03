@@ -25,14 +25,16 @@
 //! by construction, since the whole claim is that the answer does not depend
 //! on the partition.
 
-use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn compile(name: &str, src: &str) -> (bool, String, String) {
-    let dir = std::env::var("CARGO_TARGET_TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    std::fs::create_dir_all(&dir).unwrap();
+    // A fresh directory holding a PINNED profile. This wrote into the shared
+    // `CARGO_TARGET_TMPDIR` and compiled with `current_dir` at the repository,
+    // i.e. for this machine's card.
+    let dir = pinned::pinned_scratch(name, pinned::SM_PINNED);
     let ysu = dir.join(format!("{name}.ysu"));
     std::fs::write(&ysu, src).unwrap();
 
@@ -44,7 +46,7 @@ fn compile(name: &str, src: &str) -> (bool, String, String) {
     let out = Command::new(bin.join("Y"))
         .arg(&ysu)
         .arg("--emit-ptx")
-        .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let log = format!(

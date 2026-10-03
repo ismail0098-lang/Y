@@ -46,6 +46,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use y::lexer::Lexer;
 use y::parser::Parser;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -64,15 +67,19 @@ fn scratch(tag: &str) -> PathBuf {
     d
 }
 
-/// Runs the compiler from the repository root (so the hardware profile and the
-/// runtime are the ones every other test uses) on `src`, written into `dir`.
-/// Every artifact goes to `dir`: `-o` is always given, because `--emit-native`
-/// otherwise writes `output_bin` into the working directory.
+/// Runs the compiler in `dir`, against a pinned hardware profile, on `src`
+/// written there. It used to run from the repository root "so the hardware
+/// profile and the runtime are the ones every other test uses" - but the
+/// runtime is found from the compiler's own path, and the repository's profile
+/// is this machine's card. Every artifact goes to `dir`: `-o` is always given,
+/// because `--emit-native` otherwise writes `output_bin` into the working
+/// directory.
 fn compile(dir: &PathBuf, name: &str, src: &str, flag: &str) -> (bool, String) {
     let path = dir.join(format!("{name}.ysu"));
     std::fs::write(&path, src).expect("write source");
+    pinned::pin(dir, pinned::SM_PINNED);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_Y"));
-    cmd.arg(&path).current_dir(repo());
+    cmd.arg(&path).current_dir(dir);
     if !flag.is_empty() {
         cmd.arg(flag);
     }

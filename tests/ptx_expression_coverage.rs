@@ -34,6 +34,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -50,10 +53,13 @@ fn emit_ptx(name: &str, src: &str) -> Outcome {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join(format!("{}.ysu", name));
     std::fs::write(&path, src).expect("write source");
+    // A PINNED profile in the scratch directory, which is the working
+    // directory: `current_dir(repo())` compiled for this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&path)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -107,12 +113,19 @@ fn a_boolean_literal_condition_lowers() {
 /// describing an absent optimisation. It regressed again, so it is pinned here.
 #[test]
 fn the_documented_drift_example_still_compiles() {
-    let src = repo().join("tests/test_drift.ysu");
-    assert!(src.exists(), "tests/test_drift.ysu is missing");
+    assert!(repo().join("tests/test_drift.ysu").exists(), "tests/test_drift.ysu is missing");
+    // Under the condition the documentation states: the kernel carries
+    // `@require(sm >= 89)`, so the documented command needs an Ada target, and
+    // CLAUDE.md says to pin `SM_VERSION=8.9` where there is no such card. This
+    // ran IN PLACE with the repository as working directory, so it rewrote the
+    // committed `tests/test_drift.ptx` on every run and failed with R0004 on a
+    // GPU-less machine - a verdict about the machine, not the example.
+    let dir = pinned::pinned_scratch("drift", pinned::SM_FP8);
+    let src = pinned::copy_fixture(&dir, "tests/test_drift.ysu");
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     assert!(
@@ -193,14 +206,20 @@ fn the_real_kernels_still_compile() {
     ];
     let mut compiled = 0;
     for k in kernels {
-        let src = repo().join(k);
-        if !src.exists() {
+        if !repo().join(k).exists() {
             continue;
         }
+        // A COPY, against a PINNED profile. These three were compiled IN PLACE
+        // with the repository as working directory, which rewrote the committed
+        // `tests/<k>.ptx` on every run - with this machine's target, so a
+        // GPU-less run left all three modified (`.target sm_89` -> `sm_80`) -
+        // while `committed_ptx_artifacts.rs` was reading them.
+        let dir = pinned::pinned_scratch("real", pinned::SM_PINNED);
+        let src = pinned::copy_fixture(&dir, k);
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
             .arg(&src)
             .arg("--emit-ptx")
-            .current_dir(repo())
+            .current_dir(&dir)
             .output()
             .expect("run Y");
         assert!(
@@ -313,9 +332,7 @@ fn an_aggregate_zero_initialiser_is_refused_by_name() {
 /// compiled it.
 #[test]
 fn a_struct_field_access_is_refused_rather_than_spliced_as_an_empty_operand() {
-    let d = std::env::temp_dir().join(format!("y_ptx_member_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).expect("temp dir");
+    let d = pinned::pinned_scratch("member", pinned::SM_PINNED);
     let src = d.join("ma.ysu");
     std::fs::write(
         &src,
@@ -332,6 +349,7 @@ fn main() {}
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src)
         .arg("--emit-ptx")
+        .current_dir(&d)
         .output()
         .expect("run Y");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -378,10 +396,13 @@ fn a_v4_lane_is_still_a_member_access_that_works() {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let tmp = dir.join("bn254_fr_mul_fast.ysu");
     std::fs::copy(&src, &tmp).expect("copy the v4 fixture");
+    // And a PINNED profile: the repository as working directory compiled for
+    // this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&tmp)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();

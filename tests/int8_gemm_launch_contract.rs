@@ -40,43 +40,47 @@
 use std::path::Path;
 use std::process::Command;
 
-/// Compile a fixture at `(m, n, k)` in a per-test temp directory and return
-/// its PTX. The tag is in the SIGNATURE rather than a comment asking the next
-/// author to remember: this helper materialises files in a temp dir and that
-/// race has fired six times in this repository.
-fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+#[path = "common/pinned.rs"]
+mod pinned;
+
+fn y_bin() -> std::path::PathBuf {
     let mut bin = std::env::current_exe().unwrap();
     bin.pop();
     if bin.ends_with("deps") {
         bin.pop();
     }
-    let dir = std::env::temp_dir().join(format!("i8lc_{}_{}", std::process::id(), tag));
+    bin.join("Y")
+}
+
+/// Write `source` as `file` into a per-test temp directory and return
+/// `(dir, source path)`. The tag is in the SIGNATURE rather than a comment
+/// asking the next author to remember: this helper materialises files in a
+/// temp dir and that race has fired six times in this repository.
+fn prepare(prefix: &str, tag: &str, file: &str, source: String) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), tag));
     std::fs::create_dir_all(&dir).unwrap();
-    // `--emit-ptx` writes next to its input, so compile a COPY: a gate that
-    // emits must never rewrite the committed artifacts it is checking.
-    if let Ok(p) = std::fs::read(repo.join(".ysu_hw_profile")) {
-        let _ = std::fs::write(dir.join(".ysu_hw_profile"), p);
-    }
-    let src = dir.join("lc.ysu");
-    std::fs::write(
-        &src,
-        format!(
-            "@tile({}, {}, {})\n\
-             kernel int8_gemm(A: GlobalMemory<I8>, B: GlobalMemory<I8>, C: GlobalMemory<I32>) {{\n}}\n\
-             fn main() {{}}\n",
-            m, n, k
-        ),
-    )
-    .unwrap();
-    let out = Command::new(bin.join("Y"))
-        .arg(&src)
+    let src = dir.join(file);
+    std::fs::write(&src, source).unwrap();
+    (dir, src)
+}
+
+/// Compile against a PINNED profile: what every assertion about the emitted
+/// text reads and what the device tests launch. These helpers used to copy the
+/// repository's profile in, so the text was whatever this machine's card
+/// produced.
+fn compile_pinned(dir: &Path, src: &Path) -> std::process::Output {
+    pinned::pin(dir, pinned::SM_PINNED);
+    Command::new(y_bin())
+        .arg(src)
         .arg("--emit-ptx")
-        .current_dir(&dir)
+        .current_dir(dir)
         .output()
-        .expect("run Y");
+        .expect("run Y")
+}
+
+fn read_back(dir: &Path, out: std::process::Output, ptx: &str) -> Result<String, String> {
     let r = if out.status.success() {
-        Ok(std::fs::read_to_string(dir.join("lc.ptx")).expect("no .ptx"))
+        Ok(std::fs::read_to_string(dir.join(ptx)).expect("no .ptx"))
     } else {
         Err(format!(
             "{}{}",
@@ -84,8 +88,26 @@ fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr)
         ))
     };
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
     r
+}
+
+fn plain_source(m: usize, n: usize, k: usize) -> String {
+    format!(
+        "@tile({}, {}, {})\n\
+         kernel int8_gemm(A: GlobalMemory<I8>, B: GlobalMemory<I8>, C: GlobalMemory<I32>) {{\n}}\n\
+         fn main() {{}}\n",
+        m, n, k
+    )
+}
+
+/// Compile a fixture at `(m, n, k)` and return its PTX, against a pinned
+/// profile. `--emit-ptx` writes next to its input, so it compiles a COPY: a
+/// gate that emits must never rewrite the committed artifacts it is checking.
+fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
+    let (dir, src) = prepare("i8lc", tag, "lc.ysu", plain_source(m, n, k));
+    let out = compile_pinned(&dir, &src);
+    read_back(&dir, out, "lc.ptx")
 }
 
 /// The behavioural half: the answer must not depend on the block size.
@@ -554,50 +576,23 @@ fn the_warp_tile_is_chosen_from_the_shape_and_narrows_nothing() {
 // whose launch contract was the opposite of what the module advertised.
 // ---------------------------------------------------------------------------
 
-/// The fused shape: `C = acc * Sa[m] * Sb[n] + Bias[n]`, f32 out. Same tag
-/// discipline as `emit` above and for the same reason.
-fn emit_scaled(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut bin = std::env::current_exe().unwrap();
-    bin.pop();
-    if bin.ends_with("deps") {
-        bin.pop();
-    }
-    let dir = std::env::temp_dir().join(format!("i8sc_{}_{}", std::process::id(), tag));
-    std::fs::create_dir_all(&dir).unwrap();
-    if let Ok(p) = std::fs::read(repo.join(".ysu_hw_profile")) {
-        let _ = std::fs::write(dir.join(".ysu_hw_profile"), p);
-    }
-    let src = dir.join("sc.ysu");
-    std::fs::write(
-        &src,
-        format!(
-            "@tile({}, {}, {})\n\
-             kernel int8_gemm_scaled(A: GlobalMemory<I8>, B: GlobalMemory<I8>, \
-             Sa: GlobalMemory<F32>, Sb: GlobalMemory<F32>, Bias: GlobalMemory<F32>, \
-             C: GlobalMemory<F32>) {{\n}}\n\
-             fn main() {{}}\n",
-            m, n, k
-        ),
+fn scaled_source(m: usize, n: usize, k: usize) -> String {
+    format!(
+        "@tile({}, {}, {})\n\
+         kernel int8_gemm_scaled(A: GlobalMemory<I8>, B: GlobalMemory<I8>, \
+         Sa: GlobalMemory<F32>, Sb: GlobalMemory<F32>, Bias: GlobalMemory<F32>, \
+         C: GlobalMemory<F32>) {{\n}}\n\
+         fn main() {{}}\n",
+        m, n, k
     )
-    .unwrap();
-    let out = Command::new(bin.join("Y"))
-        .arg(&src)
-        .arg("--emit-ptx")
-        .current_dir(&dir)
-        .output()
-        .expect("run Y");
-    let r = if out.status.success() {
-        Ok(std::fs::read_to_string(dir.join("sc.ptx")).expect("no .ptx"))
-    } else {
-        Err(format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    };
-    let _ = std::fs::remove_dir_all(&dir);
-    r
+}
+
+/// The fused shape: `C = acc * Sa[m] * Sb[n] + Bias[n]`, f32 out. Same tag
+/// discipline as `emit` above and for the same reason, and pinned the same way.
+fn emit_scaled(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
+    let (dir, src) = prepare("i8sc", tag, "sc.ysu", scaled_source(m, n, k));
+    let out = compile_pinned(&dir, &src);
+    read_back(&dir, out, "sc.ptx")
 }
 
 /// The behavioural half for the fused shape, and the measurement that found

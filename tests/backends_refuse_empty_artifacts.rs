@@ -41,6 +41,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -52,10 +55,13 @@ fn compile(name: &str, src: &str, flag: &str, ext: &str) -> (bool, String, Optio
     std::fs::create_dir_all(&dir).expect("temp dir");
     let path = dir.join(format!("{}.ysu", name));
     std::fs::write(&path, src).expect("write source");
+    // A pinned profile, not the repository's: the artifacts below are read,
+    // and what this machine's profile holds is this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&path)
         .arg(flag)
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let text = format!(
@@ -211,6 +217,11 @@ fn sweep(flag: &str, ext: &str, tag: &str) -> (usize, usize, Vec<String>) {
     let work = std::env::temp_dir().join(format!("y_sweep_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).unwrap();
+    // Pinned at sm_89, the target the committed artifacts declare, so the
+    // corpus compiles here as it does on the card it was written for: a kernel
+    // with `@require(sm >= 89)` is emitted rather than refused, and the floors
+    // below keep their meaning on a machine with no GPU at all.
+    pinned::pin(&work, pinned::SM_FP8);
     let (mut emitted, mut refused, mut bad) = (0, 0, Vec::new());
     for src in corpus() {
         let stem = src.file_stem().unwrap().to_string_lossy().to_string();
@@ -219,7 +230,7 @@ fn sweep(flag: &str, ext: &str, tag: &str) -> (usize, usize, Vec<String>) {
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
             .arg(&copy)
             .arg(flag)
-            .current_dir(repo())
+            .current_dir(&work)
             .output()
             .expect("run Y");
         let art = std::fs::read_to_string(work.join(format!("{}.{}", stem, ext)));

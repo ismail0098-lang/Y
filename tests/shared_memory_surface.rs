@@ -53,6 +53,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn dir(tag: &str) -> PathBuf {
     // Per-test directory: these run in one binary and share a pid. The tag is
     // in the signature rather than in a comment because this race has fired
@@ -63,20 +66,15 @@ fn dir(tag: &str) -> PathBuf {
     d
 }
 
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 /// Compile `src` with `flag`, in a private directory so nothing writes an
 /// artifact next to a committed one.
 fn compile(tag: &str, src: &str, flag: &str) -> (bool, String, PathBuf) {
     let d = dir(tag);
-    // The emitters read `.ysu_hw_profile` from the working directory; without
-    // it they probe the GPU, which is slow and machine-dependent.
-    let prof = repo().join(".ysu_hw_profile");
-    if prof.exists() {
-        let _ = std::fs::copy(&prof, d.join(".ysu_hw_profile"));
-    }
+    // The emitters read `.ysu_hw_profile` from the working directory. Without
+    // one they probe this machine, and the repository's copy is this machine's
+    // too, so the profile is PINNED: the verdict must not depend on the card.
+    pinned::pin(&d, pinned::SM_PINNED);
     let f = d.join("probe.ysu");
     std::fs::write(&f, src).expect("write probe");
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))

@@ -32,16 +32,24 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 const BLOCK: u32 = 64;
 const N: u32 = 256;
 
-fn compile(fixture: &str) -> String {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+fn y_bin() -> std::path::PathBuf {
     let mut bin = std::env::current_exe().unwrap();
     bin.pop();
     if bin.ends_with("deps") {
         bin.pop();
     }
+    bin.join("Y")
+}
+
+/// A COPY of `fixture` in a fresh directory: `(dir, source)`.
+fn prepare(fixture: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     // Compile a COPY: `--emit-ptx` writes next to its input, and rewriting a
     // committed artifact from a test races every other binary doing the same.
     // The fixture name alone is NOT unique: two tests in this file compile
@@ -60,14 +68,10 @@ fn compile(fixture: &str) -> String {
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.join("k.ysu");
     std::fs::copy(repo.join(fixture), &src).expect("fixture missing");
-    let _ = std::fs::copy(repo.join(".ysu_hw_profile"), dir.join(".ysu_hw_profile"));
+    (dir, src)
+}
 
-    let out = Command::new(bin.join("Y"))
-        .arg(&src)
-        .arg("--emit-ptx")
-        .current_dir(repo)
-        .output()
-        .expect("run Y");
+fn read_back(fixture: &str, dir: &Path, out: std::process::Output) -> String {
     assert!(
         out.status.success(),
         "{} did not compile:\n{}{}",
@@ -76,8 +80,26 @@ fn compile(fixture: &str) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     let ptx = std::fs::read_to_string(dir.join("k.ptx")).expect("no .ptx emitted");
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
     ptx
+}
+
+/// Compile a COPY of `fixture` against a PINNED profile: what every test here
+/// reads, assembles, or launches. This copied the
+/// repository's profile into the scratch directory and then ran with
+/// `current_dir(repo)`, so the copy was never read: every compile used this
+/// machine's card, and an sm_90 profile failed `the_wide_fixture_assembles`
+/// (assembled at a fixed sm_89).
+fn compile(fixture: &str) -> String {
+    let (dir, src) = prepare(fixture);
+    pinned::pin(&dir, pinned::SM_PINNED);
+    let out = Command::new(y_bin())
+        .arg(&src)
+        .arg("--emit-ptx")
+        .current_dir(&dir)
+        .output()
+        .expect("run Y");
+    read_back(fixture, &dir, out)
 }
 
 /// Strip comments, so nothing below can match the emitter's own prose about
