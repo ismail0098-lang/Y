@@ -233,6 +233,89 @@ enum ZeroInitKind {
     Unrepresentable,
 }
 
+/// The lowest architecture this backend's instruction mix needs (`mma.sync`
+/// m16n8k16, `cp.async`, `ldmatrix`), and therefore the target when the
+/// hardware profile names no GPU. PTX is forward compatible, so sm_80 PTX JITs
+/// on every card from Ampere on; guessing ABOVE the device is a hard load
+/// failure, guessing below it costs nothing that exists.
+pub const PTX_FLOOR: &str = "sm_80";
+
+/// The `.target` a compilation emits, and whether a probe chose it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PtxTarget {
+    /// What `.target` says: `sm_89`, `sm_120`, or `PTX_FLOOR`.
+    pub arch: String,
+    /// The architecture as a number (`89`, `120`), for comparisons.
+    pub level: u32,
+    /// `None` when the profile named a real architecture. `Some(why)` when it
+    /// named none and `arch` is `PTX_FLOOR` in its place - an ASSUMPTION, which
+    /// a `@require(sm ...)` must not treat as a fact.
+    pub assumed: Option<String>,
+}
+
+/// The ONE place a `.target` is decided from a profile's `SM_VERSION`.
+///
+/// **A machine with no NVIDIA GPU emitted `.target sm_00`.** The probe records
+/// that case as compute capability `0.0` (`ysu_gpu_probe`'s generic fallback,
+/// and `sentinel`'s default when the probe binary cannot run), and every
+/// consumer derived the target by deleting the dot and prefixing `sm_` - so
+/// `0.0` became `sm_00`, which `ptxas` rejects outright ("Unsupported .target
+/// 'sm_00'"), under "Compilation Successful!" and exit 0. That is every PTX
+/// compile on CI, in a container, or on a laptop without an NVIDIA card - and
+/// PTX is precisely the artifact one builds where the GPU is not.
+///
+/// It survived because ONE consumer knew: `--emit-coprocessor` in `main.rs`
+/// special-cased `"0.0"` and fell back to sm_80, while this emitter, the C API
+/// and `@require` did not. A guard consulted at one site of four. Every
+/// consumer calls this now, and it accepts only something that names an
+/// architecture: `8.9`, `12.0`, `89`, `sm_89`, `sm_90a`. Empty, compute
+/// capability 0.x, and anything unparseable become [`PTX_FLOOR`] with the
+/// reason in `assumed`, so the caller can say what it guessed.
+pub fn ptx_target_for(sm_version: &str) -> PtxTarget {
+    let floor = |why: String| PtxTarget {
+        arch: PTX_FLOOR.to_string(),
+        level: 80,
+        assumed: Some(why),
+    };
+    let raw = sm_version.trim();
+    if raw.is_empty() {
+        return floor("the hardware profile records no GPU architecture".to_string());
+    }
+    let body = raw.strip_prefix("sm_").unwrap_or(raw);
+    // An architecture-specific suffix (`a`, `f`) is kept as given: it is only
+    // ever written by hand, and `.target sm_90a` is that user's explicit choice.
+    let (digits, suffix) = match body.char_indices().last() {
+        Some((i, c)) if c.is_ascii_lowercase() => (&body[..i], &body[i..]),
+        _ => (body, ""),
+    };
+    let level = match digits.split_once('.') {
+        Some((maj, min)) => match (maj.parse::<u32>(), min.parse::<u32>()) {
+            (Ok(maj), Ok(min)) if min <= 9 => Some(maj * 10 + min),
+            _ => None,
+        },
+        None if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) => {
+            digits.parse::<u32>().ok()
+        }
+        None => None,
+    };
+    match level {
+        Some(l) if l >= 10 => PtxTarget {
+            arch: format!("sm_{}{}", l, suffix),
+            level: l,
+            assumed: None,
+        },
+        Some(_) => floor(format!(
+            "the hardware profile records compute capability `{}` - the probe found no \
+             NVIDIA GPU on the machine that wrote it",
+            raw
+        )),
+        None => floor(format!(
+            "the hardware profile's SM_VERSION `{}` does not name an architecture",
+            raw
+        )),
+    }
+}
+
 pub fn ptx_version_for_sm(sm: &str) -> &'static str {
     let normalized = if sm.starts_with("sm_") {
         sm.to_string()
@@ -810,6 +893,9 @@ pub struct PtxEmitter {
     pub emit_errors: Vec<String>,
     /// The resolved SM target (e.g. "sm_80") for PTX header emission.
     sm_target: String,
+    /// Why `sm_target` is `PTX_FLOOR` rather than a probed architecture, when
+    /// it is. Carried so a refusal that names the target can say it was a guess.
+    target_assumed: Option<String>,
     /// When true, emits .file and .loc directives for NCU profiling and debugging.
     pub debug_info: bool,
     /// Module-scope declarations (currently just `.extern .shared` arrays for
@@ -882,13 +968,11 @@ impl PtxEmitter {
 
     pub fn new_with_profile(hw_profile: &HardwareProfile) -> Self {
         let mut buffer = String::new();
-        let raw_sm = hw_profile.sm_version.replace('.', "");
-        let target = if !raw_sm.is_empty() {
-            let t = if raw_sm.starts_with("sm_") {
-                raw_sm
-            } else {
-                format!("sm_{}", raw_sm)
-            };
+        // Decided in `ptx_target_for`, the one place a `.target` comes from a
+        // profile - see its comment for the `sm_00` this used to emit.
+        let decided = ptx_target_for(&hw_profile.sm_version);
+        let target = {
+            let t = decided.arch.clone();
             // NO ARCHITECTURE-SPECIFIC SUFFIX. This used to promote sm_90 to
             // `sm_90a` unconditionally and without a stated reason - a leftover
             // from the WGMMA/TMA surface that was deleted for never having
@@ -913,8 +997,6 @@ impl PtxEmitter {
             // emission, on the module - not by promoting every kernel on the
             // chance that one of them needs it.
             t
-        } else {
-            "sm_80".to_string()
         };
         let ptx_version = ptx_version_for_sm(&target);
         writeln!(&mut buffer, "{}", ptx_version).unwrap();
@@ -944,6 +1026,7 @@ impl PtxEmitter {
             drift_report: Vec::new(),
             emit_errors: Vec::new(),
             sm_target: target,
+            target_assumed: decided.assumed,
             debug_info: false,
             pending_extern_decls: Vec::new(),
             pending_module_items: Vec::new(),
@@ -2500,6 +2583,26 @@ or `shared_alloc_u32` for a shared-memory array.",
         ));
     }
 
+    /// The `.target` this module declares, and - when the profile named no
+    /// architecture - why it is `PTX_FLOOR` instead. `main` prints the second.
+    pub fn target(&self) -> (&str, Option<&str>) {
+        (&self.sm_target, self.target_assumed.as_deref())
+    }
+
+    /// `sm_89`, or `sm_80 (assumed: <why>)` - for a refusal that names the
+    /// target, so a GPU-less machine is told its target was a guess rather than
+    /// told it owns an sm_80 card.
+    fn target_desc(&self) -> String {
+        match &self.target_assumed {
+            None => self.sm_target.clone(),
+            Some(why) => format!(
+                "{} (assumed: {}; write SM_VERSION=<major>.<minor> into .ysu_hw_profile \
+                 to compile for a card this machine does not have)",
+                self.sm_target, why
+            ),
+        }
+    }
+
     /// The numeric part of `sm_NN`, for comparing architectures.
     fn sm_level(&self) -> u32 {
         self.sm_target
@@ -2532,7 +2635,7 @@ or `shared_alloc_u32` for a shared-memory array.",
             self.require_ptx_version("8.4");
             return true;
         }
-        let lvl = self.sm_target.clone();
+        let lvl = self.target_desc();
         self.emit_errors.push(format!(
             "[PTX] kernel `{}` uses FP8 (e4m3) tensor cores, which exist only on sm_89 \
              (Ada) and later; this build targets {}. There is no fallback: the \

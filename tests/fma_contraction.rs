@@ -482,6 +482,15 @@ fn stating_the_fusion_is_free_and_forbidding_it_is_not() {
         eprintln!("SKIP: no ptxas");
         return;
     }
+    // The comparison is between disassemblies. Without `nvdisasm` this used to
+    // PANIC at its first call - so a machine with `ptxas` and not `nvdisasm`
+    // (the PyPI `nvidia-cuda-nvcc` wheel ships one without the other) failed
+    // here for a missing tool rather than skipping like the `ptxas` check
+    // above. `pip install nvidia-cuda-nvdisasm` provides it.
+    if Command::new("nvdisasm").arg("--version").output().is_err() {
+        eprintln!("SKIP: no nvdisasm - the SASS comparison was not made");
+        return;
+    }
     let ptx = emit_ptx("sass", ONE_FMA_SRC);
     assert_eq!(
         body(&ptx).matches("fma.rn.f32").count(),
@@ -716,6 +725,15 @@ fn the_rope_rotation_states_its_subtract_on_the_addend() {
 fn forbidding_the_fusion_changes_nothing_where_it_is_all_stated() {
     if Command::new("ptxas").arg("--version").output().is_err() {
         eprintln!("SKIP: no ptxas");
+        return;
+    }
+    // The comparison is between disassemblies. Without `nvdisasm` this used to
+    // PANIC at its first call - so a machine with `ptxas` and not `nvdisasm`
+    // (the PyPI `nvidia-cuda-nvcc` wheel ships one without the other) failed
+    // here for a missing tool rather than skipping like the `ptxas` check
+    // above. `pip install nvidia-cuda-nvdisasm` provides it.
+    if Command::new("nvdisasm").arg("--version").output().is_err() {
+        eprintln!("SKIP: no nvdisasm - the SASS comparison was not made");
         return;
     }
     let dir = std::env::temp_dir().join(format!("y_fma_noop_{}", std::process::id()));

@@ -20,22 +20,27 @@
 //  to catch.
 // ============================================================
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 static NEXT_OUTPUT: AtomicUsize = AtomicUsize::new(0);
 
 fn run(extra: &[&str]) -> (bool, String) {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // A copy in a pinned scratch directory: some of these flags emit PTX, which
+    // must not be compiled against this machine's profile.
+    let dir = pinned::pinned_scratch("flags", pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, "tests/hello.ysu");
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
-        .arg(repo.join("tests/hello.ysu"))
+        .arg(&src)
         .args(extra)
         .arg("-o")
         // Parallel flag probes must not overwrite the LLVM input while the
         // bare-invocation control is linking it with clang.
         .arg(std::env::temp_dir().join(format!("y_flagtest_{}_{}", std::process::id(), NEXT_OUTPUT.fetch_add(1, Ordering::Relaxed))))
-        .current_dir(&repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     (

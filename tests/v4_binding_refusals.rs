@@ -31,6 +31,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 struct Run {
     ok: bool,
     text: String,
@@ -60,12 +63,15 @@ fn compile(fixture: &str) -> Run {
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.join("k.ysu");
     std::fs::copy(repo.join(fixture), &src).expect("fixture missing");
-    let _ = std::fs::copy(repo.join(".ysu_hw_profile"), dir.join(".ysu_hw_profile"));
+    // A PINNED profile. This copied the repository's into `dir` and then ran
+    // with `current_dir(repo)`, so the copy was dead and the compile targeted
+    // this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
 
     let out = Command::new(bin.join("Y"))
         .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let text = format!(

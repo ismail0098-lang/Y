@@ -29,11 +29,19 @@
 //! **The load-bearing test here is `the_condition_is_actually_evaluated`.** A
 //! gate that always refuses satisfies every assertion about a refusal and is
 //! useless; a gate that always accepts is the bug being fixed. Only a
-//! biconditional on the SAME feature separates them, and it is written to be
-//! machine-independent: the refusal message reports the value this host has, so
-//! the test reads that value back and asserts the requirement passes at it and
-//! fails one above it. That is a boundary one unit wide, on whatever hardware
-//! the suite happens to run.
+//! biconditional on the SAME feature separates them. The refusal message reports
+//! the target's value, so the test reads that value back and asserts the
+//! requirement passes at it and fails one above it - a boundary one unit wide.
+//!
+//! **It is machine-independent because the helper PINS the profile**, not
+//! because it reads whatever host it runs on. It used to run in the repo root
+//! and read the machine's own `.ysu_hw_profile`, and called that machine-
+//! independent - which held only while every machine had a GPU. On one with
+//! none the probe records compute capability `0.0`, which this file read as
+//! "`sm = 0`" and passed on: the boundary test ran at architecture 0, about a
+//! card that does not exist. Once `0.0` is (correctly) an unknown target, the
+//! machine-reading version cannot run there at all. `tests/gpu_less_target.rs`
+//! owns the GPU-less behaviour; this file owns evaluation at a known target.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -52,12 +60,16 @@ fn compile(tag: &str, source: &str, flag: &str) -> (bool, String) {
     let dir = std::env::temp_dir().join(format!("y_require_{tag}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
+    // The TARGET is pinned: GPU facts come from the profile in the working
+    // directory, and this file asks how `@require` evaluates a known target -
+    // not which card, if any, the suite happens to run on.
+    std::fs::write(dir.join(".ysu_hw_profile"), PINNED_PROFILE).unwrap();
     let src = dir.join("p.ysu");
     std::fs::write(&src, source).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src)
         .arg(flag)
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let text = format!(
@@ -67,6 +79,10 @@ fn compile(tag: &str, source: &str, flag: &str) -> (bool, String) {
     );
     (out.status.success(), text)
 }
+
+/// An sm_89 target: the architecture `tests/test_drift.ysu` requires, and an
+/// ordinary probed one (`SM_VERSION=8.9`, not an assumed floor).
+const PINNED_PROFILE: &str = "SM_VERSION=8.9\nGPU_NAME=RequireGate\nSM_COUNT=66\n";
 
 fn kernel_with(cond: &str) -> String {
     format!(
@@ -193,20 +209,22 @@ fn require_on_a_non_kernel_item_is_refused_not_discarded() {
 /// `tests/test_drift.ysu` carries `@require(sm >= 89)` and is presented in
 /// `CLAUDE.md` as a documented `--emit-ptx` invocation, so it is a real
 /// end-to-end control rather than a fixture written to pass.
+///
+/// It compiles a COPY of the fixture against the pinned sm_89 target. It used
+/// to compile `tests/test_drift.ysu` in place from the repo root, which (a)
+/// rewrote the committed `tests/test_drift.ptx` on every run - byte-identically
+/// on the developer's sm_89 card and with that machine's `.target` on any other
+/// - and (b) made the verdict a property of the machine: on one with no GPU the
+/// fixture's own `@require(sm >= 89)` is (correctly) unknowable.
 #[test]
 fn a_satisfiable_requirement_still_compiles() {
-    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
-        .arg("tests/test_drift.ysu")
-        .arg("--emit-ptx")
-        .current_dir(repo())
-        .output()
-        .expect("run Y");
+    let fixture = std::fs::read_to_string(repo().join("tests/test_drift.ysu"))
+        .expect("the documented fixture");
+    let (ok, text) = compile("drift", &fixture, "--emit-ptx");
     assert!(
-        out.status.success(),
-        "the documented `tests/test_drift.ysu --emit-ptx` must still compile; it carries \
-         `@require(sm >= 89)`:\n{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        ok,
+        "the documented `tests/test_drift.ysu --emit-ptx` must still compile for an sm_89 \
+         target; it carries `@require(sm >= 89)`:\n{text}"
     );
 
     // And a kernel with no requirement at all is unaffected.

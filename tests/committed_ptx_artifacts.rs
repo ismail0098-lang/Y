@@ -24,6 +24,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -82,6 +85,19 @@ fn header_value(src: &str, directive: &str) -> Option<String> {
         .map(str::trim)
         .find(|l| l.starts_with(directive))
         .map(|l| l[directive.len()..].trim().to_string())
+}
+
+/// The `SM_VERSION` that reproduces the target `art` declares: `.target sm_89`
+/// is `8.9`, `.target sm_120` is `12.0`. `None` for an artifact without a
+/// `.target` (an `.ll`).
+fn declared_sm_version(art: &str) -> Option<String> {
+    let target = header_value(art, ".target")?;
+    let digits = target.trim_start_matches("sm_");
+    assert!(
+        digits.len() >= 2 && digits.bytes().all(|b| b.is_ascii_digit()),
+        "an artifact declares an unusable .target `{target}`"
+    );
+    Some(format!("{}.{}", &digits[..digits.len() - 1], &digits[digits.len() - 1..]))
 }
 
 fn rel(p: &Path) -> String {
@@ -281,12 +297,26 @@ fn every_committed_artifact_still_has_a_source_that_compiles() {
         if flag == "--emit-coprocessor" {
             coprocessor_checked += 1;
         }
-        let tmp = dir.join(ysu.file_name().unwrap());
+        //
+        // And compile it for the target the ARTIFACT declares, with that pinned
+        // in the working directory. This ran with the repository as working
+        // directory, i.e. for whatever card this machine has: on a GPU-less
+        // machine the FP8 kernels were refused and `test_drift.ysu`'s
+        // `@require(sm >= 89)` was unanswerable, so the gate failed for a
+        // reason that had nothing to do with whether the sources still compile.
+        // Same rule `the_shipped_gpu_kernels_match_their_sources` follows.
+        let art_text = std::fs::read_to_string(&art).expect("read artifact");
+        let sm = declared_sm_version(&art_text).unwrap_or_else(|| pinned::SM_PINNED.to_string());
+        let work = dir.join(&stem);
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).expect("per-artifact temp dir");
+        pinned::pin(&work, &sm);
+        let tmp = work.join(ysu.file_name().unwrap());
         std::fs::copy(&ysu, &tmp).expect("copy fixture");
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
             .arg(&tmp)
             .arg(flag)
-            .current_dir(repo_root())
+            .current_dir(&work)
             .output()
             .expect("run Y");
         // Counted AFTER the run, not before: an earlier version incremented
@@ -401,18 +431,9 @@ fn the_shipped_gpu_kernels_match_their_sources() {
              tests/{stem}.ysu, so nothing can say what it should contain"
         );
         let embedded = std::fs::read_to_string(art).expect("read the shipped PTX");
-        let target = header_value(&embedded, ".target").unwrap_or_else(|| {
+        let dotted = declared_sm_version(&embedded).unwrap_or_else(|| {
             panic!("crates/y-gpu/ptx/{stem}.ptx declares no .target")
         });
-
-        // `PtxEmitter::new_with_profile` builds `sm_` + the version with the
-        // dot stripped, so sm_80 comes from "8.0" and sm_120 from "12.0".
-        let digits = target.trim_start_matches("sm_");
-        assert!(
-            digits.len() >= 2 && digits.bytes().all(|b| b.is_ascii_digit()),
-            "crates/y-gpu/ptx/{stem}.ptx declares an unusable .target `{target}`"
-        );
-        let dotted = format!("{}.{}", &digits[..digits.len() - 1], &digits[digits.len() - 1..]);
 
         // A directory per kernel: the profile lives beside the source and the
         // compiler writes its output next to the source too, so two kernels
@@ -421,11 +442,7 @@ fn the_shipped_gpu_kernels_match_their_sources() {
         let dir = work.join(&stem);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("per-kernel temp dir");
-        std::fs::write(
-            dir.join(".ysu_hw_profile"),
-            format!("SM_VERSION={dotted}\nGPU_NAME=ShippedArtifact\nSM_COUNT=66\n"),
-        )
-        .expect("pin the profile");
+        pinned::pin(&dir, &dotted);
         let src = dir.join(format!("{stem}.ysu"));
         std::fs::copy(&ysu, &src).expect("copy the kernel source");
 

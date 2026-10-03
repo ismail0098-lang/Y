@@ -25,8 +25,10 @@
 //!
 //! Run with:  cargo test --test success_banner_means_success
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 const BANNER: &str = "Compilation Successful!";
 
@@ -44,12 +46,9 @@ fn run(src: &str, flags: &[&str]) -> Run {
     let dir = std::env::temp_dir().join(format!("y_banner_{}_{}", std::process::id(), n));
     std::fs::create_dir_all(&dir).unwrap();
 
-    // Copy the cached hardware profile in so the probe does not re-run on the
-    // GPU once per case.
-    let profile = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".ysu_hw_profile");
-    if profile.exists() {
-        let _ = std::fs::copy(&profile, dir.join(".ysu_hw_profile"));
-    }
+    // A PINNED profile, not the repository's: that one holds this machine's card
+    // and measurements, so copying it made the verdict depend on the machine.
+    pinned::pin(&dir, pinned::SM_PINNED);
 
     let path = dir.join("case.ysu");
     std::fs::write(&path, src).unwrap();

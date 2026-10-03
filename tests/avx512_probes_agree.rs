@@ -32,6 +32,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -73,8 +76,11 @@ fn emit_with_profile(tag: &str, avx512_in_profile: bool) -> (PathBuf, String) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
 
-    let base = std::fs::read_to_string(repo().join(".ysu_hw_profile"))
-        .expect("the repo profile is the template");
+    // The template is a PINNED profile plus the one line this gate doctors. It
+    // was the repository's own profile, which made the gate panic on a fresh
+    // clone (there is none until something runs the compiler there) and carry
+    // this machine's measurements everywhere else.
+    let base = format!("{}AVX512=unset\n", pinned::profile_text(pinned::SM_PINNED));
     let doctored: String = base
         .lines()
         .map(|l| {
@@ -101,7 +107,11 @@ fn emit_with_profile(tag: &str, avx512_in_profile: bool) -> (PathBuf, String) {
     let src = dir.join("probe.ysu");
     std::fs::write(&src, "fn main() {\n    return;\n}\n").expect("write source");
 
-    let out = Command::new(repo().join("target/release/Y"))
+    // `CARGO_BIN_EXE_Y`, the binary `cargo test` builds from THIS source. This ran
+    // `target/release/Y`, which `cargo test` never rebuilds, so after an edit it
+    // tested whatever release build was lying around - see
+    // `suite_is_machine_independent.rs`.
+    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src)
         .arg("--emit-llvm")
         .current_dir(&dir)

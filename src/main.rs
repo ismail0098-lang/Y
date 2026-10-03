@@ -1111,18 +1111,11 @@ fn main() {
     // through the dispatch below, so checking here refuses uniformly rather
     // than once per emitter - the same reason the `@hdl_emit` refusal lives at
     // `check_func` instead of in five backends.
-    let mut require_errors: Vec<String> = Vec::new();
-    let mut require_checked = 0usize;
-    for item in &ast.items {
-        if let Item::Kernel(k) = item {
-            for req in &k.requires {
-                require_checked += 1;
-                if let Err(e) = require::check(&req.condition, &hw_profile, req.span.line) {
-                    require_errors.push(e);
-                }
-            }
-        }
-    }
+    //
+    // It is NOT every entry point: the C API's `y_compile_to_ptx` bypasses this
+    // dispatch, and evaluated no `@require` at all. Both call
+    // `require::check_program` now.
+    let (require_checked, require_errors) = require::check_program(&ast, &hw_profile);
 
     if !require_errors.is_empty() {
         log_error!(
@@ -1342,14 +1335,18 @@ fn main() {
             "output.coprocessor.ptx".to_string()
         };
 
-        // Wrap in a PTX module with dynamic target SM
-        let target_sm = if hw_profile.sm_version.starts_with("sm_") {
-            hw_profile.sm_version.clone()
-        } else if !hw_profile.sm_version.is_empty() && hw_profile.sm_version != "0.0" {
-            format!("sm_{}", hw_profile.sm_version.replace('.', ""))
-        } else {
-            "sm_80".to_string()
-        };
+        // Wrap in a PTX module with dynamic target SM. This block used to carry
+        // its own copy of the rule - the ONLY one of four consumers that knew
+        // `0.0` means "no GPU" - while `PtxEmitter` turned the same profile
+        // into `.target sm_00`. One rule now, in `ptx_target_for`.
+        let decided = ptx_emitter::ptx_target_for(&hw_profile.sm_version);
+        if let Some(why) = &decided.assumed {
+            println!(
+                "      -> NOTE: PTX target {} is ASSUMED: {}.",
+                decided.arch, why
+            );
+        }
+        let target_sm = decided.arch;
 
         // Emit a COMPLETE module, not an instruction stream.
         //
@@ -1745,6 +1742,19 @@ fn main() {
 
         let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
         emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
+        // Name the target, and say when it is a guess: on a machine with no
+        // NVIDIA GPU this used to be `.target sm_00`, which `ptxas` rejects -
+        // printed nowhere, under a green banner.
+        match emitter.target() {
+            (arch, None) => println!("      -> PTX target: {}", arch),
+            (arch, Some(why)) => println!(
+                "      -> PTX target: {} (ASSUMED: {}). PTX is forward compatible, so \
+                 this loads on every card from Ampere on; write \
+                 SM_VERSION=<major>.<minor> into .ysu_hw_profile to compile for a \
+                 specific card instead.",
+                arch, why
+            ),
+        }
         let ptx_output = emitter.emit_program(&ast, &hw_profile);
         for line in &emitter.drift_report {
             println!("      -> @ZeroDrift {}", line);

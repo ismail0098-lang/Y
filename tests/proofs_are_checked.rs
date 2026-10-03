@@ -1246,9 +1246,9 @@ fn only_the_capstone_states_a_global_negative() {
 /// were that. A blanket pattern is only safe when it names one thing.
 #[test]
 fn every_path_a_proof_or_a_gate_cites_exists() {
-    const ROOTS: &[&str] = &["proofs", "tests", "src", "tools", "docs", "crates", "fuzz"];
-    /// `python/` is a SIBLING of the cargo project, not a child of it.
-    const SIBLING: &[&str] = &["python"];
+    const ROOTS: &[&str] = &[
+        "proofs", "tests", "src", "tools", "docs", "crates", "fuzz", "python",
+    ];
     const EXT: &[&str] = &[".v", ".rs", ".py", ".md", ".circom"];
 
     let root = repo();
@@ -1273,16 +1273,19 @@ fn every_path_a_proof_or_a_gate_cites_exists() {
         for tok in src.split(|c: char| !(c.is_alphanumeric() || "._/-".contains(c))) {
             let Some(slash) = tok.find('/') else { continue };
             let head = &tok[..slash];
-            let sibling = SIBLING.contains(&head);
-            if !ROOTS.contains(&head) && !sibling {
+            if !ROOTS.contains(&head) {
                 continue;
             }
             if !EXT.iter().any(|e| tok.ends_with(e)) {
                 continue;
             }
             checked += 1;
-            let exists = root.join(tok).exists()
-                || (sibling && root.parent().map(|p| p.join(tok).exists()).unwrap_or(false));
+            // `python/` used to be a SIBLING of the cargo project and was
+            // resolved against the parent directory as a fallback. The merge
+            // 37651fb moved it inside, and the fallback became a hole: a
+            // citation to a `python/` file missing from the repository would
+            // pass whenever an old outer checkout happened to sit beside it.
+            let exists = root.join(tok).exists();
             if !exists {
                 missing.push(format!("{here} -> {tok}"));
             }

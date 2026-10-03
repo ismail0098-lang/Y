@@ -43,6 +43,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 /// Two tests calling the same helper for the same arch would otherwise share a
 /// directory and `remove_dir_all` each other's output mid-run - the `.ptx` race
 /// this repo has now hit in four files, hit again while adding the gate below.
@@ -386,26 +389,11 @@ fn fp8_refuses_below_ada_and_still_works_on_it() {
         let dir = std::env::temp_dir()
             .join(format!("y_fp8_arch_{}_{}", std::process::id(), cc.replace('.', "")));
         std::fs::create_dir_all(&dir).unwrap();
-        let real = repo().join(".ysu_hw_profile");
-        let mut profile = std::fs::read_to_string(&real).unwrap_or_default();
-        if profile.is_empty() {
-            eprintln!("SKIP: no .ysu_hw_profile to base the simulated card on");
-            return;
-        }
-        profile = profile
-            .lines()
-            .map(|l| {
-                if l.starts_with("SM_VERSION=") {
-                    format!("SM_VERSION={}", cc)
-                } else if l.starts_with("COMPUTE_CAPABILITY=") {
-                    format!("COMPUTE_CAPABILITY={}", cc)
-                } else {
-                    l.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.join(".ysu_hw_profile"), profile).unwrap();
+        // The simulated card is a PINNED profile. This used to edit a copy of
+        // the repository's profile and SKIP when there was none - which is
+        // every fresh clone - so the FP8 biconditional silently checked
+        // nothing on exactly the machines that have never run the compiler.
+        pinned::pin(&dir, cc);
         let local_src = dir.join("gemm_fp8_256.ysu");
         std::fs::copy(&src, &local_src).unwrap();
 
@@ -472,11 +460,8 @@ fn the_llvm_backend_works_from_a_foreign_directory() {
     }
     let dir = std::env::temp_dir().join(format!("y_foreign_cwd_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    // Carry the hardware profile so this does not trigger a GPU probe.
-    let prof = repo().join(".ysu_hw_profile");
-    if prof.exists() {
-        let _ = std::fs::copy(&prof, dir.join(".ysu_hw_profile"));
-    }
+    // A pinned profile, so this neither probes nor imports this machine's.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let src = dir.join("foreign.ysu");
     std::fs::write(&src, "fn main() -> I32 { let a: I32 = 9; let b: I32 = 2; return a - b; }\n")
         .unwrap();

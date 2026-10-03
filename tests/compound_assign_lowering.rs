@@ -36,6 +36,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn compile(fixture: &str) -> String {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut bin = std::env::current_exe().unwrap();
@@ -57,12 +60,16 @@ fn compile(fixture: &str) -> String {
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.join("k.ysu");
     std::fs::copy(repo.join(fixture), &src).expect("fixture missing");
-    let _ = std::fs::copy(repo.join(".ysu_hw_profile"), dir.join(".ysu_hw_profile"));
+    // PINNED, not this machine's: the kernel is assembled at a fixed sm_89
+    // below. This copied the repo's profile into `dir` and then ran with
+    // `current_dir(repo)`, so the copy was never read and the compile used the
+    // machine's card - an sm_90 profile failed `the_emitted_kernel_assembles`.
+    pinned::pin(&dir, pinned::SM_PINNED);
 
     let out = Command::new(bin.join("Y"))
         .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     assert!(

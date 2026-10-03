@@ -24,6 +24,9 @@
 
 use y::cuda_runtime::CudaContext;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 const MM: usize = 64; // must match the @tile in tests/int8_gemm_scaled.ysu
 const NN: usize = 32;
 const KK: usize = 128;
@@ -31,18 +34,22 @@ const KK: usize = 128;
 fn ptx() -> &'static str {
     static PTX: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PTX.get_or_init(|| {
-        use std::path::Path;
         use std::process::Command;
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut bin = std::env::current_exe().unwrap();
         bin.pop();
         if bin.ends_with("deps") {
             bin.pop();
         }
+        // A COPY, against a PINNED profile (the floor, which loads on any
+        // card). This compiled the fixture IN PLACE with the repository as
+        // working directory - rewriting the committed artifact for this
+        // machine's card - and read that committed path back.
+        let dir = pinned::pinned_scratch("int8_scaled", pinned::SM_PINNED);
+        let src = pinned::copy_fixture(&dir, "tests/int8_gemm_scaled.ysu");
         let out = Command::new(bin.join("Y"))
-            .arg(repo.join("tests/int8_gemm_scaled.ysu"))
+            .arg(&src)
             .arg("--emit-ptx")
-            .current_dir(repo)
+            .current_dir(&dir)
             .output()
             .expect("run Y");
         assert!(
@@ -51,7 +58,7 @@ fn ptx() -> &'static str {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
-        std::fs::read_to_string(repo.join("tests/int8_gemm_scaled.ptx")).expect("no .ptx")
+        std::fs::read_to_string(src.with_extension("ptx")).expect("no .ptx")
     })
 }
 

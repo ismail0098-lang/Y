@@ -34,6 +34,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 const NOTE: &str = "**Status: this example does not compile**";
 
 fn repo() -> PathBuf {
@@ -125,10 +128,13 @@ fn compile(code: &str, name: &str, dir: &Path) -> Result<(), String> {
     };
     let file = dir.join(format!("{name}.ysu"));
     std::fs::write(&file, code).expect("write example");
+    // A PINNED profile in the scratch directory, which is the working
+    // directory: `current_dir(repo)` compiled for this machine's card.
+    pinned::pin(dir, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&file)
         .arg(flag)
-        .current_dir(repo())
+        .current_dir(dir)
         .output()
         .expect("run Y");
     if out.status.success() {

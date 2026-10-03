@@ -33,6 +33,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 /// Per-case directory: two tests sharing one path is the `.ptx` race this repo
 /// has now hit in five files.
 static SALT: AtomicUsize = AtomicUsize::new(0);
@@ -49,10 +52,9 @@ fn run(src: &str) -> Run {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let profile = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".ysu_hw_profile");
-    if profile.exists() {
-        let _ = std::fs::copy(&profile, dir.join(".ysu_hw_profile"));
-    }
+    // A PINNED profile, not the repository's: that one holds this machine's card
+    // and measurements, so copying it made the verdict depend on the machine.
+    pinned::pin(&dir, pinned::SM_PINNED);
 
     let path = dir.join("case.ysu");
     std::fs::write(&path, src).unwrap();
@@ -172,10 +174,9 @@ fn the_emitted_witness_kernel_assembles() {
     let dir = std::env::temp_dir().join(format!("y_zkptx_asm_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let profile = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".ysu_hw_profile");
-    if profile.exists() {
-        let _ = std::fs::copy(&profile, dir.join(".ysu_hw_profile"));
-    }
+    // A PINNED profile, not the repository's: that one holds this machine's card
+    // and measurements, so copying it made the verdict depend on the machine.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let path = dir.join("case.ysu");
     std::fs::write(&path, "fn main(a: I32, b: I32) -> I32 { return a * b; }").unwrap();
 

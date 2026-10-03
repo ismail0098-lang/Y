@@ -40,24 +40,31 @@
 //!
 //! Run with:  cargo test --release --test gpu_batch_invariance -- --nocapture
 
-use std::path::Path;
 use std::process::Command;
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 const M: usize = 64;
 const N: usize = 32;
 const K: usize = 128;
 
 fn compile_fixture() -> String {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut bin = std::env::current_exe().unwrap();
     bin.pop();
     if bin.ends_with("deps") {
         bin.pop();
     }
+    // A COPY, against a PINNED profile. This compiled the fixture IN PLACE with
+    // the repository as working directory - rewriting the committed
+    // `tests/int8_gemm.ptx` for this machine's card - and then read that
+    // committed path back.
+    let dir = pinned::pinned_scratch("batch_inv", pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, "tests/int8_gemm.ysu");
     let out = Command::new(bin.join("Y"))
-        .arg(repo.join("tests/int8_gemm.ysu"))
+        .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     assert!(
@@ -66,7 +73,7 @@ fn compile_fixture() -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::read_to_string(repo.join("tests/int8_gemm.ptx")).expect("no .ptx")
+    std::fs::read_to_string(src.with_extension("ptx")).expect("no .ptx")
 }
 
 #[test]
