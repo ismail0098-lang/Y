@@ -42,6 +42,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
@@ -61,9 +64,11 @@ fn workdir(tag: &str) -> PathBuf {
     // tests/ would rewrite committed artifacts and race any other binary
     // doing the same.
     std::fs::copy("tests/gemm_f16_1024.ysu", d.join("g.ysu")).unwrap();
-    if let Ok(p) = std::fs::read_to_string(".ysu_hw_profile") {
-        std::fs::write(d.join(".ysu_hw_profile"), p).unwrap();
-    }
+    // A pinned profile. This copied the REPOSITORY's `.ysu_hw_profile` - this
+    // machine's card and its autotune cache - so the tile each compile used,
+    // and whether the cached-tile test below ran at all, was a property of the
+    // machine.
+    pinned::pin(&d, pinned::SM_PINNED);
     d
 }
 
@@ -140,20 +145,25 @@ fn a_legal_tile_still_compiles() {
 ///
 /// The first version of this probe was MIS-AIMED — it injected a line for a
 /// shape with no cached entry, so the analytic model answered and the tile
-/// never reached the emitter. It targets a shape the cache actually holds.
+/// never reached the emitter. The control below asserts the compiler REPORTS
+/// taking the cached tile, so that cannot recur silently.
+///
+/// The cached line is written here, keyed by the pinned GPU name, rather than
+/// found in this machine's profile. It used to be found: the test copied the
+/// repository's `.ysu_hw_profile` and SKIPPED - reporting `ok` - unless it held
+/// an `AUTOTUNE_F16_` line, which exists only where someone has run
+/// `--autotune`. So on every fresh clone the one guard for this producer
+/// checked nothing.
 #[test]
 fn a_corrupted_autotune_cache_line_is_refused() {
     let d = workdir("cache");
     let profile = d.join(".ysu_hw_profile");
-    let Ok(text) = std::fs::read_to_string(&profile) else {
-        eprintln!("SKIP: no .ysu_hw_profile — the cached-tile path was not demonstrated.");
-        return;
-    };
-    // Find a real cached F16 entry and corrupt only its cta_m.
-    let Some(line) = text.lines().find(|l| l.starts_with("AUTOTUNE_F16_")) else {
-        eprintln!("SKIP: no cached F16 autotune line — the cached path was not demonstrated.");
-        return;
-    };
+    let mut text = std::fs::read_to_string(&profile).expect("pinned profile");
+    let line = format!("AUTOTUNE_F16_1024x1024x1024_{}=128,128,32,2,2,2", pinned::GPU_NAME);
+    text.push_str(&line);
+    text.push('\n');
+    std::fs::write(&profile, &text).unwrap();
+    let line = line.as_str();
     let (key, val) = line.split_once('=').unwrap();
     let shape: Vec<u32> = key
         .trim_start_matches("AUTOTUNE_F16_")
@@ -176,9 +186,20 @@ fn a_corrupted_autotune_cache_line_is_refused() {
     std::fs::write(d.join("probe.ysu"), &src).unwrap();
 
     // Control first: the untouched cache line must compile, or the refusal
-    // below could be about anything.
+    // below could be about anything - and it must be the tile USED, or the
+    // refusal below is the analytic model's.
     let good = compile(&d, "probe.ysu", &[]);
     assert!(good.ok, "the cached tile itself was refused:\n{}", good.err);
+    let used = format!(
+        "measured tile from .ysu_hw_profile for M={} N={} K={} (F16): {}x{}x{} {}x{} s{}",
+        shape[0], shape[1], shape[2], parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
+    );
+    assert!(
+        good.err.contains(&used),
+        "the compiler did not report taking the cached tile (`{used}`), so the \
+         corruption below would not reach the emitter:\n{}",
+        good.err
+    );
 
     // Now make cta_m indivisible by frag*warps_m, changing nothing else.
     let warps_m: u32 = parts[3].parse().unwrap();

@@ -39,6 +39,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn repo() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
@@ -68,12 +71,14 @@ fn emit_ptx(tag: &str) -> String {
     std::fs::create_dir_all(&dir).expect("temp dir");
     let src = dir.join("exact_pv.ysu");
     std::fs::copy(repo().join("tests/exact_pv.ysu"), &src).expect("copy source");
+    // A PINNED profile, not the repository's: with the repo as the working
+    // directory this compiled for whatever card the machine has. The floor
+    // also loads on every card, so the device tests launch the same PTX.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(y_binary())
         .arg(&src)
         .arg("--emit-ptx")
-        // The repo is the cwd so `.ysu_hw_profile` is found, exactly as the
-        // sibling harness does; only the SOURCE moves.
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     assert!(

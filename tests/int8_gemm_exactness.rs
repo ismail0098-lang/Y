@@ -53,8 +53,11 @@
 //! that is the fix. Its refutation lives in Coq, pinned to the measurement
 //! above.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 /// The compiler's own bound. Parsed from the source rather than restated: a
 /// second copy of the constant is the drift this tie exists to prevent.
@@ -73,17 +76,20 @@ fn emitter_bound() -> u32 {
         .unwrap_or_else(|| panic!("could not parse a value from `{line}`"))
 }
 
-/// Compile a fixture at `(m, n, k)` in a per-test temp directory. The tag is in
-/// the SIGNATURE rather than a comment asking the next author to remember:
-/// this helper materialises files in a temp dir and that race has fired six
-/// times in this repository.
-fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+fn y_bin() -> PathBuf {
     let mut bin = std::env::current_exe().unwrap();
     bin.pop();
     if bin.ends_with("deps") {
         bin.pop();
     }
+    bin.join("Y")
+}
+
+/// Write the fixture at `(m, n, k)` into a fresh per-call directory and return
+/// `(dir, source)`. The tag is in the SIGNATURE rather than a comment asking
+/// the next author to remember: this helper materialises files in a temp dir
+/// and that race has fired six times in this repository.
+fn fixture(tag: &str, m: usize, n: usize, k: usize) -> (PathBuf, PathBuf) {
     // The tag is for legibility when a run leaves a directory behind; the
     // COUNTER is what makes the path unique. A per-test tag in the signature
     // makes the requirement visible and does not enforce it - two tests in
@@ -98,11 +104,6 @@ fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
         uniq
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    // `--emit-ptx` writes next to its input, so compile a COPY: a gate that
-    // emits must never rewrite the committed artifacts it is checking.
-    if let Ok(p) = std::fs::read(repo.join(".ysu_hw_profile")) {
-        let _ = std::fs::write(dir.join(".ysu_hw_profile"), p);
-    }
     let src = dir.join("ex.ysu");
     std::fs::write(
         &src,
@@ -113,12 +114,10 @@ fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
         ),
     )
     .unwrap();
-    let out = Command::new(bin.join("Y"))
-        .arg(&src)
-        .arg("--emit-ptx")
-        .current_dir(&dir)
-        .output()
-        .expect("run Y");
+    (dir, src)
+}
+
+fn read_back(dir: &Path, out: std::process::Output) -> Result<String, String> {
     let r = if out.status.success() {
         Ok(std::fs::read_to_string(dir.join("ex.ptx")).expect("no .ptx"))
     } else {
@@ -128,8 +127,24 @@ fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr)
         ))
     };
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir);
     r
+}
+
+/// Compile the fixture against a PINNED profile, which is what every assertion
+/// about the emitted text and the licence boundary reads, and what the device
+/// tests launch. This used to copy the repository's profile in, so the
+/// boundary was checked for whatever card this machine has.
+fn emit(tag: &str, m: usize, n: usize, k: usize) -> Result<String, String> {
+    let (dir, src) = fixture(tag, m, n, k);
+    pinned::pin(&dir, pinned::SM_PINNED);
+    let out = Command::new(y_bin())
+        .arg(&src)
+        .arg("--emit-ptx")
+        .current_dir(&dir)
+        .output()
+        .expect("run Y");
+    read_back(&dir, out)
 }
 
 /// The boundary is ONE K STEP wide, in both directions.

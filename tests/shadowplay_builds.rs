@@ -29,15 +29,74 @@
 //! hijack the developer's session. The run-the-artifact check is done against
 //! the `Y_NO_X11` build instead, which is a real execution of the same
 //! program over a surface that refuses by name.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn shadowplay_src() -> PathBuf {
-    repo().join("../shadowplay/shadowplay.ysu")
+/// A Y program that drives the ShadowPlay GUI surface the way the application
+/// does: `init` checked for failure (printing the application's own message),
+/// then a poll loop over `update` and two state accessors with a `usleep`.
+const GUI_SURFACE: &str = "\
+// The ShadowPlay GUI surface, driven the way the application drives it.
+
+@unsafe
+fn main() {
+    let ok: I32 = init_shadowplay_gui();
+    if ok < 0 {
+        println(\"Could not connect to X server\");
+        return;
+    }
+    let running: I32 = 1;
+    while running == 1 {
+        let r: I32 = update_shadowplay_gui();
+        if r < 0 {
+            running = 0;
+        }
+        let rec: I32 = get_recording_state();
+        let ind: I32 = get_indicator_state();
+        if rec + ind > 1 {
+            println(\"recording\");
+        }
+        usleep(16000);
+    }
+    cleanup_shadowplay_gui();
+}
+";
+
+/// The programs the three build tests compile, each written into `dir` as
+/// `<stem>.ysu`. Returns the stems.
+///
+/// **The application is not in this repository.** `../shadowplay/shadowplay.ysu`
+/// lived in the old outer checkout, beside the cargo project, and no commit
+/// reachable here has ever tracked it. So on a fresh clone these three tests
+/// failed with "copy shadowplay.ysu: NotFound" and checked nothing. What they
+/// exist to catch is the compiler and runtime half - a GUI entry point missing
+/// from the allowlist (the compiler refuses), a `static` entry point (the
+/// linker refuses), a headless stub that does not refuse - and `GUI_SURFACE`
+/// reaches all three on every machine. The application is checked as well
+/// wherever it exists, and its absence is announced rather than silent.
+fn subjects(dir: &Path) -> Vec<&'static str> {
+    std::fs::write(dir.join("gui_surface.ysu"), GUI_SURFACE).expect("write gui_surface.ysu");
+    let mut stems = vec!["gui_surface"];
+    let app = repo().join("../shadowplay/shadowplay.ysu");
+    if app.exists() {
+        std::fs::copy(&app, dir.join("shadowplay.ysu")).expect("copy shadowplay.ysu");
+        stems.push("shadowplay");
+    } else {
+        eprintln!(
+            "NOTE: the ShadowPlay application ({}) is not present - it is outside this \
+             repository - so only the in-repo GUI-surface program is checked",
+            app.display()
+        );
+    }
+    // Non-vacuity: with no subject the three tests below check nothing and
+    // pass, which is exactly what they did on a fresh clone before the
+    // in-repo program existed - except that they failed on the missing copy.
+    assert!(!stems.is_empty(), "no Y program to build; these tests would check nothing");
+    stems
 }
 
 fn have(prog: &str) -> bool {
@@ -114,31 +173,26 @@ fn the_shadowplay_application_compiles_and_links() {
         return;
     }
     let dir = workdir("build");
-    let src = dir.join("shadowplay.ysu");
-    std::fs::copy(shadowplay_src(), &src).expect("copy shadowplay.ysu");
+    for stem in subjects(&dir) {
+        let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+            .arg(dir.join(format!("{stem}.ysu")))
+            .current_dir(&dir)
+            .output()
+            .expect("run Y");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "`Y {stem}.ysu` failed:\n{}", text);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
-        .arg(&src)
-        .current_dir(&dir)
-        .output()
-        .expect("run Y");
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        out.status.success(),
-        "`Y shadowplay.ysu` failed:\n{}",
-        text
-    );
-
-    let bin = dir.join("shadowplay");
-    assert!(
-        bin.exists(),
-        "the compiler reported success but wrote no binary:\n{}",
-        text
-    );
+        let bin = dir.join(stem);
+        assert!(
+            bin.exists(),
+            "the compiler reported success for {stem}.ysu but wrote no binary:\n{}",
+            text
+        );
+    }
 }
 
 /// The build above must not be passing because the calls vanished.
@@ -148,37 +202,37 @@ fn the_shadowplay_application_compiles_and_links() {
 #[test]
 fn the_gui_calls_survive_to_the_emitted_module() {
     let dir = workdir("ir");
-    let src = dir.join("shadowplay.ysu");
-    std::fs::copy(shadowplay_src(), &src).expect("copy shadowplay.ysu");
+    for stem in subjects(&dir) {
+        let out = Command::new(env!("CARGO_BIN_EXE_Y"))
+            .arg(dir.join(format!("{stem}.ysu")))
+            .arg("--emit-llvm")
+            .current_dir(&dir)
+            .output()
+            .expect("run Y");
+        assert!(out.status.success(), "--emit-llvm failed on {stem}.ysu");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_Y"))
-        .arg(&src)
-        .arg("--emit-llvm")
-        .current_dir(&dir)
-        .output()
-        .expect("run Y");
-    assert!(out.status.success(), "--emit-llvm failed");
-
-    let ir = std::fs::read_to_string(dir.join("shadowplay.ll")).expect("read shadowplay.ll");
-    for sym in [
-        "init_shadowplay_gui",
-        "update_shadowplay_gui",
-        "get_recording_state",
-        "get_indicator_state",
-        "usleep",
-    ] {
-        assert!(
-            ir.contains(&format!("declare i32 @{}(", sym)),
-            "`{}` is not declared in the emitted module, so the call was \
-             dropped rather than lowered",
-            sym
-        );
-        assert!(
-            ir.contains(&format!("call i32 @{}(", sym)),
-            "`{}` is declared but never called - the module would link and \
-             do nothing",
-            sym
-        );
+        let ir = std::fs::read_to_string(dir.join(format!("{stem}.ll")))
+            .unwrap_or_else(|e| panic!("read {stem}.ll: {e}"));
+        for sym in [
+            "init_shadowplay_gui",
+            "update_shadowplay_gui",
+            "get_recording_state",
+            "get_indicator_state",
+            "usleep",
+        ] {
+            assert!(
+                ir.contains(&format!("declare i32 @{}(", sym)),
+                "`{}` is not declared in {stem}.ll, so the call was dropped \
+                 rather than lowered",
+                sym
+            );
+            assert!(
+                ir.contains(&format!("call i32 @{}(", sym)),
+                "`{}` is declared in {stem}.ll but never called - the module \
+                 would link and do nothing",
+                sym
+            );
+        }
     }
 }
 
@@ -197,49 +251,48 @@ fn the_headless_build_links_and_refuses_by_name() {
         return;
     }
     let dir = workdir("headless");
-    let src = dir.join("shadowplay.ysu");
-    std::fs::copy(shadowplay_src(), &src).expect("copy shadowplay.ysu");
+    for stem in subjects(&dir) {
+        let emit = Command::new(env!("CARGO_BIN_EXE_Y"))
+            .arg(dir.join(format!("{stem}.ysu")))
+            .arg("--emit-llvm")
+            .current_dir(&dir)
+            .output()
+            .expect("run Y");
+        assert!(emit.status.success(), "--emit-llvm failed on {stem}.ysu");
 
-    let emit = Command::new(env!("CARGO_BIN_EXE_Y"))
-        .arg(&src)
-        .arg("--emit-llvm")
-        .current_dir(&dir)
-        .output()
-        .expect("run Y");
-    assert!(emit.status.success(), "--emit-llvm failed");
+        let bin = dir.join(format!("{stem}_headless"));
+        let link = Command::new("clang")
+            .arg("-O1")
+            .arg("-DY_NO_X11")
+            .arg("-o")
+            .arg(&bin)
+            .arg(dir.join(format!("{stem}.ll")))
+            .arg(repo().join("c_src/runtime.c"))
+            .arg("-lm")
+            .output()
+            .expect("run clang");
+        assert!(
+            link.status.success(),
+            "the headless build of {stem}.ysu does not link, so a machine \
+             without libX11 cannot build any Y program:\n{}",
+            String::from_utf8_lossy(&link.stderr)
+        );
 
-    let bin = dir.join("sp_headless");
-    let link = Command::new("clang")
-        .arg("-O1")
-        .arg("-DY_NO_X11")
-        .arg("-o")
-        .arg(&bin)
-        .arg(dir.join("shadowplay.ll"))
-        .arg(repo().join("c_src/runtime.c"))
-        .arg("-lm")
-        .output()
-        .expect("run clang");
-    assert!(
-        link.status.success(),
-        "the headless build does not link, so a machine without libX11 \
-         cannot build any Y program:\n{}",
-        String::from_utf8_lossy(&link.stderr)
-    );
-
-    let text = run_with_deadline(&bin, std::time::Duration::from_secs(20));
-    assert!(
-        text.contains("without X11 support"),
-        "the headless build ran but did not refuse by name:\n{}",
-        text
-    );
-    // It must REFUSE, not proceed: the Y program checks init's return value
-    // and bails. A stub returning 0 would drop it into the 60Hz poll loop
-    // forever, which is how this would hang CI.
-    assert!(
-        text.contains("Could not connect to X server"),
-        "the Y program did not act on the refusal:\n{}",
-        text
-    );
+        let text = run_with_deadline(&bin, std::time::Duration::from_secs(20));
+        assert!(
+            text.contains("without X11 support"),
+            "the headless build of {stem}.ysu ran but did not refuse by name:\n{}",
+            text
+        );
+        // It must REFUSE, not proceed: the Y program checks init's return value
+        // and bails. A stub returning 0 would drop the application into the 60Hz
+        // poll loop forever, which is how this would hang CI.
+        assert!(
+            text.contains("Could not connect to X server"),
+            "{stem}.ysu did not act on the refusal:\n{}",
+            text
+        );
+    }
 }
 
 /// The two branches of the `Y_NO_X11` switch must export the SAME surface.

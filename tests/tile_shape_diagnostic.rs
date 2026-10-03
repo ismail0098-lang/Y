@@ -20,8 +20,10 @@
 //! COMPILE, and every shape that compiles must be NAMED. Neither half alone is
 //! enough: listing shapes that do not work is as bad as omitting ones that do.
 
-use std::path::Path;
 use std::process::Command;
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 /// Every probe gets its OWN directory. Keying it on `src.len()` collided
 /// between tests running on different threads -- one removed the directory
@@ -40,16 +42,18 @@ fn compile(src: &str) -> (bool, String) {
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("probe.ysu");
     std::fs::write(&f, src).unwrap();
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut bin = std::env::current_exe().unwrap();
     bin.pop();
     if bin.ends_with("deps") {
         bin.pop();
     }
+    // A PINNED profile in the scratch directory, which is the working
+    // directory: `current_dir(repo)` compiled for this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(bin.join("Y"))
         .arg(&f)
         .arg("--emit-ptx")
-        .current_dir(repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let text = format!(

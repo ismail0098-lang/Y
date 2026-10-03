@@ -25,6 +25,9 @@
 
 use y::cuda_runtime::CudaContext;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 const B: usize = 8; // batch * KV heads
 const T: usize = 67; // a key length, deliberately not a power of two
 const D: usize = 64; // head_dim
@@ -49,18 +52,22 @@ fn ptx() -> &'static str {
 }
 
 fn compile() -> String {
-    use std::path::Path;
     use std::process::Command;
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut bin = std::env::current_exe().unwrap();
     bin.pop();
     if bin.ends_with("deps") {
         bin.pop();
     }
+    // A COPY, against a PINNED profile (the floor, which loads on any card).
+    // This compiled the fixture IN PLACE with the repository as working
+    // directory - rewriting the committed `tests/exact_pv.ptx` for this
+    // machine's card - and then read that committed path back.
+    let dir = pinned::pinned_scratch("exact_pv", pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, "tests/exact_pv.ysu");
     let out = Command::new(bin.join("Y"))
-        .arg(repo.join("tests/exact_pv.ysu"))
+        .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     assert!(
@@ -69,7 +76,7 @@ fn compile() -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    std::fs::read_to_string(repo.join("tests/exact_pv.ptx")).expect("no .ptx")
+    std::fs::read_to_string(src.with_extension("ptx")).expect("no .ptx")
 }
 
 /// A cheap deterministic PRNG, so the fixture needs no dev-dependency.

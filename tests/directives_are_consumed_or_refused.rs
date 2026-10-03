@@ -51,6 +51,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -71,10 +74,11 @@ fn compile(tag: &str, source: &str, flag: &str) -> (bool, String) {
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.join("p.ysu");
     std::fs::write(&src, source).unwrap();
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src)
         .arg(flag)
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let text = format!(

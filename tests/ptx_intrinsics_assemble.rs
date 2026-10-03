@@ -43,8 +43,10 @@
 //!
 //! Run with:  cargo test --test ptx_intrinsics_assemble
 
-use std::path::PathBuf;
 use std::process::Command;
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 fn ptxas_present() -> bool {
     Command::new("ptxas").arg("--version").output().is_ok()
@@ -78,16 +80,19 @@ fn emit_backend(name: &str, body: &str) -> (String, Option<String>) {
 ///
 /// Returns `(compiler_output, emitted_ptx_if_any)`.
 fn compile(name: &str, body: &str) -> (String, Option<String>) {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = std::env::temp_dir().join(format!("y_intr_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    // A directory per CALL: the profile is written into it, and tests in this
+    // file run in parallel.
+    let dir = pinned::scratch(&format!("intr_{name}"));
     let src = dir.join(format!("{}.ysu", name));
     std::fs::write(&src, kernel_source(name, body)).expect("write source");
 
+    // A PINNED profile in the scratch directory, which is the working
+    // directory: `current_dir(repo)` compiled for this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(&repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let log = format!(

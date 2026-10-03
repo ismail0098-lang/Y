@@ -21,8 +21,11 @@
 //!
 //! Run with:  cargo test --release --test ptx_shared_memory
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 fn bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
@@ -31,10 +34,6 @@ fn bin() -> PathBuf {
         p.pop();
     }
     p.join("Y")
-}
-
-fn repo() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
 /// Compile a `.ysu` from `tests/` and return its PTX.
@@ -52,10 +51,18 @@ fn compile(entry: &str) -> String {
     if let Some(p) = guard.get(entry) {
         return p.clone();
     }
+    // A COPY, against a PINNED profile. This compiled `tests/<entry>.ysu` IN
+    // PLACE with the repository as working directory, so every run rewrote the
+    // committed `tests/smem_roundtrip.ptx` with this machine's target and
+    // measured latencies - and `ptxas` below assembles at a fixed sm_89, which
+    // refused the `.target sm_90` module an sm_90 profile produced. The floor
+    // is also what the device test launches: it loads on every card.
+    let dir = pinned::pinned_scratch(entry, pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, &format!("tests/{}.ysu", entry));
     let out = Command::new(bin())
-        .arg(repo().join(format!("tests/{}.ysu", entry)))
+        .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("failed to run the Y binary");
     assert!(
@@ -65,7 +72,7 @@ fn compile(entry: &str) -> String {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let ptx = std::fs::read_to_string(repo().join(format!("tests/{}.ptx", entry)))
+    let ptx = std::fs::read_to_string(dir.join(format!("{}.ptx", entry)))
         .expect("no .ptx written");
     guard.insert(entry.to_string(), ptx.clone());
     ptx
@@ -74,14 +81,13 @@ fn compile(entry: &str) -> String {
 /// Compile arbitrary source through the real binary, returning
 /// `Ok(stdout)` or `Err(stdout+stderr)`.
 fn compile_source(tag: &str, src: &str) -> Result<String, String> {
-    let dir = std::env::temp_dir().join(format!("y_smem_{}_{}", std::process::id(), tag));
-    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let dir = pinned::pinned_scratch(&format!("smem_{tag}"), pinned::SM_PINNED);
     let path = dir.join("k.ysu");
     std::fs::write(&path, src).expect("write Y source");
     let out = Command::new(bin())
         .arg(&path)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("failed to run the Y binary");
     let text = format!(
@@ -333,14 +339,13 @@ fn main() {
     compile_source("two_kernels", src).expect("two shared-memory kernels did not compile");
     // The emitter writes `<stem>.ptx` next to the source; compile_source
     // deletes the directory, so re-read through a persistent path instead.
-    let dir = std::env::temp_dir().join(format!("y_smem_two_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = pinned::pinned_scratch("smem_two", pinned::SM_PINNED);
     let path = dir.join("k.ysu");
     std::fs::write(&path, src).unwrap();
     let out = Command::new(bin())
         .arg(&path)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .unwrap();
     assert!(out.status.success());

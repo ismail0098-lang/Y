@@ -23,6 +23,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 /// Every co-processor workload in `tests/` must assemble for `sm_89`.
 #[test]
 fn every_coprocessor_workload_assembles() {
@@ -31,8 +34,10 @@ fn every_coprocessor_workload_assembles() {
         return;
     }
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = std::env::temp_dir().join(format!("y_cop_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
+    // The profile is PINNED. The repo's names whatever card this machine has,
+    // and an sm_90 one made every workload declare `.target sm_90` and fail
+    // the `-arch=sm_89` below.
+    let dir = pinned::pinned_scratch("cop", pinned::SM_PINNED);
 
     let mut checked = 0;
     let mut refused = 0;
@@ -52,7 +57,7 @@ fn every_coprocessor_workload_assembles() {
         let out = Command::new(env!("CARGO_BIN_EXE_Y"))
             .arg(&local)
             .arg("--emit-coprocessor")
-            .current_dir(&repo)
+            .current_dir(&dir)
             .output()
             .expect("run Y");
         let log = format!(

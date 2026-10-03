@@ -2336,13 +2336,40 @@ ran — read this list before trusting one:
 | `llvm-as` / `llvm-dis` | `emitted_attribute_groups` | that an emitted module's attribute groups are coherent and a non-AVX-512 target gets no AVX-512 code |
 | ThreadSanitizer | `exact_gemm_thread_sanitizer` | the happens-before edges in the threaded exact GEMM |
 | `ptxas` | `ptx_portability`, `ptx_intrinsics_assemble`, `coprocessor_ptx_assembles`, `fma_contraction` | that emitted PTX is legal, at architectures this machine does not have |
+| `nvdisasm` | `fma_contraction`'s two SASS comparisons | that stating a fusion in the PTX changes no machine code. The PyPI `nvidia-cuda-nvcc` wheel ships `ptxas` without it (`pip install nvidia-cuda-nvdisasm`); before, its absence was a panic rather than a skip |
 | a CUDA driver | `gpu_batch_invariance`, `gpu_attention_invariance`, `ptx_integer_datapath`, the `zk_gpu_*` suites | that a kernel computes the right answer on the device |
 | `solc` + Node (`npm install solc`) | `zk_solidity_verifier` | that the generated Groth16 verifier accepts a real proof on a real EVM |
 | `circom` | `circom_frontend`, `tools/circomlib_coverage.py` | that Y agrees with the reference compiler |
 | `rustc` | `cpu_emitter_lowering` | that the arithmetic `--emit-cpu` prints computes the right answer |
+| the ShadowPlay sources at `../shadowplay/` (outside this repository) | `shadowplay_builds` | that the application itself still compiles and links. A program in the test exercising the same GUI surface always runs, so the entry points, the link and the headless stubs are checked on any clone |
 
 `cpu_emitter_output_compiles` is deliberately absent: without `rustc` it fails
-rather than skips.
+rather than skips. And the `z3` row covers only the gates that skip: with no
+solver installed, 83 tests in 31 files of the default feature set FAIL -
+`safe_invariant_enforcement` among them, 3 of its 23 - because the programs they
+compile carry an `@invariant`, and the compiler refuses one it cannot check.
+Seven of those failures never mention the solver.
+
+**No verdict depends on this machine's GPU or rewrites a committed file.** The
+compiler reads `.ysu_hw_profile` from its working directory and writes
+`--emit-ptx`/`--emit-llvm` output next to its source, so a test that compiled a
+fixture in place with the repository as working directory rewrote committed
+artifacts on every run and compiled for whatever card the machine had - thirteen
+tests assembled that at a hardcoded `sm_89` and failed under an sm_90 profile.
+Every PTX compile now runs on a copy, in a scratch directory holding a pinned
+profile (`tests/common/pinned.rs`): the `sm_80` floor, which also loads on every
+card, plus recorded `@ZeroDrift` accumulate costs - without them each compile on
+a machine with a GPU times a probe kernel on the device and appends the result.
+It also links the repository's own z3 candidates (`venv/bin/z3`, `.venv/bin/z3`,
+`z3/build/z3`), which the compiler resolves against its working directory:
+without the links, a machine whose solver lives in a repo-local venv failed 21
+tests the moment their compiles left the repository.
+`suite_is_machine_independent` refuses a test that compiles a committed fixture
+in place, or compiles PTX against the repository's profile - named as working
+directory or inherited by a `Command` that sets none. The tests that compile
+only through the LLVM backend still run in the repository: their output depends
+on the live CPU probes and, for a `@ZeroDrift` program, on the costs the
+repository's profile records for this machine's GPU.
 
 That list is here because the Solidity gate had been skipping. Installing `solc`
 made it run — and with the G2 coordinate order reverted to `(c0, c1)`, the bug

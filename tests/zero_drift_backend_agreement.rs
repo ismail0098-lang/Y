@@ -29,6 +29,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "common/pinned.rs"]
+mod pinned;
+
 fn have(tool: &str) -> bool {
     Command::new(tool)
         .arg("--version")
@@ -79,9 +82,15 @@ fn main() {{
 fn compile(d: &PathBuf, name: &str, src: &str, flag: &str, ext: &str) -> (bool, String, Option<String>) {
     let path = d.join(format!("{name}.ysu"));
     std::fs::write(&path, src).expect("write source");
+    // Pinned, and the working directory named: with none, the compiler inherits
+    // the test's - the repository - and read this machine's profile, so
+    // `the_exact_kernel_assembles` below assembled an sm_90 module at a fixed
+    // `-arch=sm_89` on an sm_90 machine and failed.
+    pinned::pin(d, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&path)
         .arg(flag)
+        .current_dir(d)
         .output()
         .expect("run Y");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();

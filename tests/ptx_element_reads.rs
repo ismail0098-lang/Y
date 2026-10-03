@@ -30,9 +30,11 @@
 //! including the elements beside the ones a kernel names. The source-level
 //! tests below them need no GPU.
 
-use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 struct Emitted {
     ok: bool,
@@ -45,7 +47,6 @@ struct Emitted {
 /// and a per-test tag alone is not unique across tests in one file.
 fn emit(tag: &str, src: &str) -> Emitted {
     static SEQ: AtomicUsize = AtomicUsize::new(0);
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let dir = std::env::temp_dir().join(format!(
         "y_element_reads_{}_{}_{}",
         std::process::id(),
@@ -56,10 +57,13 @@ fn emit(tag: &str, src: &str) -> Emitted {
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("k.ysu");
     std::fs::write(&file, format!("{}\nfn main() {{}}\n", src)).unwrap();
+    // A PINNED profile in the scratch directory, which is the working
+    // directory: `current_dir(repo)` compiled for this machine's card.
+    pinned::pin(&dir, pinned::SM_PINNED);
     let out = Command::new(env!("CARGO_BIN_EXE_Y"))
         .arg(&file)
         .arg("--emit-ptx")
-        .current_dir(repo)
+        .current_dir(&dir)
         .output()
         .expect("run Y");
     let log = format!(

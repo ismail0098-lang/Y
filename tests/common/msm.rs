@@ -15,6 +15,11 @@ use ark_ff::{Field, PrimeField, Zero};
 
 use y::cuda_runtime::{CudaContext, KernelModule};
 
+// Resolves to `tests/common/pinned.rs`: a nested `#[path]` is relative to
+// the directory of the file it appears in.
+#[path = "pinned.rs"]
+mod pinned;
+
 pub fn bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
     p.pop();
@@ -49,18 +54,20 @@ pub fn ptx_for(entry: &str) -> String {
     // one repo path at once. Observed as
     // `the_v4_kernel_emitted_no_loads` after several clean runs, which is the
     // documented signature of this race. Same fix `committed_ptx_artifacts.rs`
-    // already uses; `current_dir` stays the repo so `.ysu_hw_profile` is still
-    // found.
+    // already uses. The profile is PINNED to the floor, which loads on every
+    // card: the repository's profile compiled for whatever card this machine
+    // has.
     let dir = std::env::temp_dir().join(format!("y_ptx_{}_{}", std::process::id(), entry));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir for the emitted PTX");
+    pinned::pin(&dir, pinned::SM_PINNED);
     let src = dir.join(format!("{}.ysu", entry));
     std::fs::copy(repo().join(format!("tests/{}.ysu", entry)), &src)
         .expect("copy the kernel source");
     let out = Command::new(bin())
         .arg(&src)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("failed to run the Y binary");
     assert!(

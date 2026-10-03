@@ -23,8 +23,11 @@
 //!
 //! Driven through the real binary, because the refusals are build failures.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
+
+#[path = "common/pinned.rs"]
+mod pinned;
 
 fn bin() -> PathBuf {
     let mut p = std::env::current_exe().unwrap();
@@ -35,26 +38,19 @@ fn bin() -> PathBuf {
     p.join("Y")
 }
 
-fn repo() -> &'static Path {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn scratch() -> PathBuf {
-    let d = std::env::temp_dir().join("y_ptx_int_datapath");
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
 /// Compiles `src` through the real binary. Returns (succeeded, output, ptx path).
 fn compile(src: &str, name: &str) -> (bool, String, PathBuf) {
-    let path = scratch().join(format!("{}.ysu", name));
+    // A fresh directory per call holding a PINNED profile. This wrote into one
+    // fixed directory shared by every test and every process, and compiled with
+    // the repository as working directory, i.e. for this machine's card.
+    let dir = pinned::pinned_scratch(name, pinned::SM_PINNED);
+    let path = dir.join(format!("{}.ysu", name));
     std::fs::write(&path, src).unwrap();
     let ptx = path.with_extension("ptx");
-    let _ = std::fs::remove_file(&ptx);
     let out = Command::new(bin())
         .arg(&path)
         .arg("--emit-ptx")
-        .current_dir(repo())
+        .current_dir(&dir)
         .output()
         .expect("failed to run the Y binary");
     let text = format!(
@@ -63,6 +59,28 @@ fn compile(src: &str, name: &str) -> (bool, String, PathBuf) {
         String::from_utf8_lossy(&out.stderr)
     );
     (out.status.success(), text, ptx)
+}
+
+/// Compile a COPY of `tests/<stem>.ysu` against a PINNED profile (the floor,
+/// which loads on any card) and return its PTX. In place, the two device tests
+/// rewrote the committed `tests/<stem>.ptx` with this machine's target on every
+/// run, and then read that committed path back.
+fn fixture_ptx(stem: &str) -> String {
+    let dir = pinned::pinned_scratch(stem, pinned::SM_PINNED);
+    let src = pinned::copy_fixture(&dir, &format!("tests/{stem}.ysu"));
+    let out = Command::new(bin())
+        .arg(&src)
+        .arg("--emit-ptx")
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run the Y binary");
+    assert!(
+        out.status.success(),
+        "{stem}.ysu did not compile:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::read_to_string(src.with_extension("ptx")).expect("no .ptx written")
 }
 
 const KERNEL: &str = r#"
@@ -136,25 +154,11 @@ fn the_sub_word_datapath_matches_a_cpu_reference_on_the_gpu() {
     use y::cuda_runtime::CudaContext;
 
     let Some(ctx) = CudaContext::new() else {
-        eprintln!("SKIP: no CUDA driver — the sub-word datapath was emitted but not executed.");
+        eprintln!("SKIP: no CUDA driver — the sub-word datapath was not compiled or executed.");
         return;
     };
 
-    let src = repo().join("tests/ptx_subword_ops.ysu");
-    let out = Command::new(bin())
-        .arg(&src)
-        .arg("--emit-ptx")
-        .current_dir(repo())
-        .output()
-        .expect("failed to run the Y binary");
-    assert!(
-        out.status.success(),
-        "ptx_subword_ops.ysu did not compile:\n{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let ptx = std::fs::read_to_string(repo().join("tests/ptx_subword_ops.ptx"))
-        .expect("no .ptx written");
+    let ptx = fixture_ptx("ptx_subword_ops");
     let module = ctx.load_ptx(&ptx, "subword_ops").expect("PTX failed to load");
 
     const N: usize = 4096;
@@ -417,25 +421,11 @@ fn every_integer_operator_matches_a_cpu_reference_on_the_gpu() {
     use y::cuda_runtime::CudaContext;
 
     let Some(ctx) = CudaContext::new() else {
-        eprintln!("SKIP: no CUDA driver — the integer datapath was not executed, only emitted.");
+        eprintln!("SKIP: no CUDA driver — the integer datapath was not compiled or executed.");
         return;
     };
 
-    let src = repo().join("tests/ptx_integer_ops.ysu");
-    let out = Command::new(bin())
-        .arg(&src)
-        .arg("--emit-ptx")
-        .current_dir(repo())
-        .output()
-        .expect("failed to run the Y binary");
-    assert!(
-        out.status.success(),
-        "ptx_integer_ops.ysu did not compile:\n{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let ptx = std::fs::read_to_string(repo().join("tests/ptx_integer_ops.ptx"))
-        .expect("no .ptx written");
+    let ptx = fixture_ptx("ptx_integer_ops");
 
     let module = ctx
         .load_ptx(&ptx, "int_ops")
