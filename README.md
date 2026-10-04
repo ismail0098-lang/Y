@@ -2323,8 +2323,8 @@ Requires: Rust toolchain, clang.
 cargo build --release
 cargo build --release --features zk     # ZK backend is NOT in a default build
 
-cargo test --release                    # ~765 tests
-cargo test --release --features zk      # ~1020 tests, ZK included
+cargo test --release                    # ~830 tests
+cargo test --release --features zk      # ~1080 tests, ZK included
 cargo test --release -p y-gpu           # the sibling crate; a bare `cargo test`
                                         # builds the root package ONLY and does
                                         # not run these 8
