@@ -2414,6 +2414,7 @@ throughout.
 | *(none)* | LLVM IR → native binary via `clang` | the default backend |
 | `-g` | DWARF debug information, built at `-O0`, so the program can be debugged as Y in gdb — see [Debugging](#debugging-y-programs) | real; the default backend and `--emit-llvm` only, every other backend refuses it by name |
 | `--debug` | `-g`, then start gdb on the program, stopped on the first line of `fn main` | real; needs `gdb` |
+| `-O0` … `-O3` | the optimisation level of the LLVM backend's clang step: `-O2` by default, `-O0` under `-g`; `-g -O2` is an optimised debuggable build | real; the default backend and `--emit-llvm` only, every other backend refuses it by name |
 | `--emit-llvm` | LLVM IR | real |
 | `--emit-ptx` | NVIDIA PTX | real |
 | `--emit-native` | standalone x86-64 ELF | **straight-line subset over `I32` and `bool` only**, calling only the program's own functions; refuses the rest by name |
@@ -2568,8 +2569,16 @@ Things to know:
   rather than descending into the allocator behind `print_int`.
 - **The LLVM backend only.** `--emit-ptx`, `--emit-cpu`, `--emit-native`, the
   ZK and co-processor backends refuse `-g` by name rather than ignore it.
-- **`-O0` only.** A `-g` build is unoptimised; there is no optimised debuggable
-  build yet.
+- **`-g` builds at `-O0` unless told otherwise; `-g -O1` .. `-O3` is an
+  optimised debuggable build.** There the optimiser keeps values in registers,
+  folds them away and inlines calls: gdb shows `<optimized out>` for a value
+  it no longer has, an inlined function is still a frame (`break scale` stops
+  in its inlined copy, and `bt` lists it), and `next` may jump between lines.
+  It should never show a WRONG value: `tests/debug_info.rs` checks that at
+  `-O1`, `-O2` and `-O3`, where every variable at three stops in one program
+  must print as its right value or as `<optimized out>`. Near the edges of a
+  scope the optimiser has merged code across, a variable may be listed as
+  `<optimized out>` a little before or after its block.
 - **VS Code** works through the C/C++ extension's debugger (`cppdbg`,
   `MIMode: gdb`); the bundled `ysu-lang` extension is what lets you set
   breakpoints in `.ysu` files. With the `setupCommands` in the manual, §38.5,

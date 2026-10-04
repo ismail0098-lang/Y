@@ -727,15 +727,17 @@ fn main() {
     // before the general option parsing below.
     let debug_info = args.iter().any(|a| a == "-g" || a == "--debug");
     let launch_debugger = args.iter().any(|a| a == "--debug");
+    // Every backend that is not the LLVM one: none of them produces debug
+    // information, and none has a `clang` step for `-O` to set.
+    const NOT_LLVM: &[&str] = &[
+        "--emit-attention-ptx", "--emit-c", "--c", "--target=c",
+        "--emit-coprocessor", "--target=coprocessor", "--emit-cpu", "--target=cpu",
+        "--emit-native", "--target=native", "--emit-ptx", "--target=ptx",
+        "--emit-r1cs", "--target=r1cs", "--emit-verifier", "--emit-zk-ptx", "--target=zk-ptx",
+    ];
     if debug_info {
-        const NO_DEBUG_INFO: &[&str] = &[
-            "--emit-attention-ptx", "--emit-c", "--c", "--target=c",
-            "--emit-coprocessor", "--target=coprocessor", "--emit-cpu", "--target=cpu",
-            "--emit-native", "--target=native", "--emit-ptx", "--target=ptx",
-            "--emit-r1cs", "--target=r1cs", "--emit-verifier", "--emit-zk-ptx", "--target=zk-ptx",
-        ];
         let flag = if launch_debugger { "--debug" } else { "-g" };
-        if let Some(other) = args.iter().find(|a| NO_DEBUG_INFO.contains(&a.as_str())) {
+        if let Some(other) = args.iter().find(|a| NOT_LLVM.contains(&a.as_str())) {
             log_error!(
                 "{} cannot be combined with {}: debug information is produced by the LLVM \
                  backend only (the default, and --emit-llvm).",
@@ -756,6 +758,40 @@ fn main() {
             exit(1);
         }
     }
+
+    // `-O0` .. `-O3`: the optimisation level of the LLVM backend's `clang`
+    // step - `-O2` by default, `-O0` under `-g`, and `-g -O2` an optimised
+    // debuggable build. The last one given wins, as for clang. No other
+    // backend has such a step, so they refuse it rather than ignore it.
+    let opt_flag = args
+        .iter()
+        .rev()
+        .find(|a| matches!(a.as_str(), "-O0" | "-O1" | "-O2" | "-O3"))
+        .cloned();
+    if let Some(o) = &opt_flag {
+        if let Some(other) = args.iter().find(|a| NOT_LLVM.contains(&a.as_str())) {
+            log_error!(
+                "{} cannot be combined with {}: it sets the optimisation level of the LLVM \
+                 backend's clang step (the default backend, and --emit-llvm), and {} has none.",
+                o,
+                other,
+                other
+            );
+            exit(1);
+        }
+        if args.iter().any(|a| a.ends_with(".circom")) {
+            log_error!("{} applies to Y source compiled by the LLVM backend; circom input produces R1CS.", o);
+            exit(1);
+        }
+    }
+    let opt_level: u8 = match opt_flag.as_deref() {
+        Some("-O0") => 0,
+        Some("-O1") => 1,
+        Some("-O2") => 2,
+        Some("-O3") => 3,
+        _ if debug_info => 0,
+        _ => 2,
+    };
 
     // `--emit-attention-ptx <head_dim> <seq_len>`
     //
@@ -840,7 +876,7 @@ fn main() {
     /// hard error -- see the check after the loop.
     const KNOWN_FLAGS: &[&str] = &[
         "-o", "--output", "-I", "-l", "--link", "--name", "--witness",
-        "-g", "--debug",
+        "-g", "--debug", "-O0", "-O1", "-O2", "-O3",
         "--portable", "--autotune", "--autotune-force", "--no-autotune",
         "--emit-attention-ptx", "--emit-c", "--emit-coprocessor", "--emit-cpu",
         "--emit-llvm", "--emit-native", "--emit-ptx", "--emit-r1cs",
@@ -1723,7 +1759,7 @@ fn main() {
         log_step!("4/4", "Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
         if debug_info {
-            enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items);
+            enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items, opt_level > 0);
         }
         emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ll_output = emitter.emit_program(&ast, &hw_profile);
@@ -1748,13 +1784,13 @@ fn main() {
             &output_path,
             source_file.as_deref().unwrap_or("<stdin>"),
         );
-        // `-O0` under `-g`: the optimiser moves variables out of their stack
-        // slots and reorders statements, so a debugger would show values that
-        // are "optimized out" and step out of source order.
+        // `-O0` under `-g` unless an `-O` says otherwise: the optimiser moves
+        // variables out of their stack slots and reorders statements, so a
+        // debugger shows values as "optimized out" and steps out of source
+        // order - correct, and less convenient.
         println!(
-            "      Compile manually: clang {} -o output {} c_src/runtime.c -lm",
-            if debug_info { "-O0" } else { "-O2" },
-            &output_path
+            "      Compile manually: clang -O{} -o output {} c_src/runtime.c -lm",
+            opt_level, &output_path
         );
     } else if emit_ptx {
         log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
@@ -1875,7 +1911,7 @@ fn main() {
         log_step!("4/4", "Compiling via LLVM IR Backend...");
         let mut emitter = LlvmEmitter::new();
         if debug_info {
-            enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items);
+            enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items, opt_level > 0);
         }
         let ll_output = emitter.emit_program(&ast, &hw_profile);
 
@@ -1937,8 +1973,8 @@ fn main() {
         // `-O0` under `-g`, for the reason given at `--emit-llvm`'s hint. The
         // runtime is compiled WITHOUT debug information, so `step` stays in Y
         // code instead of descending into the allocator behind `print_int`.
-        let opt = if debug_info { "-O0" } else { "-O2" };
-        let base = [opt, "-o", output_path.as_str(), ll_path.as_str(), runtime_path.as_str(), "-lm"];
+        let opt = format!("-O{}", opt_level);
+        let base = [opt.as_str(), "-o", output_path.as_str(), ll_path.as_str(), runtime_path.as_str(), "-lm"];
         let with_x11 = std::process::Command::new("clang")
             .args(base)
             .arg("-lX11")
@@ -1992,10 +2028,11 @@ fn enable_debug_info(
     emitter: &mut LlvmEmitter,
     source: Option<&str>,
     imported: &[(String, std::path::PathBuf)],
+    optimized: bool,
 ) {
     // `-g` without a source file is refused right after option parsing.
     let path = source.expect("-g without a source file is refused before any backend runs");
-    emitter.enable_debug_info(std::path::Path::new(path), imported);
+    emitter.enable_debug_info(std::path::Path::new(path), imported, optimized);
 }
 
 /// `--debug`: start gdb on the program just built, stopped on the first line

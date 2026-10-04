@@ -260,6 +260,7 @@ over a native ELF. Unrecognised options are a hard error now.
 | *(none)* | Compile with the LLVM backend → native binary via clang |
 | `-g` | Add DWARF debug information (built at `-O0`) so the program can be debugged as Y; with the default backend or `--emit-llvm` only. See §38 |
 | `--debug` | `-g`, then start gdb on the program, stopped on the first line of `fn main`. See §38 |
+| `-O0` … `-O3` | Optimisation level of the LLVM backend's clang step: `-O2` by default, `-O0` under `-g`. `-g -O2` is an optimised debuggable build (§38.6). Refused by every other backend |
 | `--emit-llvm` / `--target=llvm` | LLVM IR |
 | `--emit-ptx` / `--target=ptx` | NVIDIA PTX |
 | `--emit-cpu` / `--target=cpu` | **Scalar** host Rust source, **printed for you to paste** — Y never compiles it. It emits no SIMD; see 9.7 |
@@ -5173,10 +5174,10 @@ Inside gdb:
 `print` takes C expression syntax, which covers Y's: `x + 1`, `v[2]`, `p.x`,
 `*r`, `a == b`.
 
-`-g` compiles at `-O0`: the optimiser moves variables out of their stack slots
-and reorders statements, so a debugger on an optimised build shows values that
-are "optimized out" and steps out of source order. `-g --emit-llvm` writes the
-IR with its debug metadata instead of building.
+`-g` compiles at `-O0`: every variable lives in its stack slot and the code is
+in source order. `-g -O1` .. `-O3` builds optimised instead (§38.6 says what
+changes). `-g --emit-llvm` writes the IR with its debug metadata instead of
+building.
 
 ### 38.2 What the debugger shows
 
@@ -5340,9 +5341,20 @@ not exercised.
 - **The default backend and `--emit-llvm` only.** `--emit-ptx`, `--emit-cpu`,
   `--emit-native`, `--emit-coprocessor`, the ZK backends and circom input
   refuse `-g` and `--debug` by name rather than ignore them.
-- **`-O0` only.** `-g` compiles unoptimised, so every variable lives in its
-  stack slot at every statement boundary. There is no optimised debuggable
-  build yet.
+- **Optimised builds (`-g -O1` .. `-O3`) are debuggable, with the usual
+  losses.** The optimiser keeps values in registers and folds them away, so
+  gdb shows `<optimized out>` for a value it no longer has; it inlines calls,
+  and an inlined function is still a frame - `break scale` stops in its
+  inlined copy and `bt` lists it with its callers; `next` may jump between
+  lines. The debug information says it describes optimised code
+  (`isOptimized`, `DISPFlagOptimized`) and keeps every variable
+  (`retainedNodes`), so a variable whose value is gone is listed as
+  `<optimized out>` rather than missing. **gdb should never show a wrong
+  value**, and `tests/debug_info.rs` checks that at `-O1`, `-O2` and `-O3`:
+  every variable at three stops in one program must print as its right value
+  or as `<optimized out>`. Near a scope edge the optimiser merged code across,
+  a variable may be listed as `<optimized out>` slightly before or after its
+  block.
 - **A data-carrying enum cannot be constructed on the LLVM backend yet**: the
   constructor call is refused by name, so there is no such value to show.
 - A kernel the LLVM backend replaces with the packed GEMM keeps its parameters

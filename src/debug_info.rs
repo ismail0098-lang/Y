@@ -199,6 +199,9 @@ pub struct DebugInfo {
     /// Method symbols (`Point_sum`) and their Y names (`Point::sum`), for the
     /// stack traces the gdb extension prints.
     methods: BTreeMap<String, String>,
+    /// The module is compiled with optimisation (`-g -O1` and up), which the
+    /// compile unit and every subprogram say, as clang's do.
+    optimized: bool,
 }
 
 impl DebugInfo {
@@ -219,7 +222,13 @@ impl DebugInfo {
             scope: None,
             fn_vars: HashMap::new(),
             methods: BTreeMap::new(),
+            optimized: false,
         }
+    }
+
+    /// The module will be compiled with optimisation.
+    pub fn set_optimized(&mut self, optimized: bool) {
+        self.optimized = optimized;
     }
 
     /// `symbol` is the method `display` (`Type::method`).
@@ -569,9 +578,9 @@ impl DebugInfo {
         // rustc reports `clang LLVM (rustc version ...)` for the same reason.
         let cu = md.push(format!(
             "distinct !DICompileUnit(language: DW_LANG_C99, file: !{}, \
-             producer: \"clang LLVM (Y compiler)\", isOptimized: false, runtimeVersion: 0, \
+             producer: \"clang LLVM (Y compiler)\", isOptimized: {}, runtimeVersion: 0, \
              emissionKind: FullDebug)",
-            file
+            file, self.optimized
         ));
         let dwarf = md.push("!{i32 7, !\"Dwarf Version\", i32 4}".into());
         let version = md.push("!{i32 2, !\"Debug Info Version\", i32 3}".into());
@@ -589,6 +598,12 @@ impl DebugInfo {
         let mut declared_intrinsic = false;
         // Lexical scope -> its `DILexicalBlock`, made on first use.
         let mut blocks: HashMap<usize, usize> = HashMap::new();
+        // In an optimised build, the current function's variables, kept as
+        // the subprogram's `retainedNodes`: otherwise a variable whose every
+        // location the optimiser removed is dropped from the debug
+        // information, and the debugger says nothing about it rather than
+        // `<optimized out>`. Clang does the same.
+        let mut retained: Option<(usize, Vec<usize>)> = None;
 
         for line in module.lines() {
             if let Some(rest) = line.strip_prefix(LOC_MARKER) {
@@ -621,6 +636,9 @@ impl DebugInfo {
                         v.line,
                         ty
                     ));
+                    if let Some((_, vars)) = &mut retained {
+                        vars.push(var_id);
+                    }
                     let loc = location(&mut md, &mut locs, v.line, v.col, scope);
                     writeln!(
                         out,
@@ -636,7 +654,9 @@ impl DebugInfo {
                 func = None;
                 if let Some(f) = define_symbol(line).and_then(|s| self.functions.get(s)) {
                     let ffile = files[f.file];
-                    let sp = subprogram(&self, &mut md, &mut types, f, ffile, cu);
+                    let keep = if self.optimized { Some(md.reserve()) } else { None };
+                    retained = keep.map(|id| (id, Vec::new()));
+                    let sp = subprogram(&self, &mut md, &mut types, f, ffile, cu, keep);
                     if let Some(brace) = line.rfind('{') {
                         writeln!(out, "{}!dbg !{} {}", &line[..brace], sp, &line[brace..]).unwrap();
                         func = Some((sp, ffile, None));
@@ -645,6 +665,10 @@ impl DebugInfo {
                 }
             } else if line == "}" {
                 func = None;
+                if let Some((id, vars)) = retained.take() {
+                    let list: Vec<String> = vars.iter().map(|v| format!("!{}", v)).collect();
+                    md.define(id, format!("!{{{}}}", list.join(", ")));
+                }
             } else if let Some((sp, ffile, Some((l, c, k)))) = func {
                 if is_instruction(line) {
                     let scope = match k {
@@ -763,6 +787,7 @@ fn subprogram(
     f: &FnInfo,
     file: usize,
     cu: usize,
+    retained: Option<usize>,
 ) -> usize {
     let mut elems = vec![match &f.ret {
         Some(t) => types.node(info, md, t),
@@ -777,14 +802,16 @@ fn subprogram(
     let sig = md.push(format!("!DISubroutineType(types: !{{{}}})", elems.join(", ")));
     md.push(format!(
         "distinct !DISubprogram(name: \"{}\", scope: !{}, file: !{}, line: {}, type: !{}, \
-         scopeLine: {}, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition, unit: !{})",
+         scopeLine: {}, flags: DIFlagPrototyped, spFlags: {}, unit: !{}{})",
         md_escape(&f.display),
         file,
         file,
         f.line,
         sig,
         f.line,
-        cu
+        if info.optimized { "DISPFlagDefinition | DISPFlagOptimized" } else { "DISPFlagDefinition" },
+        cu,
+        retained.map(|r| format!(", retainedNodes: !{}", r)).unwrap_or_default()
     ))
 }
 

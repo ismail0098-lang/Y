@@ -450,8 +450,10 @@ impl LlvmEmitter {
         &mut self,
         source: &std::path::Path,
         imported: &[(String, std::path::PathBuf)],
+        optimized: bool,
     ) {
         let mut d = crate::debug_info::DebugInfo::new(source);
+        d.set_optimized(optimized);
         for (item, path) in imported {
             d.set_item_file(item, path);
         }

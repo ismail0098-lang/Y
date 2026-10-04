@@ -96,20 +96,23 @@ fn text(o: &Output) -> String {
 
 /// Writes `src` as `<dir>/<name>.ysu` and compiles it to `<dir>/<name>`.
 fn build(dir: &Path, name: &str, src: &str, g: bool) -> PathBuf {
+    build_with(dir, name, src, if g { &["-g"] } else { &[] })
+}
+
+/// The same with any flags; the binary is named after them.
+fn build_with(dir: &Path, name: &str, src: &str, flags: &[&str]) -> PathBuf {
     let path = dir.join(format!("{}.ysu", name));
     fs::write(&path, src).expect("write source");
-    let bin = dir.join(if g { format!("{}_g", name) } else { name.to_string() });
+    let suffix: String = flags.iter().map(|f| f.replace('-', "_")).collect();
+    let bin = dir.join(format!("{}{}", name, suffix));
     let mut c = y(dir);
-    c.arg(&path).arg("-o").arg(&bin);
-    if g {
-        c.arg("-g");
-    }
+    c.arg(&path).arg("-o").arg(&bin).args(flags);
     let out = c.output().expect("run Y");
     assert!(
         out.status.success() && bin.exists(),
-        "building {} {} failed:\n{}",
+        "building {} with {:?} failed:\n{}",
         name,
-        if g { "with -g" } else { "without -g" },
+        flags,
         text(&out)
     );
     bin
@@ -1160,4 +1163,218 @@ fn string_new_holds_the_text_it_was_given() {
     );
     let out = Command::new(&bin).output().expect("run");
     assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\nhi\n");
+}
+
+// ── Optimised builds: -g -O1 .. -O3 ─────────────────────────
+
+/// A program worth optimising: its input comes from a runtime call the
+/// optimiser cannot see through, and every function keeps a side effect, so
+/// there is code left to stop in after inlining. (With constant inputs LLVM
+/// folds the whole computation away and there is nothing to debug - correct,
+/// and useless as a test.)
+const OPTIMISED: &str = "\
+fn scale(x: I32, k: I32) -> I32 {
+    let s: I32 = x * k + 1;
+    print_int(s); // L:scale_print
+    return s;
+}
+
+fn twice(v: I32) -> I32 {
+    let d: I32 = scale(v, 2); // L:twice_call
+    print_int(d); // L:twice_print
+    return d;
+}
+
+fn main() -> I32 {
+    let seed: I32 = str_to_i64(\"7\");
+    let a: I32 = seed + 3;
+    let b: I32 = twice(a); // L:main_call
+    let c: I32 = b - seed;
+    print_int(c); // L:main_print
+    return c;
+}
+";
+
+/// At every level, with and without `-g`, the program computes the same.
+#[test]
+fn an_optimised_g_build_behaves_like_a_plain_one() {
+    if !have("clang") {
+        return skip("an_optimised_g_build_behaves_like_a_plain_one", "clang");
+    }
+    let dir = scratch("opt_behaviour");
+    for o in ["-O0", "-O1", "-O2", "-O3"] {
+        for flags in [vec![o], vec!["-g", o]] {
+            let bin = build_with(&dir, "optimised", OPTIMISED, &flags);
+            let out = Command::new(&bin).output().expect("run");
+            assert_eq!(out.status.code(), Some(14), "{:?}:\n{}", flags, text(&out));
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "212114", "{:?}", flags);
+        }
+    }
+}
+
+/// The debug information says when it describes optimised code, as clang's
+/// does, and keeps every variable so the debugger can say `<optimized out>`
+/// instead of nothing.
+#[test]
+fn the_debug_information_says_when_it_is_optimised() {
+    let dir = scratch("opt_flags");
+    let path = dir.join("optimised.ysu");
+    fs::write(&path, OPTIMISED).expect("write source");
+    for (flags, optimised) in [(vec!["-g"], false), (vec!["-g", "-O2"], true), (vec!["-g", "-O1"], true)] {
+        let ll = dir.join(format!("o{}.ll", flags.len()));
+        let out = y(&dir).arg(&path).arg("--emit-llvm").arg("-o").arg(&ll).args(&flags).output().expect("run Y");
+        assert!(out.status.success(), "{:?}:\n{}", flags, text(&out));
+        let m = fs::read_to_string(&ll).expect("read module");
+        assert_eq!(m.contains("isOptimized: true"), optimised, "{:?}", flags);
+        assert_eq!(m.contains("isOptimized: false"), !optimised, "{:?}", flags);
+        assert_eq!(m.contains("DISPFlagOptimized"), optimised, "{:?}", flags);
+        assert_eq!(m.contains("retainedNodes"), optimised, "{:?}", flags);
+    }
+}
+
+/// An inlined function is still a frame: a breakpoint on it stops in its
+/// inlined copy, and the backtrace has every Y caller, at every level.
+#[test]
+fn an_inlined_function_is_still_a_frame() {
+    if !have("gdb") {
+        return skip("an_inlined_function_is_still_a_frame", "gdb");
+    }
+    let dir = scratch("opt_inline");
+    for o in ["-O0", "-O1", "-O2", "-O3"] {
+        let bin = build_with(&dir, "optimised", OPTIMISED, &["-g", o]);
+        let out = gdb_y(&dir, &bin, "break scale\nrun\necho @@bt\\n\nbt\nkill\n");
+        assert!(out.contains("Breakpoint 1"), "{}: `break scale` never stopped:\n{}", o, out);
+        // The level really reached clang: an optimised build has inlined
+        // `scale`, so gdb finds its inlined copies as well as the function;
+        // an `-O0` one has the function alone.
+        let inlined = out.lines().any(|l| l.starts_with("Breakpoint 1 at") && l.contains(" locations)"));
+        assert_eq!(inlined, o != "-O0", "{}: inlined copies of `scale`:\n{}", o, out);
+        let bt: Vec<&str> = out
+            .split("@@bt")
+            .nth(1)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with('#'))
+            .collect();
+        assert_eq!(bt.len(), 3, "{}: want scale, twice, main:\n{}", o, out);
+        assert!(bt[0].starts_with("#0  scale (") && bt[0].contains(" at optimised.ysu:"), "{}:\n{}", o, out);
+        assert!(
+            bt[1].starts_with("#1  twice (")
+                && bt[1].ends_with(&format!(" at optimised.ysu:{}", line_of(OPTIMISED, "twice_call"))),
+            "{}:\n{}",
+            o,
+            out
+        );
+        assert_eq!(bt[2], format!("#2  main () at optimised.ysu:{}", line_of(OPTIMISED, "main_call")), "{}", o);
+    }
+}
+
+/// THE property of an optimised debug build: the debugger may not know a
+/// value - `<optimized out>` - but it must never show a wrong one. Checked at
+/// three stops, at every level, against what the source computes.
+#[test]
+fn an_optimised_build_never_shows_a_wrong_value() {
+    if !have("gdb") {
+        return skip("an_optimised_build_never_shows_a_wrong_value", "gdb");
+    }
+    let dir = scratch("opt_values");
+    let stops: [(&str, &[(&str, &str)]); 3] = [
+        ("scale", &[("x", "10"), ("k", "2")]),
+        ("twice_print", &[("v", "10"), ("d", "21")]),
+        ("main_print", &[("seed", "7"), ("a", "10"), ("b", "21"), ("c", "14")]),
+    ];
+    let mut known = 0;
+    for o in ["-O1", "-O2", "-O3"] {
+        let bin = build_with(&dir, "optimised", OPTIMISED, &["-g", o]);
+        let mut script = String::from(
+            "python\n\
+             def y_show(name):\n\
+             \x20   try:\n\
+             \x20       print('Y=%s=%s' % (name, gdb.parse_and_eval(name)))\n\
+             \x20   except gdb.error as e:\n\
+             \x20       print('Y!%s!%s' % (name, e))\n\
+             end\n\
+             break scale\n",
+        );
+        script.push_str(&format!("break optimised.ysu:{}\n", line_of(OPTIMISED, "twice_print")));
+        script.push_str(&format!("break optimised.ysu:{}\n", line_of(OPTIMISED, "main_print")));
+        script.push_str("run\n");
+        for (stop, names) in &stops {
+            script.push_str(&format!("echo @@{}\\n\n", stop));
+            for (n, _) in names.iter() {
+                script.push_str(&format!("python y_show('{}')\n", n));
+            }
+            script.push_str("continue\n");
+        }
+        let out = gdb_y(&dir, &bin, &script);
+        let views = scope_views(&out);
+        for (stop, names) in &stops {
+            for (n, want) in names.iter() {
+                let got = views.get(*stop).and_then(|v| v.get(*n)).cloned();
+                match got {
+                    Some(Ok(v)) if v == *want => known += 1,
+                    Some(Ok(v)) if v == "<optimized out>" => {}
+                    other => panic!("{}: `{}` at `{}` is {:?}, want {} or <optimized out>:\n{}", o, n, stop, other, want, out),
+                }
+            }
+        }
+    }
+    // Non-vacuity: a build where gdb could show nothing at all would satisfy
+    // the loop above perfectly.
+    assert!(known >= 6, "only {} values were shown across three levels", known);
+}
+
+/// Every corpus program that builds optimised builds optimised with `-g` too:
+/// clang's verifier checks the debug information an optimising build
+/// carries - an inlinable call with no location, say - which `-O0` never asks.
+#[test]
+fn every_corpus_program_that_builds_at_o2_builds_with_g() {
+    if !have("clang") {
+        return skip("every_corpus_program_that_builds_at_o2_builds_with_g", "clang");
+    }
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut sources: Vec<PathBuf> = fs::read_dir(&tests)
+        .expect("tests/")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "ysu").unwrap_or(false))
+        .collect();
+    sources.sort();
+    let dir = scratch("opt_corpus");
+    let (mut built, mut failures) = (0, Vec::new());
+    for src in &sources {
+        let name = src.file_stem().unwrap().to_string_lossy().into_owned();
+        let copy = dir.join(format!("{}.ysu", name));
+        fs::copy(src, &copy).expect("copy source");
+        let plain = y(&dir).arg(&copy).arg("-O2").arg("-o").arg(dir.join(&name)).output().expect("run Y");
+        if !plain.status.success() {
+            continue;
+        }
+        built += 1;
+        let g = y(&dir).arg(&copy).arg("-g").arg("-O2").arg("-o").arg(dir.join(format!("{}_g", name))).output().expect("run Y");
+        if !g.status.success() {
+            failures.push(format!("{}:\n{}", name, text(&g)));
+        }
+    }
+    assert!(built >= 40, "only {} corpus programs build at all; the sweep is not testing anything", built);
+    assert!(failures.is_empty(), "{} of {} failed with -g -O2:\n{}", failures.len(), built, failures.join("\n"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// `-O` sets the LLVM backend's clang step; every other backend has none and
+/// says so instead of ignoring it.
+#[test]
+fn an_optimisation_level_is_refused_where_it_would_do_nothing() {
+    let dir = scratch("opt_refuse");
+    let path = dir.join("optimised.ysu");
+    fs::write(&path, OPTIMISED).expect("write source");
+    for backend in ["--emit-ptx", "--emit-cpu", "--emit-native", "--emit-coprocessor", "--target=r1cs"] {
+        let out = y(&dir).arg(&path).arg(backend).arg("-O2").output().expect("run Y");
+        assert!(!out.status.success(), "-O2 {} was accepted", backend);
+        assert!(text(&out).contains(&format!("-O2 cannot be combined with {}", backend)), "{}", text(&out));
+    }
+    // The control: the LLVM backend takes every level, with and without -g.
+    for o in ["-O0", "-O1", "-O2", "-O3"] {
+        let out = y(&dir).arg(&path).arg("--emit-llvm").arg(o).arg("-o").arg(dir.join("ok.ll")).output().expect("run Y");
+        assert!(out.status.success(), "{} --emit-llvm was refused:\n{}", o, text(&out));
+    }
 }
