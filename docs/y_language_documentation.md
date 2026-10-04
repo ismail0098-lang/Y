@@ -5197,14 +5197,36 @@ IR with its debug metadata instead of building.
 | `Vec`, `Box`, other handles | an address |
 
 **The debugger is told what the compiled program holds, and that is checked.**
-The LLVM backend keeps each variable in one stack slot, and at `-O0` the slot is
-the variable at every statement boundary. A variable is described with its
+The LLVM backend keeps each binding in a stack slot of its own, and at `-O0` the
+slot is the variable at every statement boundary. A variable is described with its
 declared type only when that type has the slot's size; otherwise with the
 slot's own type, because gdb reading a width the code did not store prints
 garbage. An unannotated `let w = 9;` is inferred as `i64` but stored in an
 `i32` slot, so it is shown as an `I32` — `tests/debug_info.rs` asserts exactly
 that case. Likewise a `Q16.16` declared outside `@ZeroDrift` is shown as the
 `I32` this backend stores it as.
+
+**A variable is visible exactly where the language says it exists**: from the
+statement after its `let` to the end of its block, a `for` loop's variable in
+the loop's condition, body and increment, a parameter in the whole function.
+Before its `let` has run, and after its block, `print x` answers
+`No symbol "x" in current context` instead of showing a slot that does not
+hold `x` (yet, or any more), and `info locals` leaves it out. A `let` that
+shadows an outer binding of the same name hides it inside its block only:
+
+```text
+let a: I32 = 1;
+if a > 0 {
+    let a: I32 = 2;
+    print_int(a);       // (gdb) print a  ->  2
+}
+let b: I32 = a + 5;     // (gdb) print a  ->  1      (gdb) print b  ->  No symbol "b"
+```
+
+Each Y block is a DWARF lexical block, and so is the rest of a block after a
+`let` - the way rustc describes shadowing - so any DWARF debugger draws the
+same boundaries. The program keeps the same rule: every binding has a slot of
+its own, so the inner `a` above never writes the outer one.
 
 ### 38.3 Stepping
 
@@ -5288,10 +5310,6 @@ The editor's UI itself was not exercised.
 - **`-O0` only.** `-g` compiles unoptimised, so every variable lives in its
   stack slot at every statement boundary. There is no optimised debuggable
   build yet.
-- **Variables are scoped to their whole function**, because their storage is.
-  A `let` in a nested block shares the outer binding's slot in this backend —
-  a recorded bug — and the debugger shows the slot, which is what the program
-  computes.
 - A kernel the LLVM backend replaces with the packed GEMM keeps its parameters
   but has no body variables: the code that runs is the GEMM, not the loop nest.
 - A `fn main` with no return type leaves the process's exit status undefined,

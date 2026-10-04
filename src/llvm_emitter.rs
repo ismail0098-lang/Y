@@ -460,24 +460,75 @@ impl LlvmEmitter {
 
     /// Attribute what follows to `span`; returns the position to restore.
     fn dbg_enter(&mut self, span: &Span) -> Option<(usize, usize)> {
-        let d = self.debug.as_mut()?;
-        let outer = d.current();
-        if d.move_to(span.line, span.col) {
-            writeln!(&mut self.output, "{}{} {}", crate::debug_info::LOC_MARKER, span.line, span.col)
-                .unwrap();
-        }
+        let outer = self.debug.as_ref()?.current();
+        self.dbg_move(span.line, span.col);
         outer
     }
 
     /// Back to the position `dbg_enter` returned, so code a compound
     /// statement emits after its body is attributed to the statement itself.
+    /// The SCOPE is not restored here: a `let` opens a scope that lasts to the
+    /// end of its block, past the statement itself.
     fn dbg_leave(&mut self, outer: Option<(usize, usize)>) {
-        if let (Some(d), Some((line, col))) = (self.debug.as_mut(), outer) {
-            if d.move_to(line, col) {
-                writeln!(&mut self.output, "{}{} {}", crate::debug_info::LOC_MARKER, line, col)
-                    .unwrap();
-            }
+        if let Some((line, col)) = outer {
+            self.dbg_move(line, col);
         }
+    }
+
+    /// Attribute what follows to `(line, col)` in the current scope, writing
+    /// a marker if that changes anything.
+    fn dbg_move(&mut self, line: usize, col: usize) {
+        let Some(d) = self.debug.as_mut() else { return };
+        if d.move_to(line, col) {
+            let scope = d.scope_code();
+            writeln!(&mut self.output, "{}{} {} {}", crate::debug_info::LOC_MARKER, line, col, scope)
+                .unwrap();
+        }
+    }
+
+    /// Re-attribute what follows to the current position, after the scope
+    /// changed under it.
+    fn dbg_refresh(&mut self) {
+        if let Some((line, col)) = self.debug.as_ref().and_then(|d| d.current()) {
+            self.dbg_move(line, col);
+        }
+    }
+
+    /// Open a lexical scope at `span` - a `{ }` block or a `for` loop - for
+    /// what follows. Returns what [`Self::dbg_scope_leave`] restores.
+    fn dbg_scope_enter(&mut self, span: &Span) -> Option<Option<usize>> {
+        let outer = self.debug.as_mut()?.enter_scope(span.line, span.col);
+        self.dbg_refresh();
+        Some(outer)
+    }
+
+    /// Close the scope [`Self::dbg_scope_enter`] opened, and every scope a
+    /// `let` opened inside it.
+    fn dbg_scope_leave(&mut self, outer: Option<Option<usize>>) {
+        if let (Some(d), Some(o)) = (self.debug.as_mut(), outer) {
+            d.leave_scope(o);
+            self.dbg_refresh();
+        }
+    }
+
+    /// The binding `name` exists from here on. A `let`'s binding gets a scope
+    /// of its own running to the end of the enclosing block - so the debugger
+    /// does not show it before the `let` has run - and a loop variable the
+    /// loop's scope, already open.
+    fn dbg_bind(&mut self, name: &str, span: &Span, own_scope: bool) {
+        let Some(d) = self.debug.as_mut() else { return };
+        if own_scope {
+            d.enter_scope(span.line, span.col);
+        }
+        d.bind(name);
+        self.dbg_refresh();
+    }
+
+    /// A nested `{ }` block, in a lexical scope of its own under `-g`.
+    fn emit_scoped_block(&mut self, block: &Block, ret_type: &str) {
+        let scope = self.dbg_scope_enter(&block.span);
+        self.emit_block_body(block, ret_type);
+        self.dbg_scope_leave(scope);
     }
 
     /// The slot `%name` just allocated holds a Y variable. `declared` is its
@@ -1747,6 +1798,16 @@ impl LlvmEmitter {
     }
 
     fn emit_func(&mut self, f: &FuncDecl) {
+        // Every binding gets a name - and so a slot - of its own: this backend
+        // keeps one slot per name per function, and without the renaming a
+        // nested or repeated `let` wrote the slot of the binding it shadows
+        // (`crate::lexical_scope`). A function that binds no name twice is
+        // unchanged.
+        let renamed = FuncDecl {
+            body: crate::lexical_scope::unique_bindings(&f.params, &f.body),
+            ..f.clone()
+        };
+        let f = &renamed;
         self.reset_function_state();
         let prev_ptx = self.in_ptx_emit;
         self.in_ptx_emit = f.is_ptx_emit;
@@ -1871,7 +1932,7 @@ impl LlvmEmitter {
                     match crate::zero_drift::select_repr(&req, &self.drift_costs) {
                         Ok(decision) => {
                             self.drift_report.push(crate::zero_drift::report_line(
-                                name,
+                                crate::lexical_scope::source_name(name),
                                 &ty_name,
                                 &decision,
                                 crate::zero_drift::explain_requested(),
@@ -1925,7 +1986,7 @@ representation holds that range at that resolution, and only exact (integer or f
 accumulation is drift-free - f64 is the same non-associative arithmetic with more mantissa. \
 Add @bounds(min, max) to state the accumulator's real range, or declare it as a Q format.\n{}",
                                 span.line,
-                                name,
+                                crate::lexical_scope::source_name(name),
                                 ty_name,
                                 crate::zero_drift::explain_rejections(&why)
                             ));
@@ -1950,21 +2011,11 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         ),
                         _ => None,
                     };
-                    // This backend keeps ONE slot per name per function, so a
-                    // second `let` of a name reuses the first one's alloca.
-                    // For an array of another size or element type that is
-                    // storage of the wrong size, so it is refused rather than
-                    // written past.
-                    if let (Some(aty), Some(prev)) = (&array_ty, self.locals.get(name)) {
-                        if aty != prev {
-                            self.emit_errors.push(format!(
-                                "Line {}: [LLVM host backend] `{}` is declared again as `{}`, but \
-                                 this backend keeps one slot per name per function and the first \
-                                 declaration's is `{}`.",
-                                span.line, name, aty, prev
-                            ));
-                        }
-                    }
+                    // Every binding has a name of its own by now
+                    // (`emit_func` renames them apart), so this is the first
+                    // time `name` is seen: a second `let` of a source name is
+                    // `name.1`, with a slot of its own of whatever size it
+                    // declares.
                     if !self.locals.contains_key(name) {
                         let ir_ty = match ty {
                             Some(t) => {
@@ -2102,6 +2153,12 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
     }
 
     fn emit_kernel(&mut self, k: &KernelDecl) {
+        // As in `emit_func`: a binding of its own for every `let`.
+        let renamed = KernelDecl {
+            body: crate::lexical_scope::unique_bindings(&k.params, &k.body),
+            ..k.clone()
+        };
+        let k = &renamed;
         self.reset_function_state();
 
         writeln!(&mut self.output, "; @kernel").unwrap();
@@ -2536,6 +2593,11 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
     fn emit_stmt(&mut self, stmt: &Stmt, ret_type: &str) {
         let outer = self.dbg_enter(&stmt.span());
         self.emit_stmt_inner(stmt, ret_type);
+        // The binding exists once its initialiser has been stored, not before:
+        // the `let`'s own code runs in the enclosing scope.
+        if let Stmt::Let { name, span, .. } = stmt {
+            self.dbg_bind(name, span, true);
+        }
         self.dbg_leave(outer);
     }
 
@@ -2815,21 +2877,25 @@ representation, and whether that is lossless depends on the expression.",
                 // Then block
                 writeln!(&mut self.output, "{}:", then_lbl).unwrap();
                 self.block_terminated = false;
+                let scope = self.dbg_scope_enter(&then_block.span);
                 self.emit_block_body(then_block, ret_type);
                 let then_terminated = self.block_terminated;
                 if !then_terminated {
                     self.emit_branch_out(then_block, &merge_lbl);
                 }
+                self.dbg_scope_leave(scope);
 
                 // Else block
                 if let Some(eb) = else_block {
                     writeln!(&mut self.output, "{}:", else_lbl).unwrap();
                     self.block_terminated = false;
+                    let scope = self.dbg_scope_enter(&eb.span);
                     self.emit_block_body(eb, ret_type);
                     let else_terminated = self.block_terminated;
                     if !else_terminated {
                         self.emit_branch_out(eb, &merge_lbl);
                     }
+                    self.dbg_scope_leave(scope);
                 }
 
                 writeln!(&mut self.output, "{}:", merge_lbl).unwrap();
@@ -2869,11 +2935,13 @@ representation, and whether that is lossless depends on the expression.",
                 writeln!(&mut self.output, "{}:", body_lbl).unwrap();
                 self.block_terminated = false;
                 self.loop_exit_stack.push(end_lbl.clone());
+                let scope = self.dbg_scope_enter(&body.span);
                 self.emit_block_body(body, ret_type);
                 self.loop_exit_stack.pop();
                 if !self.block_terminated {
                     self.emit_branch_out(body, &cond_lbl);
                 }
+                self.dbg_scope_leave(scope);
 
                 writeln!(&mut self.output, "{}:", end_lbl).unwrap();
                 self.block_terminated = false;
@@ -2886,6 +2954,7 @@ representation, and whether that is lossless depends on the expression.",
                 body,
                 is_uniform_branch,
                 tile,
+                span,
                 ..
             } => {
                 let s = self.emit_expr(start, None, None);
@@ -2911,6 +2980,11 @@ representation, and whether that is lossless depends on the expression.",
 
                 // alloca is in entry
                 self.emit_store(&s, &format!("%{}", loop_var), "i32");
+                // The loop variable exists from its first value on - through
+                // the condition, the body and the increment, which are all the
+                // loop's - and not after the loop.
+                let loop_scope = self.dbg_scope_enter(span);
+                self.dbg_bind(loop_var, span, false);
                 writeln!(&mut self.output, "  br label %{}", cond_lbl).unwrap();
 
                 writeln!(&mut self.output, "{}:", cond_lbl).unwrap();
@@ -2927,7 +3001,7 @@ representation, and whether that is lossless depends on the expression.",
                 writeln!(&mut self.output, "{}:", body_lbl).unwrap();
                 self.block_terminated = false;
                 self.loop_exit_stack.push(end_lbl.clone());
-                self.emit_block_body(body, ret_type);
+                self.emit_scoped_block(body, ret_type);
                 self.loop_exit_stack.pop();
 
                 // Increment
@@ -2946,6 +3020,7 @@ representation, and whether that is lossless depends on the expression.",
                 .unwrap();
                 self.emit_store(&incremented, &format!("%{}", loop_var), "i32");
                 writeln!(&mut self.output, "  br label %{}", cond_lbl).unwrap();
+                self.dbg_scope_leave(loop_scope);
 
                 writeln!(&mut self.output, "{}:", end_lbl).unwrap();
                 self.block_terminated = false;
@@ -3033,6 +3108,7 @@ representation, and whether that is lossless depends on the expression.",
                     ));
                 } else {
                     self.wln("  ; --- CHISEL INLINE ASM ---");
+                    let scope = self.dbg_scope_enter(&block.span);
                     for stmt in &block.stmts {
                         if let Stmt::Expr(Expr::StringLit(s, _)) = stmt {
                             self.wln(&format!("  call void asm sideeffect \"{}\", \"~{{memory}},~{{dirflag}},~{{fpsr}},~{{flags}}\"()", s));
@@ -3040,6 +3116,7 @@ representation, and whether that is lossless depends on the expression.",
                             self.emit_stmt(stmt, ret_type);
                         }
                     }
+                    self.dbg_scope_leave(scope);
                 }
             }
             Stmt::Match {
@@ -3153,19 +3230,19 @@ representation, and whether that is lossless depends on the expression.",
             }
             Stmt::SafeBlock(block, _) => {
                 self.wln("  ; --- @safe verified block ---");
-                self.emit_block_body(block, ret_type);
+                self.emit_scoped_block(block, ret_type);
             }
             Stmt::GhostBlock(block, _) => {
                 self.wln("  ; --- @ghost speculative block ---");
-                self.emit_block_body(block, ret_type);
+                self.emit_scoped_block(block, ret_type);
             }
             Stmt::HintBlock { body, .. } => {
                 self.wln("  ; --- @hint unconstrained block ---");
-                self.emit_block_body(body, ret_type);
+                self.emit_scoped_block(body, ret_type);
             }
             Stmt::ClockDomainBlock { body, .. } => {
                 self.wln("  ; --- @clock_domain block ---");
-                self.emit_block_body(body, ret_type);
+                self.emit_scoped_block(body, ret_type);
             }
             Stmt::CompileTimeAssert { .. } => {
                 // compile_time::assert! is verified at compile time and stripped

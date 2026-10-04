@@ -15,13 +15,13 @@
 //! Instead the emitter writes two kinds of MARKER line, and only when `-g` is
 //! on (with it off, the emitted module is byte-for-byte what it was):
 //!
-//! * [`LOC_MARKER`] `<line> <col>`: every instruction from here until the
-//!   next marker belongs to that source position. `LlvmEmitter::emit_stmt`
-//!   writes one on entering a statement and another on leaving it, so the
-//!   code a compound statement emits AFTER its body - a `for` loop's
-//!   increment and back edge, an `if`'s jump to its merge block - goes back to
-//!   the compound statement's own line instead of inheriting the last body
-//!   statement's.
+//! * [`LOC_MARKER`] `<line> <col> <scope>`: every instruction from here
+//!   until the next marker belongs to that source position, in that lexical
+//!   scope. `LlvmEmitter::emit_stmt` writes one on entering a statement and
+//!   another on leaving it, so the code a compound statement emits AFTER its
+//!   body - a `for` loop's increment and back edge, an `if`'s jump to its
+//!   merge block - goes back to the compound statement's own line instead of
+//!   inheriting the last body statement's.
 //! * [`VAR_MARKER`] `<index>`: the stack slot just allocated holds a Y
 //!   variable; becomes an `llvm.dbg.declare`.
 //!
@@ -33,16 +33,20 @@
 //!
 //! # What the debugger is told, and why it is true
 //!
-//! This backend keeps every Y variable in ONE stack slot per name per
-//! function (allocated in the entry block), and `-g` compiles at `-O0`, so a
-//! variable's slot holds its current value at every statement boundary.
-//! That is what makes describing a slot as the variable exact rather than
-//! approximate. Two consequences, stated rather than hidden:
+//! This backend keeps every Y binding in a stack slot of its own (allocated
+//! in the entry block; `crate::lexical_scope` renames bindings apart so that
+//! a shadowing `let` does not share the slot of the binding it shadows), and
+//! `-g` compiles at `-O0`, so a variable's slot holds its current value at
+//! every statement boundary. That is what makes describing a slot as the
+//! variable exact rather than approximate.
 //!
-//! * Every variable is scoped to its whole function, because its storage is.
-//!   A `let` in a nested block shares the outer binding's slot in this
-//!   backend (a known bug, recorded in CLAUDE.md), and the debugger shows the
-//!   slot, i.e. what the program actually computes.
+//! * **A variable is visible exactly where the language says it exists**:
+//!   from the statement after its `let` to the end of its block, a `for`
+//!   loop's variable inside the loop, a parameter in the whole function.
+//!   Each Y block is a `DILexicalBlock`, and so is the rest of a block after
+//!   a `let` - the way rustc describes shadowing - so the debugger reports a
+//!   name as unknown before its declaration and after its scope, and resolves
+//!   a shadowed name to the inner binding inside the inner scope.
 //! * A variable's described type must have the SIZE of the slot it lives in.
 //!   Where the declared Y type and the storage disagree (a `Q16.16` outside
 //!   `@ZeroDrift` is stored as a plain `i32`), the storage wins: a debugger
@@ -57,8 +61,9 @@ use crate::ast::*;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
-/// `;@y.dbg.loc <line> <col>` - a comment, so a module that kept one would
-/// still be valid IR; [`DebugInfo::finish`] removes every one.
+/// `;@y.dbg.loc <line> <col> <scope>` - a comment, so a module that kept one
+/// would still be valid IR; [`DebugInfo::finish`] removes every one. `<scope>`
+/// is 0 for the function's own scope and `k + 1` for lexical scope `k`.
 pub const LOC_MARKER: &str = ";@y.dbg.loc ";
 /// `;@y.dbg.var <index into DebugInfo::vars>`.
 pub const VAR_MARKER: &str = ";@y.dbg.var ";
@@ -99,17 +104,43 @@ struct FnInfo {
     params: Vec<Option<DbgTy>>,
 }
 
+/// Where a variable is visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarScope {
+    /// Its binding has not been emitted (yet): the `let` is unreachable, or
+    /// emission has not got to it. A variable still unbound at the end is
+    /// left out - it has no extent the program can stop in.
+    Unbound,
+    /// The whole function: a parameter.
+    Function,
+    /// A lexical scope, an index into `DebugInfo::scopes`.
+    Block(usize),
+}
+
 /// One stack slot that holds a Y variable.
 #[derive(Debug, Clone)]
 pub struct VarInfo {
+    /// The name the source spells, which is what the debugger shows.
     pub name: String,
-    /// The LLVM value naming the slot, without the `%`.
+    /// The LLVM value naming the slot, without the `%` - the binding's own
+    /// name, which differs from `name` for a binding that shadows another.
     pub slot: String,
     pub line: usize,
     pub col: usize,
     /// 1-based position for a parameter.
     pub arg: Option<u32>,
     pub ty: DbgTy,
+    pub scope: VarScope,
+}
+
+/// A lexical scope inside a function: a `{ }` block, a `for` loop, or the
+/// rest of a block after a `let`.
+#[derive(Debug, Clone)]
+struct ScopeInfo {
+    /// The enclosing scope; `None` is the function itself.
+    parent: Option<usize>,
+    line: usize,
+    col: usize,
 }
 
 struct StructInfo {
@@ -147,11 +178,17 @@ pub struct DebugInfo {
     enums: BTreeMap<String, EnumInfo>,
     /// LLVM field types per struct, as the emitter laid them out.
     ir_structs: BTreeMap<String, Vec<String>>,
-    /// The position the emitter last wrote a marker for, so it writes one
-    /// only when the position changes.
-    current: Option<(usize, usize)>,
+    /// The position and scope the emitter last wrote a marker for, so it
+    /// writes one only when either changes.
+    current: Option<(usize, usize, Option<usize>)>,
     /// Parameters declared so far in the current function.
     next_arg: u32,
+    /// Every lexical scope of every function, in creation order.
+    scopes: Vec<ScopeInfo>,
+    /// The scope instructions emitted now belong to; `None` is the function.
+    scope: Option<usize>,
+    /// The current function's variables by binding name (`VarInfo::slot`).
+    fn_vars: HashMap<String, usize>,
 }
 
 impl DebugInfo {
@@ -168,6 +205,9 @@ impl DebugInfo {
             ir_structs: BTreeMap::new(),
             current: None,
             next_arg: 0,
+            scopes: Vec::new(),
+            scope: None,
+            fn_vars: HashMap::new(),
         }
     }
 
@@ -252,23 +292,57 @@ impl DebugInfo {
             symbol.to_string(),
             FnInfo { display: display.to_string(), file, line, ret, params },
         );
-        self.current = Some((line, col));
+        self.current = Some((line, col, None));
         self.next_arg = 0;
+        self.scope = None;
+        self.fn_vars.clear();
     }
 
     /// The position instructions are currently attributed to.
     pub fn current(&self) -> Option<(usize, usize)> {
-        self.current
+        self.current.map(|(l, c, _)| (l, c))
     }
 
-    /// Move to `(line, col)`. Returns whether that is a change, i.e. whether
-    /// the emitter must write a marker.
+    /// Move to `(line, col)` in the current scope. Returns whether that is a
+    /// change, i.e. whether the emitter must write a marker.
     pub fn move_to(&mut self, line: usize, col: usize) -> bool {
-        if self.current == Some((line, col)) {
+        let here = Some((line, col, self.scope));
+        if self.current == here {
             return false;
         }
-        self.current = Some((line, col));
+        self.current = here;
         true
+    }
+
+    /// The `<scope>` field of a marker for the current scope.
+    pub fn scope_code(&self) -> usize {
+        self.scope.map_or(0, |s| s + 1)
+    }
+
+    /// Open a scope inside the current one, starting at `(line, col)`, and
+    /// make it current. Returns the scope to restore with [`Self::leave_scope`].
+    pub fn enter_scope(&mut self, line: usize, col: usize) -> Option<usize> {
+        let outer = self.scope;
+        self.scopes.push(ScopeInfo { parent: outer, line, col });
+        self.scope = Some(self.scopes.len() - 1);
+        outer
+    }
+
+    /// Back to `outer`, what [`Self::enter_scope`] returned. Every scope opened
+    /// since - a `let`'s included - ends here.
+    pub fn leave_scope(&mut self, outer: Option<usize>) {
+        self.scope = outer;
+    }
+
+    /// The binding `slot` (see [`VarInfo::slot`]) of the current function is
+    /// visible from here to the end of the current scope.
+    pub fn bind(&mut self, slot: &str) {
+        if let Some(&i) = self.fn_vars.get(slot) {
+            self.vars[i].scope = match self.scope {
+                None => VarScope::Function,
+                Some(s) => VarScope::Block(s),
+            };
+        }
     }
 
     /// Record a variable's slot; returns the index its marker names, or `None`
@@ -289,13 +363,17 @@ impl DebugInfo {
         };
         let ty = ty?;
         self.vars.push(VarInfo {
-            name: name.to_string(),
+            name: crate::lexical_scope::source_name(name).to_string(),
             slot: name.to_string(),
             line,
             col,
             arg,
             ty,
+            // A parameter exists from the function's entry; a `let` or a loop
+            // variable from where `bind` is called for it.
+            scope: if is_param { VarScope::Function } else { VarScope::Unbound },
         });
+        self.fn_vars.insert(name.to_string(), self.vars.len() - 1);
         Some(self.vars.len() - 1)
     }
 
@@ -473,32 +551,43 @@ impl DebugInfo {
         // prologue, and a location on them is where gdb would put a
         // function breakpoint - before the parameters are stored, so every
         // argument would print as whatever the slot held before.
-        let mut func: Option<(usize, usize, Option<(usize, usize)>)> = None;
+        let mut func: Option<(usize, usize, Option<(usize, usize, Option<usize>)>)> = None;
         let mut declared_intrinsic = false;
+        // Lexical scope -> its `DILexicalBlock`, made on first use.
+        let mut blocks: HashMap<usize, usize> = HashMap::new();
 
         for line in module.lines() {
             if let Some(rest) = line.strip_prefix(LOC_MARKER) {
                 let mut it = rest.split_whitespace().filter_map(|w| w.parse::<usize>().ok());
-                if let (Some((sp, f, _)), Some(l), Some(c)) = (func, it.next(), it.next()) {
-                    func = Some((sp, f, Some((l, c))));
+                if let (Some((sp, f, _)), Some(l), Some(c), Some(k)) =
+                    (func, it.next(), it.next(), it.next())
+                {
+                    func = Some((sp, f, Some((l, c, k.checked_sub(1)))));
                 }
                 continue;
             }
             if let Some(rest) = line.strip_prefix(VAR_MARKER) {
                 let var = rest.trim().parse::<usize>().ok().and_then(|i| self.vars.get(i));
                 if let (Some((sp, vfile, _)), Some(v)) = (func, var) {
+                    // A binding that was never emitted has no extent to stop
+                    // in; describing it would put it in no scope at all.
+                    let scope = match v.scope {
+                        VarScope::Unbound => continue,
+                        VarScope::Function => sp,
+                        VarScope::Block(k) => self.block_md(&mut md, &mut blocks, k, sp, vfile),
+                    };
                     let ty = types.node(&self, &mut md, &v.ty);
                     let arg = v.arg.map(|a| format!("arg: {}, ", a)).unwrap_or_default();
                     let var_id = md.push(format!(
                         "!DILocalVariable(name: \"{}\", {}scope: !{}, file: !{}, line: {}, type: {})",
                         md_escape(&v.name),
                         arg,
-                        sp,
+                        scope,
                         vfile,
                         v.line,
                         ty
                     ));
-                    let loc = location(&mut md, &mut locs, v.line, v.col, sp);
+                    let loc = location(&mut md, &mut locs, v.line, v.col, scope);
                     writeln!(
                         out,
                         "  call void @llvm.dbg.declare(metadata ptr %{}, metadata !{}, metadata !DIExpression()), !dbg !{}",
@@ -522,9 +611,13 @@ impl DebugInfo {
                 }
             } else if line == "}" {
                 func = None;
-            } else if let Some((sp, _, Some((l, c)))) = func {
+            } else if let Some((sp, ffile, Some((l, c, k)))) = func {
                 if is_instruction(line) {
-                    let loc = location(&mut md, &mut locs, l, c, sp);
+                    let scope = match k {
+                        None => sp,
+                        Some(k) => self.block_md(&mut md, &mut blocks, k, sp, ffile),
+                    };
+                    let loc = location(&mut md, &mut locs, l, c, scope);
                     out.push_str(&attach_dbg(line, loc));
                     out.push('\n');
                     continue;
@@ -544,6 +637,32 @@ impl DebugInfo {
             writeln!(out, "!{} = {}", id, def).unwrap();
         }
         out
+    }
+
+    /// The `DILexicalBlock` of scope `k`, whose function's subprogram is `sp`
+    /// and file `file`; its enclosing scopes are made first.
+    fn block_md(
+        &self,
+        md: &mut Md,
+        blocks: &mut HashMap<usize, usize>,
+        k: usize,
+        sp: usize,
+        file: usize,
+    ) -> usize {
+        if let Some(&id) = blocks.get(&k) {
+            return id;
+        }
+        let s = &self.scopes[k];
+        let parent = match s.parent {
+            None => sp,
+            Some(p) => self.block_md(md, blocks, p, sp, file),
+        };
+        let id = md.push(format!(
+            "distinct !DILexicalBlock(scope: !{}, file: !{}, line: {}, column: {})",
+            parent, file, s.line, s.col
+        ));
+        blocks.insert(k, id);
+        id
     }
 }
 

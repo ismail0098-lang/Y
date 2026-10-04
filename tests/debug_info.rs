@@ -25,6 +25,7 @@
 //! `opt`, `llvm-dwarfdump`, `clang`). Where the tool is present they run in
 //! full; nothing here passes vacuously because a fixture failed to build -
 //! a build failure is a FAILURE.
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -716,4 +717,156 @@ fn every_backend_without_debug_information_refuses_g_by_name() {
     // The control: the LLVM backend accepts both spellings.
     let out = y(&dir).arg(&path).arg("--emit-llvm").arg("-g").arg("-o").arg(dir.join("ok.ll")).output().expect("run Y");
     assert!(out.status.success(), "-g --emit-llvm was refused:\n{}", text(&out));
+}
+
+/// Lexical scopes, seen from the debugger. A variable is visible from the
+/// statement after its `let` to the end of its block, a shadowing binding
+/// hides the outer one inside its scope only, and a loop variable exists in
+/// its loop and not after it. Before this, every variable was visible in the
+/// whole function (garbage before its `let`), and the shadowing `a` WAS the
+/// outer one - one slot per name - so `a` read 2 after the block.
+const SCOPES: &str = "\
+@unsafe
+fn main() -> I32 {
+    let a: I32 = 1;
+    let pre_v: I32 = 10; // L:pre
+    if a > 0 {
+        let a: I32 = 2;
+        let inner_v: I32 = a + pre_v;
+        print_int(inner_v); // L:in_block
+    }
+    let b_v: I32 = a + 5; // L:b
+    for ki in 0..2 {
+        let kt: I32 = ki * 2;
+        print_int(kt); // L:in_loop
+    }
+    let after_v: I32 = b_v; // L:after
+    return after_v; // L:ret
+}
+";
+
+/// What `name` evaluates to at each stop, keyed by the `@@<stop>` sections
+/// the script prints: `Ok(value)` or `Err(gdb's message)`. Asked through
+/// Python so that a name gdb cannot see does not abort the batch script.
+fn scope_views(out: &str) -> HashMap<String, HashMap<String, Result<String, String>>> {
+    let mut views: HashMap<String, HashMap<String, Result<String, String>>> = HashMap::new();
+    let mut stop = String::new();
+    for l in out.lines() {
+        if let Some(s) = l.strip_prefix("@@") {
+            stop = s.trim().to_string();
+        } else if let Some(rest) = l.strip_prefix("Y=") {
+            let (name, v) = rest.split_once('=').expect("Y=name=value");
+            views.entry(stop.clone()).or_default().insert(name.into(), Ok(v.into()));
+        } else if let Some(rest) = l.strip_prefix("Y!") {
+            let (name, e) = rest.split_once('!').expect("Y!name!error");
+            views.entry(stop.clone()).or_default().insert(name.into(), Err(e.into()));
+        }
+    }
+    views
+}
+
+#[test]
+fn a_variable_is_visible_exactly_where_its_scope_is() {
+    if !have("gdb") {
+        return skip("a_variable_is_visible_exactly_where_its_scope_is", "gdb");
+    }
+    let dir = scratch("scopes");
+    let bin = build(&dir, "scopes", SCOPES, true);
+    let mut script = String::from(
+        "python\n\
+         def y_show(name):\n\
+         \x20   try:\n\
+         \x20       print('Y=%s=%s' % (name, gdb.parse_and_eval(name)))\n\
+         \x20   except gdb.error as e:\n\
+         \x20       print('Y!%s!%s' % (name, e))\n\
+         end\n",
+    );
+    for tag in ["pre", "in_block", "b", "in_loop", "after", "ret"] {
+        script.push_str(&format!("break scopes.ysu:{}\n", line_of(SCOPES, tag)));
+    }
+    script.push_str("run\n");
+    let stops: [(&str, &[&str]); 7] = [
+        ("pre", &["a", "pre_v"]),
+        ("in_block", &["a", "pre_v", "inner_v", "b_v"]),
+        ("b", &["a", "inner_v", "b_v"]),
+        ("loop0", &["ki", "kt"]),
+        ("loop1", &["ki", "kt"]),
+        ("after", &["ki", "kt", "b_v", "after_v"]),
+        ("ret", &["after_v"]),
+    ];
+    for (stop, names) in stops {
+        script.push_str(&format!("echo @@{}\\n\n", stop));
+        for n in names {
+            script.push_str(&format!("python y_show('{}')\n", n));
+        }
+        script.push_str("continue\n");
+    }
+    let out = gdb(&dir, &bin, &script);
+    let views = scope_views(&out);
+    let val = |stop: &str, name: &str| -> Result<String, String> {
+        views
+            .get(stop)
+            .and_then(|v| v.get(name))
+            .cloned()
+            .unwrap_or_else(|| panic!("no answer for `{}` at `{}`:\n{}", name, stop, out))
+    };
+    let unknown = |stop: &str, name: &str| {
+        let got = val(stop, name);
+        assert!(
+            matches!(&got, Err(e) if e.contains("No symbol")),
+            "`{}` must not be visible at `{}`, gdb gave {:?}:\n{}",
+            name,
+            stop,
+            got,
+            out
+        );
+    };
+    let is = |stop: &str, name: &str, want: &str| {
+        assert_eq!(val(stop, name), Ok(want.to_string()), "`{}` at `{}`:\n{}", name, stop, out);
+    };
+    // Before its `let` has run, a name does not exist yet.
+    is("pre", "a", "1");
+    unknown("pre", "pre_v");
+    // Inside the block the inner `a` is the one in scope.
+    is("in_block", "a", "2");
+    is("in_block", "inner_v", "12");
+    unknown("in_block", "b_v");
+    // After the block the outer `a` is back, with ITS value.
+    is("b", "a", "1");
+    unknown("b", "inner_v");
+    unknown("b", "b_v");
+    is("loop0", "ki", "0");
+    is("loop0", "kt", "0");
+    is("loop1", "ki", "1");
+    is("loop1", "kt", "2");
+    // The loop's variables end with the loop.
+    unknown("after", "ki");
+    unknown("after", "kt");
+    is("after", "b_v", "6");
+    unknown("after", "after_v");
+    is("ret", "after_v", "6");
+    // The program computed what the source says: the inner `a` did not
+    // overwrite the outer one, so `b_v` is 1 + 5.
+    assert!(out.contains("exited with code 06"), "did not exit 6:\n{}", out);
+}
+
+/// A `let` the emitter never reaches - here after a `return` - has no extent
+/// the program can stop in, so it is not described at all. Described anyway,
+/// it would be visible in the whole function, holding whatever its slot held.
+#[test]
+fn an_unreachable_binding_is_not_described() {
+    if !have("gdb") {
+        return skip("an_unreachable_binding_is_not_described", "gdb");
+    }
+    let src = "fn main() -> I32 {\n    let a: I32 = 3;\n    if a > 1 {\n        return a; // L:ret\n    }\n    \
+               return 0;\n    let dead_v: I32 = 7;\n}\n";
+    let dir = scratch("dead");
+    let bin = build(&dir, "dead", src, true);
+    let out = gdb(
+        &dir,
+        &bin,
+        &format!("break dead.ysu:{}\nrun\ninfo locals\nprint dead_v\nkill\n", line_of(src, "ret")),
+    );
+    assert!(out.contains("a = 3"), "the reachable binding is missing:\n{}", out);
+    assert!(out.contains("No symbol \"dead_v\" in current context."), "the dead binding is described:\n{}", out);
 }

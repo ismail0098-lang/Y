@@ -338,14 +338,6 @@ fn arrays_this_backend_cannot_hold_are_refused_by_name() {
         "fn main() -> I32 {\n    let mut s: [String; 2] = {};\n    return 0;\n}\n",
         "its elements are `String`",
     );
-    // One slot per name per function: the second declaration would write
-    // eight elements into three elements' storage.
-    expect_refused(
-        "ref_redeclared",
-        "fn main() -> I32 {\n    let mut v: [I32; 3] = {};\n    v[0] = 1;\n    let mut v: [I32; 8] = {};\n    \
-         v[7] = 2;\n    return v[7];\n}\n",
-        "is declared again as `[8 x i32]`",
-    );
     // Under `@unsafe` the type checker does not bounds-check the indices, so
     // these reach the backend instead of being refused there first.
     expect_refused(
@@ -362,6 +354,21 @@ fn arrays_this_backend_cannot_hold_are_refused_by_name() {
         "ref_param_nested",
         "fn f(m: [[I32; 2]; 2]) -> I32 {\n    return 0;\n}\n\nfn main() -> I32 {\n    return 0;\n}\n",
         "a parameter of type `[[I32]]`",
+    );
+}
+
+/// A second `let` of an array name is another binding with storage of its
+/// own. This was REFUSED while the backend kept one slot per name per
+/// function - the second declaration would have written eight elements into
+/// the first one's three - and every binding has a slot of its own now
+/// (`src/lexical_scope.rs`).
+#[test]
+fn a_redeclared_array_gets_storage_of_its_own() {
+    expect_exit(
+        "redeclared",
+        "fn main() -> I32 {\n    let mut v: [I32; 3] = {};\n    v[0] = 1;\n    let mut v: [I32; 8] = {};\n    \
+         v[7] = 2;\n    return v[7] + v[0];\n}\n",
+        2,
     );
 }
 

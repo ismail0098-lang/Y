@@ -5,6 +5,7 @@ pub mod lexer;
 pub mod linear_tracker;
 pub mod llvm_emitter;
 pub mod debug_info;
+pub mod lexical_scope;
 pub mod intrinsics;
 pub mod parser;
 pub mod ptx_emitter;

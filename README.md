@@ -2519,16 +2519,17 @@ $1 = {data = 0x40600010 "hello", len = 5, cap = 6}
 variant; frame `#2` is the C runtime's `main` (below).
 
 **It describes what the compiled program actually holds, and that is checked,
-not assumed.** This backend keeps each variable in one stack slot and `-g`
-compiles at `-O0`, so the slot is the variable at every statement boundary. A
+not assumed.** This backend keeps each binding in a stack slot of its own and
+`-g` compiles at `-O0`, so the slot is the variable at every statement boundary. A
 variable's described type must have its slot's size: where the declared type
 and the storage disagree, the storage wins — gdb reading a width the code did
 not store prints garbage, and a debugger that shows a wrong value is believed.
 `tests/debug_info.rs` builds a program with `-g` and drives real gdb against
 it: it asserts the lines gdb stops on, the values it prints for each type, that
 `step` into a call finds the arguments already stored, that `next` visits each
-statement of a loop once per iteration, that an imported function is reported
-in its own file, and that `--debug` starts on the first line of `main`. Every
+statement of a loop once per iteration, that a variable is visible exactly
+where its scope is, that an imported function is reported in its own file, and
+that `--debug` starts on the first line of `main`. Every
 corpus program the backend accepts still passes the LLVM verifier with `-g`,
 and without `-g` the emitted module is byte-for-byte what it was (55 of 55,
 compared against the previous compiler).
@@ -2546,9 +2547,14 @@ Things to know:
   `acc / 2^32`.
 - A **data-carrying enum** shows its `tag` by variant name and its payload as
   raw words.
-- **Variables are scoped to the whole function**, because their storage is:
-  a `let` in a nested block shares the outer binding's slot in this backend
-  (a recorded bug), and the debugger shows the slot.
+- **A variable is visible exactly where its scope is**: from the statement
+  after its `let` to the end of its block, a `for` loop's variable inside the
+  loop. Before its `let` and after its block, `print x` answers
+  `No symbol "x" in current context` - rather than showing a slot that does
+  not hold `x` yet, or any more. A `let` that shadows an outer binding hides
+  it for its block only, and the outer one is back, with its own value, after
+  the block. Each Y block is a DWARF lexical block, and so is the rest of a
+  block after a `let`, the way rustc describes shadowing.
 - The runtime is built **without** debug information, so `step` stays in Y code
   rather than descending into the allocator behind `print_int`.
 - **The LLVM backend only.** `--emit-ptx`, `--emit-cpu`, `--emit-native`, the
