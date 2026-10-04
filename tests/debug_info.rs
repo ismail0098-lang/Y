@@ -1378,3 +1378,49 @@ fn an_optimisation_level_is_refused_where_it_would_do_nothing() {
         assert!(out.status.success(), "{} --emit-llvm was refused:\n{}", o, text(&out));
     }
 }
+
+// ── Where a statement is ────────────────────────────────────
+
+/// A statement's line is its KEYWORD's, not its first attribute's. Taken
+/// before the attributes, the condition of a `while` under `@invariant(..)`
+/// was on the attribute's line: a breakpoint on the `while` line slid into
+/// the loop body, and one on the attribute's line stopped on the condition.
+#[test]
+fn an_attributed_statement_is_on_its_keywords_line() {
+    if !have("gdb") {
+        return skip("an_attributed_statement_is_on_its_keywords_line", "gdb");
+    }
+    let dir = scratch("attr_line");
+    let src = "\
+fn main() -> I32 {
+    let mut k: I32 = 0;
+    @invariant(k >= 0) // L:inv
+    while k < 3 { // L:while
+        k = k + 1; // L:body
+    }
+    @bounds(0, 9) // L:bounds
+    let j: I32 = k; // L:let
+    return j;
+}
+";
+    let bin = build(&dir, "attr", src, true);
+    let script = format!(
+        "break attr.ysu:{}\nbreak attr.ysu:{}\nbreak attr.ysu:{}\nrun\nkill\n",
+        line_of(src, "while"),
+        line_of(src, "inv"),
+        line_of(src, "bounds")
+    );
+    let out = gdb_y(&dir, &bin, &script);
+    let resolved: Vec<usize> = out
+        .lines()
+        .filter(|l| l.starts_with("Breakpoint ") && l.contains(", line "))
+        .filter_map(|l| l.rsplit(", line ").next()?.trim_end_matches('.').parse().ok())
+        .collect();
+    assert_eq!(
+        resolved,
+        vec![line_of(src, "while"), line_of(src, "while"), line_of(src, "let")],
+        "the loop test is the `while` line's (the attribute's line has no code, so gdb \
+         moves a breakpoint there to the `while`); the `let`'s code is the `let` line's:\n{}",
+        out
+    );
+}

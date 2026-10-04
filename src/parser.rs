@@ -1100,6 +1100,18 @@ impl Parser {
             }
         }
 
+        // The statement's own position is its keyword's - `let`, `for`,
+        // `while` - not its first attribute's. Taken before the attributes,
+        // an `@invariant(..)` on the line above a `while` was where the loop
+        // WAS: `-g` stopped on the attribute's line for the loop's condition,
+        // a breakpoint on the `while` line slid into the body, and the PTX
+        // line table attributed the condition to the attribute. Each
+        // attribute keeps the position it took above.
+        let span = {
+            let t = self.peek();
+            Span { line: t.line, col: t.col }
+        };
+
         if self.match_token(TokenKind::Let) {
             let _mutable = self.match_token(TokenKind::Mut);
             let ident_tok = self.peek().clone();

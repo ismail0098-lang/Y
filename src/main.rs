@@ -740,9 +740,14 @@ fn main() {
         if let Some(other) = args.iter().find(|a| NOT_LLVM.contains(&a.as_str())) {
             log_error!(
                 "{} cannot be combined with {}: debug information is produced by the LLVM \
-                 backend only (the default, and --emit-llvm).",
+                 backend only (the default, and --emit-llvm).{}",
                 flag,
-                other
+                other,
+                if other == "--emit-ptx" || other == "--target=ptx" {
+                    " For a PTX line table - which PTX and SASS each Y line became - use --lineinfo."
+                } else {
+                    ""
+                }
             );
             exit(1);
         }
@@ -793,6 +798,31 @@ fn main() {
         _ => 2,
     };
 
+    // `--lineinfo`: a PTX line table (`.file` / `.loc`), so `ptxas -lineinfo`
+    // carries each Y line into the SASS - nvcc's `-lineinfo`. It is the PTX
+    // backend's alone: the LLVM backend's line table comes with `-g`, and no
+    // other backend maps its output to Y lines. Refused there by name.
+    let line_info = args.iter().any(|a| a == "--lineinfo");
+    if line_info && !args.iter().any(|a| a == "--emit-ptx" || a == "--target=ptx") {
+        match args.iter().find(|a| NOT_LLVM.contains(&a.as_str())) {
+            Some(other) => {
+                log_error!(
+                    "--lineinfo cannot be combined with {}: it maps a kernel's PTX to the Y \
+                     lines it came from, which only --emit-ptx records.",
+                    other
+                );
+            }
+            None => {
+                log_error!(
+                    "--lineinfo writes a PTX line table and applies to --emit-ptx. For the \
+                     LLVM backend (the default, and --emit-llvm) use -g: its debug \
+                     information includes the line table."
+                );
+            }
+        }
+        exit(1);
+    }
+
     // `--emit-attention-ptx <head_dim> <seq_len>`
     //
     // Advertised by `src/exact_attention.rs`'s module header ("the
@@ -821,6 +851,22 @@ fn main() {
         };
         let head_dim = parse(pos + 1, "a head dimension");
         let seq_len = parse(pos + 2, "a sequence length");
+        // Dispatched before the option parsing below, so nothing else on the
+        // command line would be read: `-o x.ptx` was silently ignored.
+        let extra: Vec<&str> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != 0 && *i != pos && *i != pos + 1 && *i != pos + 2)
+            .map(|(_, a)| a.as_str())
+            .collect();
+        if !extra.is_empty() {
+            log_error!(
+                "--emit-attention-ptx writes the module to standard output and takes no \
+                 other argument: {}",
+                extra.join(" ")
+            );
+            exit(1);
+        }
         match y::exact_attention::attention_ptx(head_dim, seq_len) {
             // Straight to stdout with no banner: the bridge pipes this into
             // `cuModuleLoadData`, so anything else on the stream is a parse
@@ -876,7 +922,7 @@ fn main() {
     /// hard error -- see the check after the loop.
     const KNOWN_FLAGS: &[&str] = &[
         "-o", "--output", "-I", "-l", "--link", "--name", "--witness",
-        "-g", "--debug", "-O0", "-O1", "-O2", "-O3",
+        "-g", "--debug", "-O0", "-O1", "-O2", "-O3", "--lineinfo",
         "--portable", "--autotune", "--autotune-force", "--no-autotune",
         "--emit-attention-ptx", "--emit-c", "--emit-coprocessor", "--emit-cpu",
         "--emit-llvm", "--emit-native", "--emit-ptx", "--emit-r1cs",
@@ -935,6 +981,21 @@ fn main() {
         );
         eprintln!("    Known options: {}", KNOWN_FLAGS.join(" "));
         eprintln!("    (did you mean --emit-ptx? there is no --ptx)");
+        exit(1);
+    }
+
+    // `-o FILE` / `--output=FILE`, when given. Every backend that writes a file
+    // writes it there; `--emit-ptx`, `--emit-coprocessor`, `--emit-zk-ptx` and
+    // `--emit-cpu` used to ignore it and write `<source>.ptx` and so on (or
+    // print) whatever it said.
+    let explicit_output: Option<String> = args
+        .iter()
+        .find(|a| a.starts_with("--output="))
+        .map(|a| a.trim_start_matches("--output=").to_string())
+        .or(cli_output);
+
+    if line_info && source_file.is_none() {
+        log_error!("--lineinfo needs a source file: Y program.ysu --emit-ptx --lineinfo");
         exit(1);
     }
 
@@ -1313,7 +1374,9 @@ fn main() {
                 exit(1);
             }
 
-            let write_path = if let Some(ref sf) = source_file {
+            let write_path = if let Some(o) = &explicit_output {
+                o.clone()
+            } else if let Some(ref sf) = source_file {
                 let path = std::path::Path::new(sf);
                 let mut p = path.to_path_buf();
                 p.set_extension("witness.ptx");
@@ -1421,7 +1484,9 @@ fn main() {
             }
         };
 
-        let write_path = if let Some(ref sf) = source_file {
+        let write_path = if let Some(o) = &explicit_output {
+            o.clone()
+        } else if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);
             let mut p = path.to_path_buf();
             p.set_extension("coprocessor.ptx");
@@ -1545,12 +1610,7 @@ fn main() {
         exit(1);
     }
 
-    let mut output_path = args
-        .iter()
-        .find(|a| a.starts_with("--output="))
-        .map(|a| a.trim_start_matches("--output=").to_string())
-        .or(cli_output)
-        .unwrap_or_else(|| {
+    let mut output_path = explicit_output.clone().unwrap_or_else(|| {
             if emit_native {
                 "output_bin".to_string()
             } else if emit_llvm {
@@ -1847,6 +1907,12 @@ fn main() {
 
         let mut emitter = PtxEmitter::new_with_profile(&hw_profile);
         emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
+        if line_info {
+            let path = source_file
+                .as_deref()
+                .expect("--lineinfo without a source file is refused after option parsing");
+            emitter.enable_line_info(std::path::Path::new(path), &imported_items);
+        }
         // Name the target, and say when it is a guess: on a machine with no
         // NVIDIA GPU this used to be `.target sm_00`, which `ptxas` rejects -
         // printed nowhere, under a green banner.
@@ -1870,7 +1936,9 @@ fn main() {
             }
             exit(1);
         }
-        let write_path = if let Some(ref sf) = source_file {
+        let write_path = if let Some(o) = &explicit_output {
+            o.clone()
+        } else if let Some(ref sf) = source_file {
             let path = std::path::Path::new(sf);
             let mut p = path.to_path_buf();
             p.set_extension("ptx");
@@ -1904,9 +1972,17 @@ fn main() {
             exit(1);
         }
 
-        println!("======= GENERATED RUST BLOB =======");
-        println!("{}", cpu_output);
-        println!("=======================================");
+        if let Some(o) = &explicit_output {
+            if let Err(e) = fs::write(o, &cpu_output) {
+                log_error!("Failed to write {}: {}", o, e);
+                exit(1);
+            }
+            println!("      -> Written to: {}", o);
+        } else {
+            println!("======= GENERATED RUST BLOB =======");
+            println!("{}", cpu_output);
+            println!("=======================================");
+        }
     } else {
         log_step!("4/4", "Compiling via LLVM IR Backend...");
         let mut emitter = LlvmEmitter::new();

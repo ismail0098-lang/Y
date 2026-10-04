@@ -2417,6 +2417,7 @@ throughout.
 | `-O0` … `-O3` | the optimisation level of the LLVM backend's clang step: `-O2` by default, `-O0` under `-g`; `-g -O2` is an optimised debuggable build | real; the default backend and `--emit-llvm` only, every other backend refuses it by name |
 | `--emit-llvm` | LLVM IR | real |
 | `--emit-ptx` | NVIDIA PTX | real |
+| `--lineinfo` | with `--emit-ptx`: a PTX line table, so `ptxas -lineinfo` carries each Y line into the SASS — see [GPU kernels](#gpu-kernels-which-ptx-and-sass-a-line-became) | real; refused by every other backend |
 | `--emit-native` | standalone x86-64 ELF | **straight-line subset over `I32` and `bool` only**, calling only the program's own functions; refuses the rest by name |
 | `--emit-cpu` | prints **scalar host Rust** source **for you to paste** — Y never compiles it | real, but not a build step; gated on `rustc` accepting what it prints, verbatim. **It emits no SIMD**: measured, 0 of 46 corpus blobs contain a vector intrinsic, vector type or `target_feature` |
 | `--emit-attention-ptx <head_dim> <seq_len>` | the exact-attention kernel, to stdout | real; both positional arguments are required and refused by name if absent |
@@ -2427,7 +2428,7 @@ throughout.
 | `--emit-verifier <vkey.json>` | Groth16 Solidity verifier | real; `--name <N>` sets the contract name |
 | `--emit-zk-ptx` | GPU witness-generator PTX | **lowers 5 of `WitnessOp`'s 17 variants and refuses the rest by name** — the reachable subset is tiny (see below) |
 | `-l`, `--link <dir>` | circom include path | real |
-| `-o`, `--output <path>` | output path | real |
+| `-o`, `--output <path>` | output path | real for every backend that writes a file; `--emit-cpu -o` writes the Rust source there instead of printing it. `--emit-ptx`, `--emit-coprocessor`, `--emit-zk-ptx` and `--emit-cpu` used to ignore it. `--emit-attention-ptx` writes to standard output and refuses it |
 | `--autotune` / `--autotune-force` / `--no-autotune` | GEMM tile selection: measure / re-measure / analytic model only | real |
 | `--portable` | clears the probed AVX / AVX-512 feature bits | real |
 
@@ -2586,6 +2587,75 @@ Things to know:
 - A **data-carrying enum** cannot be constructed on the LLVM backend yet (it
   is refused by name), so the debugger has none to show.
 
+### GPU kernels: which PTX and SASS a line became
+
+`Y kernel.ysu --emit-ptx --lineinfo` writes a PTX line table: `.file` naming
+the source, and a `.loc` before the instructions of every statement. `ptxas
+-lineinfo` carries it into the SASS, where `nvdisasm -g` prints it, and
+`tools/ydb/ymap.py` puts the three side by side - for every Y line of every
+kernel, the PTX the compiler emitted for it and the SASS `ptxas` made of that:
+
+```text
+kernel saxpy(X: GlobalMemory<F32>, Yv: GlobalMemory<F32>, N: I32) {
+    let i: I32 = thread_idx_x();
+    let a: F32 = 2.0;
+    let unused: I32 = i * 7 + N;
+    if i < N {
+        let x: F32 = X[i];
+        Yv[i] = a * x + Yv[i];
+    }
+}
+```
+
+```text
+$ python3 tools/ydb/ymap.py saxpy.ysu
+kernel saxpy  (sm_80)
+     2  let i: I32 = thread_idx_x();
+        PTX    1
+               mov.u32 %r1, %tid.x;
+        SASS   1
+               0010  S2R R0, SR_TID.X
+     3  let a: F32 = 2.0;
+        PTX    1
+               mov.f32 %f0, 2.0;
+        SASS   0  ptxas emitted nothing for this line: removed, or folded into another
+     4  let unused: I32 = i * 7 + N;
+        PTX    3
+               mov.u32 %r2, 7;
+               mul.lo.s32 %r3, %r1, %r2;
+               add.s32 %r4, %r3, %r0;
+        SASS   0  ptxas emitted nothing for this line: removed, or folded into another
+     7  Yv[i] = a * x + Yv[i];
+        PTX    9
+               ...
+               ld.global.ca.f32 %f2, [%rd7];
+               fma.rn.f32 %f3, %f0, %f1, %f2;
+               ...
+               st.global.f32 [%rd10], %f3;
+        SASS   6
+               0060  LEA R4, P1, R0.reuse, c[0x0][0x168], 0x2
+               0080  LEA.HI.X R5, R0, c[0x0][0x16c], RZ, 0x2, P1
+               00a0  LDG.E.STRONG.SM R7, [R4.64]
+               00b0  FFMA R7, R2, 2, R7
+               00c0  STG.E [R4.64], R7
+               00d0  EXIT
+```
+
+Line 3's constant is not gone: `ptxas` folded it into the `FFMA` on line 7 as
+an immediate. Line 4 is gone: nothing it computes is stored. `--line 7` shows
+one line, `--kernel` one kernel, and `--json` the same map for tools.
+
+- **The line table changes nothing else.** Over the whole corpus, the PTX with
+  `--lineinfo`, its `.file`/`.loc` lines removed, is byte-for-byte the PTX
+  without it, and `ptxas -lineinfo` emits the same instructions as `ptxas`. So
+  the SASS the map shows is the SASS the kernel runs.
+- `ptxas` runs at the module's own `.target`, never this machine's card.
+- A statement's line is its keyword's: the condition of a loop under
+  `@invariant(..)` is the `while` line, not the attribute's (this moved the
+  same lines in `-g` builds too).
+- The emitter had a field documented as emitting `.file` and `.loc`; nothing
+  set it and nothing read it, so this did not exist before.
+
 ---
 
 ## Hardware probing
@@ -2637,6 +2707,7 @@ self_hosted/    compiler phases rewritten in Y (.ysu); not the default build pat
 proofs/         Rocq proofs — ExactGemmSchedule.v is GENERATED
 tests/          test programs, benchmarks, PTX assembly gates
 tools/          measurement and analysis harnesses (Python), run by hand
+  ydb/ymap.py   which PTX and SASS each Y line of a kernel became (--emit-ptx --lineinfo)
 python/         the Python package `y_lang`: ctypes bindings to liby.so, torch
                 interop, the `y_inductor` torch.compile backend, and its tests
   ptxas_tval/     PTX-vs-SASS translation validator — see docs/

@@ -896,8 +896,17 @@ pub struct PtxEmitter {
     /// Why `sm_target` is `PTX_FLOOR` rather than a probed architecture, when
     /// it is. Carried so a refusal that names the target can say it was a guess.
     target_assumed: Option<String>,
-    /// When true, emits .file and .loc directives for NCU profiling and debugging.
-    pub debug_info: bool,
+    /// `--lineinfo`: a PTX line table (`.file` / `.loc`) giving every
+    /// instruction the Y line it came from, which `ptxas -lineinfo` carries
+    /// into the SASS. `None` writes none, and the module is byte-for-byte what
+    /// it is without the flag.
+    ///
+    /// This was a `pub debug_info: bool` documented as "emits .file and .loc
+    /// directives for NCU profiling and debugging". Nothing set it and nothing
+    /// read it, so no `.loc` was ever written. A `pub` field is exempt from
+    /// the dead-code lint, which is how a documented feature that did not
+    /// exist went unnoticed.
+    line_info: Option<LineInfo>,
     /// Module-scope declarations (currently just `.extern .shared` arrays for
     /// cp.async-pipelined GEMM kernels - see `emit_tensor_core_gemm_kernel`)
     /// that a kernel body emitter discovers a need for but cannot write
@@ -943,6 +952,41 @@ pub struct PtxEmitter {
     /// ptxas rejects, and it would only ever show up in a module with two
     /// shared-memory kernels in it.
     shared_sym_count: usize,
+}
+
+/// The state behind `--lineinfo`.
+///
+/// A `.loc` applies to every instruction after it until the next one, so a
+/// statement that emits more code after a nested statement - a `for` loop's
+/// increment and back edge after its body, an `if`'s jump past its `else` -
+/// has to say its own line again, or that code is attributed to the last
+/// line of the body. `stack` is what makes that possible: the kernel's line
+/// at the bottom, then each statement being emitted.
+struct LineInfo {
+    /// `.file N` is `files[N - 1]`: the source compiled, then every file an
+    /// `import` brought an item from.
+    files: Vec<std::path::PathBuf>,
+    /// The `.file` index of every item that came from an imported file.
+    item_file: std::collections::HashMap<String, usize>,
+    /// The `.file` index of the kernel being emitted.
+    file: usize,
+    /// (line, column) of the kernel being emitted and the statements inside
+    /// it that are being emitted, innermost last.
+    stack: Vec<(usize, usize)>,
+    /// The text of the last `.loc` written: the one in effect.
+    last: Option<String>,
+}
+
+/// A path as a PTX string literal: `\` and `"` escaped.
+fn ptx_string(path: &std::path::Path) -> String {
+    let mut s = String::new();
+    for c in path.to_string_lossy().chars() {
+        if c == '\\' || c == '"' {
+            s.push('\\');
+        }
+        s.push(c);
+    }
+    s
 }
 
 /// Split-K ("flash decoding") configuration for
@@ -1027,11 +1071,94 @@ impl PtxEmitter {
             emit_errors: Vec::new(),
             sm_target: target,
             target_assumed: decided.assumed,
-            debug_info: false,
+            line_info: None,
             pending_extern_decls: Vec::new(),
             pending_module_items: Vec::new(),
             shared_arrays: Vec::new(),
             shared_sym_count: 0,
+        }
+    }
+
+    /// `--lineinfo`: write a PTX line table for `source`. `imported` names
+    /// the items an `import` brought in and the file each came from, whose
+    /// lines are lines of THAT file.
+    pub fn enable_line_info(
+        &mut self,
+        source: &std::path::Path,
+        imported: &[(String, std::path::PathBuf)],
+    ) {
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let mut files = vec![canon(source)];
+        let mut item_file = std::collections::HashMap::new();
+        for (name, path) in imported {
+            let p = canon(path);
+            let index = match files.iter().position(|f| *f == p) {
+                Some(i) => i + 1,
+                None => {
+                    files.push(p);
+                    files.len()
+                }
+            };
+            item_file.insert(name.clone(), index);
+        }
+        self.line_info = Some(LineInfo { files, item_file, file: 1, stack: Vec::new(), last: None });
+    }
+
+    /// Write `.loc` for `(line, col)` unless it is the one already in effect.
+    /// A `.loc` with nothing written after it is replaced rather than
+    /// followed, so a statement that emits no instruction leaves no trace.
+    fn loc_write(&mut self, line: usize, col: usize) {
+        let Some(li) = self.line_info.as_mut() else { return };
+        let text = format!("    .loc {} {} {}\n", li.file, line, col);
+        if let Some(last) = &li.last {
+            if *last == text {
+                return;
+            }
+            if self.ptx_buffer.ends_with(last.as_str()) {
+                let keep = self.ptx_buffer.len() - last.len();
+                self.ptx_buffer.truncate(keep);
+            }
+        }
+        self.ptx_buffer.push_str(&text);
+        li.last = Some(text);
+    }
+
+    /// The start of a kernel's body: its code until the first statement -
+    /// the parameter loads - and everything a lowering that replaces the
+    /// body wholesale emits belong to the kernel's own line.
+    fn loc_begin_kernel(&mut self, kernel: &KernelDecl) {
+        let Some(li) = self.line_info.as_mut() else { return };
+        li.file = li.item_file.get(&kernel.name).copied().unwrap_or(1);
+        li.stack = vec![(kernel.span.line, kernel.span.col)];
+        li.last = None;
+        self.loc_write(kernel.span.line, kernel.span.col);
+    }
+
+    /// The end of a kernel's body: a `.loc` with no instruction after it
+    /// would be the last line of the function.
+    fn loc_end_kernel(&mut self) {
+        let Some(li) = self.line_info.as_mut() else { return };
+        if let Some(last) = li.last.take() {
+            if self.ptx_buffer.ends_with(last.as_str()) {
+                let keep = self.ptx_buffer.len() - last.len();
+                self.ptx_buffer.truncate(keep);
+            }
+        }
+        li.stack.clear();
+    }
+
+    fn loc_enter(&mut self, span: &Span) {
+        let Some(li) = self.line_info.as_mut() else { return };
+        li.stack.push((span.line, span.col));
+        self.loc_write(span.line, span.col);
+    }
+
+    fn loc_leave(&mut self) {
+        let Some(li) = self.line_info.as_mut() else { return };
+        li.stack.pop();
+        let outer = li.stack.last().copied();
+        if let Some((line, col)) = outer {
+            self.loc_write(line, col);
         }
     }
 
@@ -2811,6 +2938,19 @@ or `shared_alloc_u32` for a shared-memory array.",
     }
 
     pub fn emit_program(&mut self, prog: &Program, hw_profile: &HardwareProfile) -> String {
+        if let Some(li) = &self.line_info {
+            let mut files = String::new();
+            for (i, f) in li.files.iter().enumerate() {
+                writeln!(&mut files, ".file {} \"{}\"", i + 1, ptx_string(f)).unwrap();
+            }
+            // Module scope, after the header the constructor wrote.
+            let at = self
+                .ptx_buffer
+                .find(".address_size")
+                .and_then(|p| self.ptx_buffer[p..].find('\n').map(|q| p + q + 1))
+                .unwrap_or(self.ptx_buffer.len());
+            self.ptx_buffer.insert_str(at, &files);
+        }
         let mut kernels = 0usize;
         for item in &prog.items {
             if let Item::Kernel(k) = item {
@@ -2907,6 +3047,7 @@ or `shared_alloc_u32` for a shared-memory array.",
         
         // Swap self.ptx_buffer with body_buffer temporarily so emit_stmt / emit_block writes to body_buffer
         let saved_buffer = std::mem::replace(&mut self.ptx_buffer, body_buffer);
+        self.loc_begin_kernel(kernel);
 
         // Load parameters into registers (writes to temporary self.ptx_buffer)
         for (i, param) in kernel.params.iter().enumerate() {
@@ -3005,6 +3146,7 @@ or `shared_alloc_u32` for a shared-memory array.",
             None
         };
 
+        self.loc_end_kernel();
         // Take back the body_buffer and restore the original self.ptx_buffer
         let body_code = std::mem::replace(&mut self.ptx_buffer, saved_buffer);
         self.check_element_values_are_not_addresses(&kernel.name, &body_code);
@@ -3689,7 +3831,16 @@ or `shared_alloc_u32` for a shared-memory array.",
         }
     }
 
+    /// One statement - under `--lineinfo` preceded by its `.loc`, with the
+    /// enclosing statement's line said again after it, so what the enclosing
+    /// statement emits next is attributed to it (see `LineInfo`).
     fn emit_stmt(&mut self, stmt: &Stmt, hw_profile: &HardwareProfile) {
+        self.loc_enter(&stmt.span());
+        self.emit_stmt_inner(stmt, hw_profile);
+        self.loc_leave();
+    }
+
+    fn emit_stmt_inner(&mut self, stmt: &Stmt, hw_profile: &HardwareProfile) {
         match stmt {
             // `@ZeroDrift`: the accumulator lives in a 64-bit integer register
             // and every term is converted into its domain on the way in, so the
@@ -12371,6 +12522,11 @@ declare it as a Q format.\n{}",
         writeln!(&mut entry, "    .reg .f32 %f<{}>;", self.reg_f32_count.max(1)).unwrap();
         writeln!(&mut entry, "    .reg .b64 %rd<{}>;", self.reg_u64_count.max(1)).unwrap();
         writeln!(&mut entry, "    .reg .pred %p<{}>;", self.reg_pred_count.max(1)).unwrap();
+        // Generated from the kernel's declaration, so its code is the
+        // kernel's line.
+        if let Some(li) = &self.line_info {
+            writeln!(&mut entry, "    .loc {} {} {}", li.file, kernel.span.line, kernel.span.col).unwrap();
+        }
         entry.push_str(&body);
         writeln!(&mut entry, "}}").unwrap();
         self.pending_module_items.push(entry);

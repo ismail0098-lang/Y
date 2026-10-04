@@ -263,6 +263,7 @@ over a native ELF. Unrecognised options are a hard error now.
 | `-O0` … `-O3` | Optimisation level of the LLVM backend's clang step: `-O2` by default, `-O0` under `-g`. `-g -O2` is an optimised debuggable build (§38.6). Refused by every other backend |
 | `--emit-llvm` / `--target=llvm` | LLVM IR |
 | `--emit-ptx` / `--target=ptx` | NVIDIA PTX |
+| `--lineinfo` | With `--emit-ptx`: a PTX line table (`.file` / `.loc`) mapping each instruction to its Y line, which `ptxas -lineinfo` carries into the SASS. See §38.7. Refused by every other backend |
 | `--emit-cpu` / `--target=cpu` | **Scalar** host Rust source, **printed for you to paste** — Y never compiles it. It emits no SIMD; see 9.7 |
 | `--emit-native` / `--target=native` | Direct x86-64 ELF. A straight-line subset over `I32` and `bool` that calls only the program's own functions (no built-ins or intrinsics); anything outside it is refused with a line number |
 | `--emit-coprocessor` / `--target=coprocessor` | Fused RT Core + Tensor Core co-processor PTX |
@@ -272,7 +273,7 @@ over a native ELF. Unrecognised options are a hard error now.
 | `--emit-verifier <vkey.json>` | Solidity Groth16 verifier (`--name N` to name the contract) |
 | `--witness <input.json>` | Also solve and write `.wtns` (with `--target=r1cs`) |
 | `--autotune` / `--autotune-force` / `--no-autotune` | Empirical GEMM tile selection; see the autotuner notes |
-| `-o <path>` / `--output <path>` / `--output=<path>` | Output path |
+| `-o <path>` / `--output <path>` / `--output=<path>` | Output path, for every backend that writes a file (`--emit-cpu -o` writes the Rust source there instead of printing it). `--emit-attention-ptx` writes to standard output and refuses it |
 | `-I <dir>` / `--lib-path=<dir>` | Include path |
 | `--link`, `--portable` | Linking options |
 | `--c` / `--emit-c` / `--target=c` | **Removed.** Reports that the C backend is gone and exits 1 |
@@ -5340,7 +5341,9 @@ not exercised.
 
 - **The default backend and `--emit-llvm` only.** `--emit-ptx`, `--emit-cpu`,
   `--emit-native`, `--emit-coprocessor`, the ZK backends and circom input
-  refuse `-g` and `--debug` by name rather than ignore them.
+  refuse `-g` and `--debug` by name rather than ignore them. For a GPU kernel,
+  `--emit-ptx --lineinfo` gives the line table (§38.7); there is no variable
+  information for PTX.
 - **Optimised builds (`-g -O1` .. `-O3`) are debuggable, with the usual
   losses.** The optimiser keeps values in registers and folds them away, so
   gdb shows `<optimized out>` for a value it no longer has; it inlines calls,
@@ -5362,6 +5365,94 @@ not exercised.
 - A `fn main` with no return type leaves the process's exit status undefined,
   in any build: the runtime exits with whatever the return register holds.
   Declare `fn main() -> I32` when the status matters.
+
+### 38.7 GPU kernels: which PTX and SASS a line became
+
+`--emit-ptx --lineinfo` writes a PTX line table: a `.file` directive naming
+each source (by its canonical path; a kernel an `import` brought in is
+described in its own file), and a `.loc` before the instructions of every
+statement. After a nested statement the enclosing one's line is said again,
+so a `for` loop's increment and back edge are the `for` line's. `ptxas
+-lineinfo` carries the table into the SASS, where `nvdisasm -g` prints it.
+
+`tools/ydb/ymap.py` runs the three steps and lines them up:
+
+```bash
+python3 tools/ydb/ymap.py saxpy.ysu             # every line of every kernel
+python3 tools/ydb/ymap.py saxpy.ysu --line 7    # one line
+python3 tools/ydb/ymap.py saxpy.ysu --json      # the same, for tools
+```
+
+For
+
+```text
+kernel saxpy(X: GlobalMemory<F32>, Yv: GlobalMemory<F32>, N: I32) {
+    let i: I32 = thread_idx_x();
+    let a: F32 = 2.0;
+    let unused: I32 = i * 7 + N;
+    if i < N {
+        let x: F32 = X[i];
+        Yv[i] = a * x + Yv[i];
+    }
+}
+```
+
+it prints (abridged):
+
+```text
+$ python3 tools/ydb/ymap.py saxpy.ysu
+kernel saxpy  (sm_80)
+     2  let i: I32 = thread_idx_x();
+        PTX    1
+               mov.u32 %r1, %tid.x;
+        SASS   1
+               0010  S2R R0, SR_TID.X
+     3  let a: F32 = 2.0;
+        PTX    1
+               mov.f32 %f0, 2.0;
+        SASS   0  ptxas emitted nothing for this line: removed, or folded into another
+     4  let unused: I32 = i * 7 + N;
+        PTX    3
+               mov.u32 %r2, 7;
+               mul.lo.s32 %r3, %r1, %r2;
+               add.s32 %r4, %r3, %r0;
+        SASS   0  ptxas emitted nothing for this line: removed, or folded into another
+     7  Yv[i] = a * x + Yv[i];
+        PTX    9
+               ...
+               ld.global.ca.f32 %f2, [%rd7];
+               fma.rn.f32 %f3, %f0, %f1, %f2;
+               ...
+               st.global.f32 [%rd10], %f3;
+        SASS   6
+               0060  LEA R4, P1, R0.reuse, c[0x0][0x168], 0x2
+               0080  LEA.HI.X R5, R0, c[0x0][0x16c], RZ, 0x2, P1
+               00a0  LDG.E.STRONG.SM R7, [R4.64]
+               00b0  FFMA R7, R2, 2, R7
+               00c0  STG.E [R4.64], R7
+               00d0  EXIT
+```
+
+A line with PTX and no SASS is code `ptxas` removed (line 4: nothing it
+computes is stored) or folded into another line (line 3: the `2` is an
+immediate of line 7's `FFMA`). `ptxas` also moves instructions across
+lines, so a line's SASS is not always contiguous; the map collects every run.
+The padding `ptxas` emits after the last `EXIT` (a self-branch and `NOP`s)
+belongs to no line and is not shown.
+
+- **The table changes nothing else**: over the whole corpus, the PTX with
+  `--lineinfo` minus its `.file`/`.loc` lines is byte-for-byte the PTX without
+  it, and `ptxas -lineinfo` emits the same instructions as plain `ptxas`
+  (`tests/ptx_line_info.rs`). The SASS the map shows is the SASS that runs.
+- `ymap.py` assembles at the module's own `.target`, never the local card, and
+  runs the compiler in the current directory, so it reads the same
+  `.ysu_hw_profile` a plain compile there would.
+- A statement's line is its keyword's: a loop under `@invariant(..)` is on the
+  `while` line, not the attribute's; a `let` under `@bounds(..)` on the `let`
+  line. `-g` builds use the same positions.
+- A kernel a library lowering replaces wholesale (a `@tile`d GEMM, paged
+  decode attention, RoPE, RMSNorm) has all its code on the kernel's own line:
+  none of it comes from a statement.
 
 ---
 
