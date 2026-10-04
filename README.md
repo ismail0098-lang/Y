@@ -143,6 +143,13 @@ repository's own investigation documents contradict.
   (`v[0] = 4; v[2] = 6; return v[0] + v[2];` exited 0) and passing one to a
   function emitted IR clang rejects. Arrays of scalars now have storage and are
   passed by value; arrays of arrays, structs or strings are refused by name.
+  And until October 2026 it indexed every POINTER in 8-byte slots whatever the
+  element was: a kernel taking `GlobalMemory<I32>`, called from host code with
+  an `[I32; 4]`, wrote 16 bytes past the array (a wrong answer, and SIGILL under
+  `-g`), `a[1]` through `a: &mut [I16; 4]` wrote past an 8-byte array, and
+  `"hello"[1]` returned 5, the string's length field. An element is indexed at
+  its own width now, and one whose width the backend cannot see
+  (`GlobalMemory<bool>`, a `Q` format, a `String`) is refused by name.
 - **Leo did not compile the ZK benchmark circuits.** Earlier tables reported
   timings for Leo at 100k and 1M constraints. Leo 4.2.0 refuses both: the
   compiled program exceeds its 512,000-byte limit (`leo build` on
@@ -2296,8 +2303,8 @@ up if you look.
 **In any pass whose output is a correctness claim, an unhandled AST node is a
 hard error — never a silent identity, no-op, or "close enough" substitution.**
 This is written down because the same bug keeps being found: the table of
-instances has **87 rows** — one a case averted before it shipped, two in code
-nothing called — each a `_ =>` arm that guessed instead of refusing, or, in the
+instances has **89 rows** — one a case averted before it shipped, two in code
+nothing called, one reached by no input the parser builds — each a `_ =>` arm that guessed instead of refusing, or, in the
 later cases, a correct guard consulted at a subset of the sites where its
 property has to hold. A pass
 that silently approximates produces the paperwork of a proof without the proof,

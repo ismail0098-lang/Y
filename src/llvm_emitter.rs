@@ -198,6 +198,13 @@ pub struct LlvmEmitter {
     /// intrinsics need it to pick a load/store type, and guessing gives the
     /// silent-wrong-answer failure the `_ =>` rule exists to prevent.
     mem_elem_types: BTreeMap<String, String>,
+    /// The width of one element behind a `GlobalMemory<T>` / `SharedMemory<T>`
+    /// binding, for EVERY primitive `T`: the stride `buf[i]` steps by and the
+    /// width it loads and stores. `mem_elem_types` is narrower on purpose - the
+    /// block-pointer intrinsics and the GEMM recogniser read it, and `U16`
+    /// there would read as the SIGNED `i16` operand of `vpdpwssd`. Indexing
+    /// needs only the width.
+    mem_storage_types: BTreeMap<String, String>,
     /// Map function names to their LLVM parameter types and return type
     functions: BTreeMap<String, (Vec<String>, String)>,
     /// Each program-defined function's parameter types AS ITS DEFINITION
@@ -294,6 +301,29 @@ fn memory_element_llvm_type(ty: &Type) -> Option<String> {
         "I32" | "i32" | "u32" => Some("i32".into()),
         "I64" | "i64" | "u64" | "usize" => Some("i64".into()),
         _ => None,
+    }
+}
+
+/// The storage width of one element of a `GlobalMemory<T>` /
+/// `SharedMemory<T>`, for every primitive `T`, signed or not; `None` for one
+/// with no storage type here (`bool`, a `Q` format, `BF16`).
+fn memory_storage_llvm_type(ty: &Type) -> Option<String> {
+    let Type::Generic { base, args, .. } = ty else {
+        return None;
+    };
+    if base != "GlobalMemory" && base != "SharedMemory" {
+        return None;
+    }
+    let GenericArg::Type(inner) = args.first()? else {
+        return None;
+    };
+    let name = match inner {
+        Type::Primitive(n, _) | Type::Ident(n, _) => n.as_str(),
+        _ => return None,
+    };
+    match primitive_llvm_type(name)? {
+        "ptr" | "i1" => None,
+        t => Some(t.to_string()),
     }
 }
 
@@ -418,6 +448,7 @@ impl LlvmEmitter {
             locals_ast_type: BTreeMap::new(),
             pointee_types: BTreeMap::new(),
             mem_elem_types: BTreeMap::new(),
+            mem_storage_types: BTreeMap::new(),
             functions,
             fn_llvm_params: BTreeMap::new(),
             structs: BTreeMap::new(),
@@ -1793,6 +1824,7 @@ impl LlvmEmitter {
         self.locals_ast_type.clear();
         self.pointee_types.clear();
         self.mem_elem_types.clear();
+        self.mem_storage_types.clear();
         self.zero_drift.clear();
         self.loop_exit_stack.clear();
         self.block_terminated = false;
@@ -2142,6 +2174,9 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         }
         if let Some(ety) = memory_element_llvm_type(&p.ty) {
             self.mem_elem_types.insert(p.name.clone(), ety);
+        }
+        if let Some(sty) = memory_storage_llvm_type(&p.ty) {
+            self.mem_storage_types.insert(p.name.clone(), sty);
         }
         writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
         self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
@@ -3397,7 +3432,17 @@ representation, and whether that is lossless depends on the expression.",
                 }
 
                 let elem_ty = if base_ty == "ptr" {
-                    "i64".to_string()
+                    match self.pointer_elem_type(base) {
+                        Ok(t) => t,
+                        Err(why) => {
+                            self.emit_errors.push(format!(
+                                "[LLVM host backend] {}. Indexing used to step and store 8 bytes per \
+                                 element whatever the element was; it is refused rather than guessed.",
+                                why
+                            ));
+                            "i8".to_string()
+                        }
+                    }
                 } else if base_ty.starts_with('[') && base_ty.ends_with(']') {
                     if let Some(pos) = base_ty.rfind(' ') {
                         base_ty[pos + 1..base_ty.len() - 1].to_string()
@@ -4250,17 +4295,64 @@ representation, and whether that is lossless depends on the expression.",
                     tmp
                 }
             }
-            _ => {
-                let tmp = self.fresh_tmp();
-                writeln!(
-                    &mut self.output,
-                    "  {} = add i32 0, 0 ; unhandled expr",
-                    tmp
-                )
-                .unwrap();
-                tmp
+            // A block expression is the one `Expr` this match did not handle,
+            // and the catch-all that stood here turned it into the CONSTANT 0
+            // (`add i32 0, 0 ; unhandled expr`). The parser builds none today,
+            // so it is refused by name rather than lowered, and the match has
+            // no catch-all: a variant added later is a compile error here, not
+            // a zero.
+            Expr::BlockExpr(_, span) => {
+                self.emit_errors.push(format!(
+                    "[LLVM host backend] Line {}: a block used as an expression has no lowering \
+                     in this backend; it is refused rather than evaluated as 0.",
+                    span.line
+                ));
+                "0".into()
             }
         }
+    }
+
+    /// The LLVM type of one element of what a pointer-valued `base` points
+    /// at: the stride `base[i]` steps by, and the width it loads and stores.
+    ///
+    /// This was `"i64"` for every pointer, whatever it pointed at. `Out[i]` on
+    /// a `GlobalMemory<I32>` parameter stepped and stored 8 bytes per element,
+    /// so a kernel called from host code with a 4-element `I32` array wrote
+    /// 16 bytes past it - a wrong answer in a plain build and SIGILL under
+    /// `-g`, under "Compilation Successful!" - while `-g` described `Out` as a
+    /// pointer to `I32`, so the debugger read the same memory 4 bytes at a
+    /// time. `Err` says why the element type is not known, and the caller
+    /// refuses rather than guessing a width.
+    fn pointer_elem_type(&self, base: &Expr) -> Result<String, String> {
+        if let Expr::Ident(name, _) = base {
+            if let Some(t) = self.mem_storage_types.get(name) {
+                return Ok(t.clone());
+            }
+        }
+        // A reference to an array (`&mut [I32; 4]`), or an array reached
+        // through one (`s.buffer` with `s: &mut S`).
+        let ast = self.infer_ast_type(base);
+        let inner = ast
+            .strip_prefix("&mut ")
+            .or_else(|| ast.strip_prefix('&'))
+            .unwrap_or(&ast);
+        if let Some(elem) = inner.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+            match primitive_llvm_type(elem) {
+                Some("ptr") => {}
+                Some(t) => return Ok(t.to_string()),
+                None if self.structs.contains_key(elem) => return Ok(format!("%{}", elem)),
+                None => {}
+            }
+        }
+        let what = match base {
+            Expr::Ident(name, _) => format!("`{}`", name),
+            _ => "this expression".to_string(),
+        };
+        Err(format!(
+            "{} is indexed through a pointer whose element type this backend does not know \
+             (its type reads as `{}`)",
+            what, ast
+        ))
     }
 
     /// Element type for the buffer `expr` names, or `None` if it is not a
@@ -4850,7 +4942,11 @@ representation, and whether that is lossless depends on the expression.",
             Expr::Index { base, .. } => {
                 let base_ty = self.infer_type(base);
                 if base_ty == "ptr" {
-                    self.pointee_llvm_type(expr)
+                    // The width the element's address steps by: one function
+                    // for both, or a load reads at a stride it was not
+                    // written at. An unknown element is refused where its
+                    // address is emitted.
+                    self.pointer_elem_type(base).unwrap_or_else(|_| self.pointee_llvm_type(expr))
                 } else if base_ty.starts_with('[') {
                     if let Some(pos) = base_ty.find('x') {
                         base_ty[pos + 1..].trim().trim_end_matches(']').to_string()
