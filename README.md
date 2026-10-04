@@ -2663,6 +2663,64 @@ one line, `--kernel` one kernel, and `--json` the same map for tools.
 - The emitter had a field documented as emitting `.file` and `.loc`; nothing
   set it and nothing read it, so this did not exist before.
 
+### `ydb`: Y-aware commands over gdb
+
+`tools/ydb/ydb` is a thin front end, not another debugger: it builds the
+program with `-g` and starts gdb on it with the Y extension loaded and a few
+commands that speak Y. Everything gdb does still works.
+
+```bash
+python3 tools/ydb/ydb prog.ysu            # build with -g, start (ydb)
+python3 tools/ydb/ydb prog.ysu -O2        # an optimised debuggable build
+python3 tools/ydb/ydb prog.ysu -- a b     # arguments for the program
+```
+
+| command | what it does |
+|---|---|
+| `break kernel:42` | a Y location: `NAME:LINE` is the file `NAME.ysu`, or the file the function `NAME` is in; `FILE:LINE`, `LINE`, a function and `... if COND` work as in gdb |
+| `locals` | the arguments and the bindings in scope, as `name: Type = value` with Y types; a binding an inner `let` shadows is not listed, because it is not in scope |
+| `tensor v` / `tensor Out 64` | a buffer's elements and statistics (min, max, mean, zeros, NaN, inf); an array's length is its own, a pointer (a `GlobalMemory` parameter) needs a count |
+| `asm` | the machine code the current line became |
+| `asm --ptx 14` / `asm --sass 14` | the PTX and SASS a kernel's line became, through `Y --emit-ptx --lineinfo` and `ptxas -lineinfo` at the module's own `.target` |
+
+A session on a program with a `Point`, an array `v`, an inner `let a` that
+shadows an outer one, and a kernel `bump` the host calls (abridged):
+
+```text
+(ydb) break prog:28
+Breakpoint 1 at 0x276d: file prog.ysu, line 28.
+(ydb) run
+Breakpoint 1, main () at prog.ysu:28
+28	        print_int(a);
+(ydb) locals
+a: I32 = 9
+r: I32 = 35
+p: Point = {x = 5, y = 1.25}
+v: [F32; 6] = {0, 1.5, 0, 0, -2, 0}
+(ydb) tensor v
+v: 6 x F32 at 0x405fffd0
+  [0] 0  [1] 1.5  [2] 0  [3] 0  [4] -2  [5] 0
+  min -2, max 1.5, mean -0.0833333333, zeros 4, NaN 0, inf 0
+(ydb) asm --sass 14
+kernel bump  (sm_80)  prog.ysu:14  Out[i] = Out[i] * 2.0 + 1.0;
+  0060  @P1 LEA R2, P0, R0, c[0x0][0x160], 0x2
+  ...
+  0100  @P1 STG.E [R2.64], R5
+```
+
+The outer `a` (7) is not in `locals`: the inner `let a` hides it for its
+block, as it does in the program.
+
+- **Plain gdb reads `scale:8` as the function `scale` and drops the `8`**: the
+  breakpoint lands on the function's first line, silently, and `main:N` lands
+  in the C runtime's `main` too. ydb's `break` resolves `NAME:LINE` to a file
+  first, which is why it is worth shadowing gdb's.
+- **`asm --ptx` / `--sass` describe the program compiled for the GPU, not the
+  process being debugged.** A kernel runs on the host under gdb only when it
+  uses no GPU intrinsic; one that calls `thread_idx_x()` does not build for the
+  host at all. For such a program ydb says so, starts without a process, and
+  the GPU commands still answer.
+
 ---
 
 ## Hardware probing
@@ -2715,6 +2773,7 @@ proofs/         Rocq proofs — ExactGemmSchedule.v is GENERATED
 tests/          test programs, benchmarks, PTX assembly gates
 tools/          measurement and analysis harnesses (Python), run by hand
   ydb/ymap.py   which PTX and SASS each Y line of a kernel became (--emit-ptx --lineinfo)
+  ydb/ydb       Y-aware commands over gdb (break NAME:LINE, locals, tensor, asm --ptx/--sass)
 python/         the Python package `y_lang`: ctypes bindings to liby.so, torch
                 interop, the `y_inductor` torch.compile backend, and its tests
   ptxas_tval/     PTX-vs-SASS translation validator — see docs/
