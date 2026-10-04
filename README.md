@@ -2366,6 +2366,7 @@ ran — read this list before trusting one:
 | `circom` | `circom_frontend`, `tools/circomlib_coverage.py` | that Y agrees with the reference compiler |
 | `rustc` | `cpu_emitter_lowering` | that the arithmetic `--emit-cpu` prints computes the right answer |
 | the ShadowPlay sources at `../shadowplay/` (outside this repository) | `shadowplay_builds` | that the application itself still compiles and links. A program in the test exercising the same GUI surface always runs, so the entry points, the link and the headless stubs are checked on any clone |
+| `gdb`, `opt`, `llvm-dwarfdump` | `debug_info` | that a `-g` build is debuggable as Y: gdb stops on `.ysu` lines and prints the values the source says |
 
 `cpu_emitter_output_compiles` is deliberately absent: without `rustc` it fails
 rather than skips. And the `z3` row covers only the gates that skip: with no
@@ -2411,6 +2412,8 @@ throughout.
 | flag | what it does | state |
 |---|---|---|
 | *(none)* | LLVM IR → native binary via `clang` | the default backend |
+| `-g` | DWARF debug information, built at `-O0`, so the program can be debugged as Y in gdb — see [Debugging](#debugging-y-programs) | real; the default backend and `--emit-llvm` only, every other backend refuses it by name |
+| `--debug` | `-g`, then start gdb on the program, stopped on the first line of `fn main` | real; needs `gdb` |
 | `--emit-llvm` | LLVM IR | real |
 | `--emit-ptx` | NVIDIA PTX | real |
 | `--emit-native` | standalone x86-64 ELF | **straight-line subset over `I32` and `bool` only**, calling only the program's own functions; refuses the rest by name |
@@ -2467,6 +2470,98 @@ compiler will keep emitting a tile chosen for the old one.
 
 ---
 
+## Debugging Y programs
+
+`-g` makes a program debuggable as Y: the compiler emits DWARF describing the
+`.ysu` source, so gdb — or any DWARF debugger — sets breakpoints on Y lines,
+steps by Y statement, and prints Y variables with their Y types.
+
+```bash
+Y prog.ysu --debug              # build with -g and start gdb on the first line of `fn main`
+Y prog.ysu -g -o prog           # or build, then use any debugger
+gdb ./prog
+(gdb) break ysu_main            # `fn main`; see below for why not `break main`
+(gdb) break prog.ysu:24
+(gdb) run
+```
+
+What a session looks like — gdb's output on `tests/debug_info.rs`'s fixture,
+compiled as `prog.ysu`; unedited except that some locals and the fixture's
+`// L:` line tags are left out:
+
+```text
+(gdb) break scale
+Breakpoint 1 at 0x2677: file prog.ysu, line 15.
+(gdb) run
+Breakpoint 1, scale (p=..., k=7) at prog.ysu:15
+15	    let s: I32 = p.x * k;
+(gdb) bt
+#0  scale (p=..., k=7) at prog.ysu:15
+#1  0x0000555555556845 in main () at prog.ysu:62
+#2  0x000055555555b97d in main ()
+(gdb) up
+#1  0x0000555555556845 in main () at prog.ysu:62
+62	    let r: I32 = scale(p, a);
+(gdb) info locals
+a = 7
+big = 5000000000
+u = 4000000000
+ch = 65 'A'
+c = Blue
+p = {x = 5, y = 1.25, flag = true}
+v = {10, 20, 0}
+total = 12
+(gdb) print *name
+$1 = {data = 0x40600010 "hello", len = 5, cap = 6}
+```
+
+`u` is a `U32` above 2^31, printed unsigned; `c` is an enum, printed by
+variant; frame `#2` is the C runtime's `main` (below).
+
+**It describes what the compiled program actually holds, and that is checked,
+not assumed.** This backend keeps each variable in one stack slot and `-g`
+compiles at `-O0`, so the slot is the variable at every statement boundary. A
+variable's described type must have its slot's size: where the declared type
+and the storage disagree, the storage wins — gdb reading a width the code did
+not store prints garbage, and a debugger that shows a wrong value is believed.
+`tests/debug_info.rs` builds a program with `-g` and drives real gdb against
+it: it asserts the lines gdb stops on, the values it prints for each type, that
+`step` into a call finds the arguments already stored, that `next` visits each
+statement of a loop once per iteration, that an imported function is reported
+in its own file, and that `--debug` starts on the first line of `main`. Every
+corpus program the backend accepts still passes the LLVM verifier with `-g`,
+and without `-g` the emitted module is byte-for-byte what it was (55 of 55,
+compared against the previous compiler).
+
+Things to know:
+
+- **`break main` stops in the C runtime first.** The runtime owns the
+  process's `main` — it sets up the allocator and the program's stack before
+  calling yours, which is emitted as `ysu_main`. The debugger still calls it
+  `main` in backtraces. Use `break ysu_main`, a `file:line`, or `--debug`.
+- A **`String`** is a pointer to the runtime's `YStr`: `print *s` shows
+  `data`, `len` and `cap`, and `print s->data` the text.
+- A **`@ZeroDrift`** accumulator holds its exact representation, not the
+  value: its type reads `Q32.32_raw` (or `Q16.16_raw`), so the value is
+  `acc / 2^32`.
+- A **data-carrying enum** shows its `tag` by variant name and its payload as
+  raw words.
+- **Variables are scoped to the whole function**, because their storage is:
+  a `let` in a nested block shares the outer binding's slot in this backend
+  (a recorded bug), and the debugger shows the slot.
+- The runtime is built **without** debug information, so `step` stays in Y code
+  rather than descending into the allocator behind `print_int`.
+- **The LLVM backend only.** `--emit-ptx`, `--emit-cpu`, `--emit-native`, the
+  ZK and co-processor backends refuse `-g` by name rather than ignore it.
+- **`-O0` only.** A `-g` build is unoptimised; there is no optimised debuggable
+  build yet.
+- **VS Code** works through the C/C++ extension's debugger (`cppdbg`,
+  `MIMode: gdb`); the bundled `ysu-lang` extension is what lets you set
+  breakpoints in `.ysu` files. The `tasks.json` and `launch.json` are in the
+  manual, §38.5.
+
+---
+
 ## Hardware probing
 
 On first run the compiler measures the host and caches to `.ysu_hw_profile`:
@@ -2490,6 +2585,7 @@ src/                       Rust bootstrap compiler
   autotuner.rs empirical_autotune.rs cuda_runtime.rs
   bank_conflict.rs                 shared-memory swizzle solver
   llvm_emitter.rs                  LLVM IR (default backend)
+  debug_info.rs                    DWARF for -g: debugging Y programs in gdb
   ptx_emitter.rs                   NVIDIA PTX
   cpu_emitter.rs cpu_gemm.rs       x86-64 / AVX-512 GEMM
   native_emitter.rs                standalone ELF

@@ -17,7 +17,7 @@
 // and the 26 blanket `#![allow(dead_code)]` attributes existed to silence them.
 // The two module lists had already drifted apart.
 use y::{
-    ast, autotuner, coprocessor_scheduler, cpu_emitter, exact_gemm_certificate, ir_grapher, lexer,
+    ast, autotuner, coprocessor_scheduler, cpu_emitter, debug_info, exact_gemm_certificate, ir_grapher, lexer,
     llvm_emitter, native_emitter, parser, ptx_emitter, require, sentinel, type_checker, zero_drift,
 };
 
@@ -718,6 +718,45 @@ fn write_attention_certificate(head_dim: usize, seq_len: usize) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    // `-g`: DWARF debug information, so the program can be debugged as Y in
+    // gdb. `--debug` is `-g` plus starting gdb on the result. Both are the
+    // LLVM backend's, and every other backend REFUSES them by name rather than
+    // ignoring them: a flag that is accepted and does nothing is how `--c`
+    // once ran the LLVM backend instead of the one it named. Checked first,
+    // because `--emit-attention-ptx` and `--emit-verifier` are dispatched
+    // before the general option parsing below.
+    let debug_info = args.iter().any(|a| a == "-g" || a == "--debug");
+    let launch_debugger = args.iter().any(|a| a == "--debug");
+    if debug_info {
+        const NO_DEBUG_INFO: &[&str] = &[
+            "--emit-attention-ptx", "--emit-c", "--c", "--target=c",
+            "--emit-coprocessor", "--target=coprocessor", "--emit-cpu", "--target=cpu",
+            "--emit-native", "--target=native", "--emit-ptx", "--target=ptx",
+            "--emit-r1cs", "--target=r1cs", "--emit-verifier", "--emit-zk-ptx", "--target=zk-ptx",
+        ];
+        let flag = if launch_debugger { "--debug" } else { "-g" };
+        if let Some(other) = args.iter().find(|a| NO_DEBUG_INFO.contains(&a.as_str())) {
+            log_error!(
+                "{} cannot be combined with {}: debug information is produced by the LLVM \
+                 backend only (the default, and --emit-llvm).",
+                flag,
+                other
+            );
+            exit(1);
+        }
+        if args.iter().any(|a| a.ends_with(".circom")) {
+            log_error!("{} applies to Y source; the circom front end produces R1CS, which has no debug information.", flag);
+            exit(1);
+        }
+        if launch_debugger && args.iter().any(|a| a == "--emit-llvm" || a == "--target=llvm") {
+            log_error!(
+                "--debug builds a program and starts the debugger on it; to write LLVM IR \
+                 with debug information use -g --emit-llvm."
+            );
+            exit(1);
+        }
+    }
+
     // `--emit-attention-ptx <head_dim> <seq_len>`
     //
     // Advertised by `src/exact_attention.rs`'s module header ("the
@@ -801,6 +840,7 @@ fn main() {
     /// hard error -- see the check after the loop.
     const KNOWN_FLAGS: &[&str] = &[
         "-o", "--output", "-I", "-l", "--link", "--name", "--witness",
+        "-g", "--debug",
         "--portable", "--autotune", "--autotune-force", "--no-autotune",
         "--emit-attention-ptx", "--emit-c", "--emit-coprocessor", "--emit-cpu",
         "--emit-llvm", "--emit-native", "--emit-ptx", "--emit-r1cs",
@@ -859,6 +899,17 @@ fn main() {
         );
         eprintln!("    Known options: {}", KNOWN_FLAGS.join(" "));
         eprintln!("    (did you mean --emit-ptx? there is no --ptx)");
+        exit(1);
+    }
+
+    // Debug information names the source file it describes, and the built-in
+    // harness that runs without one has none.
+    if debug_info && source_file.is_none() {
+        log_error!(
+            "{} needs a source file: Y program.ysu {}",
+            if launch_debugger { "--debug" } else { "-g" },
+            if launch_debugger { "--debug" } else { "-g" }
+        );
         exit(1);
     }
 
@@ -993,6 +1044,9 @@ fn main() {
     }
 
     let mut queue = ast.items;
+    // Which file each imported item came from: its spans are lines of THAT
+    // file, which `-g` has to say (`debug_info::item_names`).
+    let mut imported_items: Vec<(String, std::path::PathBuf)> = Vec::new();
     let mut index = 0;
     while index < queue.len() {
         if let Item::Import(imp) = &queue[index] {
@@ -1031,6 +1085,11 @@ fn main() {
                                                 true
                                             }
                                         });
+                                        for item in &sub_prog.items {
+                                            for name in debug_info::item_names(item) {
+                                                imported_items.push((name, target_file.clone()));
+                                            }
+                                        }
                                         queue.extend(sub_prog.items);
                                     }
                                     Err(e) => {
@@ -1663,6 +1722,9 @@ fn main() {
     } else if emit_llvm {
         log_step!("4/4", "Emitting LLVM IR...");
         let mut emitter = LlvmEmitter::new();
+        if debug_info {
+            enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items);
+        }
         emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ll_output = emitter.emit_program(&ast, &hw_profile);
         for line in &emitter.drift_report {
@@ -1686,7 +1748,14 @@ fn main() {
             &output_path,
             source_file.as_deref().unwrap_or("<stdin>"),
         );
-        println!("      Compile manually: clang -O2 -o output {} c_src/runtime.c -lm", &output_path);
+        // `-O0` under `-g`: the optimiser moves variables out of their stack
+        // slots and reorders statements, so a debugger would show values that
+        // are "optimized out" and step out of source order.
+        println!(
+            "      Compile manually: clang {} -o output {} c_src/runtime.c -lm",
+            if debug_info { "-O0" } else { "-O2" },
+            &output_path
+        );
     } else if emit_ptx {
         log_step!("4/4", "Emitting NVIDIA PTX Assembly with Triton-Level Optimization Passes...");
         println!("      -> Pass 1: Multi-Stage Asynchronous Software Pipelining Pass (cp.async multi-buffering)");
@@ -1805,6 +1874,9 @@ fn main() {
     } else {
         log_step!("4/4", "Compiling via LLVM IR Backend...");
         let mut emitter = LlvmEmitter::new();
+        if debug_info {
+            enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items);
+        }
         let ll_output = emitter.emit_program(&ast, &hw_profile);
 
         // This path did not check the emitter's errors at all, so a construct
@@ -1862,7 +1934,11 @@ fn main() {
         // Both spellings of "X11 is missing" are matched: `cannot find -lX11`
         // when only the library is absent, and `X11/Xlib.h` when the
         // development headers are too.
-        let base = ["-O2", "-o", output_path.as_str(), ll_path.as_str(), runtime_path.as_str(), "-lm"];
+        // `-O0` under `-g`, for the reason given at `--emit-llvm`'s hint. The
+        // runtime is compiled WITHOUT debug information, so `step` stays in Y
+        // code instead of descending into the allocator behind `print_int`.
+        let opt = if debug_info { "-O0" } else { "-O2" };
+        let base = [opt, "-o", output_path.as_str(), ll_path.as_str(), runtime_path.as_str(), "-lm"];
         let with_x11 = std::process::Command::new("clang")
             .args(base)
             .arg("-lX11")
@@ -1905,6 +1981,51 @@ fn main() {
     // Reached only when the selected backend produced its artifact. Every
     // failure path above calls `exit(1)` and none of them exits 0.
     println!("\n\x1b[1;32mCompilation Successful!\x1b[0m\n");
+
+    if launch_debugger {
+        exit(run_debugger(&output_path));
+    }
+}
+
+/// Turn on `-g` for an LLVM emitter.
+fn enable_debug_info(
+    emitter: &mut LlvmEmitter,
+    source: Option<&str>,
+    imported: &[(String, std::path::PathBuf)],
+) {
+    // `-g` without a source file is refused right after option parsing.
+    let path = source.expect("-g without a source file is refused before any backend runs");
+    emitter.enable_debug_info(std::path::Path::new(path), imported);
+}
+
+/// `--debug`: start gdb on the program just built, stopped on the first line
+/// of the Y `fn main`. Returns gdb's exit status.
+///
+/// The breakpoint is on `ysu_main`, the symbol `fn main` is emitted as. The C
+/// runtime owns the process's own `main` - it sets up the allocator and the
+/// program's stack before calling the Y one - so `break main` in gdb stops in
+/// the runtime first, with no source to show.
+fn run_debugger(binary: &str) -> i32 {
+    let path = if binary.contains('/') { binary.to_string() } else { format!("./{}", binary) };
+    println!("[*] Starting gdb on {} (stopped at the first line of `fn main`)...", path);
+    println!("    break FILE.ysu:LINE / next / step / print VAR / bt / continue / quit");
+    match std::process::Command::new("gdb")
+        .arg("-q")
+        // Debugging Y code needs no distribution debug info, and gdb would
+        // otherwise stop to ask whether to download some.
+        .args(["-ex", "set debuginfod enabled off"])
+        .args(["-ex", "break ysu_main", "-ex", "run"])
+        .arg(&path)
+        .status()
+    {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            log_error!("could not start gdb: {}", e);
+            eprintln!("    {} carries DWARF debug information; any DWARF debugger can load it", path);
+            eprintln!("    (lldb: `breakpoint set -n ysu_main`).");
+            1
+        }
+    }
 }
 
 /// Locate `c_src/runtime.c` without assuming the working directory.

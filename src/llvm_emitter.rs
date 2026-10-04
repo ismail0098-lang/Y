@@ -259,6 +259,9 @@ pub struct LlvmEmitter {
     needs_gemm_module: bool,
     /// The flush interval of the exact VNNI GEMM, when one was substituted.
     needs_exact_gemm_module: Option<u32>,
+    /// DWARF debug information (`-g`), when requested. `None` leaves every
+    /// emitted module byte-for-byte as it was; see `crate::debug_info`.
+    debug: Option<crate::debug_info::DebugInfo>,
 }
 
 /// Entry-block stack slot that masked-off block-pointer stores are redirected
@@ -435,6 +438,78 @@ impl LlvmEmitter {
             loop_exit_stack: Vec::new(),
             needs_gemm_module: false,
             needs_exact_gemm_module: None,
+            debug: None,
+        }
+    }
+
+    /// Emit DWARF debug information describing `source`, the `.ysu` file
+    /// being compiled (`Y prog.ysu -g`). `imported` names each item an
+    /// `import` brought in (see `debug_info::item_names`) with the file it was
+    /// parsed from: its line numbers are that file's.
+    pub fn enable_debug_info(
+        &mut self,
+        source: &std::path::Path,
+        imported: &[(String, std::path::PathBuf)],
+    ) {
+        let mut d = crate::debug_info::DebugInfo::new(source);
+        for (item, path) in imported {
+            d.set_item_file(item, path);
+        }
+        self.debug = Some(d);
+    }
+
+    /// Attribute what follows to `span`; returns the position to restore.
+    fn dbg_enter(&mut self, span: &Span) -> Option<(usize, usize)> {
+        let d = self.debug.as_mut()?;
+        let outer = d.current();
+        if d.move_to(span.line, span.col) {
+            writeln!(&mut self.output, "{}{} {}", crate::debug_info::LOC_MARKER, span.line, span.col)
+                .unwrap();
+        }
+        outer
+    }
+
+    /// Back to the position `dbg_enter` returned, so code a compound
+    /// statement emits after its body is attributed to the statement itself.
+    fn dbg_leave(&mut self, outer: Option<(usize, usize)>) {
+        if let (Some(d), Some((line, col))) = (self.debug.as_mut(), outer) {
+            if d.move_to(line, col) {
+                writeln!(&mut self.output, "{}{} {}", crate::debug_info::LOC_MARKER, line, col)
+                    .unwrap();
+            }
+        }
+    }
+
+    /// The slot `%name` just allocated holds a Y variable. `declared` is its
+    /// type as written, `storage` the LLVM type of the slot, and `init` the
+    /// initialiser of an unannotated `let`.
+    fn dbg_var(
+        &mut self,
+        name: &str,
+        span: &Span,
+        declared: Option<&Type>,
+        init: Option<&Expr>,
+        storage: &str,
+        is_param: bool,
+    ) {
+        if self.debug.is_none() {
+            return;
+        }
+        // `infer_ast_type` answers a call with the callee's LLVM return type,
+        // so a `let s = String_new(..)` is inferred as `ptr`; the runtime's
+        // string constructors are known to return a string handle.
+        let inferred = match init {
+            Some(Expr::Call { func, .. })
+                if crate::debug_info::returns_string(&self.emit_call_target(func)) =>
+            {
+                Some("String".to_string())
+            }
+            _ => self.locals_ast_type.get(name).cloned(),
+        };
+        let Some(d) = self.debug.as_mut() else { return };
+        let ty = d.slot_type(declared, inferred.as_deref(), storage);
+        if let Some(i) = d.declare(name, span.line, span.col, is_param, ty) {
+            writeln!(&mut self.output, "{}{}", crate::debug_info::VAR_MARKER, i).unwrap();
         }
     }
 
@@ -1377,6 +1452,10 @@ impl LlvmEmitter {
             }
         }
 
+        if let Some(d) = &mut self.debug {
+            d.register_types(prog, &self.structs);
+        }
+
         // Phase 1: emit all function bodies into a temporary buffer,
         // collecting string constants along the way
         let mut func_output = String::new();
@@ -1575,6 +1654,10 @@ impl LlvmEmitter {
         // the prelude and the emitted text of every other program are unchanged.
         self.wln("!0 = !{i32 1}");
 
+        if let Some(d) = self.debug.take() {
+            self.output = d.finish(&self.output);
+        }
+
         self.output.clone()
     }
 
@@ -1695,6 +1778,12 @@ impl LlvmEmitter {
             f.name.clone()
         };
         self.defined_functions.push(func_name.clone());
+        if let Some(d) = &mut self.debug {
+            // `fn main` is emitted as `ysu_main` because the C runtime owns the
+            // process's `main`; the debugger still calls it `main`.
+            let display = if func_name == "ysu_main" { "main" } else { func_name.as_str() };
+            d.begin_function(&func_name, display, f.span.line, f.span.col, &f.params, f.ret_ty.as_ref());
+        }
 
         let params: Vec<String> = f
             .params
@@ -1726,6 +1815,13 @@ impl LlvmEmitter {
 
         self.emit_block_body(&f.body, &ret_type);
 
+        // The implicit return belongs to the body's last statement under `-g`.
+        // Left where `emit_stmt` restores to, the function's own line, `next`
+        // from the last statement would stop on the `fn` header on the way out.
+        let outer = match f.body.stmts.last() {
+            Some(last) if !self.block_terminated => self.dbg_enter(&last.span()),
+            _ => None,
+        };
         // Add default return if the block didn't terminate
         if !self.block_terminated {
             if ret_type == "void" {
@@ -1744,6 +1840,7 @@ impl LlvmEmitter {
                 writeln!(&mut self.output, "  ret {} 0", ret_type).unwrap();
             }
         }
+        self.dbg_leave(outer);
 
         self.wln("}");
         self.wln("");
@@ -1799,6 +1896,27 @@ impl LlvmEmitter {
                                 decision.repr.llvm_type()
                             )
                             .unwrap();
+                            if self.debug.is_some() {
+                                // The slot holds the accumulator's exact
+                                // representation, not the declared value: a
+                                // Q format is the value times 2^frac, and the
+                                // type's name says so.
+                                let repr = decision.repr;
+                                let dty = crate::debug_info::DbgTy::Int {
+                                    name: if repr.frac_bits() == 0 {
+                                        repr.name().to_string()
+                                    } else {
+                                        format!("{}_raw", repr.name())
+                                    },
+                                    bits: repr.total_bits() as u64,
+                                    signed: true,
+                                };
+                                let d = self.debug.as_mut().unwrap();
+                                if let Some(i) = d.declare(name, span.line, span.col, false, Some(dty)) {
+                                    writeln!(&mut self.output, "{}{}", crate::debug_info::VAR_MARKER, i)
+                                        .unwrap();
+                                }
+                            }
                         }
                         Err(why) => {
                             self.emit_errors.push(format!(
@@ -1894,11 +2012,13 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                         // both pointers, so an array's storage must honour it.
                         let align = if ir_ty.starts_with('[') { ", align 8" } else { "" };
                         writeln!(&mut self.output, "  %{} = alloca {}{}", name, ir_ty, align).unwrap();
+                        self.dbg_var(name, span, ty.as_ref(), init.as_ref(), &ir_ty, false);
                     }
                 }
-                Stmt::For { loop_var, body, .. } => {
+                Stmt::For { loop_var, body, span, .. } => {
                     self.locals.insert(loop_var.clone(), "i32".into());
                     writeln!(&mut self.output, "  %{} = alloca i32", loop_var).unwrap();
+                    self.dbg_var(loop_var, span, None, None, "i32", false);
                     self.emit_alloca_for_block(body);
                 }
                 Stmt::If {
@@ -1955,6 +2075,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
                     p.name, p.name, size
                 )
                 .unwrap();
+                self.dbg_var(&p.name, &p.span, Some(&p.ty), None, &aty, true);
                 return;
             }
         }
@@ -1968,6 +2089,7 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         }
         writeln!(&mut self.output, "  %{} = alloca {}", p.name, ty).unwrap();
         self.emit_store(&format!("%{}.arg", p.name), &format!("%{}", p.name), &ty);
+        self.dbg_var(&p.name, &p.span, Some(&p.ty), None, &ty, true);
     }
 
     /// `sizeof(ty)` in bytes, by the `getelementptr ty, ptr null, 1` idiom.
@@ -2002,6 +2124,9 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         .unwrap();
         self.wln("entry:");
         self.defined_functions.push(k.name.clone());
+        if let Some(d) = &mut self.debug {
+            d.begin_function(&k.name, &k.name, k.span.line, k.span.col, &k.params, None);
+        }
 
         for p in &k.params {
             self.emit_param_slot(p);
@@ -2025,7 +2150,13 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
 
         self.emit_block_body(&k.body, "void");
         if !self.block_terminated {
+            // As in `emit_func`: the implicit return belongs to the last statement.
+            let outer = match k.body.stmts.last() {
+                Some(last) => self.dbg_enter(&last.span()),
+                None => None,
+            };
             self.wln("  ret void");
+            self.dbg_leave(outer);
         }
         self.wln("}");
         self.wln("");
@@ -2397,7 +2528,34 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         }
     }
 
+    /// Every statement goes through here, which is what attributes its code to
+    /// its own source line under `-g`: the position is set on entry and put
+    /// back on exit, so what a compound statement emits after its body (a
+    /// loop's increment and back edge, an `if`'s jump to its merge block)
+    /// belongs to the compound statement and not to its last inner one.
     fn emit_stmt(&mut self, stmt: &Stmt, ret_type: &str) {
+        let outer = self.dbg_enter(&stmt.span());
+        self.emit_stmt_inner(stmt, ret_type);
+        self.dbg_leave(outer);
+    }
+
+    /// The jump out of the end of a block - an `if` branch to its merge block,
+    /// a `while` body back to its condition. Under `-g` it belongs to the
+    /// block's last statement: attributed to the `if` or `while` itself, where
+    /// `emit_stmt` would leave it, `next` would stop on that line a second time
+    /// on the way out of a `then` branch and on every iteration of a loop.
+    /// (A `for` loop's increment and back edge DO belong to the `for` line:
+    /// they are its header's code.)
+    fn emit_branch_out(&mut self, branch: &Block, label: &str) {
+        let outer = match branch.stmts.last() {
+            Some(last) => self.dbg_enter(&last.span()),
+            None => None,
+        };
+        writeln!(&mut self.output, "  br label %{}", label).unwrap();
+        self.dbg_leave(outer);
+    }
+
+    fn emit_stmt_inner(&mut self, stmt: &Stmt, ret_type: &str) {
         match stmt {
             Stmt::Let { name, init, .. } if self.zero_drift.contains_key(name) => {
                 let (repr, integer_domain) = self.zero_drift[name];
@@ -2660,7 +2818,7 @@ representation, and whether that is lossless depends on the expression.",
                 self.emit_block_body(then_block, ret_type);
                 let then_terminated = self.block_terminated;
                 if !then_terminated {
-                    writeln!(&mut self.output, "  br label %{}", merge_lbl).unwrap();
+                    self.emit_branch_out(then_block, &merge_lbl);
                 }
 
                 // Else block
@@ -2670,7 +2828,7 @@ representation, and whether that is lossless depends on the expression.",
                     self.emit_block_body(eb, ret_type);
                     let else_terminated = self.block_terminated;
                     if !else_terminated {
-                        writeln!(&mut self.output, "  br label %{}", merge_lbl).unwrap();
+                        self.emit_branch_out(eb, &merge_lbl);
                     }
                 }
 
@@ -2714,7 +2872,7 @@ representation, and whether that is lossless depends on the expression.",
                 self.emit_block_body(body, ret_type);
                 self.loop_exit_stack.pop();
                 if !self.block_terminated {
-                    writeln!(&mut self.output, "  br label %{}", cond_lbl).unwrap();
+                    self.emit_branch_out(body, &cond_lbl);
                 }
 
                 writeln!(&mut self.output, "{}:", end_lbl).unwrap();
@@ -2979,7 +3137,9 @@ representation, and whether that is lossless depends on the expression.",
 
                     writeln!(&mut self.output, "{}:", body_lbl).unwrap();
                     self.block_terminated = false;
+                    let outer = self.dbg_enter(&arm.span);
                     self.emit_expr(&arm.body, None, None);
+                    self.dbg_leave(outer);
                     if !self.block_terminated {
                         writeln!(&mut self.output, "  br label %{}", merge_lbl).unwrap();
                     }

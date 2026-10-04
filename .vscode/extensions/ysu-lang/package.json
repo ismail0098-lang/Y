@@ -2,7 +2,7 @@
   "name": "Y",
   "displayName": "Y",
   "icon": "icons/logo.svg",
-  "description": "Syntax highlighting for the Y systems language (.ysu)",
+  "description": "Syntax highlighting for the Y systems language (.ysu), and breakpoints in .ysu files for debugging a program built with Y -g",
   "version": "0.1.0",
   "publisher": "ysu-engine",
   "engines": {
@@ -34,6 +34,11 @@
         "language": "Y",
         "scopeName": "source.Y",
         "path": "./syntaxes/Y.tmLanguage.json"
+      }
+    ],
+    "breakpoints": [
+      {
+        "language": "Y"
       }
     ]
   }

@@ -58,6 +58,7 @@ Version 1.0 — July 2026 (Experimental Systems Programming Language & Prototype
 - [§35 — OpenAI Triton Architectural Comparison & Gap Analysis](#35--openai-triton-architectural-comparison--gap-analysis)
 - [§36 — 3D Block Pointer Tensor Abstractions & Hardware Intrinsics](#36--3d-block-pointer-tensor-abstractions--hardware-intrinsics)
 - [§37 — 5 Advanced Compiler Optimization Passes Pipeline](#37--5-advanced-compiler-optimization-passes-pipeline)
+- [§38 — Debugging Y Programs (`-g`, `--debug`)](#38--debugging-y-programs--g---debug)
 
 
 ---
@@ -257,6 +258,8 @@ over a native ELF. Unrecognised options are a hard error now.
 | Flag | Effect |
 | :--- | :--- |
 | *(none)* | Compile with the LLVM backend → native binary via clang |
+| `-g` | Add DWARF debug information (built at `-O0`) so the program can be debugged as Y; with the default backend or `--emit-llvm` only. See §38 |
+| `--debug` | `-g`, then start gdb on the program, stopped on the first line of `fn main`. See §38 |
 | `--emit-llvm` / `--target=llvm` | LLVM IR |
 | `--emit-ptx` / `--target=ptx` | NVIDIA PTX |
 | `--emit-cpu` / `--target=cpu` | **Scalar** host Rust source, **printed for you to paste** — Y never compiles it. It emits no SIMD; see 9.7 |
@@ -5137,6 +5140,163 @@ two names overlapped. All of it is deleted.
 * Real `cp.async` pipelining lives in the GEMM emitters, where the commit and
   the wait are separated by the mainloop — which is the whole point, and what
   the deleted "pipelining pass" did not do.
+
+---
+
+## §38 — Debugging Y Programs (`-g`, `--debug`)
+
+`-g` adds DWARF debug information to the program the default (LLVM) backend
+builds, so it can be debugged **as Y**: breakpoints on `.ysu` lines, stepping
+by Y statement, and Y variables printed with their Y types. There is no
+Y-specific debugger to install — gdb, or any DWARF debugger, reads it.
+
+### 38.1 Quick start
+
+```bash
+Y prog.ysu --debug          # build with -g, start gdb stopped on the first line of `fn main`
+
+Y prog.ysu -g -o prog       # or build, then debug however you like
+gdb ./prog
+```
+
+Inside gdb:
+
+| command | does |
+| :--- | :--- |
+| `break ysu_main` | stop at the start of `fn main` (see 38.4 for why not `break main`) |
+| `break prog.ysu:24` / `break scale` | stop at a line / a function |
+| `break scale if n == 1` | conditional breakpoint |
+| `run`, `continue` | start, resume |
+| `next`, `step`, `finish` | next statement, into a call, out of a call (shows the returned value) |
+| `info locals`, `info args`, `print EXPR`, `ptype x`, `bt` | inspect |
+
+`print` takes C expression syntax, which covers Y's: `x + 1`, `v[2]`, `p.x`,
+`*r`, `a == b`.
+
+`-g` compiles at `-O0`: the optimiser moves variables out of their stack slots
+and reorders statements, so a debugger on an optimised build shows values that
+are "optimized out" and steps out of source order. `-g --emit-llvm` writes the
+IR with its debug metadata instead of building.
+
+### 38.2 What the debugger shows
+
+| Y type | gdb shows |
+| :--- | :--- |
+| `I8` … `I64`, `isize` | signed integers, typed `I32` etc. A one-byte integer also shows its character (`-5 '\373'`), as gdb does for C |
+| `U8` … `U64`, `usize` | unsigned integers: `4000000000` for a `U32` above 2^31 |
+| `F16`, `F32`, `F64` | floating point |
+| `bool` | `true` / `false` |
+| `char` | `65 'A'` |
+| `String` | a pointer to the runtime's `YStr`: `print *s` gives `{data = 0x… "hello", len = 5, cap = 6}`, `print s->data` the text |
+| `&T`, `&mut T`, `GlobalMemory<T>` | a pointer to `T` |
+| a `struct` | its fields: `{x = 5, y = 1.25, flag = true}` |
+| `[T; N]` | the array: `{10, 20, 0}` |
+| an `enum` | the variant's name: `Blue` |
+| an `enum` with data | `{tag = Circle, payload = {…}}` — the payload as the raw words it is |
+| a `@ZeroDrift` accumulator | its exact representation, typed `Q32.32_raw` or `Q16.16_raw` (or `I64`): `print acc / 4294967296.0` gives the value of a `Q32.32` |
+| `Vec`, `Box`, other handles | an address |
+
+**The debugger is told what the compiled program holds, and that is checked.**
+The LLVM backend keeps each variable in one stack slot, and at `-O0` the slot is
+the variable at every statement boundary. A variable is described with its
+declared type only when that type has the slot's size; otherwise with the
+slot's own type, because gdb reading a width the code did not store prints
+garbage. An unannotated `let w = 9;` is inferred as `i64` but stored in an
+`i32` slot, so it is shown as an `I32` — `tests/debug_info.rs` asserts exactly
+that case. Likewise a `Q16.16` declared outside `@ZeroDrift` is shown as the
+`I32` this backend stores it as.
+
+### 38.3 Stepping
+
+`next` stops once per statement. The jump out of an `if` branch and a `while`
+loop's back edge belong to the branch's last statement, so a loop is visited
+once per iteration rather than stopping on its header twice; a `for` loop's
+increment belongs to the `for` line, because it is the header's code. A
+breakpoint on a `for` line stops once, at the loop's entry, as it does in C.
+`step` into a call stops on the callee's first statement with its arguments
+already stored. The runtime (`c_src/runtime.c`) has no debug information, so
+`step` over `print_int(x)` stays in Y code.
+
+A function `import`ed from another file is reported in that file, at that
+file's line numbers.
+
+### 38.4 `main`, and the runtime's `main`
+
+The C runtime owns the process's `main`: it sets up the allocator and the
+program's stack, then calls the Y `fn main`, which is emitted as `ysu_main`.
+The debugger calls it `main` in backtraces, but `break main` resolves to the
+runtime's `main` and stops there first, with no source to show. Use
+`break ysu_main`, a `file:line`, or `--debug`, which does that for you.
+
+### 38.5 VS Code
+
+The C/C++ extension (`ms-vscode.cpptools`) debugs a `-g` Y program through gdb.
+This repository's `.vscode/extensions/ysu-lang` extension declares breakpoint
+support for `.ysu`; without it installed, set
+`"debug.allowBreakpointsEverywhere": true` so the editor lets you put a
+breakpoint in a `.ysu` file at all.
+
+`.vscode/tasks.json`:
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Y: build with -g",
+      "type": "shell",
+      "command": "${workspaceFolder}/target/release/Y",
+      "args": ["${file}", "-g", "-o", "${fileDirname}/${fileBasenameNoExtension}"],
+      "options": { "cwd": "${workspaceFolder}" }
+    }
+  ]
+}
+```
+
+`.vscode/launch.json`:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Y program",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${fileDirname}/${fileBasenameNoExtension}",
+      "cwd": "${fileDirname}",
+      "MIMode": "gdb",
+      "preLaunchTask": "Y: build with -g",
+      "setupCommands": [{ "text": "set debuginfod enabled off" }]
+    }
+  ]
+}
+```
+
+Open the `.ysu` file, set a breakpoint in the gutter, press F5. What was
+verified: the extension's own debug adapter (`OpenDebugAD7`, cpptools 1.35.2),
+driven over the Debug Adapter Protocol with this configuration, accepts a
+breakpoint on a `.ysu` line, stops there, reports the frame with its `.ysu`
+source and line, lists the locals with their Y types and values, and steps.
+The editor's UI itself was not exercised.
+
+### 38.6 Limits
+
+- **The default backend and `--emit-llvm` only.** `--emit-ptx`, `--emit-cpu`,
+  `--emit-native`, `--emit-coprocessor`, the ZK backends and circom input
+  refuse `-g` and `--debug` by name rather than ignore them.
+- **`-O0` only.** `-g` compiles unoptimised, so every variable lives in its
+  stack slot at every statement boundary. There is no optimised debuggable
+  build yet.
+- **Variables are scoped to their whole function**, because their storage is.
+  A `let` in a nested block shares the outer binding's slot in this backend —
+  a recorded bug — and the debugger shows the slot, which is what the program
+  computes.
+- A kernel the LLVM backend replaces with the packed GEMM keeps its parameters
+  but has no body variables: the code that runs is the GEMM, not the loop nest.
+- A `fn main` with no return type leaves the process's exit status undefined,
+  in any build: the runtime exits with whatever the return register holds.
+  Declare `fn main() -> I32` when the status matters.
 
 ---
 

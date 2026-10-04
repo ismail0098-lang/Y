@@ -363,6 +363,8 @@ fn documented_y_commands() -> Vec<(String, Vec<String>)> {
             //  - the ZK backend needs `--features zk`, absent from a default build
             //  - `--emit-c` and friends are DOCUMENTED as failing, and do
             //  - autotuning touches the GPU
+            //  - `--debug` starts an interactive gdb, which would wait on the
+            //    suite's stdin
             let flags: Vec<String> = parts[1..].to_vec();
             let needs_zk = flags.iter().any(|f| f.contains("r1cs") || f.contains("zk"));
             if needs_zk && !cfg!(feature = "zk") {
@@ -370,6 +372,7 @@ fn documented_y_commands() -> Vec<(String, Vec<String>)> {
             }
             if flags.iter().any(|f| {
                 f.contains("autotune")
+                    || *f == "--debug"
                     || *f == "--emit-c"
                     || *f == "--c"
                     || f.contains("target=c")
