@@ -1844,6 +1844,9 @@ impl LlvmEmitter {
             // process's `main`; the debugger still calls it `main`.
             let display = if func_name == "ysu_main" { "main" } else { func_name.as_str() };
             d.begin_function(&func_name, display, f.span.line, f.span.col, &f.params, f.ret_ty.as_ref());
+            if let Some(target) = &self.current_impl_target {
+                d.set_method(&func_name, &format!("{}::{}", target, f.name));
+            }
         }
 
         let params: Vec<String> = f

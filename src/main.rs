@@ -2009,8 +2009,15 @@ fn run_debugger(binary: &str) -> i32 {
     let path = if binary.contains('/') { binary.to_string() } else { format!("./{}", binary) };
     println!("[*] Starting gdb on {} (stopped at the first line of `fn main`)...", path);
     println!("    break FILE.ysu:LINE / next / step / print VAR / bt / continue / quit");
+    // gdb runs the Y extension embedded in the program (pretty-printers, the
+    // stack-trace filter) only for a file in its auto-load safe path; this
+    // adds exactly this program, before gdb loads it.
+    let absolute = std::fs::canonicalize(&path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.clone());
     match std::process::Command::new("gdb")
         .arg("-q")
+        .args(["-iex", &format!("add-auto-load-safe-path {}", absolute)])
         // Debugging Y code needs no distribution debug info, and gdb would
         // otherwise stop to ask whether to download some.
         .args(["-ex", "set debuginfod enabled off"])

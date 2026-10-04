@@ -386,6 +386,11 @@ int32_t MatchPattern_EnumVariant(int32_t f0, int32_t f1) { return make_enum(1, 2
 int32_t MatchPattern_Literal(int32_t f0) { return make_enum(2, 1, f0); }
 
 int32_t String_new(const char* s) {
+    // A Y string literal reaches here as a string HANDLE - the LLVM backend
+    // turns every literal into a YStr - not as text. Read as text, the
+    // handle's own bytes came out: `String_new("hi")` printed `(`. A handle
+    // is copied; text is what the name says.
+    if (is_valid_ystr((void*)s)) return ystr_clone((int32_t)(uintptr_t)s);
     return ystr_new(s);
 }
 

@@ -68,6 +68,13 @@ pub const LOC_MARKER: &str = ";@y.dbg.loc ";
 /// `;@y.dbg.var <index into DebugInfo::vars>`.
 pub const VAR_MARKER: &str = ";@y.dbg.var ";
 
+/// Y's gdb extension - pretty-printers and the stack-trace filter - which
+/// [`DebugInfo::finish`] embeds in every `-g` build. See the file's header.
+pub const GDB_EXTENSION: &str = include_str!("debug_info_gdb.py");
+/// The name gdb lists the embedded extension under
+/// (`info auto-load python-scripts`).
+pub const GDB_EXTENSION_NAME: &str = "ysu-gdb-extension";
+
 /// A Y type as the debugger is told about it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DbgTy {
@@ -189,6 +196,9 @@ pub struct DebugInfo {
     scope: Option<usize>,
     /// The current function's variables by binding name (`VarInfo::slot`).
     fn_vars: HashMap<String, usize>,
+    /// Method symbols (`Point_sum`) and their Y names (`Point::sum`), for the
+    /// stack traces the gdb extension prints.
+    methods: BTreeMap<String, String>,
 }
 
 impl DebugInfo {
@@ -208,7 +218,31 @@ impl DebugInfo {
             scopes: Vec::new(),
             scope: None,
             fn_vars: HashMap::new(),
+            methods: BTreeMap::new(),
         }
+    }
+
+    /// `symbol` is the method `display` (`Type::method`).
+    pub fn set_method(&mut self, symbol: &str, display: &str) {
+        self.methods.insert(symbol.to_string(), display.to_string());
+    }
+
+    /// The text embedded in `.debug_gdb_scripts`: the program's own facts the
+    /// extension needs, then the extension itself.
+    pub fn gdb_script(&self) -> String {
+        let enums: Vec<String> = self
+            .enums
+            .iter()
+            .map(|(n, e)| format!("\"{}\": {}", n, if e.has_data { "True" } else { "False" }))
+            .collect();
+        let methods: Vec<String> =
+            self.methods.iter().map(|(s, d)| format!("\"{}\": \"{}\"", s, d)).collect();
+        format!(
+            "Y_PROGRAM = {{\"enums\": {{{}}}, \"methods\": {{{}}}}}\n{}",
+            enums.join(", "),
+            methods.join(", "),
+            GDB_EXTENSION
+        )
     }
 
     /// `item` (see [`item_names`]) was parsed from `path`, an `import`ed file.
@@ -625,6 +659,24 @@ impl DebugInfo {
             }
             out.push_str(line);
             out.push('\n');
+        }
+
+        // The gdb extension, as an inline script gdb auto-loads with the
+        // program (section type 4: Python text, a name line, then the text).
+        // `@llvm.used` keeps an optimising build from dropping it.
+        let script = format!("\u{4}{}\n{}", GDB_EXTENSION_NAME, self.gdb_script());
+        writeln!(
+            out,
+            "\n@__y_debug_gdb_scripts = linkonce_odr unnamed_addr constant [{} x i8] c\"{}\\00\", \
+             section \".debug_gdb_scripts\", align 1",
+            script.len() + 1,
+            md_escape(&script)
+        )
+        .unwrap();
+        if !module.contains("@llvm.used ") {
+            out.push_str(
+                "@llvm.used = appending global [1 x ptr] [ptr @__y_debug_gdb_scripts], section \"llvm.metadata\"\n",
+            );
         }
 
         out.push_str("\n; --- Debug information (Y -g) ---\n");

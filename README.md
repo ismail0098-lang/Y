@@ -2485,38 +2485,39 @@ gdb ./prog
 (gdb) run
 ```
 
-What a session looks like — gdb's output on `tests/debug_info.rs`'s fixture,
-compiled as `prog.ysu`; unedited except that some locals and the fixture's
-`// L:` line tags are left out:
+What a session looks like — gdb on `tests/debug_info.rs`'s fixture compiled as
+`prog.ysu`, with the program in gdb's auto-load safe path as `--debug` arranges;
+unedited except that some locals are left out:
 
 ```text
 (gdb) break scale
-Breakpoint 1 at 0x2677: file prog.ysu, line 15.
+Breakpoint 1 at 0x2677: file prog.ysu, line 14.
 (gdb) run
-Breakpoint 1, scale (p=..., k=7) at prog.ysu:15
-15	    let s: I32 = p.x * k;
+Breakpoint 1, scale (p=..., k=7) at prog.ysu:14
+14	    let s: I32 = p.x * k;
 (gdb) bt
-#0  scale (p=..., k=7) at prog.ysu:15
-#1  0x0000555555556845 in main () at prog.ysu:62
-#2  0x000055555555b97d in main ()
+#0  scale (p=..., k=7) at prog.ysu:14
+#1  main () at prog.ysu:61
 (gdb) up
-#1  0x0000555555556845 in main () at prog.ysu:62
-62	    let r: I32 = scale(p, a);
+#1  0x0000555555556845 in main () at prog.ysu:61
+61	    let r: I32 = scale(p, a);
 (gdb) info locals
-a = 7
-big = 5000000000
-u = 4000000000
-ch = 65 'A'
-c = Blue
-p = {x = 5, y = 1.25, flag = true}
-v = {10, 20, 0}
 total = 12
-(gdb) print *name
-$1 = {data = 0x40600010 "hello", len = 5, cap = 6}
+greet = "x"
+name = "hello"
+v = {10, 20, 0}
+p = {x = 5, y = 1.25, flag = true}
+c = Color::Blue
+ch = 65 'A'
+u = 4000000000
+big = 5000000000
+a = 7
 ```
 
-`u` is a `U32` above 2^31, printed unsigned; `c` is an enum, printed by
-variant; frame `#2` is the C runtime's `main` (below).
+`u` is a `U32` above 2^31, printed unsigned; `name` and `greet` are `String`s,
+printed as their text; `c` is an enum, printed as `Enum::Variant`. The
+backtrace is the Y one: the C runtime's frames below `fn main` are left out
+(`bt -no-filters` shows them). `r` is not listed: its `let` has not run yet.
 
 **It describes what the compiled program actually holds, and that is checked,
 not assumed.** This backend keeps each binding in a stack slot of its own and
@@ -2540,13 +2541,21 @@ Things to know:
   process's `main` — it sets up the allocator and the program's stack before
   calling yours, which is emitted as `ysu_main`. The debugger still calls it
   `main` in backtraces. Use `break ysu_main`, a `file:line`, or `--debug`.
-- A **`String`** is a pointer to the runtime's `YStr`: `print *s` shows
-  `data`, `len` and `cap`, and `print s->data` the text.
-- A **`@ZeroDrift`** accumulator holds its exact representation, not the
-  value: its type reads `Q32.32_raw` (or `Q16.16_raw`), so the value is
-  `acc / 2^32`.
-- A **data-carrying enum** shows its `tag` by variant name and its payload as
-  raw words.
+- **Y values print as Y** through an extension the compiler embeds in every
+  `-g` build (`src/debug_info_gdb.py`, in the program's `.debug_gdb_scripts`
+  section): a `String` as its text, an enum as `Color::Blue`, an `I8`/`U8` as a
+  number rather than a character, and a `@ZeroDrift` accumulator as its exact
+  value - `acc = 3.75 (Q32.32)` - where the slot holds `value * 2^32`.
+  `print/r` shows the raw representation the debug information describes, and
+  `print *s` a `String`'s `data`, `len` and `cap`. The extension only formats
+  what the DWARF says; a struct prints as gdb prints it.
+- **gdb runs that extension only for a program in its auto-load safe path.**
+  `--debug` adds the program it built. With plain `gdb ./prog`, gdb declines
+  it with a warning naming the line to add to `~/.config/gdb/gdbinit`
+  (`add-auto-load-safe-path /path/to/prog`, or a directory), and shows the raw
+  view meanwhile.
+- **Backtraces show Y frames**: a method by its Y name (`Point::sum`), no
+  return addresses, and none of the C runtime's frames below `fn main`.
 - **A variable is visible exactly where its scope is**: from the statement
   after its `let` to the end of its block, a `for` loop's variable inside the
   loop. Before its `let` and after its block, `print x` answers
@@ -2563,8 +2572,10 @@ Things to know:
   build yet.
 - **VS Code** works through the C/C++ extension's debugger (`cppdbg`,
   `MIMode: gdb`); the bundled `ysu-lang` extension is what lets you set
-  breakpoints in `.ysu` files. The `tasks.json` and `launch.json` are in the
-  manual, §38.5.
+  breakpoints in `.ysu` files. With the `setupCommands` in the manual, §38.5,
+  its variables view shows the Y values and its call stack the Y frames.
+- A **data-carrying enum** cannot be constructed on the LLVM backend yet (it
+  is refused by name), so the debugger has none to show.
 
 ---
 

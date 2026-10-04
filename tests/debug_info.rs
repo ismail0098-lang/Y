@@ -130,13 +130,30 @@ fn emit_ll(dir: &Path, name: &str, src: &str, g: bool) -> String {
     fs::read_to_string(&ll).expect("read module")
 }
 
-/// gdb in batch mode, reading no user configuration, on a script.
+/// gdb in batch mode, reading no user configuration, on a script. The Y
+/// extension embedded in the program is NOT loaded - the program is outside
+/// gdb's auto-load safe path - so this is the plain DWARF view.
 fn gdb(dir: &Path, bin: &Path, script: &str) -> String {
+    gdb_session(dir, bin, script, false)
+}
+
+/// The same with the program in gdb's auto-load safe path, so gdb runs the
+/// Y extension embedded in it, as `Y prog.ysu --debug` arranges.
+fn gdb_y(dir: &Path, bin: &Path, script: &str) -> String {
+    gdb_session(dir, bin, script, true)
+}
+
+fn gdb_session(dir: &Path, bin: &Path, script: &str, extension: bool) -> String {
     let file = dir.join(format!("script_{}.gdb", SALT.fetch_add(1, Ordering::SeqCst)));
     fs::write(&file, format!("set debuginfod enabled off\nset pagination off\n{}", script))
         .expect("write script");
     let mut c = Command::new("gdb");
-    c.args(["-nx", "-q", "-batch", "-x"]).arg(&file).arg(bin).stdin(Stdio::null()).current_dir(dir);
+    c.args(["-nx", "-q", "-batch"]);
+    if extension {
+        let abs = fs::canonicalize(bin).expect("canonical program path");
+        c.arg("-iex").arg(format!("add-auto-load-safe-path {}", abs.display()));
+    }
+    c.arg("-x").arg(&file).arg(bin).stdin(Stdio::null()).current_dir(dir);
     run_with_deadline(&mut c, dir, 120).1
 }
 
@@ -632,7 +649,7 @@ fn debug_starts_gdb_on_the_first_line_of_main() {
     let path = dir.join("fixture.ysu");
     fs::write(&path, FIXTURE).expect("write source");
     let commands = dir.join("commands.txt");
-    fs::write(&commands, "next\nprint a\ncontinue\n").expect("write commands");
+    fs::write(&commands, "info auto-load python-scripts\nnext\nprint a\ncontinue\n").expect("write commands");
     let mut c = y(&dir);
     c.arg(&path)
         .arg("--debug")
@@ -647,6 +664,14 @@ fn debug_starts_gdb_on_the_first_line_of_main() {
     let at = format!(", main () at fixture.ysu:{}", first);
     assert!(out.contains(&at), "--debug did not stop at `{}`:\n{}", at, out);
     assert!(out.contains("$1 = 7"), "`print a` after one `next`:\n{}", out);
+    // The launcher put the program in gdb's safe path, so the Y extension
+    // embedded in it is running in the session.
+    assert!(
+        out.lines().any(|l| l.contains("Yes") && l.contains("ysu-gdb-extension")),
+        "--debug did not load the Y extension:\n{}",
+        out
+    );
+    assert!(!out.contains("auto-loading has been declined"), "{}", out);
     assert!(out.contains("exited with code 0120"), "the program did not run to its end (exit 80):\n{}", out);
     assert_eq!(status, Some(0), "gdb's exit status:\n{}", out);
 }
@@ -869,4 +894,270 @@ fn an_unreachable_binding_is_not_described() {
     );
     assert!(out.contains("a = 3"), "the reachable binding is missing:\n{}", out);
     assert!(out.contains("No symbol \"dead_v\" in current context."), "the dead binding is described:\n{}", out);
+}
+
+/// A program for the gdb extension: every value it formats, and a method in
+/// the call stack.
+const PRINTERS: &str = "\
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+struct Point {
+    x: I32,
+    y: I32,
+}
+
+impl Point {
+    fn sum(p: Point) -> I32 {
+        let s: I32 = p.x + p.y; // L:sum
+        return s;
+    }
+}
+
+fn scale(p: Point, k: I32) -> I32 {
+    let r: I32 = Point::sum(p) * k; // L:scale
+    return r;
+}
+
+@unsafe
+fn main() -> I32 {
+    let name: String = \"hello\";
+    let copy: String = String_new(\"hi\");
+    let c: Color = Color::Blue;
+    let small: I8 = -5;
+    let byte: U8 = 200;
+    @ZeroDrift @bounds(-1000, 1000)
+    let acc: F32 = 0.0;
+    acc += 1.5;
+    acc += 2.25;
+    @ZeroDrift @bounds(-1000, 1000)
+    let neg: F32 = 0.0;
+    neg -= 2.5;
+    @ZeroDrift @bounds(-1000, 1000)
+    let tenth: F32 = 0.0;
+    tenth += 0.1;
+    println(copy); // L:println
+    let p: Point = Point { x: 3, y: 4 };
+    let r: I32 = scale(p, 2); // L:call
+    return r;
+}
+";
+
+/// `raw / 2^frac` written out exactly - the oracle for the extension's
+/// fixed-point printer, computed here independently of it.
+fn exact_decimal(raw: i128, frac: u32) -> String {
+    let sign = if raw < 0 { "-" } else { "" };
+    let a = raw.unsigned_abs();
+    let whole = a >> frac;
+    let rest = a & ((1u128 << frac) - 1);
+    if rest == 0 {
+        return format!("{}{}", sign, whole);
+    }
+    let digits = format!("{:0>width$}", rest * 5u128.pow(frac), width = frac as usize);
+    format!("{}{}.{}", sign, whole, digits.trim_end_matches('0'))
+}
+
+/// With the extension loaded, a Y value prints as Y: a `String` as its text,
+/// an enum as `Enum::Variant`, an `I8`/`U8` as a number, and a `@ZeroDrift`
+/// accumulator as its exact value - while `print/r` still shows the raw
+/// representation the DWARF describes.
+#[test]
+fn y_values_print_as_y() {
+    if !have("gdb") {
+        return skip("y_values_print_as_y", "gdb");
+    }
+    let dir = scratch("printers");
+    let bin = build(&dir, "printers", PRINTERS, true);
+    let out = gdb_y(
+        &dir,
+        &bin,
+        &format!(
+            "info auto-load python-scripts\nbreak printers.ysu:{}\nrun\n\
+             print name\nprint copy\nprint c\nprint small\nprint byte\n\
+             whatis acc\nprint acc\nprint/r acc\nprint neg\nprint/r neg\nprint tenth\nprint/r tenth\n\
+             print *name\nkill\n",
+            line_of(PRINTERS, "call")
+        ),
+    );
+    assert!(
+        out.lines().any(|l| l.starts_with("Yes") && l.contains("ysu-gdb-extension")),
+        "the embedded extension did not load:\n{}",
+        out
+    );
+    for want in [
+        "$1 = \"hello\"",
+        "$2 = \"hi\"",
+        "$3 = Color::Blue",
+        "$4 = -5",
+        "$5 = 200",
+    ] {
+        assert!(out.lines().any(|l| l == want), "missing `{}`:\n{}", want, out);
+    }
+    // The fixed-point values against an oracle computed from the raw words.
+    let ty = out.lines().find_map(|l| l.strip_prefix("type = ")).expect("acc's type").to_string();
+    let frac: u32 = ty
+        .strip_suffix("_raw")
+        .and_then(|q| q.split_once('.'))
+        .and_then(|(_, f)| f.parse().ok())
+        .unwrap_or_else(|| panic!("acc's type `{}` is not a Q format", ty));
+    let repr = ty.strip_suffix("_raw").unwrap();
+    let raw_of = |n: usize| -> i128 {
+        let key = format!("${} = ", n);
+        out.lines()
+            .find_map(|l| l.strip_prefix(key.as_str()))
+            .unwrap_or_else(|| panic!("no ${}:\n{}", n, out))
+            .parse()
+            .unwrap_or_else(|_| panic!("${} is not an integer:\n{}", n, out))
+    };
+    for (shown, raw, value) in [(6, 7, Some("3.75")), (8, 9, Some("-2.5")), (10, 11, None)] {
+        let r = raw_of(raw);
+        let exact = exact_decimal(r, frac);
+        if let Some(v) = value {
+            assert_eq!(exact, v, "the raw word ${} is not {}", raw, v);
+        }
+        let want = format!("${} = {} ({})", shown, exact, repr);
+        assert!(out.lines().any(|l| l == want), "missing `{}`:\n{}", want, out);
+    }
+    // The raw structure is still there to look at.
+    assert!(out.contains("len = 5, cap = 6"), "`print *name` lost the YStr view:\n{}", out);
+}
+
+/// A backtrace shows Y frames: a method by its Y name, no return addresses,
+/// and none of the C runtime's frames below `fn main`. `bt -no-filters` is
+/// gdb's own view, and still has them.
+#[test]
+fn a_backtrace_shows_the_y_frames() {
+    if !have("gdb") {
+        return skip("a_backtrace_shows_the_y_frames", "gdb");
+    }
+    let dir = scratch("bt");
+    let bin = build(&dir, "printers", PRINTERS, true);
+    let out = gdb_y(
+        &dir,
+        &bin,
+        &format!(
+            "break printers.ysu:{}\nrun\necho @@bt\\n\nbt\necho @@raw\\n\nbt -no-filters\nkill\n",
+            line_of(PRINTERS, "sum")
+        ),
+    );
+    let bt: Vec<&str> = out
+        .split("@@bt")
+        .nth(1)
+        .and_then(|r| r.split("@@raw").next())
+        .expect("the filtered backtrace")
+        .lines()
+        .filter(|l| l.starts_with('#'))
+        .collect();
+    let raw: Vec<&str> = out
+        .split("@@raw")
+        .nth(1)
+        .expect("the unfiltered backtrace")
+        .lines()
+        .filter(|l| l.starts_with('#'))
+        .collect();
+    let want = [
+        format!("#0  Point::sum (p=...) at printers.ysu:{}", line_of(PRINTERS, "sum")),
+        format!("#1  scale (p=..., k=2) at printers.ysu:{}", line_of(PRINTERS, "scale")),
+        format!("#2  main () at printers.ysu:{}", line_of(PRINTERS, "call")),
+    ];
+    assert_eq!(bt, want, "the Y backtrace:\n{}", out);
+    // gdb's own view: the symbol name, return addresses, and the runtime's
+    // `main` below the Y one.
+    assert!(raw.len() > bt.len(), "bt -no-filters shows no more than bt:\n{}", out);
+    assert!(raw[0].contains("Point_sum"), "{}", out);
+    assert!(raw.iter().any(|l| l.contains(" in main ()") && !l.contains(" at ")), "no runtime main:\n{}", out);
+}
+
+/// What Y code CALLED stays in the backtrace even without Y source - stopped
+/// inside the runtime's `println`, that frame is where the program is. Only
+/// the frames BELOW `fn main` are the runtime's own business.
+#[test]
+fn a_runtime_frame_above_y_code_is_kept() {
+    if !have("gdb") {
+        return skip("a_runtime_frame_above_y_code_is_kept", "gdb");
+    }
+    let dir = scratch("bt_runtime");
+    let bin = build(&dir, "printers", PRINTERS, true);
+    let out = gdb_y(&dir, &bin, "break println\nrun\necho @@bt\\n\nbt\nkill\n");
+    let bt: Vec<&str> = out
+        .split("@@bt")
+        .nth(1)
+        .expect("the backtrace")
+        .lines()
+        .filter(|l| l.starts_with('#'))
+        .collect();
+    assert_eq!(bt.len(), 2, "want println's frame and main's:\n{}", out);
+    assert!(bt[0].starts_with("#0") && bt[0].contains("println"), "{}", out);
+    assert_eq!(bt[1], format!("#1  main () at printers.ysu:{}", line_of(PRINTERS, "println")), "{}", out);
+}
+
+/// Without the program in gdb's safe path, gdb declines the extension - and
+/// the values are the raw DWARF view. That is the control: it is the
+/// extension, not a change to the debug information, that formats them.
+#[test]
+fn outside_the_safe_path_gdb_shows_the_raw_view() {
+    if !have("gdb") {
+        return skip("outside_the_safe_path_gdb_shows_the_raw_view", "gdb");
+    }
+    let dir = scratch("declined");
+    let bin = build(&dir, "printers", PRINTERS, true);
+    let out = gdb(
+        &dir,
+        &bin,
+        &format!("break printers.ysu:{}\nrun\nprint c\nprint small\nkill\n", line_of(PRINTERS, "call")),
+    );
+    assert!(out.contains("auto-loading has been declined"), "gdb loaded it anyway:\n{}", out);
+    assert!(out.lines().any(|l| l == "$1 = Blue"), "{}", out);
+    assert!(out.lines().any(|l| l.starts_with("$2 = -5 '")), "{}", out);
+}
+
+/// The section gdb reads is the compiler's extension, byte for byte, after
+/// the program's own facts.
+#[test]
+fn the_embedded_extension_is_the_compilers_file() {
+    if !have("objcopy") {
+        return skip("the_embedded_extension_is_the_compilers_file", "objcopy");
+    }
+    let dir = scratch("section");
+    let bin = build(&dir, "printers", PRINTERS, true);
+    let dump = dir.join("scripts.bin");
+    let st = Command::new("objcopy")
+        .arg("--dump-section")
+        .arg(format!(".debug_gdb_scripts={}", dump.display()))
+        .arg(&bin)
+        .arg(dir.join("stripped"))
+        .status()
+        .expect("run objcopy");
+    assert!(st.success(), "objcopy found no .debug_gdb_scripts section");
+    let bytes = fs::read(&dump).expect("read the section");
+    let ext = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/debug_info_gdb.py"))
+        .expect("read src/debug_info_gdb.py");
+    let head = "\u{4}ysu-gdb-extension\n";
+    let text = String::from_utf8(bytes).expect("the section is text");
+    assert!(text.starts_with(head), "not an inline Python script entry: {:?}", &text[..text.len().min(40)]);
+    let body = text[head.len()..].strip_suffix('\0').expect("NUL-terminated");
+    let (facts, rest) = body.split_once('\n').expect("the program's facts, then the extension");
+    assert!(facts.starts_with("Y_PROGRAM = {"), "{}", facts);
+    assert!(facts.contains("\"Color\": False"), "{}", facts);
+    assert!(facts.contains("\"Point_sum\": \"Point::sum\""), "{}", facts);
+    assert_eq!(rest, ext, "the embedded extension differs from src/debug_info_gdb.py");
+}
+
+/// `String_new` of a literal holds the literal's text. A literal reaches it
+/// as a string HANDLE, which it read as text: `String_new("hi")` printed `(`.
+#[test]
+fn string_new_holds_the_text_it_was_given() {
+    let dir = scratch("string_new");
+    let bin = build(
+        &dir,
+        "sn",
+        "fn main() -> I32 {\n    let s: String = String_new(\"hi\");\n    println(s);\n    \
+         let t: String = String_new(s);\n    println(t);\n    return 0;\n}\n",
+        false,
+    );
+    let out = Command::new(&bin).output().expect("run");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hi\nhi\n");
 }

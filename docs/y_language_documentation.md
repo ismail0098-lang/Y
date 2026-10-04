@@ -5182,19 +5182,30 @@ IR with its debug metadata instead of building.
 
 | Y type | gdb shows |
 | :--- | :--- |
-| `I8` … `I64`, `isize` | signed integers, typed `I32` etc. A one-byte integer also shows its character (`-5 '\373'`), as gdb does for C |
+| `I8` … `I64`, `isize` | signed integers, typed `I32` etc.: `-5` for an `I8` (gdb alone would add the character a C `char` with that value is, `-5 '\373'`) |
 | `U8` … `U64`, `usize` | unsigned integers: `4000000000` for a `U32` above 2^31 |
 | `F16`, `F32`, `F64` | floating point |
 | `bool` | `true` / `false` |
 | `char` | `65 'A'` |
-| `String` | a pointer to the runtime's `YStr`: `print *s` gives `{data = 0x… "hello", len = 5, cap = 6}`, `print s->data` the text |
+| `String` | its text: `"hello"`. It is the runtime's `YStr*`: `print *s` gives `{data = 0x… "hello", len = 5, cap = 6}` |
 | `&T`, `&mut T`, `GlobalMemory<T>` | a pointer to `T` |
 | a `struct` | its fields: `{x = 5, y = 1.25, flag = true}` |
 | `[T; N]` | the array: `{10, 20, 0}` |
-| an `enum` | the variant's name: `Blue` |
-| an `enum` with data | `{tag = Circle, payload = {…}}` — the payload as the raw words it is |
-| a `@ZeroDrift` accumulator | its exact representation, typed `Q32.32_raw` or `Q16.16_raw` (or `I64`): `print acc / 4294967296.0` gives the value of a `Q32.32` |
+| an `enum` | `Enum::Variant`: `Color::Blue` |
+| a `@ZeroDrift` accumulator | its exact value and the representation chosen for it: `3.75 (Q32.32)`. The slot holds `value * 2^32`, typed `Q32.32_raw` (or `Q16.16_raw`; an integer accumulator is a plain `I64`); `print/r acc` shows that raw word |
 | `Vec`, `Box`, other handles | an address |
+
+**The Y column is an extension, and gdb runs it for a program it trusts.**
+The compiler embeds `src/debug_info_gdb.py` in every `-g` build, in the
+program's `.debug_gdb_scripts` section, with a line of the program's own facts
+(its enums, and which symbols are methods). gdb runs an embedded script only
+for a file in its *auto-load safe path*: `--debug` adds the program it built;
+with plain `gdb ./prog`, gdb declines with a warning naming the line to add to
+`~/.config/gdb/gdbinit` - `add-auto-load-safe-path /path/to/prog`, or a
+directory holding your programs - and shows the plain DWARF view: a `String`
+as an address, an enum as `Blue`, an accumulator as its raw word. The
+extension formats what the debug information says and decides nothing itself:
+`print/r` bypasses it, and a struct or an array prints as gdb prints it.
 
 **The debugger is told what the compiled program holds, and that is checked.**
 The LLVM backend keeps each binding in a stack slot of its own, and at `-O0` the
@@ -5250,6 +5261,19 @@ The debugger calls it `main` in backtraces, but `break main` resolves to the
 runtime's `main` and stops there first, with no source to show. Use
 `break ysu_main`, a `file:line`, or `--debug`, which does that for you.
 
+With the extension running, `bt` is the Y backtrace: Y frames, a method by its
+Y name, no return addresses, and nothing below `fn main`:
+
+```text
+(gdb) bt
+#0  Point::sum (p=...) at printers.ysu:14
+#1  scale (p=..., k=2) at printers.ysu:20
+#2  main () at printers.ysu:43
+```
+
+`bt -no-filters` is gdb's own view, with the runtime's `main` below the Y one
+and the method as its symbol, `Point_sum`.
+
 ### 38.5 VS Code
 
 The C/C++ extension (`ms-vscode.cpptools`) debugs a `-g` Y program through gdb.
@@ -5289,7 +5313,12 @@ breakpoint in a `.ysu` file at all.
       "cwd": "${fileDirname}",
       "MIMode": "gdb",
       "preLaunchTask": "Y: build with -g",
-      "setupCommands": [{ "text": "set debuginfod enabled off" }]
+      "setupCommands": [
+        { "text": "set debuginfod enabled off" },
+        { "text": "-enable-pretty-printing" },
+        { "text": "-enable-frame-filters" },
+        { "text": "add-auto-load-safe-path ${workspaceFolder}" }
+      ]
     }
   ]
 }
@@ -5300,7 +5329,11 @@ verified: the extension's own debug adapter (`OpenDebugAD7`, cpptools 1.35.2),
 driven over the Debug Adapter Protocol with this configuration, accepts a
 breakpoint on a `.ysu` line, stops there, reports the frame with its `.ysu`
 source and line, lists the locals with their Y types and values, and steps.
-The editor's UI itself was not exercised.
+With the last three `setupCommands` its variables view shows the Y values
+(`name = "hello"`, `c = Color::Blue`, `acc = 3.75 (Q32.32)`) and its call stack
+exactly the Y frames (`Point::sum`, `scale`, `main`); without them, the plain
+DWARF view and the runtime's `main` below yours. The editor's UI itself was
+not exercised.
 
 ### 38.6 Limits
 
@@ -5310,6 +5343,8 @@ The editor's UI itself was not exercised.
 - **`-O0` only.** `-g` compiles unoptimised, so every variable lives in its
   stack slot at every statement boundary. There is no optimised debuggable
   build yet.
+- **A data-carrying enum cannot be constructed on the LLVM backend yet**: the
+  constructor call is refused by name, so there is no such value to show.
 - A kernel the LLVM backend replaces with the packed GEMM keeps its parameters
   but has no body variables: the code that runs is the GEMM, not the loop nest.
 - A `fn main` with no return type leaves the process's exit status undefined,
