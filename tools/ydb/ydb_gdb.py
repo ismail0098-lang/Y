@@ -7,7 +7,8 @@
 #
 # The launcher passes the program's source and the compiler in the
 # environment: YDB_PROGRAM (the .ysu), YDB_Y (the compiler), YDB_CWD (the
-# directory to compile in, for its .ysu_hw_profile).
+# directory to compile in, for its .ysu_hw_profile), and YDB_HOST (how the
+# binary was built, `clang -O0`; absent when there is no binary).
 
 import math
 import os
@@ -19,6 +20,7 @@ import gdb
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ymap  # noqa: E402
+import yverify  # noqa: E402
 
 
 def _program():
@@ -364,7 +366,81 @@ class YAsm(gdb.Command):
                 print("  " + i)
 
 
+def _guarantees():
+    """(table, where it came from). The facts the binary being debugged
+    carries describe THAT binary; with no binary - or one built by a compiler
+    that records none - the source is compiled with `--emit-guarantees`."""
+    import __main__
+    carried = getattr(__main__, "Y_PROGRAM", None)
+    if isinstance(carried, dict) and carried.get("guarantees"):
+        return carried["guarantees"], "the facts this binary carries"
+    prog = _program()
+    if not prog:
+        raise gdb.GdbError("ydb did not say which source this program came from (YDB_PROGRAM)")
+    key = ("guarantees", prog)
+    if key not in _MAP:
+        try:
+            _MAP[key] = yverify.facts_from_compiler(prog, os.environ.get("YDB_Y"), os.environ.get("YDB_CWD"))
+        except yverify.ToolError as e:
+            raise gdb.GdbError(str(e))
+    return _MAP[key], "Y --emit-guarantees, since there is no binary carrying them"
+
+
+def _gpu_ptx():
+    """This program's PTX, compiled once per session: (text, None) or
+    (None, why not)."""
+    prog = _program()
+    key = ("ptx", prog)
+    if key not in _MAP:
+        _MAP[key] = yverify.compile_ptx(prog, os.environ.get("YDB_Y"), os.environ.get("YDB_CWD"))
+    return _MAP[key]
+
+
+class YVerify(gdb.Command):
+    """What covers a line: what the compiler proved, checked or assumed there,
+    and what checks the code it became.
+
+    verify          the current line
+    verify LINE     a line of the current file (of the program, with no process)
+
+    For each fact it says how it is established - PROVED (z3, the interval
+    analysis, a Rocq proof), CHECKED, RUN-TIME, TESTED, TRUSTED, NOT CHECKED -
+    and the assumptions a proof used. For a kernel it adds the repository's
+    evidence about the PTX and SASS it becomes: the proofs of the lowering it
+    was given, and tools/ptxas_tval's validation where this compile's kernel
+    is the committed one it is about."""
+
+    def __init__(self):
+        super().__init__("verify", gdb.COMMAND_DATA)
+
+    def invoke(self, arg, from_tty):
+        parts = arg.split()
+        if len(parts) > 1 or (parts and not re.fullmatch(r"\d+", parts[0])):
+            raise gdb.GdbError("verify [LINE]")
+        filename, line = None, None
+        try:
+            sal = gdb.selected_frame().find_sal()
+            if sal.symtab is not None:
+                filename, line = sal.symtab.fullname(), sal.line
+        except gdb.error:
+            pass
+        if parts:
+            line = int(parts[0])
+        if filename is None:
+            filename = _program()
+        if line is None:
+            raise gdb.GdbError("no current line: verify LINE")
+        g, source = _guarantees()
+        item = yverify.enclosing_item(g, filename, line)
+        ptx, why = (None, None)
+        if item is not None and item["kind"] == "kernel":
+            ptx, why = _gpu_ptx()
+        print(yverify.report(_program(), line, g, source, file=filename,
+                             host=os.environ.get("YDB_HOST"), gpu_ptx=ptx, gpu_error=why))
+
+
 YBreak()
 YLocals()
 YTensor()
 YAsm()
+YVerify()

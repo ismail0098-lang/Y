@@ -11,7 +11,9 @@
 # described, so what it prints is that value. `print/r` bypasses it.
 #
 # The compiler prepends one line, `Y_PROGRAM = {...}`, describing the
-# program: its enums, and the symbols that are methods.
+# program: its enums, the symbols that are methods, and what the compiler
+# checked, proved or assumed about each line (`guarantees`, which
+# `tools/ydb`'s `verify` reads; `src/guarantees.rs`).
 
 import re
 
@@ -21,7 +23,7 @@ from gdb.FrameDecorator import FrameDecorator
 try:
     Y_PROGRAM
 except NameError:  # loaded by hand, outside a Y program
-    Y_PROGRAM = {"enums": {}, "methods": {}}
+    Y_PROGRAM = {"enums": {}, "methods": {}, "guarantees": None}
 
 _OBJFILE = gdb.current_objfile()
 

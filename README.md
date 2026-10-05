@@ -236,6 +236,9 @@ matters more than any single row below:
 - **Tested** — differentials, corpus sweeps and mutation tables. Strong evidence,
   and not a proof.
 
+`ydb`'s `verify` reports all three for one line of your own program - see
+[`verify`: what covers a line](#verify-what-covers-a-line).
+
 | kernel | proved | validated through `ptxas` | trusted or open |
 |---|---|---|---|
 | **CPU exact GEMM** (`vpdpwssd`) | **End to end**: the threaded, tiled, row- or K-split kernel holds the source dot products. The operand licence is checked exhaustively over int16, and a compilation emits its own certificate. | not applicable | `vpdpwssd`'s semantics (pinned on hardware, not proved); the ordering `pthread_join` imposes (ThreadSanitizer, dynamic); everything below the LLVM IR |
@@ -2430,6 +2433,7 @@ throughout.
 | `--emit-llvm` | LLVM IR | real |
 | `--emit-ptx` | NVIDIA PTX | real |
 | `--lineinfo` | with `--emit-ptx`: a PTX line table, so `ptxas -lineinfo` carries each Y line into the SASS — see [GPU kernels](#gpu-kernels-which-ptx-and-sass-a-line-became) | real; refused by every other backend |
+| `--emit-guarantees` | what the front end proved, checked or took on trust about each line, as JSON (`<stem>.guarantees.json`, or `-o`) - the table `ydb`'s `verify` reads; compiles nothing | real; refuses any backend or debug flag beside it |
 | `--emit-native` | standalone x86-64 ELF | **straight-line subset over `I32` and `bool` only**, calling only the program's own functions; refuses the rest by name |
 | `--emit-cpu` | prints **scalar host Rust** source **for you to paste** — Y never compiles it | real, but not a build step; gated on `rustc` accepting what it prints, verbatim. **It emits no SIMD**: measured, 0 of 46 corpus blobs contain a vector intrinsic, vector type or `target_feature` |
 | `--emit-attention-ptx <head_dim> <seq_len>` | the exact-attention kernel, to stdout | real; both positional arguments are required and refused by name if absent |
@@ -2687,6 +2691,7 @@ python3 tools/ydb/ydb prog.ysu -- a b     # arguments for the program
 | `tensor v` / `tensor Out 64` | a buffer's elements and statistics (min, max, mean, zeros, NaN, inf); an array's length is its own, a pointer (a `GlobalMemory` parameter) needs a count |
 | `asm` | the machine code the current line became |
 | `asm --ptx 14` / `asm --sass 14` | the PTX and SASS a kernel's line became, through `Y --emit-ptx --lineinfo` and `ptxas -lineinfo` at the module's own `.target` |
+| `verify` / `verify 14` | what covers a line: what the compiler proved, checked or took on trust there, and what checks the code it became - see below |
 
 A session on a program with a `Point`, an array `v`, an inner `let a` that
 shadows an outer one, and a kernel `bump` the host calls (abridged):
@@ -2725,6 +2730,88 @@ block, as it does in the program.
   uses no GPU intrinsic; one that calls `thread_idx_x()` does not build for the
   host at all. For such a program ydb says so, starts without a process, and
   the GPU commands still answer.
+
+#### `verify`: what covers a line
+
+`verify` answers two questions about the current line, or a given one, that
+the rest of the debugger cannot: what did the compiler establish here, and
+what checks the code this line became?
+
+```text
+(ydb) break prog:7
+(ydb) run
+Breakpoint 1, total (n=3) at prog.ysu:7
+7	        s = s + v[i];
+(ydb) verify
+prog.ysu:7  s = s + v[i];
+in fn total (prog.ysu:1-9)
+
+What the compiler established (the facts this binary carries):
+  PROVED       v[i]: in bounds: the index lies in [0, 5] and there are 8 elements, so no run-time
+               check is emitted
+               assumes, without checking: @bounds(0, 6) on `m` (prog.ysu:2)
+  PROVED       @invariant(i >= 0) (the loop at line 6): z3 proved it holds when the loop is entered
+               and that every iteration preserves it
+               assumes, without checking: @bounds(0, 6) on `m` (prog.ysu:2)
+  CHECKED      fn total (lines 1-9): strict mode: every `let` is initialised, ...
+
+The code this process runs (clang -O0, from the LLVM IR):
+  TRUSTED      everything below the LLVM IR - clang, the assembler, the linker and the processor.
+               Nothing checks the machine code against the IR.
+```
+
+`m` is `@bounds(0, 6)` on a parameter nothing bounds, so its range is taken on
+trust, and both proofs on the line used it, so both say so: a proof from a
+trusted premise is a proof from that premise.
+
+On a kernel's line `verify` adds what checks the PTX and SASS the line becomes.
+The repository's evidence is credited only where it applies. A proof about a
+LOWERING - the int8 and tensor-core GEMMs - is credited to a kernel given that
+lowering, whatever its shape. A proof or a `tools/ptxas_tval` standing result
+about one committed kernel is credited only to a kernel whose PTX is that
+kernel's, instruction for instruction; a kernel with the same name and one
+instruction changed gets none of it:
+
+```text
+$ python3 tools/ydb/yverify.py tests/exact_pv.ysu 64
+...
+The code the GPU runs (Y --emit-ptx for sm_89, then ptxas):
+  SAME PTX     this compile's kernel is tests/exact_pv.ptx's, instruction for instruction
+  PROVED       proofs/ExactPvExact.v: The exact PV kernel computes the source dot product -- and its
+               SASS is validated (the_emitted_exact_pv_holds_the_source_dot_product). It assumes, in
+               its own words: Hidx: every index this kernel computes stays inside i32; Hin: the
+               accesses the source intends are in range; Hacc: the accumulator licence - conditions
+               on the arguments the kernel is launched with: the compiler cannot check them, and
+               nothing checks them at launch
+  VALIDATED    the SASS ptxas -O1 makes for sm_89: loopval.py proves it stores what this PTX stores
+               - a standing result of tools/ptxas_tval/regress.sh (row o1/exact_pv), not re-run here
+  ...
+  TRUSTED      ptxas: outside the validated level and architecture above, and the CUDA driver's JIT
+               if it compiles this PTX itself
+  TRUSTED      the GPU executing its instruction set
+```
+
+- **Every fact says how it is established**: PROVED (z3 for an invariant, the
+  type checker's interval analysis for an index, a Rocq proof for a kernel the
+  backend substituted), CHECKED (a rule that would have refused the program),
+  RUN-TIME (an index under `@unsafe`, checked when the program runs), TESTED
+  (the packed f32 GEMM, tested against the nest it replaces and not
+  bit-identical to it), TRUSTED, NOT CHECKED (an index into a pointer whose
+  length the compiler does not know - in strict mode too), and UNVERIFIED (an
+  invariant `Y_ALLOW_UNVERIFIED_INVARIANTS` let through).
+- **The facts come from the compiler.** `Y -g` embeds them in the program, so
+  `verify` reports what the binary being debugged was built with.
+  `Y prog.ysu --emit-guarantees` writes the same table as JSON; `verify` uses it
+  when there is no binary (a program whose kernels use GPU intrinsics), and
+  `tools/ydb/yverify.py PROGRAM LINE` prints the report without gdb.
+- **What it cannot say.** The assumptions listed for an invariant are a
+  superset: the solver is given the range of every integer in scope, so a
+  proof can be shown resting on a trusted range it did not need. The standing
+  validation results are read from `regress.sh`, not re-run. Nothing checks the
+  host's machine code against the IR.
+- Building it found that strict mode did not bounds-check an array reached
+  through a reference (`a: &mut [I16; 4]`): `a[9] = 1` compiled and wrote past
+  the array. Fixed in `034b19f`.
 
 ---
 
@@ -2778,7 +2865,8 @@ proofs/         Rocq proofs — ExactGemmSchedule.v is GENERATED
 tests/          test programs, benchmarks, PTX assembly gates
 tools/          measurement and analysis harnesses (Python), run by hand
   ydb/ymap.py   which PTX and SASS each Y line of a kernel became (--emit-ptx --lineinfo)
-  ydb/ydb       Y-aware commands over gdb (break NAME:LINE, locals, tensor, asm --ptx/--sass)
+  ydb/ydb       Y-aware commands over gdb (break NAME:LINE, locals, tensor, asm --ptx/--sass, verify)
+  ydb/yverify.py  what covers a line: the compiler's guarantees and the evidence about its code
 python/         the Python package `y_lang`: ctypes bindings to liby.so, torch
                 interop, the `y_inductor` torch.compile backend, and its tests
   ptxas_tval/     PTX-vs-SASS translation validator — see docs/

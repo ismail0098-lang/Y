@@ -629,6 +629,15 @@ fn walk_item(item: &Item, f: &mut dyn FnMut(&Stmt)) {
     }
 }
 
+/// The last line a statement of `block` starts on, at any depth, or the
+/// block's own line when it is empty. The closing brace's line is not
+/// recorded; nothing after the last statement becomes code.
+pub fn last_line(block: &Block) -> usize {
+    let mut last = block.span.line;
+    walk_block(block, &mut |s: &Stmt| last = last.max(s.span().line));
+    last
+}
+
 fn walk_block(block: &Block, f: &mut dyn FnMut(&Stmt)) {
     for stmt in &block.stmts {
         walk_stmt(stmt, f);

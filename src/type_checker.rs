@@ -11,6 +11,7 @@
 
 use crate::ast::*;
 use crate::bank_conflict::{BankConflictProver, SmemLayout as ProverLayout, SwizzlePattern};
+use crate::guarantees::{render, Assumption, Fact, Guarantees, ItemRange, Status};
 use crate::linear_tracker::LinearTracker;
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
@@ -26,7 +27,37 @@ thread_local! {
 pub struct Interval {
     pub min: i64,
     pub max: i64,
+    /// The assumptions this range rests on, as bits of
+    /// `TypeChecker::assumptions` (bit 63 stands for the 64th and later). A
+    /// `@bounds` the checker cannot check is taken on trust, and a proof that
+    /// used a range resting on one is a proof from that assumption - which
+    /// `ydb verify` has to be able to say. Every construction site states it,
+    /// so none can drop it.
+    pub trust: u64,
 }
+
+/// The assumption bit for CUDA's launch limits, the ranges
+/// `gpu_index_interval` gives the GPU index intrinsics. Always assumption 0.
+const LAUNCH_LIMITS: u64 = 1;
+
+/// One array index the checker saw, for `finish_index_facts`.
+struct IndexSite {
+    item: String,
+    what: String,
+    /// The array's element count, when the base is a fixed-size array.
+    size: Option<usize>,
+    /// What the base is, for an index whose length is not known.
+    base: String,
+    /// The interval that proved it, from a visit that did.
+    proving: Option<Interval>,
+}
+
+/// What strict mode checks, which every function and kernel not marked
+/// `@unsafe` is checked under.
+const STRICT_DETAIL: &str = "strict mode: every `let` is initialised, no raw pointer is dereferenced, \
+every loop carries an @invariant that z3 must prove, every fixed-size array index is proved in \
+bounds, and a `@bounds` variable is only assigned values inside its bounds - or the program is \
+refused. An index into a pointer whose length the compiler does not know is not covered.";
 
 #[derive(Clone, Copy)]
 enum CompileTimeValue {
@@ -198,6 +229,23 @@ pub struct TypeChecker {
     pub zk_allow_unconstrained_stack: Vec<bool>,
     /// Set by `set_zk_target` when compiling to R1CS. See that method.
     zk_target: bool,
+
+    /// What was checked, proved or assumed, for `ydb verify`. See
+    /// `guarantees.rs`.
+    pub guarantees: Guarantees,
+    /// The function or kernel being checked, spelled as
+    /// `debug_info::item_names` spells it.
+    current_item: String,
+    /// The assumptions a range can rest on, indexed by bit of
+    /// `Interval::trust`. Assumption 0 is CUDA's launch limits.
+    assumptions: Vec<Assumption>,
+    /// The assumptions of every range an SMT query was given as a fact.
+    smt_trust: std::cell::Cell<u64>,
+    /// Why the invariant just checked was NOT verified, when
+    /// `Y_ALLOW_UNVERIFIED_INVARIANTS` let the program through anyway.
+    unverified: Option<String>,
+    /// Every array index seen, keyed by position.
+    index_sites: std::collections::BTreeMap<(usize, usize), IndexSite>,
 }
 
 fn reset_thread_locals() {
@@ -222,6 +270,203 @@ impl TypeChecker {
             zk_safe_stack: vec![false],
             zk_allow_unconstrained_stack: vec![false],
             zk_target: false,
+            guarantees: Guarantees::default(),
+            current_item: String::new(),
+            assumptions: vec![Assumption {
+                item: String::new(),
+                line: 0,
+                what: "CUDA's launch limits (threadIdx.x and .y < 1024, .z < 64, blockIdx.x < 2^31 - 1, \
+blockIdx.y and .z < 65535)"
+                    .to_string(),
+            }],
+            smt_trust: std::cell::Cell::new(0),
+            unverified: None,
+            index_sites: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// A new assumption, at `line` of the item being checked; its bit.
+    fn new_assumption(&mut self, line: usize, what: String) -> u64 {
+        let id = self.assumptions.len();
+        self.assumptions.push(Assumption { item: self.current_item.clone(), line, what });
+        1u64 << id.min(63)
+    }
+
+    /// The assumptions `trust` names.
+    fn assumptions_of(&self, trust: u64) -> Vec<Assumption> {
+        self.assumptions
+            .iter()
+            .enumerate()
+            .filter(|(id, _)| trust & (1u64 << (*id).min(63)) != 0)
+            .map(|(_, a)| a.clone())
+            .collect()
+    }
+
+    /// Record a fact about the item being checked.
+    #[allow(clippy::too_many_arguments)]
+    fn fact(
+        &mut self,
+        kind: &'static str,
+        status: Status,
+        span: &Span,
+        end_line: usize,
+        what: String,
+        detail: String,
+        trust: u64,
+    ) {
+        let rests_on = self.assumptions_of(trust);
+        self.guarantees.facts.push(Fact {
+            item: self.current_item.clone(),
+            line: span.line,
+            col: span.col,
+            end_line: end_line.max(span.line),
+            kind,
+            status,
+            what,
+            detail,
+            rests_on,
+        });
+    }
+
+    /// Start checking an item: what it spans, and whether strict mode holds.
+    fn enter_item(&mut self, name: String, kind: &'static str, display: String, span: &Span, body: &Block, strict: bool) {
+        self.current_item = name.clone();
+        let end_line = crate::ast::last_line(body).max(span.line);
+        self.guarantees.items.push(ItemRange { name, kind, line: span.line, end_line });
+        if strict {
+            self.fact("safe", Status::Checked, span, end_line, display, STRICT_DETAIL.to_string(), 0);
+        } else {
+            self.fact(
+                "safe",
+                Status::NotChecked,
+                span,
+                end_line,
+                display,
+                "@unsafe: strict mode is off here - an array index the compiler cannot prove is \
+checked when the program runs instead, a loop needs no @invariant and one it has is not \
+verified, and a raw pointer may be dereferenced"
+                    .to_string(),
+                0,
+            );
+        }
+    }
+
+    /// The fact for an invariant that was just checked: proved, or let
+    /// through unverified. A refuted one has already refused the program.
+    fn invariant_fact(&mut self, inv: &Expr, span: &Span, end_line: usize, errors_before: usize) {
+        if self.errors.len() > errors_before {
+            return;
+        }
+        let what = format!("@invariant({})", render(inv));
+        match self.unverified.take() {
+            Some(why) => self.fact(
+                "invariant",
+                Status::Unverified,
+                span,
+                end_line,
+                what,
+                format!("NOT verified, because Y_ALLOW_UNVERIFIED_INVARIANTS let the program through: {}", why),
+                0,
+            ),
+            None => {
+                let trust = self.smt_trust.get();
+                self.fact(
+                    "invariant",
+                    Status::Proved,
+                    span,
+                    end_line,
+                    what,
+                    "z3 proved it holds when the loop is entered and that every iteration preserves it"
+                        .to_string(),
+                    trust,
+                );
+            }
+        }
+    }
+
+    /// Classify every index seen, once every visit to it is done: proved in
+    /// bounds, checked at run time, or not checked at all. This is the rule
+    /// all three backends follow (`SAFE_INDICES`, `INDEX_ARRAY_SIZES`).
+    fn finish_index_facts(&mut self) {
+        let sites = std::mem::take(&mut self.index_sites);
+        for ((line, col), site) in sites {
+            self.current_item = site.item.clone();
+            let span = Span { line, col };
+            let safe = SAFE_INDICES.with(|set| set.borrow().contains(&(line, col)));
+            let size = INDEX_ARRAY_SIZES.with(|map| map.borrow().get(&(line, col)).cloned());
+            if safe {
+                let (detail, trust) = match (site.proving, size.or(site.size)) {
+                    (Some(iv), Some(n)) => (
+                        format!(
+                            "in bounds: the index lies in [{}, {}] and there are {} elements, so no \
+run-time check is emitted",
+                            iv.min, iv.max, n
+                        ),
+                        iv.trust,
+                    ),
+                    _ => ("in bounds, so no run-time check is emitted".to_string(), 0),
+                };
+                self.fact("index", Status::Proved, &span, line, site.what, detail, trust);
+            } else if let Some(n) = size {
+                self.fact(
+                    "index",
+                    Status::RunTime,
+                    &span,
+                    line,
+                    site.what,
+                    format!(
+                        "not proved (the code is @unsafe): it is checked against the {} elements when \
+the program runs, and an index outside them stops the program",
+                        n
+                    ),
+                    0,
+                );
+            } else {
+                self.fact(
+                    "index",
+                    Status::NotChecked,
+                    &span,
+                    line,
+                    site.what,
+                    format!(
+                        "not checked at compile time or at run time: {}, so the compiler does \
+not know its length",
+                        site.base
+                    ),
+                    0,
+                );
+            }
+        }
+    }
+
+    /// Note a visit to an index site.
+    fn note_index(&mut self, expr: &Expr, span: &Span, size: Option<usize>, base: &SemanticType, proving: Option<Interval>) {
+        let item = self.current_item.clone();
+        let entry = self.index_sites.entry((span.line, span.col)).or_insert_with(|| IndexSite {
+            item,
+            what: render(expr),
+            size,
+            // `GlobalMemory<T>` resolves to `Unknown` here, so the base is
+            // named by its expression and its type is said only when known.
+            base: match (expr, base) {
+                (Expr::Index { base: b, .. }, SemanticType::Unknown) => {
+                    format!("`{}` is not a fixed-size array", render(b))
+                }
+                (Expr::Index { base: b, .. }, t) => {
+                    format!("`{}` is `{}`, not a fixed-size array", render(b), Self::semantic_type_name(t))
+                }
+                _ => "the base is not a fixed-size array".to_string(),
+            },
+            proving: None,
+        });
+        if let (Some(iv), None) = (proving, entry.proving) {
+            entry.proving = Some(iv);
+        } else if let (Some(iv), Some(old)) = (proving, entry.proving) {
+            entry.proving = Some(Interval {
+                min: old.min.min(iv.min),
+                max: old.max.max(iv.max),
+                trust: old.trust | iv.trust,
+            });
         }
     }
 
@@ -529,7 +774,11 @@ impl TypeChecker {
         for (frame, saved) in self.scopes.iter_mut().zip(other) {
             for (name, entry) in &mut frame.symbols {
                 entry.interval = match (entry.interval, saved.get(name).copied().flatten()) {
-                    (Some(a), Some(b)) => Some(Interval { min: a.min.min(b.min), max: a.max.max(b.max) }),
+                    (Some(a), Some(b)) => Some(Interval {
+                        min: a.min.min(b.min),
+                        max: a.max.max(b.max),
+                        trust: a.trust | b.trust,
+                    }),
                     _ => None,
                 };
             }
@@ -569,11 +818,22 @@ impl TypeChecker {
                         // behind that a later safe block could trust.
                         self.update_interval(name, None);
                     }
-                    _ => {}
+                    Some(v) => self.add_trust(name, v.trust),
                 }
             }
         } else {
             self.update_interval(name, val_interval);
+        }
+    }
+
+    /// `name`'s range now also rests on `trust`.
+    fn add_trust(&mut self, name: &str, trust: u64) {
+        if let Some(idx) = self.find_var_scope_index(name) {
+            if let Some(entry) = self.scopes[idx].symbols.get_mut(name) {
+                if let Some(iv) = entry.interval.as_mut() {
+                    iv.trust |= trust;
+                }
+            }
         }
     }
 
@@ -669,10 +929,10 @@ impl TypeChecker {
 
     fn eval_interval(&self, expr: &Expr) -> Option<Interval> {
         match expr {
-            Expr::IntLit(val, _) => Some(Interval { min: *val, max: *val }),
+            Expr::IntLit(val, _) => Some(Interval { min: *val, max: *val, trust: 0 }),
             Expr::UnaryOp { op: UnaryOp::Neg, operand, .. } => {
                 let value = self.eval_interval(operand)?;
-                Some(Interval { min: value.max.checked_neg()?, max: value.min.checked_neg()? })
+                Some(Interval { min: value.max.checked_neg()?, max: value.min.checked_neg()?, trust: value.trust })
             }
             Expr::Ident(name, _) => self.lookup_interval(name).cloned(),
             // The GPU index intrinsics have ranges the HARDWARE guarantees, so
@@ -703,14 +963,16 @@ impl TypeChecker {
                 // unbounded left operand, and demanding an interval for it
                 // returns `None` before the operator is ever consulted. A
                 // negative or non-constant mask falls through to `None`.
-                let mask_of = |side: &Expr| -> Option<i64> {
+                let mask_of = |side: &Expr| -> Option<(i64, u64)> {
                     match self.eval_interval(side) {
-                        Some(i) if i.min == i.max && i.min >= 0 => Some(i.min),
+                        Some(i) if i.min == i.max && i.min >= 0 => Some((i.min, i.trust)),
                         _ => None,
                     }
                 };
-                let mask = mask_of(right).or_else(|| mask_of(left))?;
-                Some(Interval { min: 0, max: mask })
+                // The result rests on the MASK's range only: it holds whatever
+                // the other operand is.
+                let (mask, trust) = mask_of(right).or_else(|| mask_of(left))?;
+                Some(Interval { min: 0, max: mask, trust })
             }
             Expr::BinaryOp { left, op, right, .. } => {
                 let lhs = self.eval_interval(left)?;
@@ -719,10 +981,12 @@ impl TypeChecker {
                     BinaryOp::Add => Some(Interval {
                         min: lhs.min.checked_add(rhs.min)?,
                         max: lhs.max.checked_add(rhs.max)?,
+                        trust: lhs.trust | rhs.trust,
                     }),
                     BinaryOp::Sub => Some(Interval {
                         min: lhs.min.checked_sub(rhs.max)?,
                         max: lhs.max.checked_sub(rhs.min)?,
+                        trust: lhs.trust | rhs.trust,
                     }),
                     BinaryOp::Mul => {
                         let candidates = [
@@ -734,6 +998,7 @@ impl TypeChecker {
                         Some(Interval {
                             min: *candidates.iter().min().unwrap(),
                             max: *candidates.iter().max().unwrap(),
+                            trust: lhs.trust | rhs.trust,
                         })
                     }
                     BinaryOp::Div => {
@@ -749,6 +1014,7 @@ impl TypeChecker {
                             Some(Interval {
                                 min: *candidates.iter().min().unwrap(),
                                 max: *candidates.iter().max().unwrap(),
+                                trust: lhs.trust | rhs.trust,
                             })
                         }
                     }
@@ -1102,6 +1368,7 @@ impl TypeChecker {
         for item in &prog.items {
             self.check_item(item);
         }
+        self.finish_index_facts();
     }
 
     fn collect_signatures_item(&mut self, item: &Item) {
@@ -1161,10 +1428,25 @@ impl TypeChecker {
     fn check_item(&mut self, item: &Item) {
         match item {
             Item::StaticAssert(a) => self.check_compile_time_assert(&a.condition, &a.message, &a.span),
-            Item::Kernel(k) => self.check_kernel(k),
-            Item::Func(f) => self.check_func(f),
+            Item::Kernel(k) => {
+                // A kernel has no `@unsafe`: it is always checked in strict mode.
+                self.enter_item(k.name.clone(), "kernel", format!("kernel {}", k.name), &k.span, &k.body, true);
+                self.check_kernel(k)
+            }
+            Item::Func(f) => {
+                self.enter_item(f.name.clone(), "fn", format!("fn {}", f.name), &f.span, &f.body, f.is_safe);
+                self.check_func(f)
+            }
             Item::Impl(imp) => {
                 for f in &imp.methods {
+                    self.enter_item(
+                        format!("{}_{}", imp.target_type, f.name),
+                        "method",
+                        format!("fn {}::{}", imp.target_type, f.name),
+                        &f.span,
+                        &f.body,
+                        f.is_safe,
+                    );
                     self.check_func(f);
                 }
             }
@@ -1499,8 +1781,38 @@ impl TypeChecker {
                 init,
                 span,
                 bounds,
+                zero_drift,
                 ..
             } => {
+                if zero_drift.is_some() {
+                    let range = match bounds {
+                        Some(b) => format!("inside @bounds({}, {})", render(&b.min), render(&b.max)),
+                        None => "inside the range of its declared type".to_string(),
+                    };
+                    let assumption = Assumption {
+                        item: self.current_item.clone(),
+                        line: span.line,
+                        what: format!(
+                            "the running sum of `{}` stays {}: nothing checks it, and past it the \
+integer wraps",
+                            name, range
+                        ),
+                    };
+                    self.guarantees.facts.push(Fact {
+                        item: self.current_item.clone(),
+                        line: span.line,
+                        col: span.col,
+                        end_line: span.line,
+                        kind: "drift",
+                        status: Status::Checked,
+                        what: format!("@ZeroDrift on `{}`", name),
+                        detail: "every `+=` and `-=` on it is exact integer or fixed-point arithmetic, so \
+the result does not depend on the order of the additions; each term is rounded to the \
+representation the backend selects, and anything else is refused"
+                            .to_string(),
+                        rests_on: vec![assumption],
+                    });
+                }
                 let mut inferred_type = SemanticType::Unknown;
                 let mut explicit_resolved = None;
 
@@ -1524,20 +1836,55 @@ impl TypeChecker {
                 }
 
                 if let Some(bounds_attr) = bounds {
-                    let min_val = self.eval_interval(&bounds_attr.min).map(|i| i.min);
-                    let max_val = self.eval_interval(&bounds_attr.max).map(|i| i.max);
-                    if let (Some(mn), Some(mx)) = (min_val, max_val) {
-                        if let Some(init_expr) = init {
-                            if let Some(init_interval) = self.eval_interval(init_expr) {
-                                if (init_interval.min < mn || init_interval.max > mx) && !self.in_unsafe {
-                                    self.errors.push(format!(
-                                        "Line {}: [Strict Safety] Bounds Violation: initialized value range [{}, {}] exceeds declared bounds [{}, {}] of `{}`.",
-                                        span.line, init_interval.min, init_interval.max, mn, mx, name
-                                    ));
-                                }
+                    let min_iv = self.eval_interval(&bounds_attr.min);
+                    let max_iv = self.eval_interval(&bounds_attr.max);
+                    if let (Some(min_iv), Some(max_iv)) = (min_iv, max_iv) {
+                        let (mn, mx) = (min_iv.min, max_iv.max);
+                        let init_interval = init.as_ref().and_then(|e| self.eval_interval(e));
+                        if let Some(init_interval) = init_interval {
+                            if (init_interval.min < mn || init_interval.max > mx) && !self.in_unsafe {
+                                self.errors.push(format!(
+                                    "Line {}: [Strict Safety] Bounds Violation: initialized value range [{}, {}] exceeds declared bounds [{}, {}] of `{}`.",
+                                    span.line, init_interval.min, init_interval.max, mn, mx, name
+                                ));
                             }
                         }
-                        self.insert_interval(name.clone(), Interval { min: mn, max: mx });
+                        // CHECKED when the initializer's range is known and lies
+                        // inside: the declared range then rests on whatever the
+                        // initializer's did. Otherwise it is TAKEN ON TRUST, and
+                        // every proof that uses it says so.
+                        let what = format!("@bounds({}, {}) on `{}`", mn, mx, name);
+                        let from_bounds = min_iv.trust | max_iv.trust;
+                        let trust = match init_interval {
+                            Some(iv) if iv.min >= mn && iv.max <= mx => {
+                                self.fact(
+                                    "bounds",
+                                    Status::Checked,
+                                    span,
+                                    span.line,
+                                    what,
+                                    format!("checked: the initializer's range [{}, {}] lies inside it", iv.min, iv.max),
+                                    iv.trust | from_bounds,
+                                );
+                                iv.trust | from_bounds
+                            }
+                            other => {
+                                let why = match other {
+                                    Some(iv) => format!(
+                                        "TRUSTED, and contradicted: the initializer's range [{}, {}] exceeds it, \
+which @unsafe lets through. Every proof using this range assumes it",
+                                        iv.min, iv.max
+                                    ),
+                                    None => "TRUSTED: nothing bounds the initializer, so the compiler assumes the \
+range without checking it. Every proof using this range assumes it"
+                                        .to_string(),
+                                };
+                                let bit = self.new_assumption(span.line, what.clone());
+                                self.fact("bounds", Status::Trusted, span, span.line, what, why, from_bounds);
+                                bit | from_bounds
+                            }
+                        };
+                        self.insert_interval(name.clone(), Interval { min: mn, max: mx, trust });
                         self.mark_explicitly_bounded(name.clone());
                     }
                 }
@@ -1679,11 +2026,14 @@ impl TypeChecker {
                     ));
                 }
 
-                let start_val = self.eval_interval(start).map(|i| i.min);
-                let end_val = self.eval_interval(end).and_then(|i| i.max.checked_sub(1));
+                let start_iv = self.eval_interval(start);
+                let end_iv = self.eval_interval(end);
+                let range_trust = start_iv.map_or(0, |i| i.trust) | end_iv.map_or(0, |i| i.trust);
+                let start_val = start_iv.map(|i| i.min);
+                let end_val = end_iv.and_then(|i| i.max.checked_sub(1));
                 let bounds_are_known = matches!((start_val, end_val), (Some(_), Some(_)));
                 if let (Some(s_min), Some(e_max)) = (start_val, end_val) {
-                    self.insert_interval(loop_var.clone(), Interval { min: s_min, max: e_max });
+                    self.insert_interval(loop_var.clone(), Interval { min: s_min, max: e_max, trust: range_trust });
                 } else {
                     // The loop bounds are not statically known, so the loop
                     // variable has NO provable range and must not be given one.
@@ -1728,12 +2078,27 @@ impl TypeChecker {
                 }
                 self.linear_tracker.exit_loop();
 
+                let loop_end = crate::ast::last_line(body).max(span.line);
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
+                        let errors_before = self.errors.len();
+                        self.unverified = None;
+                        self.smt_trust.set(0);
                         self.verify_for_loop_invariant(
                             loop_var, start, end, step, body, inv_expr, &entry_intervals, span,
                         );
+                        self.invariant_fact(inv_expr, span, loop_end, errors_before);
                     }
+                } else if let Some(inv_expr) = invariant {
+                    self.fact(
+                        "invariant",
+                        Status::NotChecked,
+                        span,
+                        loop_end,
+                        format!("@invariant({})", render(inv_expr)),
+                        "not verified: the code is @unsafe".to_string(),
+                        0,
+                    );
                 }
 
                 for var in &assigned_vars {
@@ -1844,7 +2209,7 @@ impl TypeChecker {
                 self.linear_tracker.exit_conditional();
             }
             Stmt::While {
-                condition, body, invariant, max_iterations, is_uniform_branch, ..
+                condition, body, invariant, max_iterations, is_uniform_branch, span: while_span,
             } => {
                 if self.zk_target && max_iterations.is_none() {
                     // A `while` with no static bound cannot be unrolled into a
@@ -1888,12 +2253,27 @@ impl TypeChecker {
                 self.linear_tracker.exit_conditional();
                 self.linear_tracker.exit_loop();
 
+                let loop_end = crate::ast::last_line(body).max(while_span.line);
                 if !self.in_unsafe {
                     if let Some(inv_expr) = invariant {
+                        let errors_before = self.errors.len();
+                        self.unverified = None;
+                        self.smt_trust.set(0);
                         self.verify_while_loop_invariant(
                             condition, body, inv_expr, &entry_intervals, &condition.span(),
                         );
+                        self.invariant_fact(inv_expr, while_span, loop_end, errors_before);
                     }
+                } else if let Some(inv_expr) = invariant {
+                    self.fact(
+                        "invariant",
+                        Status::NotChecked,
+                        while_span,
+                        loop_end,
+                        format!("@invariant({})", render(inv_expr)),
+                        "not verified: the code is @unsafe".to_string(),
+                        0,
+                    );
                 }
 
                 for var in &assigned_vars {
@@ -1965,14 +2345,13 @@ impl TypeChecker {
                     self.update_assignment_facts(name, &result, span);
                 }
             }
-            Stmt::SafeBlock(block, _) => {
+            Stmt::SafeBlock(block, block_span) | Stmt::GhostBlock(block, block_span) => {
                 let prev_unsafe = self.in_unsafe;
-                self.in_unsafe = false;
-                self.check_block(block);
-                self.in_unsafe = prev_unsafe;
-            }
-            Stmt::GhostBlock(block, _) => {
-                let prev_unsafe = self.in_unsafe;
+                if prev_unsafe {
+                    let what = if matches!(stmt, Stmt::SafeBlock(..)) { "@safe { }" } else { "@ghost { }" };
+                    let end = crate::ast::last_line(block).max(block_span.line);
+                    self.fact("safe", Status::Checked, block_span, end, what.to_string(), STRICT_DETAIL.to_string(), 0);
+                }
                 self.in_unsafe = false;
                 self.check_block(block);
                 self.in_unsafe = prev_unsafe;
@@ -2335,9 +2714,10 @@ impl TypeChecker {
                     INDEX_ARRAY_SIZES.with(|map| {
                         map.borrow_mut().insert((span.line, span.col), *size);
                     });
-                    
+
                     let mut is_safe = false;
-                    if let Some(index_interval) = self.eval_interval(index) {
+                    let index_iv = self.eval_interval(index);
+                    if let Some(index_interval) = index_iv {
                         let mut min_ok = true;
                         let mut max_ok = true;
                         if index_interval.min < 0 {
@@ -2369,7 +2749,8 @@ impl TypeChecker {
                             set.borrow_mut().insert((span.line, span.col));
                         });
                     }
-                    
+                    self.note_index(expr, &span, Some(*size), &base_ty, if is_safe { index_iv } else { None });
+
                     return (**element).clone();
                 }
 
@@ -2385,7 +2766,8 @@ impl TypeChecker {
                     }
 
                     let mut is_safe = false;
-                    if let Some(index_interval) = self.eval_interval(index) {
+                    let index_iv = self.eval_interval(index);
+                    if let Some(index_interval) = index_iv {
                         let mut min_ok = true;
                         let mut max_ok = true;
                         if index_interval.min < 0 {
@@ -2417,10 +2799,14 @@ impl TypeChecker {
                             set.borrow_mut().insert((span.line, span.col));
                         });
                     }
-                    
+                    self.note_index(expr, &span, Some(size), &base_ty, if is_safe { index_iv } else { None });
+
                     return SemanticType::Primitive("F16".into());
                 }
-                
+
+                // Not a fixed-size array: a pointer (`GlobalMemory<T>`), a
+                // string, a vector. Nothing bounds this index.
+                self.note_index(expr, &span, None, &base_ty, None);
                 SemanticType::Unknown
             }
             Expr::BinaryOp { left, op, right, span } => {
@@ -2952,6 +3338,7 @@ own operand, so `*p` was proven as `p`)",
                 .and_then(|m| m.get(var))
                 .or_else(|| self.lookup_interval(var));
             if let Some(interval) = interval {
+                self.smt_trust.set(self.smt_trust.get() | interval.trust);
                 preconditions.push(format!(
                     "(assert (and (>= {}_{} {}) (<= {}_{} {})))",
                     var, 0, interval.min, var, 0, interval.max
@@ -3537,6 +3924,7 @@ model",
     /// Silent approximation produces the paperwork of a proof without the proof.
     fn smt_unmodellable(&mut self, line: usize, invariant: &Expr, what: &str) {
         if std::env::var("Y_ALLOW_UNVERIFIED_INVARIANTS").is_ok() {
+            self.unverified = Some(format!("the verifier cannot model it: {}", what));
             println!(
                 "[Warning] invariant `{}` was NOT verified: {}.",
                 expr_to_string(invariant),
@@ -3558,6 +3946,7 @@ with this invariant UNVERIFIED.",
 
     fn smt_unavailable(&mut self, line: usize, invariant: &Expr, phase: &str, err: &str) {
         if std::env::var("Y_ALLOW_UNVERIFIED_INVARIANTS").is_ok() {
+            self.unverified = Some(format!("the SMT solver could not be run ({} check)", phase));
             println!(
                 "[Warning] SMT solver unavailable; invariant `{}` was NOT verified ({} check). {}",
                 expr_to_string(invariant),
@@ -3958,7 +4347,7 @@ fn gpu_index_interval(name: &str) -> Option<Interval> {
         "grid_dim_y" | "grid_dim_z" => (1, 65_535),
         _ => return None,
     };
-    Some(Interval { min, max })
+    Some(Interval { min, max, trust: LAUNCH_LIMITS })
 }
 
 fn gpu_index_symbol(name: &str) -> Option<&'static str> {

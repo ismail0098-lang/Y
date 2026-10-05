@@ -17,7 +17,7 @@
 // and the 26 blanket `#![allow(dead_code)]` attributes existed to silence them.
 // The two module lists had already drifted apart.
 use y::{
-    ast, autotuner, coprocessor_scheduler, cpu_emitter, debug_info, exact_gemm_certificate, ir_grapher, lexer,
+    ast, autotuner, coprocessor_scheduler, cpu_emitter, debug_info, exact_gemm_certificate, guarantees, ir_grapher, lexer,
     llvm_emitter, native_emitter, parser, ptx_emitter, require, sentinel, type_checker, zero_drift,
 };
 
@@ -823,6 +823,44 @@ fn main() {
         exit(1);
     }
 
+    // `--emit-guarantees`: write what the front end checked, proved or
+    // assumed about each line (`src/guarantees.rs`) - the table `ydb verify`
+    // reads for a program with no host binary to carry it - and compile
+    // nothing. A backend or debug flag beside it would be ignored, so it is
+    // refused by name.
+    let emit_guarantees = args.iter().any(|a| a == "--emit-guarantees");
+    if emit_guarantees {
+        if args.iter().any(|a| a.ends_with(".circom")) {
+            log_error!(
+                "--emit-guarantees reports what Y's type checker established, and circom \
+                 source does not go through it."
+            );
+            exit(1);
+        }
+        let mut i = 1;
+        while i < args.len() {
+            let a = &args[i];
+            if a == "-o" || a == "--output" || a == "-I" {
+                i += 2;
+                continue;
+            }
+            if a.starts_with('-')
+                && a != "--emit-guarantees"
+                && !a.starts_with("--output=")
+                && !a.starts_with("-I")
+                && !a.starts_with("--lib-path=")
+            {
+                log_error!(
+                    "--emit-guarantees writes the front end's table of what it checked and \
+                     compiles nothing, so {} cannot be combined with it.",
+                    a
+                );
+                exit(1);
+            }
+            i += 1;
+        }
+    }
+
     // `--emit-attention-ptx <head_dim> <seq_len>`
     //
     // Advertised by `src/exact_attention.rs`'s module header ("the
@@ -922,7 +960,7 @@ fn main() {
     /// hard error -- see the check after the loop.
     const KNOWN_FLAGS: &[&str] = &[
         "-o", "--output", "-I", "-l", "--link", "--name", "--witness",
-        "-g", "--debug", "-O0", "-O1", "-O2", "-O3", "--lineinfo",
+        "-g", "--debug", "-O0", "-O1", "-O2", "-O3", "--lineinfo", "--emit-guarantees",
         "--portable", "--autotune", "--autotune-force", "--no-autotune",
         "--emit-attention-ptx", "--emit-c", "--emit-coprocessor", "--emit-cpu",
         "--emit-llvm", "--emit-native", "--emit-ptx", "--emit-r1cs",
@@ -996,6 +1034,10 @@ fn main() {
 
     if line_info && source_file.is_none() {
         log_error!("--lineinfo needs a source file: Y program.ysu --emit-ptx --lineinfo");
+        exit(1);
+    }
+    if emit_guarantees && source_file.is_none() {
+        log_error!("--emit-guarantees needs a source file: Y program.ysu --emit-guarantees");
         exit(1);
     }
 
@@ -1284,6 +1326,16 @@ fn main() {
         }
         eprintln!("\nCompilation aborted to prevent undefined hardware behavior.");
         exit(1);
+    }
+
+    // What the front end checked, proved or assumed (`src/guarantees.rs`),
+    // with what each `@require` was checked against. A `-g` program carries
+    // it; `--emit-guarantees` writes it.
+    let mut guarantees = std::mem::take(&mut type_checker.guarantees);
+    guarantees.facts.extend(require::facts(&ast, &hw_profile));
+    if emit_guarantees {
+        write_guarantees(&guarantees, source_file.as_deref(), &imported_items, explicit_output.as_deref());
+        return;
     }
 
     // Check for target flags
@@ -1820,6 +1872,7 @@ fn main() {
         let mut emitter = LlvmEmitter::new();
         if debug_info {
             enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items, opt_level > 0);
+            emitter.set_guarantees(guarantees.clone());
         }
         emitter.set_drift_costs(load_or_measure_drift_costs(&hw_profile.gpu_name));
         let ll_output = emitter.emit_program(&ast, &hw_profile);
@@ -1988,6 +2041,7 @@ fn main() {
         let mut emitter = LlvmEmitter::new();
         if debug_info {
             enable_debug_info(&mut emitter, source_file.as_deref(), &imported_items, opt_level > 0);
+            emitter.set_guarantees(guarantees.clone());
         }
         let ll_output = emitter.emit_program(&ast, &hw_profile);
 
@@ -2100,6 +2154,39 @@ fn main() {
 }
 
 /// Turn on `-g` for an LLVM emitter.
+/// `--emit-guarantees`: the front end's facts as JSON, at `-o` or beside the
+/// source as `<stem>.guarantees.json`. Each item is attributed to the file it
+/// was parsed from, as `-g` attributes it.
+fn write_guarantees(
+    g: &guarantees::Guarantees,
+    source: Option<&str>,
+    imported: &[(String, std::path::PathBuf)],
+    output: Option<&str>,
+) {
+    let source = source.expect("--emit-guarantees without a source file is refused after option parsing");
+    let abs = |p: &std::path::Path| {
+        fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned()
+    };
+    let main_file = abs(std::path::Path::new(source));
+    let files: std::collections::HashMap<String, String> = imported.iter().map(|(n, p)| (n.clone(), abs(p))).collect();
+    let json = g.to_json(&|item| files.get(item).cloned().unwrap_or_else(|| main_file.clone()));
+    let path = output
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::Path::new(source).with_extension("guarantees.json"));
+    match fs::write(&path, json + "\n") {
+        Ok(_) => println!(
+            "      -> Guarantees: {} ({} facts about {} items)",
+            path.display(),
+            g.facts.len(),
+            g.items.len()
+        ),
+        Err(e) => {
+            log_error!("could not write {}: {}", path.display(), e);
+            exit(1);
+        }
+    }
+}
+
 fn enable_debug_info(
     emitter: &mut LlvmEmitter,
     source: Option<&str>,

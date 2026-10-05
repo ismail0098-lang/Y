@@ -202,6 +202,10 @@ pub struct DebugInfo {
     /// The module is compiled with optimisation (`-g -O1` and up), which the
     /// compile unit and every subprogram say, as clang's do.
     optimized: bool,
+    /// What the compiler checked, proved or assumed about the program, for
+    /// `ydb verify`: `Y_PROGRAM["guarantees"]` in the embedded extension.
+    /// `None` when the caller supplied none.
+    guarantees: Option<crate::guarantees::Guarantees>,
 }
 
 impl DebugInfo {
@@ -223,7 +227,33 @@ impl DebugInfo {
             fn_vars: HashMap::new(),
             methods: BTreeMap::new(),
             optimized: false,
+            guarantees: None,
         }
+    }
+
+    /// The front end's facts about the program (`TypeChecker::guarantees`
+    /// and `require::facts`), which the program then carries.
+    pub fn set_guarantees(&mut self, g: crate::guarantees::Guarantees) {
+        self.guarantees = Some(g);
+    }
+
+    /// A fact the backend established (a substituted kernel), added to the
+    /// front end's. Ignored when the caller supplied no guarantees.
+    pub fn add_fact(&mut self, f: crate::guarantees::Fact) {
+        if let Some(g) = self.guarantees.as_mut() {
+            g.facts.push(f);
+        }
+    }
+
+    /// The `@bounds` the front end took on trust in `item` between two lines.
+    pub fn trusted_bounds(&self, item: &str, first: usize, last: usize) -> Vec<crate::guarantees::Assumption> {
+        self.guarantees.as_ref().map(|g| g.trusted_bounds(item, first, last)).unwrap_or_default()
+    }
+
+    /// The path of the file `item` was parsed from.
+    fn file_path(&self, item: &str) -> String {
+        let (name, dir) = &self.files[self.file_of(item)];
+        std::path::Path::new(dir).join(name).to_string_lossy().into_owned()
     }
 
     /// The module will be compiled with optimisation.
@@ -246,10 +276,20 @@ impl DebugInfo {
             .collect();
         let methods: Vec<String> =
             self.methods.iter().map(|(s, d)| format!("\"{}\": \"{}\"", s, d)).collect();
+        // The guarantees are JSON, which is ASCII here (`json_string`), so
+        // inside a Python string literal only `\\` and `"` need escaping.
+        let guarantees = match &self.guarantees {
+            Some(g) => {
+                let json = g.to_json(&|item| self.file_path(item));
+                format!("__import__(\"json\").loads(\"{}\")", json.replace('\\', "\\\\").replace('"', "\\\""))
+            }
+            None => "None".to_string(),
+        };
         format!(
-            "Y_PROGRAM = {{\"enums\": {{{}}}, \"methods\": {{{}}}}}\n{}",
+            "Y_PROGRAM = {{\"enums\": {{{}}}, \"methods\": {{{}}}, \"guarantees\": {}}}\n{}",
             enums.join(", "),
             methods.join(", "),
+            guarantees,
             GDB_EXTENSION
         )
     }

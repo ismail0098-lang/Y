@@ -124,6 +124,11 @@ enum Class {
     Removed,
     /// Does not compile a `.ysu` source at all.
     NoSource,
+    /// Runs the front end and generates no code (`--emit-guarantees`, which
+    /// writes what the type checker established): a policy has nothing to be
+    /// lowered into, so it is neither honoured nor refused. Checked to accept
+    /// the program and write its table, not code.
+    NoCode,
 }
 
 fn classify(flag: &str) -> Option<Class> {
@@ -138,6 +143,7 @@ fn classify(flag: &str) -> Option<Class> {
         // own parameters, and `--emit-verifier` reads a snarkjs key: neither
         // compiles the source program a `@cache_policy` would be written in.
         "--emit-attention-ptx" | "--emit-verifier" => Some(Class::NoSource),
+        "--emit-guarantees" => Some(Class::NoCode),
         _ => None,
     }
 }
@@ -236,6 +242,12 @@ fn every_backend_honours_or_refuses_a_cache_policy() {
                 assert!(!ok, "{shown} is a removed backend and must still refuse every program");
             }
             Class::NoSource => skipped.push(format!("{shown}: compiles no source program")),
+            Class::NoCode => {
+                let (ok, out) = compile(&d, "pol", SCALAR_POLICY, flag);
+                assert!(ok, "{shown} writes the front end's table and must accept the program:\n{out}");
+                let table = std::fs::read_to_string(d.join("pol.out")).expect("read the table");
+                assert!(table.starts_with("{\"version\": 1"), "{shown} wrote something other than its table:\n{table}");
+            }
         }
         let _ = std::fs::remove_dir_all(&d);
     }

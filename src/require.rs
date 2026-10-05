@@ -89,6 +89,61 @@ pub fn check_program(program: &Program, hw: &HardwareProfile) -> (usize, Vec<Str
     (checked, errors)
 }
 
+/// What each satisfied `@require` was checked against, for `ydb verify`. A
+/// GPU fact is a claim about the compilation TARGET (`.ysu_hw_profile`), not
+/// about the card the program later runs on; a CPU one is about this machine.
+pub fn facts(program: &Program, hw: &HardwareProfile) -> Vec<crate::guarantees::Fact> {
+    fn walk(items: &[Item], hw: &HardwareProfile, out: &mut Vec<crate::guarantees::Fact>) {
+        for item in items {
+            match item {
+                Item::Kernel(k) => {
+                    for req in &k.requires {
+                        if check(&req.condition, hw, req.span.line).is_err() {
+                            continue;
+                        }
+                        let name = match &req.condition {
+                            Expr::BinaryOp { left, .. } => match &**left {
+                                Expr::Ident(n, _) => n.clone(),
+                                _ => continue,
+                            },
+                            _ => continue,
+                        };
+                        let Some(have) = feature_value(&name, hw) else { continue };
+                        let source = if name.starts_with("sm") {
+                            "for the compile target, from .ysu_hw_profile - a claim about the target, \
+not about the card the program later runs on"
+                        } else {
+                            "on this machine, read live (CPUID and the OS's register state)"
+                        };
+                        out.push(crate::guarantees::Fact {
+                            item: k.name.clone(),
+                            line: req.span.line,
+                            col: req.span.col,
+                            end_line: req.span.line,
+                            kind: "require",
+                            status: crate::guarantees::Status::Checked,
+                            what: format!("@require({})", render(&req.condition)),
+                            detail: format!("satisfied: `{}` is {} {}", name, have, source),
+                            rests_on: Vec::new(),
+                        });
+                    }
+                }
+                Item::Module(m) => walk(&m.items, hw, out),
+                Item::Func(_)
+                | Item::Struct(_)
+                | Item::Enum(_)
+                | Item::Import(_)
+                | Item::StaticAssert(_)
+                | Item::Impl(_)
+                | Item::Const(_) => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&program.items, hw, &mut out);
+    out
+}
+
 /// The features `@require` can answer for, and where each answer comes from.
 ///
 /// Kept as one table rather than a `match` with a fallback, so that adding a

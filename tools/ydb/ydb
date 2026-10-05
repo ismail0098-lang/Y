@@ -26,6 +26,9 @@ Everything gdb does still works. ydb adds:
   asm [LINE]            the machine code a line of the running program became
   asm --ptx [LINE]      the PTX a kernel's line became (`Y --emit-ptx --lineinfo`)
   asm --sass [LINE]     the SASS ptxas made of it (at the module's own .target)
+  verify [LINE]         what covers a line: what the compiler proved, checked
+                        or took on trust there, and what checks the code it
+                        became (Rocq proofs, tools/ptxas_tval)
 
 The compiler is this checkout's `target/release/Y` unless `--y` or `$Y_BIN`
 names another. It runs in the current directory, so it reads the same
@@ -84,7 +87,8 @@ def main(argv=None):
             print(l, file=sys.stderr)
         print(
             "ydb: %s does not build for the host, so there is no process to debug.\n"
-            "     The GPU commands still work: asm --ptx LINE, asm --sass LINE." % os.path.basename(program),
+            "     The GPU commands still work: asm --ptx LINE, asm --sass LINE, verify LINE."
+            % os.path.basename(program),
             file=sys.stderr,
         )
 
@@ -92,6 +96,10 @@ def main(argv=None):
     env["YDB_PROGRAM"] = program
     env["YDB_Y"] = y
     env["YDB_CWD"] = os.getcwd()
+    if not static:
+        env["YDB_HOST"] = "clang -O%s" % (a.opt or "0")
+    else:
+        env.pop("YDB_HOST", None)
     cmd = [gdb, "-q"] + (["-nx"] if a.nx else []) + [
         "-iex", "set debuginfod enabled off",
         "-iex", "set prompt (ydb) ",

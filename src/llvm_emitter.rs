@@ -491,6 +491,14 @@ impl LlvmEmitter {
         self.debug = Some(d);
     }
 
+    /// What the front end checked, proved or assumed, for the program to
+    /// carry under `-g` (`ydb verify` reads it). A no-op without `-g`.
+    pub fn set_guarantees(&mut self, g: crate::guarantees::Guarantees) {
+        if let Some(d) = self.debug.as_mut() {
+            d.set_guarantees(g);
+        }
+    }
+
     /// Attribute what follows to `span`; returns the position to restore.
     fn dbg_enter(&mut self, span: &Span) -> Option<(usize, usize)> {
         let outer = self.debug.as_ref()?.current();
@@ -2234,8 +2242,53 @@ Add @bounds(min, max) to state the accumulator's real range, or declare it as a 
         // A kernel whose whole body is the canonical matmul nest is replaced by
         // the packed AVX-512 kernel. The recogniser is strict and the scalar
         // lowering below is correct, so a near-miss costs speed, not an answer.
+        let certificates_before = self.exact_gemm_certificates.len();
         if let Some(shape) = self.try_emit_gemm_kernel(k) {
             self.needs_gemm_module = true;
+            // What runs is not the kernel's body, and `ydb verify` has to
+            // say so: the body's lines become no code.
+            if let Some(d) = self.debug.as_mut() {
+                let exact = self.exact_gemm_certificates.len() > certificates_before;
+                let (status, detail) = if exact {
+                    (
+                        crate::guarantees::Status::Proved,
+                        "this kernel is REPLACED by Y's exact vpdpwssd GEMM, and its body's lines \
+become no code. proofs/ExactGemmWhole.v proves the substituted kernel holds this nest's \
+dot products exactly, for every shape - provided every operand lies within the @bounds on \
+its operand `let`, which nothing checks when the program runs. `Y --emit-llvm` writes the \
+certificate that instantiates the proof for this nest. Everything below the LLVM IR - clang, \
+the assembler, the processor - is trusted"
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        crate::guarantees::Status::Tested,
+                        "this kernel is REPLACED by Y's packed, threaded f32 GEMM, and its body's \
+lines become no code. It is NOT bit-identical to the nest as written: f32 addition is not \
+associative, so a tiled reduction rounds differently. It is tested against the nest \
+(tests/gemm_substitution_differential.rs), not proved; Y_NO_GEMM_RECOGNISER=1 compiles the \
+nest as written"
+                            .to_string(),
+                    )
+                };
+                let end_line = crate::ast::last_line(&k.body).max(k.span.line);
+                // The licence is granted from the operands' `@bounds`, which
+                // nothing checks: the exactness claim rests on them. Every
+                // trusted range in the kernel is named - a superset, which is
+                // the safe direction for a list of assumptions.
+                let rests_on = if exact { d.trusted_bounds(&k.name, k.span.line, end_line) } else { Vec::new() };
+                d.add_fact(crate::guarantees::Fact {
+                    item: k.name.clone(),
+                    line: k.span.line,
+                    col: k.span.col,
+                    end_line,
+                    kind: "gemm",
+                    status,
+                    what: format!("kernel {}", k.name),
+                    detail,
+                    rests_on,
+                });
+            }
             writeln!(&mut self.output, "  ; [Y CPU GEMM] {:?}", shape).unwrap();
             self.wln("  ret void");
             self.wln("}");
